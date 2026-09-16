@@ -1,4 +1,10 @@
-export type PageBindingState = 'unbound' | 'owned' | 'identity_lost' | 'conflict' | 'closed';
+export type PageBindingState =
+  | 'unbound'
+  | 'reserved'
+  | 'owned'
+  | 'identity_lost'
+  | 'conflict'
+  | 'closed';
 
 export interface PageBindingSnapshot {
   readonly pageKey: string;
@@ -18,6 +24,12 @@ export interface BindPageInput {
   readonly sessionId: string;
   readonly generation: number | null;
   readonly conversationId: string;
+}
+
+export interface ReservePageInput {
+  readonly sessionId: string;
+  readonly generation: number;
+  readonly conversationId?: string | null;
 }
 
 const CHATGPT_HOSTS = new Set(['chatgpt.com', 'chat.openai.com']);

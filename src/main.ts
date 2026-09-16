@@ -6,16 +6,23 @@ import { PageRegistry } from './browser/page-registry.ts';
 import { prepareRuntimeDirectories, resolveConfig, type SessionPlaneConfig } from './config.ts';
 import { getSystemHealth } from './core/health.ts';
 import { TeamDirectory } from './core/team-directory.ts';
+import { SubmissionService } from './core/submission-service.ts';
 import { createLogger, type Logger } from './logging.ts';
 import { RpcRouter } from './rpc/router.ts';
 import { RpcServer } from './rpc/server.ts';
 import { registerBrowserMethods } from './rpc/methods/browser.ts';
 import { registerSessionMethods } from './rpc/methods/session.ts';
+import { registerSendMethods } from './rpc/methods/send.ts';
 import { registerTeamMethods } from './rpc/methods/team.ts';
 import { registerWaitMethods } from './rpc/methods/wait.ts';
 import { ActorScheduler } from './scheduler/actor-scheduler.ts';
 import { SessionPlaneDatabase } from './storage/database.ts';
 import { ReceiptRepository } from './storage/receipt-repository.ts';
+import { ChatGptAdapter } from './providers/chatgpt/adapter.ts';
+import {
+  ProviderAdapterRegistry,
+  type ProviderAdapter,
+} from './providers/provider-adapter.ts';
 import { z } from 'zod';
 
 export interface CoreService {
@@ -28,6 +35,8 @@ export interface CoreService {
   readonly teamDirectory: TeamDirectory;
   readonly receipts: ReceiptRepository;
   readonly actorScheduler: ActorScheduler;
+  readonly providerAdapters: ProviderAdapterRegistry;
+  readonly submissionService: SubmissionService;
   readonly startedAt: Date;
   close(): Promise<void>;
 }
@@ -37,6 +46,7 @@ export interface StartCoreOptions {
   readonly logger?: Logger;
   readonly startBrowser?: boolean;
   readonly browserHeadless?: boolean;
+  readonly providerAdapters?: readonly ProviderAdapter[];
 }
 
 export async function startCore(options: StartCoreOptions = {}): Promise<CoreService> {
@@ -70,6 +80,39 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     throw error;
   }
 
+  const providerAdapters = new ProviderAdapterRegistry(
+    options.providerAdapters ??
+      (browserOwner === null
+        ? []
+        : [
+            new ChatGptAdapter({
+              browserOwner,
+              pageRegistry,
+              loginUrl: config.chatgptUrl,
+              acknowledgementTimeoutMs: config.submissionAckTimeoutMs,
+            }),
+          ]),
+  );
+  const submissionService = new SubmissionService({
+    database,
+    directory: teamDirectory,
+    scheduler: actorScheduler,
+    pageMutex: pageMutationMutex,
+    adapters: providerAdapters,
+  });
+
+  try {
+    const recovered = await submissionService.recoverInterruptedSubmissions();
+    if (recovered > 0) {
+      logger.warn('submission.recovered-ambiguous', { count: recovered });
+    }
+  } catch (error) {
+    await browserOwner?.close();
+    actorScheduler.close();
+    database.close();
+    throw error;
+  }
+
   router.register('system.health', z.object({}).strict(), () =>
     getSystemHealth({ config, database, startedAt, browserOwner, pageRegistry }),
   );
@@ -81,6 +124,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   });
   registerTeamMethods(router, teamDirectory, receipts);
   registerSessionMethods(router, teamDirectory, receipts);
+  registerSendMethods(router, submissionService);
   registerWaitMethods(router, teamDirectory, actorScheduler);
 
   const rpcServer = new RpcServer({
@@ -109,6 +153,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     teamDirectory,
     receipts,
     actorScheduler,
+    providerAdapters,
+    submissionService,
     startedAt,
     async close(): Promise<void> {
       if (closed) {

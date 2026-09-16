@@ -7,6 +7,7 @@ import {
   type BindPageInput,
   type PageBindingSnapshot,
   type PageBindingState,
+  type ReservePageInput,
 } from './page-binding.ts';
 
 interface PageRecord {
@@ -155,6 +156,36 @@ export class PageRegistry {
   bindPage(pageKey: string, input: BindPageInput): PageBindingSnapshot {
     const record = this.#requireRecord(pageKey);
     this.refreshPage(pageKey);
+    if (record.state === 'closed' || record.page.isClosed()) {
+      throw new PageRegistryError('browser.unavailable', `Page ${pageKey} is closed`);
+    }
+    if (record.state === 'conflict') {
+      throw new PageRegistryError(
+        'session.page-identity-unverified',
+        `Page ${pageKey} is quarantined by a duplicate conversation conflict`,
+      );
+    }
+    if (record.sessionId !== null && record.sessionId !== input.sessionId) {
+      throw new PageRegistryError(
+        'session.page-identity-unverified',
+        `Page ${pageKey} is reserved by another session`,
+      );
+    }
+    if (record.generation !== null && record.generation !== input.generation) {
+      throw new PageRegistryError(
+        'session.page-identity-unverified',
+        `Page ${pageKey} is reserved for another generation`,
+      );
+    }
+    if (
+      record.expectedConversationId !== null &&
+      record.expectedConversationId !== input.conversationId
+    ) {
+      throw new PageRegistryError(
+        'session.conversation-mismatch',
+        `Page ${pageKey} is reserved for conversation ${record.expectedConversationId}`,
+      );
+    }
     if (record.conversationId !== input.conversationId) {
       throw new PageRegistryError(
         'session.conversation-mismatch',
@@ -164,6 +195,51 @@ export class PageRegistry {
     record.sessionId = input.sessionId;
     record.generation = input.generation;
     record.expectedConversationId = input.conversationId;
+    record.lastSeenAt = this.#now().toISOString();
+    this.#reconcileConflicts();
+    this.#emit(record);
+    return this.#snapshot(record);
+  }
+
+  reservePage(pageKey: string, input: ReservePageInput): PageBindingSnapshot {
+    const record = this.#requireRecord(pageKey);
+    this.refreshPage(pageKey);
+    if (record.state === 'closed' || record.page.isClosed()) {
+      throw new PageRegistryError('browser.unavailable', `Page ${pageKey} is closed`);
+    }
+    if (record.state === 'conflict') {
+      throw new PageRegistryError(
+        'session.page-identity-unverified',
+        `Page ${pageKey} is quarantined by a duplicate conversation conflict`,
+      );
+    }
+    if (record.sessionId !== null && record.sessionId !== input.sessionId) {
+      throw new PageRegistryError(
+        'session.page-identity-unverified',
+        `Page ${pageKey} is reserved by another session`,
+      );
+    }
+
+    const expectedConversationId = input.conversationId ?? null;
+    if (expectedConversationId === null && record.conversationId !== null) {
+      throw new PageRegistryError(
+        'session.page-identity-unverified',
+        `Page ${pageKey} already has a provider conversation identity`,
+      );
+    }
+    if (
+      expectedConversationId !== null &&
+      record.conversationId !== expectedConversationId
+    ) {
+      throw new PageRegistryError(
+        'session.conversation-mismatch',
+        `Page ${pageKey} is not at conversation ${expectedConversationId}`,
+      );
+    }
+
+    record.sessionId = input.sessionId;
+    record.generation = input.generation;
+    record.expectedConversationId = expectedConversationId;
     record.lastSeenAt = this.#now().toISOString();
     this.#reconcileConflicts();
     this.#emit(record);
@@ -239,6 +315,48 @@ export class PageRegistry {
     return record.page;
   }
 
+  requireSessionPage(
+    pageKey: string,
+    expected: {
+      readonly sessionId: string;
+      readonly generation?: number;
+      readonly conversationId?: string | null;
+    },
+  ): Page {
+    const record = this.#requireRecord(pageKey);
+    this.refreshPage(pageKey);
+    if (record.state === 'closed' || record.page.isClosed()) {
+      throw new PageRegistryError('browser.unavailable', `Page ${pageKey} is closed`);
+    }
+    if (record.state === 'conflict' || record.state === 'identity_lost') {
+      throw new PageRegistryError(
+        'session.page-identity-unverified',
+        `Page ${pageKey} does not have verifiable session ownership`,
+      );
+    }
+    if (
+      record.sessionId !== expected.sessionId ||
+      (expected.generation !== undefined && record.generation !== expected.generation)
+    ) {
+      throw new PageRegistryError(
+        'session.page-identity-unverified',
+        `Page ${pageKey} ownership does not match the requested session`,
+      );
+    }
+    const expectedConversationId = expected.conversationId ?? null;
+    const exactConversation =
+      expectedConversationId === null
+        ? record.state === 'reserved'
+        : record.state === 'owned' && record.conversationId === expectedConversationId;
+    if (!exactConversation) {
+      throw new PageRegistryError(
+        'session.page-identity-unverified',
+        `Page ${pageKey} conversation ownership is not exact`,
+      );
+    }
+    return record.page;
+  }
+
   subscribe(listener: (snapshot: PageBindingSnapshot) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
@@ -298,7 +416,10 @@ export class PageRegistry {
 
   #baseState(record: PageRecord): PageBindingState {
     if (record.expectedConversationId === null) {
-      return 'unbound';
+      if (record.sessionId === null) {
+        return 'unbound';
+      }
+      return record.conversationId === null ? 'reserved' : 'identity_lost';
     }
     return record.conversationId === record.expectedConversationId ? 'owned' : 'identity_lost';
   }

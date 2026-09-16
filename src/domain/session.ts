@@ -50,6 +50,7 @@ export interface SessionSnapshot {
   readonly roleKey: string;
   readonly sessionId: string;
   readonly predecessorSessionId: string | null;
+  readonly provider: string;
   readonly generation: number;
   readonly sessionState: SessionState;
   readonly providerState: ProviderState;
@@ -58,12 +59,14 @@ export interface SessionSnapshot {
   readonly waitExpired: boolean;
   readonly nextCheckAt: string | null;
   readonly conversationId: string | null;
+  readonly pageKey: string | null;
   readonly submittedUserMessageId: string | null;
   readonly submittedUserTurnId: string | null;
   readonly responseMessageId: string | null;
   readonly answerText: string | null;
   readonly reason: string | null;
   readonly errorCode: string | null;
+  readonly promptSubmitted: boolean;
 }
 
 const TERMINAL_SESSION_STATES = new Set<SessionState>([

@@ -15,6 +15,7 @@ export interface SessionPlaneConfig {
   readonly rpcMaxLineBytes: number;
   readonly rpcRequestTimeoutMs: number;
   readonly browserLaunchTimeoutMs: number;
+  readonly submissionAckTimeoutMs: number;
   readonly chatgptUrl: string;
 }
 
@@ -29,6 +30,7 @@ export interface ConfigOverrides {
   readonly rpcMaxLineBytes?: number;
   readonly rpcRequestTimeoutMs?: number;
   readonly browserLaunchTimeoutMs?: number;
+  readonly submissionAckTimeoutMs?: number;
   readonly chatgptUrl?: string;
 }
 
@@ -99,6 +101,13 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
         env.SESSIONPLANE_BROWSER_LAUNCH_TIMEOUT_MS,
         30_000,
         'Browser launch timeout',
+      ),
+    submissionAckTimeoutMs:
+      overrides.submissionAckTimeoutMs ??
+      parsePositiveInteger(
+        env.SESSIONPLANE_SUBMISSION_ACK_TIMEOUT_MS,
+        12_000,
+        'Submission acknowledgement timeout',
       ),
     chatgptUrl,
   });

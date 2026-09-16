@@ -24,6 +24,9 @@ export interface GenerationRecord {
   readonly responseMessageId: string | null;
   readonly answerText: string | null;
   readonly completedAt: string | null;
+  readonly reason: string | null;
+  readonly errorCode: string | null;
+  readonly promptSubmitted: boolean;
 }
 
 export interface CurrentGenerationUpdate {
@@ -39,5 +42,8 @@ export interface CurrentGenerationUpdate {
   readonly responseMessageId?: string | null;
   readonly answerText?: string | null;
   readonly completedAt?: string | null;
+  readonly reason?: string | null;
+  readonly errorCode?: string | null;
+  readonly promptSubmitted?: boolean;
 }
 

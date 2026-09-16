@@ -38,6 +38,9 @@ interface SnapshotRow extends SessionRow {
   readonly submittedUserTurnId: string | null;
   readonly responseMessageId: string | null;
   readonly answerText: string | null;
+  readonly reason: string | null;
+  readonly errorCode: string | null;
+  readonly promptSubmitted: number;
 }
 
 const SESSION_COLUMNS = `
@@ -147,8 +150,8 @@ export class SessionRepository {
         INSERT INTO generations(
           session_id, generation, team_brief_version, prompt_hash, submission_state,
           submitted_user_message_id, submitted_user_turn_id, response_message_id,
-          answer_text, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          answer_text, completed_at, reason, error_code, prompt_submitted
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       .run(
         generation.sessionId,
@@ -161,6 +164,9 @@ export class SessionRepository {
         generation.responseMessageId,
         generation.answerText,
         generation.completedAt,
+        generation.reason,
+        generation.errorCode,
+        generation.promptSubmitted ? 1 : 0,
       );
   }
 
@@ -245,6 +251,14 @@ export class SessionRepository {
     );
     appendAssignment(generationAssignments, generationValues, 'answer_text', update.answerText);
     appendAssignment(generationAssignments, generationValues, 'completed_at', update.completedAt);
+    appendAssignment(generationAssignments, generationValues, 'reason', update.reason);
+    appendAssignment(generationAssignments, generationValues, 'error_code', update.errorCode);
+    appendAssignment(
+      generationAssignments,
+      generationValues,
+      'prompt_submitted',
+      update.promptSubmitted === undefined ? undefined : update.promptSubmitted ? 1 : 0,
+    );
 
     const sessionResult = this.#database
       .prepare(`
@@ -320,7 +334,10 @@ export class SessionRepository {
           g.submitted_user_message_id AS submittedUserMessageId,
           g.submitted_user_turn_id AS submittedUserTurnId,
           g.response_message_id AS responseMessageId,
-          g.answer_text AS answerText
+          g.answer_text AS answerText,
+          g.reason AS reason,
+          g.error_code AS errorCode,
+          g.prompt_submitted AS promptSubmitted
         FROM sessions s
         JOIN team_roles r ON r.role_id = s.role_id
         LEFT JOIN generations g
@@ -338,6 +355,7 @@ export class SessionRepository {
       roleKey: row.roleKey,
       sessionId: row.sessionId,
       predecessorSessionId: row.predecessorSessionId,
+      provider: row.provider,
       generation: Number(row.currentGeneration),
       sessionState: row.sessionState,
       providerState: row.providerState,
@@ -346,12 +364,14 @@ export class SessionRepository {
       waitExpired: false,
       nextCheckAt: row.nextCheckAt,
       conversationId: row.conversationId,
+      pageKey: row.pageKey,
       submittedUserMessageId: row.submittedUserMessageId,
       submittedUserTurnId: row.submittedUserTurnId,
       responseMessageId: row.responseMessageId,
       answerText: row.answerText,
-      reason: null,
-      errorCode: null,
+      reason: row.reason,
+      errorCode: row.errorCode,
+      promptSubmitted: Number(row.promptSubmitted) === 1,
     };
   }
 }

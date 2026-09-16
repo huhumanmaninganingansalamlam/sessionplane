@@ -96,6 +96,9 @@ export class ActorScheduler {
           responseMessageId: null,
           answerText: null,
           completedAt: null,
+          reason: null,
+          errorCode: null,
+          promptSubmitted: false,
         });
         const advanced = this.#sessions.advanceGeneration({
           sessionId: session.sessionId,

@@ -11,6 +11,7 @@ const BASE_SNAPSHOT: SessionSnapshot = {
   roleKey: 'main',
   sessionId: 'session-1',
   predecessorSessionId: null,
+  provider: 'chatgpt',
   generation: 3,
   sessionState: 'observing',
   providerState: 'generating',
@@ -19,12 +20,14 @@ const BASE_SNAPSHOT: SessionSnapshot = {
   waitExpired: false,
   nextCheckAt: null,
   conversationId: 'conversation-1',
+  pageKey: 'page-1',
   submittedUserMessageId: 'user-message-1',
   submittedUserTurnId: 'user-turn-1',
   responseMessageId: null,
   answerText: null,
   reason: null,
   errorCode: null,
+  promptSubmitted: true,
 };
 
 test('client wait expiry decorates a snapshot without terminalizing provider work', () => {

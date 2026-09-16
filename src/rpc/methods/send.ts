@@ -1,0 +1,68 @@
+import { z } from 'zod';
+
+import type { SubmissionService } from '../../core/submission-service.ts';
+import { SessionPlaneDomainError } from '../../domain/errors.ts';
+import { RpcMethodError, type RpcRouter } from '../router.ts';
+
+const ClientId = z.string().trim().min(1).max(200);
+const RequestId = z.string().trim().min(1).max(300);
+const SessionId = z.string().uuid();
+const TeamId = z.string().uuid();
+const RoleKey = z.string().trim().min(1).max(80);
+const Prompt = z.string().min(1).max(200_000);
+const Model = z.string().trim().min(1).max(200).nullable().optional();
+const SessionDeadlineSec = z.number().int().min(1).max(86_400).default(5_400);
+
+export function registerSendMethods(router: RpcRouter, submissions: SubmissionService): void {
+  router.register(
+    'session.send',
+    z.union([
+      z
+        .object({
+          clientId: ClientId,
+          requestId: RequestId,
+          sessionId: SessionId,
+          prompt: Prompt,
+          model: Model,
+          sessionDeadlineSec: SessionDeadlineSec,
+        })
+        .strict(),
+      z
+        .object({
+          clientId: ClientId,
+          requestId: RequestId,
+          teamId: TeamId,
+          roleKey: RoleKey,
+          prompt: Prompt,
+          model: Model,
+          sessionDeadlineSec: SessionDeadlineSec,
+        })
+        .strict(),
+    ]),
+    async (params) =>
+      await wrapDomainAsync(async () =>
+        await submissions.send({
+          clientId: params.clientId,
+          requestId: params.requestId,
+          prompt: params.prompt,
+          sessionDeadlineSec: params.sessionDeadlineSec,
+          ...(params.model === undefined ? {} : { model: params.model }),
+          ...('sessionId' in params
+            ? { sessionId: params.sessionId }
+            : { teamId: params.teamId, roleKey: params.roleKey }),
+        }),
+      ),
+  );
+}
+
+async function wrapDomainAsync<Result>(operation: () => Promise<Result>): Promise<Result> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof SessionPlaneDomainError) {
+      throw new RpcMethodError(error.errorCode, error.message, { details: error.details });
+    }
+    throw error;
+  }
+}
+
