@@ -1,0 +1,29 @@
+{
+  "name": "sessionplane",
+  "version": "0.1.0",
+  "description": "Durable local runtime for role-addressed browser-backed AI chat sessions",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.15 <25"
+  },
+  "bin": {
+    "sessplane": "bin/sessplane.mjs"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --experimental-strip-types test/**/*.test.ts",
+    "dev": "node --watch --experimental-strip-types src/main.ts",
+    "doctor": "node --experimental-strip-types src/cli/main.ts doctor --json",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "playwright-core": "1.63.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.5",
+    "typescript": "7.0.2"
+  }
+}
