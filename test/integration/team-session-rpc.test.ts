@@ -40,6 +40,14 @@ test('teams, role isolation, session replacement, events, and restart restoratio
       primaryRoleKey: 'main',
     });
     assert.equal(teamA.primaryRoleKey, 'main');
+    const teamAReplay = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'client-a',
+      requestId: 'team-a',
+      name: 'Team A',
+      objective: 'Implement and review',
+      primaryRoleKey: 'main',
+    });
+    assert.equal(teamAReplay.teamId, teamA.teamId);
 
     for (const [roleKey, roleType] of [
       ['expert.backend', 'expert'],

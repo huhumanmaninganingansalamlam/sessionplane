@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import type { TeamDirectory } from '../../core/team-directory.ts';
 import { SessionPlaneDomainError } from '../../domain/errors.ts';
+import type { ReceiptRepository } from '../../storage/receipt-repository.ts';
 import { RpcMethodError, type RpcRouter } from '../router.ts';
 
 const ClientId = z.string().trim().min(1).max(200);
@@ -9,7 +10,11 @@ const RequestId = z.string().trim().min(1).max(300);
 const TeamId = z.string().uuid();
 const RoleKey = z.string().trim().min(1).max(80);
 
-export function registerTeamMethods(router: RpcRouter, directory: TeamDirectory): void {
+export function registerTeamMethods(
+  router: RpcRouter,
+  directory: TeamDirectory,
+  receipts: ReceiptRepository,
+): void {
   router.register(
     'team.create',
     z
@@ -22,9 +27,8 @@ export function registerTeamMethods(router: RpcRouter, directory: TeamDirectory)
         externalRef: z.string().max(500).nullable().optional(),
       })
       .strict(),
-    (params) =>
-      wrapDomain(() =>
-        directory.createTeam({
+    (params) => {
+      const command = {
           clientId: params.clientId,
           ...(params.name === undefined ? {} : { name: params.name }),
           ...(params.objective === undefined ? {} : { objective: params.objective }),
@@ -32,8 +36,17 @@ export function registerTeamMethods(router: RpcRouter, directory: TeamDirectory)
             ? {}
             : { primaryRoleKey: params.primaryRoleKey }),
           ...(params.externalRef === undefined ? {} : { externalRef: params.externalRef }),
+      };
+      return wrapDomain(() =>
+        receipts.execute({
+          clientId: params.clientId,
+          requestId: params.requestId,
+          method: 'team.create',
+          payload: command,
+          operation: () => directory.createTeam(command),
         }),
-      ),
+      );
+    },
   );
 
   router.register(
@@ -62,9 +75,8 @@ export function registerTeamMethods(router: RpcRouter, directory: TeamDirectory)
         provider: z.literal('chatgpt').optional(),
       })
       .strict(),
-    (params) =>
-      wrapDomain(() =>
-        directory.createRole({
+    (params) => {
+      const command = {
           teamId: params.teamId,
           roleKey: params.roleKey,
           roleType: params.roleType,
@@ -72,8 +84,17 @@ export function registerTeamMethods(router: RpcRouter, directory: TeamDirectory)
           ...(params.reportsToRoleKey === undefined
             ? {}
             : { reportsToRoleKey: params.reportsToRoleKey }),
+      };
+      return wrapDomain(() =>
+        receipts.execute({
+          clientId: params.clientId,
+          requestId: params.requestId,
+          method: 'team.role.create',
+          payload: command,
+          operation: () => directory.createRole(command),
         }),
-      ),
+      );
+    },
   );
 
   router.register(
@@ -86,7 +107,16 @@ export function registerTeamMethods(router: RpcRouter, directory: TeamDirectory)
         roleKey: RoleKey,
       })
       .strict(),
-    (params) => wrapDomain(() => directory.retireRole(params.teamId, params.roleKey)),
+    (params) =>
+      wrapDomain(() =>
+        receipts.execute({
+          clientId: params.clientId,
+          requestId: params.requestId,
+          method: 'team.role.retire',
+          payload: { teamId: params.teamId, roleKey: params.roleKey },
+          operation: () => directory.retireRole(params.teamId, params.roleKey),
+        }),
+      ),
   );
 
   router.register(
@@ -100,14 +130,22 @@ export function registerTeamMethods(router: RpcRouter, directory: TeamDirectory)
         briefText: z.string().min(1).max(200_000),
       })
       .strict(),
-    (params) =>
-      wrapDomain(() =>
-        directory.updateBrief({
+    (params) => {
+      const command = {
           teamId: params.teamId,
           briefText: params.briefText,
           ...(params.objective === undefined ? {} : { objective: params.objective }),
+      };
+      return wrapDomain(() =>
+        receipts.execute({
+          clientId: params.clientId,
+          requestId: params.requestId,
+          method: 'team.brief.update',
+          payload: command,
+          operation: () => directory.updateBrief(command),
         }),
-      ),
+      );
+    },
   );
 }
 

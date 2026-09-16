@@ -12,7 +12,10 @@ import { RpcServer } from './rpc/server.ts';
 import { registerBrowserMethods } from './rpc/methods/browser.ts';
 import { registerSessionMethods } from './rpc/methods/session.ts';
 import { registerTeamMethods } from './rpc/methods/team.ts';
+import { registerWaitMethods } from './rpc/methods/wait.ts';
+import { ActorScheduler } from './scheduler/actor-scheduler.ts';
 import { SessionPlaneDatabase } from './storage/database.ts';
+import { ReceiptRepository } from './storage/receipt-repository.ts';
 import { z } from 'zod';
 
 export interface CoreService {
@@ -23,6 +26,8 @@ export interface CoreService {
   readonly pageRegistry: PageRegistry;
   readonly pageMutationMutex: PageMutationMutex;
   readonly teamDirectory: TeamDirectory;
+  readonly receipts: ReceiptRepository;
+  readonly actorScheduler: ActorScheduler;
   readonly startedAt: Date;
   close(): Promise<void>;
 }
@@ -44,6 +49,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   const pageRegistry = new PageRegistry();
   const pageMutationMutex = new PageMutationMutex();
   const teamDirectory = new TeamDirectory(database);
+  const receipts = new ReceiptRepository(database);
+  const actorScheduler = new ActorScheduler(database);
   const browserOwner =
     options.startBrowser === false
       ? null
@@ -56,7 +63,9 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
 
   try {
     await browserOwner?.start();
+    actorScheduler.restore();
   } catch (error) {
+    actorScheduler.close();
     database.close();
     throw error;
   }
@@ -70,8 +79,9 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     loginUrl: config.chatgptUrl,
     profileDir: config.profileDir,
   });
-  registerTeamMethods(router, teamDirectory);
-  registerSessionMethods(router, teamDirectory);
+  registerTeamMethods(router, teamDirectory, receipts);
+  registerSessionMethods(router, teamDirectory, receipts);
+  registerWaitMethods(router, teamDirectory, actorScheduler);
 
   const rpcServer = new RpcServer({
     socketPath: config.socketPath,
@@ -97,6 +107,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageRegistry,
     pageMutationMutex,
     teamDirectory,
+    receipts,
+    actorScheduler,
     startedAt,
     async close(): Promise<void> {
       if (closed) {
@@ -105,6 +117,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       closed = true;
       await rpcServer.close();
       await browserOwner?.close();
+      actorScheduler.close();
       database.close();
     },
   };

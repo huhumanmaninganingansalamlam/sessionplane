@@ -56,6 +56,13 @@ export class EventRepository {
     return Number(row.sequence);
   }
 
+  latestSequenceForSession(sessionId: string): number {
+    const row = this.#database
+      .prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM events WHERE session_id = ?')
+      .get(sessionId) as { sequence: number };
+    return Number(row.sequence);
+  }
+
   list(teamId: string, afterSequence: number, limit: number): readonly SessionPlaneEvent[] {
     const rows = this.#database
       .prepare(`

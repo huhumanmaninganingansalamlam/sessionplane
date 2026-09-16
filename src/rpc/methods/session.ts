@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import type { TeamDirectory } from '../../core/team-directory.ts';
 import { SessionPlaneDomainError } from '../../domain/errors.ts';
+import type { ReceiptRepository } from '../../storage/receipt-repository.ts';
 import { RpcMethodError, type RpcRouter } from '../router.ts';
 
 const ClientId = z.string().trim().min(1).max(200);
@@ -10,7 +11,11 @@ const TeamId = z.string().uuid();
 const SessionId = z.string().uuid();
 const RoleKey = z.string().trim().min(1).max(80);
 
-export function registerSessionMethods(router: RpcRouter, directory: TeamDirectory): void {
+export function registerSessionMethods(
+  router: RpcRouter,
+  directory: TeamDirectory,
+  receipts: ReceiptRepository,
+): void {
   router.register(
     'session.create',
     z
@@ -22,7 +27,22 @@ export function registerSessionMethods(router: RpcRouter, directory: TeamDirecto
         provider: z.literal('chatgpt').default('chatgpt'),
       })
       .strict(),
-    (params) => wrapDomain(() => directory.createSession(params)),
+    (params) => {
+      const command = {
+        teamId: params.teamId,
+        roleKey: params.roleKey,
+        provider: params.provider,
+      };
+      return wrapDomain(() =>
+        receipts.execute({
+          clientId: params.clientId,
+          requestId: params.requestId,
+          method: 'session.create',
+          payload: command,
+          operation: () => directory.createSession(command),
+        }),
+      );
+    },
   );
 
   router.register(

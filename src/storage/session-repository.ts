@@ -1,4 +1,4 @@
-import type { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 
 import type {
   ObservationTransport,
@@ -8,6 +8,11 @@ import type {
   SessionState,
 } from '../domain/session.ts';
 import { isTerminalSessionState } from '../domain/session.ts';
+import type {
+  CurrentGenerationUpdate,
+  GenerationRecord,
+  SubmissionState,
+} from '../domain/generation.ts';
 
 interface SessionRow {
   readonly sessionId: string;
@@ -124,6 +129,160 @@ export class SessionRepository {
       .all(roleId) as unknown as SessionRow[];
   }
 
+  listNonterminalSessionIds(): readonly string[] {
+    const rows = this.#database
+      .prepare(`
+        SELECT session_id AS sessionId
+        FROM sessions
+        WHERE session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
+        ORDER BY created_at, session_id
+      `)
+      .all() as unknown as Array<{ sessionId: string }>;
+    return rows.map((row) => row.sessionId);
+  }
+
+  insertGeneration(generation: GenerationRecord): void {
+    this.#database
+      .prepare(`
+        INSERT INTO generations(
+          session_id, generation, team_brief_version, prompt_hash, submission_state,
+          submitted_user_message_id, submitted_user_turn_id, response_message_id,
+          answer_text, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(
+        generation.sessionId,
+        generation.generation,
+        generation.teamBriefVersion,
+        generation.promptHash,
+        generation.submissionState,
+        generation.submittedUserMessageId,
+        generation.submittedUserTurnId,
+        generation.responseMessageId,
+        generation.answerText,
+        generation.completedAt,
+      );
+  }
+
+  advanceGeneration(input: {
+    readonly sessionId: string;
+    readonly expectedGeneration: number;
+    readonly nextGeneration: number;
+    readonly deadlineAt: string | null;
+    readonly updatedAt: string;
+  }): boolean {
+    const result = this.#database
+      .prepare(`
+        UPDATE sessions
+        SET
+          current_generation = ?,
+          session_state = 'submitting',
+          provider_state = 'pending',
+          observation_transport = 'fresh',
+          deadline_at = ?,
+          next_check_at = NULL,
+          updated_at = ?
+        WHERE session_id = ?
+          AND current_generation = ?
+          AND session_state NOT IN ('cancelled', 'superseded', 'failed')
+      `)
+      .run(
+        input.nextGeneration,
+        input.deadlineAt,
+        input.updatedAt,
+        input.sessionId,
+        input.expectedGeneration,
+      );
+    return Number(result.changes) === 1;
+  }
+
+  updateCurrentGeneration(
+    sessionId: string,
+    generation: number,
+    update: CurrentGenerationUpdate,
+    updatedAt: string,
+  ): boolean {
+    const sessionAssignments: string[] = ['updated_at = ?'];
+    const sessionValues: SQLInputValue[] = [updatedAt];
+    const generationAssignments: string[] = [];
+    const generationValues: SQLInputValue[] = [];
+
+    appendAssignment(sessionAssignments, sessionValues, 'session_state', update.sessionState);
+    appendAssignment(sessionAssignments, sessionValues, 'provider_state', update.providerState);
+    appendAssignment(
+      sessionAssignments,
+      sessionValues,
+      'observation_transport',
+      update.observationTransport,
+    );
+    appendAssignment(sessionAssignments, sessionValues, 'conversation_id', update.conversationId);
+    appendAssignment(sessionAssignments, sessionValues, 'page_key', update.pageKey);
+    appendAssignment(sessionAssignments, sessionValues, 'next_check_at', update.nextCheckAt);
+
+    appendAssignment(
+      generationAssignments,
+      generationValues,
+      'submission_state',
+      update.submissionState,
+    );
+    appendAssignment(
+      generationAssignments,
+      generationValues,
+      'submitted_user_message_id',
+      update.submittedUserMessageId,
+    );
+    appendAssignment(
+      generationAssignments,
+      generationValues,
+      'submitted_user_turn_id',
+      update.submittedUserTurnId,
+    );
+    appendAssignment(
+      generationAssignments,
+      generationValues,
+      'response_message_id',
+      update.responseMessageId,
+    );
+    appendAssignment(generationAssignments, generationValues, 'answer_text', update.answerText);
+    appendAssignment(generationAssignments, generationValues, 'completed_at', update.completedAt);
+
+    const sessionResult = this.#database
+      .prepare(`
+        UPDATE sessions
+        SET ${sessionAssignments.join(', ')}
+        WHERE session_id = ? AND current_generation = ?
+      `)
+      .run(...sessionValues, sessionId, generation);
+    if (Number(sessionResult.changes) !== 1) {
+      return false;
+    }
+
+    if (generationAssignments.length > 0) {
+      const generationResult = this.#database
+        .prepare(`
+          UPDATE generations
+          SET ${generationAssignments.join(', ')}
+          WHERE session_id = ? AND generation = ?
+        `)
+        .run(...generationValues, sessionId, generation);
+      if (Number(generationResult.changes) !== 1) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  getGenerationSubmissionState(sessionId: string, generation: number): SubmissionState | null {
+    const row = this.#database
+      .prepare(`
+        SELECT submission_state AS submissionState
+        FROM generations
+        WHERE session_id = ? AND generation = ?
+      `)
+      .get(sessionId, generation) as { submissionState: SubmissionState } | undefined;
+    return row?.submissionState ?? null;
+  }
+
   transitionToSuperseded(sessionId: string, updatedAt: string): void {
     const session = this.getSession(sessionId);
     if (session === null || isTerminalSessionState(session.sessionState)) {
@@ -195,5 +354,18 @@ export class SessionRepository {
       errorCode: null,
     };
   }
+}
+
+function appendAssignment(
+  assignments: string[],
+  values: SQLInputValue[],
+  column: string,
+  value: SQLInputValue | undefined,
+): void {
+  if (value === undefined) {
+    return;
+  }
+  assignments.push(`${column} = ?`);
+  values.push(value);
 }
 

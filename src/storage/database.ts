@@ -17,6 +17,8 @@ export class SessionPlaneDatabase {
   readonly path: string;
   readonly schemaVersion: number;
   #closed = false;
+  #transactionDepth = 0;
+  #savepointSequence = 0;
 
   private constructor(databasePath: string, raw: DatabaseSync, schemaVersion: number) {
     this.path = databasePath;
@@ -64,14 +66,24 @@ export class SessionPlaneDatabase {
 
   transaction<T>(operation: () => T): T {
     this.assertOpen();
-    this.raw.exec('BEGIN IMMEDIATE');
+    const outermost = this.#transactionDepth === 0;
+    const savepoint = outermost ? null : `sessionplane_sp_${++this.#savepointSequence}`;
+    this.raw.exec(outermost ? 'BEGIN IMMEDIATE' : `SAVEPOINT ${savepoint}`);
+    this.#transactionDepth += 1;
     try {
       const result = operation();
-      this.raw.exec('COMMIT');
+      this.raw.exec(outermost ? 'COMMIT' : `RELEASE SAVEPOINT ${savepoint}`);
       return result;
     } catch (error) {
-      this.raw.exec('ROLLBACK');
+      if (outermost) {
+        this.raw.exec('ROLLBACK');
+      } else {
+        this.raw.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        this.raw.exec(`RELEASE SAVEPOINT ${savepoint}`);
+      }
       throw error;
+    } finally {
+      this.#transactionDepth -= 1;
     }
   }
 

@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 
 import { initialMigration } from './0001-initial.ts';
+import { runtimeCoordinationMigration } from './0002-runtime-coordination.ts';
 
 export interface Migration {
   readonly version: number;
@@ -8,7 +9,7 @@ export interface Migration {
   up(database: DatabaseSync): void;
 }
 
-export const migrations: readonly Migration[] = [initialMigration];
+export const migrations: readonly Migration[] = [initialMigration, runtimeCoordinationMigration];
 
 export function runMigrations(database: DatabaseSync, now: () => Date = () => new Date()): number {
   database.exec(`
