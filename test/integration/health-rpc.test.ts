@@ -13,6 +13,7 @@ test('system.health is served over an owner-only Unix socket and durable SQLite 
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const service = await startCore({
     config,
+    startBrowser: false,
     logger: {
       debug() {},
       info() {},
@@ -38,7 +39,7 @@ test('system.health is served over an owner-only Unix socket and durable SQLite 
     assert.equal(statSync(config.databasePath).mode & 0o777, 0o600);
 
     await assert.rejects(
-      startCore({ config }),
+      startCore({ config, startBrowser: false }),
       /already listening/,
       'a second core must fail closed instead of stealing the socket',
     );

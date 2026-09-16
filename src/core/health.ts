@@ -1,11 +1,16 @@
 import type { SessionPlaneConfig } from '../config.ts';
 import { SESSIONPLANE_VERSION } from '../config.ts';
+import type { BrowserOwner } from '../browser/browser-owner.ts';
+import { summarizeBrowserHealth } from '../browser/browser-health.ts';
+import type { PageRegistry } from '../browser/page-registry.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 
 export interface HealthContext {
   readonly config: SessionPlaneConfig;
   readonly database: SessionPlaneDatabase;
   readonly startedAt: Date;
+  readonly browserOwner: BrowserOwner | null;
+  readonly pageRegistry: PageRegistry;
 }
 
 export function getSystemHealth(context: HealthContext): Readonly<Record<string, unknown>> {
@@ -24,10 +29,16 @@ export function getSystemHealth(context: HealthContext): Readonly<Record<string,
       path: context.config.socketPath,
     },
     database,
-    browser: {
-      state: 'not_started',
-      profileDir: context.config.profileDir,
-    },
+    browser: summarizeBrowserHealth(
+      context.browserOwner?.status ?? {
+        state: 'not_started',
+        profileDir: context.config.profileDir,
+        headless: false,
+        chrome: null,
+        lastError: null,
+      },
+      context.pageRegistry.listBindings(),
+    ),
   };
 }
 

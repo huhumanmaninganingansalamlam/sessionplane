@@ -14,6 +14,8 @@ export interface SessionPlaneConfig {
   readonly logLevel: LogLevel;
   readonly rpcMaxLineBytes: number;
   readonly rpcRequestTimeoutMs: number;
+  readonly browserLaunchTimeoutMs: number;
+  readonly chatgptUrl: string;
 }
 
 export interface ConfigOverrides {
@@ -26,6 +28,8 @@ export interface ConfigOverrides {
   readonly logLevel?: LogLevel;
   readonly rpcMaxLineBytes?: number;
   readonly rpcRequestTimeoutMs?: number;
+  readonly browserLaunchTimeoutMs?: number;
+  readonly chatgptUrl?: string;
 }
 
 const LOG_LEVELS = new Set<LogLevel>(['debug', 'info', 'warn', 'error']);
@@ -72,6 +76,9 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
     stateDir,
     overrides.profileDir ?? env.SESSIONPLANE_PROFILE_DIR ?? 'chrome-profile',
   );
+  const chatgptUrl = validateChatGptUrl(
+    overrides.chatgptUrl ?? env.SESSIONPLANE_CHATGPT_URL ?? 'https://chatgpt.com/',
+  );
 
   return Object.freeze({
     cwd,
@@ -86,7 +93,24 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
     rpcRequestTimeoutMs:
       overrides.rpcRequestTimeoutMs ??
       parsePositiveInteger(env.SESSIONPLANE_RPC_TIMEOUT_MS, 10_000, 'RPC timeout'),
+    browserLaunchTimeoutMs:
+      overrides.browserLaunchTimeoutMs ??
+      parsePositiveInteger(
+        env.SESSIONPLANE_BROWSER_LAUNCH_TIMEOUT_MS,
+        30_000,
+        'Browser launch timeout',
+      ),
+    chatgptUrl,
   });
+}
+
+function validateChatGptUrl(value: string): string {
+  const url = new URL(value);
+  const hostname = url.hostname.toLowerCase();
+  if (url.protocol !== 'https:' || (hostname !== 'chatgpt.com' && hostname !== 'chat.openai.com')) {
+    throw new Error('SESSIONPLANE_CHATGPT_URL must be an HTTPS ChatGPT URL');
+  }
+  return url.href;
 }
 
 export function prepareRuntimeDirectories(config: SessionPlaneConfig): void {

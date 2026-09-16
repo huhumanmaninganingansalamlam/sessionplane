@@ -34,6 +34,16 @@ Query it from another terminal:
 npm exec sessplane -- health --json
 ```
 
+Open or reuse the dedicated ChatGPT login page without attaching to a personal
+Chrome profile:
+
+```bash
+npm exec sessplane -- login --json
+```
+
+`doctor --json` reports the installed Chrome build and, when the core is
+running, the current Page bindings without changing browser focus.
+
 Runtime state defaults to `.state/`. Override it with
 `SESSIONPLANE_STATE_DIR` when tests or multiple isolated instances are needed.
 

@@ -1,10 +1,14 @@
 import { pathToFileURL } from 'node:url';
 
+import { BrowserOwner } from './browser/browser-owner.ts';
+import { PageMutationMutex } from './browser/page-mutex.ts';
+import { PageRegistry } from './browser/page-registry.ts';
 import { prepareRuntimeDirectories, resolveConfig, type SessionPlaneConfig } from './config.ts';
 import { getSystemHealth } from './core/health.ts';
 import { createLogger, type Logger } from './logging.ts';
 import { RpcRouter } from './rpc/router.ts';
 import { RpcServer } from './rpc/server.ts';
+import { registerBrowserMethods } from './rpc/methods/browser.ts';
 import { SessionPlaneDatabase } from './storage/database.ts';
 import { z } from 'zod';
 
@@ -12,6 +16,9 @@ export interface CoreService {
   readonly config: SessionPlaneConfig;
   readonly database: SessionPlaneDatabase;
   readonly rpcServer: RpcServer;
+  readonly browserOwner: BrowserOwner | null;
+  readonly pageRegistry: PageRegistry;
+  readonly pageMutationMutex: PageMutationMutex;
   readonly startedAt: Date;
   close(): Promise<void>;
 }
@@ -19,6 +26,8 @@ export interface CoreService {
 export interface StartCoreOptions {
   readonly config?: SessionPlaneConfig;
   readonly logger?: Logger;
+  readonly startBrowser?: boolean;
+  readonly browserHeadless?: boolean;
 }
 
 export async function startCore(options: StartCoreOptions = {}): Promise<CoreService> {
@@ -28,10 +37,34 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   const database = SessionPlaneDatabase.open(config.databasePath);
   const startedAt = new Date();
   const router = new RpcRouter();
+  const pageRegistry = new PageRegistry();
+  const pageMutationMutex = new PageMutationMutex();
+  const browserOwner =
+    options.startBrowser === false
+      ? null
+      : new BrowserOwner({
+          profileDir: config.profileDir,
+          pageRegistry,
+          headless: options.browserHeadless ?? false,
+          launchTimeoutMs: config.browserLaunchTimeoutMs,
+        });
+
+  try {
+    await browserOwner?.start();
+  } catch (error) {
+    database.close();
+    throw error;
+  }
 
   router.register('system.health', z.object({}).strict(), () =>
-    getSystemHealth({ config, database, startedAt }),
+    getSystemHealth({ config, database, startedAt, browserOwner, pageRegistry }),
   );
+  registerBrowserMethods(router, {
+    browserOwner,
+    pageRegistry,
+    loginUrl: config.chatgptUrl,
+    profileDir: config.profileDir,
+  });
 
   const rpcServer = new RpcServer({
     socketPath: config.socketPath,
@@ -43,6 +76,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   try {
     await rpcServer.listen();
   } catch (error) {
+    await browserOwner?.close();
     database.close();
     throw error;
   }
@@ -52,6 +86,9 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     config,
     database,
     rpcServer,
+    browserOwner,
+    pageRegistry,
+    pageMutationMutex,
     startedAt,
     async close(): Promise<void> {
       if (closed) {
@@ -59,6 +96,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       }
       closed = true;
       await rpcServer.close();
+      await browserOwner?.close();
       database.close();
     },
   };

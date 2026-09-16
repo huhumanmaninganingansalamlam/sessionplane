@@ -1,17 +1,10 @@
-import { accessSync, constants, statSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
-import { delimiter, isAbsolute, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import {
-  prepareRuntimeDirectories,
-  resolveConfig,
-  SESSIONPLANE_VERSION,
-  type SessionPlaneConfig,
-} from '../config.ts';
+import { resolveConfig, SESSIONPLANE_VERSION } from '../config.ts';
 import { serveForever } from '../main.ts';
-import { SessionPlaneDatabase } from '../storage/database.ts';
 import { callRpc, RpcClientError } from './client.ts';
+import { runDoctor } from './commands/doctor.ts';
+import { runLogin } from './commands/login.ts';
 
 interface CliIo {
   readonly stdout: NodeJS.WriteStream;
@@ -23,6 +16,7 @@ interface ParsedArgs {
   readonly json: boolean;
   readonly stateDir?: string;
   readonly socketPath?: string;
+  readonly url?: string;
 }
 
 export async function runCli(
@@ -58,9 +52,14 @@ export async function runCli(
         return 0;
       }
       case 'doctor': {
-        const report = runDoctor(config);
+        const report = await runDoctor(config);
         writeResult(io, parsed.json, report);
         return report.requestOk ? 0 : 1;
+      }
+      case 'login': {
+        const result = await runLogin(config, parsed.url);
+        writeResult(io, parsed.json, result);
+        return 0;
       }
       case 'version':
       case '--version':
@@ -90,6 +89,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
   let json = false;
   let stateDir: string | undefined;
   let socketPath: string | undefined;
+  let url: string | undefined;
 
   for (let index = 1; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -97,7 +97,7 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       json = true;
       continue;
     }
-    if (arg === '--state-dir' || arg === '--socket') {
+    if (arg === '--state-dir' || arg === '--socket' || arg === '--url') {
       const value = argv[index + 1];
       if (value === undefined) {
         throw new Error(`${arg} requires a value`);
@@ -105,8 +105,10 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
       index += 1;
       if (arg === '--state-dir') {
         stateDir = value;
-      } else {
+      } else if (arg === '--socket') {
         socketPath = value;
+      } else {
+        url = value;
       }
       continue;
     }
@@ -118,114 +120,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     json,
     ...(stateDir === undefined ? {} : { stateDir }),
     ...(socketPath === undefined ? {} : { socketPath }),
+    ...(url === undefined ? {} : { url }),
   };
-}
-
-function runDoctor(config: SessionPlaneConfig): {
-  readonly requestOk: boolean;
-  readonly service: string;
-  readonly version: string;
-  readonly checks: readonly Readonly<Record<string, unknown>>[];
-} {
-  const checks: Array<Readonly<Record<string, unknown>>> = [];
-
-  const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);
-  checks.push({
-    name: 'node',
-    ok: major === 24 && minor >= 15,
-    version: process.version,
-    required: '>=24.15 <25',
-  });
-
-  const chrome = findChrome();
-  checks.push({ name: 'chrome', ...chrome });
-
-  try {
-    prepareRuntimeDirectories(config);
-    const mode = statSync(config.stateDir).mode & 0o777;
-    checks.push({
-      name: 'state-directory',
-      ok: mode === 0o700,
-      path: config.stateDir,
-      mode: mode.toString(8).padStart(3, '0'),
-    });
-  } catch (error) {
-    checks.push({
-      name: 'state-directory',
-      ok: false,
-      path: config.stateDir,
-      reason: error instanceof Error ? error.message : String(error),
-    });
-  }
-
-  try {
-    const database = SessionPlaneDatabase.open(config.databasePath);
-    const health = database.health();
-    database.close();
-    checks.push({
-      name: 'database',
-      ok: health.integrity === 'ok' && health.foreignKeys && health.journalMode === 'wal',
-      ...health,
-    });
-  } catch (error) {
-    checks.push({
-      name: 'database',
-      ok: false,
-      path: config.databasePath,
-      reason: error instanceof Error ? error.message : String(error),
-    });
-  }
-
-  return {
-    requestOk: checks.every((check) => check.ok === true),
-    service: 'sessionplane',
-    version: SESSIONPLANE_VERSION,
-    checks,
-  };
-}
-
-function findChrome(): Readonly<Record<string, unknown>> {
-  const candidates = [
-    'google-chrome',
-    'google-chrome-stable',
-    'chromium',
-    'chromium-browser',
-  ];
-  for (const candidate of candidates) {
-    const executable = findExecutable(candidate);
-    if (executable === null) {
-      continue;
-    }
-    const result = spawnSync(executable, ['--version'], { encoding: 'utf8' });
-    return {
-      ok: result.status === 0,
-      executable,
-      version: result.stdout.trim() || result.stderr.trim(),
-    };
-  }
-  return { ok: false, reason: 'Google Chrome executable not found on PATH' };
-}
-
-function findExecutable(command: string): string | null {
-  if (isAbsolute(command)) {
-    return canExecute(command) ? command : null;
-  }
-  for (const directory of (process.env.PATH ?? '').split(delimiter)) {
-    const candidate = join(directory, command);
-    if (canExecute(candidate)) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
-function canExecute(candidate: string): boolean {
-  try {
-    accessSync(candidate, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function writeResult(io: CliIo, json: boolean, result: unknown): void {
@@ -251,7 +147,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function helpText(): string {
-  return `SessionPlane ${SESSIONPLANE_VERSION}\n\nUsage:\n  sessplane serve [--state-dir PATH]\n  sessplane health [--json] [--socket PATH]\n  sessplane doctor [--json] [--state-dir PATH]\n  sessplane version\n`;
+  return `SessionPlane ${SESSIONPLANE_VERSION}\n\nUsage:\n  sessplane serve [--state-dir PATH]\n  sessplane health [--json] [--socket PATH]\n  sessplane doctor [--json] [--state-dir PATH]\n  sessplane login [--json] [--url HTTPS_URL]\n  sessplane version\n`;
 }
 
 function isDirectExecution(): boolean {

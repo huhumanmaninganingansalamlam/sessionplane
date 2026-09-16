@@ -13,7 +13,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test --experimental-strip-types test/**/*.test.ts",
+    "test": "node --test --test-concurrency=1 --experimental-strip-types test/**/*.test.ts",
     "dev": "node --watch --experimental-strip-types src/main.ts",
     "doctor": "node --experimental-strip-types src/cli/main.ts doctor --json",
     "start": "node dist/main.js"
