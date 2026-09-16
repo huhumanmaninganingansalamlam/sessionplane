@@ -22,6 +22,12 @@ test('resolveConfig anchors runtime paths under an explicit state directory', ()
     assert.equal(config.observationActiveSweepMs, 5_000);
     assert.equal(config.observationQuietSweepMs, 15_000);
     assert.equal(config.observationQuietWindowMs, 1_500);
+    assert.equal(config.backendRecoveryAfterMs, 30_000);
+    assert.equal(config.backendRequestTimeoutMs, 15_000);
+    assert.equal(config.probeSuccessIntervalMs, 30_000);
+    assert.equal(config.probeMin429BackoffMs, 60_000);
+    assert.equal(config.probeMax429BackoffMs, 15 * 60_000);
+    assert.equal(config.tokenCacheTtlMs, 60_000);
 
     prepareRuntimeDirectories(config);
     assert.equal(statSync(config.stateDir).mode & 0o777, 0o700);

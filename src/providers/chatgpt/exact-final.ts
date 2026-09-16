@@ -56,8 +56,11 @@ export class ExactFinalTracker {
     const candidate = evidence.candidate;
     if (candidate === null) {
       this.#reset();
-      if (evidence.activity === 'strong' || evidence.networkActivity) {
+      if (evidence.activity === 'strong') {
         return decision('progress', 'provider-generation-activity', true);
+      }
+      if (evidence.networkActivity) {
+        return decision('progress', 'provider-network-activity');
       }
       return decision('pending', 'assistant-candidate-missing');
     }

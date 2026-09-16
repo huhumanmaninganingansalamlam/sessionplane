@@ -17,6 +17,7 @@ import { registerSendMethods } from './rpc/methods/send.ts';
 import { registerTeamMethods } from './rpc/methods/team.ts';
 import { registerWaitMethods } from './rpc/methods/wait.ts';
 import { ActorScheduler } from './scheduler/actor-scheduler.ts';
+import { ProbeCoordinator } from './scheduler/probe-coordinator.ts';
 import { SessionPlaneDatabase } from './storage/database.ts';
 import { ReceiptRepository } from './storage/receipt-repository.ts';
 import { ChatGptAdapter } from './providers/chatgpt/adapter.ts';
@@ -36,6 +37,7 @@ export interface CoreService {
   readonly teamDirectory: TeamDirectory;
   readonly receipts: ReceiptRepository;
   readonly actorScheduler: ActorScheduler;
+  readonly probeCoordinator: ProbeCoordinator;
   readonly providerAdapters: ProviderAdapterRegistry;
   readonly observationService: ObservationService;
   readonly submissionService: SubmissionService;
@@ -92,9 +94,17 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
               pageRegistry,
               loginUrl: config.chatgptUrl,
               acknowledgementTimeoutMs: config.submissionAckTimeoutMs,
+              backendRequestTimeoutMs: config.backendRequestTimeoutMs,
+              tokenCacheTtlMs: config.tokenCacheTtlMs,
             }),
           ]),
   );
+  const probeCoordinator = new ProbeCoordinator({
+    database,
+    successIntervalMs: config.probeSuccessIntervalMs,
+    min429BackoffMs: config.probeMin429BackoffMs,
+    max429BackoffMs: config.probeMax429BackoffMs,
+  });
   const observationService = new ObservationService({
     database,
     scheduler: actorScheduler,
@@ -102,6 +112,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     activeSweepMs: config.observationActiveSweepMs,
     quietSweepMs: config.observationQuietSweepMs,
     quietWindowMs: config.observationQuietWindowMs,
+    backendRecoveryAfterMs: config.backendRecoveryAfterMs,
+    probeCoordinator,
     logger,
   });
   const submissionService = new SubmissionService({
@@ -167,6 +179,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     teamDirectory,
     receipts,
     actorScheduler,
+    probeCoordinator,
     providerAdapters,
     observationService,
     submissionService,

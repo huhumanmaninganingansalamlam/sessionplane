@@ -19,6 +19,12 @@ export interface SessionPlaneConfig {
   readonly observationActiveSweepMs: number;
   readonly observationQuietSweepMs: number;
   readonly observationQuietWindowMs: number;
+  readonly backendRecoveryAfterMs: number;
+  readonly backendRequestTimeoutMs: number;
+  readonly probeSuccessIntervalMs: number;
+  readonly probeMin429BackoffMs: number;
+  readonly probeMax429BackoffMs: number;
+  readonly tokenCacheTtlMs: number;
   readonly chatgptUrl: string;
 }
 
@@ -37,6 +43,12 @@ export interface ConfigOverrides {
   readonly observationActiveSweepMs?: number;
   readonly observationQuietSweepMs?: number;
   readonly observationQuietWindowMs?: number;
+  readonly backendRecoveryAfterMs?: number;
+  readonly backendRequestTimeoutMs?: number;
+  readonly probeSuccessIntervalMs?: number;
+  readonly probeMin429BackoffMs?: number;
+  readonly probeMax429BackoffMs?: number;
+  readonly tokenCacheTtlMs?: number;
   readonly chatgptUrl?: string;
 }
 
@@ -124,6 +136,24 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
     observationQuietWindowMs:
       overrides.observationQuietWindowMs ??
       parsePositiveInteger(env.SESSIONPLANE_OBSERVATION_QUIET_WINDOW_MS, 1_500, 'Observation quiet window'),
+    backendRecoveryAfterMs:
+      overrides.backendRecoveryAfterMs ??
+      parsePositiveInteger(env.SESSIONPLANE_BACKEND_RECOVERY_AFTER_MS, 30_000, 'Backend recovery delay'),
+    backendRequestTimeoutMs:
+      overrides.backendRequestTimeoutMs ??
+      parsePositiveInteger(env.SESSIONPLANE_BACKEND_REQUEST_TIMEOUT_MS, 15_000, 'Backend request timeout'),
+    probeSuccessIntervalMs:
+      overrides.probeSuccessIntervalMs ??
+      parsePositiveInteger(env.SESSIONPLANE_PROBE_SUCCESS_INTERVAL_MS, 30_000, 'Probe success interval'),
+    probeMin429BackoffMs:
+      overrides.probeMin429BackoffMs ??
+      parsePositiveInteger(env.SESSIONPLANE_PROBE_MIN_429_BACKOFF_MS, 60_000, 'Probe minimum 429 backoff'),
+    probeMax429BackoffMs:
+      overrides.probeMax429BackoffMs ??
+      parsePositiveInteger(env.SESSIONPLANE_PROBE_MAX_429_BACKOFF_MS, 15 * 60_000, 'Probe maximum 429 backoff'),
+    tokenCacheTtlMs:
+      overrides.tokenCacheTtlMs ??
+      parsePositiveInteger(env.SESSIONPLANE_TOKEN_CACHE_TTL_MS, 60_000, 'Token cache TTL'),
     chatgptUrl,
   });
 }

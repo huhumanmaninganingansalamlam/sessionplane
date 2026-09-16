@@ -62,10 +62,33 @@ export interface ProviderObservationSource {
   close(): void;
 }
 
+export type ProviderRecoveryKind =
+  | 'complete'
+  | 'pending'
+  | 'unverified'
+  | 'deferred'
+  | 'unavailable';
+
+export interface ProviderRecoveryResult {
+  readonly kind: ProviderRecoveryKind;
+  readonly observationTransport: ObservationTransport;
+  readonly responseMessageId: string | null;
+  readonly answerText: string | null;
+  readonly reason: string;
+  readonly retryAfterMs: number | null;
+  readonly nextCheckAt: string | null;
+}
+
+export interface ProviderRecoveryRequest {
+  readonly session: SessionSnapshot;
+  readonly generation: number;
+}
+
 export interface ProviderAdapter {
   readonly provider: string;
   openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission>;
   openObservation(request: ProviderObservationRequest): Promise<ProviderObservationSource>;
+  recover(request: ProviderRecoveryRequest): Promise<ProviderRecoveryResult>;
 }
 
 export class ProviderSubmissionError extends Error {

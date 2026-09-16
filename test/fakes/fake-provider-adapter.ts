@@ -4,6 +4,8 @@ import {
   type ProviderObservationEvidence,
   type ProviderObservationRequest,
   type ProviderObservationSource,
+  type ProviderRecoveryRequest,
+  type ProviderRecoveryResult,
   type ProviderSubmission,
   type ProviderSubmissionAcknowledgement,
   type ProviderSubmissionRequest,
@@ -23,11 +25,13 @@ export class FakeProviderAdapter implements ProviderAdapter {
   acknowledgementCount = 0;
   bindCount = 0;
   observationOpenCount = 0;
+  recoveryCount = 0;
   readonly #observationSources = new Map<string, FakeObservationSource>();
   readonly #pendingObservations = new Map<
     string,
     Array<Partial<ProviderObservationEvidence>>
   >();
+  readonly #recoveryResults = new Map<string, ProviderRecoveryResult[]>();
 
   async openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission> {
     this.openCount += 1;
@@ -91,6 +95,30 @@ export class FakeProviderAdapter implements ProviderAdapter {
     const pending = this.#pendingObservations.get(sessionId) ?? [];
     pending.push(observation);
     this.#pendingObservations.set(sessionId, pending);
+  }
+
+  queueRecovery(sessionId: string, result: ProviderRecoveryResult): void {
+    const queue = this.#recoveryResults.get(sessionId) ?? [];
+    queue.push(result);
+    this.#recoveryResults.set(sessionId, queue);
+  }
+
+  async recover(request: ProviderRecoveryRequest): Promise<ProviderRecoveryResult> {
+    this.recoveryCount += 1;
+    const queue = this.#recoveryResults.get(request.session.sessionId);
+    const result = queue?.shift();
+    if (queue !== undefined && queue.length === 0) {
+      this.#recoveryResults.delete(request.session.sessionId);
+    }
+    return result ?? {
+      kind: 'pending',
+      observationTransport: 'fresh',
+      responseMessageId: null,
+      answerText: null,
+      reason: 'fake-backend-pending',
+      retryAfterMs: null,
+      nextCheckAt: null,
+    };
   }
 }
 

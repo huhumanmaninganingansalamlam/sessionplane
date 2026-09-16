@@ -5,9 +5,11 @@ import {
   type ProviderAdapterRegistry,
   type ProviderObservationEvidence,
   type ProviderObservationSource,
+  type ProviderRecoveryResult,
 } from '../providers/provider-adapter.ts';
 import { ExactFinalTracker, type ExactFinalDecision } from '../providers/chatgpt/exact-final.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
+import type { ProbeCoordinator } from '../scheduler/probe-coordinator.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
 
@@ -24,6 +26,8 @@ export interface ObservationServiceOptions {
   readonly activeSweepMs: number;
   readonly quietSweepMs: number;
   readonly quietWindowMs: number;
+  readonly backendRecoveryAfterMs: number;
+  readonly probeCoordinator: ProbeCoordinator;
   readonly logger?: Logger;
   readonly now?: () => Date;
 }
@@ -35,6 +39,8 @@ export class ObservationService {
   readonly #activeSweepMs: number;
   readonly #quietSweepMs: number;
   readonly #quietWindowMs: number;
+  readonly #backendRecoveryAfterMs: number;
+  readonly #probeCoordinator: ProbeCoordinator;
   readonly #logger: Logger | null;
   readonly #now: () => Date;
   readonly #runtimes = new Map<string, ObserverRuntime>();
@@ -47,6 +53,8 @@ export class ObservationService {
     this.#activeSweepMs = options.activeSweepMs;
     this.#quietSweepMs = options.quietSweepMs;
     this.#quietWindowMs = options.quietWindowMs;
+    this.#backendRecoveryAfterMs = options.backendRecoveryAfterMs;
+    this.#probeCoordinator = options.probeCoordinator;
     this.#logger = options.logger ?? null;
     this.#now = options.now ?? (() => new Date());
   }
@@ -102,6 +110,7 @@ export class ObservationService {
 
   async #run(initial: SessionSnapshot, signal: AbortSignal): Promise<void> {
     const tracker = new ExactFinalTracker(this.#quietWindowMs);
+    let lastExactProgressAtMs = this.#now().getTime();
     let source: ProviderObservationSource | null = null;
     try {
       while (!signal.aborted) {
@@ -139,10 +148,36 @@ export class ObservationService {
           continue;
         }
 
-        const decision = tracker.evaluate(evidence, this.#now().getTime());
-        const persisted = await this.#persistDecision(current, evidence, decision);
+        const nowMs = this.#now().getTime();
+        const decision = tracker.evaluate(evidence, nowMs);
+        const preserveBackendDeferral =
+          current.observationTransport === 'deferred' &&
+          current.nextCheckAt !== null &&
+          Date.parse(current.nextCheckAt) > nowMs &&
+          !decision.freshExactProgress &&
+          decision.kind !== 'complete' &&
+          decision.kind !== 'blocked' &&
+          decision.kind !== 'interstitial';
+        const persisted = preserveBackendDeferral
+          ? current
+          : await this.#persistDecision(current, evidence, decision);
         if (persisted.terminal || decision.kind === 'complete') {
           return;
+        }
+        if (decision.freshExactProgress) {
+          lastExactProgressAtMs = this.#now().getTime();
+        }
+
+        if (
+          decision.kind !== 'blocked' &&
+          decision.kind !== 'interstitial' &&
+          this.#now().getTime() - lastExactProgressAtMs >= this.#backendRecoveryAfterMs
+        ) {
+          const recovery = await this.#recover(persisted);
+          const recovered = await this.#persistRecovery(persisted, recovery);
+          if (recovered.terminal || recovery.kind === 'complete') {
+            return;
+          }
         }
 
         const sweepMs = decision.freshExactProgress
@@ -188,6 +223,29 @@ export class ObservationService {
       snapshot.generation,
       update,
       'generation.observation-unavailable',
+    );
+  }
+
+  async #recover(snapshot: SessionSnapshot): Promise<ProviderRecoveryResult> {
+    const adapter = this.#adapters.require(snapshot.provider);
+    return await this.#probeCoordinator.run(`${snapshot.provider}:default`, async () =>
+      await adapter.recover({ session: snapshot, generation: snapshot.generation }),
+    );
+  }
+
+  async #persistRecovery(
+    previous: SessionSnapshot,
+    recovery: ProviderRecoveryResult,
+  ): Promise<SessionSnapshot> {
+    const update = updateForRecovery(recovery, this.#now().toISOString());
+    if (!hasMeaningfulChange(previous, update)) {
+      return previous;
+    }
+    return await this.#scheduler.updateGeneration(
+      previous.sessionId,
+      previous.generation,
+      update,
+      eventTypeForRecovery(recovery),
     );
   }
 }
@@ -279,6 +337,77 @@ function eventTypeForDecision(decision: ExactFinalDecision): string {
   }
 }
 
+function updateForRecovery(
+  recovery: ProviderRecoveryResult,
+  now: string,
+): CurrentGenerationUpdate {
+  switch (recovery.kind) {
+    case 'complete':
+      return {
+        sessionState: 'complete',
+        providerState: 'complete',
+        observationTransport: 'fresh',
+        responseMessageId: recovery.responseMessageId,
+        answerText: recovery.answerText,
+        completedAt: now,
+        nextCheckAt: null,
+        reason: recovery.reason,
+        errorCode: null,
+      };
+    case 'pending':
+      return {
+        sessionState: 'observing',
+        providerState: 'pending',
+        observationTransport: recovery.observationTransport,
+        nextCheckAt: recovery.nextCheckAt,
+        reason: recovery.reason,
+        errorCode: null,
+      };
+    case 'unverified':
+      return {
+        sessionState: 'observing',
+        providerState: 'unknown',
+        observationTransport: recovery.observationTransport,
+        nextCheckAt: recovery.nextCheckAt,
+        reason: recovery.reason,
+        errorCode: null,
+      };
+    case 'deferred':
+      return {
+        sessionState: 'observing',
+        providerState: 'unknown',
+        observationTransport: 'deferred',
+        nextCheckAt: recovery.nextCheckAt,
+        reason: recovery.reason,
+        errorCode: null,
+      };
+    case 'unavailable':
+      return {
+        sessionState: 'observing',
+        providerState: 'unknown',
+        observationTransport: 'unavailable',
+        nextCheckAt: recovery.nextCheckAt,
+        reason: recovery.reason,
+        errorCode: null,
+      };
+  }
+}
+
+function eventTypeForRecovery(recovery: ProviderRecoveryResult): string {
+  switch (recovery.kind) {
+    case 'complete':
+      return 'generation.backend-complete';
+    case 'pending':
+      return 'generation.backend-pending';
+    case 'unverified':
+      return 'generation.backend-unverified';
+    case 'deferred':
+      return 'generation.backend-deferred';
+    case 'unavailable':
+      return 'generation.backend-unavailable';
+  }
+}
+
 function hasMeaningfulChange(
   snapshot: SessionSnapshot,
   update: CurrentGenerationUpdate,
@@ -291,6 +420,7 @@ function hasMeaningfulChange(
     (update.responseMessageId !== undefined &&
       update.responseMessageId !== snapshot.responseMessageId) ||
     (update.answerText !== undefined && update.answerText !== snapshot.answerText) ||
+    (update.nextCheckAt !== undefined && update.nextCheckAt !== snapshot.nextCheckAt) ||
     (update.reason !== undefined && update.reason !== snapshot.reason) ||
     (update.errorCode !== undefined && update.errorCode !== snapshot.errorCode)
   );

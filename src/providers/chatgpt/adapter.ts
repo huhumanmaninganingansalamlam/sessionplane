@@ -6,11 +6,17 @@ import {
   type ProviderObservationEvidence,
   type ProviderObservationRequest,
   type ProviderObservationSource,
+  type ProviderRecoveryRequest,
+  type ProviderRecoveryResult,
   type ProviderSubmission,
   type ProviderSubmissionRequest,
   type ProviderWakeReason,
 } from '../provider-adapter.ts';
 import { observeChatGptActivity } from './activity-observer.ts';
+import {
+  ChatGptBackendRecovery,
+  type BackendJsonClient,
+} from './backend-recovery.ts';
 import { observeChatGptDialog } from './dialog-observer.ts';
 import { observeChatGptDom, waitForChatGptDomMutation } from './dom-observer.ts';
 import { ChatGptNetworkObserver } from './network-observer.ts';
@@ -21,6 +27,8 @@ export interface ChatGptAdapterOptions {
   readonly pageRegistry: PageRegistry;
   readonly loginUrl: string;
   readonly acknowledgementTimeoutMs: number;
+  readonly backendRequestTimeoutMs?: number;
+  readonly tokenCacheTtlMs?: number;
 }
 
 export class ChatGptAdapter implements ProviderAdapter {
@@ -29,12 +37,17 @@ export class ChatGptAdapter implements ProviderAdapter {
   readonly #pageRegistry: PageRegistry;
   readonly #loginUrl: string;
   readonly #acknowledgementTimeoutMs: number;
+  readonly #backendRecovery: ChatGptBackendRecovery;
 
   constructor(options: ChatGptAdapterOptions) {
     this.#browserOwner = options.browserOwner;
     this.#pageRegistry = options.pageRegistry;
     this.#loginUrl = options.loginUrl;
     this.#acknowledgementTimeoutMs = options.acknowledgementTimeoutMs;
+    this.#backendRecovery = new ChatGptBackendRecovery({
+      requestTimeoutMs: options.backendRequestTimeoutMs ?? 15_000,
+      tokenCacheTtlMs: options.tokenCacheTtlMs ?? 60_000,
+    });
   }
 
   async openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission> {
@@ -122,6 +135,61 @@ export class ChatGptAdapter implements ProviderAdapter {
       throw error;
     }
   }
+
+  async recover(request: ProviderRecoveryRequest): Promise<ProviderRecoveryResult> {
+    const pageKey = request.session.pageKey;
+    const conversationId = request.session.conversationId;
+    if (pageKey === null || conversationId === null) {
+      return recoveryUnavailable('backend-page-identity-incomplete');
+    }
+
+    let page: ReturnType<PageRegistry['requireOwnedPage']>;
+    try {
+      page = this.#pageRegistry.requireOwnedPage(pageKey, {
+        sessionId: request.session.sessionId,
+        generation: request.generation,
+        conversationId,
+      });
+    } catch (error) {
+      return recoveryUnavailable(
+        error instanceof PageRegistryError
+          ? 'backend-page-identity-unverified'
+          : 'backend-page-unavailable',
+      );
+    }
+
+    const client: BackendJsonClient = {
+      async get(url, options) {
+        const response = await page.context().request.get(url, {
+          failOnStatusCode: false,
+          ...(options.headers === undefined ? {} : { headers: { ...options.headers } }),
+          timeout: options.timeoutMs,
+        });
+        try {
+          return {
+            status: response.status(),
+            headers: response.headers(),
+            body: await response.json().catch(() => null),
+          };
+        } finally {
+          await response.dispose();
+        }
+      },
+    };
+    return await this.#backendRecovery.recover(request, client, new URL(page.url()).origin);
+  }
+}
+
+function recoveryUnavailable(reason: string): ProviderRecoveryResult {
+  return {
+    kind: 'unavailable',
+    observationTransport: 'unavailable',
+    responseMessageId: null,
+    answerText: null,
+    reason,
+    retryAfterMs: null,
+    nextCheckAt: null,
+  };
 }
 
 interface ChatGptObservationSourceOptions {
