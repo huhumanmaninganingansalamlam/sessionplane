@@ -20,5 +20,23 @@ export const CHATGPT_SELECTORS = {
   ],
   modelOptions: '[role="menuitem"], [role="option"], [data-testid*="model-option"], [role="menu"] button',
   userMessages: '[data-message-author-role="user"]',
+  messages: '[data-message-author-role]',
+  stopControls: [
+    '[data-testid="stop-button"]',
+    'button[aria-label="Stop generating"]',
+    'button[aria-label="Stop streaming"]',
+    'button[aria-label="생성 중지"]',
+  ],
+  thinkingIndicators: [
+    '[data-testid*="thinking"]',
+    '[data-testid*="reasoning"]',
+    '[aria-label*="thinking" i]',
+  ],
+  dialogs: [
+    '[role="alertdialog"]',
+    '[role="dialog"]',
+    '[data-testid*="interstitial"]',
+    '[data-testid*="modal"]',
+  ],
 } as const;
 

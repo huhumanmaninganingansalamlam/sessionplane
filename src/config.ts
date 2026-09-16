@@ -16,6 +16,9 @@ export interface SessionPlaneConfig {
   readonly rpcRequestTimeoutMs: number;
   readonly browserLaunchTimeoutMs: number;
   readonly submissionAckTimeoutMs: number;
+  readonly observationActiveSweepMs: number;
+  readonly observationQuietSweepMs: number;
+  readonly observationQuietWindowMs: number;
   readonly chatgptUrl: string;
 }
 
@@ -31,6 +34,9 @@ export interface ConfigOverrides {
   readonly rpcRequestTimeoutMs?: number;
   readonly browserLaunchTimeoutMs?: number;
   readonly submissionAckTimeoutMs?: number;
+  readonly observationActiveSweepMs?: number;
+  readonly observationQuietSweepMs?: number;
+  readonly observationQuietWindowMs?: number;
   readonly chatgptUrl?: string;
 }
 
@@ -109,6 +115,15 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
         12_000,
         'Submission acknowledgement timeout',
       ),
+    observationActiveSweepMs:
+      overrides.observationActiveSweepMs ??
+      parsePositiveInteger(env.SESSIONPLANE_OBSERVATION_ACTIVE_SWEEP_MS, 5_000, 'Observation active sweep'),
+    observationQuietSweepMs:
+      overrides.observationQuietSweepMs ??
+      parsePositiveInteger(env.SESSIONPLANE_OBSERVATION_QUIET_SWEEP_MS, 15_000, 'Observation quiet sweep'),
+    observationQuietWindowMs:
+      overrides.observationQuietWindowMs ??
+      parsePositiveInteger(env.SESSIONPLANE_OBSERVATION_QUIET_WINDOW_MS, 1_500, 'Observation quiet window'),
     chatgptUrl,
   });
 }

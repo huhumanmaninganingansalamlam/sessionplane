@@ -19,6 +19,9 @@ test('resolveConfig anchors runtime paths under an explicit state directory', ()
     assert.equal(config.socketPath, path.join(root, 'runtime', 'sessionplane.sock'));
     assert.equal(config.databasePath, path.join(root, 'runtime', 'sessionplane.sqlite'));
     assert.equal(config.profileDir, path.join(root, 'runtime', 'chrome-profile'));
+    assert.equal(config.observationActiveSweepMs, 5_000);
+    assert.equal(config.observationQuietSweepMs, 15_000);
+    assert.equal(config.observationQuietWindowMs, 1_500);
 
     prepareRuntimeDirectories(config);
     assert.equal(statSync(config.stateDir).mode & 0o777, 0o700);
@@ -36,6 +39,10 @@ test('resolveConfig rejects invalid numeric and log-level environment values', (
   assert.throws(
     () => resolveConfig({ env: { SESSIONPLANE_LOG_LEVEL: 'verbose' } }),
     /must be one of/,
+  );
+  assert.throws(
+    () => resolveConfig({ env: { SESSIONPLANE_OBSERVATION_ACTIVE_SWEEP_MS: '0' } }),
+    /positive integer/,
   );
 });
 

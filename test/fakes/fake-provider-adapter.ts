@@ -1,9 +1,13 @@
 import {
   ProviderSubmissionError,
   type ProviderAdapter,
+  type ProviderObservationEvidence,
+  type ProviderObservationRequest,
+  type ProviderObservationSource,
   type ProviderSubmission,
   type ProviderSubmissionAcknowledgement,
   type ProviderSubmissionRequest,
+  type ProviderWakeReason,
 } from '../../src/providers/provider-adapter.ts';
 
 export type FakeAcknowledgementMode = 'success' | 'missing';
@@ -18,6 +22,12 @@ export class FakeProviderAdapter implements ProviderAdapter {
   submitCount = 0;
   acknowledgementCount = 0;
   bindCount = 0;
+  observationOpenCount = 0;
+  readonly #observationSources = new Map<string, FakeObservationSource>();
+  readonly #pendingObservations = new Map<
+    string,
+    Array<Partial<ProviderObservationEvidence>>
+  >();
 
   async openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission> {
     this.openCount += 1;
@@ -55,6 +65,108 @@ export class FakeProviderAdapter implements ProviderAdapter {
       bindAcknowledgement(): void {
         adapter.bindCount += 1;
       },
+    };
+  }
+
+  async openObservation(request: ProviderObservationRequest): Promise<ProviderObservationSource> {
+    this.observationOpenCount += 1;
+    const source = new FakeObservationSource(request);
+    this.#observationSources.set(request.session.sessionId, source);
+    for (const observation of this.#pendingObservations.get(request.session.sessionId) ?? []) {
+      source.emit(observation);
+    }
+    this.#pendingObservations.delete(request.session.sessionId);
+    return source;
+  }
+
+  emitObservation(
+    sessionId: string,
+    observation: Partial<ProviderObservationEvidence>,
+  ): void {
+    const source = this.#observationSources.get(sessionId);
+    if (source !== undefined) {
+      source.emit(observation);
+      return;
+    }
+    const pending = this.#pendingObservations.get(sessionId) ?? [];
+    pending.push(observation);
+    this.#pendingObservations.set(sessionId, pending);
+  }
+}
+
+class FakeObservationSource implements ProviderObservationSource {
+  readonly provider = 'chatgpt';
+  readonly pageKey: string;
+  readonly #request: ProviderObservationRequest;
+  readonly #queue: ProviderObservationEvidence[] = [];
+  readonly #waiters = new Set<(reason: ProviderWakeReason) => void>();
+  #closed = false;
+
+  constructor(request: ProviderObservationRequest) {
+    this.#request = request;
+    this.pageKey = request.session.pageKey ?? `fake-page:${request.session.sessionId}`;
+  }
+
+  async observe(): Promise<ProviderObservationEvidence> {
+    return this.#queue.shift() ?? this.#baseEvidence();
+  }
+
+  async waitForWake(timeoutMs: number): Promise<ProviderWakeReason> {
+    if (this.#closed || this.#queue.length > 0) {
+      return this.#closed ? 'timer' : 'dom';
+    }
+    return await new Promise<ProviderWakeReason>((resolve) => {
+      let settled = false;
+      const finish = (reason: ProviderWakeReason): void => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        this.#waiters.delete(finish);
+        resolve(reason);
+      };
+      const timer = setTimeout(() => finish('timer'), timeoutMs);
+      timer.unref?.();
+      this.#waiters.add(finish);
+    });
+  }
+
+  emit(overrides: Partial<ProviderObservationEvidence>): void {
+    if (this.#closed) {
+      return;
+    }
+    this.#queue.push({ ...this.#baseEvidence(), ...overrides });
+    for (const waiter of [...this.#waiters]) {
+      waiter('dom');
+    }
+  }
+
+  close(): void {
+    if (this.#closed) {
+      return;
+    }
+    this.#closed = true;
+    for (const waiter of [...this.#waiters]) {
+      waiter('timer');
+    }
+  }
+
+  #baseEvidence(): ProviderObservationEvidence {
+    return {
+      provider: this.provider,
+      pageKey: this.pageKey,
+      bindingEpoch: 1,
+      observedAt: new Date().toISOString(),
+      conversationId: this.#request.session.conversationId,
+      submittedUserFound: true,
+      laterUserFound: false,
+      candidate: null,
+      activity: 'none',
+      dialogKind: null,
+      networkActivity: false,
+      observationTransport: 'fresh',
+      reason: null,
     };
   }
 }

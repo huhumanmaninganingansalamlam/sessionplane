@@ -5,6 +5,7 @@ import { PageMutationMutex } from './browser/page-mutex.ts';
 import { PageRegistry } from './browser/page-registry.ts';
 import { prepareRuntimeDirectories, resolveConfig, type SessionPlaneConfig } from './config.ts';
 import { getSystemHealth } from './core/health.ts';
+import { ObservationService } from './core/observation-service.ts';
 import { TeamDirectory } from './core/team-directory.ts';
 import { SubmissionService } from './core/submission-service.ts';
 import { createLogger, type Logger } from './logging.ts';
@@ -36,6 +37,7 @@ export interface CoreService {
   readonly receipts: ReceiptRepository;
   readonly actorScheduler: ActorScheduler;
   readonly providerAdapters: ProviderAdapterRegistry;
+  readonly observationService: ObservationService;
   readonly submissionService: SubmissionService;
   readonly startedAt: Date;
   close(): Promise<void>;
@@ -93,12 +95,22 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
             }),
           ]),
   );
+  const observationService = new ObservationService({
+    database,
+    scheduler: actorScheduler,
+    adapters: providerAdapters,
+    activeSweepMs: config.observationActiveSweepMs,
+    quietSweepMs: config.observationQuietSweepMs,
+    quietWindowMs: config.observationQuietWindowMs,
+    logger,
+  });
   const submissionService = new SubmissionService({
     database,
     directory: teamDirectory,
     scheduler: actorScheduler,
     pageMutex: pageMutationMutex,
     adapters: providerAdapters,
+    onSubmitted: (snapshot) => observationService.start(snapshot),
   });
 
   try {
@@ -107,6 +119,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       logger.warn('submission.recovered-ambiguous', { count: recovered });
     }
   } catch (error) {
+    await observationService.close();
     await browserOwner?.close();
     actorScheduler.close();
     database.close();
@@ -137,6 +150,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   try {
     await rpcServer.listen();
   } catch (error) {
+    await observationService.close();
     await browserOwner?.close();
     database.close();
     throw error;
@@ -154,6 +168,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     receipts,
     actorScheduler,
     providerAdapters,
+    observationService,
     submissionService,
     startedAt,
     async close(): Promise<void> {
@@ -162,6 +177,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       }
       closed = true;
       await rpcServer.close();
+      await observationService.close();
       await browserOwner?.close();
       actorScheduler.close();
       database.close();

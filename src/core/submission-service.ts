@@ -50,6 +50,7 @@ export class SubmissionService {
   readonly #events: EventRepository;
   readonly #outbox: OutboxRepository;
   readonly #now: () => Date;
+  readonly #onSubmitted: ((snapshot: SessionSnapshot) => void) | null;
   readonly #requestTails = new Map<string, Promise<void>>();
 
   constructor(options: {
@@ -58,6 +59,7 @@ export class SubmissionService {
     readonly scheduler: ActorScheduler;
     readonly pageMutex: PageMutationMutex;
     readonly adapters: ProviderAdapterRegistry;
+    readonly onSubmitted?: (snapshot: SessionSnapshot) => void;
     readonly now?: () => Date;
   }) {
     this.#database = options.database;
@@ -68,6 +70,7 @@ export class SubmissionService {
     this.#sessions = new SessionRepository(options.database.raw);
     this.#events = new EventRepository(options.database.raw);
     this.#outbox = new OutboxRepository(options.database);
+    this.#onSubmitted = options.onSubmitted ?? null;
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -487,6 +490,7 @@ export class SubmissionService {
       });
     });
     actor.publish(snapshot, eventSequence);
+    this.#onSubmitted?.(snapshot);
     return snapshot;
   }
 

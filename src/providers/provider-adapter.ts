@@ -1,4 +1,4 @@
-import type { SessionSnapshot } from '../domain/session.ts';
+import type { ObservationTransport, SessionSnapshot } from '../domain/session.ts';
 
 export interface ProviderSubmissionRequest {
   readonly session: SessionSnapshot;
@@ -22,9 +22,50 @@ export interface ProviderSubmission {
   bindAcknowledgement(acknowledgement: ProviderSubmissionAcknowledgement): void;
 }
 
+export type ProviderActivityStrength = 'strong' | 'weak' | 'none' | 'unknown';
+export type ProviderDialogKind = 'rate_limit' | 'interstitial';
+export type ProviderWakeReason = 'dom' | 'network' | 'timer';
+
+export interface ProviderAssistantCandidate {
+  readonly responseMessageId: string;
+  readonly answerText: string;
+  readonly terminalMarker: boolean;
+  readonly streamingMarker: boolean;
+}
+
+export interface ProviderObservationEvidence {
+  readonly provider: string;
+  readonly pageKey: string;
+  readonly bindingEpoch: number;
+  readonly observedAt: string;
+  readonly conversationId: string | null;
+  readonly submittedUserFound: boolean;
+  readonly laterUserFound: boolean;
+  readonly candidate: ProviderAssistantCandidate | null;
+  readonly activity: ProviderActivityStrength;
+  readonly dialogKind: ProviderDialogKind | null;
+  readonly networkActivity: boolean;
+  readonly observationTransport: ObservationTransport;
+  readonly reason: string | null;
+}
+
+export interface ProviderObservationRequest {
+  readonly session: SessionSnapshot;
+  readonly generation: number;
+}
+
+export interface ProviderObservationSource {
+  readonly provider: string;
+  readonly pageKey: string;
+  observe(): Promise<ProviderObservationEvidence>;
+  waitForWake(timeoutMs: number): Promise<ProviderWakeReason>;
+  close(): void;
+}
+
 export interface ProviderAdapter {
   readonly provider: string;
   openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission>;
+  openObservation(request: ProviderObservationRequest): Promise<ProviderObservationSource>;
 }
 
 export class ProviderSubmissionError extends Error {
