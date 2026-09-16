@@ -6,6 +6,7 @@ import { PageRegistry } from './browser/page-registry.ts';
 import { prepareRuntimeDirectories, resolveConfig, type SessionPlaneConfig } from './config.ts';
 import { getSystemHealth } from './core/health.ts';
 import { ObservationService } from './core/observation-service.ts';
+import { StopService } from './core/stop-service.ts';
 import { TeamDirectory } from './core/team-directory.ts';
 import { SubmissionService } from './core/submission-service.ts';
 import { createLogger, type Logger } from './logging.ts';
@@ -14,6 +15,7 @@ import { RpcServer } from './rpc/server.ts';
 import { registerBrowserMethods } from './rpc/methods/browser.ts';
 import { registerSessionMethods } from './rpc/methods/session.ts';
 import { registerSendMethods } from './rpc/methods/send.ts';
+import { registerStopMethods } from './rpc/methods/stop.ts';
 import { registerTeamMethods } from './rpc/methods/team.ts';
 import { registerWaitMethods } from './rpc/methods/wait.ts';
 import { ActorScheduler } from './scheduler/actor-scheduler.ts';
@@ -41,6 +43,7 @@ export interface CoreService {
   readonly providerAdapters: ProviderAdapterRegistry;
   readonly observationService: ObservationService;
   readonly submissionService: SubmissionService;
+  readonly stopService: StopService;
   readonly startedAt: Date;
   close(): Promise<void>;
 }
@@ -124,6 +127,13 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     adapters: providerAdapters,
     onSubmitted: (snapshot) => observationService.start(snapshot),
   });
+  const stopService = new StopService({
+    database,
+    directory: teamDirectory,
+    scheduler: actorScheduler,
+    pageMutex: pageMutationMutex,
+    adapters: providerAdapters,
+  });
 
   try {
     const recovered = await submissionService.recoverInterruptedSubmissions();
@@ -150,6 +160,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   registerTeamMethods(router, teamDirectory, receipts);
   registerSessionMethods(router, teamDirectory, receipts);
   registerSendMethods(router, submissionService);
+  registerStopMethods(router, stopService);
   registerWaitMethods(router, teamDirectory, actorScheduler);
 
   const rpcServer = new RpcServer({
@@ -183,6 +194,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     providerAdapters,
     observationService,
     submissionService,
+    stopService,
     startedAt,
     async close(): Promise<void> {
       if (closed) {

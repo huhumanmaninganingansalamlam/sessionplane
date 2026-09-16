@@ -84,11 +84,24 @@ export interface ProviderRecoveryRequest {
   readonly generation: number;
 }
 
+export interface ProviderStopRequest {
+  readonly session: SessionSnapshot;
+  readonly generation: number;
+}
+
+export interface ProviderStopOperation {
+  readonly provider: string;
+  readonly pageKey: string;
+  prepare(): Promise<boolean>;
+  stopOnce(): Promise<void>;
+}
+
 export interface ProviderAdapter {
   readonly provider: string;
   openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission>;
   openObservation(request: ProviderObservationRequest): Promise<ProviderObservationSource>;
   recover(request: ProviderRecoveryRequest): Promise<ProviderRecoveryResult>;
+  openStop(request: ProviderStopRequest): Promise<ProviderStopOperation>;
 }
 
 export class ProviderSubmissionError extends Error {

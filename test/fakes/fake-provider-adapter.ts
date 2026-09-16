@@ -6,6 +6,8 @@ import {
   type ProviderObservationSource,
   type ProviderRecoveryRequest,
   type ProviderRecoveryResult,
+  type ProviderStopOperation,
+  type ProviderStopRequest,
   type ProviderSubmission,
   type ProviderSubmissionAcknowledgement,
   type ProviderSubmissionRequest,
@@ -26,6 +28,10 @@ export class FakeProviderAdapter implements ProviderAdapter {
   bindCount = 0;
   observationOpenCount = 0;
   recoveryCount = 0;
+  stopPrepareCount = 0;
+  stopCount = 0;
+  stopControlAvailable = true;
+  stopThrows = false;
   readonly #observationSources = new Map<string, FakeObservationSource>();
   readonly #pendingObservations = new Map<
     string,
@@ -118,6 +124,24 @@ export class FakeProviderAdapter implements ProviderAdapter {
       reason: 'fake-backend-pending',
       retryAfterMs: null,
       nextCheckAt: null,
+    };
+  }
+
+  async openStop(request: ProviderStopRequest): Promise<ProviderStopOperation> {
+    const adapter = this;
+    return {
+      provider: this.provider,
+      pageKey: request.session.pageKey ?? `fake-page:${request.session.sessionId}`,
+      async prepare(): Promise<boolean> {
+        adapter.stopPrepareCount += 1;
+        return adapter.stopControlAvailable;
+      },
+      async stopOnce(): Promise<void> {
+        adapter.stopCount += 1;
+        if (adapter.stopThrows) {
+          throw new Error('Synthetic stop acknowledgement failure');
+        }
+      },
     };
   }
 }

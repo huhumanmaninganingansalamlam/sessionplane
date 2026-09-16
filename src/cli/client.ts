@@ -21,6 +21,7 @@ export interface RpcCallOptions {
   readonly params?: unknown;
   readonly timeoutMs?: number;
   readonly maxLineBytes?: number;
+  readonly signal?: AbortSignal;
 }
 
 export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> {
@@ -40,13 +41,24 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
       }
       settled = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onAbort);
       socket.destroy();
       operation();
+    };
+
+    const onAbort = (): void => {
+      finish(() => reject(new Error('RPC request was cancelled')));
     };
 
     const timer = setTimeout(() => {
       finish(() => reject(new Error(`RPC request timed out after ${timeoutMs}ms`)));
     }, timeoutMs);
+    timer.unref?.();
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    if (options.signal?.aborted === true) {
+      onAbort();
+      return;
+    }
 
     socket.once('connect', () => {
       socket.write(`${JSON.stringify({

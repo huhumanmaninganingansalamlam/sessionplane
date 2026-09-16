@@ -8,6 +8,8 @@ import {
   type ProviderObservationSource,
   type ProviderRecoveryRequest,
   type ProviderRecoveryResult,
+  type ProviderStopOperation,
+  type ProviderStopRequest,
   type ProviderSubmission,
   type ProviderSubmissionRequest,
   type ProviderWakeReason,
@@ -20,6 +22,7 @@ import {
 import { observeChatGptDialog } from './dialog-observer.ts';
 import { observeChatGptDom, waitForChatGptDomMutation } from './dom-observer.ts';
 import { ChatGptNetworkObserver } from './network-observer.ts';
+import { CHATGPT_SELECTORS } from './selectors.ts';
 import { ChatGptSubmission } from './submission.ts';
 
 export interface ChatGptAdapterOptions {
@@ -178,6 +181,29 @@ export class ChatGptAdapter implements ProviderAdapter {
     };
     return await this.#backendRecovery.recover(request, client, new URL(page.url()).origin);
   }
+
+  async openStop(request: ProviderStopRequest): Promise<ProviderStopOperation> {
+    const pageKey = request.session.pageKey;
+    const conversationId = request.session.conversationId;
+    if (pageKey === null || conversationId === null) {
+      throw new ProviderSubmissionError(
+        'session.page-identity-unverified',
+        'Exact ChatGPT stop identity is incomplete',
+        { promptSubmitted: request.session.promptSubmitted },
+      );
+    }
+    const page = this.#pageRegistry.requireOwnedPage(pageKey, {
+      sessionId: request.session.sessionId,
+      generation: request.generation,
+      conversationId,
+    });
+    return new ChatGptStopOperation({
+      pageKey,
+      page,
+      pageRegistry: this.#pageRegistry,
+      request,
+    });
+  }
 }
 
 function recoveryUnavailable(reason: string): ProviderRecoveryResult {
@@ -190,6 +216,86 @@ function recoveryUnavailable(reason: string): ProviderRecoveryResult {
     retryAfterMs: null,
     nextCheckAt: null,
   };
+}
+
+interface ChatGptStopOperationOptions {
+  readonly pageKey: string;
+  readonly page: ReturnType<PageRegistry['requireOwnedPage']>;
+  readonly pageRegistry: PageRegistry;
+  readonly request: ProviderStopRequest;
+}
+
+class ChatGptStopOperation implements ProviderStopOperation {
+  readonly provider = 'chatgpt';
+  readonly pageKey: string;
+  readonly #page: ReturnType<PageRegistry['requireOwnedPage']>;
+  readonly #pageRegistry: PageRegistry;
+  readonly #request: ProviderStopRequest;
+  #selector: string | null = null;
+
+  constructor(options: ChatGptStopOperationOptions) {
+    this.pageKey = options.pageKey;
+    this.#page = options.page;
+    this.#pageRegistry = options.pageRegistry;
+    this.#request = options.request;
+  }
+
+  async prepare(): Promise<boolean> {
+    this.#requireExactPage();
+    for (const selector of CHATGPT_SELECTORS.stopControls) {
+      const controls = this.#page.locator(selector);
+      const count = await controls.count().catch(() => 0);
+      for (let index = 0; index < count; index += 1) {
+        const control = controls.nth(index);
+        if (
+          (await control.isVisible().catch(() => false)) &&
+          (await control.isEnabled().catch(() => false)) &&
+          !(await control.isDisabled().catch(() => true))
+        ) {
+          this.#selector = selector;
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  async stopOnce(): Promise<void> {
+    if (this.#selector === null) {
+      throw new ProviderSubmissionError(
+        'internal.invariant-violation',
+        'ChatGPT stop was not prepared before mutation',
+        { promptSubmitted: this.#request.session.promptSubmitted },
+      );
+    }
+    this.#requireExactPage();
+    const controls = this.#page.locator(this.#selector);
+    const count = await controls.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      const control = controls.nth(index);
+      if (
+        (await control.isVisible().catch(() => false)) &&
+        (await control.isEnabled().catch(() => false)) &&
+        !(await control.isDisabled().catch(() => true))
+      ) {
+        await control.click({ timeout: 5_000 });
+        return;
+      }
+    }
+    throw new ProviderSubmissionError(
+      'browser.unavailable',
+      'Prepared ChatGPT stop control disappeared before mutation',
+      { promptSubmitted: this.#request.session.promptSubmitted },
+    );
+  }
+
+  #requireExactPage(): void {
+    this.#pageRegistry.requireOwnedPage(this.pageKey, {
+      sessionId: this.#request.session.sessionId,
+      generation: this.#request.generation,
+      conversationId: this.#request.session.conversationId ?? '',
+    });
+  }
 }
 
 interface ChatGptObservationSourceOptions {
