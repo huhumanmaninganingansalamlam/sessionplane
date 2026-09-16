@@ -5,10 +5,13 @@ import { PageMutationMutex } from './browser/page-mutex.ts';
 import { PageRegistry } from './browser/page-registry.ts';
 import { prepareRuntimeDirectories, resolveConfig, type SessionPlaneConfig } from './config.ts';
 import { getSystemHealth } from './core/health.ts';
+import { TeamDirectory } from './core/team-directory.ts';
 import { createLogger, type Logger } from './logging.ts';
 import { RpcRouter } from './rpc/router.ts';
 import { RpcServer } from './rpc/server.ts';
 import { registerBrowserMethods } from './rpc/methods/browser.ts';
+import { registerSessionMethods } from './rpc/methods/session.ts';
+import { registerTeamMethods } from './rpc/methods/team.ts';
 import { SessionPlaneDatabase } from './storage/database.ts';
 import { z } from 'zod';
 
@@ -19,6 +22,7 @@ export interface CoreService {
   readonly browserOwner: BrowserOwner | null;
   readonly pageRegistry: PageRegistry;
   readonly pageMutationMutex: PageMutationMutex;
+  readonly teamDirectory: TeamDirectory;
   readonly startedAt: Date;
   close(): Promise<void>;
 }
@@ -39,6 +43,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   const router = new RpcRouter();
   const pageRegistry = new PageRegistry();
   const pageMutationMutex = new PageMutationMutex();
+  const teamDirectory = new TeamDirectory(database);
   const browserOwner =
     options.startBrowser === false
       ? null
@@ -65,6 +70,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     loginUrl: config.chatgptUrl,
     profileDir: config.profileDir,
   });
+  registerTeamMethods(router, teamDirectory);
+  registerSessionMethods(router, teamDirectory);
 
   const rpcServer = new RpcServer({
     socketPath: config.socketPath,
@@ -89,6 +96,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     browserOwner,
     pageRegistry,
     pageMutationMutex,
+    teamDirectory,
     startedAt,
     async close(): Promise<void> {
       if (closed) {
