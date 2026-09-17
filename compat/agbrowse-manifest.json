@@ -189,6 +189,31 @@
       "contracts": []
     },
     {
+      "id": "artifact.provider-files",
+      "category": "artifact",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["web-ai"],
+      "canonicalCommands": [
+        "artifact discover",
+        "artifact capture",
+        "artifact list",
+        "artifact get",
+        "artifact export"
+      ],
+      "rpcMethods": [
+        "artifact.discover",
+        "artifact.capture",
+        "artifact.list",
+        "artifact.get",
+        "artifact.export"
+      ],
+      "contracts": [
+        "test/browser/provider-dom-adapters.test.ts",
+        "test/integration/provider-upload-artifact.test.ts"
+      ]
+    },
+    {
       "id": "artifact.code",
       "category": "artifact",
       "required": true,

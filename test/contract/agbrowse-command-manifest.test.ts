@@ -24,6 +24,17 @@ test('agbrowse compatibility manifest is source-bound and browser-complete', () 
   );
   assert.equal(requiredIncomplete(manifest, 'fetch').length, 0);
   assert.equal(requiredIncomplete(manifest, 'search').length, 0);
+  const providerArtifacts = manifest.commands.find(
+    (command) => command.id === 'artifact.provider-files',
+  );
+  assert.equal(providerArtifacts?.status, 'implemented');
+  assert.deepEqual(providerArtifacts?.rpcMethods, [
+    'artifact.discover',
+    'artifact.capture',
+    'artifact.list',
+    'artifact.get',
+    'artifact.export',
+  ]);
   assert.equal(replacementReady(manifest), false);
 
   for (const command of manifest.commands) {
@@ -32,6 +43,20 @@ test('agbrowse compatibility manifest is source-bound and browser-complete', () 
     for (const contract of command.contracts) {
       assert.equal(existsSync(path.resolve(contract)), true, `${command.id}: ${contract}`);
     }
+  }
+});
+
+test('implemented artifact RPC rows exist in the registered core source', () => {
+  const manifest = loadAgbrowseManifest();
+  const source = [
+    readFileSync(path.resolve('src/rpc/methods/artifact.ts'), 'utf8'),
+    readFileSync(path.resolve('src/main.ts'), 'utf8'),
+  ].join('\n');
+  const methods = manifest.commands
+    .filter((command) => command.category === 'artifact' && command.status === 'implemented')
+    .flatMap((command) => command.rpcMethods);
+  for (const method of new Set(methods)) {
+    assert.match(source, new RegExp(`['\"]${escapeRegExp(method)}['\"]`), method);
   }
 });
 
