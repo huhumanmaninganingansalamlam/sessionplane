@@ -25,10 +25,11 @@ test('agbrowse compatibility manifest is source-bound and browser-complete', () 
   assert.equal(requiredIncomplete(manifest, 'fetch').length, 0);
   assert.equal(requiredIncomplete(manifest, 'search').length, 0);
   assert.equal(requiredIncomplete(manifest, 'skills').length, 0);
-  assert.deepEqual(
-    requiredIncomplete(manifest, 'artifact').map((command) => command.id),
-    ['artifact.code'],
-  );
+  assert.equal(requiredIncomplete(manifest, 'web-ai').length, 0);
+  assert.equal(requiredIncomplete(manifest, 'artifact').length, 0);
+  const work = manifest.commands.find((command) => command.id === 'web-ai.work');
+  assert.equal(work?.required, false);
+  assert.equal(work?.status, 'deferred');
   const providerArtifacts = manifest.commands.find(
     (command) => command.id === 'artifact.provider-files',
   );
@@ -40,7 +41,7 @@ test('agbrowse compatibility manifest is source-bound and browser-complete', () 
     'artifact.get',
     'artifact.export',
   ]);
-  assert.equal(replacementReady(manifest), false);
+  assert.equal(replacementReady(manifest), true);
 
   for (const command of manifest.commands) {
     if (command.status !== 'implemented') continue;
@@ -55,7 +56,9 @@ test('implemented artifact RPC rows exist in the registered core source', () => 
   const manifest = loadAgbrowseManifest();
   const source = [
     readFileSync(path.resolve('src/rpc/methods/artifact.ts'), 'utf8'),
+    readFileSync(path.resolve('src/rpc/methods/code.ts'), 'utf8'),
     readFileSync(path.resolve('src/rpc/methods/context.ts'), 'utf8'),
+    readFileSync(path.resolve('src/rpc/methods/send.ts'), 'utf8'),
     readFileSync(path.resolve('src/main.ts'), 'utf8'),
   ].join('\n');
   const methods = manifest.commands

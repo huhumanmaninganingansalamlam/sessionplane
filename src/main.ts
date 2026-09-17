@@ -8,8 +8,10 @@ import { prepareRuntimeDirectories, resolveConfig, type SessionPlaneConfig } fro
 import { getSystemHealth } from './core/health.ts';
 import { BrowserControlService } from './core/browser-control-service.ts';
 import { ArtifactService } from './core/artifact-service.ts';
+import { ChatGptWorkflowService } from './core/chatgpt-workflow-service.ts';
 import { ContextPackageService } from './context/context-package.ts';
 import { ObservationService } from './core/observation-service.ts';
+import { ProjectSourceService } from './core/project-source-service.ts';
 import { RecoveryService } from './core/recovery-service.ts';
 import { StopService } from './core/stop-service.ts';
 import { TeamDirectory } from './core/team-directory.ts';
@@ -20,6 +22,8 @@ import { RpcServer } from './rpc/server.ts';
 import { registerBrowserMethods } from './rpc/methods/browser.ts';
 import { registerBrowserControlMethods } from './rpc/methods/browser-control.ts';
 import { registerArtifactMethods } from './rpc/methods/artifact.ts';
+import { registerChatGptMethods } from './rpc/methods/chatgpt.ts';
+import { registerCodeMethods } from './rpc/methods/code.ts';
 import { registerContextMethods } from './rpc/methods/context.ts';
 import { registerSessionMethods } from './rpc/methods/session.ts';
 import { registerSendMethods } from './rpc/methods/send.ts';
@@ -52,7 +56,9 @@ export interface CoreService {
   readonly pageRegistry: PageRegistry;
   readonly browserControl: BrowserControlService;
   readonly artifactService: ArtifactService;
+  readonly chatgptWorkflows: ChatGptWorkflowService;
   readonly contextPackages: ContextPackageService;
+  readonly projectSources: ProjectSourceService;
   readonly pageMutationMutex: PageMutationMutex;
   readonly teamDirectory: TeamDirectory;
   readonly receipts: ReceiptRepository;
@@ -205,6 +211,22 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     maxArtifactFileBytes: config.maxArtifactFileBytes,
   });
   const contextPackages = new ContextPackageService({ stateDir: config.stateDir });
+  const projectSources = new ProjectSourceService({
+    browserOwner,
+    pageRegistry,
+    maxUploadFileBytes: config.maxUploadFileBytes,
+  });
+  const chatgptWorkflows = new ChatGptWorkflowService({
+    browserOwner,
+    pageRegistry,
+    directory: teamDirectory,
+    submissions: submissionService,
+    scheduler: actorScheduler,
+    adapters: providerAdapters,
+    artifacts: artifactService,
+    chatgptUrl: config.chatgptUrl,
+    maxArtifactFileBytes: config.maxArtifactFileBytes,
+  });
 
   try {
     const recovered = await submissionService.recoverInterruptedSubmissions();
@@ -242,6 +264,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   });
   registerBrowserControlMethods(router, browserControl);
   registerArtifactMethods(router, artifactService);
+  registerChatGptMethods(router, projectSources);
+  registerCodeMethods(router, chatgptWorkflows);
   registerContextMethods(router, contextPackages);
   registerTeamMethods(router, teamDirectory, receipts);
   registerSessionMethods(router, teamDirectory, receipts);
@@ -282,7 +306,9 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageRegistry,
     browserControl,
     artifactService,
+    chatgptWorkflows,
     contextPackages,
+    projectSources,
     pageMutationMutex,
     teamDirectory,
     receipts,

@@ -172,11 +172,82 @@
       "id": "web-ai.advanced-chatgpt",
       "category": "web-ai",
       "required": true,
-      "status": "missing",
+      "status": "implemented",
       "legacyCommands": ["web-ai"],
+      "canonicalCommands": [
+        "chatgpt project-sources list",
+        "chatgpt project-sources add"
+      ],
+      "rpcMethods": [
+        "chatgpt.projectSources.list",
+        "chatgpt.projectSources.add"
+      ],
+      "contracts": [
+        "test/browser/chatgpt-advanced.test.ts",
+        "test/integration/advanced-chatgpt-code.test.ts",
+        "test/integration/web-ai-compat.test.ts",
+        "test/unit/project-source-service.test.ts"
+      ]
+    },
+    {
+      "id": "web-ai.work",
+      "category": "deferred",
+      "required": false,
+      "status": "deferred",
+      "legacyCommands": ["web-ai work"],
       "canonicalCommands": [],
       "rpcMethods": [],
       "contracts": []
+    },
+    {
+      "id": "web-ai.sessions",
+      "category": "web-ai",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["web-ai"],
+      "canonicalCommands": [
+        "session list",
+        "status",
+        "wait",
+        "snapshot",
+        "stop"
+      ],
+      "rpcMethods": [
+        "session.list",
+        "session.get",
+        "session.wait",
+        "browser.snapshot",
+        "session.stop"
+      ],
+      "contracts": [
+        "test/integration/web-ai-compat.test.ts",
+        "test/integration/cli-mcp.test.ts",
+        "test/integration/restart-recovery.test.ts"
+      ]
+    },
+    {
+      "id": "web-ai.chatgpt-surfaces",
+      "category": "web-ai",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["web-ai"],
+      "canonicalCommands": [
+        "send --surface deep-research",
+        "send --surface create-image",
+        "send --session SESSION_ID",
+        "artifact capture"
+      ],
+      "rpcMethods": [
+        "session.send",
+        "session.wait",
+        "artifact.capture",
+        "artifact.export"
+      ],
+      "contracts": [
+        "test/browser/chatgpt-advanced.test.ts",
+        "test/integration/web-ai-compat.test.ts",
+        "test/integration/provider-upload-artifact.test.ts"
+      ]
     },
     {
       "id": "context.package",
@@ -217,14 +288,42 @@
       ]
     },
     {
+      "id": "artifact.generated-images",
+      "category": "artifact",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["web-ai"],
+      "canonicalCommands": [
+        "send --surface create-image",
+        "artifact capture",
+        "artifact export"
+      ],
+      "rpcMethods": [
+        "session.send",
+        "artifact.capture",
+        "artifact.export"
+      ],
+      "contracts": [
+        "test/browser/chatgpt-advanced.test.ts",
+        "test/integration/web-ai-compat.test.ts",
+        "test/integration/provider-upload-artifact.test.ts"
+      ]
+    },
+    {
       "id": "artifact.code",
       "category": "artifact",
       "required": true,
-      "status": "missing",
+      "status": "implemented",
       "legacyCommands": ["web-ai"],
-      "canonicalCommands": [],
-      "rpcMethods": [],
-      "contracts": []
+      "canonicalCommands": ["code generate", "code extract"],
+      "rpcMethods": ["code.generate", "code.extract"],
+      "contracts": [
+        "test/integration/advanced-chatgpt-code.test.ts",
+        "test/integration/web-ai-compat.test.ts",
+        "test/unit/chatgpt-code-artifacts.test.ts",
+        "test/unit/code-mode-prompt.test.ts",
+        "test/unit/zip-inspector.test.ts"
+      ]
     },
     {
       "id": "skills.distribution",
@@ -245,6 +344,26 @@
       "required": false,
       "status": "deferred",
       "legacyCommands": ["runway"],
+      "canonicalCommands": [],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
+      "id": "fetch.experimental-escalation",
+      "category": "deferred",
+      "required": false,
+      "status": "deferred",
+      "legacyCommands": ["fetch"],
+      "canonicalCommands": [],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
+      "id": "web-ai.release-audit",
+      "category": "deferred",
+      "required": false,
+      "status": "deferred",
+      "legacyCommands": ["web-ai"],
       "canonicalCommands": [],
       "rpcMethods": [],
       "contracts": []

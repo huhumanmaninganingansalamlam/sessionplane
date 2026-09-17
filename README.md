@@ -94,6 +94,69 @@ the provider identity, source descriptor, byte length, SHA-256, and durable
 relative path. Existing output files are never replaced unless `--overwrite`
 is explicit.
 
+## Advanced ChatGPT Chat and code artifacts
+
+SessionPlane deliberately uses the Chat surface only. It never switches a
+composer into ChatGPT Work, and an explicit Work request fails before provider
+mutation. Chat model/reasoning selection, named Chat modes, uploads, durable
+follow-up generations, Project Sources, and artifact recovery remain supported.
+
+ChatGPT Project Sources are addressed by an explicit project URL. `add` hashes
+and validates every local file before opening the provider page, skips names
+already visible in the project, and serializes concurrent mutations for the
+same project. Use `--dry-run` to inspect the upload set without starting a
+browser mutation.
+
+```bash
+sessplane chatgpt project-sources list \
+  --project-url "https://chatgpt.com/g/<project-id>" --json
+
+sessplane chatgpt project-sources add \
+  --project-url "https://chatgpt.com/g/<project-id>" \
+  --file ./requirements.md --file ./architecture.pdf --dry-run --json
+
+agbrowse web-ai project-sources add \
+  --chatgpt-url "https://chatgpt.com/g/<project-id>" \
+  --file ./requirements.md --dry-run summary --json
+```
+
+Code mode submits a strict packaging contract, waits on the exact durable
+generation, scans the corresponding ChatGPT conversation for `/mnt/data/*.zip`
+artifacts, downloads the newest matching sandbox snapshot, validates the ZIP,
+stores it content-addressed, and exports it to the requested path. Newly
+generated code archives must contain a nonempty root `PLAN.md` or
+`00_plan.md`. Unsafe paths, symbolic links, malformed local headers, oversized
+archives, and output replacement are rejected.
+
+```bash
+sessplane code generate --session "$SESSION_ID" \
+  --prompt "Build a small TypeScript CLI" \
+  --output-zip ./result.zip \
+  --request-id code-generation-1 --json
+
+sessplane code generate --session "$SESSION_ID" \
+  --prompt "Build separate frontend and backend deliverables" \
+  --multi-zip --output-dir ./artifacts \
+  --request-id code-generation-2 --json
+
+# Read-only recovery from a durable session or an explicit conversation.
+sessplane code extract --session "$SESSION_ID" \
+  --output-zip ./recovered.zip --require-plan --json
+sessplane code extract --conversation "https://chatgpt.com/c/<conversation-id>" \
+  --multi-zip --output-dir ./recovered --json
+
+# Legacy-compatible spellings
+agbrowse web-ai code --vendor chatgpt --prompt "Build an MVP" \
+  --output-zip ./result.zip --json
+agbrowse web-ai code-extract --vendor chatgpt --session "$SESSION_ID" \
+  --output-zip ./recovered.zip --json
+```
+
+The same Project Sources, code generation, and code extraction methods are
+available through the thin MCP adapter. `compat/agbrowse-manifest.json`
+binds every required agbrowse replacement row to executable contracts; the
+compatibility contract fails when any required row is not implemented.
+
 `doctor --json` reports the installed Chrome build and, when the core is
 running, the current Page bindings without changing browser focus.
 

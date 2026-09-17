@@ -1,8 +1,17 @@
+import { createHash } from 'node:crypto';
+import path from 'node:path';
+
 import type { BrowserOwner } from '../../browser/browser-owner.ts';
 import { PageRegistryError, type PageRegistry } from '../../browser/page-registry.ts';
 import {
   ProviderSubmissionError,
   type ProviderAdapter,
+  type ProviderArtifactCandidate,
+  type ProviderArtifactDownload,
+  type ProviderArtifactRequest,
+  type ProviderCodeArtifactCandidate,
+  type ProviderCodeArtifactDownload,
+  type ProviderCodeArtifactRequest,
   type ProviderObservationEvidence,
   type ProviderObservationRequest,
   type ProviderObservationSource,
@@ -15,6 +24,10 @@ import {
   type ProviderWakeReason,
 } from '../provider-adapter.ts';
 import { observeChatGptActivity } from './activity-observer.ts';
+import {
+  discoverChatGptCodeArtifacts,
+  downloadChatGptCodeArtifact,
+} from './code-artifacts.ts';
 import {
   ChatGptBackendRecovery,
   type BackendJsonClient,
@@ -182,6 +195,102 @@ export class ChatGptAdapter implements ProviderAdapter {
     return await this.#backendRecovery.recover(request, client, new URL(page.url()).origin);
   }
 
+  async discoverArtifacts(
+    request: ProviderArtifactRequest,
+  ): Promise<readonly ProviderArtifactCandidate[]> {
+    const page = this.#requireExactArtifactPage(request);
+    const rows = await page.locator(CHATGPT_SELECTORS.artifactLinks.join(', ')).evaluateAll((elements) =>
+      elements.map((element) => {
+        const source =
+          element instanceof HTMLAnchorElement
+            ? element.href
+            : element instanceof HTMLImageElement
+              ? element.src
+              : '';
+        const explicitName =
+          element instanceof HTMLAnchorElement
+            ? element.download
+            : element instanceof HTMLImageElement
+              ? element.alt
+              : '';
+        return {
+          source,
+          name: explicitName || element.textContent?.trim() || '',
+          mediaType: element instanceof HTMLImageElement ? 'image/*' : null,
+        };
+      }),
+    );
+    const seen = new Set<string>();
+    const candidates: ProviderArtifactCandidate[] = [];
+    for (const row of rows) {
+      if (row.source === '' || seen.has(row.source)) continue;
+      seen.add(row.source);
+      const fallbackName = nameFromSource(row.source);
+      const name = sanitizeArtifactName(row.name || fallbackName);
+      const providerArtifactId = `chatgpt-link-${createHash('sha256')
+        .update(row.source)
+        .digest('hex')}`;
+      candidates.push(Object.freeze({
+        providerArtifactId,
+        name,
+        sourceUrl: row.source,
+        mediaType: row.mediaType,
+      }));
+    }
+    return Object.freeze(candidates);
+  }
+
+  async downloadArtifact(
+    request: ProviderArtifactRequest,
+    candidate: ProviderArtifactCandidate,
+  ): Promise<ProviderArtifactDownload> {
+    const page = this.#requireExactArtifactPage(request);
+    const result = await page.evaluate(async (sourceUrl) => {
+      const response = await fetch(sourceUrl, { credentials: 'include' }).catch(() => null);
+      if (response === null || !response.ok) {
+        return { ok: false as const, status: response?.status ?? 0, base64: '' };
+      }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      let binary = '';
+      const chunkSize = 0x8000;
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+      }
+      return { ok: true as const, status: response.status, base64: btoa(binary) };
+    }, candidate.sourceUrl);
+    if (!result.ok) {
+      throw new ProviderSubmissionError(
+        'provider.artifact-download-failed',
+        `ChatGPT artifact download failed with status ${result.status}`,
+        { promptSubmitted: request.session.promptSubmitted },
+      );
+    }
+    return {
+      candidate,
+      bytes: Uint8Array.from(Buffer.from(result.base64, 'base64')),
+    };
+  }
+
+  async discoverCodeArtifacts(
+    request: ProviderCodeArtifactRequest,
+  ): Promise<readonly ProviderCodeArtifactCandidate[]> {
+    const page = this.#requireExactArtifactPage(request);
+    return await discoverChatGptCodeArtifacts(page, request.conversationId);
+  }
+
+  async downloadCodeArtifact(
+    request: ProviderCodeArtifactRequest,
+    candidate: ProviderCodeArtifactCandidate,
+  ): Promise<ProviderCodeArtifactDownload> {
+    const page = this.#requireExactArtifactPage(request);
+    return await downloadChatGptCodeArtifact(
+      page,
+      request.conversationId,
+      candidate,
+      request.maxBytes,
+    );
+  }
+
   async openStop(request: ProviderStopRequest): Promise<ProviderStopOperation> {
     const pageKey = request.session.pageKey;
     const conversationId = request.session.conversationId;
@@ -204,6 +313,32 @@ export class ChatGptAdapter implements ProviderAdapter {
       request,
     });
   }
+
+  #requireExactArtifactPage(
+    request: ProviderArtifactRequest | ProviderCodeArtifactRequest,
+  ): ReturnType<PageRegistry['requireOwnedPage']> {
+    const pageKey = request.session.pageKey;
+    const conversationId = request.session.conversationId;
+    if (pageKey === null || conversationId === null) {
+      throw new ProviderSubmissionError(
+        'session.page-identity-unverified',
+        'Exact ChatGPT artifact identity is incomplete',
+        { promptSubmitted: request.session.promptSubmitted },
+      );
+    }
+    if ('conversationId' in request && request.conversationId !== conversationId) {
+      throw new ProviderSubmissionError(
+        'session.conversation-mismatch',
+        `Requested conversation ${request.conversationId} does not match session ${conversationId}`,
+        { promptSubmitted: request.session.promptSubmitted },
+      );
+    }
+    return this.#pageRegistry.requireOwnedPage(pageKey, {
+      sessionId: request.session.sessionId,
+      generation: request.generation,
+      conversationId,
+    });
+  }
 }
 
 function recoveryUnavailable(reason: string): ProviderRecoveryResult {
@@ -216,6 +351,21 @@ function recoveryUnavailable(reason: string): ProviderRecoveryResult {
     retryAfterMs: null,
     nextCheckAt: null,
   };
+}
+
+function nameFromSource(source: string): string {
+  try {
+    const url = new URL(source);
+    const name = path.posix.basename(url.pathname);
+    return name === '' || name === '/' ? 'chatgpt-artifact' : name;
+  } catch {
+    return 'chatgpt-artifact';
+  }
+}
+
+function sanitizeArtifactName(value: string): string {
+  const name = value.trim().replaceAll(/[\\/\u0000]/g, '_');
+  return name === '' ? 'chatgpt-artifact' : name.slice(0, 255);
 }
 
 interface ChatGptStopOperationOptions {

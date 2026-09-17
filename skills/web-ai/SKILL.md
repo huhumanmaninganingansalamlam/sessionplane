@@ -35,3 +35,56 @@ sessplane artifact export "$ARTIFACT_ID" --out ./result.zip
 Use `sessplane context dry-run` before a large submission and either upload the
 generated package or select inline transport.
 
+## ChatGPT Chat only
+
+SessionPlane never submits through ChatGPT Work and never silently changes a
+Work composer back to Chat. An explicit `surface=work` request or a visibly
+active Work composer fails before the irreversible submit. Use ordinary Chat
+model/reasoning selection and named Chat modes instead.
+
+## ChatGPT Project Sources
+
+Always pass the exact `https://chatgpt.com/g/<project-id>` URL. Inspect the
+files first with `--dry-run`; actual additions are append-only by visible file
+name and concurrent mutations to one project are serialized.
+
+```bash
+sessplane chatgpt project-sources add \
+  --project-url "$PROJECT_URL" \
+  --file ./context.md --dry-run --json
+
+sessplane chatgpt project-sources add \
+  --project-url "$PROJECT_URL" \
+  --file ./context.md --request-id project-source-1 --json
+```
+
+## ChatGPT code mode
+
+`code generate` is a normal durable generation followed by exact artifact
+recovery. It never scans the active tab. New code ZIPs must contain a nonempty
+root `PLAN.md` or `00_plan.md`; unsafe or malformed archives are rejected.
+
+```bash
+sessplane code generate --session "$SESSION_ID" \
+  --prompt "Build a minimal TypeScript CLI" \
+  --output-zip ./result.zip \
+  --request-id code-1 --json
+
+sessplane code generate --session "$SESSION_ID" \
+  --prompt "Build frontend and backend archives" \
+  --multi-zip --output-dir ./artifacts \
+  --request-id code-2 --json
+```
+
+`code extract` is read-only provider recovery. Prefer an exact durable session;
+an explicit conversation ID or URL is also accepted. Omit `--require-plan`
+only when recovering legacy archives created before the plan contract.
+
+```bash
+sessplane code extract --session "$SESSION_ID" \
+  --output-zip ./recovered.zip --require-plan --json
+
+agbrowse web-ai code-extract --vendor chatgpt \
+  --session "$SESSION_ID" --output-zip ./recovered.zip --json
+```
+

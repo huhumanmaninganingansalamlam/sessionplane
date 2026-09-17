@@ -44,6 +44,9 @@ const FLAG_OPTIONS = new Set([
   'files-report',
   'inline-only',
   'allow-grok-context-pack',
+  'multi-zip',
+  'require-plan',
+  'dry-run',
 ]);
 const MULTI_VALUE_OPTIONS = new Set(['file', 'context-from-files', 'context-exclude', 'skill']);
 const VALUE_OPTIONS = new Set([
@@ -120,12 +123,16 @@ const VALUE_OPTIONS = new Set([
   'max-input',
   'max-file-size',
   'max-total-size',
-  'dry-run',
   'target',
   'skill',
   'vendor',
   'max-context-file-size',
   'max-upload-file-size',
+  'conversation',
+  'output-zip',
+  'output-dir',
+  'chatgpt-url',
+  'project-url',
 ]);
 
 export async function runCli(
@@ -197,6 +204,10 @@ export async function runCli(
         return await runResearchCommand(io, parsed, config);
       case 'artifact':
         return await runArtifactCommand(io, parsed, config);
+      case 'code':
+        return await runCodeCommand(io, parsed, config);
+      case 'chatgpt':
+        return await runChatGptCommand(io, parsed, config);
       case 'context':
         return await runContextCommand(io, parsed, config);
       case 'skills':
@@ -870,6 +881,97 @@ async function runArtifactCommand(
   }
 }
 
+async function runCodeCommand(
+  io: CliIo,
+  parsed: ParsedArgs,
+  config: SessionPlaneConfig,
+): Promise<number> {
+  const action = parsed.words[1] ?? 'generate';
+  const rest = parsed.words.slice(2);
+  if (action === 'generate' || action === 'run') {
+    let prompt = requireOption(parsed, 'prompt');
+    const files = [...parsed.files];
+    if (hasContextInput(parsed)) {
+      const contextPackages = new ContextPackageService({ stateDir: config.stateDir });
+      const context = contextPackages.render(contextInput(parsed, prompt));
+      if (context.transport === 'inline') prompt = context.composerText;
+      else if (context.artifactPath !== null) files.push(context.artifactPath);
+    }
+    const deadline = integerOption(parsed, 'deadline', 5_400, 1, 86_400);
+    return await printRpc(
+      io,
+      parsed,
+      config,
+      'code.generate',
+      {
+        ...mutationIdentity(parsed),
+        ...sessionSelector(parsed, rest),
+        prompt,
+        ...optionalParam('model', parsed.options.model),
+        ...optionalParam('effort', parsed.options.effort),
+        ...(files.length === 0 ? {} : { files }),
+        sessionDeadlineSec: deadline,
+        ...optionalParam('outputPath', parsed.options['output-zip'] ?? parsed.options.out),
+        ...optionalParam('outputDir', parsed.options['output-dir']),
+        multiZip: parsed.options['multi-zip'] === 'true',
+        overwrite: parsed.options.overwrite === 'true',
+      },
+      deadline * 1_000 + config.submissionAckTimeoutMs + 10_000,
+    );
+  }
+  if (action === 'extract') {
+    const selector = optionalSessionSelector(parsed, rest);
+    const conversationId = parsed.options.conversation ?? parsed.options.url;
+    const timeoutMs = Math.max(config.rpcRequestTimeoutMs, 120_000);
+    return await printRpc(
+      io,
+      parsed,
+      config,
+      'code.extract',
+      {
+        clientId: clientId(parsed),
+        ...selector,
+        ...optionalParam('conversationId', conversationId),
+        ...optionalIntegerParam(parsed, 'generation', 'generation', 1),
+        ...optionalParam('outputPath', parsed.options['output-zip'] ?? parsed.options.out),
+        ...optionalParam('outputDir', parsed.options['output-dir']),
+        multiZip: parsed.options['multi-zip'] === 'true',
+        requirePlan: parsed.options['require-plan'] === 'true',
+        overwrite: parsed.options.overwrite === 'true',
+      },
+      timeoutMs,
+    );
+  }
+  throw new Error(`Unknown code command: ${action}`);
+}
+
+async function runChatGptCommand(
+  io: CliIo,
+  parsed: ParsedArgs,
+  config: SessionPlaneConfig,
+): Promise<number> {
+  const family = parsed.words[1];
+  const action = parsed.words[2];
+  if (family === 'project-sources' && (action === 'list' || action === 'add')) {
+    const projectUrl =
+      parsed.options['project-url'] ?? parsed.options['chatgpt-url'] ?? parsed.options.url;
+    if (projectUrl === undefined) throw new Error('--project-url or --chatgpt-url is required');
+    if (action === 'list') {
+      return await printRpc(io, parsed, config, 'chatgpt.projectSources.list', {
+        clientId: clientId(parsed),
+        projectUrl,
+      }, 60_000);
+    }
+    return await printRpc(io, parsed, config, 'chatgpt.projectSources.add', {
+      ...mutationIdentity(parsed),
+      projectUrl,
+      files: parsed.files,
+      dryRun: parsed.options['dry-run'] !== undefined,
+    }, 120_000);
+  }
+  throw new Error(`Unknown chatgpt command: ${[family, action].filter(Boolean).join(' ')}`);
+}
+
 async function runContextCommand(
   io: CliIo,
   parsed: ParsedArgs,
@@ -1024,6 +1126,16 @@ function sessionSelector(
     teamId: requirePositional(positionals, 0, 'teamId'),
     roleKey: requirePositional(positionals, 1, 'roleKey'),
   };
+}
+
+function optionalSessionSelector(
+  parsed: ParsedArgs,
+  positionals: readonly string[],
+): Readonly<Record<string, string>> {
+  if (parsed.options.session !== undefined || positionals.length > 0) {
+    return sessionSelector(parsed, positionals);
+  }
+  return {};
 }
 
 function mutationIdentity(parsed: ParsedArgs): Readonly<Record<string, string>> {
@@ -1223,7 +1335,102 @@ function normalizeUntil(value: string): string {
 }
 
 function helpText(): string {
-  return `SessionPlane ${SESSIONPLANE_VERSION}\n\nUsage:\n  sessplane serve [--state-dir PATH]\n  sessplane health [--json] [--socket PATH]\n  sessplane doctor [--json] [--state-dir PATH]\n  sessplane login [--json] [--url HTTPS_URL]\n\nBrowser compatibility:\n  sessplane browser-status | browser-start | browser-stop\n  sessplane browser-reset --force\n  sessplane tabs | active-tab\n  sessplane new-tab [URL]\n  sessplane select-tab PAGE_KEY\n  sessplane tab-close [PAGE_KEY]\n  sessplane navigate URL [--page PAGE_KEY]\n  sessplane snapshot [--page PAGE_KEY] [--max-nodes N]\n  sessplane click REF [--snapshot-id ID]\n  sessplane type REF --text TEXT\n  sessplane press [REF] KEY\n  sessplane hover|check|uncheck REF\n  sessplane select REF --value VALUE[,VALUE]\n  sessplane upload REF FILE...\n  sessplane drag SOURCE_REF TARGET_REF\n  sessplane screenshot --out PATH [--full-page]\n  sessplane text [--selector CSS] | get-dom\n  sessplane console | network | evaluate --script JS\n  sessplane wait-for-selector CSS | wait-for-text TEXT | wait-for REF_OR_TEXT\n  sessplane observe-bundle [--screenshot --out PATH --boxes]\n  sessplane observe-actions INSTRUCTION [--top-n N]\n\nFetch, search, and research:\n  sessplane fetch URL [--max-bytes N] [--max-redirects N] [--include-html]\n  sessplane extract URL --schema FILE [--source auto|json|jsonld|table]\n  sessplane extract --from-file HTML --schema FILE\n  sessplane search QUERY [--max-results N] [--deep]\n  sessplane search --verify URL\n  sessplane search QUERY --results FILE [--backend NAME]\n  sessplane research plan QUERY [--max-queries N]\n  sessplane research normalize-results --query QUERY --results FILE --backend NAME\n  sessplane research enrich-fetch --plan PLAN --results RESULTS\n  sessplane research browse-plan --plan PLAN --enrichment ENRICHMENT\n\nContext packages:\n  sessplane context dry-run --context-from-files GLOB [--context-exclude GLOB]\n  sessplane context render --context-file FILE --context-transport inline|upload\n  sessplane send ... --context-from-files GLOB --context-transform raw|repomix\n\nTeam and role sessions:\n  sessplane team create --name NAME [--objective TEXT] [--request-id ID]\n  sessplane team show TEAM_ID [--json]\n  sessplane team list [--json]\n  sessplane team wait TEAM_ID [--roles KEY,KEY] [--until CONDITION]\n  sessplane team brief [update] TEAM_ID --brief TEXT\n  sessplane role add TEAM_ID ROLE_KEY --type expert|reviewer|custom\n  sessplane role retire TEAM_ID ROLE_KEY\n  sessplane session create TEAM_ID ROLE_KEY [--provider chatgpt|gemini|grok]\n  sessplane session show SESSION_ID\n  sessplane session events TEAM_ID [--after-sequence N]\n  sessplane send TEAM_ID ROLE_KEY --prompt TEXT [--model MODEL] [--effort LEVEL] [--surface NAME] [--file PATH ...]\n  sessplane send --session SESSION_ID --prompt TEXT\n  sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID\n  sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]\n  sessplane stop TEAM_ID ROLE_KEY [--request-id ID]\n\nProvider artifacts:\n  sessplane artifact discover --session SESSION_ID\n  sessplane artifact capture --session SESSION_ID [--artifact-id ID]\n  sessplane artifact list --session SESSION_ID [--generation N]\n  sessplane artifact get ARTIFACT_ID\n  sessplane artifact export ARTIFACT_ID --out PATH [--overwrite]\n\nSkill distribution:\n  sessplane skills list [--json]\n  sessplane skills get core --full\n  sessplane skills path [SKILL]\n  sessplane skills install --target DIR [--skill NAME ...] [--link] [--force]\n\n  sessplane mcp\n\nGlobal options:\n  --client-id ID       Stable caller identity\n  --request-id ID      Stable mutation identity for exact retries\n  --page PAGE_KEY      Explicit browser Page identity\n  --json               Emit one compact JSON object\n  --state-dir PATH     Override runtime state directory\n  --socket PATH        Override core Unix socket\n`;
+  return `SessionPlane ${SESSIONPLANE_VERSION}
+
+Usage:
+  sessplane serve [--state-dir PATH]
+  sessplane health [--json] [--socket PATH]
+  sessplane doctor [--json] [--state-dir PATH]
+  sessplane login [--json] [--url HTTPS_URL]
+
+Browser compatibility:
+  sessplane browser-status | browser-start | browser-stop
+  sessplane browser-reset --force
+  sessplane tabs | active-tab
+  sessplane new-tab [URL]
+  sessplane select-tab PAGE_KEY
+  sessplane tab-close [PAGE_KEY]
+  sessplane navigate URL [--page PAGE_KEY]
+  sessplane snapshot [--page PAGE_KEY] [--max-nodes N]
+  sessplane click REF [--snapshot-id ID]
+  sessplane type REF --text TEXT
+  sessplane press [REF] KEY
+  sessplane hover|check|uncheck REF
+  sessplane select REF --value VALUE[,VALUE]
+  sessplane upload REF FILE...
+  sessplane drag SOURCE_REF TARGET_REF
+  sessplane screenshot --out PATH [--full-page]
+  sessplane text [--selector CSS] | get-dom
+  sessplane console | network | evaluate --script JS
+  sessplane wait-for-selector CSS | wait-for-text TEXT | wait-for REF_OR_TEXT
+  sessplane observe-bundle [--screenshot --out PATH --boxes]
+  sessplane observe-actions INSTRUCTION [--top-n N]
+
+Fetch, search, and research:
+  sessplane fetch URL [--max-bytes N] [--max-redirects N] [--include-html]
+  sessplane extract URL --schema FILE [--source auto|json|jsonld|table]
+  sessplane extract --from-file HTML --schema FILE
+  sessplane search QUERY [--max-results N] [--deep]
+  sessplane search --verify URL
+  sessplane search QUERY --results FILE [--backend NAME]
+  sessplane research plan QUERY [--max-queries N]
+  sessplane research normalize-results --query QUERY --results FILE --backend NAME
+  sessplane research enrich-fetch --plan PLAN --results RESULTS
+  sessplane research browse-plan --plan PLAN --enrichment ENRICHMENT
+
+Context packages:
+  sessplane context dry-run --context-from-files GLOB [--context-exclude GLOB]
+  sessplane context render --context-file FILE --context-transport inline|upload
+  sessplane send ... --context-from-files GLOB --context-transform raw|repomix
+
+Team and role sessions:
+  sessplane team create --name NAME [--objective TEXT] [--request-id ID]
+  sessplane team show TEAM_ID [--json]
+  sessplane team list [--json]
+  sessplane team wait TEAM_ID [--roles KEY,KEY] [--until CONDITION]
+  sessplane team brief [update] TEAM_ID --brief TEXT
+  sessplane role add TEAM_ID ROLE_KEY --type expert|reviewer|custom
+  sessplane role retire TEAM_ID ROLE_KEY
+  sessplane session create TEAM_ID ROLE_KEY [--provider chatgpt|gemini|grok]
+  sessplane session show SESSION_ID
+  sessplane session events TEAM_ID [--after-sequence N]
+  sessplane send TEAM_ID ROLE_KEY --prompt TEXT [--model MODEL] [--effort LEVEL] [--surface NAME] [--file PATH ...]
+  sessplane send --session SESSION_ID --prompt TEXT
+  sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID
+  sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]
+  sessplane stop TEAM_ID ROLE_KEY [--request-id ID]
+
+Advanced ChatGPT Chat and code artifacts:
+  sessplane chatgpt project-sources list --project-url URL
+  sessplane chatgpt project-sources add --project-url URL --file PATH [--dry-run]
+  sessplane code generate --session SESSION_ID --prompt TEXT [--output-zip PATH]
+  sessplane code generate --session SESSION_ID --prompt TEXT --multi-zip --output-dir DIR
+  sessplane code extract --session SESSION_ID [--output-zip PATH] [--require-plan]
+  sessplane code extract --conversation ID_OR_URL [--multi-zip --output-dir DIR]
+
+Provider artifacts:
+  sessplane artifact discover --session SESSION_ID
+  sessplane artifact capture --session SESSION_ID [--artifact-id ID]
+  sessplane artifact list --session SESSION_ID [--generation N]
+  sessplane artifact get ARTIFACT_ID
+  sessplane artifact export ARTIFACT_ID --out PATH [--overwrite]
+
+Skill distribution:
+  sessplane skills list [--json]
+  sessplane skills get core --full
+  sessplane skills path [SKILL]
+  sessplane skills install --target DIR [--skill NAME ...] [--link] [--force]
+
+  sessplane mcp
+
+Global options:
+  --client-id ID       Stable caller identity
+  --request-id ID      Stable mutation identity for exact retries
+  --page PAGE_KEY      Explicit browser Page identity
+  --json               Emit one compact JSON object
+  --state-dir PATH     Override runtime state directory
+  --socket PATH        Override core Unix socket
+`;
 }
 
 function isDirectExecution(): boolean {

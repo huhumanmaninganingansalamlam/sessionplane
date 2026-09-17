@@ -22,6 +22,7 @@ import {
   MCP_TOOLS,
   McpToolNotFoundError,
   invokeMcpTool,
+  resolveMcpToolTimeoutMs,
 } from './tools.ts';
 
 export interface McpServerOptions {
@@ -211,7 +212,12 @@ class SessionPlaneMcpServer {
         name,
         arguments: toolArguments,
         socketPath: this.#config.socketPath,
-        timeoutMs: Math.max(this.#config.rpcRequestTimeoutMs, 125_000),
+        timeoutMs: resolveMcpToolTimeoutMs({
+          name,
+          arguments: toolArguments,
+          rpcRequestTimeoutMs: this.#config.rpcRequestTimeoutMs,
+          submissionAckTimeoutMs: this.#config.submissionAckTimeoutMs,
+        }),
         maxLineBytes: this.#config.rpcMaxLineBytes,
         signal: controller.signal,
       });

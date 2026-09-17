@@ -25,6 +25,29 @@ export class McpToolNotFoundError extends Error {
   }
 }
 
+export function resolveMcpToolTimeoutMs(options: {
+  readonly name: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+  readonly rpcRequestTimeoutMs: number;
+  readonly submissionAckTimeoutMs: number;
+}): number {
+  const transportFloorMs = Math.max(options.rpcRequestTimeoutMs, 125_000);
+  if (options.name !== 'sessionplane_code_generate') return transportFloorMs;
+
+  const requested = options.arguments.sessionDeadlineSec;
+  const deadlineSec =
+    typeof requested === 'number' &&
+    Number.isSafeInteger(requested) &&
+    requested >= 1 &&
+    requested <= 86_400
+      ? requested
+      : 5_400;
+  return Math.max(
+    transportFloorMs,
+    deadlineSec * 1_000 + options.submissionAckTimeoutMs + 10_000,
+  );
+}
+
 const stringProperty = (description: string): Readonly<Record<string, unknown>> => ({
   type: 'string',
   minLength: 1,
@@ -685,6 +708,102 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
       },
       ['clientId', 'requestId', 'prompt'],
       { oneOf: selectorOneOf },
+    ),
+    false,
+  ),
+  tool(
+    'sessionplane_code_generate',
+    'code.generate',
+    'Generate ChatGPT code under the strict ZIP contract and retrieve verified artifacts.',
+    objectSchema(
+      {
+        ...mutationIdentityProperties,
+        sessionId: stringProperty('Exact durable ChatGPT session UUID.'),
+        teamId: stringProperty('Durable team UUID.'),
+        roleKey: stringProperty('Stable role key within the team.'),
+        prompt: { type: 'string', minLength: 1, maxLength: 200_000 },
+        model: { type: ['string', 'null'], maxLength: 200 },
+        effort: { type: ['string', 'null'], maxLength: 200 },
+        files: {
+          type: 'array',
+          maxItems: 20,
+          items: stringProperty('Local file path to upload.'),
+        },
+        sessionDeadlineSec: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 86_400,
+          default: 5_400,
+        },
+        outputPath: stringProperty('Destination for one ZIP artifact.'),
+        outputDir: stringProperty('Destination directory for multi-ZIP artifacts.'),
+        multiZip: { type: 'boolean', default: false },
+        overwrite: { type: 'boolean', default: false },
+      },
+      ['clientId', 'requestId', 'prompt'],
+      { oneOf: selectorOneOf },
+    ),
+    false,
+  ),
+  tool(
+    'sessionplane_code_extract',
+    'code.extract',
+    'Re-retrieve verified ChatGPT ZIP artifacts without sending a new prompt.',
+    objectSchema(
+      {
+        ...baseIdentityProperties,
+        sessionId: stringProperty('Exact durable ChatGPT session UUID.'),
+        teamId: stringProperty('Durable team UUID.'),
+        roleKey: stringProperty('Stable role key within the team.'),
+        conversationId: stringProperty('ChatGPT conversation ID or URL.'),
+        generation: { type: 'integer', minimum: 1 },
+        outputPath: stringProperty('Destination for one ZIP artifact.'),
+        outputDir: stringProperty('Destination directory for multi-ZIP artifacts.'),
+        multiZip: { type: 'boolean', default: false },
+        requirePlan: { type: 'boolean', default: false },
+        overwrite: { type: 'boolean', default: false },
+      },
+      ['clientId'],
+      {
+        anyOf: [
+          { required: ['sessionId'] },
+          { required: ['teamId', 'roleKey'] },
+          { required: ['conversationId'] },
+        ],
+      },
+    ),
+    false,
+  ),
+  tool(
+    'sessionplane_chatgpt_project_sources_list',
+    'chatgpt.projectSources.list',
+    'List exact ChatGPT Project Sources from an explicit project URL.',
+    objectSchema(
+      {
+        ...baseIdentityProperties,
+        projectUrl: stringProperty('Exact https://chatgpt.com/g/... project URL.'),
+      },
+      ['clientId', 'projectUrl'],
+    ),
+    true,
+  ),
+  tool(
+    'sessionplane_chatgpt_project_sources_add',
+    'chatgpt.projectSources.add',
+    'Append local files to an exact ChatGPT Project without replacing existing sources.',
+    objectSchema(
+      {
+        ...mutationIdentityProperties,
+        projectUrl: stringProperty('Exact https://chatgpt.com/g/... project URL.'),
+        files: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 50,
+          items: stringProperty('Local project-source file path.'),
+        },
+        dryRun: { type: 'boolean', default: false },
+      },
+      ['clientId', 'requestId', 'projectUrl', 'files'],
     ),
     false,
   ),

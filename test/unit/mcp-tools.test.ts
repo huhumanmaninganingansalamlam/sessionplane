@@ -12,6 +12,7 @@ import {
   McpToolNotFoundError,
   getMcpTool,
   invokeMcpTool,
+  resolveMcpToolTimeoutMs,
 } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
@@ -42,11 +43,22 @@ test('MCP tool catalogue exposes unique core mappings and exact selector schemas
     getMcpTool('sessionplane_artifact_export')?.rpcMethod,
     'artifact.export',
   );
+  assert.equal(
+    getMcpTool('sessionplane_chatgpt_project_sources_add')?.rpcMethod,
+    'chatgpt.projectSources.add',
+  );
+  assert.equal(getMcpTool('sessionplane_code_generate')?.rpcMethod, 'code.generate');
+  assert.equal(getMcpTool('sessionplane_code_extract')?.rpcMethod, 'code.extract');
   assert.equal(getMcpTool('browser_network')?.rpcMethod, 'browser.network');
   const sessionCreate = getMcpTool('sessionplane_session_create');
   const providerSchema = (sessionCreate?.inputSchema.properties as Record<string, unknown>)
     .provider as { enum?: readonly string[] };
   assert.deepEqual(providerSchema.enum, ['chatgpt', 'gemini', 'grok']);
+  const send = getMcpTool('sessionplane_send');
+  const sendProperties = send?.inputSchema.properties as Record<string, unknown>;
+  assert.equal('power' in sendProperties, false);
+  assert.equal('speed' in sendProperties, false);
+  assert.equal(getMcpTool('sessionplane_chatgpt_work_send'), null);
   assert.equal(getMcpTool('missing'), null);
 
   for (const definition of MCP_TOOLS) {
@@ -54,6 +66,27 @@ test('MCP tool catalogue exposes unique core mappings and exact selector schemas
     assert.equal(definition.inputSchema.additionalProperties, false);
     assert.equal(typeof definition.description, 'string');
   }
+});
+
+test('MCP code generation timeout follows the durable generation deadline', () => {
+  assert.equal(
+    resolveMcpToolTimeoutMs({
+      name: 'sessionplane_status',
+      arguments: {},
+      rpcRequestTimeoutMs: 10_000,
+      submissionAckTimeoutMs: 12_000,
+    }),
+    125_000,
+  );
+  assert.equal(
+    resolveMcpToolTimeoutMs({
+      name: 'sessionplane_code_generate',
+      arguments: { sessionDeadlineSec: 600 },
+      rpcRequestTimeoutMs: 10_000,
+      submissionAckTimeoutMs: 12_000,
+    }),
+    622_000,
+  );
 });
 
 test('MCP tool invocation preserves nonterminal core snapshots and typed RPC errors', async () => {

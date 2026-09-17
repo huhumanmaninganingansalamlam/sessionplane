@@ -104,7 +104,16 @@ export class SubmissionService {
     const model = normalizeOptional(input.model);
     const effort = normalizeOptional(input.effort);
     const surface = normalizeOptional(input.surface);
-    const attachments = await resolveAttachments(input.files ?? [], this.#maxUploadFileBytes);
+    if (surface?.toLowerCase() === 'work') {
+      throw new SessionPlaneDomainError(
+        'capability.unsupported',
+        'SessionPlane supports the Chat surface only; ChatGPT Work is not supported',
+      );
+    }
+    const attachments = await resolveProviderAttachments(
+      input.files ?? [],
+      this.#maxUploadFileBytes,
+    );
     const payload = {
       selector:
         input.sessionId === undefined
@@ -822,7 +831,7 @@ function throwUnexpectedSuccess(snapshot: SessionSnapshot): never {
   );
 }
 
-async function resolveAttachments(
+export async function resolveProviderAttachments(
   values: readonly string[],
   maxUploadFileBytes: number,
 ): Promise<readonly ProviderAttachment[]> {
