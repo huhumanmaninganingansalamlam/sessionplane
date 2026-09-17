@@ -20,6 +20,20 @@ interface LegacySnapshot {
   }>;
 }
 
+test('agbrowse alias help identifies SessionPlane and the Chat-only boundary', async () => {
+  const rootHelp = await runJson(['--help']);
+  assert.equal(rootHelp.code, 0, rootHelp.stderr);
+  assert.match(rootHelp.stdout, /SessionPlane .*agbrowse compatibility/);
+  assert.match(rootHelp.stdout, /ChatGPT provider automation is Chat-only/);
+  assert.match(rootHelp.stdout, /agbrowse web-ai --help/);
+
+  const webAiHelp = await runJson(['web-ai', '--help']);
+  assert.equal(webAiHelp.code, 0, webAiHelp.stderr);
+  assert.match(webAiHelp.stdout, /agbrowse web-ai compatibility/);
+  assert.match(webAiHelp.stdout, /ChatGPT is Chat-only/);
+  assert.match(webAiHelp.stdout, /--power, --speed/);
+});
+
 test('agbrowse alias translates legacy browser grammar into the same core', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-agbrowse-compat-'));
   const fixture = await startFixtureServer();

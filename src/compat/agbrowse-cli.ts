@@ -6,7 +6,11 @@ import { Readable, Writable } from 'node:stream';
 import { runCli } from '../cli/main.ts';
 import { callRpc, RpcClientError } from '../cli/client.ts';
 import { writeCliError, writeCliResult, type CliIo } from '../cli/format.ts';
-import { resolveConfig, type SessionPlaneConfig } from '../config.ts';
+import {
+  resolveConfig,
+  SESSIONPLANE_VERSION,
+  type SessionPlaneConfig,
+} from '../config.ts';
 import { ContextPackageService } from '../context/context-package.ts';
 import {
   capabilityForLegacyCommand,
@@ -24,6 +28,10 @@ export async function runAgbrowseCli(
 ): Promise<number> {
   const command = argv[0] ?? '--help';
   const json = argv.includes('--json') || process.env.AGBROWSE_JSON_ERRORS === '1';
+  if (isHelpToken(command) || (command !== 'web-ai' && argv.slice(1).some(isHelpToken))) {
+    io.stdout.write(`${agbrowseCompatibilityHelp()}\n`);
+    return 0;
+  }
   const manifest = loadAgbrowseManifest();
   const capability = capabilityForLegacyCommand(manifest, command);
   if (
@@ -95,6 +103,10 @@ async function runWebAiCompatibility(
   json: boolean,
 ): Promise<number> {
   const action = argv[0] ?? 'status';
+  if (isHelpToken(action) || argv.slice(1).some(isHelpToken)) {
+    io.stdout.write(`${agbrowseWebAiHelp()}\n`);
+    return 0;
+  }
   if (action === 'context-dry-run' || action === 'context-render') {
     return await runCli(
       [
@@ -853,6 +865,54 @@ function assertSupportedLegacyWebAiOptions(argv: readonly string[]): void {
 
 function hasOption(argv: readonly string[], name: string): boolean {
   return argv.some((value) => value === name || value.startsWith(`${name}=`));
+}
+
+function isHelpToken(value: string): boolean {
+  return value === '--help' || value === '-h' || value === 'help';
+}
+
+function agbrowseCompatibilityHelp(): string {
+  return `SessionPlane ${SESSIONPLANE_VERSION} — agbrowse compatibility
+
+Usage:
+  agbrowse start [--headed|--headless] [--json]
+  agbrowse status|stop|reset
+  agbrowse tabs|new-tab|tab-switch|tab-close|tab-cleanup
+  agbrowse navigate|snapshot|click|type|press|hover|select|upload
+  agbrowse screenshot|text|get-dom|console|network|evaluate
+  agbrowse fetch|extract|search|research
+  agbrowse web-ai <command> [options]
+  agbrowse skills|install-skills
+
+This command is the SessionPlane compatibility alias. It uses the same
+long-running core, persistent Chrome profile, PageRegistry, SQLite state, and
+session actors as sessplane. ChatGPT provider automation is Chat-only; Work,
+Power, and speed controls are intentionally unsupported.
+
+Run "agbrowse web-ai --help" for provider commands or "sessplane --help" for
+the complete canonical command surface.`;
+}
+
+function agbrowseWebAiHelp(): string {
+  return `SessionPlane ${SESSIONPLANE_VERSION} — agbrowse web-ai compatibility
+
+Usage:
+  agbrowse web-ai render --vendor chatgpt|gemini|grok --prompt TEXT
+  agbrowse web-ai send|query --vendor PROVIDER --prompt TEXT [--session ID]
+  agbrowse web-ai poll|watch|status|snapshot|stop --session ID
+  agbrowse web-ai sessions list|show|resume|reattach|doctor
+  agbrowse web-ai project-sources list|add --chatgpt-url URL
+  agbrowse web-ai code --vendor chatgpt --prompt TEXT --output-zip PATH
+  agbrowse web-ai code-extract --vendor chatgpt --session ID
+  agbrowse web-ai context-dry-run|context-render [context options]
+
+Common options:
+  --model MODEL --effort EFFORT --surface chat|deep-research|create-image
+  --file PATH --context-from-files GLOB --context-transport inline|upload
+  --timeout SEC --deadline ISO_TIME --request-id ID --json
+
+ChatGPT is Chat-only. "agbrowse web-ai work", --power, --speed, and an active
+Work composer fail before prompt fill or submit.`;
 }
 
 function requireArgOption(argv: readonly string[], name: string): string {

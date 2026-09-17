@@ -20,18 +20,25 @@ npm ci
 npm run typecheck
 npm test
 npm run build
+npm link --force
 ```
+
+`npm link --force` points the current Node installation's global `sessplane`
+and `agbrowse` commands at this source checkout. The force flag is needed when
+the old standalone agbrowse package already owns the `agbrowse` command. To
+avoid changing global links, use `node bin/sessplane.mjs` and
+`node bin/agbrowse.mjs` directly instead.
 
 Start the core in one terminal:
 
 ```bash
-npm exec sessplane -- serve
+sessplane serve
 ```
 
 Query it from another terminal:
 
 ```bash
-npm exec sessplane -- health --json
+sessplane health --json
 ```
 
 ## Generic browser automation
@@ -42,12 +49,12 @@ opaque `pageKey` returned by `tabs`; browser focus, title, recency, and page
 array order are never identity.
 
 ```bash
-npm exec sessplane -- tabs --json
-npm exec sessplane -- new-tab https://example.com --json
-npm exec sessplane -- snapshot --page <pageKey> --max-nodes 120 --json
-npm exec sessplane -- click @e1 --page <pageKey> --snapshot-id <snapshotId> --json
-npm exec sessplane -- type @e2 --text "hello" --page <pageKey> --snapshot-id <snapshotId> --json
-npm exec sessplane -- screenshot --page <pageKey> --out /tmp/page.png --json
+sessplane tabs --json
+sessplane new-tab https://example.com --json
+sessplane snapshot --page <pageKey> --max-nodes 120 --json
+sessplane click @e1 --page <pageKey> --snapshot-id <snapshotId> --json
+sessplane type @e2 --text "hello" --page <pageKey> --snapshot-id <snapshotId> --json
+sessplane screenshot --page <pageKey> --out /tmp/page.png --json
 ```
 
 Available browser surfaces include tabs and navigation, snapshot-bound refs,
@@ -60,8 +67,8 @@ existing root browser commands can be migrated without running the old CDP
 runtime:
 
 ```bash
-npm exec agbrowse -- tabs --json
-npm exec agbrowse -- snapshot --page <pageKey> --json
+agbrowse tabs --json
+agbrowse snapshot --page <pageKey> --json
 ```
 
 SessionPlane keeps these generic browser commands and role-addressed AI
@@ -71,7 +78,7 @@ Open or reuse the dedicated ChatGPT login page without attaching to a personal
 Chrome profile:
 
 ```bash
-npm exec sessplane -- login --json
+sessplane login --json
 ```
 
 Provider sessions support ChatGPT, Gemini, and Grok, including exact local file
@@ -79,14 +86,14 @@ uploads. Provider-created downloadable files are captured into an owner-only,
 content-addressed artifact store and remain queryable after core restart:
 
 ```bash
-npm exec sessplane -- send --session <sessionId> \
+sessplane send --session <sessionId> \
   --prompt "Use the attached context and create result.zip" \
   --file ./context.md --json
 
-npm exec sessplane -- artifact discover --session <sessionId> --json
-npm exec sessplane -- artifact capture --session <sessionId> --json
-npm exec sessplane -- artifact list --session <sessionId> --json
-npm exec sessplane -- artifact export <artifactId> --out ./result.zip
+sessplane artifact discover --session <sessionId> --json
+sessplane artifact capture --session <sessionId> --json
+sessplane artifact list --session <sessionId> --json
+sessplane artifact export <artifactId> --out ./result.zip
 ```
 
 Artifact descriptors are bound to the exact `sessionId + generation` and store
