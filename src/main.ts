@@ -6,6 +6,7 @@ import { PageMutationMutex } from './browser/page-mutex.ts';
 import { PageRegistry } from './browser/page-registry.ts';
 import { prepareRuntimeDirectories, resolveConfig, type SessionPlaneConfig } from './config.ts';
 import { getSystemHealth } from './core/health.ts';
+import { BrowserControlService } from './core/browser-control-service.ts';
 import { ObservationService } from './core/observation-service.ts';
 import { RecoveryService } from './core/recovery-service.ts';
 import { StopService } from './core/stop-service.ts';
@@ -15,6 +16,7 @@ import { createLogger, type Logger } from './logging.ts';
 import { RpcRouter } from './rpc/router.ts';
 import { RpcServer } from './rpc/server.ts';
 import { registerBrowserMethods } from './rpc/methods/browser.ts';
+import { registerBrowserControlMethods } from './rpc/methods/browser-control.ts';
 import { registerSessionMethods } from './rpc/methods/session.ts';
 import { registerSendMethods } from './rpc/methods/send.ts';
 import { registerStopMethods } from './rpc/methods/stop.ts';
@@ -39,6 +41,7 @@ export interface CoreService {
   readonly rpcServer: RpcServer;
   readonly browserOwner: BrowserOwner | null;
   readonly pageRegistry: PageRegistry;
+  readonly browserControl: BrowserControlService;
   readonly pageMutationMutex: PageMutationMutex;
   readonly teamDirectory: TeamDirectory;
   readonly receipts: ReceiptRepository;
@@ -91,6 +94,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
           headless: options.browserHeadless ?? false,
           launchTimeoutMs: config.browserLaunchTimeoutMs,
         });
+  const browserControl = new BrowserControlService({ browserOwner, pageRegistry });
 
   try {
     await browserOwner?.start();
@@ -200,6 +204,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     loginUrl: config.chatgptUrl,
     profileDir: config.profileDir,
   });
+  registerBrowserControlMethods(router, browserControl);
   registerTeamMethods(router, teamDirectory, receipts);
   registerSessionMethods(router, teamDirectory, receipts);
   registerSendMethods(router, submissionService);
@@ -232,6 +237,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     rpcServer,
     browserOwner,
     pageRegistry,
+    browserControl,
     pageMutationMutex,
     teamDirectory,
     receipts,

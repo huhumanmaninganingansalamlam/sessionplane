@@ -26,10 +26,15 @@ interface SessionSnapshot {
 }
 
 test('MCP tool catalogue exposes unique core mappings and exact selector schemas', () => {
-  assert.equal(MCP_TOOLS.length, 13);
+  assert.ok(MCP_TOOLS.length >= 40);
   assert.equal(new Set(MCP_TOOLS.map((tool) => tool.name)).size, MCP_TOOLS.length);
   assert.equal(new Set(MCP_TOOLS.map((tool) => tool.rpcMethod)).size, MCP_TOOLS.length);
   assert.equal(getMcpTool('sessionplane_send')?.rpcMethod, 'session.send');
+  assert.equal(getMcpTool('browser_snapshot')?.rpcMethod, 'browser.snapshot');
+  assert.equal(getMcpTool('browser_click_ref')?.rpcMethod, 'browser.click');
+  assert.equal(getMcpTool('browser_observe_bundle')?.rpcMethod, 'browser.observeBundle');
+  assert.equal(getMcpTool('browser_upload_ref')?.rpcMethod, 'browser.upload');
+  assert.equal(getMcpTool('browser_network')?.rpcMethod, 'browser.network');
   assert.equal(getMcpTool('missing'), null);
 
   for (const definition of MCP_TOOLS) {
