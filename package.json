@@ -13,6 +13,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "browser:install": "node node_modules/playwright-core/cli.js install chromium --no-shell",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --test --test-concurrency=1 --experimental-strip-types test/**/*.test.ts",
     "test:acceptance": "node --test --test-concurrency=1 --experimental-strip-types test/reliability/acceptance.test.ts",

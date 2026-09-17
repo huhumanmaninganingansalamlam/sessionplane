@@ -1,6 +1,6 @@
 import { existsSync, statSync } from 'node:fs';
 
-import { findInstalledChrome } from '../../browser/browser-health.ts';
+import { findPlaywrightChromium } from '../../browser/browser-health.ts';
 import { prepareRuntimeDirectories, SESSIONPLANE_VERSION, type SessionPlaneConfig } from '../../config.ts';
 import { SessionPlaneDatabase } from '../../storage/database.ts';
 import { callRpc } from '../client.ts';
@@ -25,12 +25,14 @@ export async function runDoctor(config: SessionPlaneConfig): Promise<DoctorRepor
     expected: '>=24.15 <25',
   });
 
-  const chrome = findInstalledChrome();
+  const chrome = findPlaywrightChromium();
   checks.push({
-    name: 'chrome',
+    name: 'playwright-chromium',
     required: true,
     ok: chrome !== null,
-    ...(chrome === null ? { reason: 'Installed Google Chrome not found' } : chrome),
+    ...(chrome === null
+      ? { reason: 'Playwright Chromium is not installed; run `npm run browser:install`' }
+      : chrome),
   });
 
   try {

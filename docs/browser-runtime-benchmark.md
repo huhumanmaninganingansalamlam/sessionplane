@@ -8,7 +8,7 @@ product scope.
 
 | Project | Revision | Useful runtime pattern |
 | --- | --- | --- |
-| agbrowse | `55150e1` | installed Chrome subprocess, dedicated profile, CDP attachment |
+| agbrowse | `55150e1` | dedicated profile, explicit browser ownership, CDP attachment |
 | Proxima | `1113686` | persistent provider partitions and serialized provider mutations |
 | browser-use | `d8110c5` | direct subprocess ownership, profile-copy validation, CDP reconnect |
 | Stagehand | `e7e5b67` | random loopback port, launched-vs-connected ownership, supervised shutdown |
@@ -24,17 +24,14 @@ The checked-out source snapshots live outside the product repository under
 
 ## Adopted
 
-- Launch the installed Google Chrome directly and attach through a random
-  loopback-only CDP endpoint.
+- Install and launch the exact Chromium revision pinned by `playwright-core`
+  through the standard Playwright persistent-context API.
 - Keep a SessionPlane-dedicated persistent profile and reject personal/default
-  Chrome profile paths.
-- Keep Chrome and the long-running core under one explicit ownership record.
-- Record core PID, Chrome PID, and CDP port in an owner-only profile lock.
-- On core restart, adopt a still-running Chrome only when the stale lock,
-  process command line, exact profile path, exact port, and live CDP endpoint
-  all agree. Otherwise fail closed or terminate only the provably owned process.
-- Supervise startup readiness and shutdown, preserve Chrome stderr for
-  diagnosis, and use TERM then KILL only for the exact owned process.
+  Chromium profile paths.
+- Keep BrowserContext and the long-running core under one explicit ownership
+  record; a second owner for the same profile fails closed.
+- Let Playwright own browser startup and shutdown rather than maintaining a
+  second subprocess/CDP lifecycle implementation.
 - Preserve SessionPlane's opaque `pageKey` and durable
   `sessionId + generation + conversationId` identity instead of active-tab or
   discovery-order selection.
@@ -43,12 +40,12 @@ The checked-out source snapshots live outside the product repository under
 
 - JavaScript fingerprint patches, `navigator` rewriting, WebGL spoofing,
   User-Agent/client-hint rewriting, and request-header impersonation.
-- CAPTCHA or Cloudflare challenge solving/bypass. Headed Chrome remains
+- CAPTCHA or Cloudflare challenge solving/bypass. Headed Chromium remains
   available for explicit human completion, after which automation may resume.
 - Calling undocumented provider-internal web APIs as the primary submission
   path.
-- Attaching to an arbitrary external CDP endpoint or reusing a personal default
-  Chrome profile without ownership proof.
+- Searching for a system Chrome, attaching to an arbitrary external CDP
+  endpoint, or reusing a personal default browser profile.
 - Automatic `bringToFront()` for identity or routine background work.
 - An extension/native-messaging relay in v1. It is useful for controlling a
   person's existing browser, but conflicts with SessionPlane's dedicated
@@ -57,7 +54,7 @@ The checked-out source snapshots live outside the product repository under
 
 ## Resulting contract
 
-SessionPlane minimizes avoidable automation-only launch differences without
-pretending to be a different browser. Compatibility comes from normal headed
-Chrome, persistent same-user state, minimal launch arguments, exact ownership,
-and reliable recovery—not from disguising or bypassing site security.
+SessionPlane uses the browser build tested with its exact Playwright version,
+a persistent same-user profile, explicit ownership, and durable recovery. It
+does not depend on whichever system Chrome happens to be installed, and it does
+not disguise the browser or bypass site security.

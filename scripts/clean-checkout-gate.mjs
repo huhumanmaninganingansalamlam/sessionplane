@@ -26,6 +26,7 @@ try {
 
   for (const [command, args] of [
     ['npm', ['ci']],
+    ['npm', ['run', 'browser:install']],
     ['npm', ['run', 'typecheck']],
     ['npm', ['test']],
     ['npm', ['run', 'build']],

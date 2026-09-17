@@ -18,7 +18,7 @@ precedence over implementation convenience.
 ## Development
 
 - Runtime: Node.js 24, TypeScript, ESM.
-- Browser integration uses direct `playwright-core` and installed Google Chrome.
+- Browser integration uses direct `playwright-core` and its exact, explicitly installed Chromium revision. System Chrome is not an implicit runtime dependency.
 - SQLite access stays behind `src/storage/`.
 - Public clients are thin adapters over the Unix-socket JSON-RPC core.
 - Add focused invariant tests with every behavior change.

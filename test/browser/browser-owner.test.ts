@@ -1,23 +1,27 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import {
-  BrowserOwner,
-  buildChromeArguments,
-} from '../../src/browser/browser-owner.ts';
+import { chromium } from 'playwright-core';
+
+import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 
 test('BrowserOwner owns one dedicated persistent profile and fails closed for a second owner', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-owner-'));
   const profileDir = path.join(root, 'profile');
+  let capturedLaunchOptions: Parameters<typeof chromium.launchPersistentContext>[1] | null = null;
   const first = new BrowserOwner({
     profileDir,
     pageRegistry: new PageRegistry(),
     headless: true,
+    launchPersistentContext(userDataDir, options) {
+      capturedLaunchOptions = options;
+      return chromium.launchPersistentContext(userDataDir, options);
+    },
   });
   const second = new BrowserOwner({
     profileDir,
@@ -28,21 +32,19 @@ test('BrowserOwner owns one dedicated persistent profile and fails closed for a 
   try {
     await first.start();
     assert.equal(first.status.state, 'ready');
-    assert.equal(first.status.transport, 'cdp');
-    assert.equal(first.status.ownership, 'spawned');
+    assert.equal(first.status.transport, 'playwright');
+    assert.equal(first.status.ownership, 'playwright');
+    assert.equal(first.status.chrome?.source, 'playwright');
+    assert.equal(first.status.chrome?.product, 'chromium');
+    assert.equal(capturedLaunchOptions?.channel, undefined);
+    assert.equal(capturedLaunchOptions?.executablePath, chromium.executablePath());
+    assert.deepEqual(capturedLaunchOptions?.ignoreDefaultArgs, [
+      '--password-store=basic',
+      '--use-mock-keychain',
+    ]);
     const lockPath = path.join(profileDir, '.sessionplane-profile.lock');
     assert.equal(existsSync(lockPath), true);
     assert.equal(statSync(lockPath).mode & 0o777, 0o600);
-    const lock = JSON.parse(readFileSync(lockPath, 'utf8')) as {
-      readonly pid: number;
-      readonly browserPid: number;
-      readonly debuggingPort: number;
-    };
-    assert.equal(lock.pid, process.pid);
-    assert.ok(Number.isSafeInteger(lock.browserPid) && lock.browserPid > 0);
-    assert.ok(lock.debuggingPort > 0 && lock.debuggingPort <= 65_535);
-    assert.equal(first.status.browserPid, lock.browserPid);
-    assert.equal(first.status.debuggingPort, lock.debuggingPort);
 
     await assert.rejects(second.start(), /already owned/);
   } finally {
@@ -52,98 +54,6 @@ test('BrowserOwner owns one dedicated persistent profile and fails closed for a 
     rmSync(root, { recursive: true, force: true });
   }
 });
-
-test(
-  'BrowserOwner adopts the exact orphan Chrome after the owning core disappears',
-  { skip: process.platform === 'win32' },
-  async () => {
-    const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-adopt-'));
-    const profileDir = path.join(root, 'profile');
-    const firstRegistry = new PageRegistry();
-    const secondRegistry = new PageRegistry();
-    const first = new BrowserOwner({
-      profileDir,
-      pageRegistry: firstRegistry,
-      headless: true,
-      pid: 2_147_483_000,
-    });
-    const second = new BrowserOwner({
-      profileDir,
-      pageRegistry: secondRegistry,
-      headless: true,
-    });
-
-    try {
-      await first.start();
-      const page = await first.createPage();
-      await page.page.goto('data:text/html,<title>Orphan Chrome</title>');
-      const originalPid = first.status.browserPid;
-      const originalPort = first.status.debuggingPort;
-      assert.ok(originalPid !== null && originalPort !== null);
-
-      await second.start();
-      assert.equal(second.status.state, 'ready');
-      assert.equal(second.status.ownership, 'adopted');
-      assert.equal(second.status.browserPid, originalPid);
-      assert.equal(second.status.debuggingPort, originalPort);
-      assert.ok(
-        secondRegistry
-          .listBindings({ includeClosed: false })
-          .some((binding) => binding.url.startsWith('data:text/html')),
-      );
-      const lock = JSON.parse(
-        readFileSync(path.join(profileDir, '.sessionplane-profile.lock'), 'utf8'),
-      ) as { readonly pid: number; readonly browserPid: number; readonly debuggingPort: number };
-      assert.equal(lock.pid, process.pid);
-      assert.equal(lock.browserPid, originalPid);
-      assert.equal(lock.debuggingPort, originalPort);
-    } finally {
-      await second.close();
-      await first.close();
-      rmSync(root, { recursive: true, force: true });
-    }
-  },
-);
-
-test('Chrome arguments expose loopback CDP without automation or stealth switches', () => {
-  const args = buildChromeArguments({
-    profileDir: '/tmp/sessionplane-profile',
-    debuggingPort: 9_333,
-    headless: false,
-  });
-  assert.ok(args.includes('--remote-debugging-address=127.0.0.1'));
-  assert.ok(args.includes('--remote-debugging-port=9333'));
-  assert.ok(args.includes('--user-data-dir=/tmp/sessionplane-profile'));
-  assert.equal(args.some((argument) => argument === '--enable-automation'), false);
-  assert.equal(args.some((argument) => argument.includes('AutomationControlled')), false);
-  assert.equal(args.some((argument) => argument.startsWith('--headless')), false);
-});
-
-test(
-  'headed Chrome CDP attachment preserves navigator.webdriver=false',
-  {
-    skip:
-      process.platform === 'linux' &&
-      process.env.DISPLAY === undefined &&
-      process.env.WAYLAND_DISPLAY === undefined,
-  },
-  async () => {
-    const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-webdriver-'));
-    const owner = new BrowserOwner({
-      profileDir: path.join(root, 'profile'),
-      pageRegistry: new PageRegistry(),
-      headless: false,
-    });
-    try {
-      await owner.start();
-      const created = await owner.createPage();
-      assert.equal(await created.page.evaluate(() => navigator.webdriver), false);
-    } finally {
-      await owner.close();
-      rmSync(root, { recursive: true, force: true });
-    }
-  },
-);
 
 test('BrowserOwner login returns after response commit without waiting for page completion', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-login-'));

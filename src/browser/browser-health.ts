@@ -1,6 +1,8 @@
-import { accessSync, constants } from 'node:fs';
-import { delimiter, isAbsolute, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { accessSync, constants } from 'node:fs';
+import path from 'node:path';
+
+import { chromium } from 'playwright-core';
 
 import type { PageBindingSnapshot } from './page-binding.ts';
 
@@ -16,6 +18,8 @@ export type BrowserRuntimeState =
 export interface ChromeInstallation {
   readonly executable: string;
   readonly version: string;
+  readonly source: 'playwright';
+  readonly product: 'chromium';
 }
 
 export interface BrowserStatusSource {
@@ -23,53 +27,41 @@ export interface BrowserStatusSource {
   readonly profileDir: string;
   readonly headless: boolean;
   readonly chrome: ChromeInstallation | null;
-  readonly transport: 'cdp' | null;
-  readonly ownership: 'spawned' | 'adopted' | null;
+  readonly transport: 'playwright' | null;
+  readonly ownership: 'playwright' | null;
   readonly browserPid: number | null;
   readonly debuggingPort: number | null;
   readonly lastError: string | null;
 }
 
-export function findInstalledChrome(
-  env: NodeJS.ProcessEnv = process.env,
-  platform: NodeJS.Platform = process.platform,
+export function findPlaywrightChromium(
+  executablePath?: string,
 ): ChromeInstallation | null {
-  const pathCandidates = (env.PATH ?? '')
-    .split(delimiter)
-    .filter(Boolean)
-    .flatMap((directory) => [
-      join(directory, 'google-chrome'),
-      join(directory, 'google-chrome-stable'),
-    ]);
-  const platformCandidates =
-    platform === 'darwin'
-      ? ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
-      : platform === 'win32'
-        ? [
-            join(env.PROGRAMFILES ?? '', 'Google/Chrome/Application/chrome.exe'),
-            join(env['PROGRAMFILES(X86)'] ?? '', 'Google/Chrome/Application/chrome.exe'),
-            join(env.LOCALAPPDATA ?? '', 'Google/Chrome/Application/chrome.exe'),
-          ]
-        : ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable'];
-
-  for (const candidate of [...new Set([...pathCandidates, ...platformCandidates])]) {
-    if (candidate === '' || (!isAbsolute(candidate) && !candidate.includes('/'))) {
-      continue;
-    }
-    try {
-      accessSync(candidate, constants.X_OK);
-    } catch {
-      continue;
-    }
-    const result = spawnSync(candidate, ['--version'], { encoding: 'utf8' });
-    if (result.status === 0) {
-      return {
-        executable: candidate,
-        version: result.stdout.trim() || result.stderr.trim(),
-      };
-    }
+  let candidate: string;
+  try {
+    candidate = path.resolve(executablePath ?? chromium.executablePath());
+    accessSync(candidate, constants.X_OK);
+  } catch {
+    return null;
   }
-  return null;
+
+  const result = spawnSync(candidate, ['--version'], {
+    encoding: 'utf8',
+    timeout: 5_000,
+  });
+  if (result.status !== 0) {
+    return null;
+  }
+  const version = result.stdout.trim() || result.stderr.trim();
+  if (version === '') {
+    return null;
+  }
+  return Object.freeze({
+    executable: candidate,
+    version,
+    source: 'playwright',
+    product: 'chromium',
+  });
 }
 
 export function summarizeBrowserHealth(
@@ -92,4 +84,3 @@ export function summarizeBrowserHealth(
     identityLostCount: openBindings.filter((binding) => binding.state === 'identity_lost').length,
   };
 }
-

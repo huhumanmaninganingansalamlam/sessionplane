@@ -1,8 +1,8 @@
 # SessionPlane
 
-SessionPlane is a local runtime that owns one dedicated Playwright persistent
-Chrome profile and safely coordinates durable, role-addressed AI chat sessions
-for multiple clients.
+SessionPlane is a local runtime that owns one dedicated Playwright Chromium
+persistent profile and safely coordinates durable, role-addressed AI chat
+sessions for multiple clients.
 
 The core process owns browser state, SQLite state, session actors, observation,
 and recovery. The `sessplane` CLI and MCP adapter are thin Unix-socket clients.
@@ -10,13 +10,14 @@ and recovery. The `sessplane` CLI and MCP adapter are thin Unix-socket clients.
 ## Requirements
 
 - Node.js `>=24.15 <25`
-- Installed Google Chrome
+- Playwright-managed Chromium (`npm run browser:install`)
 - A Unix-like operating system with Unix domain sockets
 
 ## Development
 
 ```bash
 npm ci
+npm run browser:install
 npm run typecheck
 npm test
 npm run build
@@ -48,16 +49,12 @@ replace the standalone agbrowse browser workflow. Pages are addressed by the
 opaque `pageKey` returned by `tabs`; browser focus, title, recency, and page
 array order are never identity.
 
-The core starts the installed Google Chrome itself with the dedicated
-SessionPlane profile and a random loopback-only CDP port, then attaches with
-`playwright-core`. Headed Chrome is not launched with `--enable-automation`
-and reports `navigator.webdriver === false`; no stealth or challenge-bypass
-flags are injected. This matches the useful ownership property of the former
-agbrowse launcher while keeping Chrome, CDP, Pages, and profile lifecycle
-inside one SessionPlane process. The profile lock records the core PID, Chrome
-PID, and debugging port. If the core crashes while its exact Chrome process is
-still healthy, the next core adopts that process and startup recovery rebinds
-the durable sessions instead of destroying the browser first.
+The core launches the exact Chromium revision managed by `playwright-core`
+through `chromium.launchPersistentContext()`, using the dedicated SessionPlane
+profile. It does not search for or implicitly depend on a system-installed
+Google Chrome. Browser binary, BrowserContext, Pages, profile, and lifecycle
+therefore stay pinned to one SessionPlane/Playwright version. No custom browser
+fingerprint patches are injected.
 
 ```bash
 sessplane tabs --json
@@ -181,7 +178,7 @@ available through the thin MCP adapter. `compat/agbrowse-manifest.json`
 binds every required agbrowse replacement row to executable contracts; the
 compatibility contract fails when any required row is not implemented.
 
-`doctor --json` reports the installed Chrome build and, when the core is
+`doctor --json` reports the pinned Playwright Chromium build and, when the core is
 running, the current Page bindings without changing browser focus.
 
 Installed or linked `sessplane` and `agbrowse` commands use one stable runtime
