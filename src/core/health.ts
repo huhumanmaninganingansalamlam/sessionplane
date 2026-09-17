@@ -3,7 +3,10 @@ import { SESSIONPLANE_VERSION } from '../config.ts';
 import type { BrowserOwner } from '../browser/browser-owner.ts';
 import { summarizeBrowserHealth } from '../browser/browser-health.ts';
 import type { PageRegistry } from '../browser/page-registry.ts';
+import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
+import type { RuntimeMetrics } from '../telemetry/metrics.ts';
+import type { ObservationService } from './observation-service.ts';
 
 export interface HealthContext {
   readonly config: SessionPlaneConfig;
@@ -11,6 +14,9 @@ export interface HealthContext {
   readonly startedAt: Date;
   readonly browserOwner: BrowserOwner | null;
   readonly pageRegistry: PageRegistry;
+  readonly actorScheduler: ActorScheduler;
+  readonly observationService: ObservationService;
+  readonly metrics: RuntimeMetrics;
 }
 
 export function getSystemHealth(context: HealthContext): Readonly<Record<string, unknown>> {
@@ -39,6 +45,12 @@ export function getSystemHealth(context: HealthContext): Readonly<Record<string,
       },
       context.pageRegistry.listBindings(),
     ),
+    metrics: context.metrics.snapshot({
+      sessionActorCount: context.actorScheduler.actorCount,
+      sessionActorQueueDepth: context.actorScheduler.totalQueueDepth,
+      waitSubscriberCount: context.actorScheduler.totalSubscriberCount,
+      observerCount: context.observationService.observerCount,
+    }),
   };
 }
 

@@ -156,6 +156,12 @@ export class BrowserOwner {
     }
   }
 
+  async restart(): Promise<BrowserStatusSource> {
+    await this.close();
+    await this.start();
+    return this.status;
+  }
+
   async createPage(): Promise<{ readonly page: Page; readonly binding: PageBindingSnapshot }> {
     const context = this.#requireContext();
     const page = await context.newPage();

@@ -12,6 +12,7 @@ import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import type { ProbeCoordinator } from '../scheduler/probe-coordinator.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
+import type { RuntimeMetrics } from '../telemetry/metrics.ts';
 
 interface ObserverRuntime {
   readonly generation: number;
@@ -30,6 +31,7 @@ export interface ObservationServiceOptions {
   readonly probeCoordinator: ProbeCoordinator;
   readonly logger?: Logger;
   readonly now?: () => Date;
+  readonly metrics?: RuntimeMetrics;
 }
 
 export class ObservationService {
@@ -43,6 +45,7 @@ export class ObservationService {
   readonly #probeCoordinator: ProbeCoordinator;
   readonly #logger: Logger | null;
   readonly #now: () => Date;
+  readonly #metrics: RuntimeMetrics | null;
   readonly #runtimes = new Map<string, ObserverRuntime>();
   #closed = false;
 
@@ -57,18 +60,32 @@ export class ObservationService {
     this.#probeCoordinator = options.probeCoordinator;
     this.#logger = options.logger ?? null;
     this.#now = options.now ?? (() => new Date());
+    this.#metrics = options.metrics ?? null;
   }
 
   get observerCount(): number {
     return this.#runtimes.size;
   }
 
-  start(snapshot: SessionSnapshot): void {
+  stop(sessionId: string, expectedGeneration?: number): boolean {
+    const runtime = this.#runtimes.get(sessionId);
+    if (
+      runtime === undefined ||
+      (expectedGeneration !== undefined && runtime.generation !== expectedGeneration)
+    ) {
+      return false;
+    }
+    this.#runtimes.delete(sessionId);
+    runtime.controller.abort();
+    return true;
+  }
+
+  start(snapshot: SessionSnapshot, options: { readonly force?: boolean } = {}): void {
     if (this.#closed || !isObservable(snapshot)) {
       return;
     }
     const existing = this.#runtimes.get(snapshot.sessionId);
-    if (existing?.generation === snapshot.generation) {
+    if (existing?.generation === snapshot.generation && options.force !== true) {
       return;
     }
     existing?.controller.abort();
@@ -110,6 +127,7 @@ export class ObservationService {
 
   async #run(initial: SessionSnapshot, signal: AbortSignal): Promise<void> {
     const tracker = new ExactFinalTracker(this.#quietWindowMs);
+    const observationStartedAtMs = this.#now().getTime();
     let lastExactProgressAtMs = this.#now().getTime();
     let source: ProviderObservationSource | null = null;
     try {
@@ -147,6 +165,9 @@ export class ObservationService {
           await waitForDelay(this.#quietSweepMs, signal);
           continue;
         }
+        if (signal.aborted) {
+          return;
+        }
 
         const nowMs = this.#now().getTime();
         const decision = tracker.evaluate(evidence, nowMs);
@@ -162,6 +183,12 @@ export class ObservationService {
           ? current
           : await this.#persistDecision(current, evidence, decision);
         if (persisted.terminal || decision.kind === 'complete') {
+          if (decision.kind === 'complete') {
+            this.#metrics?.observe(
+              'final_detection_latency_ms',
+              Math.max(0, this.#now().getTime() - observationStartedAtMs),
+            );
+          }
           return;
         }
         if (decision.freshExactProgress) {
@@ -174,8 +201,17 @@ export class ObservationService {
           this.#now().getTime() - lastExactProgressAtMs >= this.#backendRecoveryAfterMs
         ) {
           const recovery = await this.#recover(persisted);
+          if (signal.aborted) {
+            return;
+          }
           const recovered = await this.#persistRecovery(persisted, recovery);
           if (recovered.terminal || recovery.kind === 'complete') {
+            if (recovery.kind === 'complete') {
+              this.#metrics?.observe(
+                'final_detection_latency_ms',
+                Math.max(0, this.#now().getTime() - observationStartedAtMs),
+              );
+            }
             return;
           }
         }

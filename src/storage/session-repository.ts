@@ -144,6 +144,17 @@ export class SessionRepository {
     return rows.map((row) => row.sessionId);
   }
 
+  listRecoverableSnapshots(): readonly SessionSnapshot[] {
+    const snapshots: SessionSnapshot[] = [];
+    for (const sessionId of this.listNonterminalSessionIds()) {
+      const snapshot = this.getSnapshot(sessionId);
+      if (snapshot !== null && snapshot.generation > 0) {
+        snapshots.push(snapshot);
+      }
+    }
+    return snapshots;
+  }
+
   insertGeneration(generation: GenerationRecord): void {
     this.#database
       .prepare(`

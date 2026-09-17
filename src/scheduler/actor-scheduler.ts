@@ -37,6 +37,22 @@ export class ActorScheduler {
     return this.#actors.size;
   }
 
+  get totalQueueDepth(): number {
+    let total = 0;
+    for (const [, actor] of this.#actors.entries()) {
+      total += actor.queueDepth;
+    }
+    return total;
+  }
+
+  get totalSubscriberCount(): number {
+    let total = 0;
+    for (const [, actor] of this.#actors.entries()) {
+      total += actor.subscriberCount;
+    }
+    return total;
+  }
+
   restore(): number {
     for (const sessionId of this.#sessions.listNonterminalSessionIds()) {
       this.actorFor(sessionId);

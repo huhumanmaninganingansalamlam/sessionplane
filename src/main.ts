@@ -1,4 +1,5 @@
 import { pathToFileURL } from 'node:url';
+import type { Page } from 'playwright-core';
 
 import { BrowserOwner } from './browser/browser-owner.ts';
 import { PageMutationMutex } from './browser/page-mutex.ts';
@@ -6,6 +7,7 @@ import { PageRegistry } from './browser/page-registry.ts';
 import { prepareRuntimeDirectories, resolveConfig, type SessionPlaneConfig } from './config.ts';
 import { getSystemHealth } from './core/health.ts';
 import { ObservationService } from './core/observation-service.ts';
+import { RecoveryService } from './core/recovery-service.ts';
 import { StopService } from './core/stop-service.ts';
 import { TeamDirectory } from './core/team-directory.ts';
 import { SubmissionService } from './core/submission-service.ts';
@@ -21,7 +23,9 @@ import { registerWaitMethods } from './rpc/methods/wait.ts';
 import { ActorScheduler } from './scheduler/actor-scheduler.ts';
 import { ProbeCoordinator } from './scheduler/probe-coordinator.ts';
 import { SessionPlaneDatabase } from './storage/database.ts';
+import { PageBindingRepository } from './storage/page-binding-repository.ts';
 import { ReceiptRepository } from './storage/receipt-repository.ts';
+import { RuntimeMetrics } from './telemetry/metrics.ts';
 import { ChatGptAdapter } from './providers/chatgpt/adapter.ts';
 import {
   ProviderAdapterRegistry,
@@ -40,11 +44,15 @@ export interface CoreService {
   readonly receipts: ReceiptRepository;
   readonly actorScheduler: ActorScheduler;
   readonly probeCoordinator: ProbeCoordinator;
+  readonly metrics: RuntimeMetrics;
+  readonly pageBindings: PageBindingRepository;
   readonly providerAdapters: ProviderAdapterRegistry;
   readonly observationService: ObservationService;
+  readonly recoveryService: RecoveryService;
   readonly submissionService: SubmissionService;
   readonly stopService: StopService;
   readonly startedAt: Date;
+  restartBrowser(): Promise<Readonly<Record<string, unknown>>>;
   close(): Promise<void>;
 }
 
@@ -54,6 +62,7 @@ export interface StartCoreOptions {
   readonly startBrowser?: boolean;
   readonly browserHeadless?: boolean;
   readonly providerAdapters?: readonly ProviderAdapter[];
+  readonly recoveryNavigatePage?: (page: Page, url: string) => Promise<void>;
 }
 
 export async function startCore(options: StartCoreOptions = {}): Promise<CoreService> {
@@ -63,7 +72,12 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   const database = SessionPlaneDatabase.open(config.databasePath);
   const startedAt = new Date();
   const router = new RpcRouter();
-  const pageRegistry = new PageRegistry();
+  const metrics = new RuntimeMetrics();
+  const pageRegistry = new PageRegistry({ metrics });
+  const pageBindings = new PageBindingRepository(database.raw);
+  const unsubscribePageBindings = pageRegistry.subscribe((binding) => {
+    pageBindings.upsert(binding);
+  });
   const pageMutationMutex = new PageMutationMutex();
   const teamDirectory = new TeamDirectory(database);
   const receipts = new ReceiptRepository(database);
@@ -83,6 +97,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     actorScheduler.restore();
   } catch (error) {
     actorScheduler.close();
+    unsubscribePageBindings();
+    metrics.close();
     database.close();
     throw error;
   }
@@ -107,6 +123,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     successIntervalMs: config.probeSuccessIntervalMs,
     min429BackoffMs: config.probeMin429BackoffMs,
     max429BackoffMs: config.probeMax429BackoffMs,
+    metrics,
   });
   const observationService = new ObservationService({
     database,
@@ -118,6 +135,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     backendRecoveryAfterMs: config.backendRecoveryAfterMs,
     probeCoordinator,
     logger,
+    metrics,
   });
   const submissionService = new SubmissionService({
     database,
@@ -134,22 +152,47 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageMutex: pageMutationMutex,
     adapters: providerAdapters,
   });
+  const recoveryService = new RecoveryService({
+    database,
+    browserOwner,
+    pageRegistry,
+    scheduler: actorScheduler,
+    observations: observationService,
+    chatgptUrl: config.chatgptUrl,
+    metrics,
+    logger,
+    ...(options.recoveryNavigatePage === undefined
+      ? {}
+      : { navigatePage: options.recoveryNavigatePage }),
+  });
 
   try {
     const recovered = await submissionService.recoverInterruptedSubmissions();
     if (recovered > 0) {
       logger.warn('submission.recovered-ambiguous', { count: recovered });
     }
+    await recoveryService.restore();
   } catch (error) {
     await observationService.close();
     await browserOwner?.close();
     actorScheduler.close();
+    unsubscribePageBindings();
+    metrics.close();
     database.close();
     throw error;
   }
 
   router.register('system.health', z.object({}).strict(), () =>
-    getSystemHealth({ config, database, startedAt, browserOwner, pageRegistry }),
+    getSystemHealth({
+      config,
+      database,
+      startedAt,
+      browserOwner,
+      pageRegistry,
+      actorScheduler,
+      observationService,
+      metrics,
+    }),
   );
   registerBrowserMethods(router, {
     browserOwner,
@@ -175,6 +218,9 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   } catch (error) {
     await observationService.close();
     await browserOwner?.close();
+    actorScheduler.close();
+    unsubscribePageBindings();
+    metrics.close();
     database.close();
     throw error;
   }
@@ -191,11 +237,22 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     receipts,
     actorScheduler,
     probeCoordinator,
+    metrics,
+    pageBindings,
     providerAdapters,
     observationService,
+    recoveryService,
     submissionService,
     stopService,
     startedAt,
+    async restartBrowser(): Promise<Readonly<Record<string, unknown>>> {
+      if (browserOwner === null) {
+        throw new Error('Browser owner is disabled');
+      }
+      const browser = await browserOwner.restart();
+      const recovery = await recoveryService.restore({ forceObservers: true });
+      return { browser, recovery };
+    },
     async close(): Promise<void> {
       if (closed) {
         return;
@@ -205,6 +262,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       await observationService.close();
       await browserOwner?.close();
       actorScheduler.close();
+      unsubscribePageBindings();
+      metrics.close();
       database.close();
     },
   };

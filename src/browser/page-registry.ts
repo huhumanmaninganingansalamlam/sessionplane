@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 
 import type { BrowserContext, Frame, Page } from 'playwright-core';
 
+import type { RuntimeMetrics } from '../telemetry/metrics.ts';
+
 import {
   parseChatGptConversationId,
   type BindPageInput,
@@ -43,6 +45,8 @@ export class PageRegistry {
   readonly #keysByPage = new WeakMap<Page, string>();
   readonly #listeners = new Set<(snapshot: PageBindingSnapshot) => void>();
   readonly #now: () => Date;
+  readonly #metrics: RuntimeMetrics | null;
+  #conflictFingerprints = new Set<string>();
   #registrationSequence = 0;
   #context: BrowserContext | null = null;
   readonly #onContextPage = (page: Page): void => {
@@ -56,8 +60,14 @@ export class PageRegistry {
     }
   };
 
-  constructor(options: { readonly now?: () => Date } = {}) {
+  constructor(
+    options: {
+      readonly now?: () => Date;
+      readonly metrics?: RuntimeMetrics;
+    } = {},
+  ) {
     this.#now = options.now ?? (() => new Date());
+    this.#metrics = options.metrics ?? null;
   }
 
   attach(context: BrowserContext): void {
@@ -166,12 +176,14 @@ export class PageRegistry {
       );
     }
     if (record.sessionId !== null && record.sessionId !== input.sessionId) {
+      this.#metrics?.increment('wrong_session_total');
       throw new PageRegistryError(
         'session.page-identity-unverified',
         `Page ${pageKey} is reserved by another session`,
       );
     }
     if (record.generation !== null && record.generation !== input.generation) {
+      this.#metrics?.increment('wrong_generation_total');
       throw new PageRegistryError(
         'session.page-identity-unverified',
         `Page ${pageKey} is reserved for another generation`,
@@ -214,6 +226,7 @@ export class PageRegistry {
       );
     }
     if (record.sessionId !== null && record.sessionId !== input.sessionId) {
+      this.#metrics?.increment('wrong_session_total');
       throw new PageRegistryError(
         'session.page-identity-unverified',
         `Page ${pageKey} is reserved by another session`,
@@ -307,6 +320,12 @@ export class PageRegistry {
       record.conversationId !== expected.conversationId ||
       (expected.generation !== undefined && record.generation !== expected.generation)
     ) {
+      if (record.sessionId !== expected.sessionId) {
+        this.#metrics?.increment('wrong_session_total');
+      }
+      if (expected.generation !== undefined && record.generation !== expected.generation) {
+        this.#metrics?.increment('wrong_generation_total');
+      }
       throw new PageRegistryError(
         'session.page-identity-unverified',
         `Page ${pageKey} ownership does not match the requested session identity`,
@@ -338,6 +357,12 @@ export class PageRegistry {
       record.sessionId !== expected.sessionId ||
       (expected.generation !== undefined && record.generation !== expected.generation)
     ) {
+      if (record.sessionId !== expected.sessionId) {
+        this.#metrics?.increment('wrong_session_total');
+      }
+      if (expected.generation !== undefined && record.generation !== expected.generation) {
+        this.#metrics?.increment('wrong_generation_total');
+      }
       throw new PageRegistryError(
         'session.page-identity-unverified',
         `Page ${pageKey} ownership does not match the requested session`,
@@ -392,7 +417,8 @@ export class PageRegistry {
       groups.set(record.conversationId, group);
     }
 
-    for (const group of groups.values()) {
+    const nextConflictFingerprints = new Set<string>();
+    for (const [conversationId, group] of groups) {
       if (group.length < 2) {
         continue;
       }
@@ -406,12 +432,18 @@ export class PageRegistry {
         continue;
       }
       const allKeys = group.map((record) => record.pageKey);
+      const fingerprint = `${conversationId}\u0000${[...allKeys].sort().join('\u0000')}`;
+      nextConflictFingerprints.add(fingerprint);
+      if (!this.#conflictFingerprints.has(fingerprint)) {
+        this.#metrics?.increment('page_binding_conflict_total');
+      }
       for (const record of group) {
         record.state = 'conflict';
         record.conflictOwnerPageKey = owner.pageKey;
         record.duplicatePageKeys = allKeys.filter((pageKey) => pageKey !== record.pageKey);
       }
     }
+    this.#conflictFingerprints = nextConflictFingerprints;
   }
 
   #baseState(record: PageRecord): PageBindingState {

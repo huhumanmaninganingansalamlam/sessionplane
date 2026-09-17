@@ -14,6 +14,7 @@ export interface RpcServerOptions {
 
 export class RpcServer {
   readonly #options: RpcServerOptions;
+  readonly #sockets = new Set<Socket>();
   #server: Server | null = null;
   #closed = false;
 
@@ -57,10 +58,14 @@ export class RpcServer {
     const server = this.#server;
     this.#server = null;
     if (server !== null) {
+      for (const socket of this.#sockets) {
+        socket.destroy();
+      }
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error === undefined ? resolve() : reject(error)));
       });
     }
+    this.#sockets.clear();
 
     if (existsSync(this.#options.socketPath) && lstatSync(this.#options.socketPath).isSocket()) {
       unlinkSync(this.#options.socketPath);
@@ -69,9 +74,15 @@ export class RpcServer {
   }
 
   #handleConnection(socket: Socket): void {
+    this.#sockets.add(socket);
     socket.setEncoding('utf8');
     let buffer = '';
     let queued = Promise.resolve();
+
+    const forget = (): void => {
+      this.#sockets.delete(socket);
+    };
+    socket.once('close', forget);
 
     socket.on('data', (chunk: string) => {
       buffer += chunk;

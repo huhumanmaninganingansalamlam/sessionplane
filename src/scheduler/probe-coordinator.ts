@@ -1,6 +1,7 @@
 import type { ProviderRecoveryResult } from '../providers/provider-adapter.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { ProbeBudgetRepository } from '../storage/probe-budget-repository.ts';
+import type { RuntimeMetrics } from '../telemetry/metrics.ts';
 
 export interface ProbeCoordinatorOptions {
   readonly database: SessionPlaneDatabase;
@@ -10,6 +11,7 @@ export interface ProbeCoordinatorOptions {
   readonly jitterRatio?: number;
   readonly now?: () => Date;
   readonly random?: () => number;
+  readonly metrics?: RuntimeMetrics;
 }
 
 export class ProbeCoordinator {
@@ -21,6 +23,7 @@ export class ProbeCoordinator {
   readonly #jitterRatio: number;
   readonly #now: () => Date;
   readonly #random: () => number;
+  readonly #metrics: RuntimeMetrics | null;
   readonly #inFlight = new Map<string, Promise<ProviderRecoveryResult>>();
 
   constructor(options: ProbeCoordinatorOptions) {
@@ -35,6 +38,7 @@ export class ProbeCoordinator {
     this.#jitterRatio = options.jitterRatio ?? 0.1;
     this.#now = options.now ?? (() => new Date());
     this.#random = options.random ?? Math.random;
+    this.#metrics = options.metrics ?? null;
   }
 
   run(
@@ -67,6 +71,7 @@ export class ProbeCoordinator {
     const budget = this.#budgets.get(scope);
     const earliest = latestTimestamp(budget?.nextAllowedAt ?? null, budget?.blockedUntil ?? null);
     if (earliest !== null && Date.parse(earliest) > now.getTime()) {
+      this.#metrics?.increment('backend_probe_deferred_total');
       return Promise.resolve({
         kind: 'deferred',
         observationTransport: 'deferred',
@@ -86,6 +91,7 @@ export class ProbeCoordinator {
     consecutiveFailures: number,
     operation: () => Promise<ProviderRecoveryResult>,
   ): Promise<ProviderRecoveryResult> {
+    this.#metrics?.increment('backend_probe_total');
     let result: ProviderRecoveryResult;
     try {
       result = await operation();
@@ -103,6 +109,8 @@ export class ProbeCoordinator {
 
     const now = this.#now();
     if (result.kind === 'deferred' && result.reason === 'backend-http-429') {
+      this.#metrics?.increment('backend_probe_429_total');
+      this.#metrics?.increment('backend_probe_deferred_total');
       const rawBackoff = Math.max(
         result.retryAfterMs ?? 0,
         Math.min(this.#max429BackoffMs, this.#min429BackoffMs * 2 ** backoffLevel),
@@ -126,6 +134,10 @@ export class ProbeCoordinator {
         retryAfterMs: Date.parse(nextCheckAt) - now.getTime(),
         nextCheckAt,
       };
+    }
+
+    if (result.kind === 'deferred') {
+      this.#metrics?.increment('backend_probe_deferred_total');
     }
 
     const nextAllowedAt = new Date(now.getTime() + this.#successIntervalMs).toISOString();
