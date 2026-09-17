@@ -80,41 +80,63 @@
       "id": "fetch.adaptive",
       "category": "fetch",
       "required": true,
-      "status": "missing",
+      "status": "implemented",
       "legacyCommands": ["fetch"],
       "canonicalCommands": ["fetch"],
-      "rpcMethods": [],
-      "contracts": []
+      "rpcMethods": [
+        "fetch.read"
+      ],
+      "contracts": [
+        "test/unit/url-safety.test.ts",
+        "test/unit/html-extractor.test.ts",
+        "test/integration/fetch-search-research.test.ts"
+      ]
     },
     {
       "id": "extract.schema",
       "category": "fetch",
       "required": true,
-      "status": "missing",
+      "status": "implemented",
       "legacyCommands": ["extract"],
       "canonicalCommands": ["extract"],
-      "rpcMethods": [],
-      "contracts": []
+      "rpcMethods": [
+        "extract.schema"
+      ],
+      "contracts": [
+        "test/unit/schema-extractor.test.ts",
+        "test/integration/fetch-search-research.test.ts"
+      ]
     },
     {
       "id": "search.standalone",
       "category": "search",
       "required": true,
-      "status": "missing",
+      "status": "implemented",
       "legacyCommands": ["search"],
       "canonicalCommands": ["search"],
-      "rpcMethods": [],
-      "contracts": []
+      "rpcMethods": [
+        "search.query"
+      ],
+      "contracts": [
+        "test/integration/fetch-search-research.test.ts"
+      ]
     },
     {
       "id": "research.pipeline",
       "category": "search",
       "required": true,
-      "status": "missing",
+      "status": "implemented",
       "legacyCommands": ["research"],
       "canonicalCommands": ["research"],
-      "rpcMethods": [],
-      "contracts": []
+      "rpcMethods": [
+        "research.plan",
+        "research.normalize",
+        "research.enrich",
+        "research.browsePlan"
+      ],
+      "contracts": [
+        "test/integration/fetch-search-research.test.ts"
+      ]
     },
     {
       "id": "web-ai.chatgpt",

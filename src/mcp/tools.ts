@@ -445,6 +445,120 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     ),
   ),
   tool(
+    'sessionplane_fetch',
+    'fetch.read',
+    'Safely fetch one HTTP(S) URL with DNS/private-network checks, redirect validation, and bounded extraction.',
+    objectSchema(
+      {
+        url: { type: 'string', format: 'uri', maxLength: 8_000 },
+        timeoutMs: { type: 'integer', minimum: 1, maximum: 120_000 },
+        maxBytes: { type: 'integer', minimum: 1, maximum: 26_214_400 },
+        maxRedirects: { type: 'integer', minimum: 0, maximum: 20 },
+        maxExtractChars: { type: 'integer', minimum: 1, maximum: 2_000_000 },
+        includeHtml: { type: 'boolean', default: false },
+        includeBinary: { type: 'boolean', default: false },
+      },
+      ['url'],
+    ),
+    true,
+  ),
+  tool(
+    'sessionplane_extract_schema',
+    'extract.schema',
+    'Map JSON, JSON-LD, or HTML tables to a supported JSON schema and fail closed on mismatch.',
+    objectSchema(
+      {
+        schema: { type: 'object' },
+        url: { type: 'string', format: 'uri', maxLength: 8_000 },
+        html: { type: 'string', maxLength: 5_000_000 },
+        json: {},
+        sourceMode: { type: 'string', enum: ['auto', 'json', 'jsonld', 'table'] },
+      },
+      ['schema'],
+      {
+        anyOf: [
+          { required: ['url'] },
+          { required: ['html'] },
+          { required: ['json'] },
+        ],
+      },
+    ),
+    true,
+  ),
+  tool(
+    'sessionplane_search',
+    'search.query',
+    'Discover or accept search candidates, fetch original pages, and return scored evidence.',
+    objectSchema(
+      {
+        query: { type: 'string', minLength: 1, maxLength: 20_000 },
+        results: {},
+        backend: { type: 'string', minLength: 1, maxLength: 100 },
+        verifyUrl: { type: 'string', format: 'uri', maxLength: 8_000 },
+        maxResults: { type: 'integer', minimum: 1, maximum: 50 },
+        deep: { type: 'boolean', default: false },
+      },
+      ['query'],
+    ),
+    true,
+  ),
+  tool(
+    'sessionplane_research_plan',
+    'research.plan',
+    'Decompose a research query into constraints, source hints, and bounded subqueries.',
+    objectSchema(
+      {
+        query: { type: 'string', minLength: 1, maxLength: 20_000 },
+        maxQueries: { type: 'integer', minimum: 1, maximum: 20 },
+      },
+      ['query'],
+    ),
+    true,
+  ),
+  tool(
+    'sessionplane_research_normalize',
+    'research.normalize',
+    'Normalize provider-specific search rows into a stable candidate ledger.',
+    objectSchema(
+      {
+        query: { type: 'string', minLength: 1, maxLength: 20_000 },
+        results: {},
+        backend: { type: 'string', minLength: 1, maxLength: 100 },
+        maxResults: { type: 'integer', minimum: 1, maximum: 500 },
+      },
+      ['query', 'results'],
+    ),
+    true,
+  ),
+  tool(
+    'sessionplane_research_enrich',
+    'research.enrich',
+    'Fetch normalized candidates and create an original-page evidence ledger.',
+    objectSchema(
+      {
+        plan: { type: 'object' },
+        results: { type: 'object' },
+        maxResults: { type: 'integer', minimum: 1, maximum: 100 },
+      },
+      ['plan', 'results'],
+    ),
+    true,
+  ),
+  tool(
+    'sessionplane_research_browse_plan',
+    'research.browsePlan',
+    'Turn weak or blocked evidence into explicit browser inspection actions without mutating the browser.',
+    objectSchema(
+      {
+        plan: { type: 'object' },
+        enrichment: { type: 'object' },
+        maxActions: { type: 'integer', minimum: 1, maximum: 50 },
+      },
+      ['plan', 'enrichment'],
+    ),
+    true,
+  ),
+  tool(
     'sessionplane_team_create',
     'team.create',
     'Create a durable team and its primary role.',

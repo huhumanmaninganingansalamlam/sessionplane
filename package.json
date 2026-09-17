@@ -18,6 +18,7 @@
     "test:acceptance": "node --test --test-concurrency=1 --experimental-strip-types test/reliability/acceptance.test.ts",
     "test:reliability": "node --test --test-concurrency=1 --experimental-strip-types test/reliability/*.test.ts test/integration/restart-recovery.test.ts test/browser/browser-restart-recovery.test.ts",
     "test:compat": "node --test --test-concurrency=1 --experimental-strip-types test/contract/*.test.ts test/integration/*compat.test.ts test/integration/multi-provider-session.test.ts test/browser/provider-dom-adapters.test.ts",
+    "test:research": "node --test --test-concurrency=1 --experimental-strip-types test/unit/url-safety.test.ts test/unit/html-extractor.test.ts test/unit/schema-extractor.test.ts test/integration/fetch-search-research.test.ts",
     "dev": "node --watch --experimental-strip-types src/main.ts",
     "doctor": "node --experimental-strip-types src/cli/main.ts doctor --json",
     "start": "node dist/main.js",

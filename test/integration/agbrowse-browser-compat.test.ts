@@ -23,7 +23,12 @@ interface LegacySnapshot {
 test('agbrowse alias translates legacy browser grammar into the same core', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-agbrowse-compat-'));
   const fixture = await startFixtureServer();
-  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const config = resolveConfig({
+    cwd: root,
+    env: {},
+    stateDir: '.state',
+    fetchAllowPrivateNetworks: true,
+  });
   const service = await startCore({
     config,
     browserHeadless: true,
@@ -107,15 +112,15 @@ test('agbrowse alias translates legacy browser grammar into the same core', asyn
     assert.equal(evaluated.code, 0, evaluated.stderr);
     assert.deepEqual(JSON.parse(evaluated.stdout).value, { name: 'Ada', count: 1 });
 
-    const unsupported = await runJson([
+    const fetched = await runJson([
       'fetch',
       fixture.url,
       '--state-dir',
       config.stateDir,
       '--json',
     ]);
-    assert.equal(unsupported.code, 2);
-    assert.equal(JSON.parse(unsupported.stderr).errorCode, 'compatibility.unsupported');
+    assert.equal(fetched.code, 0, fetched.stderr);
+    assert.equal(JSON.parse(fetched.stdout).schemaVersion, 'sessionplane-adaptive-fetch-v1');
 
     const stopped = await runJson(['stop', '--state-dir', config.stateDir, '--json']);
     assert.equal(stopped.code, 0, stopped.stderr);

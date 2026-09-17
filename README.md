@@ -111,3 +111,45 @@ agbrowse web-ai query --vendor grok --prompt "..." --json
 These aliases create or resume durable SessionPlane sessions and share the same
 generation, idempotency, wait, observer, and restart contracts as `sessplane`.
 
+## Adaptive fetch, extraction, search, and research
+
+SessionPlane owns the replacement fetch pipeline instead of shelling out to the
+old agbrowse runtime. Each HTTP redirect is revalidated, DNS answers are pinned
+to the requested connection, private/link-local/documentation/multicast ranges
+are blocked by default, and response and extraction sizes are bounded.
+
+```bash
+sessplane fetch https://example.com --json
+sessplane extract https://example.com/catalog --schema schema.json --json
+sessplane search "Node.js 24 node:sqlite" --json
+sessplane search --verify https://nodejs.org/api/sqlite.html --json
+```
+
+Search results are candidates, not evidence. `search` fetches original pages
+and returns a scored evidence ledger with explicit verified, weak, blocked, or
+failed verdicts. Provider-specific search rows can be supplied through
+`--results FILE` or `--stdin-results`.
+
+Research planning is split into inspectable, non-mutating stages:
+
+```bash
+sessplane research plan --query "Node.js 24 SQLite changes" --json > plan.json
+sessplane research normalize-results --query "Node.js 24 SQLite changes" \
+  --results provider-results.json --backend external --json > candidates.json
+sessplane research enrich-fetch --plan plan.json --results candidates.json \
+  --json > enrichment.json
+sessplane research browse-plan --plan plan.json --enrichment enrichment.json --json
+```
+
+The same grammar is exposed by the `agbrowse` compatibility bin:
+
+```bash
+agbrowse fetch https://example.com --json
+agbrowse search "Node.js 24 node:sqlite" --json
+agbrowse research plan --query "Node.js 24 SQLite changes" --json
+```
+
+`SESSIONPLANE_FETCH_ALLOW_PRIVATE=true` exists only for isolated local fixtures
+or intentionally private deployments. It is false by default and should not be
+enabled for untrusted URLs.
+

@@ -22,6 +22,8 @@ test('agbrowse compatibility manifest is source-bound and browser-complete', () 
     requiredIncomplete(manifest, 'web-ai').map((command) => command.id).includes('web-ai.grok'),
     false,
   );
+  assert.equal(requiredIncomplete(manifest, 'fetch').length, 0);
+  assert.equal(requiredIncomplete(manifest, 'search').length, 0);
   assert.equal(replacementReady(manifest), false);
 
   for (const command of manifest.commands) {
@@ -30,6 +32,23 @@ test('agbrowse compatibility manifest is source-bound and browser-complete', () 
     for (const contract of command.contracts) {
       assert.equal(existsSync(path.resolve(contract)), true, `${command.id}: ${contract}`);
     }
+  }
+});
+
+test('implemented fetch/search RPC rows exist in the registered core source', () => {
+  const manifest = loadAgbrowseManifest();
+  const source = [
+    readFileSync(path.resolve('src/rpc/methods/research.ts'), 'utf8'),
+    readFileSync(path.resolve('src/main.ts'), 'utf8'),
+  ].join('\n');
+  const methods = manifest.commands
+    .filter((command) =>
+      (command.category === 'fetch' || command.category === 'search') &&
+      command.status === 'implemented',
+    )
+    .flatMap((command) => command.rpcMethods);
+  for (const method of new Set(methods)) {
+    assert.match(source, new RegExp(`['\"]${escapeRegExp(method)}['\"]`), method);
   }
 });
 

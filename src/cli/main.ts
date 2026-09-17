@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 import { resolveConfig, SESSIONPLANE_VERSION, type SessionPlaneConfig } from '../config.ts';
@@ -27,6 +28,10 @@ const FLAG_OPTIONS = new Set([
   'screenshot',
   'all-nodes',
   'force',
+  'deep',
+  'include-html',
+  'include-binary',
+  'stdin-results',
 ]);
 const VALUE_OPTIONS = new Set([
   'state-dir',
@@ -77,6 +82,21 @@ const VALUE_OPTIONS = new Set([
   'top-n',
   'button',
   'click-count',
+  'max-bytes',
+  'max-redirects',
+  'max-results',
+  'max-queries',
+  'max-actions',
+  'schema',
+  'from-file',
+  'source',
+  'backend',
+  'verify',
+  'results',
+  'plan',
+  'enrichment',
+  'query',
+  'timeout',
 ]);
 
 export async function runCli(
@@ -138,6 +158,14 @@ export async function runCli(
           : await runStatusCommand(io, parsed, config);
       case 'events':
         return await runEventsCommand(io, parsed, config, parsed.words.slice(1));
+      case 'fetch':
+        return await runFetchCommand(io, parsed, config);
+      case 'extract':
+        return await runExtractCommand(io, parsed, config);
+      case 'search':
+        return await runSearchCommand(io, parsed, config);
+      case 'research':
+        return await runResearchCommand(io, parsed, config);
       case 'mcp':
         await runMcpServer({ input: io.stdin, output: io.stdout, error: io.stderr, config });
         return 0;
@@ -628,6 +656,128 @@ async function runEventsCommand(
   });
 }
 
+async function runFetchCommand(
+  io: CliIo,
+  parsed: ParsedArgs,
+  config: SessionPlaneConfig,
+): Promise<number> {
+  const url = parsed.options.url ?? requirePositional(parsed.words.slice(1), 0, 'url');
+  const timeoutMs = integerOption(parsed, 'timeout-ms', config.fetchTimeoutMs, 1, 120_000);
+  return await printRpc(io, parsed, config, 'fetch.read', {
+    url,
+    timeoutMs,
+    maxBytes: integerOption(parsed, 'max-bytes', config.fetchMaxBytes, 1, 25 * 1024 * 1024),
+    maxRedirects: integerOption(parsed, 'max-redirects', config.fetchMaxRedirects, 0, 20),
+    maxExtractChars: integerOption(parsed, 'max-chars', 500_000, 1, 2_000_000),
+    includeHtml: parsed.options['include-html'] === 'true',
+    includeBinary: parsed.options['include-binary'] === 'true',
+  }, timeoutMs + 2_000);
+}
+
+async function runExtractCommand(
+  io: CliIo,
+  parsed: ParsedArgs,
+  config: SessionPlaneConfig,
+): Promise<number> {
+  const schema = readJsonFile(requireOption(parsed, 'schema'), 'schema');
+  const sourceMode = parsed.options.source;
+  const fromFile = parsed.options['from-file'];
+  const url = parsed.words[1] ?? parsed.options.url;
+  if (fromFile === undefined && url === undefined) {
+    throw new Error('extract requires a URL or --from-file PATH');
+  }
+  const params: Record<string, unknown> = {
+    schema,
+    ...(sourceMode === undefined ? {} : { sourceMode }),
+  };
+  if (fromFile !== undefined) params.html = readFileSync(fromFile, 'utf8');
+  else params.url = url;
+  return await printRpc(io, parsed, config, 'extract.schema', params, config.fetchTimeoutMs + 2_000);
+}
+
+async function runSearchCommand(
+  io: CliIo,
+  parsed: ParsedArgs,
+  config: SessionPlaneConfig,
+): Promise<number> {
+  const verifyUrl = parsed.options.verify;
+  const query = (parsed.options.query ?? parsed.words.slice(1).join(' ') ?? '').trim() || verifyUrl;
+  if (query === undefined || query.trim() === '') throw new Error('search query is required');
+  let results: unknown = undefined;
+  if (parsed.options.results !== undefined) results = readJsonFile(parsed.options.results, 'results');
+  else if (parsed.options['stdin-results'] === 'true') results = parseJsonText(await readInput(io.stdin), 'stdin results');
+  return await printRpc(io, parsed, config, 'search.query', {
+    query,
+    ...(results === undefined ? {} : { results }),
+    ...optionalParam('backend', parsed.options.backend),
+    ...optionalParam('verifyUrl', verifyUrl),
+    maxResults: integerOption(
+      parsed,
+      'max-results',
+      config.searchMaxCandidates,
+      1,
+      50,
+    ),
+    deep: parsed.options.deep === 'true',
+  }, Math.max(config.rpcRequestTimeoutMs, config.fetchTimeoutMs * config.searchMaxCandidates));
+}
+
+async function runResearchCommand(
+  io: CliIo,
+  parsed: ParsedArgs,
+  config: SessionPlaneConfig,
+): Promise<number> {
+  const action = parsed.words[1] ?? 'plan';
+  switch (action) {
+    case 'plan': {
+      const query = parsed.options.query ?? parsed.words.slice(2).join(' ');
+      if (query.trim() === '') throw new Error('research plan requires a query');
+      return await printRpc(io, parsed, config, 'research.plan', {
+        query,
+        maxQueries: integerOption(parsed, 'max-queries', 6, 1, 20),
+      });
+    }
+    case 'normalize-results': {
+      const results = parsed.options.results !== undefined
+        ? readJsonFile(parsed.options.results, 'results')
+        : parsed.files[0] !== undefined
+          ? readJsonFile(parsed.files[0], 'results')
+          : parsed.options['stdin-results'] === 'true'
+            ? parseJsonText(await readInput(io.stdin), 'stdin results')
+            : undefined;
+      if (results === undefined) throw new Error('research normalize-results requires --results FILE or --stdin-results');
+      const query = parsed.options.query ?? parsed.words.slice(2).join(' ');
+      if (query.trim() === '') throw new Error('research normalize-results requires --query');
+      return await printRpc(io, parsed, config, 'research.normalize', {
+        query,
+        results,
+        ...optionalParam('backend', parsed.options.backend),
+        maxResults: integerOption(parsed, 'max-results', 100, 1, 500),
+      });
+    }
+    case 'enrich-fetch': {
+      const planPath = requireOption(parsed, 'plan');
+      const resultsPath = requireOption(parsed, 'results');
+      return await printRpc(io, parsed, config, 'research.enrich', {
+        plan: readJsonFile(planPath, 'plan'),
+        results: readJsonFile(resultsPath, 'results'),
+        maxResults: integerOption(parsed, 'max-results', config.searchMaxCandidates, 1, 100),
+      }, Math.max(config.rpcRequestTimeoutMs, config.fetchTimeoutMs * config.searchMaxCandidates));
+    }
+    case 'browse-plan': {
+      const planPath = requireOption(parsed, 'plan');
+      const enrichmentPath = requireOption(parsed, 'enrichment');
+      return await printRpc(io, parsed, config, 'research.browsePlan', {
+        plan: readJsonFile(planPath, 'plan'),
+        enrichment: readJsonFile(enrichmentPath, 'enrichment'),
+        maxActions: integerOption(parsed, 'max-actions', 10, 1, 50),
+      });
+    }
+    default:
+      throw new Error(`Unknown research command: ${action}`);
+  }
+}
+
 async function printRpc(
   io: CliIo,
   parsed: ParsedArgs,
@@ -816,6 +966,27 @@ function optionalParam(
   return value === undefined ? {} : { [name]: value };
 }
 
+function readJsonFile(path: string, label: string): unknown {
+  return parseJsonText(readFileSync(path, 'utf8'), label);
+}
+
+function parseJsonText(value: string, label: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch (error) {
+    throw new Error(`${label} is not valid JSON`, { cause: error });
+  }
+}
+
+async function readInput(stream: NodeJS.ReadableStream): Promise<string> {
+  let value = '';
+  for await (const chunk of stream) {
+    value += typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString('utf8');
+    if (value.length > 20 * 1024 * 1024) throw new Error('stdin exceeded 20 MiB');
+  }
+  return value;
+}
+
 function normalizeUntil(value: string): string {
   const normalized = value.replaceAll('-', '_');
   if (!['any_change', 'primary_terminal', 'all_selected_terminal'].includes(normalized)) {
@@ -825,7 +996,7 @@ function normalizeUntil(value: string): string {
 }
 
 function helpText(): string {
-  return `SessionPlane ${SESSIONPLANE_VERSION}\n\nUsage:\n  sessplane serve [--state-dir PATH]\n  sessplane health [--json] [--socket PATH]\n  sessplane doctor [--json] [--state-dir PATH]\n  sessplane login [--json] [--url HTTPS_URL]\n\nBrowser compatibility:\n  sessplane browser-status | browser-start | browser-stop\n  sessplane browser-reset --force\n  sessplane tabs | active-tab\n  sessplane new-tab [URL]\n  sessplane select-tab PAGE_KEY\n  sessplane tab-close [PAGE_KEY]\n  sessplane navigate URL [--page PAGE_KEY]\n  sessplane snapshot [--page PAGE_KEY] [--max-nodes N]\n  sessplane click REF [--snapshot-id ID]\n  sessplane type REF --text TEXT\n  sessplane press [REF] KEY\n  sessplane hover|check|uncheck REF\n  sessplane select REF --value VALUE[,VALUE]\n  sessplane upload REF FILE...\n  sessplane drag SOURCE_REF TARGET_REF\n  sessplane screenshot --out PATH [--full-page]\n  sessplane text [--selector CSS] | get-dom\n  sessplane console | network | evaluate --script JS\n  sessplane wait-for-selector CSS | wait-for-text TEXT | wait-for REF_OR_TEXT\n  sessplane observe-bundle [--screenshot --out PATH --boxes]\n  sessplane observe-actions INSTRUCTION [--top-n N]\n\nTeam and role sessions:\n  sessplane team create --name NAME [--objective TEXT] [--request-id ID]\n  sessplane team show TEAM_ID [--json]\n  sessplane team list [--json]\n  sessplane team wait TEAM_ID [--roles KEY,KEY] [--until CONDITION]\n  sessplane team brief [update] TEAM_ID --brief TEXT\n  sessplane role add TEAM_ID ROLE_KEY --type expert|reviewer|custom\n  sessplane role retire TEAM_ID ROLE_KEY\n  sessplane session create TEAM_ID ROLE_KEY [--provider chatgpt|gemini|grok]\n  sessplane session show SESSION_ID\n  sessplane session events TEAM_ID [--after-sequence N]\n  sessplane send TEAM_ID ROLE_KEY --prompt TEXT [--model MODEL] [--effort LEVEL] [--surface NAME] [--file PATH ...]\n  sessplane send --session SESSION_ID --prompt TEXT\n  sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID\n  sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]\n  sessplane stop TEAM_ID ROLE_KEY [--request-id ID]\n  sessplane mcp\n\nGlobal options:\n  --client-id ID       Stable caller identity\n  --request-id ID      Stable mutation identity for exact retries\n  --page PAGE_KEY      Explicit browser Page identity\n  --json               Emit one compact JSON object\n  --state-dir PATH     Override runtime state directory\n  --socket PATH        Override core Unix socket\n`;
+  return `SessionPlane ${SESSIONPLANE_VERSION}\n\nUsage:\n  sessplane serve [--state-dir PATH]\n  sessplane health [--json] [--socket PATH]\n  sessplane doctor [--json] [--state-dir PATH]\n  sessplane login [--json] [--url HTTPS_URL]\n\nBrowser compatibility:\n  sessplane browser-status | browser-start | browser-stop\n  sessplane browser-reset --force\n  sessplane tabs | active-tab\n  sessplane new-tab [URL]\n  sessplane select-tab PAGE_KEY\n  sessplane tab-close [PAGE_KEY]\n  sessplane navigate URL [--page PAGE_KEY]\n  sessplane snapshot [--page PAGE_KEY] [--max-nodes N]\n  sessplane click REF [--snapshot-id ID]\n  sessplane type REF --text TEXT\n  sessplane press [REF] KEY\n  sessplane hover|check|uncheck REF\n  sessplane select REF --value VALUE[,VALUE]\n  sessplane upload REF FILE...\n  sessplane drag SOURCE_REF TARGET_REF\n  sessplane screenshot --out PATH [--full-page]\n  sessplane text [--selector CSS] | get-dom\n  sessplane console | network | evaluate --script JS\n  sessplane wait-for-selector CSS | wait-for-text TEXT | wait-for REF_OR_TEXT\n  sessplane observe-bundle [--screenshot --out PATH --boxes]\n  sessplane observe-actions INSTRUCTION [--top-n N]\n\nFetch, search, and research:\n  sessplane fetch URL [--max-bytes N] [--max-redirects N] [--include-html]\n  sessplane extract URL --schema FILE [--source auto|json|jsonld|table]\n  sessplane extract --from-file HTML --schema FILE\n  sessplane search QUERY [--max-results N] [--deep]\n  sessplane search --verify URL\n  sessplane search QUERY --results FILE [--backend NAME]\n  sessplane research plan QUERY [--max-queries N]\n  sessplane research normalize-results --query QUERY --results FILE --backend NAME\n  sessplane research enrich-fetch --plan PLAN --results RESULTS\n  sessplane research browse-plan --plan PLAN --enrichment ENRICHMENT\n\nTeam and role sessions:\n  sessplane team create --name NAME [--objective TEXT] [--request-id ID]\n  sessplane team show TEAM_ID [--json]\n  sessplane team list [--json]\n  sessplane team wait TEAM_ID [--roles KEY,KEY] [--until CONDITION]\n  sessplane team brief [update] TEAM_ID --brief TEXT\n  sessplane role add TEAM_ID ROLE_KEY --type expert|reviewer|custom\n  sessplane role retire TEAM_ID ROLE_KEY\n  sessplane session create TEAM_ID ROLE_KEY [--provider chatgpt|gemini|grok]\n  sessplane session show SESSION_ID\n  sessplane session events TEAM_ID [--after-sequence N]\n  sessplane send TEAM_ID ROLE_KEY --prompt TEXT [--model MODEL] [--effort LEVEL] [--surface NAME] [--file PATH ...]\n  sessplane send --session SESSION_ID --prompt TEXT\n  sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID\n  sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]\n  sessplane stop TEAM_ID ROLE_KEY [--request-id ID]\n  sessplane mcp\n\nGlobal options:\n  --client-id ID       Stable caller identity\n  --request-id ID      Stable mutation identity for exact retries\n  --page PAGE_KEY      Explicit browser Page identity\n  --json               Emit one compact JSON object\n  --state-dir PATH     Override runtime state directory\n  --socket PATH        Override core Unix socket\n`;
 }
 
 function isDirectExecution(): boolean {

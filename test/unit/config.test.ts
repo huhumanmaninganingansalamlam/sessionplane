@@ -30,6 +30,11 @@ test('resolveConfig anchors runtime paths under an explicit state directory', ()
     assert.equal(config.probeMax429BackoffMs, 15 * 60_000);
     assert.equal(config.tokenCacheTtlMs, 60_000);
     assert.equal(config.maxUploadFileBytes, 100 * 1024 * 1024);
+    assert.equal(config.fetchTimeoutMs, 15_000);
+    assert.equal(config.fetchMaxBytes, 5 * 1024 * 1024);
+    assert.equal(config.fetchMaxRedirects, 5);
+    assert.equal(config.fetchAllowPrivateNetworks, false);
+    assert.equal(config.searchMaxCandidates, 10);
     assert.equal(config.chatgptUrl, 'https://chatgpt.com/');
     assert.equal(config.geminiUrl, 'https://gemini.google.com/app');
     assert.equal(config.grokUrl, 'https://grok.com/');

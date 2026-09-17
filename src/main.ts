@@ -22,12 +22,15 @@ import { registerSendMethods } from './rpc/methods/send.ts';
 import { registerStopMethods } from './rpc/methods/stop.ts';
 import { registerTeamMethods } from './rpc/methods/team.ts';
 import { registerWaitMethods } from './rpc/methods/wait.ts';
+import { registerResearchMethods } from './rpc/methods/research.ts';
 import { ActorScheduler } from './scheduler/actor-scheduler.ts';
 import { ProbeCoordinator } from './scheduler/probe-coordinator.ts';
 import { SessionPlaneDatabase } from './storage/database.ts';
 import { PageBindingRepository } from './storage/page-binding-repository.ts';
 import { ReceiptRepository } from './storage/receipt-repository.ts';
 import { RuntimeMetrics } from './telemetry/metrics.ts';
+import { ResearchService } from './research/research-service.ts';
+import { SearchService } from './search/search-service.ts';
 import { ChatGptAdapter } from './providers/chatgpt/adapter.ts';
 import { GeminiAdapter } from './providers/gemini/adapter.ts';
 import { GrokAdapter } from './providers/grok/adapter.ts';
@@ -56,6 +59,8 @@ export interface CoreService {
   readonly recoveryService: RecoveryService;
   readonly submissionService: SubmissionService;
   readonly stopService: StopService;
+  readonly searchService: SearchService;
+  readonly researchService: ResearchService;
   readonly startedAt: Date;
   restartBrowser(): Promise<Readonly<Record<string, unknown>>>;
   close(): Promise<void>;
@@ -184,6 +189,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       ? {}
       : { navigatePage: options.recoveryNavigatePage }),
   });
+  const searchService = SearchService.fromConfig(config);
+  const researchService = new ResearchService({ search: searchService });
 
   try {
     const recovered = await submissionService.recoverInterruptedSubmissions();
@@ -225,6 +232,11 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   registerSendMethods(router, submissionService);
   registerStopMethods(router, stopService);
   registerWaitMethods(router, teamDirectory, actorScheduler);
+  registerResearchMethods(router, {
+    config,
+    search: searchService,
+    research: researchService,
+  });
 
   const rpcServer = new RpcServer({
     socketPath: config.socketPath,
@@ -265,6 +277,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     recoveryService,
     submissionService,
     stopService,
+    searchService,
+    researchService,
     startedAt,
     async restartBrowser(): Promise<Readonly<Record<string, unknown>>> {
       if (browserOwner === null) {
