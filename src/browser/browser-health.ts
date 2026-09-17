@@ -23,6 +23,10 @@ export interface BrowserStatusSource {
   readonly profileDir: string;
   readonly headless: boolean;
   readonly chrome: ChromeInstallation | null;
+  readonly transport: 'cdp' | null;
+  readonly ownership: 'spawned' | 'adopted' | null;
+  readonly browserPid: number | null;
+  readonly debuggingPort: number | null;
   readonly lastError: string | null;
 }
 
@@ -78,6 +82,10 @@ export function summarizeBrowserHealth(
     profileDir: status.profileDir,
     headless: status.headless,
     chrome: status.chrome,
+    transport: status.transport,
+    ownership: status.ownership,
+    browserPid: status.browserPid,
+    debuggingPort: status.debuggingPort,
     lastError: status.lastError,
     pageCount: openBindings.length,
     conflictCount: openBindings.filter((binding) => binding.state === 'conflict').length,

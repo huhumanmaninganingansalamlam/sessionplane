@@ -48,6 +48,17 @@ replace the standalone agbrowse browser workflow. Pages are addressed by the
 opaque `pageKey` returned by `tabs`; browser focus, title, recency, and page
 array order are never identity.
 
+The core starts the installed Google Chrome itself with the dedicated
+SessionPlane profile and a random loopback-only CDP port, then attaches with
+`playwright-core`. Headed Chrome is not launched with `--enable-automation`
+and reports `navigator.webdriver === false`; no stealth or challenge-bypass
+flags are injected. This matches the useful ownership property of the former
+agbrowse launcher while keeping Chrome, CDP, Pages, and profile lifecycle
+inside one SessionPlane process. The profile lock records the core PID, Chrome
+PID, and debugging port. If the core crashes while its exact Chrome process is
+still healthy, the next core adopts that process and startup recovery rebinds
+the durable sessions instead of destroying the browser first.
+
 ```bash
 sessplane tabs --json
 sessplane new-tab https://example.com --json
