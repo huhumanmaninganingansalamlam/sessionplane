@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { createReadStream, statSync } from 'node:fs';
+import path from 'node:path';
 
 import type { PageMutationMutex } from '../browser/page-mutex.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
@@ -7,6 +9,7 @@ import { isTerminalSessionState, type SessionSnapshot } from '../domain/session.
 import {
   ProviderSubmissionError,
   type ProviderAdapterRegistry,
+  type ProviderAttachment,
   type ProviderSubmission,
   type ProviderSubmissionAcknowledgement,
 } from '../providers/provider-adapter.ts';
@@ -31,6 +34,9 @@ export interface SessionSendInput {
   readonly roleKey?: string;
   readonly prompt: string;
   readonly model?: string | null;
+  readonly effort?: string | null;
+  readonly surface?: string | null;
+  readonly files?: readonly string[];
   readonly sessionDeadlineSec: number;
 }
 
@@ -51,6 +57,7 @@ export class SubmissionService {
   readonly #outbox: OutboxRepository;
   readonly #now: () => Date;
   readonly #onSubmitted: ((snapshot: SessionSnapshot) => void) | null;
+  readonly #maxUploadFileBytes: number;
   readonly #requestTails = new Map<string, Promise<void>>();
 
   constructor(options: {
@@ -59,6 +66,7 @@ export class SubmissionService {
     readonly scheduler: ActorScheduler;
     readonly pageMutex: PageMutationMutex;
     readonly adapters: ProviderAdapterRegistry;
+    readonly maxUploadFileBytes?: number;
     readonly onSubmitted?: (snapshot: SessionSnapshot) => void;
     readonly now?: () => Date;
   }) {
@@ -71,6 +79,7 @@ export class SubmissionService {
     this.#events = new EventRepository(options.database.raw);
     this.#outbox = new OutboxRepository(options.database);
     this.#onSubmitted = options.onSubmitted ?? null;
+    this.#maxUploadFileBytes = options.maxUploadFileBytes ?? 100 * 1024 * 1024;
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -93,6 +102,9 @@ export class SubmissionService {
   async send(input: SessionSendInput): Promise<SessionSnapshot> {
     const prompt = validatePrompt(input.prompt);
     const model = normalizeOptional(input.model);
+    const effort = normalizeOptional(input.effort);
+    const surface = normalizeOptional(input.surface);
+    const attachments = await resolveAttachments(input.files ?? [], this.#maxUploadFileBytes);
     const payload = {
       selector:
         input.sessionId === undefined
@@ -100,6 +112,9 @@ export class SubmissionService {
           : { sessionId: input.sessionId },
       prompt,
       model,
+      effort,
+      surface,
+      attachments,
       sessionDeadlineSec: input.sessionDeadlineSec,
     };
     const requestHash = hashCanonical({ method: 'session.send', payload });
@@ -122,7 +137,14 @@ export class SubmissionService {
       const selected = this.#resolveSession(input);
       const actor = this.#scheduler.actorFor(selected.sessionId);
       return await actor.enqueue(async () =>
-        await this.#sendLocked(actor, selected.sessionId, input, payload, requestHash),
+        await this.#sendLocked(
+          actor,
+          selected.sessionId,
+          input,
+          payload,
+          requestHash,
+          attachments,
+        ),
       );
     });
   }
@@ -133,6 +155,7 @@ export class SubmissionService {
     input: SessionSendInput,
     payload: Readonly<Record<string, unknown>>,
     requestHash: string,
+    attachments: readonly ProviderAttachment[],
   ): Promise<SessionSnapshot> {
     const existing = this.#outbox.getByRequest(input.clientId, input.requestId);
     if (existing !== null) {
@@ -160,6 +183,9 @@ export class SubmissionService {
         generation: prepared.snapshot.generation,
         prompt: input.prompt,
         model: normalizeOptional(input.model),
+        effort: normalizeOptional(input.effort),
+        surface: normalizeOptional(input.surface),
+        attachments,
       });
     } catch (error) {
       return await this.#failPreSubmit(actor, prepared.outbox, error);
@@ -794,5 +820,88 @@ function throwUnexpectedSuccess(snapshot: SessionSnapshot): never {
     'internal.invariant-violation',
     `Submission ${snapshot.sessionId}/${snapshot.generation} completed while handling a failure`,
   );
+}
+
+async function resolveAttachments(
+  values: readonly string[],
+  maxUploadFileBytes: number,
+): Promise<readonly ProviderAttachment[]> {
+  if (values.length > 20) {
+    throw new SessionPlaneDomainError('input.invalid', 'At most 20 files may be attached');
+  }
+  const seen = new Set<string>();
+  const attachments: ProviderAttachment[] = [];
+  for (const value of values) {
+    const absolutePath = path.resolve(value);
+    if (seen.has(absolutePath)) continue;
+    seen.add(absolutePath);
+    let stat: ReturnType<typeof statSync>;
+    try {
+      stat = statSync(absolutePath);
+    } catch (error) {
+      throw new SessionPlaneDomainError(
+        'input.invalid',
+        `Attachment does not exist: ${absolutePath}`,
+        error,
+      );
+    }
+    if (!stat.isFile()) {
+      throw new SessionPlaneDomainError(
+        'input.invalid',
+        `Attachment is not a regular file: ${absolutePath}`,
+      );
+    }
+    if (stat.size <= 0 || stat.size > maxUploadFileBytes) {
+      throw new SessionPlaneDomainError(
+        'input.invalid',
+        `Attachment size must be from 1 to ${maxUploadFileBytes} bytes: ${absolutePath}`,
+      );
+    }
+    attachments.push({
+      path: absolutePath,
+      name: path.basename(absolutePath),
+      sizeBytes: stat.size,
+      sha256: await hashFile(absolutePath),
+      mediaType: mediaTypeForPath(absolutePath),
+    });
+  }
+  return Object.freeze(attachments);
+}
+
+async function hashFile(filePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.once('error', reject);
+    stream.once('end', resolve);
+  });
+  return hash.digest('hex');
+}
+
+function mediaTypeForPath(filePath: string): string | null {
+  switch (path.extname(filePath).toLowerCase()) {
+    case '.txt':
+    case '.md':
+    case '.log':
+      return 'text/plain';
+    case '.json':
+      return 'application/json';
+    case '.pdf':
+      return 'application/pdf';
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.gif':
+      return 'image/gif';
+    case '.webp':
+      return 'image/webp';
+    case '.zip':
+      return 'application/zip';
+    default:
+      return null;
+  }
 }
 

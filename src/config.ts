@@ -15,6 +15,7 @@ export interface SessionPlaneConfig {
   readonly rpcMaxLineBytes: number;
   readonly rpcRequestTimeoutMs: number;
   readonly browserLaunchTimeoutMs: number;
+  readonly browserHeadless: boolean;
   readonly submissionAckTimeoutMs: number;
   readonly observationActiveSweepMs: number;
   readonly observationQuietSweepMs: number;
@@ -25,7 +26,10 @@ export interface SessionPlaneConfig {
   readonly probeMin429BackoffMs: number;
   readonly probeMax429BackoffMs: number;
   readonly tokenCacheTtlMs: number;
+  readonly maxUploadFileBytes: number;
   readonly chatgptUrl: string;
+  readonly geminiUrl: string;
+  readonly grokUrl: string;
 }
 
 export interface ConfigOverrides {
@@ -39,6 +43,7 @@ export interface ConfigOverrides {
   readonly rpcMaxLineBytes?: number;
   readonly rpcRequestTimeoutMs?: number;
   readonly browserLaunchTimeoutMs?: number;
+  readonly browserHeadless?: boolean;
   readonly submissionAckTimeoutMs?: number;
   readonly observationActiveSweepMs?: number;
   readonly observationQuietSweepMs?: number;
@@ -49,7 +54,10 @@ export interface ConfigOverrides {
   readonly probeMin429BackoffMs?: number;
   readonly probeMax429BackoffMs?: number;
   readonly tokenCacheTtlMs?: number;
+  readonly maxUploadFileBytes?: number;
   readonly chatgptUrl?: string;
+  readonly geminiUrl?: string;
+  readonly grokUrl?: string;
 }
 
 const LOG_LEVELS = new Set<LogLevel>(['debug', 'info', 'warn', 'error']);
@@ -80,6 +88,20 @@ function parseLogLevel(value: string | undefined, fallback: LogLevel): LogLevel 
   return value as LogLevel;
 }
 
+function parseBoolean(value: string | undefined, fallback: boolean, name: string): boolean {
+  if (value === undefined || value === '') {
+    return fallback;
+  }
+  const normalized = value.toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true;
+  }
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false;
+  }
+  throw new Error(`${name} must be a boolean`);
+}
+
 export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConfig {
   const env = overrides.env ?? process.env;
   const cwd = path.resolve(overrides.cwd ?? process.cwd());
@@ -98,6 +120,16 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
   );
   const chatgptUrl = validateChatGptUrl(
     overrides.chatgptUrl ?? env.SESSIONPLANE_CHATGPT_URL ?? 'https://chatgpt.com/',
+  );
+  const geminiUrl = validateProviderUrl(
+    overrides.geminiUrl ?? env.SESSIONPLANE_GEMINI_URL ?? 'https://gemini.google.com/app',
+    'SESSIONPLANE_GEMINI_URL',
+    new Set(['gemini.google.com']),
+  );
+  const grokUrl = validateProviderUrl(
+    overrides.grokUrl ?? env.SESSIONPLANE_GROK_URL ?? 'https://grok.com/',
+    'SESSIONPLANE_GROK_URL',
+    new Set(['grok.com', 'x.com']),
   );
 
   return Object.freeze({
@@ -120,6 +152,9 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
         30_000,
         'Browser launch timeout',
       ),
+    browserHeadless:
+      overrides.browserHeadless ??
+      parseBoolean(env.SESSIONPLANE_BROWSER_HEADLESS, false, 'SESSIONPLANE_BROWSER_HEADLESS'),
     submissionAckTimeoutMs:
       overrides.submissionAckTimeoutMs ??
       parsePositiveInteger(
@@ -154,7 +189,16 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
     tokenCacheTtlMs:
       overrides.tokenCacheTtlMs ??
       parsePositiveInteger(env.SESSIONPLANE_TOKEN_CACHE_TTL_MS, 60_000, 'Token cache TTL'),
+    maxUploadFileBytes:
+      overrides.maxUploadFileBytes ??
+      parsePositiveInteger(
+        env.SESSIONPLANE_MAX_UPLOAD_FILE_BYTES,
+        100 * 1024 * 1024,
+        'Maximum upload file bytes',
+      ),
     chatgptUrl,
+    geminiUrl,
+    grokUrl,
   });
 }
 
@@ -163,6 +207,14 @@ function validateChatGptUrl(value: string): string {
   const hostname = url.hostname.toLowerCase();
   if (url.protocol !== 'https:' || (hostname !== 'chatgpt.com' && hostname !== 'chat.openai.com')) {
     throw new Error('SESSIONPLANE_CHATGPT_URL must be an HTTPS ChatGPT URL');
+  }
+  return url.href;
+}
+
+function validateProviderUrl(value: string, name: string, hosts: ReadonlySet<string>): string {
+  const url = new URL(value);
+  if (url.protocol !== 'https:' || !hosts.has(url.hostname.toLowerCase())) {
+    throw new Error(`${name} must be an HTTPS provider URL`);
   }
   return url.href;
 }

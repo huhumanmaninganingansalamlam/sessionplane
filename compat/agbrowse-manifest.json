@@ -1,0 +1,200 @@
+{
+  "schemaVersion": "agbrowse-compatibility-v1",
+  "source": {
+    "repository": "/tmp/work/agbrowse",
+    "commit": "55150e1fe048b81121b952fe8eb965c755c0fd19",
+    "branch": "fix/session-conversation-generation"
+  },
+  "commands": [
+    {
+      "id": "browser.lifecycle",
+      "category": "browser",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["start", "status", "stop", "reset", "doctor"],
+      "canonicalCommands": ["serve", "health", "browser-start", "browser-status", "browser-stop", "browser-reset", "doctor"],
+      "rpcMethods": ["system.health", "browser.runtime.start", "browser.runtime.status", "browser.runtime.stop", "browser.runtime.reset"],
+      "contracts": ["test/browser/browser-control.test.ts", "test/integration/agbrowse-browser-compat.test.ts"]
+    },
+    {
+      "id": "browser.tabs",
+      "category": "browser",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["tabs", "active-tab", "new-tab", "tab-switch", "select-tab", "tab-close", "tab-cleanup"],
+      "canonicalCommands": ["tabs", "active-tab", "new-tab", "select-tab", "tab-close", "tab-cleanup"],
+      "rpcMethods": ["browser.tabs", "browser.new", "browser.select", "browser.close", "browser.cleanup"],
+      "contracts": ["test/browser/browser-control.test.ts", "test/integration/agbrowse-browser-compat.test.ts"]
+    },
+    {
+      "id": "browser.navigation",
+      "category": "browser",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["navigate", "reload", "back", "forward", "resize", "scroll"],
+      "canonicalCommands": ["navigate", "reload", "back", "forward", "resize", "scroll"],
+      "rpcMethods": ["browser.navigate", "browser.reload", "browser.back", "browser.forward", "browser.resize", "browser.scroll"],
+      "contracts": ["test/browser/browser-control.test.ts"]
+    },
+    {
+      "id": "browser.snapshot-refs",
+      "category": "browser",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["snapshot", "click", "type", "press", "hover", "select", "check", "uncheck", "drag", "mouse-click", "move-mouse", "mouse-down", "mouse-up"],
+      "canonicalCommands": ["snapshot", "click", "type", "press", "hover", "select", "check", "uncheck", "drag", "mouse-click", "move-mouse", "mouse-down", "mouse-up"],
+      "rpcMethods": ["browser.snapshot", "browser.click", "browser.type", "browser.press", "browser.hover", "browser.selectOption", "browser.check", "browser.uncheck", "browser.drag", "browser.mouse"],
+      "contracts": ["test/browser/browser-control.test.ts", "test/integration/browser-cli-mcp.test.ts"]
+    },
+    {
+      "id": "browser.observation",
+      "category": "browser",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["screenshot", "text", "get-dom", "observe-bundle", "observe-actions"],
+      "canonicalCommands": ["screenshot", "text", "get-dom", "observe-bundle", "observe-actions"],
+      "rpcMethods": ["browser.screenshot", "browser.text", "browser.dom", "browser.observeBundle", "browser.observeActions"],
+      "contracts": ["test/browser/browser-control.test.ts", "test/integration/browser-cli-mcp.test.ts"]
+    },
+    {
+      "id": "browser.diagnostics",
+      "category": "browser",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["console", "network", "evaluate", "wait", "wait-for-selector", "wait-for-text", "wait-for"],
+      "canonicalCommands": ["console", "network", "evaluate", "wait-for-selector", "wait-for-text", "wait-for"],
+      "rpcMethods": ["browser.console", "browser.network", "browser.evaluate", "browser.wait"],
+      "contracts": ["test/browser/browser-control.test.ts"]
+    },
+    {
+      "id": "browser.upload",
+      "category": "browser",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["upload"],
+      "canonicalCommands": ["upload"],
+      "rpcMethods": ["browser.upload"],
+      "contracts": ["test/browser/browser-control.test.ts"]
+    },
+    {
+      "id": "fetch.adaptive",
+      "category": "fetch",
+      "required": true,
+      "status": "missing",
+      "legacyCommands": ["fetch"],
+      "canonicalCommands": ["fetch"],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
+      "id": "extract.schema",
+      "category": "fetch",
+      "required": true,
+      "status": "missing",
+      "legacyCommands": ["extract"],
+      "canonicalCommands": ["extract"],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
+      "id": "search.standalone",
+      "category": "search",
+      "required": true,
+      "status": "missing",
+      "legacyCommands": ["search"],
+      "canonicalCommands": ["search"],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
+      "id": "research.pipeline",
+      "category": "search",
+      "required": true,
+      "status": "missing",
+      "legacyCommands": ["research"],
+      "canonicalCommands": ["research"],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
+      "id": "web-ai.chatgpt",
+      "category": "web-ai",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["web-ai"],
+      "canonicalCommands": ["send", "wait", "status", "stop"],
+      "rpcMethods": ["session.send", "session.wait", "session.get", "session.stop"],
+      "contracts": ["test/integration/web-ai-compat.test.ts", "test/integration/session-observation.test.ts"]
+    },
+    {
+      "id": "web-ai.gemini",
+      "category": "web-ai",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["web-ai"],
+      "canonicalCommands": ["session create", "send", "wait", "status", "stop"],
+      "rpcMethods": ["session.create", "session.send", "session.wait", "session.get", "session.stop"],
+      "contracts": ["test/browser/provider-dom-adapters.test.ts", "test/integration/web-ai-compat.test.ts", "test/integration/multi-provider-session.test.ts"]
+    },
+    {
+      "id": "web-ai.grok",
+      "category": "web-ai",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["web-ai"],
+      "canonicalCommands": ["session create", "send", "wait", "status", "stop"],
+      "rpcMethods": ["session.create", "session.send", "session.wait", "session.get", "session.stop"],
+      "contracts": ["test/browser/provider-dom-adapters.test.ts", "test/integration/web-ai-compat.test.ts", "test/integration/multi-provider-session.test.ts"]
+    },
+    {
+      "id": "web-ai.advanced-chatgpt",
+      "category": "web-ai",
+      "required": true,
+      "status": "missing",
+      "legacyCommands": ["web-ai"],
+      "canonicalCommands": [],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
+      "id": "context.package",
+      "category": "artifact",
+      "required": true,
+      "status": "missing",
+      "legacyCommands": ["web-ai"],
+      "canonicalCommands": [],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
+      "id": "artifact.code",
+      "category": "artifact",
+      "required": true,
+      "status": "missing",
+      "legacyCommands": ["web-ai"],
+      "canonicalCommands": [],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
+      "id": "skills.distribution",
+      "category": "skills",
+      "required": true,
+      "status": "foundation",
+      "legacyCommands": ["skills", "install-skills"],
+      "canonicalCommands": [],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
+      "id": "runway.experimental",
+      "category": "deferred",
+      "required": false,
+      "status": "deferred",
+      "legacyCommands": ["runway"],
+      "canonicalCommands": [],
+      "rpcMethods": [],
+      "contracts": []
+    }
+  ]
+}

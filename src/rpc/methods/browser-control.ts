@@ -20,6 +20,20 @@ export function registerBrowserControlMethods(
   router: RpcRouter,
   browser: BrowserControlService,
 ): void {
+  router.register('browser.runtime.status', z.object({}).strict(), () =>
+    wrapSync(() => browser.runtimeStatus()),
+  );
+  router.register('browser.runtime.start', z.object({}).strict(), async () =>
+    await wrap(() => browser.startRuntime()),
+  );
+  router.register('browser.runtime.stop', z.object({}).strict(), async () =>
+    await wrap(() => browser.stopRuntime()),
+  );
+  router.register(
+    'browser.runtime.reset',
+    z.object({ force: z.boolean().default(false) }).strict(),
+    async ({ force }) => await wrap(() => browser.resetRuntime(force)),
+  );
   router.register('browser.tabs', z.object({}).strict(), async () => await browser.tabs());
   router.register(
     'browser.select',

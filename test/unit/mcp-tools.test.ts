@@ -35,6 +35,10 @@ test('MCP tool catalogue exposes unique core mappings and exact selector schemas
   assert.equal(getMcpTool('browser_observe_bundle')?.rpcMethod, 'browser.observeBundle');
   assert.equal(getMcpTool('browser_upload_ref')?.rpcMethod, 'browser.upload');
   assert.equal(getMcpTool('browser_network')?.rpcMethod, 'browser.network');
+  const sessionCreate = getMcpTool('sessionplane_session_create');
+  const providerSchema = (sessionCreate?.inputSchema.properties as Record<string, unknown>)
+    .provider as { enum?: readonly string[] };
+  assert.deepEqual(providerSchema.enum, ['chatgpt', 'gemini', 'grok']);
   assert.equal(getMcpTool('missing'), null);
 
   for (const definition of MCP_TOOLS) {

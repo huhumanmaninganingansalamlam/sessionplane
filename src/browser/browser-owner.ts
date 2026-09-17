@@ -1,4 +1,14 @@
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -158,6 +168,13 @@ export class BrowserOwner {
 
   async restart(): Promise<BrowserStatusSource> {
     await this.close();
+    await this.start();
+    return this.status;
+  }
+
+  async resetProfile(): Promise<BrowserStatusSource> {
+    await this.close();
+    rmSync(this.#profileDir, { recursive: true, force: true });
     await this.start();
     return this.status;
   }

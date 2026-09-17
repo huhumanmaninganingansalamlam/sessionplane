@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { TeamDirectory } from '../../core/team-directory.ts';
 import { SessionPlaneDomainError } from '../../domain/errors.ts';
 import type { ReceiptRepository } from '../../storage/receipt-repository.ts';
+import { PROVIDERS } from '../../providers/provider-adapter.ts';
 import { RpcMethodError, type RpcRouter } from '../router.ts';
 
 const ClientId = z.string().trim().min(1).max(200);
@@ -24,7 +25,7 @@ export function registerSessionMethods(
         requestId: RequestId,
         teamId: TeamId,
         roleKey: RoleKey,
-        provider: z.literal('chatgpt').default('chatgpt'),
+        provider: z.enum(PROVIDERS).default('chatgpt'),
       })
       .strict(),
     (params) => {
@@ -57,6 +58,12 @@ export function registerSessionMethods(
           ? directory.getSession(params.sessionId)
           : directory.getCurrentSession(params.teamId, params.roleKey),
       ),
+  );
+
+  router.register(
+    'session.list',
+    z.object({ clientId: ClientId }).strict(),
+    (params) => ({ requestOk: true, sessions: directory.listSessions(params.clientId) }),
   );
 
   router.register(

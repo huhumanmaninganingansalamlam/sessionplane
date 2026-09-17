@@ -80,3 +80,34 @@ running, the current Page bindings without changing browser focus.
 Runtime state defaults to `.state/`. Override it with
 `SESSIONPLANE_STATE_DIR` when tests or multiple isolated instances are needed.
 
+## agbrowse compatibility
+
+The repository also installs an `agbrowse` compatibility binary. It translates
+supported legacy browser commands into the same SessionPlane core RPCs; it does
+not start the old agbrowse runtime or reuse its state directory.
+
+```bash
+agbrowse start --headed
+agbrowse new-tab https://example.com --json
+agbrowse snapshot --interactive --json
+agbrowse click e1 --json
+agbrowse stop --json
+```
+
+`compat/agbrowse-manifest.json` is the machine-readable replacement ledger.
+`npm run test:compat` verifies the implemented browser rows. Commands whose
+required capability is not implemented fail with `compatibility.unsupported`
+instead of silently approximating old behavior.
+
+Normal ChatGPT, Gemini, and Grok sessions are available through both the
+canonical team/session commands and the legacy web-ai grammar:
+
+```bash
+agbrowse web-ai send --vendor gemini --prompt "..." --json
+agbrowse web-ai poll --vendor gemini --session <sessionId> --json
+agbrowse web-ai query --vendor grok --prompt "..." --json
+```
+
+These aliases create or resume durable SessionPlane sessions and share the same
+generation, idempotency, wait, observer, and restart contracts as `sessplane`.
+

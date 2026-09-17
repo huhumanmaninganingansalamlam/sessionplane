@@ -11,6 +11,9 @@ const TeamId = z.string().uuid();
 const RoleKey = z.string().trim().min(1).max(80);
 const Prompt = z.string().min(1).max(200_000);
 const Model = z.string().trim().min(1).max(200).nullable().optional();
+const Effort = z.string().trim().min(1).max(200).nullable().optional();
+const Surface = z.string().trim().min(1).max(200).nullable().optional();
+const Files = z.array(z.string().min(1).max(20_000)).max(20).optional();
 const SessionDeadlineSec = z.number().int().min(1).max(86_400).default(5_400);
 
 export function registerSendMethods(router: RpcRouter, submissions: SubmissionService): void {
@@ -24,6 +27,9 @@ export function registerSendMethods(router: RpcRouter, submissions: SubmissionSe
           sessionId: SessionId,
           prompt: Prompt,
           model: Model,
+          effort: Effort,
+          surface: Surface,
+          files: Files,
           sessionDeadlineSec: SessionDeadlineSec,
         })
         .strict(),
@@ -35,6 +41,9 @@ export function registerSendMethods(router: RpcRouter, submissions: SubmissionSe
           roleKey: RoleKey,
           prompt: Prompt,
           model: Model,
+          effort: Effort,
+          surface: Surface,
+          files: Files,
           sessionDeadlineSec: SessionDeadlineSec,
         })
         .strict(),
@@ -47,6 +56,9 @@ export function registerSendMethods(router: RpcRouter, submissions: SubmissionSe
           prompt: params.prompt,
           sessionDeadlineSec: params.sessionDeadlineSec,
           ...(params.model === undefined ? {} : { model: params.model }),
+          ...(params.effort === undefined ? {} : { effort: params.effort }),
+          ...(params.surface === undefined ? {} : { surface: params.surface }),
+          ...(params.files === undefined ? {} : { files: params.files }),
           ...('sessionId' in params
             ? { sessionId: params.sessionId }
             : { teamId: params.teamId, roleKey: params.roleKey }),

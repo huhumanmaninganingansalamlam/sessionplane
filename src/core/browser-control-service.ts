@@ -69,6 +69,42 @@ export class BrowserControlService {
     this.#pageRegistry = options.pageRegistry;
   }
 
+  runtimeStatus(): Readonly<Record<string, unknown>> {
+    const owner = this.#requireBrowserOwner();
+    return {
+      requestOk: true,
+      browser: owner.status,
+      selectedPageKey: this.#selectedPageKey,
+      pageCount: this.#pageRegistry.listBindings({ includeClosed: false }).length,
+    };
+  }
+
+  async startRuntime(): Promise<Readonly<Record<string, unknown>>> {
+    const owner = this.#requireBrowserOwner();
+    await owner.start();
+    return this.runtimeStatus();
+  }
+
+  async stopRuntime(): Promise<Readonly<Record<string, unknown>>> {
+    const owner = this.#requireBrowserOwner();
+    await owner.close();
+    this.#selectedPageKey = null;
+    return this.runtimeStatus();
+  }
+
+  async resetRuntime(force: boolean): Promise<Readonly<Record<string, unknown>>> {
+    if (!force) {
+      throw new BrowserControlError(
+        'input.confirmation-required',
+        'Browser profile reset requires force=true',
+      );
+    }
+    const owner = this.#requireBrowserOwner();
+    await owner.resetProfile();
+    this.#selectedPageKey = null;
+    return this.runtimeStatus();
+  }
+
   async tabs(): Promise<Readonly<Record<string, unknown>>> {
     const bindings = this.#pageRegistry.listBindings({ includeClosed: false });
     this.#repairSelection(bindings);

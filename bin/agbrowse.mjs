@@ -4,15 +4,14 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const translated = translate(process.argv.slice(2));
-const sourcePath = fileURLToPath(new URL('../src/cli/main.ts', import.meta.url));
-const distUrl = new URL('../dist/cli/main.js', import.meta.url);
+const sourcePath = fileURLToPath(new URL('../src/compat/agbrowse-cli.ts', import.meta.url));
+const distUrl = new URL('../dist/compat/agbrowse-cli.js', import.meta.url);
 
 try {
   if (existsSync(sourcePath)) {
     const result = spawnSync(
       process.execPath,
-      ['--experimental-strip-types', sourcePath, ...translated],
+      ['--experimental-strip-types', sourcePath, ...process.argv.slice(2)],
       { stdio: 'inherit', env: process.env },
     );
     if (result.error !== undefined) {
@@ -21,7 +20,7 @@ try {
     process.exitCode = result.status ?? 1;
   } else {
     const { main } = await import(distUrl.href);
-    await main(translated);
+    await main(process.argv.slice(2));
   }
 } catch (error) {
   if (error && typeof error === 'object' && error.code === 'ERR_MODULE_NOT_FOUND') {
@@ -30,10 +29,4 @@ try {
     console.error(error instanceof Error ? error.stack ?? error.message : String(error));
   }
   process.exitCode = 1;
-}
-
-function translate(argv) {
-  if (argv[0] === 'status') return ['health', ...argv.slice(1)];
-  if (argv[0] === 'start') return ['serve', ...argv.slice(1)];
-  return argv;
 }

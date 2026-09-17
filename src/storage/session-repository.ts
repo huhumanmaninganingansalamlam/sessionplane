@@ -144,6 +144,19 @@ export class SessionRepository {
     return rows.map((row) => row.sessionId);
   }
 
+  listSessionIdsForOwner(ownerClientId: string): readonly string[] {
+    const rows = this.#database
+      .prepare(`
+        SELECT s.session_id AS sessionId
+        FROM sessions s
+        JOIN teams t ON t.team_id = s.team_id
+        WHERE t.owner_client_id = ?
+        ORDER BY s.created_at, s.session_id
+      `)
+      .all(ownerClientId) as unknown as Array<{ sessionId: string }>;
+    return rows.map((row) => row.sessionId);
+  }
+
   listRecoverableSnapshots(): readonly SessionSnapshot[] {
     const snapshots: SessionSnapshot[] = [];
     for (const sessionId of this.listNonterminalSessionIds()) {

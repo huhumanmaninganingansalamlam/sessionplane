@@ -1,10 +1,24 @@
 import type { ObservationTransport, SessionSnapshot } from '../domain/session.ts';
 
+export const PROVIDERS = ['chatgpt', 'gemini', 'grok'] as const;
+export type ProviderName = (typeof PROVIDERS)[number];
+
+export interface ProviderAttachment {
+  readonly path: string;
+  readonly name: string;
+  readonly sizeBytes: number;
+  readonly sha256: string;
+  readonly mediaType: string | null;
+}
+
 export interface ProviderSubmissionRequest {
   readonly session: SessionSnapshot;
   readonly generation: number;
   readonly prompt: string;
   readonly model: string | null;
+  readonly effort?: string | null;
+  readonly surface?: string | null;
+  readonly attachments?: readonly ProviderAttachment[];
 }
 
 export interface ProviderSubmissionAcknowledgement {
@@ -84,6 +98,23 @@ export interface ProviderRecoveryRequest {
   readonly generation: number;
 }
 
+export interface ProviderArtifactCandidate {
+  readonly providerArtifactId: string;
+  readonly name: string;
+  readonly sourceUrl: string;
+  readonly mediaType: string | null;
+}
+
+export interface ProviderArtifactRequest {
+  readonly session: SessionSnapshot;
+  readonly generation: number;
+}
+
+export interface ProviderArtifactDownload {
+  readonly candidate: ProviderArtifactCandidate;
+  readonly bytes: Uint8Array;
+}
+
 export interface ProviderStopRequest {
   readonly session: SessionSnapshot;
   readonly generation: number;
@@ -102,6 +133,11 @@ export interface ProviderAdapter {
   openObservation(request: ProviderObservationRequest): Promise<ProviderObservationSource>;
   recover(request: ProviderRecoveryRequest): Promise<ProviderRecoveryResult>;
   openStop(request: ProviderStopRequest): Promise<ProviderStopOperation>;
+  discoverArtifacts?(request: ProviderArtifactRequest): Promise<readonly ProviderArtifactCandidate[]>;
+  downloadArtifact?(
+    request: ProviderArtifactRequest,
+    candidate: ProviderArtifactCandidate,
+  ): Promise<ProviderArtifactDownload>;
 }
 
 export class ProviderSubmissionError extends Error {
@@ -147,6 +183,10 @@ export class ProviderAdapterRegistry {
       );
     }
     return adapter;
+  }
+
+  list(): readonly ProviderAdapter[] {
+    return [...this.#adapters.values()];
   }
 }
 

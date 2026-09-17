@@ -29,6 +29,8 @@ import { PageBindingRepository } from './storage/page-binding-repository.ts';
 import { ReceiptRepository } from './storage/receipt-repository.ts';
 import { RuntimeMetrics } from './telemetry/metrics.ts';
 import { ChatGptAdapter } from './providers/chatgpt/adapter.ts';
+import { GeminiAdapter } from './providers/gemini/adapter.ts';
+import { GrokAdapter } from './providers/grok/adapter.ts';
 import {
   ProviderAdapterRegistry,
   type ProviderAdapter,
@@ -91,7 +93,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       : new BrowserOwner({
           profileDir: config.profileDir,
           pageRegistry,
-          headless: options.browserHeadless ?? false,
+          headless: options.browserHeadless ?? config.browserHeadless,
           launchTimeoutMs: config.browserLaunchTimeoutMs,
         });
   const browserControl = new BrowserControlService({ browserOwner, pageRegistry });
@@ -120,6 +122,18 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
               backendRequestTimeoutMs: config.backendRequestTimeoutMs,
               tokenCacheTtlMs: config.tokenCacheTtlMs,
             }),
+            new GeminiAdapter({
+              browserOwner,
+              pageRegistry,
+              loginUrl: config.geminiUrl,
+              acknowledgementTimeoutMs: config.submissionAckTimeoutMs,
+            }),
+            new GrokAdapter({
+              browserOwner,
+              pageRegistry,
+              loginUrl: config.grokUrl,
+              acknowledgementTimeoutMs: config.submissionAckTimeoutMs,
+            }),
           ]),
   );
   const probeCoordinator = new ProbeCoordinator({
@@ -147,6 +161,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     scheduler: actorScheduler,
     pageMutex: pageMutationMutex,
     adapters: providerAdapters,
+    maxUploadFileBytes: config.maxUploadFileBytes,
     onSubmitted: (snapshot) => observationService.start(snapshot),
   });
   const stopService = new StopService({

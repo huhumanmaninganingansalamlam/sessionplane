@@ -5,7 +5,7 @@ import type { BrowserContext, Frame, Page } from 'playwright-core';
 import type { RuntimeMetrics } from '../telemetry/metrics.ts';
 
 import {
-  parseChatGptConversationId,
+  parseProviderConversationId,
   type BindPageInput,
   type PageBindingSnapshot,
   type PageBindingState,
@@ -114,7 +114,7 @@ export class PageRegistry {
       bindingEpoch: 1,
       sessionId: null,
       generation: null,
-      conversationId: parseChatGptConversationId(url),
+      conversationId: parseProviderConversationId(url),
       expectedConversationId: null,
       url,
       state: page.isClosed() ? 'closed' : 'unbound',
@@ -156,7 +156,7 @@ export class PageRegistry {
       record.bindingEpoch += 1;
       record.url = url;
     }
-    record.conversationId = parseChatGptConversationId(url);
+    record.conversationId = parseProviderConversationId(url);
     record.lastSeenAt = this.#now().toISOString();
     this.#reconcileConflicts();
     this.#emit(record);

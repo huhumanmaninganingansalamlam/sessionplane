@@ -152,6 +152,40 @@ test('multiple generic Pages require an explicit selected pageKey', async () => 
   }
 });
 
+test('browser lifecycle stop, start, and forced profile reset stay core-owned', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-lifecycle-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+  const browser = new BrowserControlService({ browserOwner: owner, pageRegistry: registry });
+
+  try {
+    await owner.start();
+    assert.equal((browser.runtimeStatus().browser as { state: string }).state, 'ready');
+
+    const stopped = await browser.stopRuntime();
+    assert.equal((stopped.browser as { state: string }).state, 'stopped');
+
+    const started = await browser.startRuntime();
+    assert.equal((started.browser as { state: string }).state, 'ready');
+
+    await assert.rejects(
+      browser.resetRuntime(false),
+      (error: unknown) =>
+        error instanceof BrowserControlError &&
+        error.errorCode === 'input.confirmation-required',
+    );
+    const reset = await browser.resetRuntime(true);
+    assert.equal((reset.browser as { state: string }).state, 'ready');
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function fixtureHtml(): string {
   return `<!doctype html>
     <html>

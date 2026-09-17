@@ -19,6 +19,7 @@ import {
   type SessionSnapshot,
 } from '../domain/session.ts';
 import type { TeamListResult, TeamRecord, TeamSnapshot } from '../domain/team.ts';
+import { PROVIDERS } from '../providers/provider-adapter.ts';
 
 export interface TeamDirectoryOptions {
   readonly now?: () => Date;
@@ -241,7 +242,11 @@ export class TeamDirectory {
     const team = this.#requireTeam(input.teamId);
     const role = this.#requireRole(team.teamId, normalizeRoleKey(input.roleKey));
     assertDomain(role.roleState === 'active', 'input.invalid', 'Session can be created only for an active role');
-    assertDomain(input.provider === 'chatgpt', 'input.invalid', 'v1 supports only the chatgpt provider');
+    assertDomain(
+      PROVIDERS.includes(input.provider as (typeof PROVIDERS)[number]),
+      'input.invalid',
+      `Unsupported provider: ${input.provider}`,
+    );
 
     const timestamp = this.#now().toISOString();
     const sessionId = this.#uuid();
@@ -299,6 +304,13 @@ export class TeamDirectory {
       );
     }
     return this.getSession(role.currentSessionId);
+  }
+
+  listSessions(ownerClientId: string): readonly SessionSnapshot[] {
+    const clientId = requireNonEmpty(ownerClientId, 'clientId');
+    return this.#sessions
+      .listSessionIdsForOwner(clientId)
+      .map((sessionId) => this.getSession(sessionId));
   }
 
   listEvents(teamId: string, afterSequence = 0, limit = 200): EventListResult {

@@ -12,6 +12,7 @@ import { writeCliError, writeCliResult, type CliIo } from './format.ts';
 interface ParsedArgs {
   readonly words: readonly string[];
   readonly options: Readonly<Record<string, string>>;
+  readonly files: readonly string[];
   readonly json: boolean;
 }
 
@@ -25,6 +26,7 @@ const FLAG_OPTIONS = new Set([
   'include-disabled',
   'screenshot',
   'all-nodes',
+  'force',
 ]);
 const VALUE_OPTIONS = new Set([
   'state-dir',
@@ -44,6 +46,9 @@ const VALUE_OPTIONS = new Set([
   'prompt',
   'text',
   'model',
+  'effort',
+  'surface',
+  'file',
   'deadline',
   'session',
   'generation',
@@ -137,6 +142,10 @@ export async function runCli(
         await runMcpServer({ input: io.stdin, output: io.stdout, error: io.stderr, config });
         return 0;
       case 'tabs':
+      case 'browser-status':
+      case 'browser-start':
+      case 'browser-stop':
+      case 'browser-reset':
       case 'active-tab':
       case 'select-tab':
       case 'tab-switch':
@@ -207,6 +216,16 @@ async function runBrowserCommand(
   const snapshot = snapshotId === undefined ? {} : { snapshotId };
 
   switch (command) {
+    case 'browser-status':
+      return await printRpc(io, parsed, config, 'browser.runtime.status', {});
+    case 'browser-start':
+      return await printRpc(io, parsed, config, 'browser.runtime.start', {});
+    case 'browser-stop':
+      return await printRpc(io, parsed, config, 'browser.runtime.stop', {});
+    case 'browser-reset':
+      return await printRpc(io, parsed, config, 'browser.runtime.reset', {
+        force: parsed.options.force === 'true',
+      });
     case 'tabs':
     case 'active-tab':
       return await printRpc(io, parsed, config, 'browser.tabs', {});
@@ -525,6 +544,8 @@ async function runSessionCommand(
     case 'show':
     case 'get':
       return await runStatusCommand(io, { ...parsed, words: ['status', ...rest] }, config);
+    case 'list':
+      return await printRpc(io, parsed, config, 'session.list', { clientId: clientId(parsed) });
     case 'events':
       return await runEventsCommand(io, parsed, config, rest);
     default:
@@ -542,6 +563,9 @@ async function runSendCommand(
     ...sessionSelector(parsed, parsed.words.slice(1)),
     prompt: requireOption(parsed, 'prompt'),
     ...optionalParam('model', parsed.options.model),
+    ...optionalParam('effort', parsed.options.effort),
+    ...optionalParam('surface', parsed.options.surface),
+    ...(parsed.files.length === 0 ? {} : { files: parsed.files }),
     ...optionalIntegerParam(parsed, 'deadline', 'sessionDeadlineSec', 1, 86_400),
   });
 }
@@ -626,6 +650,7 @@ async function printRpc(
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const words: string[] = [];
   const options: Record<string, string> = {};
+  const files: string[] = [];
   let json = false;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -669,10 +694,14 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     if (equals < 0) {
       index += 1;
     }
-    options[name] = value;
+    if (name === 'file') {
+      files.push(value);
+    } else {
+      options[name] = value;
+    }
   }
 
-  return { words, options, json };
+  return { words, options, files, json };
 }
 
 function sessionSelector(
@@ -796,7 +825,7 @@ function normalizeUntil(value: string): string {
 }
 
 function helpText(): string {
-  return `SessionPlane ${SESSIONPLANE_VERSION}\n\nUsage:\n  sessplane serve [--state-dir PATH]\n  sessplane health [--json] [--socket PATH]\n  sessplane doctor [--json] [--state-dir PATH]\n  sessplane login [--json] [--url HTTPS_URL]\n\nBrowser compatibility:\n  sessplane tabs | active-tab\n  sessplane new-tab [URL]\n  sessplane select-tab PAGE_KEY\n  sessplane tab-close [PAGE_KEY]\n  sessplane navigate URL [--page PAGE_KEY]\n  sessplane snapshot [--page PAGE_KEY] [--max-nodes N]\n  sessplane click REF [--snapshot-id ID]\n  sessplane type REF --text TEXT\n  sessplane press [REF] KEY\n  sessplane hover|check|uncheck REF\n  sessplane select REF --value VALUE[,VALUE]\n  sessplane upload REF FILE...\n  sessplane drag SOURCE_REF TARGET_REF\n  sessplane screenshot --out PATH [--full-page]\n  sessplane text [--selector CSS] | get-dom\n  sessplane console | network | evaluate --script JS\n  sessplane wait-for-selector CSS | wait-for-text TEXT | wait-for REF_OR_TEXT\n  sessplane observe-bundle [--screenshot --out PATH --boxes]\n  sessplane observe-actions INSTRUCTION [--top-n N]\n\nTeam and role sessions:\n  sessplane team create --name NAME [--objective TEXT] [--request-id ID]\n  sessplane team show TEAM_ID [--json]\n  sessplane team list [--json]\n  sessplane team wait TEAM_ID [--roles KEY,KEY] [--until CONDITION]\n  sessplane team brief [update] TEAM_ID --brief TEXT\n  sessplane role add TEAM_ID ROLE_KEY --type expert|reviewer|custom\n  sessplane role retire TEAM_ID ROLE_KEY\n  sessplane session create TEAM_ID ROLE_KEY [--provider chatgpt]\n  sessplane session show SESSION_ID\n  sessplane session events TEAM_ID [--after-sequence N]\n  sessplane send TEAM_ID ROLE_KEY --prompt TEXT [--model MODEL]\n  sessplane send --session SESSION_ID --prompt TEXT\n  sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID\n  sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]\n  sessplane stop TEAM_ID ROLE_KEY [--request-id ID]\n  sessplane mcp\n\nGlobal options:\n  --client-id ID       Stable caller identity\n  --request-id ID      Stable mutation identity for exact retries\n  --page PAGE_KEY      Explicit browser Page identity\n  --json               Emit one compact JSON object\n  --state-dir PATH     Override runtime state directory\n  --socket PATH        Override core Unix socket\n`;
+  return `SessionPlane ${SESSIONPLANE_VERSION}\n\nUsage:\n  sessplane serve [--state-dir PATH]\n  sessplane health [--json] [--socket PATH]\n  sessplane doctor [--json] [--state-dir PATH]\n  sessplane login [--json] [--url HTTPS_URL]\n\nBrowser compatibility:\n  sessplane browser-status | browser-start | browser-stop\n  sessplane browser-reset --force\n  sessplane tabs | active-tab\n  sessplane new-tab [URL]\n  sessplane select-tab PAGE_KEY\n  sessplane tab-close [PAGE_KEY]\n  sessplane navigate URL [--page PAGE_KEY]\n  sessplane snapshot [--page PAGE_KEY] [--max-nodes N]\n  sessplane click REF [--snapshot-id ID]\n  sessplane type REF --text TEXT\n  sessplane press [REF] KEY\n  sessplane hover|check|uncheck REF\n  sessplane select REF --value VALUE[,VALUE]\n  sessplane upload REF FILE...\n  sessplane drag SOURCE_REF TARGET_REF\n  sessplane screenshot --out PATH [--full-page]\n  sessplane text [--selector CSS] | get-dom\n  sessplane console | network | evaluate --script JS\n  sessplane wait-for-selector CSS | wait-for-text TEXT | wait-for REF_OR_TEXT\n  sessplane observe-bundle [--screenshot --out PATH --boxes]\n  sessplane observe-actions INSTRUCTION [--top-n N]\n\nTeam and role sessions:\n  sessplane team create --name NAME [--objective TEXT] [--request-id ID]\n  sessplane team show TEAM_ID [--json]\n  sessplane team list [--json]\n  sessplane team wait TEAM_ID [--roles KEY,KEY] [--until CONDITION]\n  sessplane team brief [update] TEAM_ID --brief TEXT\n  sessplane role add TEAM_ID ROLE_KEY --type expert|reviewer|custom\n  sessplane role retire TEAM_ID ROLE_KEY\n  sessplane session create TEAM_ID ROLE_KEY [--provider chatgpt|gemini|grok]\n  sessplane session show SESSION_ID\n  sessplane session events TEAM_ID [--after-sequence N]\n  sessplane send TEAM_ID ROLE_KEY --prompt TEXT [--model MODEL] [--effort LEVEL] [--surface NAME] [--file PATH ...]\n  sessplane send --session SESSION_ID --prompt TEXT\n  sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID\n  sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]\n  sessplane stop TEAM_ID ROLE_KEY [--request-id ID]\n  sessplane mcp\n\nGlobal options:\n  --client-id ID       Stable caller identity\n  --request-id ID      Stable mutation identity for exact retries\n  --page PAGE_KEY      Explicit browser Page identity\n  --json               Emit one compact JSON object\n  --state-dir PATH     Override runtime state directory\n  --socket PATH        Override core Unix socket\n`;
 }
 
 function isDirectExecution(): boolean {

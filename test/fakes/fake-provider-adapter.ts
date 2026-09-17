@@ -1,6 +1,7 @@
 import {
   ProviderSubmissionError,
   type ProviderAdapter,
+  type ProviderName,
   type ProviderObservationEvidence,
   type ProviderObservationRequest,
   type ProviderObservationSource,
@@ -17,10 +18,11 @@ import {
 export type FakeAcknowledgementMode = 'success' | 'missing';
 
 export class FakeProviderAdapter implements ProviderAdapter {
-  readonly provider = 'chatgpt';
+  readonly provider: ProviderName;
   acknowledgementMode: FakeAcknowledgementMode = 'success';
   submitThrows = false;
   readonly disabledModels = new Set<string>();
+  readonly submissionRequests: ProviderSubmissionRequest[] = [];
   openCount = 0;
   prepareCount = 0;
   submitCount = 0;
@@ -32,6 +34,7 @@ export class FakeProviderAdapter implements ProviderAdapter {
   stopCount = 0;
   stopControlAvailable = true;
   stopThrows = false;
+  autoFinalText: string | null = null;
   readonly #observationSources = new Map<string, FakeObservationSource>();
   readonly #pendingObservations = new Map<
     string,
@@ -39,8 +42,13 @@ export class FakeProviderAdapter implements ProviderAdapter {
   >();
   readonly #recoveryResults = new Map<string, ProviderRecoveryResult[]>();
 
+  constructor(provider: ProviderName = 'chatgpt') {
+    this.provider = provider;
+  }
+
   async openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission> {
     this.openCount += 1;
+    this.submissionRequests.push(request);
     const adapter = this;
     const pageKey = `fake-page:${request.session.sessionId}`;
     return {
@@ -67,7 +75,10 @@ export class FakeProviderAdapter implements ProviderAdapter {
           return null;
         }
         return {
-          conversationId: `conversation-${request.session.sessionId}`,
+          conversationId:
+            adapter.provider === 'chatgpt'
+              ? `conversation-${request.session.sessionId}`
+              : `${adapter.provider}-conversation-${request.session.sessionId}`,
           submittedUserMessageId: `user-message-${request.generation}`,
           submittedUserTurnId: `user-turn-${request.generation}`,
         };
@@ -80,12 +91,23 @@ export class FakeProviderAdapter implements ProviderAdapter {
 
   async openObservation(request: ProviderObservationRequest): Promise<ProviderObservationSource> {
     this.observationOpenCount += 1;
-    const source = new FakeObservationSource(request);
+    const source = new FakeObservationSource(this.provider, request);
     this.#observationSources.set(request.session.sessionId, source);
     for (const observation of this.#pendingObservations.get(request.session.sessionId) ?? []) {
       source.emit(observation);
     }
     this.#pendingObservations.delete(request.session.sessionId);
+    if (this.autoFinalText !== null) {
+      source.emit({
+        candidate: {
+          responseMessageId: `${this.provider}-auto-final-${request.generation}`,
+          answerText: this.autoFinalText,
+          terminalMarker: true,
+          streamingMarker: false,
+        },
+        activity: 'none',
+      });
+    }
     return source;
   }
 
@@ -147,14 +169,15 @@ export class FakeProviderAdapter implements ProviderAdapter {
 }
 
 class FakeObservationSource implements ProviderObservationSource {
-  readonly provider = 'chatgpt';
+  readonly provider: ProviderName;
   readonly pageKey: string;
   readonly #request: ProviderObservationRequest;
   readonly #queue: ProviderObservationEvidence[] = [];
   readonly #waiters = new Set<(reason: ProviderWakeReason) => void>();
   #closed = false;
 
-  constructor(request: ProviderObservationRequest) {
+  constructor(provider: ProviderName, request: ProviderObservationRequest) {
+    this.provider = provider;
     this.#request = request;
     this.pageKey = request.session.pageKey ?? `fake-page:${request.session.sessionId}`;
   }
