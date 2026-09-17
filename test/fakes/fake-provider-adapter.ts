@@ -1,6 +1,9 @@
 import {
   ProviderSubmissionError,
   type ProviderAdapter,
+  type ProviderArtifactCandidate,
+  type ProviderArtifactDownload,
+  type ProviderArtifactRequest,
   type ProviderName,
   type ProviderObservationEvidence,
   type ProviderObservationRequest,
@@ -32,6 +35,8 @@ export class FakeProviderAdapter implements ProviderAdapter {
   recoveryCount = 0;
   stopPrepareCount = 0;
   stopCount = 0;
+  artifactDiscoverCount = 0;
+  artifactDownloadCount = 0;
   stopControlAvailable = true;
   stopThrows = false;
   autoFinalText: string | null = null;
@@ -41,6 +46,8 @@ export class FakeProviderAdapter implements ProviderAdapter {
     Array<Partial<ProviderObservationEvidence>>
   >();
   readonly #recoveryResults = new Map<string, ProviderRecoveryResult[]>();
+  readonly #artifactCandidates = new Map<string, ProviderArtifactCandidate[]>();
+  readonly #artifactBytes = new Map<string, Uint8Array>();
 
   constructor(provider: ProviderName = 'chatgpt') {
     this.provider = provider;
@@ -165,6 +172,39 @@ export class FakeProviderAdapter implements ProviderAdapter {
         }
       },
     };
+  }
+
+  addArtifact(
+    sessionId: string,
+    candidate: ProviderArtifactCandidate,
+    bytes: Uint8Array | string,
+  ): void {
+    const candidates = this.#artifactCandidates.get(sessionId) ?? [];
+    candidates.push(candidate);
+    this.#artifactCandidates.set(sessionId, candidates);
+    this.#artifactBytes.set(
+      candidate.providerArtifactId,
+      typeof bytes === 'string' ? Buffer.from(bytes, 'utf8') : Uint8Array.from(bytes),
+    );
+  }
+
+  async discoverArtifacts(
+    request: ProviderArtifactRequest,
+  ): Promise<readonly ProviderArtifactCandidate[]> {
+    this.artifactDiscoverCount += 1;
+    return [...(this.#artifactCandidates.get(request.session.sessionId) ?? [])];
+  }
+
+  async downloadArtifact(
+    _request: ProviderArtifactRequest,
+    candidate: ProviderArtifactCandidate,
+  ): Promise<ProviderArtifactDownload> {
+    this.artifactDownloadCount += 1;
+    const bytes = this.#artifactBytes.get(candidate.providerArtifactId);
+    if (bytes === undefined) {
+      throw new Error(`Missing fake artifact bytes: ${candidate.providerArtifactId}`);
+    }
+    return { candidate, bytes: Uint8Array.from(bytes) };
   }
 }
 

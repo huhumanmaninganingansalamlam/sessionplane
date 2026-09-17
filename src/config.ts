@@ -11,6 +11,7 @@ export interface SessionPlaneConfig {
   readonly socketPath: string;
   readonly databasePath: string;
   readonly profileDir: string;
+  readonly artifactDir: string;
   readonly logLevel: LogLevel;
   readonly rpcMaxLineBytes: number;
   readonly rpcRequestTimeoutMs: number;
@@ -27,6 +28,7 @@ export interface SessionPlaneConfig {
   readonly probeMax429BackoffMs: number;
   readonly tokenCacheTtlMs: number;
   readonly maxUploadFileBytes: number;
+  readonly maxArtifactFileBytes: number;
   readonly fetchTimeoutMs: number;
   readonly fetchMaxBytes: number;
   readonly fetchMaxRedirects: number;
@@ -44,6 +46,7 @@ export interface ConfigOverrides {
   readonly socketPath?: string;
   readonly databasePath?: string;
   readonly profileDir?: string;
+  readonly artifactDir?: string;
   readonly logLevel?: LogLevel;
   readonly rpcMaxLineBytes?: number;
   readonly rpcRequestTimeoutMs?: number;
@@ -60,6 +63,7 @@ export interface ConfigOverrides {
   readonly probeMax429BackoffMs?: number;
   readonly tokenCacheTtlMs?: number;
   readonly maxUploadFileBytes?: number;
+  readonly maxArtifactFileBytes?: number;
   readonly fetchTimeoutMs?: number;
   readonly fetchMaxBytes?: number;
   readonly fetchMaxRedirects?: number;
@@ -128,6 +132,10 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
     stateDir,
     overrides.profileDir ?? env.SESSIONPLANE_PROFILE_DIR ?? 'chrome-profile',
   );
+  const artifactDir = resolvePath(
+    stateDir,
+    overrides.artifactDir ?? env.SESSIONPLANE_ARTIFACT_DIR ?? 'artifacts',
+  );
   const chatgptUrl = validateChatGptUrl(
     overrides.chatgptUrl ?? env.SESSIONPLANE_CHATGPT_URL ?? 'https://chatgpt.com/',
   );
@@ -148,6 +156,7 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
     socketPath,
     databasePath,
     profileDir,
+    artifactDir,
     logLevel: overrides.logLevel ?? parseLogLevel(env.SESSIONPLANE_LOG_LEVEL, 'info'),
     rpcMaxLineBytes:
       overrides.rpcMaxLineBytes ??
@@ -206,6 +215,13 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
         100 * 1024 * 1024,
         'Maximum upload file bytes',
       ),
+    maxArtifactFileBytes:
+      overrides.maxArtifactFileBytes ??
+      parsePositiveInteger(
+        env.SESSIONPLANE_MAX_ARTIFACT_FILE_BYTES,
+        512 * 1024 * 1024,
+        'Maximum artifact file bytes',
+      ),
     fetchTimeoutMs:
       overrides.fetchTimeoutMs ??
       parsePositiveInteger(env.SESSIONPLANE_FETCH_TIMEOUT_MS, 15_000, 'Fetch timeout'),
@@ -253,12 +269,14 @@ export function prepareRuntimeDirectories(config: SessionPlaneConfig): void {
   mkdirSync(path.dirname(config.socketPath), { recursive: true, mode: 0o700 });
   mkdirSync(path.dirname(config.databasePath), { recursive: true, mode: 0o700 });
   mkdirSync(config.profileDir, { recursive: true, mode: 0o700 });
+  mkdirSync(config.artifactDir, { recursive: true, mode: 0o700 });
 
   for (const directory of new Set([
     config.stateDir,
     path.dirname(config.socketPath),
     path.dirname(config.databasePath),
     config.profileDir,
+    config.artifactDir,
   ])) {
     chmodSync(directory, 0o700);
   }

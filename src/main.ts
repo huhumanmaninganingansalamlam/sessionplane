@@ -7,6 +7,7 @@ import { PageRegistry } from './browser/page-registry.ts';
 import { prepareRuntimeDirectories, resolveConfig, type SessionPlaneConfig } from './config.ts';
 import { getSystemHealth } from './core/health.ts';
 import { BrowserControlService } from './core/browser-control-service.ts';
+import { ArtifactService } from './core/artifact-service.ts';
 import { ObservationService } from './core/observation-service.ts';
 import { RecoveryService } from './core/recovery-service.ts';
 import { StopService } from './core/stop-service.ts';
@@ -17,6 +18,7 @@ import { RpcRouter } from './rpc/router.ts';
 import { RpcServer } from './rpc/server.ts';
 import { registerBrowserMethods } from './rpc/methods/browser.ts';
 import { registerBrowserControlMethods } from './rpc/methods/browser-control.ts';
+import { registerArtifactMethods } from './rpc/methods/artifact.ts';
 import { registerSessionMethods } from './rpc/methods/session.ts';
 import { registerSendMethods } from './rpc/methods/send.ts';
 import { registerStopMethods } from './rpc/methods/stop.ts';
@@ -47,6 +49,7 @@ export interface CoreService {
   readonly browserOwner: BrowserOwner | null;
   readonly pageRegistry: PageRegistry;
   readonly browserControl: BrowserControlService;
+  readonly artifactService: ArtifactService;
   readonly pageMutationMutex: PageMutationMutex;
   readonly teamDirectory: TeamDirectory;
   readonly receipts: ReceiptRepository;
@@ -191,6 +194,13 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   });
   const searchService = SearchService.fromConfig(config);
   const researchService = new ResearchService({ search: searchService });
+  const artifactService = new ArtifactService({
+    database,
+    directory: teamDirectory,
+    adapters: providerAdapters,
+    artifactDir: config.artifactDir,
+    maxArtifactFileBytes: config.maxArtifactFileBytes,
+  });
 
   try {
     const recovered = await submissionService.recoverInterruptedSubmissions();
@@ -227,6 +237,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     profileDir: config.profileDir,
   });
   registerBrowserControlMethods(router, browserControl);
+  registerArtifactMethods(router, artifactService);
   registerTeamMethods(router, teamDirectory, receipts);
   registerSessionMethods(router, teamDirectory, receipts);
   registerSendMethods(router, submissionService);
@@ -265,6 +276,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     browserOwner,
     pageRegistry,
     browserControl,
+    artifactService,
     pageMutationMutex,
     teamDirectory,
     receipts,

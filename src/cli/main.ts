@@ -32,6 +32,7 @@ const FLAG_OPTIONS = new Set([
   'include-html',
   'include-binary',
   'stdin-results',
+  'overwrite',
 ]);
 const VALUE_OPTIONS = new Set([
   'state-dir',
@@ -97,6 +98,7 @@ const VALUE_OPTIONS = new Set([
   'enrichment',
   'query',
   'timeout',
+  'artifact-id',
 ]);
 
 export async function runCli(
@@ -166,6 +168,8 @@ export async function runCli(
         return await runSearchCommand(io, parsed, config);
       case 'research':
         return await runResearchCommand(io, parsed, config);
+      case 'artifact':
+        return await runArtifactCommand(io, parsed, config);
       case 'mcp':
         await runMcpServer({ input: io.stdin, output: io.stdout, error: io.stderr, config });
         return 0;
@@ -778,6 +782,52 @@ async function runResearchCommand(
   }
 }
 
+async function runArtifactCommand(
+  io: CliIo,
+  parsed: ParsedArgs,
+  config: SessionPlaneConfig,
+): Promise<number> {
+  const action = parsed.words[1] ?? 'list';
+  const rest = parsed.words.slice(2);
+  switch (action) {
+    case 'discover':
+      return await printRpc(io, parsed, config, 'artifact.discover', {
+        clientId: clientId(parsed),
+        ...sessionSelector(parsed, rest),
+        ...optionalIntegerParam(parsed, 'generation', 'generation', 1),
+      }, 120_000);
+    case 'capture':
+      return await printRpc(io, parsed, config, 'artifact.capture', {
+        clientId: clientId(parsed),
+        ...sessionSelector(parsed, rest),
+        ...optionalIntegerParam(parsed, 'generation', 'generation', 1),
+        ...(parsed.options['artifact-id'] === undefined
+          ? {}
+          : { artifactIds: [parsed.options['artifact-id']] }),
+      }, 120_000);
+    case 'list':
+      return await printRpc(io, parsed, config, 'artifact.list', {
+        clientId: clientId(parsed),
+        ...sessionSelector(parsed, rest),
+        ...optionalIntegerParam(parsed, 'generation', 'generation', 1),
+      });
+    case 'get':
+      return await printRpc(io, parsed, config, 'artifact.get', {
+        clientId: clientId(parsed),
+        artifactId: requirePositional(rest, 0, 'artifactId'),
+      });
+    case 'export':
+      return await printRpc(io, parsed, config, 'artifact.export', {
+        clientId: clientId(parsed),
+        artifactId: requirePositional(rest, 0, 'artifactId'),
+        outputPath: requireOption(parsed, 'out'),
+        overwrite: parsed.options.overwrite === 'true',
+      }, 120_000);
+    default:
+      throw new Error(`Unknown artifact command: ${action}`);
+  }
+}
+
 async function printRpc(
   io: CliIo,
   parsed: ParsedArgs,
@@ -996,7 +1046,7 @@ function normalizeUntil(value: string): string {
 }
 
 function helpText(): string {
-  return `SessionPlane ${SESSIONPLANE_VERSION}\n\nUsage:\n  sessplane serve [--state-dir PATH]\n  sessplane health [--json] [--socket PATH]\n  sessplane doctor [--json] [--state-dir PATH]\n  sessplane login [--json] [--url HTTPS_URL]\n\nBrowser compatibility:\n  sessplane browser-status | browser-start | browser-stop\n  sessplane browser-reset --force\n  sessplane tabs | active-tab\n  sessplane new-tab [URL]\n  sessplane select-tab PAGE_KEY\n  sessplane tab-close [PAGE_KEY]\n  sessplane navigate URL [--page PAGE_KEY]\n  sessplane snapshot [--page PAGE_KEY] [--max-nodes N]\n  sessplane click REF [--snapshot-id ID]\n  sessplane type REF --text TEXT\n  sessplane press [REF] KEY\n  sessplane hover|check|uncheck REF\n  sessplane select REF --value VALUE[,VALUE]\n  sessplane upload REF FILE...\n  sessplane drag SOURCE_REF TARGET_REF\n  sessplane screenshot --out PATH [--full-page]\n  sessplane text [--selector CSS] | get-dom\n  sessplane console | network | evaluate --script JS\n  sessplane wait-for-selector CSS | wait-for-text TEXT | wait-for REF_OR_TEXT\n  sessplane observe-bundle [--screenshot --out PATH --boxes]\n  sessplane observe-actions INSTRUCTION [--top-n N]\n\nFetch, search, and research:\n  sessplane fetch URL [--max-bytes N] [--max-redirects N] [--include-html]\n  sessplane extract URL --schema FILE [--source auto|json|jsonld|table]\n  sessplane extract --from-file HTML --schema FILE\n  sessplane search QUERY [--max-results N] [--deep]\n  sessplane search --verify URL\n  sessplane search QUERY --results FILE [--backend NAME]\n  sessplane research plan QUERY [--max-queries N]\n  sessplane research normalize-results --query QUERY --results FILE --backend NAME\n  sessplane research enrich-fetch --plan PLAN --results RESULTS\n  sessplane research browse-plan --plan PLAN --enrichment ENRICHMENT\n\nTeam and role sessions:\n  sessplane team create --name NAME [--objective TEXT] [--request-id ID]\n  sessplane team show TEAM_ID [--json]\n  sessplane team list [--json]\n  sessplane team wait TEAM_ID [--roles KEY,KEY] [--until CONDITION]\n  sessplane team brief [update] TEAM_ID --brief TEXT\n  sessplane role add TEAM_ID ROLE_KEY --type expert|reviewer|custom\n  sessplane role retire TEAM_ID ROLE_KEY\n  sessplane session create TEAM_ID ROLE_KEY [--provider chatgpt|gemini|grok]\n  sessplane session show SESSION_ID\n  sessplane session events TEAM_ID [--after-sequence N]\n  sessplane send TEAM_ID ROLE_KEY --prompt TEXT [--model MODEL] [--effort LEVEL] [--surface NAME] [--file PATH ...]\n  sessplane send --session SESSION_ID --prompt TEXT\n  sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID\n  sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]\n  sessplane stop TEAM_ID ROLE_KEY [--request-id ID]\n  sessplane mcp\n\nGlobal options:\n  --client-id ID       Stable caller identity\n  --request-id ID      Stable mutation identity for exact retries\n  --page PAGE_KEY      Explicit browser Page identity\n  --json               Emit one compact JSON object\n  --state-dir PATH     Override runtime state directory\n  --socket PATH        Override core Unix socket\n`;
+  return `SessionPlane ${SESSIONPLANE_VERSION}\n\nUsage:\n  sessplane serve [--state-dir PATH]\n  sessplane health [--json] [--socket PATH]\n  sessplane doctor [--json] [--state-dir PATH]\n  sessplane login [--json] [--url HTTPS_URL]\n\nBrowser compatibility:\n  sessplane browser-status | browser-start | browser-stop\n  sessplane browser-reset --force\n  sessplane tabs | active-tab\n  sessplane new-tab [URL]\n  sessplane select-tab PAGE_KEY\n  sessplane tab-close [PAGE_KEY]\n  sessplane navigate URL [--page PAGE_KEY]\n  sessplane snapshot [--page PAGE_KEY] [--max-nodes N]\n  sessplane click REF [--snapshot-id ID]\n  sessplane type REF --text TEXT\n  sessplane press [REF] KEY\n  sessplane hover|check|uncheck REF\n  sessplane select REF --value VALUE[,VALUE]\n  sessplane upload REF FILE...\n  sessplane drag SOURCE_REF TARGET_REF\n  sessplane screenshot --out PATH [--full-page]\n  sessplane text [--selector CSS] | get-dom\n  sessplane console | network | evaluate --script JS\n  sessplane wait-for-selector CSS | wait-for-text TEXT | wait-for REF_OR_TEXT\n  sessplane observe-bundle [--screenshot --out PATH --boxes]\n  sessplane observe-actions INSTRUCTION [--top-n N]\n\nFetch, search, and research:\n  sessplane fetch URL [--max-bytes N] [--max-redirects N] [--include-html]\n  sessplane extract URL --schema FILE [--source auto|json|jsonld|table]\n  sessplane extract --from-file HTML --schema FILE\n  sessplane search QUERY [--max-results N] [--deep]\n  sessplane search --verify URL\n  sessplane search QUERY --results FILE [--backend NAME]\n  sessplane research plan QUERY [--max-queries N]\n  sessplane research normalize-results --query QUERY --results FILE --backend NAME\n  sessplane research enrich-fetch --plan PLAN --results RESULTS\n  sessplane research browse-plan --plan PLAN --enrichment ENRICHMENT\n\nTeam and role sessions:\n  sessplane team create --name NAME [--objective TEXT] [--request-id ID]\n  sessplane team show TEAM_ID [--json]\n  sessplane team list [--json]\n  sessplane team wait TEAM_ID [--roles KEY,KEY] [--until CONDITION]\n  sessplane team brief [update] TEAM_ID --brief TEXT\n  sessplane role add TEAM_ID ROLE_KEY --type expert|reviewer|custom\n  sessplane role retire TEAM_ID ROLE_KEY\n  sessplane session create TEAM_ID ROLE_KEY [--provider chatgpt|gemini|grok]\n  sessplane session show SESSION_ID\n  sessplane session events TEAM_ID [--after-sequence N]\n  sessplane send TEAM_ID ROLE_KEY --prompt TEXT [--model MODEL] [--effort LEVEL] [--surface NAME] [--file PATH ...]\n  sessplane send --session SESSION_ID --prompt TEXT\n  sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID\n  sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]\n  sessplane stop TEAM_ID ROLE_KEY [--request-id ID]\n\nProvider artifacts:\n  sessplane artifact discover --session SESSION_ID\n  sessplane artifact capture --session SESSION_ID [--artifact-id ID]\n  sessplane artifact list --session SESSION_ID [--generation N]\n  sessplane artifact get ARTIFACT_ID\n  sessplane artifact export ARTIFACT_ID --out PATH [--overwrite]\n\n  sessplane mcp\n\nGlobal options:\n  --client-id ID       Stable caller identity\n  --request-id ID      Stable mutation identity for exact retries\n  --page PAGE_KEY      Explicit browser Page identity\n  --json               Emit one compact JSON object\n  --state-dir PATH     Override runtime state directory\n  --socket PATH        Override core Unix socket\n`;
 }
 
 function isDirectExecution(): boolean {

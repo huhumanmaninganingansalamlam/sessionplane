@@ -3,6 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { initialMigration } from './0001-initial.ts';
 import { runtimeCoordinationMigration } from './0002-runtime-coordination.ts';
 import { submissionOutboxMigration } from './0003-submission-outbox.ts';
+import { providerArtifactsMigration } from './0004-provider-artifacts.ts';
 
 export interface Migration {
   readonly version: number;
@@ -14,6 +15,7 @@ export const migrations: readonly Migration[] = [
   initialMigration,
   runtimeCoordinationMigration,
   submissionOutboxMigration,
+  providerArtifactsMigration,
 ];
 
 export function runMigrations(database: DatabaseSync, now: () => Date = () => new Date()): number {

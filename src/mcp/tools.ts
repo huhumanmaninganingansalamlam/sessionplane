@@ -787,6 +787,91 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     ),
     true,
   ),
+  tool(
+    'sessionplane_artifact_discover',
+    'artifact.discover',
+    'Discover provider-created artifacts for the exact current session generation.',
+    objectSchema(
+      {
+        ...baseIdentityProperties,
+        sessionId: stringProperty('Exact durable session UUID.'),
+        teamId: stringProperty('Durable team UUID.'),
+        roleKey: stringProperty('Stable role key within the team.'),
+        generation: { type: 'integer', minimum: 1 },
+      },
+      ['clientId'],
+      { oneOf: selectorOneOf },
+    ),
+    true,
+  ),
+  tool(
+    'sessionplane_artifact_capture',
+    'artifact.capture',
+    'Download provider-created artifacts into the durable content-addressed store.',
+    objectSchema(
+      {
+        ...baseIdentityProperties,
+        sessionId: stringProperty('Exact durable session UUID.'),
+        teamId: stringProperty('Durable team UUID.'),
+        roleKey: stringProperty('Stable role key within the team.'),
+        generation: { type: 'integer', minimum: 1 },
+        artifactIds: {
+          type: 'array',
+          maxItems: 100,
+          uniqueItems: true,
+          items: stringProperty('Artifact or provider-artifact identity.'),
+        },
+      },
+      ['clientId'],
+      { oneOf: selectorOneOf },
+    ),
+    false,
+  ),
+  tool(
+    'sessionplane_artifact_list',
+    'artifact.list',
+    'List durable artifact descriptors for one exact session generation.',
+    objectSchema(
+      {
+        ...baseIdentityProperties,
+        sessionId: stringProperty('Exact durable session UUID.'),
+        teamId: stringProperty('Durable team UUID.'),
+        roleKey: stringProperty('Stable role key within the team.'),
+        generation: { type: 'integer', minimum: 1 },
+      },
+      ['clientId'],
+      { oneOf: selectorOneOf },
+    ),
+    true,
+  ),
+  tool(
+    'sessionplane_artifact_get',
+    'artifact.get',
+    'Read one durable artifact descriptor.',
+    objectSchema(
+      {
+        ...baseIdentityProperties,
+        artifactId: stringProperty('Durable artifact UUID.'),
+      },
+      ['clientId', 'artifactId'],
+    ),
+    true,
+  ),
+  tool(
+    'sessionplane_artifact_export',
+    'artifact.export',
+    'Materialize downloaded artifact bytes at an explicit local output path.',
+    objectSchema(
+      {
+        ...baseIdentityProperties,
+        artifactId: stringProperty('Durable artifact UUID.'),
+        outputPath: stringProperty('Explicit local destination path.'),
+        overwrite: { type: 'boolean', default: false },
+      },
+      ['clientId', 'artifactId', 'outputPath'],
+    ),
+    false,
+  ),
 ];
 
 export function getMcpTool(name: string): McpToolDefinition | null {

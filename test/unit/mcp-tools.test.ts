@@ -34,6 +34,14 @@ test('MCP tool catalogue exposes unique core mappings and exact selector schemas
   assert.equal(getMcpTool('browser_click_ref')?.rpcMethod, 'browser.click');
   assert.equal(getMcpTool('browser_observe_bundle')?.rpcMethod, 'browser.observeBundle');
   assert.equal(getMcpTool('browser_upload_ref')?.rpcMethod, 'browser.upload');
+  assert.equal(
+    getMcpTool('sessionplane_artifact_capture')?.rpcMethod,
+    'artifact.capture',
+  );
+  assert.equal(
+    getMcpTool('sessionplane_artifact_export')?.rpcMethod,
+    'artifact.export',
+  );
   assert.equal(getMcpTool('browser_network')?.rpcMethod, 'browser.network');
   const sessionCreate = getMcpTool('sessionplane_session_create');
   const providerSchema = (sessionCreate?.inputSchema.properties as Record<string, unknown>)

@@ -74,11 +74,34 @@ Chrome profile:
 npm exec sessplane -- login --json
 ```
 
+Provider sessions support ChatGPT, Gemini, and Grok, including exact local file
+uploads. Provider-created downloadable files are captured into an owner-only,
+content-addressed artifact store and remain queryable after core restart:
+
+```bash
+npm exec sessplane -- send --session <sessionId> \
+  --prompt "Use the attached context and create result.zip" \
+  --file ./context.md --json
+
+npm exec sessplane -- artifact discover --session <sessionId> --json
+npm exec sessplane -- artifact capture --session <sessionId> --json
+npm exec sessplane -- artifact list --session <sessionId> --json
+npm exec sessplane -- artifact export <artifactId> --out ./result.zip
+```
+
+Artifact descriptors are bound to the exact `sessionId + generation` and store
+the provider identity, source descriptor, byte length, SHA-256, and durable
+relative path. Existing output files are never replaced unless `--overwrite`
+is explicit.
+
 `doctor --json` reports the installed Chrome build and, when the core is
 running, the current Page bindings without changing browser focus.
 
 Runtime state defaults to `.state/`. Override it with
 `SESSIONPLANE_STATE_DIR` when tests or multiple isolated instances are needed.
+The artifact store defaults to `.state/artifacts/`; override it with
+`SESSIONPLANE_ARTIFACT_DIR`. Use `SESSIONPLANE_MAX_ARTIFACT_FILE_BYTES` to set
+the fail-closed per-artifact download limit.
 
 ## agbrowse compatibility
 
