@@ -28,6 +28,11 @@ type LaunchPersistentContext = (
   options: Parameters<typeof chromium.launchPersistentContext>[1],
 ) => ReturnType<typeof chromium.launchPersistentContext>;
 
+const PROFILE_AUTH_DEFAULT_ARGS = [
+  '--password-store=basic',
+  '--use-mock-keychain',
+] as const;
+
 interface ProfileLockPayload {
   readonly pid: number;
   readonly token: string;
@@ -120,6 +125,10 @@ export class BrowserOwner {
         headless: this.#headless,
         acceptDownloads: true,
         timeout: this.#launchTimeoutMs,
+        // Preserve same-user Chrome profile authentication when importing a
+        // dedicated profile created outside Playwright. These Playwright
+        // defaults switch Chrome away from the user's normal OS keyring.
+        ignoreDefaultArgs: [...PROFILE_AUTH_DEFAULT_ARGS],
       });
       this.#context = context;
       this.#browser = context.browser();

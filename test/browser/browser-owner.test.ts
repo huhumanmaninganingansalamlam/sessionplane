@@ -5,16 +5,23 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { chromium } from 'playwright-core';
+
 import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 
 test('BrowserOwner owns one dedicated persistent profile and fails closed for a second owner', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-owner-'));
   const profileDir = path.join(root, 'profile');
+  let capturedLaunchOptions: Parameters<typeof chromium.launchPersistentContext>[1] | null = null;
   const first = new BrowserOwner({
     profileDir,
     pageRegistry: new PageRegistry(),
     headless: true,
+    launchPersistentContext(userDataDir, options) {
+      capturedLaunchOptions = options;
+      return chromium.launchPersistentContext(userDataDir, options);
+    },
   });
   const second = new BrowserOwner({
     profileDir,
@@ -25,6 +32,10 @@ test('BrowserOwner owns one dedicated persistent profile and fails closed for a 
   try {
     await first.start();
     assert.equal(first.status.state, 'ready');
+    assert.deepEqual(capturedLaunchOptions?.ignoreDefaultArgs, [
+      '--password-store=basic',
+      '--use-mock-keychain',
+    ]);
     const lockPath = path.join(profileDir, '.sessionplane-profile.lock');
     assert.equal(existsSync(lockPath), true);
     assert.equal(statSync(lockPath).mode & 0o777, 0o600);
