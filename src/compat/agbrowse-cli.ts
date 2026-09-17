@@ -877,6 +877,8 @@ function agbrowseCompatibilityHelp(): string {
 Usage:
   agbrowse start [--headed|--headless] [--json]
   agbrowse status|stop|reset
+
+Browser compatibility:
   agbrowse tabs|new-tab|tab-switch|tab-close|tab-cleanup
   agbrowse navigate|snapshot|click|type|press|hover|select|upload
   agbrowse screenshot|text|get-dom|console|network|evaluate

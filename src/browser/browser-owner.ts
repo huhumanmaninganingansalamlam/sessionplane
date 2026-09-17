@@ -195,9 +195,10 @@ export class BrowserOwner {
 
     const { page, binding } = await this.createPage();
     try {
-      await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: this.#launchTimeoutMs });
+      await page.goto(loginUrl, { waitUntil: 'commit', timeout: this.#launchTimeoutMs });
       return this.#pageRegistry.refreshPage(binding.pageKey);
     } catch (error) {
+      await page.close().catch(() => undefined);
       throw new BrowserOwnerError('browser.unavailable', 'Failed to open the ChatGPT login page', {
         cause: error,
       });

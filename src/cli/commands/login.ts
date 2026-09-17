@@ -9,7 +9,7 @@ export async function runLogin(
     socketPath: config.socketPath,
     method: 'browser.login',
     params: url === undefined ? {} : { url },
-    timeoutMs: Math.max(config.rpcRequestTimeoutMs, config.browserLaunchTimeoutMs),
+    timeoutMs: Math.max(config.rpcRequestTimeoutMs, config.browserLaunchTimeoutMs + 5_000),
     maxLineBytes: config.rpcMaxLineBytes,
   });
 }
