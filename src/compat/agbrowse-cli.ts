@@ -7,6 +7,7 @@ import { runCli } from '../cli/main.ts';
 import { callRpc, RpcClientError } from '../cli/client.ts';
 import { writeCliError, writeCliResult, type CliIo } from '../cli/format.ts';
 import { resolveConfig, type SessionPlaneConfig } from '../config.ts';
+import { ContextPackageService } from '../context/context-package.ts';
 import {
   capabilityForLegacyCommand,
   loadAgbrowseManifest,
@@ -45,6 +46,10 @@ export async function runAgbrowseCli(
         return await runCli(['browser-reset', ...translateFlags(argv.slice(1))], io);
       case 'web-ai':
         return await runWebAiCompatibility(argv.slice(1), io, json);
+      case 'skills':
+        return await runCli(['skills', ...argv.slice(1)], io);
+      case 'install-skills':
+        return await runCli(['skills', 'install', ...argv.slice(1)], io);
       case 'tabs':
       case 'active-tab':
         return await runTransformedBrowserRead(command, argv.slice(1), io, json);
@@ -93,7 +98,14 @@ async function runWebAiCompatibility(
     return writeCompatibilityUnsupported(io, json, `web-ai ${action}`, 'web-ai.advanced-chatgpt', 'missing');
   }
   if (action === 'context-dry-run' || action === 'context-render') {
-    return writeCompatibilityUnsupported(io, json, `web-ai ${action}`, 'context.package', 'missing');
+    return await runCli(
+      [
+        'context',
+        action === 'context-render' ? 'render' : 'dry-run',
+        ...argv.slice(1),
+      ],
+      io,
+    );
   }
 
   const config = configFromArgs(argv);
@@ -225,7 +237,26 @@ async function sendWebAi(
   clientId: string,
 ): Promise<Record<string, unknown>> {
   const provider = providerOption(argv);
-  const prompt = requireArgOption(argv, '--prompt');
+  let prompt = requireArgOption(argv, '--prompt');
+  const files = [...optionValues(argv, '--file')];
+  if (hasLegacyContext(argv)) {
+    const contextPackages = new ContextPackageService({ stateDir: config.stateDir });
+    const contextFile = optionValue(argv, '--context-file');
+    const context = contextPackages.render({
+      root: optionValue(argv, '--root') ?? process.cwd(),
+      includes: optionValues(argv, '--context-from-files'),
+      excludes: optionValues(argv, '--context-exclude'),
+      ...(contextFile === undefined ? {} : { contextFile }),
+      prompt,
+      transport: legacyTransport(optionValue(argv, '--context-transport')),
+      transform: legacyTransform(optionValue(argv, '--context-transform')),
+      maxInputTokens: numberOption(argv, '--max-input', 120_000),
+      maxFileBytes: numberOption(argv, '--max-context-file-size', 2 * 1024 * 1024),
+      maxTotalBytes: numberOption(argv, '--max-file-size', 20 * 1024 * 1024),
+    });
+    if (context.transport === 'inline') prompt = context.composerText;
+    else if (context.artifactPath !== null) files.push(context.artifactPath);
+  }
   const requestId = optionValue(argv, '--request-id') ?? randomUUID();
   let sessionId = optionValue(argv, '--session');
   if (sessionId === undefined) {
@@ -275,7 +306,7 @@ async function sendWebAi(
       model: optionValue(argv, '--model') ?? optionValue(argv, '--family') ?? null,
       effort: optionValue(argv, '--effort') ?? optionValue(argv, '--reasoning-effort') ?? null,
       surface: optionValue(argv, '--surface') ?? 'chat',
-      files: optionValues(argv, '--file'),
+      files,
       sessionDeadlineSec: numberOption(argv, '--timeout', 1_200),
     },
     timeoutMs: Math.max(config.rpcRequestTimeoutMs, config.submissionAckTimeoutMs + 5_000),
@@ -413,6 +444,30 @@ function numberOption(argv: readonly string[], name: string, fallback: number): 
   const value = Number(raw);
   if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be positive`);
   return value;
+}
+
+function hasLegacyContext(argv: readonly string[]): boolean {
+  return (
+    optionValues(argv, '--context-from-files').length > 0 ||
+    optionValues(argv, '--context-exclude').length > 0 ||
+    optionValue(argv, '--context-file') !== undefined
+  );
+}
+
+function legacyTransport(value: string | undefined): 'inline' | 'upload' {
+  const resolved = value ?? 'upload';
+  if (resolved !== 'inline' && resolved !== 'upload') {
+    throw new Error('--context-transport must be inline or upload');
+  }
+  return resolved;
+}
+
+function legacyTransform(value: string | undefined): 'raw' | 'repomix' {
+  const resolved = value ?? 'raw';
+  if (resolved !== 'raw' && resolved !== 'repomix') {
+    throw new Error('--context-transform must be raw or repomix');
+  }
+  return resolved;
 }
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {

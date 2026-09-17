@@ -8,6 +8,7 @@ import { prepareRuntimeDirectories, resolveConfig, type SessionPlaneConfig } fro
 import { getSystemHealth } from './core/health.ts';
 import { BrowserControlService } from './core/browser-control-service.ts';
 import { ArtifactService } from './core/artifact-service.ts';
+import { ContextPackageService } from './context/context-package.ts';
 import { ObservationService } from './core/observation-service.ts';
 import { RecoveryService } from './core/recovery-service.ts';
 import { StopService } from './core/stop-service.ts';
@@ -19,6 +20,7 @@ import { RpcServer } from './rpc/server.ts';
 import { registerBrowserMethods } from './rpc/methods/browser.ts';
 import { registerBrowserControlMethods } from './rpc/methods/browser-control.ts';
 import { registerArtifactMethods } from './rpc/methods/artifact.ts';
+import { registerContextMethods } from './rpc/methods/context.ts';
 import { registerSessionMethods } from './rpc/methods/session.ts';
 import { registerSendMethods } from './rpc/methods/send.ts';
 import { registerStopMethods } from './rpc/methods/stop.ts';
@@ -50,6 +52,7 @@ export interface CoreService {
   readonly pageRegistry: PageRegistry;
   readonly browserControl: BrowserControlService;
   readonly artifactService: ArtifactService;
+  readonly contextPackages: ContextPackageService;
   readonly pageMutationMutex: PageMutationMutex;
   readonly teamDirectory: TeamDirectory;
   readonly receipts: ReceiptRepository;
@@ -201,6 +204,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     artifactDir: config.artifactDir,
     maxArtifactFileBytes: config.maxArtifactFileBytes,
   });
+  const contextPackages = new ContextPackageService({ stateDir: config.stateDir });
 
   try {
     const recovered = await submissionService.recoverInterruptedSubmissions();
@@ -238,6 +242,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   });
   registerBrowserControlMethods(router, browserControl);
   registerArtifactMethods(router, artifactService);
+  registerContextMethods(router, contextPackages);
   registerTeamMethods(router, teamDirectory, receipts);
   registerSessionMethods(router, teamDirectory, receipts);
   registerSendMethods(router, submissionService);
@@ -277,6 +282,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageRegistry,
     browserControl,
     artifactService,
+    contextPackages,
     pageMutationMutex,
     teamDirectory,
     receipts,

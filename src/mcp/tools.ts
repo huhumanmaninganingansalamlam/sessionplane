@@ -872,7 +872,49 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     ),
     false,
   ),
+  tool(
+    'sessionplane_context_dry_run',
+    'context.dryRun',
+    'Inspect a deterministic, symlink-safe context package without writing an upload artifact.',
+    contextPackageSchema(),
+    true,
+  ),
+  tool(
+    'sessionplane_context_render',
+    'context.render',
+    'Render a deterministic inline or upload context package and enforce the token budget.',
+    contextPackageSchema(),
+    false,
+  ),
 ];
+
+function contextPackageSchema(): Readonly<Record<string, unknown>> {
+  return objectSchema(
+    {
+      root: stringProperty('Context root directory; defaults to the core working directory.'),
+      includes: {
+        type: 'array',
+        maxItems: 2_000,
+        uniqueItems: true,
+        items: stringProperty('Root-relative file path or glob.'),
+      },
+      excludes: {
+        type: 'array',
+        maxItems: 2_000,
+        uniqueItems: true,
+        items: stringProperty('Root-relative exclusion glob.'),
+      },
+      contextFile: stringProperty('Root-relative newline-delimited selector file.'),
+      prompt: { type: 'string', maxLength: 500_000 },
+      transport: { type: 'string', enum: ['inline', 'upload'], default: 'upload' },
+      transform: { type: 'string', enum: ['raw', 'repomix'], default: 'raw' },
+      maxInputTokens: { type: 'integer', minimum: 1, maximum: 10_000_000 },
+      maxFileBytes: { type: 'integer', minimum: 1, maximum: 1024 * 1024 * 1024 },
+      maxTotalBytes: { type: 'integer', minimum: 1, maximum: 2 * 1024 * 1024 * 1024 },
+    },
+    [],
+  );
+}
 
 export function getMcpTool(name: string): McpToolDefinition | null {
   return MCP_TOOLS.find((candidate) => candidate.name === name) ?? null;

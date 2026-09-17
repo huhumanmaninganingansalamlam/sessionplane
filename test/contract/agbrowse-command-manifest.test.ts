@@ -24,6 +24,11 @@ test('agbrowse compatibility manifest is source-bound and browser-complete', () 
   );
   assert.equal(requiredIncomplete(manifest, 'fetch').length, 0);
   assert.equal(requiredIncomplete(manifest, 'search').length, 0);
+  assert.equal(requiredIncomplete(manifest, 'skills').length, 0);
+  assert.deepEqual(
+    requiredIncomplete(manifest, 'artifact').map((command) => command.id),
+    ['artifact.code'],
+  );
   const providerArtifacts = manifest.commands.find(
     (command) => command.id === 'artifact.provider-files',
   );
@@ -50,6 +55,7 @@ test('implemented artifact RPC rows exist in the registered core source', () => 
   const manifest = loadAgbrowseManifest();
   const source = [
     readFileSync(path.resolve('src/rpc/methods/artifact.ts'), 'utf8'),
+    readFileSync(path.resolve('src/rpc/methods/context.ts'), 'utf8'),
     readFileSync(path.resolve('src/main.ts'), 'utf8'),
   ].join('\n');
   const methods = manifest.commands

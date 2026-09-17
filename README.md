@@ -134,6 +134,57 @@ agbrowse web-ai query --vendor grok --prompt "..." --json
 These aliases create or resume durable SessionPlane sessions and share the same
 generation, idempotency, wait, observer, and restart contracts as `sessplane`.
 
+## Context packages and bundled skills
+
+Large local context can be inspected before any browser mutation. Selection is
+root-bounded, deterministic, symlink-rejecting, binary-aware, size-bounded, and
+SHA-256 addressed. `raw` renders one fenced section per file; `repomix` renders
+a deterministic XML-compatible package without executing repository config or
+processors.
+
+```bash
+sessplane context dry-run \
+  --root . \
+  --context-from-files 'src/**/*.ts' \
+  --context-exclude 'src/**/*.generated.ts' \
+  --max-input 120000 --json
+
+sessplane context render \
+  --root . \
+  --context-file context-files.txt \
+  --context-transform repomix \
+  --context-transport upload --json
+
+sessplane send --session <sessionId> --prompt "Review this repository" \
+  --context-from-files 'src/**/*.ts' \
+  --context-transport upload --json
+```
+
+The legacy utility grammar is preserved:
+
+```bash
+agbrowse web-ai context-dry-run --context-from-files 'src/**/*.ts' --json
+agbrowse web-ai context-render --context-file context-files.txt \
+  --context-transport inline --json
+```
+
+Bundled SessionPlane skills can be inspected or installed without the old
+agbrowse package:
+
+```bash
+sessplane skills list --json
+sessplane skills get core --full
+sessplane skills path web-ai
+sessplane skills install --target ~/.codex/skills --skill browser --skill web-ai
+
+# Compatible aliases
+agbrowse skills get core --full
+agbrowse install-skills --target ~/.codex/skills --link
+```
+
+Installation never replaces an existing skill unless `--force` is explicit.
+`--link` creates directory symlinks; the default copies the bundled skills.
+
 ## Adaptive fetch, extraction, search, and research
 
 SessionPlane owns the replacement fetch pipeline instead of shelling out to the

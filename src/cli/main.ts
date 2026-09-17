@@ -3,8 +3,13 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 import { resolveConfig, SESSIONPLANE_VERSION, type SessionPlaneConfig } from '../config.ts';
+import {
+  ContextPackageService,
+  type ContextPackageInput,
+} from '../context/context-package.ts';
 import { serveForever } from '../main.ts';
 import { runMcpServer } from '../mcp/server.ts';
+import { SkillDistributionService } from '../skills/skill-distribution.ts';
 import { callRpc, RpcClientError } from './client.ts';
 import { runDoctor } from './commands/doctor.ts';
 import { runLogin } from './commands/login.ts';
@@ -13,6 +18,7 @@ import { writeCliError, writeCliResult, type CliIo } from './format.ts';
 interface ParsedArgs {
   readonly words: readonly string[];
   readonly options: Readonly<Record<string, string>>;
+  readonly multiOptions: Readonly<Record<string, readonly string[]>>;
   readonly files: readonly string[];
   readonly json: boolean;
 }
@@ -33,7 +39,13 @@ const FLAG_OPTIONS = new Set([
   'include-binary',
   'stdin-results',
   'overwrite',
+  'full',
+  'link',
+  'files-report',
+  'inline-only',
+  'allow-grok-context-pack',
 ]);
+const MULTI_VALUE_OPTIONS = new Set(['file', 'context-from-files', 'context-exclude', 'skill']);
 const VALUE_OPTIONS = new Set([
   'state-dir',
   'socket',
@@ -99,6 +111,21 @@ const VALUE_OPTIONS = new Set([
   'query',
   'timeout',
   'artifact-id',
+  'root',
+  'context-from-files',
+  'context-exclude',
+  'context-file',
+  'context-transport',
+  'context-transform',
+  'max-input',
+  'max-file-size',
+  'max-total-size',
+  'dry-run',
+  'target',
+  'skill',
+  'vendor',
+  'max-context-file-size',
+  'max-upload-file-size',
 ]);
 
 export async function runCli(
@@ -170,6 +197,10 @@ export async function runCli(
         return await runResearchCommand(io, parsed, config);
       case 'artifact':
         return await runArtifactCommand(io, parsed, config);
+      case 'context':
+        return await runContextCommand(io, parsed, config);
+      case 'skills':
+        return await runSkillsCommand(io, parsed);
       case 'mcp':
         await runMcpServer({ input: io.stdin, output: io.stdout, error: io.stderr, config });
         return 0;
@@ -590,14 +621,25 @@ async function runSendCommand(
   parsed: ParsedArgs,
   config: SessionPlaneConfig,
 ): Promise<number> {
+  let prompt = requireOption(parsed, 'prompt');
+  const files = [...parsed.files];
+  if (hasContextInput(parsed)) {
+    const contextPackages = new ContextPackageService({ stateDir: config.stateDir });
+    const context = contextPackages.render(contextInput(parsed, prompt));
+    if (context.transport === 'inline') {
+      prompt = context.composerText;
+    } else if (context.artifactPath !== null) {
+      files.push(context.artifactPath);
+    }
+  }
   return await printRpc(io, parsed, config, 'session.send', {
     ...mutationIdentity(parsed),
     ...sessionSelector(parsed, parsed.words.slice(1)),
-    prompt: requireOption(parsed, 'prompt'),
+    prompt,
     ...optionalParam('model', parsed.options.model),
     ...optionalParam('effort', parsed.options.effort),
     ...optionalParam('surface', parsed.options.surface),
-    ...(parsed.files.length === 0 ? {} : { files: parsed.files }),
+    ...(files.length === 0 ? {} : { files }),
     ...optionalIntegerParam(parsed, 'deadline', 'sessionDeadlineSec', 1, 86_400),
   });
 }
@@ -828,6 +870,63 @@ async function runArtifactCommand(
   }
 }
 
+async function runContextCommand(
+  io: CliIo,
+  parsed: ParsedArgs,
+  config: SessionPlaneConfig,
+): Promise<number> {
+  const action = parsed.words[1] ?? 'dry-run';
+  const service = new ContextPackageService({ stateDir: config.stateDir });
+  const input = contextInput(parsed, parsed.options.prompt ?? '');
+  if (action === 'dry-run') {
+    const result = service.dryRun(input);
+    writeCliResult(io, parsed.json, contextOutput(result, parsed.options.full === 'true'));
+    return 0;
+  }
+  if (action === 'render') {
+    const result = service.render(input);
+    writeCliResult(io, parsed.json, result);
+    return 0;
+  }
+  throw new Error(`Unknown context command: ${action}`);
+}
+
+async function runSkillsCommand(io: CliIo, parsed: ParsedArgs): Promise<number> {
+  const action = parsed.words[1] ?? 'list';
+  const service = new SkillDistributionService();
+  switch (action) {
+    case 'list':
+      writeCliResult(io, parsed.json, { requestOk: true, skills: service.list() });
+      return 0;
+    case 'get':
+      writeCliResult(
+        io,
+        parsed.json,
+        service.get(requirePositional(parsed.words.slice(2), 0, 'skill'), parsed.options.full === 'true'),
+      );
+      return 0;
+    case 'path':
+      writeCliResult(io, parsed.json, service.path(parsed.words[2]));
+      return 0;
+    case 'install':
+      writeCliResult(
+        io,
+        parsed.json,
+        service.install({
+          target: requireOption(parsed, 'target'),
+          ...(optionValues(parsed, 'skill').length === 0
+            ? {}
+            : { names: optionValues(parsed, 'skill') }),
+          link: parsed.options.link === 'true',
+          force: parsed.options.force === 'true',
+        }),
+      );
+      return 0;
+    default:
+      throw new Error(`Unknown skills command: ${action}`);
+  }
+}
+
 async function printRpc(
   io: CliIo,
   parsed: ParsedArgs,
@@ -850,6 +949,7 @@ async function printRpc(
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const words: string[] = [];
   const options: Record<string, string> = {};
+  const multiOptions: Record<string, string[]> = {};
   const files: string[] = [];
   let json = false;
 
@@ -894,14 +994,16 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
     if (equals < 0) {
       index += 1;
     }
-    if (name === 'file') {
-      files.push(value);
-    } else {
-      options[name] = value;
+    if (MULTI_VALUE_OPTIONS.has(name)) {
+      const values = multiOptions[name] ?? [];
+      values.push(value);
+      multiOptions[name] = values;
     }
+    if (name === 'file') files.push(value);
+    else options[name] = value;
   }
 
-  return { words, options, files, json };
+  return { words, options, multiOptions, files, json };
 }
 
 function sessionSelector(
@@ -1016,6 +1118,81 @@ function optionalParam(
   return value === undefined ? {} : { [name]: value };
 }
 
+function optionValues(parsed: ParsedArgs, name: string): readonly string[] {
+  return parsed.multiOptions[name] ?? (parsed.options[name] === undefined ? [] : [parsed.options[name]]);
+}
+
+function hasContextInput(parsed: ParsedArgs): boolean {
+  return (
+    optionValues(parsed, 'context-from-files').length > 0 ||
+    optionValues(parsed, 'context-exclude').length > 0 ||
+    parsed.options['context-file'] !== undefined
+  );
+}
+
+function contextInput(parsed: ParsedArgs, prompt: string): ContextPackageInput {
+  return {
+    ...(parsed.options.root === undefined ? {} : { root: parsed.options.root }),
+    ...(optionValues(parsed, 'context-from-files').length === 0
+      ? {}
+      : { includes: optionValues(parsed, 'context-from-files') }),
+    ...(optionValues(parsed, 'context-exclude').length === 0
+      ? {}
+      : { excludes: optionValues(parsed, 'context-exclude') }),
+    ...(parsed.options['context-file'] === undefined
+      ? {}
+      : { contextFile: parsed.options['context-file'] }),
+    ...(prompt.length === 0 ? {} : { prompt }),
+    transport: parseContextTransport(parsed.options['context-transport']),
+    transform: parseContextTransform(parsed.options['context-transform']),
+    maxInputTokens: integerOption(parsed, 'max-input', 120_000, 1, 10_000_000),
+    maxFileBytes: integerOption(
+      parsed,
+      parsed.options['max-context-file-size'] === undefined
+        ? 'max-file-size'
+        : 'max-context-file-size',
+      2 * 1024 * 1024,
+      1,
+      1024 * 1024 * 1024,
+    ),
+    maxTotalBytes: integerOption(
+      parsed,
+      'max-total-size',
+      20 * 1024 * 1024,
+      1,
+      2 * 1024 * 1024 * 1024,
+    ),
+  };
+}
+
+function parseContextTransport(value: string | undefined): 'inline' | 'upload' {
+  const resolved = value ?? 'upload';
+  if (resolved !== 'inline' && resolved !== 'upload') {
+    throw new Error('--context-transport must be inline or upload');
+  }
+  return resolved;
+}
+
+function parseContextTransform(value: string | undefined): 'raw' | 'repomix' {
+  const resolved = value ?? 'raw';
+  if (resolved !== 'raw' && resolved !== 'repomix') {
+    throw new Error('--context-transform must be raw or repomix');
+  }
+  return resolved;
+}
+
+function contextOutput(
+  result: ReturnType<ContextPackageService['dryRun']>,
+  full: boolean,
+): unknown {
+  if (full) return result;
+  return {
+    ...result,
+    files: result.files.map(({ content: _content, ...file }) => file),
+    composerText: '',
+  };
+}
+
 function readJsonFile(path: string, label: string): unknown {
   return parseJsonText(readFileSync(path, 'utf8'), label);
 }
@@ -1046,7 +1223,7 @@ function normalizeUntil(value: string): string {
 }
 
 function helpText(): string {
-  return `SessionPlane ${SESSIONPLANE_VERSION}\n\nUsage:\n  sessplane serve [--state-dir PATH]\n  sessplane health [--json] [--socket PATH]\n  sessplane doctor [--json] [--state-dir PATH]\n  sessplane login [--json] [--url HTTPS_URL]\n\nBrowser compatibility:\n  sessplane browser-status | browser-start | browser-stop\n  sessplane browser-reset --force\n  sessplane tabs | active-tab\n  sessplane new-tab [URL]\n  sessplane select-tab PAGE_KEY\n  sessplane tab-close [PAGE_KEY]\n  sessplane navigate URL [--page PAGE_KEY]\n  sessplane snapshot [--page PAGE_KEY] [--max-nodes N]\n  sessplane click REF [--snapshot-id ID]\n  sessplane type REF --text TEXT\n  sessplane press [REF] KEY\n  sessplane hover|check|uncheck REF\n  sessplane select REF --value VALUE[,VALUE]\n  sessplane upload REF FILE...\n  sessplane drag SOURCE_REF TARGET_REF\n  sessplane screenshot --out PATH [--full-page]\n  sessplane text [--selector CSS] | get-dom\n  sessplane console | network | evaluate --script JS\n  sessplane wait-for-selector CSS | wait-for-text TEXT | wait-for REF_OR_TEXT\n  sessplane observe-bundle [--screenshot --out PATH --boxes]\n  sessplane observe-actions INSTRUCTION [--top-n N]\n\nFetch, search, and research:\n  sessplane fetch URL [--max-bytes N] [--max-redirects N] [--include-html]\n  sessplane extract URL --schema FILE [--source auto|json|jsonld|table]\n  sessplane extract --from-file HTML --schema FILE\n  sessplane search QUERY [--max-results N] [--deep]\n  sessplane search --verify URL\n  sessplane search QUERY --results FILE [--backend NAME]\n  sessplane research plan QUERY [--max-queries N]\n  sessplane research normalize-results --query QUERY --results FILE --backend NAME\n  sessplane research enrich-fetch --plan PLAN --results RESULTS\n  sessplane research browse-plan --plan PLAN --enrichment ENRICHMENT\n\nTeam and role sessions:\n  sessplane team create --name NAME [--objective TEXT] [--request-id ID]\n  sessplane team show TEAM_ID [--json]\n  sessplane team list [--json]\n  sessplane team wait TEAM_ID [--roles KEY,KEY] [--until CONDITION]\n  sessplane team brief [update] TEAM_ID --brief TEXT\n  sessplane role add TEAM_ID ROLE_KEY --type expert|reviewer|custom\n  sessplane role retire TEAM_ID ROLE_KEY\n  sessplane session create TEAM_ID ROLE_KEY [--provider chatgpt|gemini|grok]\n  sessplane session show SESSION_ID\n  sessplane session events TEAM_ID [--after-sequence N]\n  sessplane send TEAM_ID ROLE_KEY --prompt TEXT [--model MODEL] [--effort LEVEL] [--surface NAME] [--file PATH ...]\n  sessplane send --session SESSION_ID --prompt TEXT\n  sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID\n  sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]\n  sessplane stop TEAM_ID ROLE_KEY [--request-id ID]\n\nProvider artifacts:\n  sessplane artifact discover --session SESSION_ID\n  sessplane artifact capture --session SESSION_ID [--artifact-id ID]\n  sessplane artifact list --session SESSION_ID [--generation N]\n  sessplane artifact get ARTIFACT_ID\n  sessplane artifact export ARTIFACT_ID --out PATH [--overwrite]\n\n  sessplane mcp\n\nGlobal options:\n  --client-id ID       Stable caller identity\n  --request-id ID      Stable mutation identity for exact retries\n  --page PAGE_KEY      Explicit browser Page identity\n  --json               Emit one compact JSON object\n  --state-dir PATH     Override runtime state directory\n  --socket PATH        Override core Unix socket\n`;
+  return `SessionPlane ${SESSIONPLANE_VERSION}\n\nUsage:\n  sessplane serve [--state-dir PATH]\n  sessplane health [--json] [--socket PATH]\n  sessplane doctor [--json] [--state-dir PATH]\n  sessplane login [--json] [--url HTTPS_URL]\n\nBrowser compatibility:\n  sessplane browser-status | browser-start | browser-stop\n  sessplane browser-reset --force\n  sessplane tabs | active-tab\n  sessplane new-tab [URL]\n  sessplane select-tab PAGE_KEY\n  sessplane tab-close [PAGE_KEY]\n  sessplane navigate URL [--page PAGE_KEY]\n  sessplane snapshot [--page PAGE_KEY] [--max-nodes N]\n  sessplane click REF [--snapshot-id ID]\n  sessplane type REF --text TEXT\n  sessplane press [REF] KEY\n  sessplane hover|check|uncheck REF\n  sessplane select REF --value VALUE[,VALUE]\n  sessplane upload REF FILE...\n  sessplane drag SOURCE_REF TARGET_REF\n  sessplane screenshot --out PATH [--full-page]\n  sessplane text [--selector CSS] | get-dom\n  sessplane console | network | evaluate --script JS\n  sessplane wait-for-selector CSS | wait-for-text TEXT | wait-for REF_OR_TEXT\n  sessplane observe-bundle [--screenshot --out PATH --boxes]\n  sessplane observe-actions INSTRUCTION [--top-n N]\n\nFetch, search, and research:\n  sessplane fetch URL [--max-bytes N] [--max-redirects N] [--include-html]\n  sessplane extract URL --schema FILE [--source auto|json|jsonld|table]\n  sessplane extract --from-file HTML --schema FILE\n  sessplane search QUERY [--max-results N] [--deep]\n  sessplane search --verify URL\n  sessplane search QUERY --results FILE [--backend NAME]\n  sessplane research plan QUERY [--max-queries N]\n  sessplane research normalize-results --query QUERY --results FILE --backend NAME\n  sessplane research enrich-fetch --plan PLAN --results RESULTS\n  sessplane research browse-plan --plan PLAN --enrichment ENRICHMENT\n\nContext packages:\n  sessplane context dry-run --context-from-files GLOB [--context-exclude GLOB]\n  sessplane context render --context-file FILE --context-transport inline|upload\n  sessplane send ... --context-from-files GLOB --context-transform raw|repomix\n\nTeam and role sessions:\n  sessplane team create --name NAME [--objective TEXT] [--request-id ID]\n  sessplane team show TEAM_ID [--json]\n  sessplane team list [--json]\n  sessplane team wait TEAM_ID [--roles KEY,KEY] [--until CONDITION]\n  sessplane team brief [update] TEAM_ID --brief TEXT\n  sessplane role add TEAM_ID ROLE_KEY --type expert|reviewer|custom\n  sessplane role retire TEAM_ID ROLE_KEY\n  sessplane session create TEAM_ID ROLE_KEY [--provider chatgpt|gemini|grok]\n  sessplane session show SESSION_ID\n  sessplane session events TEAM_ID [--after-sequence N]\n  sessplane send TEAM_ID ROLE_KEY --prompt TEXT [--model MODEL] [--effort LEVEL] [--surface NAME] [--file PATH ...]\n  sessplane send --session SESSION_ID --prompt TEXT\n  sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID\n  sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]\n  sessplane stop TEAM_ID ROLE_KEY [--request-id ID]\n\nProvider artifacts:\n  sessplane artifact discover --session SESSION_ID\n  sessplane artifact capture --session SESSION_ID [--artifact-id ID]\n  sessplane artifact list --session SESSION_ID [--generation N]\n  sessplane artifact get ARTIFACT_ID\n  sessplane artifact export ARTIFACT_ID --out PATH [--overwrite]\n\nSkill distribution:\n  sessplane skills list [--json]\n  sessplane skills get core --full\n  sessplane skills path [SKILL]\n  sessplane skills install --target DIR [--skill NAME ...] [--link] [--force]\n\n  sessplane mcp\n\nGlobal options:\n  --client-id ID       Stable caller identity\n  --request-id ID      Stable mutation identity for exact retries\n  --page PAGE_KEY      Explicit browser Page identity\n  --json               Emit one compact JSON object\n  --state-dir PATH     Override runtime state directory\n  --socket PATH        Override core Unix socket\n`;
 }
 
 function isDirectExecution(): boolean {

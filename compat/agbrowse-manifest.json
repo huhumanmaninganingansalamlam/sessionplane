@@ -182,11 +182,14 @@
       "id": "context.package",
       "category": "artifact",
       "required": true,
-      "status": "missing",
+      "status": "implemented",
       "legacyCommands": ["web-ai"],
-      "canonicalCommands": [],
-      "rpcMethods": [],
-      "contracts": []
+      "canonicalCommands": ["context dry-run", "context render"],
+      "rpcMethods": ["context.dryRun", "context.render"],
+      "contracts": [
+        "test/unit/context-package.test.ts",
+        "test/integration/context-skill-compat.test.ts"
+      ]
     },
     {
       "id": "artifact.provider-files",
@@ -227,11 +230,14 @@
       "id": "skills.distribution",
       "category": "skills",
       "required": true,
-      "status": "foundation",
+      "status": "implemented",
       "legacyCommands": ["skills", "install-skills"],
-      "canonicalCommands": [],
+      "canonicalCommands": ["skills list", "skills get", "skills path", "skills install"],
       "rpcMethods": [],
-      "contracts": []
+      "contracts": [
+        "test/unit/skill-distribution.test.ts",
+        "test/integration/context-skill-compat.test.ts"
+      ]
     },
     {
       "id": "runway.experimental",
