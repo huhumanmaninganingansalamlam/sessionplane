@@ -28,6 +28,7 @@ import {
   type ProviderSubmissionRequest,
   type ProviderWakeReason,
 } from './provider-adapter.ts';
+import { assertNoHumanVerification } from './human-verification.ts';
 
 export interface ProviderDomSelectors {
   readonly composer: readonly string[];
@@ -314,6 +315,11 @@ class DomProviderSubmission implements ProviderSubmission {
         `Page ${this.pageKey} is not a ${this.provider} URL`,
       );
     }
+    await assertNoHumanVerification({
+      page: this.#page,
+      provider: this.provider,
+      pageKey: this.pageKey,
+    });
     if (this.#request.model !== null) {
       await selectExactModel(this.#page, this.#selectors, this.#request.model);
     }

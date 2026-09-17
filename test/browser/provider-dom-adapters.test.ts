@@ -125,6 +125,69 @@ for (const provider of ['gemini', 'grok'] as const) {
   });
 }
 
+test('generic provider verification fails closed before prompt or submit mutation', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-provider-verification-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://gemini.google.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: `<!doctype html>
+          <title>Security verification</title>
+          <section id="challenge-stage" style="width:320px;height:120px">Verify</section>
+          <rich-textarea><div class="ql-editor" contenteditable="true"></div></rich-textarea>
+          <button class="send-button" type="button">Send</button>
+          <script>
+            window.sendCount = 0;
+            document.querySelector('button').addEventListener('click', () => { window.sendCount += 1; });
+          </script>`,
+      });
+    });
+    await created.page.goto('https://gemini.google.com/app');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'gemini-verification-session',
+      generation: 1,
+      conversationId: null,
+    });
+    const adapter = createAdapter('gemini', owner, registry);
+    const submission = await adapter.openSubmission({
+      session: {
+        ...sessionSnapshot('gemini', created.binding.pageKey),
+        sessionId: 'gemini-verification-session',
+      },
+      generation: 1,
+      prompt: 'Do not mutate this composer.',
+      model: null,
+    });
+
+    await assert.rejects(
+      submission.prepare(),
+      (error: unknown) =>
+        error instanceof Error &&
+        'errorCode' in error &&
+        error.errorCode === 'provider.human-action-required',
+    );
+    assert.equal(await created.page.locator('[contenteditable="true"]').textContent(), '');
+    assert.equal(
+      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
+      0,
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function createAdapter(
   provider: ProviderName,
   browserOwner: BrowserOwner,

@@ -7,6 +7,7 @@ import test from 'node:test';
 import { callRpc, RpcClientError } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore, type CoreService } from '../../src/main.ts';
+import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 interface TeamSnapshot {
@@ -152,6 +153,48 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     assert.equal(disabledSnapshot.sessionState, 'ready');
     assert.equal(disabledSnapshot.promptSubmitted, false);
     assert.equal(disabledSnapshot.errorCode, 'provider.model-unavailable');
+
+    await createRole(config.socketPath, team.teamId, 'expert.human', 'human-role');
+    const human = await createSession(
+      config.socketPath,
+      team.teamId,
+      'expert.human',
+      'human-session',
+    );
+    fake.prepareError = new ProviderSubmissionError(
+      'provider.human-action-required',
+      'Visible browser verification requires human completion before retry',
+      {
+        details: {
+          provider: 'chatgpt',
+          requiresHumanAction: true,
+          retryWithNewRequestId: true,
+        },
+      },
+    );
+    const beforeHuman = fake.submitCount;
+    await assert.rejects(
+      rpc(config.socketPath, 'session.send', {
+        clientId: 'client-send',
+        requestId: 'send-human-verification',
+        sessionId: human.sessionId,
+        prompt: 'This must stay out of the composer.',
+        sessionDeadlineSec: 600,
+      }),
+      (error: unknown) => {
+        if (!(error instanceof RpcClientError)) return false;
+        const data = error.data as Record<string, unknown>;
+        const details = data.details as Record<string, unknown> | undefined;
+        return (
+          data.errorCode === 'provider.human-action-required' &&
+          details?.promptSubmitted === false &&
+          details.requiresHumanAction === true &&
+          details.retryWithNewRequestId === true
+        );
+      },
+    );
+    assert.equal(fake.submitCount, beforeHuman);
+    fake.prepareError = null;
 
     await createRole(config.socketPath, team.teamId, 'expert.interrupted', 'interrupted-role');
     const interrupted = await createSession(

@@ -188,6 +188,70 @@ test('ChatGPT Work surface is rejected before composer mutation', async () => {
   }
 });
 
+test('visible browser verification is handed to a human before composer mutation', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-verification-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: humanVerificationFixture(),
+      });
+    });
+    await created.page.goto('https://chatgpt.com/');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'verification-session',
+      generation: 1,
+      conversationId: null,
+    });
+    const submission = new ChatGptSubmission({
+      page: created.page,
+      pageKey: created.binding.pageKey,
+      pageRegistry: registry,
+      request: {
+        session: {
+          ...sessionSnapshot(created.binding.pageKey),
+          sessionId: 'verification-session',
+        },
+        generation: 1,
+        prompt: 'This must remain untouched.',
+        model: null,
+        surface: 'chat',
+      },
+      acknowledgementTimeoutMs: 1_000,
+    });
+
+    await assert.rejects(
+      submission.prepare(),
+      (error: unknown) =>
+        error instanceof Error &&
+        'errorCode' in error &&
+        error.errorCode === 'provider.human-action-required' &&
+        'details' in error &&
+        (error.details as Record<string, unknown>).requiresHumanAction === true,
+    );
+    assert.equal(await created.page.locator('#prompt-textarea').textContent(), '');
+    assert.equal(
+      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
+      0,
+    );
+    assert.equal(created.page.isClosed(), false);
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ChatGPT named Deep Research mode must acknowledge selection before submit', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-deep-research-'));
   const registry = new PageRegistry();
@@ -367,6 +431,24 @@ function namedModeFixture(): string {
             switcher.textContent = 'Deep Research';
             menu.hidden = true;
           });
+          document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+            window.sendCount += 1;
+          });
+        </script>
+      </body>
+    </html>`;
+}
+
+function humanVerificationFixture(): string {
+  return `<!doctype html>
+    <html>
+      <head><title>Just a moment...</title></head>
+      <body>
+        <section id="challenge-stage" style="width:320px;height:120px">Verify you are human</section>
+        <div id="prompt-textarea" data-testid="prompt-textarea" contenteditable="true"></div>
+        <button data-testid="send-button" type="button">Send</button>
+        <script>
+          window.sendCount = 0;
           document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
             window.sendCount += 1;
           });

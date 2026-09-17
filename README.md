@@ -119,6 +119,12 @@ composer into ChatGPT Work, and an explicit Work request fails before provider
 mutation. Chat model/reasoning selection, named Chat modes, uploads, durable
 follow-up generations, Project Sources, and artifact recovery remain supported.
 
+When a provider Page visibly presents Cloudflare or CAPTCHA-style browser
+verification, submission fails before model selection, upload, prompt fill, or
+send with `provider.human-action-required`. SessionPlane leaves the headed Page
+open so a person can complete the check and rerun the command with a new
+request ID. It never clicks, solves, disguises, or bypasses the challenge.
+
 ChatGPT Project Sources are addressed by an explicit project URL. `add` hashes
 and validates every local file before opening the provider page, skips names
 already visible in the project, and serializes concurrent mutations for the

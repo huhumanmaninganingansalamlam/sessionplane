@@ -27,6 +27,7 @@ export class FakeProviderAdapter implements ProviderAdapter {
   readonly provider: ProviderName;
   acknowledgementMode: FakeAcknowledgementMode = 'success';
   submitThrows = false;
+  prepareError: ProviderSubmissionError | null = null;
   readonly disabledModels = new Set<string>();
   readonly submissionRequests: ProviderSubmissionRequest[] = [];
   openCount = 0;
@@ -70,6 +71,9 @@ export class FakeProviderAdapter implements ProviderAdapter {
       pageKey,
       async prepare(): Promise<void> {
         adapter.prepareCount += 1;
+        if (adapter.prepareError !== null) {
+          throw adapter.prepareError;
+        }
         if (request.model !== null && adapter.disabledModels.has(request.model)) {
           throw new ProviderSubmissionError(
             'provider.model-unavailable',

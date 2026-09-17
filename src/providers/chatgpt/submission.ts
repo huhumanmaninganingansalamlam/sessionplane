@@ -9,6 +9,7 @@ import {
   type ProviderSubmissionAcknowledgement,
   type ProviderSubmissionRequest,
 } from '../provider-adapter.ts';
+import { assertNoHumanVerification } from '../human-verification.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
 export interface ChatGptSubmissionOptions {
@@ -49,6 +50,11 @@ export class ChatGptSubmission implements ProviderSubmission {
       this.#registry.refreshPage(this.pageKey);
     }
     this.#requireExactPage();
+    await assertNoHumanVerification({
+      page: this.#page,
+      provider: this.provider,
+      pageKey: this.pageKey,
+    });
     const surface = normalizeLabel(this.#request.surface ?? '');
     if (surface === 'work') {
       throw new ProviderSubmissionError(

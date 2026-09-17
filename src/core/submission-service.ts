@@ -600,6 +600,7 @@ export class SubmissionService {
     });
     actor.publish(snapshot, eventSequence);
     throw new SessionPlaneDomainError(classified.errorCode, classified.message, {
+      ...preSubmitDetails(classified.details),
       promptSubmitted: false,
       snapshot,
     });
@@ -793,17 +794,29 @@ function hashPrompt(prompt: string): string {
   return createHash('sha256').update(prompt).digest('hex');
 }
 
-function classifyPreSubmitError(error: unknown): { readonly errorCode: string; readonly message: string } {
+function classifyPreSubmitError(error: unknown): {
+  readonly errorCode: string;
+  readonly message: string;
+  readonly details?: unknown;
+} {
   if (error instanceof ProviderSubmissionError) {
-    return { errorCode: error.errorCode, message: error.message };
+    return { errorCode: error.errorCode, message: error.message, details: error.details };
   }
   if (error instanceof SessionPlaneDomainError) {
-    return { errorCode: error.errorCode, message: error.message };
+    return { errorCode: error.errorCode, message: error.message, details: error.details };
   }
   return {
     errorCode: 'browser.unavailable',
     message: error instanceof Error ? error.message : 'Provider preparation failed',
   };
+}
+
+function preSubmitDetails(value: unknown): Readonly<Record<string, unknown>> {
+  if (value === undefined) return {};
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Readonly<Record<string, unknown>>;
+  }
+  return { providerDetails: value };
 }
 
 function parseStoredSnapshot(outbox: OutboxRecord): SessionSnapshot {

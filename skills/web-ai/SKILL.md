@@ -24,6 +24,11 @@ sessplane wait --session "$SESSION_ID" --generation "$GENERATION" --json
 `submission_unknown` must never be automatically resent. Use a stable
 `requestId` only for an exact retry of the same mutation.
 
+`provider.human-action-required` means a visible browser verification is open.
+Do not retry in a loop and do not attempt to click or bypass it. Ask the user to
+complete it in the headed SessionPlane Chrome window, then rerun the submission
+with a new request ID because the previous attempt ended before prompt mutation.
+
 Provider-created files are durable:
 
 ```bash
