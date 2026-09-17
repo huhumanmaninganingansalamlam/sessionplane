@@ -167,11 +167,14 @@ compatibility contract fails when any required row is not implemented.
 `doctor --json` reports the installed Chrome build and, when the core is
 running, the current Page bindings without changing browser focus.
 
-Runtime state defaults to `.state/`. Override it with
-`SESSIONPLANE_STATE_DIR` when tests or multiple isolated instances are needed.
-The artifact store defaults to `.state/artifacts/`; override it with
-`SESSIONPLANE_ARTIFACT_DIR`. Use `SESSIONPLANE_MAX_ARTIFACT_FILE_BYTES` to set
-the fail-closed per-artifact download limit.
+Installed or linked `sessplane` and `agbrowse` commands use one stable runtime
+directory independent of the caller's current directory:
+`${XDG_STATE_HOME:-$HOME/.local/state}/sessionplane`. Override it with
+`SESSIONPLANE_STATE_DIR` or `--state-dir` when tests or multiple isolated
+instances are needed. The artifact store defaults to `<state-dir>/artifacts/`;
+override it with `SESSIONPLANE_ARTIFACT_DIR`. Use
+`SESSIONPLANE_MAX_ARTIFACT_FILE_BYTES` to set the fail-closed per-artifact
+download limit.
 
 ## agbrowse compatibility
 

@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+import { ensureSessionPlaneStateDir } from './runtime-state.mjs';
+
+ensureSessionPlaneStateDir();
+
 const cliUrl = new URL('../dist/cli/main.js', import.meta.url);
 
 try {

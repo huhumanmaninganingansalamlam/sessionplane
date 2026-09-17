@@ -3,6 +3,9 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { ensureSessionPlaneStateDir } from './runtime-state.mjs';
+
+ensureSessionPlaneStateDir();
 
 const sourcePath = fileURLToPath(new URL('../src/compat/agbrowse-cli.ts', import.meta.url));
 const distUrl = new URL('../dist/compat/agbrowse-cli.js', import.meta.url);
