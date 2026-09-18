@@ -55,7 +55,7 @@ interface BrowserCandidate {
   readonly executable: string;
 }
 
-const AUTO_PREFERENCE_ORDER = ['chrome', 'chromium', 'edge', 'brave'] as const;
+const AUTO_PREFERENCE_ORDER = ['chromium', 'chrome', 'edge', 'brave'] as const;
 
 export function findHostBrowser(
   options: HostBrowserDiscoveryOptions = {},

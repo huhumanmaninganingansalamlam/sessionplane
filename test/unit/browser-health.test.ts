@@ -9,7 +9,7 @@ import {
   listHostBrowsers,
 } from '../../src/browser/browser-health.ts';
 
-test('auto browser discovery uses only host executables and prefers Chrome', () => {
+test('auto browser discovery uses only host executables and prefers Chromium', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-host-browsers-'));
   try {
     fakeBrowser(root, 'chromium', 'Chromium 152.0.0.0');
@@ -19,9 +19,9 @@ test('auto browser discovery uses only host executables and prefers Chrome', () 
     const browsers = listHostBrowsers({ env, platform: 'linux', includePlatformDefaults: false });
     assert.deepEqual(
       browsers.map((browser) => browser.product),
-      ['chrome', 'chromium'],
+      ['chromium', 'chrome'],
     );
-    assert.equal(findHostBrowser({ env, platform: 'linux', includePlatformDefaults: false })?.product, 'chrome');
+    assert.equal(findHostBrowser({ env, platform: 'linux', includePlatformDefaults: false })?.product, 'chromium');
     assert.ok(browsers.every((browser) => browser.source === 'host'));
   } finally {
     rmSync(root, { recursive: true, force: true });
