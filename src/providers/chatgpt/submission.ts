@@ -156,8 +156,10 @@ export class ChatGptSubmission implements ProviderSubmission {
         if (identity === null || this.#baselineUserIds.has(identity.identityKey)) {
           continue;
         }
-        const text = normalizeLineEndings((await message.textContent().catch(() => null)) ?? '');
-        if (text !== normalizeLineEndings(this.#request.prompt) || conversationId === null) {
+        if (
+          !(await messageHasExactPrompt(message, this.#request.prompt)) ||
+          conversationId === null
+        ) {
           continue;
         }
         return {
@@ -546,8 +548,8 @@ async function firstVisible(
   return null;
 }
 
-async function readComposerValues(composer: Locator): Promise<readonly string[]> {
-  return await composer
+async function readExactTextCandidates(locator: Locator): Promise<readonly string[]> {
+  return await locator
     .evaluate(
       (element) => {
         const values: string[] = [];
@@ -556,6 +558,23 @@ async function readComposerValues(composer: Locator): Promise<readonly string[]>
         }
         if (element instanceof HTMLElement) {
           values.push(element.innerText, element.textContent ?? '');
+          const blockChildren = Array.from(element.childNodes);
+          if (
+            blockChildren.length > 0 &&
+            blockChildren.every(
+              (node) =>
+                (node.nodeType === Node.TEXT_NODE && (node.textContent ?? '').trim() === '') ||
+                (node instanceof HTMLElement &&
+                  (node.tagName === 'P' || node.tagName === 'DIV')),
+            )
+          ) {
+            values.push(
+              blockChildren
+                .filter((node): node is HTMLElement => node instanceof HTMLElement)
+                .map((node) => node.textContent ?? '')
+                .join('\n'),
+            );
+          }
         }
         return values;
       },
@@ -570,8 +589,24 @@ async function composerHasExactValue(
   expected: string,
 ): Promise<boolean> {
   const normalizedExpected = normalizeLineEndings(expected);
-  const values = await readComposerValues(composer);
+  const values = await readExactTextCandidates(composer);
   return values.some((value) => normalizeLineEndings(value) === normalizedExpected);
+}
+
+async function messageHasExactPrompt(message: Locator, expected: string): Promise<boolean> {
+  const normalizedExpected = normalizeLineEndings(expected);
+  for (const selector of CHATGPT_SELECTORS.userMessageContent) {
+    const content = message.locator(selector).first();
+    if ((await content.count().catch(() => 0)) === 0) continue;
+    const values = await readExactTextCandidates(content);
+    if (values.some((value) => normalizeLineEndings(value) === normalizedExpected)) {
+      return true;
+    }
+  }
+  const fallbackValues = await readExactTextCandidates(message);
+  return fallbackValues.some(
+    (value) => normalizeLineEndings(value) === normalizedExpected,
+  );
 }
 
 async function writeExactComposerValue(
@@ -620,7 +655,7 @@ async function waitForComposerStability(
   let previous = '';
   let stableSince = 0;
   while (Date.now() < deadline) {
-    const values = await readComposerValues(composer);
+    const values = await readExactTextCandidates(composer);
     if (values.length === 0) {
       previous = '';
       stableSince = 0;
@@ -649,7 +684,7 @@ async function waitForComposerValue(
   let deadline = Date.now() + COMPOSER_COMMIT_TIMEOUT_MS;
   let matchingSince = 0;
   for (;;) {
-    const values = await readComposerValues(composer);
+    const values = await readExactTextCandidates(composer);
     const now = Date.now();
     if (values.some((value) => normalizeLineEndings(value) === normalizedExpected)) {
       if (matchingSince === 0) {

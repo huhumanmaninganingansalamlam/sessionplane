@@ -75,6 +75,11 @@ export const CHATGPT_SELECTORS = {
     'button[aria-label*="project files" i]',
   ],
   userMessages: '[data-message-author-role="user"]',
+  userMessageContent: [
+    '[data-testid="collapsible-user-message-content"]',
+    '.whitespace-pre-wrap',
+    '[data-testid*="user-message-content"]',
+  ],
   messages: '[data-message-author-role]',
   stopControls: [
     '[data-testid="stop-button"]',

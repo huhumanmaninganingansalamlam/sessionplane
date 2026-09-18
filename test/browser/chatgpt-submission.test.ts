@@ -202,6 +202,79 @@ test('ChatGPT submission waits for a controlled composer to commit the filled pr
   }
 });
 
+test('ChatGPT submission preserves exact multiline text through ProseMirror block paragraphs', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-prosemirror-lines-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    const prompt = [
+      '[USER]',
+      '## Question',
+      'Return exactly MULTILINE_OK.',
+      '',
+      '[INSTRUCTIONS]',
+      'Keep the logical line breaks exact.',
+    ].join('\n');
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: chatGptFixture(false, true, false, prompt, false, false, false, true),
+      });
+    });
+    await created.page.goto('https://chatgpt.com/');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'session-prosemirror-lines',
+      generation: 1,
+      conversationId: null,
+    });
+
+    const submission = new ChatGptSubmission({
+      page: created.page,
+      pageKey: created.binding.pageKey,
+      pageRegistry: registry,
+      request: {
+        session: sessionSnapshot({
+          sessionId: 'session-prosemirror-lines',
+          pageKey: created.binding.pageKey,
+        }),
+        generation: 1,
+        prompt,
+        model: null,
+      },
+      acknowledgementTimeoutMs: 2_000,
+    });
+
+    await submission.prepare();
+    assert.equal(
+      await created.page.locator('#prompt-textarea').evaluate((element) =>
+        Array.from(element.children)
+          .map((child) => child.textContent ?? '')
+          .join('\n'),
+      ),
+      prompt,
+    );
+
+    await submission.submitOnce();
+    assert.deepEqual(await submission.captureAcknowledgement(), {
+      conversationId: 'conversation-123456',
+      submittedUserMessageId: 'user-message-1',
+      submittedUserTurnId: 'user-turn-1',
+    });
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ChatGPT submission accepts an already exact controlled composer value', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-composer-exact-'));
   const registry = new PageRegistry();
@@ -468,7 +541,18 @@ function chatGptFixture(
   stickyComposerValue = false,
   replaceComposerOnInput = false,
   delayedComposerVisibility = false,
+  proseMirrorBlocks = false,
 ): string {
+  const initialComposerMarkup = proseMirrorBlocks
+    ? initialComposerText
+        .split('\n')
+        .map((line) =>
+          line === ''
+            ? '<p data-empty-paragraph="true"><br class="ProseMirror-trailingBreak"></p>'
+            : `<p>${escapeHtml(line)}</p>`,
+        )
+        .join('')
+    : initialComposerText;
   return `<!doctype html>
     <html>
       <body>
@@ -477,7 +561,7 @@ function chatGptFixture(
           <button role="menuitem" type="button" aria-disabled="${disabledModel ? 'true' : 'false'}">Model B</button>
         </div>
         ${delayedComposerVisibility ? '<form><textarea placeholder="Proxy composer"></textarea></form>' : ''}
-        <div id="prompt-textarea" data-testid="prompt-textarea" contenteditable="true">${initialComposerText}</div>
+        <div id="prompt-textarea" data-testid="prompt-textarea" contenteditable="true">${initialComposerMarkup}</div>
         <button data-testid="send-button" type="button">Send</button>
         <section id="messages"></section>
         <script>
@@ -522,19 +606,57 @@ function chatGptFixture(
               composer.after(replacement);
             });
           }
+          if (${proseMirrorBlocks}) {
+            composer.addEventListener('input', () => {
+              const value = composer.innerText;
+              const blocks = value.split('\\n').map((line) => {
+                const paragraph = document.createElement('p');
+                if (line === '') {
+                  paragraph.appendChild(document.createElement('br'));
+                } else {
+                  paragraph.textContent = line;
+                }
+                return paragraph;
+              });
+              composer.replaceChildren(...blocks);
+            });
+          }
           document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
             window.sendCount += 1;
-            const prompt = composer.textContent;
+            const prompt = ${proseMirrorBlocks}
+              ? Array.from(composer.children).map((child) => child.textContent ?? '').join('\\n')
+              : composer.textContent;
             history.pushState({}, '', '/c/conversation-123456');
             const message = document.createElement('article');
             message.setAttribute('data-message-author-role', 'user');
             message.setAttribute('data-message-id', 'user-message-1');
             message.setAttribute('data-turn-id', 'user-turn-1');
-            message.textContent = prompt;
+            if (${proseMirrorBlocks}) {
+              const content = document.createElement('div');
+              content.setAttribute('data-testid', 'collapsible-user-message-content');
+              const body = document.createElement('div');
+              body.className = 'whitespace-pre-wrap';
+              body.textContent = prompt;
+              content.appendChild(body);
+              const toggle = document.createElement('button');
+              toggle.textContent = 'Show moreShow less';
+              message.append(content, toggle);
+            } else {
+              message.textContent = prompt;
+            }
             document.querySelector('#messages').appendChild(message);
           });
         </script>
       </body>
     </html>`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
 }
 
