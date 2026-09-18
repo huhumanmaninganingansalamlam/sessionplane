@@ -28,6 +28,23 @@ test('auto browser discovery uses only host executables and prefers Chromium', (
   }
 });
 
+test('Chromium discovery accepts the Flatpak exported launcher name', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-flatpak-chromium-'));
+  try {
+    fakeBrowser(root, 'org.chromium.Chromium', 'Chromium 153.0.0.0');
+    const selected = findHostBrowser({
+      env: { PATH: root, HOME: root },
+      platform: 'linux',
+      preference: 'chromium',
+      includePlatformDefaults: false,
+    });
+    assert.equal(selected?.product, 'chromium');
+    assert.equal(selected?.version, 'Chromium 153.0.0.0');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('an explicit host browser selection never falls back to another product', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-choice-'));
   try {

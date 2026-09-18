@@ -225,10 +225,11 @@ function browserCandidates(
   }
 
   addPathNames('chrome', ['google-chrome', 'google-chrome-stable']);
-  addPathNames('chromium', ['chromium', 'chromium-browser']);
+  addPathNames('chromium', ['chromium', 'chromium-browser', 'org.chromium.Chromium']);
   addPathNames('edge', ['microsoft-edge', 'microsoft-edge-stable']);
   addPathNames('brave', ['brave-browser', 'brave-browser-stable']);
   if (!includePlatformDefaults) return candidates;
+  const home = env.HOME ?? '';
   candidates.push(
     { product: 'chrome', executable: '/usr/bin/google-chrome' },
     { product: 'chrome', executable: '/usr/bin/google-chrome-stable' },
@@ -236,6 +237,21 @@ function browserCandidates(
     { product: 'chromium', executable: '/usr/bin/chromium' },
     { product: 'chromium', executable: '/usr/bin/chromium-browser' },
     { product: 'chromium', executable: '/snap/bin/chromium' },
+    {
+      product: 'chromium',
+      executable: '/var/lib/flatpak/exports/bin/org.chromium.Chromium',
+    },
+    ...(home === ''
+      ? []
+      : [
+          {
+            product: 'chromium' as const,
+            executable: join(
+              home,
+              '.local/share/flatpak/exports/bin/org.chromium.Chromium',
+            ),
+          },
+        ]),
     { product: 'edge', executable: '/usr/bin/microsoft-edge' },
     { product: 'edge', executable: '/usr/bin/microsoft-edge-stable' },
     { product: 'edge', executable: '/opt/microsoft/msedge/msedge' },

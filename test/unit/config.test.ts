@@ -22,7 +22,7 @@ test('resolveConfig anchors runtime paths under an explicit state directory', ()
     assert.equal(config.browserScopedProfile, true);
     assert.equal(config.artifactDir, path.join(root, 'runtime', 'artifacts'));
     assert.equal(config.browserHeadless, false);
-    assert.equal(config.browserPreference, 'auto');
+    assert.equal(config.browserPreference, 'chromium');
     assert.equal(config.browserExecutable, null);
     assert.equal(config.observationActiveSweepMs, 5_000);
     assert.equal(config.observationQuietSweepMs, 15_000);

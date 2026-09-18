@@ -51,9 +51,11 @@ array order are never identity.
 The core launches a browser already installed by the user and controls it with
 `playwright-core` through `chromium.launchPersistentContext()`. SessionPlane
 never downloads, installs, upgrades, or silently falls back to a Playwright-
-managed browser. The default `auto` selection prefers host Chromium, then
-host Google Chrome, Microsoft Edge, and Brave. Select explicitly with
-`--browser chrome|chromium|edge|brave`, or use
+managed browser. The default selection is the user-installed host Chromium,
+including native, Snap, and Flatpak Chromium launchers. It does not silently
+fall back to another browser. Select explicitly with
+`--browser chrome|chromium|edge|brave`, use `--browser auto` to opt into the
+Chromium, Chrome, Edge, then Brave fallback order, or use
 `--browser custom --browser-executable /absolute/path`. Every selection uses
 the dedicated SessionPlane profile; the user's normal browser profile and open
 tabs are never attached. No custom fingerprint patches are injected.

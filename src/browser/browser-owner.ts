@@ -95,7 +95,7 @@ export class BrowserOwner {
     this.#profileDir = this.#profileRoot;
     this.#pageRegistry = options.pageRegistry;
     this.#headless = options.headless ?? false;
-    this.#browserPreference = options.browserPreference ?? 'auto';
+    this.#browserPreference = options.browserPreference ?? 'chromium';
     this.#browserExecutable = options.browserExecutable ?? null;
     this.#launchTimeoutMs = options.launchTimeoutMs ?? 30_000;
     this.#launchPersistentContext =
