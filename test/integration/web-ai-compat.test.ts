@@ -224,6 +224,66 @@ test('agbrowse web-ai normal chat compatibility uses durable multi-provider sess
     assert.equal(JSON.parse(polled.stdout).answerText, 'Gemini final');
     assert.equal(gemini.submissionRequests[0]?.attachments?.length, 1);
 
+    const resumeSent = await runJson([
+      'web-ai',
+      'send',
+      '--vendor',
+      'gemini',
+      '--prompt',
+      'Resume this exact generation',
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(resumeSent.code, 0, resumeSent.stderr);
+    const resumeSessionId = JSON.parse(resumeSent.stdout).sessionId as string;
+    const resumePromise = runJson([
+      'web-ai',
+      'sessions',
+      'resume',
+      resumeSessionId,
+      '--timeout',
+      '2',
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    await waitUntil(() => service.actorScheduler.totalSubscriberCount === 1, 1_000);
+    gemini.emitObservation(resumeSessionId, {
+      candidate: {
+        responseMessageId: 'gemini-resume-final-1',
+        answerText: 'Gemini resumed final',
+        terminalMarker: true,
+        streamingMarker: false,
+      },
+      activity: 'none',
+    });
+    const resumed = await resumePromise;
+    assert.equal(resumed.code, 0, resumed.stderr);
+    assert.equal(JSON.parse(resumed.stdout).answerText, 'Gemini resumed final');
+    assert.equal(service.actorScheduler.totalSubscriberCount, 0);
+
+    const sessionDoctor = await runJson([
+      'web-ai',
+      'sessions',
+      'doctor',
+      resumeSessionId,
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(sessionDoctor.code, 0, sessionDoctor.stderr);
+    const doctorValue = JSON.parse(sessionDoctor.stdout) as {
+      readonly status: string;
+      readonly sessionId: string;
+      readonly recoveryMode: string;
+      readonly issues: readonly string[];
+    };
+    assert.equal(doctorValue.status, 'session-doctor');
+    assert.equal(doctorValue.sessionId, resumeSessionId);
+    assert.equal(doctorValue.recoveryMode, 'automatic-on-core-and-browser-start');
+    assert.ok(Array.isArray(doctorValue.issues));
+
     const grokSend = await runJson([
       'web-ai',
       'send',
@@ -261,7 +321,7 @@ test('agbrowse web-ai normal chat compatibility uses durable multi-provider sess
       '--json',
     ]);
     assert.equal(sessions.code, 0, sessions.stderr);
-    assert.equal(JSON.parse(sessions.stdout).sessions.length, 3);
+    assert.equal(JSON.parse(sessions.stdout).sessions.length, 4);
 
     const status = await runJson([
       'web-ai',
@@ -388,6 +448,54 @@ test('agbrowse web-ai normal chat compatibility uses durable multi-provider sess
   }
 });
 
+test('agbrowse compatibility fails closed on intentionally unsupported legacy surfaces', async () => {
+  const cases: ReadonlyArray<{
+    readonly argv: readonly string[];
+    readonly capabilityId: string;
+  }> = [
+    { argv: ['connect', '--auto', '--json'], capabilityId: 'browser.external-connect' },
+    { argv: ['action-memory', '--json'], capabilityId: 'browser.action-memory' },
+    { argv: ['runway', 'status', '--json'], capabilityId: 'runway.experimental' },
+    {
+      argv: ['web-ai', 'eval', '--json'],
+      capabilityId: 'web-ai.release-audit',
+    },
+    {
+      argv: ['web-ai', 'claim-audit', '--json'],
+      capabilityId: 'web-ai.release-audit',
+    },
+    {
+      argv: ['web-ai', 'sessions', 'reattach', 'session-test', '--json'],
+      capabilityId: 'web-ai.manual-reattach',
+    },
+    {
+      argv: ['web-ai', 'sessions', 'prune', '--json'],
+      capabilityId: 'web-ai.session-maintenance',
+    },
+  ];
+
+  for (const item of cases) {
+    const result = await runJson(item.argv);
+    assert.equal(result.code, 2, `${item.argv.join(' ')}: ${result.stderr}`);
+    const error = JSON.parse(result.stderr) as {
+      readonly errorCode: string;
+      readonly details?: {
+        readonly capabilityId?: string;
+        readonly status?: string;
+      };
+    };
+    assert.equal(error.errorCode, 'compatibility.unsupported', item.argv.join(' '));
+    assert.equal(error.details?.capabilityId, item.capabilityId, item.argv.join(' '));
+    assert.equal(error.details?.status, 'deferred', item.argv.join(' '));
+  }
+});
+
+test('agbrowse web-ai mcp-server delegates to the canonical SessionPlane MCP stdio server', async () => {
+  const result = await runJson(['web-ai', 'mcp-server']);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stdout, '');
+});
+
 class CaptureWritable extends Writable {
   value = '';
 
@@ -410,6 +518,16 @@ async function runJson(argv: readonly string[]) {
     stderr,
   });
   return { code, stdout: stdout.value.trim(), stderr: stderr.value.trim() };
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error('Timed out waiting for test condition');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 function silentLogger() {

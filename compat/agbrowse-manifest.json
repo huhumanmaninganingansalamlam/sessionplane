@@ -77,6 +77,26 @@
       "contracts": ["test/browser/browser-control.test.ts"]
     },
     {
+      "id": "browser.external-connect",
+      "category": "deferred",
+      "required": false,
+      "status": "deferred",
+      "legacyCommands": ["connect"],
+      "canonicalCommands": [],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
+      "id": "browser.action-memory",
+      "category": "deferred",
+      "required": false,
+      "status": "deferred",
+      "legacyCommands": ["action-memory"],
+      "canonicalCommands": [],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
       "id": "fetch.adaptive",
       "category": "fetch",
       "required": true,
@@ -200,6 +220,19 @@
       "contracts": []
     },
     {
+      "id": "web-ai.mcp-server",
+      "category": "web-ai",
+      "required": true,
+      "status": "implemented",
+      "legacyCommands": ["web-ai mcp-server"],
+      "canonicalCommands": ["mcp"],
+      "rpcMethods": [],
+      "contracts": [
+        "test/integration/web-ai-compat.test.ts",
+        "test/integration/cli-mcp.test.ts"
+      ]
+    },
+    {
       "id": "web-ai.sessions",
       "category": "web-ai",
       "required": true,
@@ -224,6 +257,26 @@
         "test/integration/cli-mcp.test.ts",
         "test/integration/restart-recovery.test.ts"
       ]
+    },
+    {
+      "id": "web-ai.manual-reattach",
+      "category": "deferred",
+      "required": false,
+      "status": "deferred",
+      "legacyCommands": ["web-ai sessions reattach"],
+      "canonicalCommands": [],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
+      "id": "web-ai.session-maintenance",
+      "category": "deferred",
+      "required": false,
+      "status": "deferred",
+      "legacyCommands": ["web-ai sessions prune"],
+      "canonicalCommands": [],
+      "rpcMethods": [],
+      "contracts": []
     },
     {
       "id": "web-ai.chatgpt-surfaces",
@@ -363,7 +416,7 @@
       "category": "deferred",
       "required": false,
       "status": "deferred",
-      "legacyCommands": ["web-ai"],
+      "legacyCommands": ["web-ai eval", "web-ai claim-audit"],
       "canonicalCommands": [],
       "rpcMethods": [],
       "contracts": []

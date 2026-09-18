@@ -30,6 +30,25 @@ test('agbrowse compatibility manifest is source-bound and browser-complete', () 
   const work = manifest.commands.find((command) => command.id === 'web-ai.work');
   assert.equal(work?.required, false);
   assert.equal(work?.status, 'deferred');
+  for (const [id, legacyCommand] of [
+    ['browser.external-connect', 'connect'],
+    ['browser.action-memory', 'action-memory'],
+  ] as const) {
+    const boundary = manifest.commands.find((command) => command.id === id);
+    assert.equal(boundary?.required, false, id);
+    assert.equal(boundary?.status, 'deferred', id);
+    assert.deepEqual(boundary?.legacyCommands, [legacyCommand], id);
+  }
+  for (const id of ['web-ai.manual-reattach', 'web-ai.session-maintenance'] as const) {
+    const boundary = manifest.commands.find((command) => command.id === id);
+    assert.equal(boundary?.required, false, id);
+    assert.equal(boundary?.status, 'deferred', id);
+  }
+  const mcpServer = manifest.commands.find((command) => command.id === 'web-ai.mcp-server');
+  assert.equal(mcpServer?.required, true);
+  assert.equal(mcpServer?.status, 'implemented');
+  assert.deepEqual(mcpServer?.legacyCommands, ['web-ai mcp-server']);
+  assert.deepEqual(mcpServer?.canonicalCommands, ['mcp']);
   const providerArtifacts = manifest.commands.find(
     (command) => command.id === 'artifact.provider-files',
   );

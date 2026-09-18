@@ -40,7 +40,6 @@ export async function runAgbrowseCli(
   const capability = capabilityForLegacyCommand(manifest, command);
   if (
     capability !== null &&
-    capability.required &&
     capability.status !== 'implemented' &&
     !['web-ai'].includes(command)
   ) {
@@ -130,6 +129,15 @@ async function runWebAiCompatibility(
       json,
       'web-ai work',
       'web-ai.work',
+      'deferred',
+    );
+  }
+  if (action === 'eval' || action === 'claim-audit') {
+    return writeCompatibilityUnsupported(
+      io,
+      json,
+      `web-ai ${action}`,
+      'web-ai.release-audit',
       'deferred',
     );
   }
@@ -656,14 +664,127 @@ async function runWebAiSessions(
     writeCliResult(io, json, { ok: true, status: 'sessions', ...result });
     return 0;
   }
-  if (['show', 'resume', 'reattach', 'doctor'].includes(action)) {
-    const sessionId = optionValue(argv, '--session') ?? argv[1];
-    if (sessionId === undefined) throw new Error(`web-ai sessions ${action} requires session id`);
+  const sessionId = optionValue(argv, '--session') ?? argv[1];
+  if (action === 'show') {
+    if (sessionId === undefined) throw new Error('web-ai sessions show requires session id');
     const result = await getSession(config, clientId, sessionId);
     writeCliResult(io, json, legacyWebAiEnvelope(result));
     return 0;
   }
+  if (action === 'resume') {
+    if (sessionId === undefined) throw new Error('web-ai sessions resume requires session id');
+    const current = await getSession(config, clientId, sessionId);
+    const generation = Number(current.generation);
+    if (!Number.isSafeInteger(generation) || generation < 0) {
+      throw new Error(`Session ${sessionId} has invalid generation`);
+    }
+    const result = await pollWebAi(
+      config,
+      clientId,
+      sessionId,
+      numberOption(argv, '--timeout', 1_200) * 1_000,
+      generation,
+    );
+    writeCliResult(io, json, legacyWebAiEnvelope(result));
+    return 0;
+  }
+  if (action === 'doctor') {
+    if (sessionId === undefined) throw new Error('web-ai sessions doctor requires session id');
+    const result = await buildWebAiSessionDoctor(config, clientId, sessionId);
+    writeCliResult(io, json, result);
+    return 0;
+  }
+  if (action === 'reattach') {
+    return writeCompatibilityUnsupported(
+      io,
+      json,
+      'web-ai sessions reattach',
+      'web-ai.manual-reattach',
+      'deferred',
+    );
+  }
+  if (action === 'prune') {
+    return writeCompatibilityUnsupported(
+      io,
+      json,
+      'web-ai sessions prune',
+      'web-ai.session-maintenance',
+      'deferred',
+    );
+  }
   return writeCompatibilityUnsupported(io, json, `web-ai sessions ${action}`, 'web-ai.chatgpt', 'foundation');
+}
+
+async function buildWebAiSessionDoctor(
+  config: SessionPlaneConfig,
+  clientId: string,
+  sessionId: string,
+): Promise<Record<string, unknown>> {
+  const [session, health, tabsResult] = await Promise.all([
+    getSession(config, clientId, sessionId),
+    callRpc<Record<string, unknown>>({
+      socketPath: config.socketPath,
+      method: 'system.health',
+      params: {},
+      timeoutMs: config.rpcRequestTimeoutMs,
+      maxLineBytes: config.rpcMaxLineBytes,
+    }),
+    callRpc<Record<string, unknown>>({
+      socketPath: config.socketPath,
+      method: 'browser.tabs',
+      params: {},
+      timeoutMs: config.rpcRequestTimeoutMs,
+      maxLineBytes: config.rpcMaxLineBytes,
+    }),
+  ]);
+  const tabs = Array.isArray(tabsResult.tabs)
+    ? tabsResult.tabs.filter(
+        (entry): entry is Record<string, unknown> =>
+          typeof entry === 'object' && entry !== null,
+      )
+    : [];
+  const pageKey = typeof session.pageKey === 'string' ? session.pageKey : null;
+  const page = pageKey === null
+    ? undefined
+    : tabs.find((entry) => entry.pageKey === pageKey);
+  const issues: string[] = [];
+  if (pageKey === null) {
+    issues.push('session.page-key-missing');
+  } else if (page === undefined) {
+    issues.push('session.page-not-registered');
+  } else {
+    if (page.sessionId !== session.sessionId) issues.push('session.page-session-mismatch');
+    if (Number(page.generation) !== Number(session.generation)) {
+      issues.push('session.page-generation-mismatch');
+    }
+    if ((page.conversationId ?? null) !== (session.conversationId ?? null)) {
+      issues.push('session.page-conversation-mismatch');
+    }
+  }
+  const browser =
+    typeof health.browser === 'object' && health.browser !== null
+      ? health.browser as Record<string, unknown>
+      : null;
+  if (browser?.state !== 'ready') issues.push('browser.not-ready');
+  if (typeof session.errorCode === 'string' && session.errorCode.length > 0) {
+    issues.push(`session.error:${session.errorCode}`);
+  }
+  return {
+    ok: true,
+    requestOk: true,
+    status: 'session-doctor',
+    sessionId,
+    summary: issues.length === 0 ? 'exact binding healthy' : 'issues detected',
+    recoveryMode: 'automatic-on-core-and-browser-start',
+    issues,
+    session,
+    page: page ?? null,
+    browser,
+    metrics:
+      typeof health.metrics === 'object' && health.metrics !== null
+        ? health.metrics
+        : null,
+  };
 }
 
 async function listSessions(
@@ -892,6 +1013,10 @@ Browser compatibility:
   agbrowse web-ai <command> [options]
   agbrowse skills|install-skills
 
+Legacy-only surfaces that violate SessionPlane ownership or are intentionally
+out of scope fail closed with compatibility.unsupported (for example connect,
+action-memory, and runway).
+
 This command is the SessionPlane compatibility alias. It uses the same
 long-running core, persistent Chrome profile, PageRegistry, SQLite state, and
 session actors as sessplane. ChatGPT provider automation is Chat-only; Work,
@@ -908,7 +1033,7 @@ Usage:
   agbrowse web-ai render --vendor chatgpt|gemini|grok --prompt TEXT
   agbrowse web-ai send|query --vendor PROVIDER --prompt TEXT [--session ID]
   agbrowse web-ai poll|watch|status|snapshot|stop --session ID
-  agbrowse web-ai sessions list|show|resume|reattach|doctor
+  agbrowse web-ai sessions list|show|resume|doctor
   agbrowse web-ai project-sources list|add --chatgpt-url URL
   agbrowse web-ai code --vendor chatgpt --prompt TEXT --output-zip PATH
   agbrowse web-ai code-extract --vendor chatgpt --session ID
@@ -920,7 +1045,9 @@ Common options:
   --timeout SEC --deadline ISO_TIME --request-id ID --json
 
 ChatGPT is Chat-only. "agbrowse web-ai work", --power, --speed, and an active
-Work composer fail before prompt fill or submit.`;
+Work composer fail before prompt fill or submit. Manual sessions reattach is
+not exposed: SessionPlane restores exact conversation bindings automatically on
+core/browser start. sessions prune, eval, and claim-audit also fail closed.`;
 }
 
 function requireArgOption(argv: readonly string[], name: string): string {
@@ -1391,7 +1518,7 @@ function writeCompatibilityUnsupported(
   const error = {
     requestOk: false,
     errorCode: 'compatibility.unsupported',
-    message: `agbrowse command is not implemented by SessionPlane yet: ${command}`,
+    message: `agbrowse command is unsupported by SessionPlane: ${command}`,
     details: { command, capabilityId, status },
   };
   io.stderr.write(
