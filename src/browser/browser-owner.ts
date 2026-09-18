@@ -9,7 +9,6 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
 import path from 'node:path';
 
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
@@ -23,6 +22,12 @@ import {
 } from './browser-health.ts';
 import { isChatGptUrl, type PageBindingSnapshot } from './page-binding.ts';
 import { PageRegistry } from './page-registry.ts';
+import {
+  assertDedicatedBrowserProfile,
+  BrowserProfileError,
+  ensureProfileBrowserIdentity,
+  resolveBrowserProfileDir,
+} from './browser-profile.ts';
 
 type LaunchPersistentContext = (
   userDataDir: string,
@@ -34,12 +39,6 @@ const PROFILE_AUTH_DEFAULT_ARGS = [
   '--use-mock-keychain',
 ] as const;
 
-interface BrowserProfileIdentity {
-  readonly product: ChromeInstallation['product'];
-  readonly executable: string;
-  readonly recordedAt: string;
-}
-
 interface ProfileLockPayload {
   readonly pid: number;
   readonly token: string;
@@ -48,6 +47,7 @@ interface ProfileLockPayload {
 
 export interface BrowserOwnerOptions {
   readonly profileDir: string;
+  readonly scopeProfileByBrowser?: boolean;
   readonly pageRegistry: PageRegistry;
   readonly headless?: boolean;
   readonly browserPreference?: BrowserPreference;
@@ -69,7 +69,9 @@ export class BrowserOwnerError extends Error {
 }
 
 export class BrowserOwner {
-  readonly #profileDir: string;
+  readonly #profileRoot: string;
+  readonly #scopeProfileByBrowser: boolean;
+  #profileDir: string;
   readonly #pageRegistry: PageRegistry;
   readonly #headless: boolean;
   readonly #browserPreference: BrowserPreference;
@@ -78,7 +80,7 @@ export class BrowserOwner {
   readonly #launchPersistentContext: LaunchPersistentContext;
   readonly #now: () => Date;
   readonly #pid: number;
-  readonly #lockPath: string;
+  #lockPath: string;
   #lockToken: string | null = null;
   #context: BrowserContext | null = null;
   #browser: Browser | null = null;
@@ -88,7 +90,9 @@ export class BrowserOwner {
   #closing = false;
 
   constructor(options: BrowserOwnerOptions) {
-    this.#profileDir = path.resolve(options.profileDir);
+    this.#profileRoot = path.resolve(options.profileDir);
+    this.#scopeProfileByBrowser = options.scopeProfileByBrowser ?? false;
+    this.#profileDir = this.#profileRoot;
     this.#pageRegistry = options.pageRegistry;
     this.#headless = options.headless ?? false;
     this.#browserPreference = options.browserPreference ?? 'auto';
@@ -127,28 +131,12 @@ export class BrowserOwner {
     this.#state = 'starting';
     this.#lastError = null;
     try {
-      assertDedicatedProfile(this.#profileDir);
-      this.#chrome = findHostBrowser({
-        preference: this.#browserPreference,
-        ...(this.#browserExecutable === null
-          ? {}
-          : { executablePath: this.#browserExecutable }),
-      });
-      if (this.#chrome === null) {
-        throw new BrowserOwnerError(
-          'browser.unavailable',
-          this.#browserExecutable === null
-            ? `No supported host browser was found for ${this.#browserPreference}; ` +
-              'install Chrome, Chromium, Edge, or Brave, or set ' +
-              'SESSIONPLANE_BROWSER_EXECUTABLE'
-            : `The selected host browser is unavailable or unsupported: ${this.#browserExecutable}`,
-        );
-      }
+      const selectedBrowser = this.#resolveBrowserProfile();
       this.#acquireProfileLock();
-      ensureProfileBrowserIdentity(this.#profileDir, this.#chrome, this.#now);
+      ensureProfileBrowserIdentity(this.#profileDir, selectedBrowser, this.#now);
 
       const context = await this.#launchPersistentContext(this.#profileDir, {
-        executablePath: this.#chrome.executable,
+        executablePath: selectedBrowser.executable,
         headless: this.#headless,
         acceptDownloads: true,
         timeout: this.#launchTimeoutMs,
@@ -169,6 +157,9 @@ export class BrowserOwner {
       this.#releaseProfileLock();
       if (error instanceof BrowserOwnerError) {
         throw error;
+      }
+      if (error instanceof BrowserProfileError) {
+        throw new BrowserOwnerError(error.errorCode, error.message, { cause: error });
       }
       throw new BrowserOwnerError(
         'browser.unavailable',
@@ -212,6 +203,7 @@ export class BrowserOwner {
 
   async resetProfile(): Promise<BrowserStatusSource> {
     await this.close();
+    this.#resolveBrowserProfile();
     rmSync(this.#profileDir, { recursive: true, force: true });
     await this.start();
     return this.status;
@@ -248,6 +240,42 @@ export class BrowserOwner {
       throw new BrowserOwnerError('browser.unavailable', 'Browser context is not ready');
     }
     return this.#context;
+  }
+
+  #resolveBrowserProfile(): ChromeInstallation {
+    const selected = findHostBrowser({
+      preference: this.#browserPreference,
+      ...(this.#browserExecutable === null
+        ? {}
+        : { executablePath: this.#browserExecutable }),
+    });
+    if (selected === null) {
+      throw new BrowserOwnerError(
+        'browser.unavailable',
+        this.#browserExecutable === null
+          ? `No supported host browser was found for ${this.#browserPreference}; ` +
+            'install Chrome, Chromium, Edge, or Brave, or set ' +
+            'SESSIONPLANE_BROWSER_EXECUTABLE'
+          : `The selected host browser is unavailable or unsupported: ${this.#browserExecutable}`,
+      );
+    }
+    const profileDir = resolveBrowserProfileDir({
+      profileRoot: this.#profileRoot,
+      browser: selected,
+      scopeByBrowser: this.#scopeProfileByBrowser,
+    });
+    try {
+      assertDedicatedBrowserProfile(profileDir);
+    } catch (error) {
+      if (error instanceof BrowserProfileError) {
+        throw new BrowserOwnerError(error.errorCode, error.message, { cause: error });
+      }
+      throw error;
+    }
+    this.#chrome = selected;
+    this.#profileDir = profileDir;
+    this.#lockPath = path.join(profileDir, '.sessionplane-profile.lock');
+    return selected;
   }
 
   #handleDisconnect(reason: string): void {
@@ -312,74 +340,6 @@ export class BrowserOwner {
     } catch {
       // Fail closed: never remove a lock whose ownership can no longer be proven.
     }
-  }
-}
-
-function ensureProfileBrowserIdentity(
-  profileDir: string,
-  browser: ChromeInstallation,
-  now: () => Date,
-): void {
-  const identityPath = path.join(profileDir, '.sessionplane-browser.json');
-  if (existsSync(identityPath)) {
-    let existing: BrowserProfileIdentity;
-    try {
-      existing = JSON.parse(readFileSync(identityPath, 'utf8')) as BrowserProfileIdentity;
-    } catch (error) {
-      throw new BrowserOwnerError(
-        'browser.unavailable',
-        `Browser profile identity is unreadable: ${identityPath}`,
-        { cause: error },
-      );
-    }
-    if (
-      typeof existing.product !== 'string' ||
-      typeof existing.executable !== 'string' ||
-      typeof existing.recordedAt !== 'string'
-    ) {
-      throw new BrowserOwnerError(
-        'browser.unavailable',
-        `Browser profile identity is malformed: ${identityPath}`,
-      );
-    }
-    const compatible =
-      existing.executable === browser.executable ||
-      existing.product === browser.product;
-    if (!compatible) {
-      throw new BrowserOwnerError(
-        'browser.profile-incompatible',
-        `Profile ${profileDir} belongs to ${existing.product} ` +
-          `(${existing.executable}), not ${browser.product} (${browser.executable}); ` +
-          'use a separate SESSIONPLANE_PROFILE_DIR or reset the profile',
-      );
-    }
-    return;
-  }
-
-  writeFileSync(
-    identityPath,
-    JSON.stringify({
-      product: browser.product,
-      executable: browser.executable,
-      recordedAt: now().toISOString(),
-    } satisfies BrowserProfileIdentity),
-    { encoding: 'utf8', mode: 0o600 },
-  );
-  chmodSync(identityPath, 0o600);
-}
-
-function assertDedicatedProfile(profileDir: string): void {
-  const home = path.resolve(homedir());
-  const personalRoots = [
-    path.join(home, '.config', 'google-chrome'),
-    path.join(home, '.config', 'chromium'),
-    path.join(home, 'Library', 'Application Support', 'Google', 'Chrome'),
-  ].map((candidate) => path.resolve(candidate));
-  if (personalRoots.some((candidate) => profileDir === candidate || profileDir.startsWith(`${candidate}${path.sep}`))) {
-    throw new BrowserOwnerError(
-      'browser.unavailable',
-      'Refusing to use a personal/default Chrome profile; configure a SessionPlane-dedicated profile',
-    );
   }
 }
 

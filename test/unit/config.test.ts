@@ -18,7 +18,8 @@ test('resolveConfig anchors runtime paths under an explicit state directory', ()
     assert.equal(config.stateDir, path.join(root, 'runtime'));
     assert.equal(config.socketPath, path.join(root, 'runtime', 'sessionplane.sock'));
     assert.equal(config.databasePath, path.join(root, 'runtime', 'sessionplane.sqlite'));
-    assert.equal(config.profileDir, path.join(root, 'runtime', 'chrome-profile'));
+    assert.equal(config.profileDir, path.join(root, 'runtime', 'profiles'));
+    assert.equal(config.browserScopedProfile, true);
     assert.equal(config.artifactDir, path.join(root, 'runtime', 'artifacts'));
     assert.equal(config.browserHeadless, false);
     assert.equal(config.browserPreference, 'auto');
@@ -116,10 +117,13 @@ test('resolveConfig accepts explicit host browser selection and executable', () 
       env: {
         SESSIONPLANE_BROWSER: 'custom',
         SESSIONPLANE_BROWSER_EXECUTABLE: './browser-bin',
+        SESSIONPLANE_PROFILE_DIR: './explicit-profile',
       },
     });
     assert.equal(selected.browserPreference, 'custom');
     assert.equal(selected.browserExecutable, path.join(root, 'browser-bin'));
+    assert.equal(selected.profileDir, path.join(root, '.state', 'explicit-profile'));
+    assert.equal(selected.browserScopedProfile, false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

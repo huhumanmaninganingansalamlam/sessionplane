@@ -1,6 +1,10 @@
 import { existsSync, statSync } from 'node:fs';
 
 import { findHostBrowser, listHostBrowsers } from '../../browser/browser-health.ts';
+import {
+  assertDedicatedBrowserProfile,
+  resolveBrowserProfileDir,
+} from '../../browser/browser-profile.ts';
 import { prepareRuntimeDirectories, SESSIONPLANE_VERSION, type SessionPlaneConfig } from '../../config.ts';
 import { SessionPlaneDatabase } from '../../storage/database.ts';
 import { callRpc } from '../client.ts';
@@ -32,6 +36,14 @@ export async function runDoctor(config: SessionPlaneConfig): Promise<DoctorRepor
       ? {}
       : { executablePath: config.browserExecutable }),
   });
+  const selectedProfileDir =
+    chrome === null
+      ? config.profileDir
+      : resolveBrowserProfileDir({
+          profileRoot: config.profileDir,
+          browser: chrome,
+          scopeByBrowser: config.browserScopedProfile,
+        });
   checks.push({
     name: 'host-browser',
     required: true,
@@ -44,8 +56,31 @@ export async function runDoctor(config: SessionPlaneConfig): Promise<DoctorRepor
           reason:
             'No supported user-installed browser was found; install Chrome, Chromium, Edge, or Brave, or set SESSIONPLANE_BROWSER_EXECUTABLE',
         }
-      : { selected: chrome }),
+      : { selected: chrome, profileDir: selectedProfileDir }),
   });
+
+  try {
+    assertDedicatedBrowserProfile(selectedProfileDir);
+    checks.push({
+      name: 'browser-profile-isolation',
+      required: true,
+      ok: true,
+      browserScoped: config.browserScopedProfile,
+      profileRoot: config.profileDir,
+      profileDir: selectedProfileDir,
+      personalProfileAttached: false,
+    });
+  } catch (error) {
+    checks.push({
+      name: 'browser-profile-isolation',
+      required: true,
+      ok: false,
+      browserScoped: config.browserScopedProfile,
+      profileRoot: config.profileDir,
+      profileDir: selectedProfileDir,
+      reason: error instanceof Error ? error.message : String(error),
+    });
+  }
 
   try {
     prepareRuntimeDirectories(config);

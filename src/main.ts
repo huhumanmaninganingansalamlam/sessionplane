@@ -109,6 +109,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       ? null
       : new BrowserOwner({
           profileDir: config.profileDir,
+          scopeProfileByBrowser: config.browserScopedProfile,
           pageRegistry,
           headless: options.browserHeadless ?? config.browserHeadless,
           browserPreference: config.browserPreference,

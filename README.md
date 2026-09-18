@@ -70,9 +70,12 @@ sessplane serve --browser custom \
 
 The equivalent environment variables are `SESSIONPLANE_BROWSER` and
 `SESSIONPLANE_BROWSER_EXECUTABLE`. Stop the existing core before changing the
-selection. A profile records its browser product and refuses to open under a
-different product; use a separate `SESSIONPLANE_PROFILE_DIR` when switching
-between Chrome, Chromium, Edge, or Brave.
+selection. By default profiles are isolated automatically under
+`$SESSIONPLANE_STATE_DIR/profiles/<product>/`, so Chrome, Chromium, Edge, and
+Brave never open each other's SessionPlane data. An explicit
+`SESSIONPLANE_PROFILE_DIR` opts out of that automatic product subdirectory but
+still records the browser product and fails closed on a mismatch. Known
+personal/default profile roots for all supported browsers are rejected.
 
 ```bash
 sessplane tabs --json

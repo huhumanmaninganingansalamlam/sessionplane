@@ -13,6 +13,7 @@ export interface SessionPlaneConfig {
   readonly socketPath: string;
   readonly databasePath: string;
   readonly profileDir: string;
+  readonly browserScopedProfile: boolean;
   readonly artifactDir: string;
   readonly logLevel: LogLevel;
   readonly rpcMaxLineBytes: number;
@@ -156,9 +157,12 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
     stateDir,
     overrides.databasePath ?? env.SESSIONPLANE_DATABASE_PATH ?? 'sessionplane.sqlite',
   );
+  const configuredProfileDir = overrides.profileDir ?? env.SESSIONPLANE_PROFILE_DIR;
+  const browserScopedProfile =
+    configuredProfileDir === undefined || configuredProfileDir.trim() === '';
   const profileDir = resolvePath(
     stateDir,
-    overrides.profileDir ?? env.SESSIONPLANE_PROFILE_DIR ?? 'chrome-profile',
+    browserScopedProfile ? 'profiles' : configuredProfileDir,
   );
   const artifactDir = resolvePath(
     stateDir,
@@ -206,6 +210,7 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
     socketPath,
     databasePath,
     profileDir,
+    browserScopedProfile,
     artifactDir,
     logLevel: overrides.logLevel ?? parseLogLevel(env.SESSIONPLANE_LOG_LEVEL, 'info'),
     rpcMaxLineBytes:

@@ -15,11 +15,13 @@ const HOST_BROWSER = findHostBrowser();
 
 test('BrowserOwner owns one dedicated persistent profile and fails closed for a second owner', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-owner-'));
-  const profileDir = path.join(root, 'profile');
+  const profileRoot = path.join(root, 'profiles');
+  const profileDir = path.join(profileRoot, HOST_BROWSER?.product ?? 'unknown');
   assert.notEqual(HOST_BROWSER, null, 'a user-installed Chromium-family browser is required');
   let capturedLaunchOptions: Parameters<typeof chromium.launchPersistentContext>[1] | null = null;
   const first = new BrowserOwner({
-    profileDir,
+    profileDir: profileRoot,
+    scopeProfileByBrowser: true,
     pageRegistry: new PageRegistry(),
     headless: true,
     browserExecutable: HOST_BROWSER?.executable ?? null,
@@ -29,7 +31,8 @@ test('BrowserOwner owns one dedicated persistent profile and fails closed for a 
     },
   });
   const second = new BrowserOwner({
-    profileDir,
+    profileDir: profileRoot,
+    scopeProfileByBrowser: true,
     pageRegistry: new PageRegistry(),
     headless: true,
     browserExecutable: HOST_BROWSER?.executable ?? null,
@@ -47,6 +50,7 @@ test('BrowserOwner owns one dedicated persistent profile and fails closed for a 
       '--password-store=basic',
       '--use-mock-keychain',
     ]);
+    assert.equal(first.status.profileDir, profileDir);
     const lockPath = path.join(profileDir, '.sessionplane-profile.lock');
     assert.equal(existsSync(lockPath), true);
     assert.equal(statSync(lockPath).mode & 0o777, 0o600);
