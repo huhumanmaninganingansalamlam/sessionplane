@@ -56,6 +56,7 @@ export class BrowserControlError extends Error {
 export class BrowserControlService {
   readonly #browserOwner: BrowserOwner | null;
   readonly #pageRegistry: PageRegistry;
+  readonly #onStarted: (() => Promise<unknown>) | null;
   readonly #refs = new BrowserRefSnapshotStore();
   readonly #diagnostics = new Map<string, DiagnosticBuffer>();
   readonly #attachedPages = new WeakSet<Page>();
@@ -64,9 +65,11 @@ export class BrowserControlService {
   constructor(options: {
     readonly browserOwner: BrowserOwner | null;
     readonly pageRegistry: PageRegistry;
+    readonly onStarted?: (() => Promise<unknown>) | undefined;
   }) {
     this.#browserOwner = options.browserOwner;
     this.#pageRegistry = options.pageRegistry;
+    this.#onStarted = options.onStarted ?? null;
   }
 
   runtimeStatus(): Readonly<Record<string, unknown>> {
@@ -81,8 +84,16 @@ export class BrowserControlService {
 
   async startRuntime(): Promise<Readonly<Record<string, unknown>>> {
     const owner = this.#requireBrowserOwner();
+    const previousState = owner.status.state;
     await owner.start();
-    return this.runtimeStatus();
+    if (previousState === 'ready' || this.#onStarted === null) {
+      return this.runtimeStatus();
+    }
+    const recovery = await this.#onStarted();
+    return {
+      ...this.runtimeStatus(),
+      recovery,
+    };
   }
 
   async stopRuntime(): Promise<Readonly<Record<string, unknown>>> {

@@ -116,7 +116,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
           browserExecutable: config.browserExecutable,
           launchTimeoutMs: config.browserLaunchTimeoutMs,
         });
-  const browserControl = new BrowserControlService({ browserOwner, pageRegistry });
 
   try {
     await browserOwner?.start();
@@ -203,6 +202,11 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     ...(options.recoveryNavigatePage === undefined
       ? {}
       : { navigatePage: options.recoveryNavigatePage }),
+  });
+  const browserControl = new BrowserControlService({
+    browserOwner,
+    pageRegistry,
+    onStarted: async () => await recoveryService.restore({ forceObservers: true }),
   });
   const searchService = SearchService.fromConfig(config);
   const researchService = new ResearchService({ search: searchService });

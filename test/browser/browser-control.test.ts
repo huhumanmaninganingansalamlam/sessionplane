@@ -160,7 +160,12 @@ test('browser lifecycle stop, start, and forced profile reset stay core-owned', 
     pageRegistry: registry,
     headless: true,
   });
-  const browser = new BrowserControlService({ browserOwner: owner, pageRegistry: registry });
+  let recoveries = 0;
+  const browser = new BrowserControlService({
+    browserOwner: owner,
+    pageRegistry: registry,
+    onStarted: async () => ({ recovery: ++recoveries }),
+  });
 
   try {
     await owner.start();
@@ -171,6 +176,13 @@ test('browser lifecycle stop, start, and forced profile reset stay core-owned', 
 
     const started = await browser.startRuntime();
     assert.equal((started.browser as { state: string }).state, 'ready');
+    assert.deepEqual(started.recovery, { recovery: 1 });
+    assert.equal(recoveries, 1);
+
+    const alreadyReady = await browser.startRuntime();
+    assert.equal((alreadyReady.browser as { state: string }).state, 'ready');
+    assert.equal('recovery' in alreadyReady, false);
+    assert.equal(recoveries, 1);
 
     await assert.rejects(
       browser.resetRuntime(false),
