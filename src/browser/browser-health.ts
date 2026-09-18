@@ -43,8 +43,8 @@ export interface BrowserStatusSource {
   readonly profileDir: string;
   readonly headless: boolean;
   readonly chrome: ChromeInstallation | null;
-  readonly transport: 'playwright' | null;
-  readonly ownership: 'playwright' | null;
+  readonly transport: 'cdp' | null;
+  readonly ownership: 'spawned' | 'adopted' | null;
   readonly browserPid: number | null;
   readonly debuggingPort: number | null;
   readonly lastError: string | null;

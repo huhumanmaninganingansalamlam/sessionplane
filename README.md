@@ -48,10 +48,11 @@ replace the standalone agbrowse browser workflow. Pages are addressed by the
 opaque `pageKey` returned by `tabs`; browser focus, title, recency, and page
 array order are never identity.
 
-The core launches a browser already installed by the user and controls it with
-`playwright-core` through `chromium.launchPersistentContext()`. SessionPlane
-never downloads, installs, upgrades, or silently falls back to a Playwright-
-managed browser. The default selection is the user-installed host Chromium,
+The core launches a browser already installed by the user with a minimal,
+positive loopback CDP endpoint and then controls its persistent default context
+with `playwright-core` through `chromium.connectOverCDP()`. SessionPlane never
+downloads, installs, upgrades, or silently falls back to a Playwright-managed
+browser. The default selection is the user-installed host Chromium,
 including native, Snap, and Flatpak Chromium launchers. It does not silently
 fall back to another browser. Select explicitly with
 `--browser chrome|chromium|edge|brave`, use `--browser auto` to opt into the
@@ -61,10 +62,11 @@ the dedicated SessionPlane profile; the user's normal browser profile and open
 tabs are never attached. No custom fingerprint patches are injected.
 
 Host Chromium-family browsers always run with their native process sandbox
-enabled. SessionPlane explicitly prevents Playwright from adding
-`--no-sandbox` or `--disable-setuid-sandbox`, and removes the unnecessary
-`--disable-infobars` and `--unsafely-disable-devtools-self-xss-warnings`
-defaults. It does not retry without the sandbox when launch fails.
+enabled. SessionPlane launches only the profile, positive loopback CDP,
+first-run, window-size, and optional headless arguments it owns. It never adds
+`--enable-automation`, `--no-sandbox`, `--disable-setuid-sandbox`, warning-UI
+suppression, or a silent unsandboxed fallback. A headed startup is rejected if
+the resulting browser reports `navigator.webdriver !== false`.
 
 Browser selection is a core-startup setting:
 

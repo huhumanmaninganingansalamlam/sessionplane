@@ -1,15 +1,25 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { chromium } from 'playwright-core';
 import { findHostBrowser } from '../../src/browser/browser-health.ts';
 
-import { BrowserOwner } from '../../src/browser/browser-owner.ts';
+import {
+  BrowserOwner,
+  buildHostBrowserArguments,
+} from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 
 const HOST_BROWSER = findHostBrowser();
@@ -19,17 +29,12 @@ test('BrowserOwner owns one dedicated persistent profile and fails closed for a 
   const profileRoot = path.join(root, 'profiles');
   const profileDir = path.join(profileRoot, HOST_BROWSER?.product ?? 'unknown');
   assert.notEqual(HOST_BROWSER, null, 'a user-installed Chromium-family browser is required');
-  let capturedLaunchOptions: Parameters<typeof chromium.launchPersistentContext>[1] | null = null;
   const first = new BrowserOwner({
     profileDir: profileRoot,
     scopeProfileByBrowser: true,
     pageRegistry: new PageRegistry(),
     headless: true,
     browserExecutable: HOST_BROWSER?.executable ?? null,
-    launchPersistentContext(userDataDir, options) {
-      capturedLaunchOptions = options;
-      return chromium.launchPersistentContext(userDataDir, options);
-    },
   });
   const second = new BrowserOwner({
     profileDir: profileRoot,
@@ -42,20 +47,11 @@ test('BrowserOwner owns one dedicated persistent profile and fails closed for a 
   try {
     await first.start();
     assert.equal(first.status.state, 'ready');
-    assert.equal(first.status.transport, 'playwright');
-    assert.equal(first.status.ownership, 'playwright');
+    assert.equal(first.status.transport, 'cdp');
+    assert.equal(first.status.ownership, 'spawned');
     assert.equal(first.status.chrome?.source, 'host');
-    assert.equal(capturedLaunchOptions?.channel, undefined);
-    assert.equal(capturedLaunchOptions?.executablePath, HOST_BROWSER?.executable);
-    assert.equal(capturedLaunchOptions?.chromiumSandbox, true);
-    assert.deepEqual(capturedLaunchOptions?.ignoreDefaultArgs, [
-      '--password-store=basic',
-      '--use-mock-keychain',
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-infobars',
-      '--unsafely-disable-devtools-self-xss-warnings',
-    ]);
+    assert.ok((first.status.browserPid ?? 0) > 0);
+    assert.ok((first.status.debuggingPort ?? 0) > 0);
     if (process.platform === 'linux') {
       const commandLines = browserCommandLines(profileDir);
       assert.doesNotMatch(commandLines, /(?:^|\s)--no-sandbox(?:\s|$)/m);
@@ -70,12 +66,96 @@ test('BrowserOwner owns one dedicated persistent profile and fails closed for a 
     const lockPath = path.join(profileDir, '.sessionplane-profile.lock');
     assert.equal(existsSync(lockPath), true);
     assert.equal(statSync(lockPath).mode & 0o777, 0o600);
+    const lock = JSON.parse(readFileSync(lockPath, 'utf8')) as {
+      readonly browserPid: number;
+      readonly debuggingPort: number;
+    };
+    assert.equal(lock.browserPid, first.status.browserPid);
+    assert.equal(lock.debuggingPort, first.status.debuggingPort);
 
     await assert.rejects(second.start(), /already owned/);
   } finally {
     await second.close();
     await first.close();
     assert.equal(existsSync(path.join(profileDir, '.sessionplane-profile.lock')), false);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('host browser arguments use a positive loopback CDP port without automation or sandbox-disabling switches', () => {
+  const args = buildHostBrowserArguments({
+    profileDir: '/tmp/sessionplane-profile',
+    debuggingPort: 9_333,
+    headless: false,
+  });
+  assert.ok(args.includes('--remote-debugging-address=127.0.0.1'));
+  assert.ok(args.includes('--remote-debugging-port=9333'));
+  assert.ok(args.includes('--user-data-dir=/tmp/sessionplane-profile'));
+  assert.equal(args.some((argument) => argument === '--enable-automation'), false);
+  assert.equal(args.some((argument) => argument === '--no-sandbox'), false);
+  assert.equal(args.some((argument) => argument === '--disable-setuid-sandbox'), false);
+  assert.equal(args.some((argument) => argument === '--remote-debugging-port=0'), false);
+  assert.equal(args.some((argument) => argument.startsWith('--headless')), false);
+});
+
+test(
+  'headed host browser CDP attachment preserves navigator.webdriver=false',
+  {
+    skip:
+      process.platform === 'linux' &&
+      process.env.DISPLAY === undefined &&
+      process.env.WAYLAND_DISPLAY === undefined,
+  },
+  async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-webdriver-'));
+    const owner = new BrowserOwner({
+      profileDir: path.join(root, 'profile'),
+      pageRegistry: new PageRegistry(),
+      headless: false,
+      browserExecutable: HOST_BROWSER?.executable ?? null,
+    });
+    try {
+      await owner.start();
+      const created = await owner.createPage();
+      assert.equal(await created.page.evaluate(() => navigator.webdriver), false);
+      assert.equal(owner.status.transport, 'cdp');
+    } finally {
+      await owner.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test('a new core owner adopts the exact live profile and positive CDP endpoint after a stale lock', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-adoption-'));
+  const profileDir = path.join(root, 'profile');
+  const first = new BrowserOwner({
+    profileDir,
+    pageRegistry: new PageRegistry(),
+    headless: true,
+    browserExecutable: HOST_BROWSER?.executable ?? null,
+  });
+  const second = new BrowserOwner({
+    profileDir,
+    pageRegistry: new PageRegistry(),
+    headless: true,
+    browserExecutable: HOST_BROWSER?.executable ?? null,
+  });
+  try {
+    await first.start();
+    const lockPath = path.join(profileDir, '.sessionplane-profile.lock');
+    const lock = JSON.parse(readFileSync(lockPath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(lockPath, JSON.stringify({ ...lock, pid: 99_999_999 }), { mode: 0o600 });
+
+    await second.start();
+    assert.equal(second.status.ownership, 'adopted');
+    assert.equal(second.status.browserPid, first.status.browserPid);
+    assert.equal(second.status.debuggingPort, first.status.debuggingPort);
+    const page = await second.createPage();
+    assert.equal(await page.page.evaluate(() => document.location.href), 'about:blank');
+  } finally {
+    await second.close();
+    await first.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

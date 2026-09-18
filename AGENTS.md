@@ -22,6 +22,10 @@ precedence over implementation convenience.
 
 - Runtime: Node.js 24, TypeScript, ESM.
 - Browser integration uses `playwright-core` only as the controller for an explicitly selected user-installed Chrome, Chromium, Edge, Brave, or custom Chromium-family executable. SessionPlane never downloads or installs a browser and never attaches to the user's personal/default profile.
+- SessionPlane launches the selected host browser itself with a positive
+  loopback CDP port and attaches with `connectOverCDP`; headed runtime must
+  preserve `navigator.webdriver === false` without script or fingerprint
+  overrides.
 - SQLite access stays behind `src/storage/`.
 - Public clients are thin adapters over the Unix-socket JSON-RPC core.
 - Add focused invariant tests with every behavior change.
