@@ -108,6 +108,26 @@ test('strong current-turn activity prevents quiet completion', () => {
   assert.equal(tracker.evaluate(active, 10_000).kind, 'progress');
 });
 
+test('request placeholder messages can never become final answers', () => {
+  const tracker = new ExactFinalTracker(10);
+  const placeholder = evidence({
+    candidate: {
+      responseMessageId: 'request-placeholder-request-conversation-0',
+      answerText: '생각 중...',
+      terminalMarker: true,
+      streamingMarker: false,
+    },
+  });
+
+  const first = tracker.evaluate(placeholder, 0);
+  const later = tracker.evaluate(placeholder, 10_000);
+  assert.equal(first.kind, 'progress');
+  assert.equal(first.reason, 'assistant-placeholder-active');
+  assert.equal(first.answerText, null);
+  assert.equal(later.kind, 'progress');
+  assert.equal(later.answerText, null);
+});
+
 function evidence(
   overrides: Partial<ProviderObservationEvidence> = {},
 ): ProviderObservationEvidence {

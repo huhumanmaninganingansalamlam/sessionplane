@@ -19,6 +19,7 @@ import { findHostBrowser } from '../../src/browser/browser-health.ts';
 import {
   BrowserOwner,
   buildHostBrowserArguments,
+  buildManualLoginArguments,
 } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 
@@ -97,6 +98,124 @@ test('host browser arguments use a positive loopback CDP port without automation
   assert.equal(args.some((argument) => argument === '--remote-debugging-port=0'), false);
   assert.equal(args.some((argument) => argument.startsWith('--headless')), false);
 });
+
+test('manual login arguments contain no automation or remote-debugging surface', () => {
+  const args = buildManualLoginArguments({
+    profileDir: '/tmp/sessionplane-profile',
+    loginUrl: 'https://chatgpt.com/',
+  });
+  assert.ok(args.includes('--user-data-dir=/tmp/sessionplane-profile'));
+  assert.ok(args.includes('--new-window'));
+  assert.ok(args.includes('https://chatgpt.com/'));
+  assert.equal(args.some((argument) => argument.startsWith('--remote-debugging')), false);
+  assert.equal(args.some((argument) => argument === '--enable-automation'), false);
+  assert.equal(args.some((argument) => argument === '--no-sandbox'), false);
+  assert.equal(args.some((argument) => argument === '--disable-setuid-sandbox'), false);
+});
+
+test(
+  'manual login hands the same dedicated profile to a non-CDP browser and resumes automation',
+  {
+    skip:
+      process.platform === 'linux' &&
+      process.env.DISPLAY === undefined &&
+      process.env.WAYLAND_DISPLAY === undefined,
+  },
+  async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-manual-login-'));
+    const profileDir = path.join(root, 'profile');
+    const registry = new PageRegistry();
+    const owner = new BrowserOwner({
+      profileDir,
+      pageRegistry: registry,
+      headless: false,
+      browserExecutable: HOST_BROWSER?.executable ?? null,
+    });
+    const fixture = await startFinishedResponseFixture();
+    try {
+      await owner.start();
+      const manual = await owner.beginManualLogin(fixture.url);
+      assert.equal(manual.mode, 'manual');
+      assert.equal(manual.browser.state, 'manual');
+      assert.equal(manual.browser.transport, null);
+      assert.equal(manual.browser.ownership, 'manual');
+      assert.equal(manual.browser.debuggingPort, null);
+      assert.ok((manual.browser.browserPid ?? 0) > 0);
+
+      if (process.platform === 'linux') {
+        const commandLines = browserCommandLines(profileDir);
+        assert.match(commandLines, /--user-data-dir=/);
+        assert.doesNotMatch(commandLines, /--remote-debugging-(?:port|pipe)/);
+        assert.doesNotMatch(commandLines, /(?:^|\s)--enable-automation(?:\s|$)/m);
+        assert.doesNotMatch(commandLines, /(?:^|\s)--no-sandbox(?:\s|$)/m);
+      }
+
+      const resumed = await owner.resumeManualLogin();
+      assert.equal(resumed.mode, 'automated');
+      assert.equal(resumed.browser.state, 'ready');
+      assert.equal(resumed.browser.transport, 'cdp');
+      assert.ok((resumed.browser.debuggingPort ?? 0) > 0);
+      assert.equal(registry.listBindings({ includeClosed: false }).length > 0, true);
+    } finally {
+      await owner.close();
+      await closeServer(fixture.server);
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'a restarted core adopts a live manual login browser without terminating it',
+  {
+    skip:
+      process.platform === 'linux' &&
+      process.env.DISPLAY === undefined &&
+      process.env.WAYLAND_DISPLAY === undefined,
+  },
+  async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-manual-adopt-'));
+    const profileDir = path.join(root, 'profile');
+    const first = new BrowserOwner({
+      profileDir,
+      pageRegistry: new PageRegistry(),
+      headless: false,
+      browserExecutable: HOST_BROWSER?.executable ?? null,
+    });
+    const second = new BrowserOwner({
+      profileDir,
+      pageRegistry: new PageRegistry(),
+      headless: false,
+      browserExecutable: HOST_BROWSER?.executable ?? null,
+    });
+    const fixture = await startFinishedResponseFixture();
+    try {
+      await first.start();
+      await first.beginManualLogin(fixture.url);
+      const manualPid = first.status.browserPid;
+      assert.ok((manualPid ?? 0) > 0);
+
+      const lockPath = path.join(profileDir, '.sessionplane-profile.lock');
+      const lock = JSON.parse(readFileSync(lockPath, 'utf8')) as Record<string, unknown>;
+      writeFileSync(lockPath, JSON.stringify({ ...lock, pid: 99_999_999 }), { mode: 0o600 });
+
+      await second.start();
+      assert.equal(second.status.state, 'manual');
+      assert.equal(second.status.ownership, 'manual');
+      assert.equal(second.status.transport, null);
+      assert.equal(second.status.browserPid, manualPid);
+      assert.equal(process.kill(manualPid ?? 0, 0), true);
+
+      const resumed = await second.resumeManualLogin();
+      assert.equal(resumed.browser.state, 'ready');
+      assert.equal(resumed.browser.transport, 'cdp');
+    } finally {
+      await second.close();
+      await first.close();
+      await closeServer(fixture.server);
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   'headed host browser CDP attachment preserves navigator.webdriver=false',
@@ -239,6 +358,18 @@ test(
     }
   },
 );
+
+async function startFinishedResponseFixture(): Promise<{
+  readonly server: Server;
+  readonly url: string;
+}> {
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+    response.end('<!doctype html><title>Manual login fixture</title><p>ready</p>');
+  });
+  const url = await listen(server);
+  return { server, url };
+}
 
 async function startCommittedResponseFixture(): Promise<{
   readonly server: Server;

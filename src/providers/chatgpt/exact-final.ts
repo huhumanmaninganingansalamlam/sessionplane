@@ -65,6 +65,11 @@ export class ExactFinalTracker {
       return decision('pending', 'assistant-candidate-missing');
     }
 
+    if (candidate.responseMessageId.startsWith('request-placeholder-')) {
+      this.#reset();
+      return decision('progress', 'assistant-placeholder-active', true);
+    }
+
     const text = candidate.answerText.trim();
     if (text.length === 0 || candidate.responseMessageId.length === 0) {
       this.#reset();

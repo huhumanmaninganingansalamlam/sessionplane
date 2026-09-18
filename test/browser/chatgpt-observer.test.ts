@@ -8,6 +8,7 @@ import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
+import { observeChatGptDom } from '../../src/providers/chatgpt/dom-observer.ts';
 import { ExactFinalTracker } from '../../src/providers/chatgpt/exact-final.ts';
 
 const CONVERSATION_ID = 'conversation-observer-123456';
@@ -125,6 +126,58 @@ test('background ChatGPT Page yields exact DOM, dialog, and network evidence wit
     } finally {
       source.close();
     }
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ChatGPT DOM ignores request placeholders until a real assistant message exists', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-placeholder-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.setContent(`
+      <article data-message-author-role="user" data-message-id="user-message-1" data-turn-id="user-turn-1">
+        <div class="markdown">Question</div>
+      </article>
+      <article
+        id="assistant-placeholder"
+        data-message-author-role="assistant"
+        data-message-id="request-placeholder-request-conversation-0"
+      >
+        <div class="markdown">생각 중...</div>
+      </article>
+    `);
+
+    const placeholder = await observeChatGptDom(created.page, {
+      submittedUserMessageId: 'user-message-1',
+      submittedUserTurnId: 'user-turn-1',
+    });
+    assert.equal(placeholder.submittedUserFound, true);
+    assert.equal(placeholder.candidate, null);
+
+    await created.page.evaluate(() => {
+      const assistant = document.querySelector<HTMLElement>('#assistant-placeholder');
+      if (assistant === null) throw new Error('assistant placeholder missing');
+      assistant.setAttribute('data-message-id', 'assistant-final-1');
+      const content = assistant.querySelector<HTMLElement>('.markdown');
+      if (content === null) throw new Error('assistant content missing');
+      content.textContent = 'Final answer';
+    });
+    const final = await observeChatGptDom(created.page, {
+      submittedUserMessageId: 'user-message-1',
+      submittedUserTurnId: 'user-turn-1',
+    });
+    assert.equal(final.candidate?.responseMessageId, 'assistant-final-1');
+    assert.equal(final.candidate?.answerText, 'Final answer');
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });

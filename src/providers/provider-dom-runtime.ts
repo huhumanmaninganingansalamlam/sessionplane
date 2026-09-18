@@ -77,6 +77,9 @@ export class DomProviderAdapter implements ProviderAdapter {
     try {
       let pageKey = request.session.pageKey;
       let initialUrl: string | undefined;
+      if (pageKey !== null && shouldReplaceMissingUnsubmittedPage(this.#pageRegistry, request)) {
+        pageKey = null;
+      }
       if (pageKey === null) {
         const created = await this.#browserOwner.createPage();
         pageKey = created.binding.pageKey;
@@ -261,6 +264,23 @@ export class DomProviderAdapter implements ProviderAdapter {
       throw error;
     }
   }
+}
+
+function shouldReplaceMissingUnsubmittedPage(
+  pageRegistry: PageRegistry,
+  request: ProviderSubmissionRequest,
+): boolean {
+  const pageKey = request.session.pageKey;
+  if (
+    pageKey === null ||
+    request.session.promptSubmitted ||
+    request.session.conversationId !== null
+  ) {
+    return false;
+  }
+  return !pageRegistry
+    .listBindings({ includeClosed: false })
+    .some((binding) => binding.pageKey === pageKey);
 }
 
 interface DomProviderSubmissionOptions {

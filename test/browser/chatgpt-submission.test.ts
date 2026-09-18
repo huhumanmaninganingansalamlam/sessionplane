@@ -146,6 +146,178 @@ test('ChatGPT submission captures exact model, conversation, and user-turn ackno
   }
 });
 
+test('ChatGPT submission waits for a controlled composer to commit the filled prompt', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-composer-commit-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    const prompt = 'Prompt committed after a controlled-editor render';
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: chatGptFixture(false, true, true, prompt, false, false, true),
+      });
+    });
+    await created.page.goto('https://chatgpt.com/');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'session-delayed-composer',
+      generation: 1,
+      conversationId: null,
+    });
+
+    const submission = new ChatGptSubmission({
+      page: created.page,
+      pageKey: created.binding.pageKey,
+      pageRegistry: registry,
+      request: {
+        session: sessionSnapshot({
+          sessionId: 'session-delayed-composer',
+          pageKey: created.binding.pageKey,
+        }),
+        generation: 1,
+        prompt,
+        model: null,
+      },
+      acknowledgementTimeoutMs: 500,
+    });
+
+    await submission.prepare();
+    assert.equal(await created.page.locator('#prompt-textarea').textContent(), prompt);
+    assert.equal(
+      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
+      0,
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ChatGPT submission accepts an already exact controlled composer value', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-composer-exact-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    const prompt = 'Already exact controlled composer value';
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: chatGptFixture(false, true, false, prompt, true),
+      });
+    });
+    await created.page.goto('https://chatgpt.com/');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'session-exact-composer',
+      generation: 1,
+      conversationId: null,
+    });
+
+    const submission = new ChatGptSubmission({
+      page: created.page,
+      pageKey: created.binding.pageKey,
+      pageRegistry: registry,
+      request: {
+        session: sessionSnapshot({
+          sessionId: 'session-exact-composer',
+          pageKey: created.binding.pageKey,
+        }),
+        generation: 1,
+        prompt,
+        model: null,
+      },
+      acknowledgementTimeoutMs: 500,
+    });
+
+    await submission.prepare();
+    assert.equal(await created.page.locator('#prompt-textarea').textContent(), prompt);
+    assert.equal(
+      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
+      0,
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ChatGPT submission follows the visible composer across a DOM replacement', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-composer-replace-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    const prompt = 'Prompt survives visible composer replacement';
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: chatGptFixture(false, true, false, '', false, true),
+      });
+    });
+    await created.page.goto('https://chatgpt.com/');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'session-replaced-composer',
+      generation: 1,
+      conversationId: null,
+    });
+
+    const submission = new ChatGptSubmission({
+      page: created.page,
+      pageKey: created.binding.pageKey,
+      pageRegistry: registry,
+      request: {
+        session: sessionSnapshot({
+          sessionId: 'session-replaced-composer',
+          pageKey: created.binding.pageKey,
+        }),
+        generation: 1,
+        prompt,
+        model: null,
+      },
+      acknowledgementTimeoutMs: 500,
+    });
+
+    await submission.prepare();
+    const visibleComposer = created.page
+      .locator('#prompt-textarea')
+      .filter({ visible: true })
+      .first();
+    assert.equal(await visibleComposer.textContent(), prompt);
+    assert.equal(
+      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
+      0,
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ChatGPT submission refuses a disabled requested model before send', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-disabled-'));
   const registry = new PageRegistry();
@@ -288,7 +460,15 @@ function sessionSnapshot(overrides: {
   };
 }
 
-function chatGptFixture(disabledModel: boolean, applyModelSelection = true): string {
+function chatGptFixture(
+  disabledModel: boolean,
+  applyModelSelection = true,
+  delayedComposerCommit = false,
+  initialComposerText = '',
+  stickyComposerValue = false,
+  replaceComposerOnInput = false,
+  delayedComposerVisibility = false,
+): string {
   return `<!doctype html>
     <html>
       <body>
@@ -296,7 +476,8 @@ function chatGptFixture(disabledModel: boolean, applyModelSelection = true): str
         <div id="model-menu" role="menu" hidden>
           <button role="menuitem" type="button" aria-disabled="${disabledModel ? 'true' : 'false'}">Model B</button>
         </div>
-        <div id="prompt-textarea" data-testid="prompt-textarea" contenteditable="true"></div>
+        ${delayedComposerVisibility ? '<form><textarea placeholder="Proxy composer"></textarea></form>' : ''}
+        <div id="prompt-textarea" data-testid="prompt-textarea" contenteditable="true">${initialComposerText}</div>
         <button data-testid="send-button" type="button">Send</button>
         <section id="messages"></section>
         <script>
@@ -311,9 +492,39 @@ function chatGptFixture(disabledModel: boolean, applyModelSelection = true): str
             switcher.textContent = option.textContent;
             menu.hidden = true;
           });
+          const composer = document.querySelector('#prompt-textarea');
+          if (${delayedComposerVisibility}) {
+            composer.setAttribute('hidden', '');
+            setTimeout(() => composer.removeAttribute('hidden'), 150);
+          }
+          if (${delayedComposerCommit}) {
+            composer.addEventListener('input', () => {
+              const nextValue = composer.textContent;
+              composer.textContent = '';
+              setTimeout(() => { composer.textContent = nextValue; }, 150);
+            });
+          }
+          if (${stickyComposerValue}) {
+            const exactValue = ${JSON.stringify(initialComposerText)};
+            composer.addEventListener('input', () => {
+              composer.textContent = exactValue;
+            });
+          }
+          if (${replaceComposerOnInput}) {
+            let replaced = false;
+            composer.addEventListener('input', () => {
+              if (replaced || composer.textContent === '') return;
+              replaced = true;
+              const replacement = composer.cloneNode(false);
+              replacement.textContent = composer.textContent;
+              composer.textContent = '';
+              composer.setAttribute('hidden', '');
+              composer.after(replacement);
+            });
+          }
           document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
             window.sendCount += 1;
-            const prompt = document.querySelector('#prompt-textarea').textContent;
+            const prompt = composer.textContent;
             history.pushState({}, '', '/c/conversation-123456');
             const message = document.createElement('article');
             message.setAttribute('data-message-author-role', 'user');

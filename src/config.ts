@@ -169,7 +169,7 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
     overrides.artifactDir ?? env.SESSIONPLANE_ARTIFACT_DIR ?? 'artifacts',
   );
   const browserPreference =
-    overrides.browserPreference ?? parseBrowserPreference(env.SESSIONPLANE_BROWSER, 'chromium');
+    overrides.browserPreference ?? parseBrowserPreference(env.SESSIONPLANE_BROWSER, 'chrome');
   const browserExecutableValue =
     overrides.browserExecutable ?? env.SESSIONPLANE_BROWSER_EXECUTABLE;
   const browserExecutable =

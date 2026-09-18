@@ -123,6 +123,60 @@ for (const provider of ['gemini', 'grok'] as const) {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test(`${provider} replaces a missing Page only before any prompt submission`, async () => {
+    const root = mkdtempSync(path.join(tmpdir(), `sessionplane-${provider}-stale-page-`));
+    const registry = new PageRegistry();
+    const owner = new BrowserOwner({
+      profileDir: path.join(root, 'profile'),
+      pageRegistry: registry,
+      headless: true,
+    });
+
+    try {
+      await owner.start();
+      const stale = await owner.createPage();
+      await stale.page.close();
+      const adapter = createAdapter(provider, owner, registry);
+      const staleSession: SessionSnapshot = {
+        ...sessionSnapshot(provider, stale.binding.pageKey),
+        generation: 2,
+        sessionState: 'ready',
+        providerState: 'error',
+        errorCode: 'provider.composer-unavailable',
+        reason: 'pre-submit-failure',
+        promptSubmitted: false,
+      };
+
+      const replacement = await adapter.openSubmission({
+        session: staleSession,
+        generation: 3,
+        prompt: `Safe ${provider} retry`,
+        model: null,
+      });
+      assert.notEqual(replacement.pageKey, stale.binding.pageKey);
+      const replacementBinding = registry.getBinding(replacement.pageKey);
+      assert.equal(replacementBinding.state, 'reserved');
+      assert.equal(replacementBinding.sessionId, staleSession.sessionId);
+      assert.equal(replacementBinding.generation, 3);
+
+      await assert.rejects(
+        adapter.openSubmission({
+          session: { ...staleSession, promptSubmitted: true },
+          generation: 4,
+          prompt: `Never replace submitted ${provider} Page`,
+          model: null,
+        }),
+        (error: unknown) =>
+          error instanceof Error &&
+          'errorCode' in error &&
+          error.errorCode === 'browser.unavailable',
+      );
+    } finally {
+      await owner.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 }
 
 test('generic provider verification fails closed before prompt or submit mutation', async () => {

@@ -4,7 +4,26 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { sessionSendRpcTimeoutMs } from '../../src/cli/main.ts';
 import { prepareRuntimeDirectories, resolveConfig } from '../../src/config.ts';
+
+test('session.send RPC timeout covers browser setup and provider acknowledgement', () => {
+  const config = resolveConfig({
+    env: {},
+    rpcRequestTimeoutMs: 10_000,
+    browserLaunchTimeoutMs: 30_000,
+    submissionAckTimeoutMs: 12_000,
+  });
+  assert.equal(sessionSendRpcTimeoutMs(config), 72_000);
+
+  const slowerClient = resolveConfig({
+    env: {},
+    rpcRequestTimeoutMs: 90_000,
+    browserLaunchTimeoutMs: 30_000,
+    submissionAckTimeoutMs: 12_000,
+  });
+  assert.equal(sessionSendRpcTimeoutMs(slowerClient), 90_000);
+});
 
 test('resolveConfig anchors runtime paths under an explicit state directory', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-config-'));
@@ -22,7 +41,7 @@ test('resolveConfig anchors runtime paths under an explicit state directory', ()
     assert.equal(config.browserScopedProfile, true);
     assert.equal(config.artifactDir, path.join(root, 'runtime', 'artifacts'));
     assert.equal(config.browserHeadless, false);
-    assert.equal(config.browserPreference, 'chromium');
+    assert.equal(config.browserPreference, 'chrome');
     assert.equal(config.browserExecutable, null);
     assert.equal(config.observationActiveSweepMs, 5_000);
     assert.equal(config.observationQuietSweepMs, 15_000);

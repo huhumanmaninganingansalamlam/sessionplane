@@ -41,21 +41,34 @@ export function registerBrowserMethods(
 
   router.register(
     'browser.login',
-    z.object({ url: z.string().url().optional() }).strict(),
+    z.object({
+      url: z.string().url().optional(),
+      mode: z.enum(['automated', 'manual', 'resume']).optional(),
+    }).strict(),
     async (params) => {
-      const loginUrl = params.url ?? dependencies.loginUrl;
-      if (!isChatGptUrl(loginUrl)) {
-        throw new RpcMethodError('input.invalid', 'browser.login accepts only ChatGPT URLs', {
-          rpcCode: -32602,
-        });
-      }
+      const mode = params.mode ?? 'automated';
       const owner = dependencies.browserOwner;
       if (owner === null) {
         throw new RpcMethodError('browser.unavailable', 'Browser owner is not running');
       }
+      if (mode === 'resume' && params.url !== undefined) {
+        throw new RpcMethodError(
+          'input.invalid',
+          'browser.login resume does not accept a URL',
+          { rpcCode: -32602 },
+        );
+      }
+      const loginUrl = params.url ?? dependencies.loginUrl;
+      if (mode !== 'resume' && !isChatGptUrl(loginUrl)) {
+        throw new RpcMethodError('input.invalid', 'browser.login accepts only ChatGPT URLs', {
+          rpcCode: -32602,
+        });
+      }
       try {
+        if (mode === 'manual') return await owner.beginManualLogin(loginUrl);
+        if (mode === 'resume') return await owner.resumeManualLogin();
         const page = await owner.openLoginPage(loginUrl);
-        return { requestOk: true, page };
+        return { requestOk: true, mode: 'automated', page };
       } catch (error) {
         if (error instanceof BrowserOwnerError) {
           throw new RpcMethodError(error.errorCode, error.message, { details: error.cause });

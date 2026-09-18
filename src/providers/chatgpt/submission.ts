@@ -12,6 +12,15 @@ import {
 import { assertNoHumanVerification } from '../human-verification.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
+const COMPOSER_HYDRATION_TIMEOUT_MS = 3_000;
+const COMPOSER_COMMIT_TIMEOUT_MS = 3_000;
+const COMPOSER_COMMIT_POLL_MS = 50;
+const COMPOSER_READ_TIMEOUT_MS = 500;
+const COMPOSER_STABLE_WINDOW_MS = 250;
+const COMPOSER_WRITE_ATTEMPTS = 2;
+const VISIBLE_SELECTOR_TIMEOUT_MS = 5_000;
+const VISIBLE_SELECTOR_POLL_MS = 50;
+
 export interface ChatGptSubmissionOptions {
   readonly page: Page;
   readonly pageKey: string;
@@ -88,7 +97,7 @@ export class ChatGptSubmission implements ProviderSubmission {
       );
     }
 
-    const composer = await firstVisible(this.#page, CHATGPT_SELECTORS.composer);
+    const composer = await firstVisibleComposer(this.#page);
     if (composer === null || !(await composer.isEditable().catch(() => false))) {
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
@@ -101,9 +110,7 @@ export class ChatGptSubmission implements ProviderSubmission {
     if (attachments.length > 0) {
       await uploadAttachments(this.#page, attachments);
     }
-    await composer.fill(this.#request.prompt);
-    const actual = await readComposerValue(composer);
-    if (normalizeLineEndings(actual) !== normalizeLineEndings(this.#request.prompt)) {
+    if (!(await writeExactComposerValue(this.#page, composer, this.#request.prompt))) {
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         'ChatGPT composer value did not match the requested prompt',
@@ -505,30 +512,160 @@ async function attachmentsAcknowledged(
   return expected.every((name) => normalizedEvidence.includes(name));
 }
 
-async function firstVisible(page: Page, selectors: readonly string[]): Promise<Locator | null> {
-  for (const selector of selectors) {
-    const candidates = page.locator(selector);
-    const count = await candidates.count().catch(() => 0);
-    for (let index = 0; index < count; index += 1) {
-      const candidate = candidates.nth(index);
-      if (await candidate.isVisible().catch(() => false)) {
+async function firstVisibleComposer(page: Page): Promise<Locator | null> {
+  const exact = await firstVisible(
+    page,
+    CHATGPT_SELECTORS.composer.slice(0, 2),
+    VISIBLE_SELECTOR_TIMEOUT_MS,
+  );
+  if (exact !== null) return exact;
+  return await firstVisible(
+    page,
+    CHATGPT_SELECTORS.composer.slice(2),
+    VISIBLE_SELECTOR_TIMEOUT_MS,
+  );
+}
+
+async function firstVisible(
+  page: Page,
+  selectors: readonly string[],
+  timeoutMs = VISIBLE_SELECTOR_TIMEOUT_MS,
+): Promise<Locator | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const selector of selectors) {
+      const candidate = page.locator(selector).filter({ visible: true }).first();
+      if ((await candidate.count().catch(() => 0)) > 0) {
         return candidate;
       }
     }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await page.waitForTimeout(Math.min(VISIBLE_SELECTOR_POLL_MS, remaining));
   }
   return null;
 }
 
-async function readComposerValue(composer: Locator): Promise<string> {
-  return await composer.evaluate((element) => {
-    if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
-      return element.value;
+async function readComposerValues(composer: Locator): Promise<readonly string[]> {
+  return await composer
+    .evaluate(
+      (element) => {
+        const values: string[] = [];
+        if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
+          values.push(element.value);
+        }
+        if (element instanceof HTMLElement) {
+          values.push(element.innerText, element.textContent ?? '');
+        }
+        return values;
+      },
+      undefined,
+      { timeout: COMPOSER_READ_TIMEOUT_MS },
+    )
+    .catch(() => [] as string[]);
+}
+
+async function composerHasExactValue(
+  composer: Locator,
+  expected: string,
+): Promise<boolean> {
+  const normalizedExpected = normalizeLineEndings(expected);
+  const values = await readComposerValues(composer);
+  return values.some((value) => normalizeLineEndings(value) === normalizedExpected);
+}
+
+async function writeExactComposerValue(
+  page: Page,
+  composer: Locator,
+  expected: string,
+): Promise<boolean> {
+  await waitForComposerStability(page, composer, COMPOSER_HYDRATION_TIMEOUT_MS);
+  for (let attempt = 0; attempt < COMPOSER_WRITE_ATTEMPTS; attempt += 1) {
+    if (await composerHasExactValue(composer, expected)) {
+      return true;
     }
-    if (element instanceof HTMLElement) {
-      return element.innerText;
+    if (!(await clearComposerValue(page, composer))) {
+      continue;
     }
-    return element.textContent ?? '';
-  });
+    await composer.focus().catch(() => undefined);
+    await page.keyboard.insertText(expected).catch(async () => {
+      await composer.fill(expected);
+    });
+    if (await waitForComposerValue(page, composer, expected)) {
+      return true;
+    }
+  }
+  return await waitForComposerValue(page, composer, expected);
+}
+
+async function clearComposerValue(page: Page, composer: Locator): Promise<boolean> {
+  await composer.click({ timeout: 5_000 }).catch(() => undefined);
+  await composer.focus().catch(() => undefined);
+  const selectAll = process.platform === 'darwin' ? 'Meta+A' : 'Control+A';
+  await page.keyboard.press(selectAll).catch(() => undefined);
+  await page.keyboard.press('Backspace').catch(() => undefined);
+  if (await waitForComposerValue(page, composer, '')) {
+    return true;
+  }
+  await composer.fill('').catch(() => undefined);
+  return await waitForComposerValue(page, composer, '');
+}
+
+async function waitForComposerStability(
+  page: Page,
+  composer: Locator,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let previous = '';
+  let stableSince = 0;
+  while (Date.now() < deadline) {
+    const values = await readComposerValues(composer);
+    if (values.length === 0) {
+      previous = '';
+      stableSince = 0;
+      await page.waitForTimeout(COMPOSER_COMMIT_POLL_MS);
+      continue;
+    }
+    const signature = values.map(normalizeLineEndings).join('\u0000');
+    const now = Date.now();
+    if (signature === previous) {
+      if (stableSince === 0) stableSince = now;
+      if (now - stableSince >= COMPOSER_STABLE_WINDOW_MS) return;
+    } else {
+      previous = signature;
+      stableSince = now;
+    }
+    await page.waitForTimeout(COMPOSER_COMMIT_POLL_MS);
+  }
+}
+
+async function waitForComposerValue(
+  page: Page,
+  composer: Locator,
+  expected: string,
+): Promise<boolean> {
+  const normalizedExpected = normalizeLineEndings(expected);
+  let deadline = Date.now() + COMPOSER_COMMIT_TIMEOUT_MS;
+  let matchingSince = 0;
+  for (;;) {
+    const values = await readComposerValues(composer);
+    const now = Date.now();
+    if (values.some((value) => normalizeLineEndings(value) === normalizedExpected)) {
+      if (matchingSince === 0) {
+        matchingSince = now;
+        deadline = Math.max(deadline, now + COMPOSER_STABLE_WINDOW_MS);
+      }
+      if (now - matchingSince >= COMPOSER_STABLE_WINDOW_MS) return true;
+    } else {
+      matchingSince = 0;
+    }
+    const remaining = deadline - now;
+    if (remaining <= 0) {
+      return false;
+    }
+    await page.waitForTimeout(Math.min(COMPOSER_COMMIT_POLL_MS, remaining));
+  }
 }
 
 async function captureUserIdentitySet(page: Page): Promise<Set<string>> {

@@ -127,6 +127,138 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
   }
 });
 
+test('ChatGPT replaces only a missing unsubmitted Page after restart', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-stale-page-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const stale = await owner.createPage();
+    await stale.page.close();
+    const adapter = new ChatGptAdapter({
+      browserOwner: owner,
+      pageRegistry: registry,
+      loginUrl: 'https://chatgpt.com/',
+      acknowledgementTimeoutMs: 500,
+    });
+    const staleSession: SessionSnapshot = {
+      ...sessionSnapshot(stale.binding.pageKey),
+      generation: 2,
+      sessionState: 'ready',
+      providerState: 'error',
+      errorCode: 'provider.composer-unavailable',
+      reason: 'pre-submit-failure',
+      promptSubmitted: false,
+    };
+
+    const replacement = await adapter.openSubmission({
+      session: staleSession,
+      generation: 3,
+      prompt: 'Safe retry after a pre-submit failure',
+      model: null,
+    });
+    assert.notEqual(replacement.pageKey, stale.binding.pageKey);
+    const replacementBinding = registry.getBinding(replacement.pageKey);
+    assert.equal(replacementBinding.state, 'reserved');
+    assert.equal(replacementBinding.sessionId, staleSession.sessionId);
+    assert.equal(replacementBinding.generation, 3);
+
+    await assert.rejects(
+      adapter.openSubmission({
+        session: { ...staleSession, promptSubmitted: true },
+        generation: 4,
+        prompt: 'Never replace an ambiguously submitted Page',
+        model: null,
+      }),
+      (error: unknown) =>
+        error instanceof Error &&
+        'errorCode' in error &&
+        error.errorCode === 'browser.unavailable',
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ChatGPT follow-up reopens the exact conversation when the durable pageKey is stale', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-followup-rebind-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const routingPage = await owner.createPage();
+    await routingPage.page.context().route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: advancedFixture(),
+      });
+    });
+    const stalePageKey = routingPage.binding.pageKey;
+    registry.detach();
+    assert.equal(registry.getBinding(stalePageKey).state, 'closed');
+    const adapter = new ChatGptAdapter({
+      browserOwner: owner,
+      pageRegistry: registry,
+      loginUrl: 'https://chatgpt.com/',
+      acknowledgementTimeoutMs: 500,
+    });
+    const conversationId = '6aacf04a-4964-83e9-8954-fc317621f157';
+    const preparedSession: SessionSnapshot = {
+      ...sessionSnapshot(stalePageKey),
+      sessionId: 'restart-followup-session',
+      generation: 2,
+      sessionState: 'submitting',
+      providerState: 'pending',
+      terminal: false,
+      conversationId,
+      promptSubmitted: false,
+      answerText: null,
+      responseMessageId: null,
+    };
+
+    const submission = await adapter.openSubmission({
+      session: preparedSession,
+      generation: 2,
+      prompt: 'Continue the exact durable conversation',
+      model: null,
+    });
+    assert.notEqual(submission.pageKey, preparedSession.pageKey);
+    const binding = registry.getBinding(submission.pageKey);
+    assert.equal(binding.state, 'owned');
+    assert.equal(binding.sessionId, preparedSession.sessionId);
+    assert.equal(binding.generation, 2);
+    assert.equal(binding.conversationId, conversationId);
+    assert.equal(
+      registry.pageForObservation(submission.pageKey).url(),
+      `https://chatgpt.com/c/${conversationId}`,
+    );
+
+    await submission.prepare();
+    assert.equal(
+      await registry
+        .pageForObservation(submission.pageKey)
+        .locator('#prompt-textarea')
+        .textContent(),
+      'Continue the exact durable conversation',
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ChatGPT Work surface is rejected before composer mutation', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-work-rejected-'));
   const registry = new PageRegistry();

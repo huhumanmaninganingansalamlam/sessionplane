@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { Page } from 'playwright-core';
 import path from 'node:path';
 
 import type { BrowserOwner } from '../../browser/browser-owner.ts';
@@ -67,11 +68,45 @@ export class ChatGptAdapter implements ProviderAdapter {
   }
 
   async openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission> {
+    let createdPage: Page | null = null;
     try {
       let pageKey = request.session.pageKey;
       let initialUrl: string | undefined;
+      if (
+        pageKey !== null &&
+        !hasOpenPage(this.#pageRegistry, pageKey) &&
+        !request.session.promptSubmitted
+      ) {
+        pageKey = null;
+      }
+
+      if (pageKey === null && request.session.conversationId !== null) {
+        if (request.session.promptSubmitted) {
+          throw new PageRegistryError(
+            'browser.unavailable',
+            'Cannot replace a missing Page after provider submission was attempted',
+          );
+        }
+        const existing = this.#pageRegistry.findByConversation(
+          request.session.conversationId,
+        );
+        if (existing.length > 0) {
+          pageKey = existing[0]?.pageKey ?? null;
+        } else {
+          const created = await this.#browserOwner.createPage();
+          createdPage = created.page;
+          pageKey = created.binding.pageKey;
+          await created.page.goto(
+            chatGptConversationUrl(this.#loginUrl, request.session.conversationId),
+            { waitUntil: 'domcontentloaded', timeout: 15_000 },
+          );
+          this.#pageRegistry.refreshPage(pageKey);
+        }
+      }
+
       if (pageKey === null) {
         const created = await this.#browserOwner.createPage();
+        createdPage = created.page;
         pageKey = created.binding.pageKey;
         this.#pageRegistry.reservePage(pageKey, {
           sessionId: request.session.sessionId,
@@ -92,6 +127,7 @@ export class ChatGptAdapter implements ProviderAdapter {
         generation: request.generation,
         conversationId: request.session.conversationId,
       });
+      createdPage = null;
       return new ChatGptSubmission({
         page,
         pageKey,
@@ -101,6 +137,7 @@ export class ChatGptAdapter implements ProviderAdapter {
         ...(initialUrl === undefined ? {} : { initialUrl }),
       });
     } catch (error) {
+      await createdPage?.close().catch(() => undefined);
       if (error instanceof ProviderSubmissionError) {
         throw error;
       }
@@ -339,6 +376,23 @@ export class ChatGptAdapter implements ProviderAdapter {
       conversationId,
     });
   }
+}
+
+function hasOpenPage(pageRegistry: PageRegistry, pageKey: string): boolean {
+  try {
+    return pageRegistry.refreshPage(pageKey).state !== 'closed';
+  } catch (error) {
+    if (error instanceof PageRegistryError) return false;
+    throw error;
+  }
+}
+
+function chatGptConversationUrl(loginUrl: string, conversationId: string): string {
+  const url = new URL(loginUrl);
+  url.pathname = '/c/' + encodeURIComponent(conversationId);
+  url.search = '';
+  url.hash = '';
+  return url.href;
 }
 
 function recoveryUnavailable(reason: string): ProviderRecoveryResult {

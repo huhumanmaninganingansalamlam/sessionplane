@@ -33,17 +33,40 @@ import {
 
 const MAX_LAUNCH_ATTEMPTS = 3;
 
+type BrowserLockMode = 'cdp' | 'manual';
+
 interface ProfileLockPayload {
   readonly pid: number;
   readonly token: string;
   readonly createdAt: string;
+  readonly mode?: BrowserLockMode;
   readonly browserPid?: number;
   readonly debuggingPort?: number;
 }
 
-interface AdoptedBrowser {
-  readonly browserPid: number;
-  readonly debuggingPort: number;
+type AdoptedBrowser =
+  | {
+      readonly mode: 'cdp';
+      readonly browserPid: number;
+      readonly debuggingPort: number;
+    }
+  | {
+      readonly mode: 'manual';
+      readonly browserPid: number;
+    };
+
+export interface ManualLoginSnapshot {
+  readonly requestOk: true;
+  readonly mode: 'manual';
+  readonly url: string;
+  readonly browser: BrowserStatusSource;
+  readonly instruction: string;
+}
+
+export interface ManualLoginResumeSnapshot {
+  readonly requestOk: true;
+  readonly mode: 'automated';
+  readonly browser: BrowserStatusSource;
 }
 
 export interface BrowserOwnerOptions {
@@ -86,7 +109,8 @@ export class BrowserOwner {
   #browserProcess: ChildProcess | null = null;
   #browserPid: number | null = null;
   #debuggingPort: number | null = null;
-  #ownership: 'spawned' | 'adopted' | null = null;
+  #ownership: 'spawned' | 'adopted' | 'manual' | null = null;
+  #manualLoginUrl: string | null = null;
   #browserStderrTail = '';
   #state: BrowserRuntimeState = 'not_started';
   #chrome: ChromeInstallation | null = null;
@@ -99,7 +123,7 @@ export class BrowserOwner {
     this.#profileDir = this.#profileRoot;
     this.#pageRegistry = options.pageRegistry;
     this.#headless = options.headless ?? false;
-    this.#browserPreference = options.browserPreference ?? 'chromium';
+    this.#browserPreference = options.browserPreference ?? 'chrome';
     this.#browserExecutable = options.browserExecutable ?? null;
     this.#launchTimeoutMs = options.launchTimeoutMs ?? 30_000;
     this.#now = options.now ?? (() => new Date());
@@ -113,7 +137,7 @@ export class BrowserOwner {
       profileDir: this.#profileDir,
       headless: this.#headless,
       chrome: this.#chrome,
-      transport: 'cdp',
+      transport: this.#ownership === 'manual' ? null : 'cdp',
       ownership: this.#ownership,
       browserPid: this.#browserPid,
       debuggingPort: this.#debuggingPort,
@@ -122,7 +146,7 @@ export class BrowserOwner {
   }
 
   async start(): Promise<void> {
-    if (this.#state === 'ready') return;
+    if (this.#state === 'ready' || this.#state === 'manual') return;
     if (this.#state === 'starting' || this.#state === 'stopping') {
       throw new BrowserOwnerError('browser.unavailable', `Browser owner is ${this.#state}`);
     }
@@ -136,6 +160,14 @@ export class BrowserOwner {
       const selectedBrowser = this.#resolveBrowserProfile();
       const adopted = await this.#acquireProfileLock();
       ensureProfileBrowserIdentity(this.#profileDir, selectedBrowser, this.#now);
+
+      if (adopted?.mode === 'manual') {
+        this.#browserPid = adopted.browserPid;
+        this.#debuggingPort = null;
+        this.#ownership = 'manual';
+        this.#state = 'manual';
+        return;
+      }
 
       let debuggingPort: number;
       if (adopted === null) {
@@ -242,6 +274,194 @@ export class BrowserOwner {
     }
   }
 
+  async beginManualLogin(loginUrl: string): Promise<ManualLoginSnapshot> {
+    if (this.#headless) {
+      throw new BrowserOwnerError(
+        'browser.manual-login-unavailable',
+        'Manual login requires a headed host browser',
+      );
+    }
+    if (this.#state === 'starting' || this.#state === 'stopping') {
+      throw new BrowserOwnerError(
+        'browser.unavailable',
+        `Browser owner is ${this.#state}`,
+      );
+    }
+    if (this.#state === 'manual') {
+      return this.#manualLoginSnapshot(this.#manualLoginUrl ?? loginUrl);
+    }
+    if (this.#state === 'disconnected' || this.#state === 'error') {
+      await this.close();
+    }
+
+    const activeBindings = this.#pageRegistry
+      .listBindings({ includeClosed: false })
+      .filter((binding) => binding.sessionId !== null || binding.generation !== null);
+    if (activeBindings.length > 0) {
+      throw new BrowserOwnerError(
+        'browser.manual-login-blocked',
+        `Manual login cannot interrupt ${activeBindings.length} bound browser Page(s)`,
+      );
+    }
+
+    const selectedBrowser = this.#resolveBrowserProfile();
+    if (this.#lockToken === null) {
+      const adopted = await this.#acquireProfileLock();
+      if (adopted?.mode === 'manual') {
+        this.#browserPid = adopted.browserPid;
+        this.#debuggingPort = null;
+        this.#ownership = 'manual';
+        this.#manualLoginUrl = loginUrl;
+        this.#state = 'manual';
+        return this.#manualLoginSnapshot(loginUrl);
+      }
+      if (adopted?.mode === 'cdp') {
+        this.#browserPid = adopted.browserPid;
+        this.#debuggingPort = adopted.debuggingPort;
+        this.#ownership = 'adopted';
+        await this.#stopOwnedProcess(adopted.browserPid, adopted.debuggingPort);
+        this.#browserPid = null;
+        this.#debuggingPort = null;
+        this.#ownership = null;
+      }
+      ensureProfileBrowserIdentity(this.#profileDir, selectedBrowser, this.#now);
+    }
+
+    this.#closing = true;
+    this.#state = 'stopping';
+    try {
+      this.#pageRegistry.detach();
+      await this.#shutdownBrowser();
+    } catch (error) {
+      this.#state = 'error';
+      this.#lastError = error instanceof Error ? error.message : String(error);
+      throw error;
+    } finally {
+      this.#closing = false;
+    }
+
+    this.#state = 'starting';
+    try {
+      await this.#launchManualBrowser(selectedBrowser, loginUrl);
+      this.#state = 'manual';
+      return this.#manualLoginSnapshot(loginUrl);
+    } catch (error) {
+      await this.#shutdownBrowser().catch(() => undefined);
+      this.#state = 'error';
+      this.#lastError = error instanceof Error ? error.message : String(error);
+      this.#releaseProfileLock();
+      if (error instanceof BrowserOwnerError) throw error;
+      throw new BrowserOwnerError(
+        'browser.manual-login-unavailable',
+        'Failed to launch the dedicated host browser for manual login',
+        { cause: error },
+      );
+    }
+  }
+
+  async resumeManualLogin(): Promise<ManualLoginResumeSnapshot> {
+    if (this.#state !== 'manual' || this.#ownership !== 'manual') {
+      throw new BrowserOwnerError(
+        'browser.manual-login-not-active',
+        'No SessionPlane manual login browser is active',
+      );
+    }
+
+    this.#closing = true;
+    this.#state = 'stopping';
+    try {
+      const lockedPid = existsSync(this.#lockPath)
+        ? readProfileLock(this.#lockPath).browserPid ?? null
+        : null;
+      const pid = this.#browserPid ?? lockedPid;
+      if (pid !== null && isProcessAlive(pid)) {
+        await this.#stopOwnedProcess(pid, null);
+      }
+      const child = this.#browserProcess;
+      if (child !== null) await waitForChildExit(child, 2_000);
+      this.#browserProcess = null;
+      this.#browserPid = null;
+      this.#debuggingPort = null;
+      this.#ownership = null;
+      this.#manualLoginUrl = null;
+      this.#releaseProfileLock();
+      this.#state = 'stopped';
+    } catch (error) {
+      this.#state = 'manual';
+      throw error;
+    } finally {
+      this.#closing = false;
+    }
+
+    await this.start();
+    return Object.freeze({
+      requestOk: true,
+      mode: 'automated',
+      browser: this.status,
+    });
+  }
+
+  #manualLoginSnapshot(loginUrl: string): ManualLoginSnapshot {
+    return Object.freeze({
+      requestOk: true,
+      mode: 'manual',
+      url: loginUrl,
+      browser: this.status,
+      instruction:
+        'Complete sign-in in the dedicated browser window, then run `sessplane login --resume`.',
+    });
+  }
+
+  async #launchManualBrowser(
+    browser: ChromeInstallation,
+    loginUrl: string,
+  ): Promise<void> {
+    const child = spawn(
+      browser.executable,
+      buildManualLoginArguments({ profileDir: this.#profileDir, loginUrl }),
+      {
+        env: process.env,
+        detached: process.platform !== 'win32',
+        stdio: ['ignore', 'ignore', 'pipe'],
+      },
+    );
+    this.#browserProcess = child;
+    this.#browserPid = child.pid ?? null;
+    this.#debuggingPort = null;
+    this.#ownership = 'manual';
+    this.#manualLoginUrl = loginUrl;
+    this.#browserStderrTail = '';
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (chunk: string) => {
+      this.#browserStderrTail = `${this.#browserStderrTail}${chunk}`.slice(-8_000);
+    });
+    child.once('exit', (code, signal) => {
+      if (this.#browserProcess !== child || this.#closing) return;
+      this.#browserProcess = null;
+      this.#browserPid = null;
+      if (code !== 0 && code !== null) {
+        this.#lastError = `Manual login browser exited with code ${code}${
+          signal === null ? '' : ` from ${signal}`
+        }`;
+      }
+    });
+    child.unref();
+    (child.stderr as (NodeJS.ReadableStream & { unref?: () => void }) | null)?.unref?.();
+
+    if (child.pid === undefined) {
+      throw new BrowserOwnerError(
+        'browser.manual-login-unavailable',
+        'Manual login browser process did not expose a PID',
+      );
+    }
+    this.#recordBrowserProcess(child.pid, null, 'manual');
+    await waitForManualBrowserStartup(
+      child,
+      Math.min(this.#launchTimeoutMs, 2_000),
+      () => this.#browserStderrTail,
+    );
+  }
+
   #requireContext(): BrowserContext {
     if (this.#state !== 'ready' || this.#context === null) {
       throw new BrowserOwnerError('browser.unavailable', 'Browser context is not ready');
@@ -326,7 +546,7 @@ export class BrowserOwner {
         if (child.pid === undefined) {
           throw new BrowserOwnerError('browser.unavailable', 'Host browser process did not expose a PID');
         }
-        this.#recordBrowserProcess(child.pid, debuggingPort);
+        this.#recordBrowserProcess(child.pid, debuggingPort, 'cdp');
         await waitForCdpEndpoint(
           debuggingPort,
           child,
@@ -364,38 +584,47 @@ export class BrowserOwner {
     const child = this.#browserProcess;
     const browserPid = this.#browserPid;
     const debuggingPort = this.#debuggingPort;
+    const ownership = this.#ownership;
     this.#context = null;
     this.#browser = null;
 
-    if (browser !== null && browser.isConnected()) {
-      try {
-        const session = await settleWithin(browser.newBrowserCDPSession(), 1_000);
-        if (session !== undefined) {
-          await settleWithin(session.send('Browser.close'), 1_000);
-          void session.detach().catch(() => undefined);
-        }
-      } catch {
-        // The exact owned process is terminated below if graceful CDP close fails.
+    if (ownership === 'manual') {
+      if (browserPid !== null && isProcessAlive(browserPid)) {
+        await this.#stopOwnedProcess(browserPid, null);
       }
-    }
+      if (child !== null) await waitForChildExit(child, 2_000);
+    } else {
+      if (browser !== null && browser.isConnected()) {
+        try {
+          const session = await settleWithin(browser.newBrowserCDPSession(), 1_000);
+          if (session !== undefined) {
+            await settleWithin(session.send('Browser.close'), 1_000);
+            void session.detach().catch(() => undefined);
+          }
+        } catch {
+          // The exact owned process is terminated below if graceful CDP close fails.
+        }
+      }
 
-    if (child !== null && !(await waitForChildExit(child, 3_000))) {
-      await this.#stopOwnedProcess(child.pid ?? browserPid, debuggingPort);
-    } else if (
-      child === null &&
-      browserPid !== null &&
-      isProcessAlive(browserPid)
-    ) {
-      await this.#stopOwnedProcess(browserPid, debuggingPort);
-    }
-    if (browser !== null && browser.isConnected()) {
-      await settleWithin(browser.close(), 1_000);
+      if (child !== null && !(await waitForChildExit(child, 3_000))) {
+        await this.#stopOwnedProcess(child.pid ?? browserPid, debuggingPort);
+      } else if (
+        child === null &&
+        browserPid !== null &&
+        isProcessAlive(browserPid)
+      ) {
+        await this.#stopOwnedProcess(browserPid, debuggingPort);
+      }
+      if (browser !== null && browser.isConnected()) {
+        await settleWithin(browser.close(), 1_000);
+      }
     }
 
     this.#browserProcess = null;
     this.#browserPid = null;
     this.#debuggingPort = null;
     this.#ownership = null;
+    this.#manualLoginUrl = null;
   }
 
   async #stopOwnedProcess(pid: number | null, debuggingPort: number | null): Promise<void> {
@@ -415,7 +644,11 @@ export class BrowserOwner {
     await terminateProcessGroup(pid);
   }
 
-  #recordBrowserProcess(browserPid: number, debuggingPort: number): void {
+  #recordBrowserProcess(
+    browserPid: number,
+    debuggingPort: number | null,
+    mode: BrowserLockMode,
+  ): void {
     const token = this.#lockToken;
     if (token === null) {
       throw new BrowserOwnerError(
@@ -432,7 +665,14 @@ export class BrowserOwner {
     }
     writeFileSync(
       this.#lockPath,
-      JSON.stringify({ ...current, browserPid, debuggingPort }),
+      JSON.stringify({
+        pid: current.pid,
+        token: current.token,
+        createdAt: current.createdAt,
+        mode,
+        browserPid,
+        ...(debuggingPort === null ? {} : { debuggingPort }),
+      }),
       { encoding: 'utf8', mode: 0o600 },
     );
     chmodSync(this.#lockPath, 0o600);
@@ -458,11 +698,18 @@ export class BrowserOwner {
           JSON.stringify(
             adopted === null
               ? payload
-              : {
-                  ...payload,
-                  browserPid: adopted.browserPid,
-                  debuggingPort: adopted.debuggingPort,
-                },
+              : adopted.mode === 'manual'
+                ? {
+                    ...payload,
+                    mode: 'manual',
+                    browserPid: adopted.browserPid,
+                  }
+                : {
+                    ...payload,
+                    mode: 'cdp',
+                    browserPid: adopted.browserPid,
+                    debuggingPort: adopted.debuggingPort,
+                  },
           ),
           { encoding: 'utf8' },
         );
@@ -489,12 +736,18 @@ export class BrowserOwner {
               `Stale profile lock references live process ${existing.browserPid}, but exact profile ownership cannot be proven`,
             );
           }
-          if (
+          if (existing.mode === 'manual') {
+            adopted = {
+              mode: 'manual',
+              browserPid: existing.browserPid,
+            };
+          } else if (
             existing.debuggingPort !== undefined &&
             processOwnsDebuggingPort(existing.browserPid, existing.debuggingPort) &&
             (await isCdpEndpointReady(existing.debuggingPort))
           ) {
             adopted = {
+              mode: 'cdp',
               browserPid: existing.browserPid,
               debuggingPort: existing.debuggingPort,
             };
@@ -543,6 +796,20 @@ export function buildHostBrowserArguments(input: {
     '--no-default-browser-check',
     ...(input.headless ? ['--headless=new'] : []),
     'about:blank',
+  ]);
+}
+
+export function buildManualLoginArguments(input: {
+  readonly profileDir: string;
+  readonly loginUrl: string;
+}): readonly string[] {
+  return Object.freeze([
+    `--user-data-dir=${path.resolve(input.profileDir)}`,
+    '--window-size=1440,900',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--new-window',
+    input.loginUrl,
   ]);
 }
 
@@ -622,6 +889,33 @@ async function waitForCdpEndpoint(
     browserProcess.off('error', onError);
   }
   throw new Error(`Host browser CDP endpoint did not become ready${formatStderrSuffix(stderrTail())}`);
+}
+
+async function waitForManualBrowserStartup(
+  browserProcess: ChildProcess,
+  timeoutMs: number,
+  stderrTail: () => string,
+): Promise<void> {
+  const deadline = Date.now() + Math.max(250, timeoutMs);
+  let spawnError: Error | null = null;
+  const onError = (error: Error): void => {
+    spawnError = error;
+  };
+  browserProcess.once('error', onError);
+  try {
+    while (Date.now() < deadline) {
+      if (spawnError !== null) throw spawnError;
+      if (browserProcess.exitCode !== null || browserProcess.signalCode !== null) {
+        throw new Error(
+          `Manual login browser exited during startup${formatStderrSuffix(stderrTail())}`,
+        );
+      }
+      if (Date.now() + 100 >= deadline) return;
+      await delay(100);
+    }
+  } finally {
+    browserProcess.off('error', onError);
+  }
 }
 
 function formatStderrSuffix(value: string): string {
@@ -766,6 +1060,7 @@ function readProfileLock(lockPath: string): ProfileLockPayload {
     record.pid <= 0 ||
     typeof record.token !== 'string' ||
     typeof record.createdAt !== 'string' ||
+    (record.mode !== undefined && record.mode !== 'cdp' && record.mode !== 'manual') ||
     (record.browserPid !== undefined &&
       (typeof record.browserPid !== 'number' ||
         !Number.isSafeInteger(record.browserPid) ||
@@ -774,7 +1069,10 @@ function readProfileLock(lockPath: string): ProfileLockPayload {
       (typeof record.debuggingPort !== 'number' ||
         !Number.isSafeInteger(record.debuggingPort) ||
         record.debuggingPort <= 0 ||
-        record.debuggingPort > 65_535))
+        record.debuggingPort > 65_535)) ||
+    (record.mode === 'manual' && record.debuggingPort !== undefined) ||
+    (record.mode === 'cdp' &&
+      (record.browserPid === undefined || record.debuggingPort === undefined))
   ) {
     throw new BrowserOwnerError('browser.unavailable', `Persistent profile lock is malformed: ${lockPath}`);
   }

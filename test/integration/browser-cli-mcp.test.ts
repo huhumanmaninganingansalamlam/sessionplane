@@ -32,6 +32,30 @@ test('agbrowse-compatible CLI and MCP share one explicit browser Page and snapsh
   });
 
   try {
+    const contradictoryLogin = await runCliJson([
+      'login',
+      '--manual',
+      '--resume',
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(contradictoryLogin.code, 2);
+    assert.match(contradictoryLogin.stderr, /mutually exclusive/);
+
+    const manualLogin = await runCliJson([
+      'login',
+      '--manual',
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(manualLogin.code, 1);
+    assert.equal(
+      (JSON.parse(manualLogin.stderr) as { errorCode: string }).errorCode,
+      'browser.manual-login-unavailable',
+    );
+
     const createdRun = await runCliJson([
       'new-tab',
       fixture.url,

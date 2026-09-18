@@ -8,6 +8,7 @@ export type BrowserRuntimeState =
   | 'not_started'
   | 'starting'
   | 'ready'
+  | 'manual'
   | 'stopping'
   | 'stopped'
   | 'disconnected'
@@ -44,7 +45,7 @@ export interface BrowserStatusSource {
   readonly headless: boolean;
   readonly chrome: ChromeInstallation | null;
   readonly transport: 'cdp' | null;
-  readonly ownership: 'spawned' | 'adopted' | null;
+  readonly ownership: 'spawned' | 'adopted' | 'manual' | null;
   readonly browserPid: number | null;
   readonly debuggingPort: number | null;
   readonly lastError: string | null;

@@ -103,7 +103,10 @@ export async function observeChatGptDom(
           continue;
         }
         const responseMessageId = message.messageId ?? message.turnId;
-        if (responseMessageId === null) {
+        if (
+          responseMessageId === null ||
+          responseMessageId.startsWith('request-placeholder-')
+        ) {
           continue;
         }
         candidate = {

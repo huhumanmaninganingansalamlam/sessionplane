@@ -54,6 +54,43 @@ test('PageMutationMutex serializes one Page while allowing distinct Pages to pro
   assert.equal(mutex.isBusy('page-a'), false);
 });
 
+test('PageRegistry detach invalidates every Page from the detached context', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-page-registry-detach-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'detached-session',
+      generation: 1,
+      conversationId: null,
+    });
+
+    registry.detach();
+
+    assert.equal(registry.getBinding(created.binding.pageKey).state, 'closed');
+    assert.equal(
+      registry
+        .listBindings({ includeClosed: false })
+        .some((binding) => binding.pageKey === created.binding.pageKey),
+      false,
+    );
+    assert.throws(
+      () => registry.pageForObservation(created.binding.pageKey),
+      /closed/,
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('PageRegistry quarantines duplicate conversations and detects navigation identity loss', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-page-registry-'));
   const registry = new PageRegistry();

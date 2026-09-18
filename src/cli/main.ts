@@ -52,6 +52,8 @@ const FLAG_OPTIONS = new Set([
   'multi-zip',
   'require-plan',
   'dry-run',
+  'manual',
+  'resume',
 ]);
 const MULTI_VALUE_OPTIONS = new Set(['file', 'context-from-files', 'context-exclude', 'skill']);
 const VALUE_OPTIONS = new Set([
@@ -202,7 +204,21 @@ export async function runCli(
         return selected === null ? 1 : 0;
       }
       case 'login': {
-        const result = await runLogin(config, parsed.options.url);
+        if (parsed.options.manual !== undefined && parsed.options.resume !== undefined) {
+          throw new Error('--manual and --resume are mutually exclusive');
+        }
+        if (parsed.options.resume !== undefined && parsed.options.url !== undefined) {
+          throw new Error('--resume does not accept --url');
+        }
+        const mode = parsed.options.manual !== undefined
+          ? 'manual'
+          : parsed.options.resume !== undefined
+            ? 'resume'
+            : 'automated';
+        const result = await runLogin(config, {
+          mode,
+          ...(parsed.options.url === undefined ? {} : { url: parsed.options.url }),
+        });
         writeCliResult(io, parsed.json, result);
         return 0;
       }
@@ -700,6 +716,18 @@ async function runSessionCommand(
   }
 }
 
+export function sessionSendRpcTimeoutMs(
+  config: Pick<
+    SessionPlaneConfig,
+    'rpcRequestTimeoutMs' | 'browserLaunchTimeoutMs' | 'submissionAckTimeoutMs'
+  >,
+): number {
+  return Math.max(
+    config.rpcRequestTimeoutMs,
+    config.browserLaunchTimeoutMs + config.submissionAckTimeoutMs + 30_000,
+  );
+}
+
 async function runSendCommand(
   io: CliIo,
   parsed: ParsedArgs,
@@ -725,7 +753,7 @@ async function runSendCommand(
     ...optionalParam('surface', parsed.options.surface),
     ...(files.length === 0 ? {} : { files }),
     ...optionalIntegerParam(parsed, 'deadline', 'sessionDeadlineSec', 1, 86_400),
-  });
+  }, sessionSendRpcTimeoutMs(config));
 }
 
 async function runWaitCommand(
@@ -1415,7 +1443,7 @@ Usage:
   sessplane health [--json] [--socket PATH]
   sessplane doctor [--json] [--state-dir PATH]
   sessplane browser-list [--browser NAME] [--browser-executable PATH]
-  sessplane login [--json] [--url HTTPS_URL]
+  sessplane login [--manual|--resume] [--json] [--url HTTPS_URL]
 
 Browser compatibility:
   sessplane browser-status | browser-start | browser-stop

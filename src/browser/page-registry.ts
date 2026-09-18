@@ -95,6 +95,14 @@ export class PageRegistry {
     }
     context.off('page', this.#onContextPage);
     context.off('close', this.#onContextClose);
+    for (const record of this.#records.values()) {
+      if (record.state === 'closed' || record.page.context() !== context) {
+        continue;
+      }
+      record.page.off('framenavigated', record.onFrameNavigated);
+      record.page.off('close', record.onClose);
+      this.#markClosed(record);
+    }
     this.#context = null;
   }
 

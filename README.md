@@ -52,9 +52,9 @@ The core launches a browser already installed by the user with a minimal,
 positive loopback CDP endpoint and then controls its persistent default context
 with `playwright-core` through `chromium.connectOverCDP()`. SessionPlane never
 downloads, installs, upgrades, or silently falls back to a Playwright-managed
-browser. The default selection is the user-installed host Chromium,
-including native, Snap, and Flatpak Chromium launchers. It does not silently
-fall back to another browser. Select explicitly with
+browser. The default selection is the user-installed Google Chrome Stable. Chromium,
+Edge, Brave, and custom Chromium-family executables remain explicit choices.
+The default never falls back silently to another browser. Select explicitly with
 `--browser chrome|chromium|edge|brave`, use `--browser auto` to opt into the
 Chromium, Chrome, Edge, then Brave fallback order, or use
 `--browser custom --browser-executable /absolute/path`. Every selection uses
@@ -113,12 +113,27 @@ agbrowse snapshot --page <pageKey> --json
 SessionPlane keeps these generic browser commands and role-addressed AI
 sessions on the same persistent profile and PageRegistry.
 
-Open or reuse the dedicated ChatGPT login page without attaching to a personal
-Chrome profile:
+Open or reuse the dedicated ChatGPT page during normal automated operation:
 
 ```bash
 sessplane login --json
 ```
+
+For Google OAuth or another sign-in flow that rejects an attached automation
+transport, use the explicit manual handoff. SessionPlane first closes its CDP
+browser and starts the same host browser with the same product-scoped
+SessionPlane profile, but with no CDP endpoint or Playwright attachment:
+
+```bash
+sessplane login --manual --json
+# Complete login in the visible dedicated browser window.
+sessplane login --resume --json
+```
+
+`--manual` refuses to interrupt bound session Pages. `--resume` closes only the
+exact SessionPlane-owned manual browser and relaunches the normal positive-port
+CDP runtime. Neither phase uses or mutates the user's personal/default browser
+profile, and neither performs CAPTCHA, OTP, or provider challenge bypass.
 
 Provider sessions support ChatGPT, Gemini, and Grok, including exact local file
 uploads. Provider-created downloadable files are captured into an owner-only,
