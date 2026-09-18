@@ -1,6 +1,6 @@
 import { existsSync, statSync } from 'node:fs';
 
-import { findPlaywrightChromium } from '../../browser/browser-health.ts';
+import { findHostBrowser, listHostBrowsers } from '../../browser/browser-health.ts';
 import { prepareRuntimeDirectories, SESSIONPLANE_VERSION, type SessionPlaneConfig } from '../../config.ts';
 import { SessionPlaneDatabase } from '../../storage/database.ts';
 import { callRpc } from '../client.ts';
@@ -25,14 +25,26 @@ export async function runDoctor(config: SessionPlaneConfig): Promise<DoctorRepor
     expected: '>=24.15 <25',
   });
 
-  const chrome = findPlaywrightChromium();
+  const availableBrowsers = listHostBrowsers();
+  const chrome = findHostBrowser({
+    preference: config.browserPreference,
+    ...(config.browserExecutable === null
+      ? {}
+      : { executablePath: config.browserExecutable }),
+  });
   checks.push({
-    name: 'playwright-chromium',
+    name: 'host-browser',
     required: true,
     ok: chrome !== null,
+    requested: config.browserPreference,
+    executableOverride: config.browserExecutable,
+    available: availableBrowsers,
     ...(chrome === null
-      ? { reason: 'Playwright Chromium is not installed; run `npm run browser:install`' }
-      : chrome),
+      ? {
+          reason:
+            'No supported user-installed browser was found; install Chrome, Chromium, Edge, or Brave, or set SESSIONPLANE_BROWSER_EXECUTABLE',
+        }
+      : { selected: chrome }),
   });
 
   try {

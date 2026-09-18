@@ -111,6 +111,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
           profileDir: config.profileDir,
           pageRegistry,
           headless: options.browserHeadless ?? config.browserHeadless,
+          browserPreference: config.browserPreference,
+          browserExecutable: config.browserExecutable,
           launchTimeoutMs: config.browserLaunchTimeoutMs,
         });
   const browserControl = new BrowserControlService({ browserOwner, pageRegistry });

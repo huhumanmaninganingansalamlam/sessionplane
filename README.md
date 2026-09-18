@@ -1,8 +1,8 @@
 # SessionPlane
 
-SessionPlane is a local runtime that owns one dedicated Playwright Chromium
-persistent profile and safely coordinates durable, role-addressed AI chat
-sessions for multiple clients.
+SessionPlane is a local runtime that controls a user-installed Chromium-family
+browser through Playwright, owns one dedicated persistent profile, and safely
+coordinates durable, role-addressed AI chat sessions for multiple clients.
 
 The core process owns browser state, SQLite state, session actors, observation,
 and recovery. The `sessplane` CLI and MCP adapter are thin Unix-socket clients.
@@ -10,14 +10,13 @@ and recovery. The `sessplane` CLI and MCP adapter are thin Unix-socket clients.
 ## Requirements
 
 - Node.js `>=24.15 <25`
-- Playwright-managed Chromium (`npm run browser:install`)
+- A user-installed Google Chrome, Chromium, Microsoft Edge, or Brave browser
 - A Unix-like operating system with Unix domain sockets
 
 ## Development
 
 ```bash
 npm ci
-npm run browser:install
 npm run typecheck
 npm test
 npm run build
@@ -49,12 +48,31 @@ replace the standalone agbrowse browser workflow. Pages are addressed by the
 opaque `pageKey` returned by `tabs`; browser focus, title, recency, and page
 array order are never identity.
 
-The core launches the exact Chromium revision managed by `playwright-core`
-through `chromium.launchPersistentContext()`, using the dedicated SessionPlane
-profile. It does not search for or implicitly depend on a system-installed
-Google Chrome. Browser binary, BrowserContext, Pages, profile, and lifecycle
-therefore stay pinned to one SessionPlane/Playwright version. No custom browser
-fingerprint patches are injected.
+The core launches a browser already installed by the user and controls it with
+`playwright-core` through `chromium.launchPersistentContext()`. SessionPlane
+never downloads, installs, upgrades, or silently falls back to a Playwright-
+managed browser. The default `auto` selection prefers host Google Chrome,
+then host Chromium, Microsoft Edge, and Brave. Select explicitly with
+`--browser chrome|chromium|edge|brave`, or use
+`--browser custom --browser-executable /absolute/path`. Every selection uses
+the dedicated SessionPlane profile; the user's normal browser profile and open
+tabs are never attached. No custom fingerprint patches are injected.
+
+Browser selection is a core-startup setting:
+
+```bash
+sessplane browser-list --json
+sessplane serve --browser chrome
+sessplane serve --browser chromium
+sessplane serve --browser custom \
+  --browser-executable /opt/browser/chrome
+```
+
+The equivalent environment variables are `SESSIONPLANE_BROWSER` and
+`SESSIONPLANE_BROWSER_EXECUTABLE`. Stop the existing core before changing the
+selection. A profile records its browser product and refuses to open under a
+different product; use a separate `SESSIONPLANE_PROFILE_DIR` when switching
+between Chrome, Chromium, Edge, or Brave.
 
 ```bash
 sessplane tabs --json
@@ -178,8 +196,9 @@ available through the thin MCP adapter. `compat/agbrowse-manifest.json`
 binds every required agbrowse replacement row to executable contracts; the
 compatibility contract fails when any required row is not implemented.
 
-`doctor --json` reports the pinned Playwright Chromium build and, when the core is
-running, the current Page bindings without changing browser focus.
+`browser-list --json` shows the supported host browsers and the exact selected
+executable. `doctor --json` verifies that selection and, when the core is
+running, reports the current Page bindings without changing browser focus.
 
 Installed or linked `sessplane` and `agbrowse` commands use one stable runtime
 directory independent of the caller's current directory:

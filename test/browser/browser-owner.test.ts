@@ -1,23 +1,28 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
 import { chromium } from 'playwright-core';
+import { findHostBrowser } from '../../src/browser/browser-health.ts';
 
 import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 
+const HOST_BROWSER = findHostBrowser();
+
 test('BrowserOwner owns one dedicated persistent profile and fails closed for a second owner', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-owner-'));
   const profileDir = path.join(root, 'profile');
+  assert.notEqual(HOST_BROWSER, null, 'a user-installed Chromium-family browser is required');
   let capturedLaunchOptions: Parameters<typeof chromium.launchPersistentContext>[1] | null = null;
   const first = new BrowserOwner({
     profileDir,
     pageRegistry: new PageRegistry(),
     headless: true,
+    browserExecutable: HOST_BROWSER?.executable ?? null,
     launchPersistentContext(userDataDir, options) {
       capturedLaunchOptions = options;
       return chromium.launchPersistentContext(userDataDir, options);
@@ -27,6 +32,7 @@ test('BrowserOwner owns one dedicated persistent profile and fails closed for a 
     profileDir,
     pageRegistry: new PageRegistry(),
     headless: true,
+    browserExecutable: HOST_BROWSER?.executable ?? null,
   });
 
   try {
@@ -34,10 +40,9 @@ test('BrowserOwner owns one dedicated persistent profile and fails closed for a 
     assert.equal(first.status.state, 'ready');
     assert.equal(first.status.transport, 'playwright');
     assert.equal(first.status.ownership, 'playwright');
-    assert.equal(first.status.chrome?.source, 'playwright');
-    assert.equal(first.status.chrome?.product, 'chromium');
+    assert.equal(first.status.chrome?.source, 'host');
     assert.equal(capturedLaunchOptions?.channel, undefined);
-    assert.equal(capturedLaunchOptions?.executablePath, chromium.executablePath());
+    assert.equal(capturedLaunchOptions?.executablePath, HOST_BROWSER?.executable);
     assert.deepEqual(capturedLaunchOptions?.ignoreDefaultArgs, [
       '--password-store=basic',
       '--use-mock-keychain',
@@ -62,6 +67,7 @@ test('BrowserOwner login returns after response commit without waiting for page 
     profileDir: path.join(root, 'profile'),
     pageRegistry: registry,
     headless: true,
+    browserExecutable: HOST_BROWSER?.executable ?? null,
     launchTimeoutMs: 5_000,
   });
   const fixture = await startCommittedResponseFixture();
@@ -87,6 +93,7 @@ test('BrowserOwner closes a newly created login Page when navigation fails', asy
     profileDir: path.join(root, 'profile'),
     pageRegistry: registry,
     headless: true,
+    browserExecutable: HOST_BROWSER?.executable ?? null,
     launchTimeoutMs: 2_000,
   });
   const unavailableUrl = await closedFixtureUrl();
@@ -101,6 +108,37 @@ test('BrowserOwner closes a newly created login Page when navigation fails', asy
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test(
+  'BrowserOwner refuses to open a profile bound to a different host browser',
+  { skip: HOST_BROWSER === null },
+  async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-profile-kind-'));
+    const profileDir = path.join(root, 'profile');
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(
+      path.join(profileDir, '.sessionplane-browser.json'),
+      JSON.stringify({
+        product: 'edge',
+        executable: '/different/browser',
+        recordedAt: new Date(0).toISOString(),
+      }),
+    );
+    const owner = new BrowserOwner({
+      profileDir,
+      pageRegistry: new PageRegistry(),
+      headless: true,
+      browserExecutable: HOST_BROWSER?.executable ?? null,
+    });
+    try {
+      await assert.rejects(owner.start(), /belongs to edge/);
+    } finally {
+      await owner.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 async function startCommittedResponseFixture(): Promise<{
   readonly server: Server;

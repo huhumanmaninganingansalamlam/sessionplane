@@ -1,6 +1,8 @@
 import { chmodSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 
+import type { BrowserPreference } from './browser/browser-health.ts';
+
 export const SESSIONPLANE_VERSION = '0.1.0';
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -17,6 +19,8 @@ export interface SessionPlaneConfig {
   readonly rpcRequestTimeoutMs: number;
   readonly browserLaunchTimeoutMs: number;
   readonly browserHeadless: boolean;
+  readonly browserPreference: BrowserPreference;
+  readonly browserExecutable: string | null;
   readonly submissionAckTimeoutMs: number;
   readonly observationActiveSweepMs: number;
   readonly observationQuietSweepMs: number;
@@ -52,6 +56,8 @@ export interface ConfigOverrides {
   readonly rpcRequestTimeoutMs?: number;
   readonly browserLaunchTimeoutMs?: number;
   readonly browserHeadless?: boolean;
+  readonly browserPreference?: BrowserPreference;
+  readonly browserExecutable?: string;
   readonly submissionAckTimeoutMs?: number;
   readonly observationActiveSweepMs?: number;
   readonly observationQuietSweepMs?: number;
@@ -75,6 +81,14 @@ export interface ConfigOverrides {
 }
 
 const LOG_LEVELS = new Set<LogLevel>(['debug', 'info', 'warn', 'error']);
+const BROWSER_PREFERENCES = new Set<BrowserPreference>([
+  'auto',
+  'chrome',
+  'chromium',
+  'edge',
+  'brave',
+  'custom',
+]);
 
 function resolvePath(base: string, value: string): string {
   return path.isAbsolute(value) ? path.normalize(value) : path.resolve(base, value);
@@ -116,6 +130,20 @@ function parseBoolean(value: string | undefined, fallback: boolean, name: string
   throw new Error(`${name} must be a boolean`);
 }
 
+function parseBrowserPreference(
+  value: string | undefined,
+  fallback: BrowserPreference,
+): BrowserPreference {
+  if (value === undefined || value === '') return fallback;
+  const normalized = value.toLowerCase() as BrowserPreference;
+  if (!BROWSER_PREFERENCES.has(normalized)) {
+    throw new Error(
+      `SESSIONPLANE_BROWSER must be one of ${[...BROWSER_PREFERENCES].join(', ')}`,
+    );
+  }
+  return normalized;
+}
+
 export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConfig {
   const env = overrides.env ?? process.env;
   const cwd = path.resolve(overrides.cwd ?? process.cwd());
@@ -136,6 +164,28 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
     stateDir,
     overrides.artifactDir ?? env.SESSIONPLANE_ARTIFACT_DIR ?? 'artifacts',
   );
+  const browserPreference =
+    overrides.browserPreference ?? parseBrowserPreference(env.SESSIONPLANE_BROWSER, 'auto');
+  const browserExecutableValue =
+    overrides.browserExecutable ?? env.SESSIONPLANE_BROWSER_EXECUTABLE;
+  const browserExecutable =
+    browserExecutableValue === undefined || browserExecutableValue === ''
+      ? null
+      : resolvePath(cwd, browserExecutableValue);
+  if (browserPreference === 'custom' && browserExecutable === null) {
+    throw new Error(
+      'SESSIONPLANE_BROWSER=custom requires SESSIONPLANE_BROWSER_EXECUTABLE',
+    );
+  }
+  if (
+    browserExecutable !== null &&
+    browserPreference !== 'auto' &&
+    browserPreference !== 'custom'
+  ) {
+    throw new Error(
+      'SESSIONPLANE_BROWSER_EXECUTABLE can be combined only with SESSIONPLANE_BROWSER=auto or custom',
+    );
+  }
   const chatgptUrl = validateChatGptUrl(
     overrides.chatgptUrl ?? env.SESSIONPLANE_CHATGPT_URL ?? 'https://chatgpt.com/',
   );
@@ -174,6 +224,8 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
     browserHeadless:
       overrides.browserHeadless ??
       parseBoolean(env.SESSIONPLANE_BROWSER_HEADLESS, false, 'SESSIONPLANE_BROWSER_HEADLESS'),
+    browserPreference,
+    browserExecutable,
     submissionAckTimeoutMs:
       overrides.submissionAckTimeoutMs ??
       parsePositiveInteger(

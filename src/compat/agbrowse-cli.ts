@@ -3,6 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { Readable, Writable } from 'node:stream';
 
+import {
+  findHostBrowser,
+  type BrowserPreference,
+} from '../browser/browser-health.ts';
 import { runCli } from '../cli/main.ts';
 import { callRpc, RpcClientError } from '../cli/client.ts';
 import { writeCliError, writeCliResult, type CliIo } from '../cli/format.ts';
@@ -875,8 +879,10 @@ function agbrowseCompatibilityHelp(): string {
   return `SessionPlane ${SESSIONPLANE_VERSION} — agbrowse compatibility
 
 Usage:
-  agbrowse start [--headed|--headless] [--json]
+  agbrowse start [--headed|--headless] [--browser NAME]
+                 [--browser-executable PATH] [--json]
   agbrowse status|stop|reset
+  agbrowse browser-list [--browser NAME] [--browser-executable PATH]
 
 Browser compatibility:
   agbrowse tabs|new-tab|tab-switch|tab-close|tab-cleanup
@@ -992,6 +998,40 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   process.exitCode = await runAgbrowseCli(argv);
 }
 
+function assertCompatibilityCoreBrowserSelection(
+  config: SessionPlaneConfig,
+  health: Readonly<Record<string, unknown>>,
+): void {
+  if (config.browserPreference === 'auto' && config.browserExecutable === null) return;
+
+  const expected = findHostBrowser({
+    preference: config.browserPreference,
+    ...(config.browserExecutable === null
+      ? {}
+      : { executablePath: config.browserExecutable }),
+  });
+  if (expected === null) throw new Error('The requested host browser is unavailable');
+
+  const current = (health.browser as {
+    readonly chrome?: {
+      readonly executable?: string;
+      readonly product?: string;
+    } | null;
+  } | undefined)?.chrome;
+  const matches =
+    current !== null &&
+    current !== undefined &&
+    (config.browserExecutable !== null
+      ? current.executable === expected.executable
+      : current.product === expected.product);
+  if (!matches) {
+    throw new Error(
+      `The running core owns ${current?.product ?? 'an unknown browser'}; ` +
+        `stop it and restart with --browser ${config.browserPreference}`,
+    );
+  }
+}
+
 async function startCompatibilityCore(
   argv: readonly string[],
   io: CliIo,
@@ -1025,6 +1065,7 @@ async function startCompatibilityCore(
     }
   }
 
+  assertCompatibilityCoreBrowserSelection(config, health);
   const browser = health.browser as { state?: string } | undefined;
   if (browser?.state === 'stopped' || browser?.state === 'not_started') {
     await callRpc({
@@ -1222,7 +1263,12 @@ function globalArgs(argv: readonly string[]): readonly string[] {
   const result: string[] = [];
   for (let index = 0; index < argv.length; index += 1) {
     const value = argv[index];
-    if (value === '--state-dir' || value === '--socket') {
+    if (
+      value === '--state-dir' ||
+      value === '--socket' ||
+      value === '--browser' ||
+      value === '--browser-executable'
+    ) {
       const next = argv[index + 1];
       if (next !== undefined) result.push(value, next);
       index += 1;
@@ -1250,9 +1296,15 @@ function legacyRef(value: string): string {
 function configFromArgs(argv: readonly string[]): SessionPlaneConfig {
   const stateDir = optionValue(argv, '--state-dir');
   const socketPath = optionValue(argv, '--socket');
+  const browserPreference = optionValue(argv, '--browser');
+  const browserExecutable = optionValue(argv, '--browser-executable');
   return resolveConfig({
     ...(stateDir === undefined ? {} : { stateDir }),
     ...(socketPath === undefined ? {} : { socketPath }),
+    ...(browserPreference === undefined
+      ? {}
+      : { browserPreference: browserPreference as BrowserPreference }),
+    ...(browserExecutable === undefined ? {} : { browserExecutable }),
   });
 }
 

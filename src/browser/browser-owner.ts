@@ -15,7 +15,8 @@ import path from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 
 import {
-  findPlaywrightChromium,
+  findHostBrowser,
+  type BrowserPreference,
   type BrowserRuntimeState,
   type BrowserStatusSource,
   type ChromeInstallation,
@@ -33,6 +34,12 @@ const PROFILE_AUTH_DEFAULT_ARGS = [
   '--use-mock-keychain',
 ] as const;
 
+interface BrowserProfileIdentity {
+  readonly product: ChromeInstallation['product'];
+  readonly executable: string;
+  readonly recordedAt: string;
+}
+
 interface ProfileLockPayload {
   readonly pid: number;
   readonly token: string;
@@ -43,6 +50,8 @@ export interface BrowserOwnerOptions {
   readonly profileDir: string;
   readonly pageRegistry: PageRegistry;
   readonly headless?: boolean;
+  readonly browserPreference?: BrowserPreference;
+  readonly browserExecutable?: string | null;
   readonly launchTimeoutMs?: number;
   readonly launchPersistentContext?: LaunchPersistentContext;
   readonly now?: () => Date;
@@ -63,6 +72,8 @@ export class BrowserOwner {
   readonly #profileDir: string;
   readonly #pageRegistry: PageRegistry;
   readonly #headless: boolean;
+  readonly #browserPreference: BrowserPreference;
+  readonly #browserExecutable: string | null;
   readonly #launchTimeoutMs: number;
   readonly #launchPersistentContext: LaunchPersistentContext;
   readonly #now: () => Date;
@@ -80,6 +91,8 @@ export class BrowserOwner {
     this.#profileDir = path.resolve(options.profileDir);
     this.#pageRegistry = options.pageRegistry;
     this.#headless = options.headless ?? false;
+    this.#browserPreference = options.browserPreference ?? 'auto';
+    this.#browserExecutable = options.browserExecutable ?? null;
     this.#launchTimeoutMs = options.launchTimeoutMs ?? 30_000;
     this.#launchPersistentContext =
       options.launchPersistentContext ??
@@ -115,14 +128,24 @@ export class BrowserOwner {
     this.#lastError = null;
     try {
       assertDedicatedProfile(this.#profileDir);
-      this.#chrome = findPlaywrightChromium();
+      this.#chrome = findHostBrowser({
+        preference: this.#browserPreference,
+        ...(this.#browserExecutable === null
+          ? {}
+          : { executablePath: this.#browserExecutable }),
+      });
       if (this.#chrome === null) {
         throw new BrowserOwnerError(
           'browser.unavailable',
-          'Playwright Chromium is not installed; run `npm run browser:install`',
+          this.#browserExecutable === null
+            ? `No supported host browser was found for ${this.#browserPreference}; ` +
+              'install Chrome, Chromium, Edge, or Brave, or set ' +
+              'SESSIONPLANE_BROWSER_EXECUTABLE'
+            : `The selected host browser is unavailable or unsupported: ${this.#browserExecutable}`,
         );
       }
       this.#acquireProfileLock();
+      ensureProfileBrowserIdentity(this.#profileDir, this.#chrome, this.#now);
 
       const context = await this.#launchPersistentContext(this.#profileDir, {
         executablePath: this.#chrome.executable,
@@ -149,7 +172,7 @@ export class BrowserOwner {
       }
       throw new BrowserOwnerError(
         'browser.unavailable',
-        'Failed to launch the Playwright Chromium persistent context',
+        'Failed to launch the selected host browser persistent context',
         { cause: error },
       );
     }
@@ -290,6 +313,59 @@ export class BrowserOwner {
       // Fail closed: never remove a lock whose ownership can no longer be proven.
     }
   }
+}
+
+function ensureProfileBrowserIdentity(
+  profileDir: string,
+  browser: ChromeInstallation,
+  now: () => Date,
+): void {
+  const identityPath = path.join(profileDir, '.sessionplane-browser.json');
+  if (existsSync(identityPath)) {
+    let existing: BrowserProfileIdentity;
+    try {
+      existing = JSON.parse(readFileSync(identityPath, 'utf8')) as BrowserProfileIdentity;
+    } catch (error) {
+      throw new BrowserOwnerError(
+        'browser.unavailable',
+        `Browser profile identity is unreadable: ${identityPath}`,
+        { cause: error },
+      );
+    }
+    if (
+      typeof existing.product !== 'string' ||
+      typeof existing.executable !== 'string' ||
+      typeof existing.recordedAt !== 'string'
+    ) {
+      throw new BrowserOwnerError(
+        'browser.unavailable',
+        `Browser profile identity is malformed: ${identityPath}`,
+      );
+    }
+    const compatible =
+      existing.executable === browser.executable ||
+      existing.product === browser.product;
+    if (!compatible) {
+      throw new BrowserOwnerError(
+        'browser.profile-incompatible',
+        `Profile ${profileDir} belongs to ${existing.product} ` +
+          `(${existing.executable}), not ${browser.product} (${browser.executable}); ` +
+          'use a separate SESSIONPLANE_PROFILE_DIR or reset the profile',
+      );
+    }
+    return;
+  }
+
+  writeFileSync(
+    identityPath,
+    JSON.stringify({
+      product: browser.product,
+      executable: browser.executable,
+      recordedAt: now().toISOString(),
+    } satisfies BrowserProfileIdentity),
+    { encoding: 'utf8', mode: 0o600 },
+  );
+  chmodSync(identityPath, 0o600);
 }
 
 function assertDedicatedProfile(profileDir: string): void {

@@ -2,6 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
+import {
+  findHostBrowser,
+  listHostBrowsers,
+  type BrowserPreference,
+} from '../browser/browser-health.ts';
 import { resolveConfig, SESSIONPLANE_VERSION, type SessionPlaneConfig } from '../config.ts';
 import {
   ContextPackageService,
@@ -51,6 +56,8 @@ const FLAG_OPTIONS = new Set([
 const MULTI_VALUE_OPTIONS = new Set(['file', 'context-from-files', 'context-exclude', 'skill']);
 const VALUE_OPTIONS = new Set([
   'state-dir',
+  'browser',
+  'browser-executable',
   'socket',
   'url',
   'client-id',
@@ -156,6 +163,12 @@ export async function runCli(
       ? {}
       : { stateDir: parsed.options['state-dir'] }),
     ...(parsed.options.socket === undefined ? {} : { socketPath: parsed.options.socket }),
+    ...(parsed.options.browser === undefined
+      ? {}
+      : { browserPreference: parsed.options.browser as BrowserPreference }),
+    ...(parsed.options['browser-executable'] === undefined
+      ? {}
+      : { browserExecutable: parsed.options['browser-executable'] }),
   });
 
   try {
@@ -170,6 +183,23 @@ export async function runCli(
         const report = await runDoctor(config);
         writeCliResult(io, parsed.json, report);
         return report.requestOk ? 0 : 1;
+      }
+      case 'browser-list': {
+        const available = listHostBrowsers();
+        const selected = findHostBrowser({
+          preference: config.browserPreference,
+          ...(config.browserExecutable === null
+            ? {}
+            : { executablePath: config.browserExecutable }),
+        });
+        writeCliResult(io, parsed.json, {
+          requestOk: selected !== null,
+          requested: config.browserPreference,
+          executableOverride: config.browserExecutable,
+          selected,
+          available,
+        });
+        return selected === null ? 1 : 0;
       }
       case 'login': {
         const result = await runLogin(config, parsed.options.url);
@@ -277,6 +307,48 @@ export async function runCli(
   }
 }
 
+async function assertCoreBrowserSelection(config: SessionPlaneConfig): Promise<void> {
+  if (config.browserPreference === 'auto' && config.browserExecutable === null) return;
+
+  const expected = findHostBrowser({
+    preference: config.browserPreference,
+    ...(config.browserExecutable === null
+      ? {}
+      : { executablePath: config.browserExecutable }),
+  });
+  if (expected === null) {
+    throw new Error('The requested host browser is unavailable');
+  }
+
+  const health = await callRpc<{
+    readonly browser?: {
+      readonly chrome?: {
+        readonly executable?: string;
+        readonly product?: string;
+      } | null;
+    };
+  }>({
+    socketPath: config.socketPath,
+    method: 'system.health',
+    params: {},
+    timeoutMs: config.rpcRequestTimeoutMs,
+    maxLineBytes: config.rpcMaxLineBytes,
+  });
+  const current = health.browser?.chrome;
+  const matches =
+    current !== null &&
+    current !== undefined &&
+    (config.browserExecutable !== null
+      ? current.executable === expected.executable
+      : current.product === expected.product);
+  if (!matches) {
+    throw new Error(
+      `The running core owns ${current?.product ?? 'an unknown browser'}; ` +
+        `restart the core with --browser ${config.browserPreference}`,
+    );
+  }
+}
+
 async function runBrowserCommand(
   io: CliIo,
   parsed: ParsedArgs,
@@ -293,6 +365,7 @@ async function runBrowserCommand(
     case 'browser-status':
       return await printRpc(io, parsed, config, 'browser.runtime.status', {});
     case 'browser-start':
+      await assertCoreBrowserSelection(config);
       return await printRpc(io, parsed, config, 'browser.runtime.start', {});
     case 'browser-stop':
       return await printRpc(io, parsed, config, 'browser.runtime.stop', {});
@@ -1341,6 +1414,7 @@ Usage:
   sessplane serve [--state-dir PATH]
   sessplane health [--json] [--socket PATH]
   sessplane doctor [--json] [--state-dir PATH]
+  sessplane browser-list [--browser NAME] [--browser-executable PATH]
   sessplane login [--json] [--url HTTPS_URL]
 
 Browser compatibility:
@@ -1430,6 +1504,8 @@ Global options:
   --json               Emit one compact JSON object
   --state-dir PATH     Override runtime state directory
   --socket PATH        Override core Unix socket
+  --browser NAME       auto|chrome|chromium|edge|brave|custom
+  --browser-executable PATH  Explicit host Chromium-family executable
 `;
 }
 

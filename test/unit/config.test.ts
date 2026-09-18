@@ -21,6 +21,8 @@ test('resolveConfig anchors runtime paths under an explicit state directory', ()
     assert.equal(config.profileDir, path.join(root, 'runtime', 'chrome-profile'));
     assert.equal(config.artifactDir, path.join(root, 'runtime', 'artifacts'));
     assert.equal(config.browserHeadless, false);
+    assert.equal(config.browserPreference, 'auto');
+    assert.equal(config.browserExecutable, null);
     assert.equal(config.observationActiveSweepMs, 5_000);
     assert.equal(config.observationQuietSweepMs, 15_000);
     assert.equal(config.observationQuietWindowMs, 1_500);
@@ -49,7 +51,7 @@ test('resolveConfig anchors runtime paths under an explicit state directory', ()
   }
 });
 
-test('resolveConfig rejects invalid numeric and log-level environment values', () => {
+test('resolveConfig rejects invalid environment values', () => {
   assert.throws(
     () => resolveConfig({ env: { SESSIONPLANE_RPC_TIMEOUT_MS: 'zero' } }),
     /positive integer/,
@@ -78,6 +80,24 @@ test('resolveConfig rejects invalid numeric and log-level environment values', (
     () => resolveConfig({ env: { SESSIONPLANE_BROWSER_HEADLESS: 'sometimes' } }),
     /must be a boolean/,
   );
+  assert.throws(
+    () => resolveConfig({ env: { SESSIONPLANE_BROWSER: 'firefox' } }),
+    /must be one of/,
+  );
+  assert.throws(
+    () => resolveConfig({ env: { SESSIONPLANE_BROWSER: 'custom' } }),
+    /requires SESSIONPLANE_BROWSER_EXECUTABLE/,
+  );
+  assert.throws(
+    () =>
+      resolveConfig({
+        env: {
+          SESSIONPLANE_BROWSER: 'chrome',
+          SESSIONPLANE_BROWSER_EXECUTABLE: '/tmp/browser',
+        },
+      }),
+    /can be combined only/,
+  );
 });
 
 test('resolveConfig accepts explicit browser headless environment control', () => {
@@ -88,3 +108,19 @@ test('resolveConfig accepts explicit browser headless environment control', () =
   );
 });
 
+test('resolveConfig accepts explicit host browser selection and executable', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-config-'));
+  try {
+    const selected = resolveConfig({
+      cwd: root,
+      env: {
+        SESSIONPLANE_BROWSER: 'custom',
+        SESSIONPLANE_BROWSER_EXECUTABLE: './browser-bin',
+      },
+    });
+    assert.equal(selected.browserPreference, 'custom');
+    assert.equal(selected.browserExecutable, path.join(root, 'browser-bin'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
