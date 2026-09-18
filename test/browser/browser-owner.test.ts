@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -46,10 +47,25 @@ test('BrowserOwner owns one dedicated persistent profile and fails closed for a 
     assert.equal(first.status.chrome?.source, 'host');
     assert.equal(capturedLaunchOptions?.channel, undefined);
     assert.equal(capturedLaunchOptions?.executablePath, HOST_BROWSER?.executable);
+    assert.equal(capturedLaunchOptions?.chromiumSandbox, true);
     assert.deepEqual(capturedLaunchOptions?.ignoreDefaultArgs, [
       '--password-store=basic',
       '--use-mock-keychain',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-infobars',
+      '--unsafely-disable-devtools-self-xss-warnings',
     ]);
+    if (process.platform === 'linux') {
+      const commandLines = browserCommandLines(profileDir);
+      assert.doesNotMatch(commandLines, /(?:^|\s)--no-sandbox(?:\s|$)/m);
+      assert.doesNotMatch(commandLines, /(?:^|\s)--disable-setuid-sandbox(?:\s|$)/m);
+      assert.doesNotMatch(commandLines, /(?:^|\s)--disable-infobars(?:\s|$)/m);
+      assert.doesNotMatch(
+        commandLines,
+        /(?:^|\s)--unsafely-disable-devtools-self-xss-warnings(?:\s|$)/m,
+      );
+    }
     assert.equal(first.status.profileDir, profileDir);
     const lockPath = path.join(profileDir, '.sessionplane-profile.lock');
     assert.equal(existsSync(lockPath), true);
@@ -180,5 +196,18 @@ async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     server.close((error) => (error === undefined ? resolve() : reject(error)));
   });
+}
+
+function browserCommandLines(profileDir: string): string {
+  try {
+    return execFileSync('pgrep', ['-af', '--', `--user-data-dir=${profileDir}`], {
+      encoding: 'utf8',
+      timeout: 2_000,
+    });
+  } catch (error) {
+    throw new Error(`Could not inspect the host browser command line for ${profileDir}`, {
+      cause: error,
+    });
+  }
 }
 

@@ -34,9 +34,18 @@ type LaunchPersistentContext = (
   options: Parameters<typeof chromium.launchPersistentContext>[1],
 ) => ReturnType<typeof chromium.launchPersistentContext>;
 
-const PROFILE_AUTH_DEFAULT_ARGS = [
+const HOST_BROWSER_IGNORED_DEFAULT_ARGS = [
   '--password-store=basic',
   '--use-mock-keychain',
+  // Host browsers must retain their real process sandbox. Playwright normally
+  // adds --no-sandbox unless chromiumSandbox is explicitly enabled below; keep
+  // these entries as a second fail-closed guard against launcher changes.
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  // These switches are not needed for SessionPlane and either suppress browser
+  // safety UI or disable a DevTools self-XSS warning in an interactive browser.
+  '--disable-infobars',
+  '--unsafely-disable-devtools-self-xss-warnings',
 ] as const;
 
 interface ProfileLockPayload {
@@ -138,12 +147,16 @@ export class BrowserOwner {
       const context = await this.#launchPersistentContext(this.#profileDir, {
         executablePath: selectedBrowser.executable,
         headless: this.#headless,
+        // Playwright defaults to --no-sandbox. A user-installed host browser is
+        // interactive and long-lived, so SessionPlane always keeps Chromium's
+        // native process sandbox enabled and never silently falls back.
+        chromiumSandbox: true,
         acceptDownloads: true,
         timeout: this.#launchTimeoutMs,
         // Preserve same-user Chromium profile authentication when importing a
         // dedicated profile created outside Playwright. These Playwright
         // defaults switch Chrome away from the user's normal OS keyring.
-        ignoreDefaultArgs: [...PROFILE_AUTH_DEFAULT_ARGS],
+        ignoreDefaultArgs: [...HOST_BROWSER_IGNORED_DEFAULT_ARGS],
       });
       this.#context = context;
       this.#browser = context.browser();

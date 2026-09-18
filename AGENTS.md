@@ -14,6 +14,9 @@ precedence over implementation convenience.
 - A submit with ambiguous acknowledgement is never retried automatically.
 - Backend observation HTTP 429 is transport deferral, not provider blocking.
 - Logs and metrics must not contain prompt, answer, cookie, or access-token bodies.
+- Host browser processes keep the Chromium sandbox enabled. Never add
+  `--no-sandbox`, `--disable-setuid-sandbox`, security-warning suppression, or
+  a silent unsandboxed fallback.
 
 ## Development
 

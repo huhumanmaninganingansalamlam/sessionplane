@@ -60,6 +60,12 @@ Chromium, Chrome, Edge, then Brave fallback order, or use
 the dedicated SessionPlane profile; the user's normal browser profile and open
 tabs are never attached. No custom fingerprint patches are injected.
 
+Host Chromium-family browsers always run with their native process sandbox
+enabled. SessionPlane explicitly prevents Playwright from adding
+`--no-sandbox` or `--disable-setuid-sandbox`, and removes the unnecessary
+`--disable-infobars` and `--unsafely-disable-devtools-self-xss-warnings`
+defaults. It does not retry without the sandbox when launch fails.
+
 Browser selection is a core-startup setting:
 
 ```bash
