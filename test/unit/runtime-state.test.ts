@@ -29,9 +29,8 @@ test('global bins choose one user-scoped state directory independent of cwd', ()
   );
 });
 
-test('both public bin entrypoints install the stable state default', () => {
-  for (const entrypoint of ['bin/agbrowse.mjs', 'bin/sessplane.mjs']) {
-    const source = readFileSync(path.resolve(entrypoint), 'utf8');
-    assert.match(source, /ensureSessionPlaneStateDir\(\)/, entrypoint);
-  }
+test('the public sessplane entrypoint installs the stable state default', () => {
+  const entrypoint = 'bin/sessplane.mjs';
+  const source = readFileSync(path.resolve(entrypoint), 'utf8');
+  assert.match(source, /ensureSessionPlaneStateDir\(\)/, entrypoint);
 });

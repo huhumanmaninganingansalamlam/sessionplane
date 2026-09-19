@@ -5,8 +5,8 @@ description: Control the SessionPlane-owned Chrome with explicit pageKey and sna
 
 # SessionPlane Browser
 
-Use `sessplane` or the compatible `agbrowse` binary. The long-running
-SessionPlane core owns Chrome; clients never attach to a separate browser.
+Use `sessplane`. The long-running SessionPlane core owns Chrome; clients never
+attach to a separate browser.
 
 ## Safe workflow
 

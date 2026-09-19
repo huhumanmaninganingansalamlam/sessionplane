@@ -88,8 +88,5 @@ only when recovering legacy archives created before the plan contract.
 ```bash
 sessplane code extract --session "$SESSION_ID" \
   --output-zip ./recovered.zip --require-plan --json
-
-agbrowse web-ai code-extract --vendor chatgpt \
-  --session "$SESSION_ID" --output-zip ./recovered.zip --json
 ```
 

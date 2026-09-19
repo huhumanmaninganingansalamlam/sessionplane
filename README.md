@@ -24,10 +24,9 @@ npm link --force
 ```
 
 `npm link --force` points the current Node installation's global `sessplane`
-and `agbrowse` commands at this source checkout. The force flag is needed when
-the old standalone agbrowse package already owns the `agbrowse` command. To
-avoid changing global links, use `node bin/sessplane.mjs` and
-`node bin/agbrowse.mjs` directly instead.
+command at this source checkout. The public command surface is intentionally
+`sessplane` only. To avoid changing the global link, use
+`node bin/sessplane.mjs` directly instead.
 
 Start the core in one terminal:
 
@@ -101,15 +100,6 @@ click/type/press/hover/select/check/upload/drag, coordinate mouse input,
 scroll and waits, screenshots, text/DOM reads, console/network diagnostics,
 JavaScript evaluation, ObservationBundleV1, and ranked action candidates.
 
-An `agbrowse` compatibility bin is installed from this repository as well, so
-existing root browser commands can be migrated without running the old CDP
-runtime:
-
-```bash
-agbrowse tabs --json
-agbrowse snapshot --page <pageKey> --json
-```
-
 SessionPlane keeps these generic browser commands and role-addressed AI
 sessions on the same persistent profile and PageRegistry.
 
@@ -181,10 +171,6 @@ sessplane chatgpt project-sources list \
 sessplane chatgpt project-sources add \
   --project-url "https://chatgpt.com/g/<project-id>" \
   --file ./requirements.md --file ./architecture.pdf --dry-run --json
-
-agbrowse web-ai project-sources add \
-  --chatgpt-url "https://chatgpt.com/g/<project-id>" \
-  --file ./requirements.md --dry-run summary --json
 ```
 
 Code mode submits a strict packaging contract, waits on the exact durable
@@ -211,12 +197,6 @@ sessplane code extract --session "$SESSION_ID" \
   --output-zip ./recovered.zip --require-plan --json
 sessplane code extract --conversation "https://chatgpt.com/c/<conversation-id>" \
   --multi-zip --output-dir ./recovered --json
-
-# Legacy-compatible spellings
-agbrowse web-ai code --vendor chatgpt --prompt "Build an MVP" \
-  --output-zip ./result.zip --json
-agbrowse web-ai code-extract --vendor chatgpt --session "$SESSION_ID" \
-  --output-zip ./recovered.zip --json
 ```
 
 The same Project Sources, code generation, and code extraction methods are
@@ -228,8 +208,8 @@ compatibility contract fails when any required row is not implemented.
 executable. `doctor --json` verifies that selection and, when the core is
 running, reports the current Page bindings without changing browser focus.
 
-Installed or linked `sessplane` and `agbrowse` commands use one stable runtime
-directory independent of the caller's current directory:
+Installed or linked `sessplane` commands use one stable runtime directory
+independent of the caller's current directory:
 `${XDG_STATE_HOME:-$HOME/.local/state}/sessionplane`. Override it with
 `SESSIONPLANE_STATE_DIR` or `--state-dir` when tests or multiple isolated
 instances are needed. The artifact store defaults to `<state-dir>/artifacts/`;
@@ -237,36 +217,14 @@ override it with `SESSIONPLANE_ARTIFACT_DIR`. Use
 `SESSIONPLANE_MAX_ARTIFACT_FILE_BYTES` to set the fail-closed per-artifact
 download limit.
 
-## agbrowse compatibility
+## Legacy migration contract
 
-The repository also installs an `agbrowse` compatibility binary. It translates
-supported legacy browser commands into the same SessionPlane core RPCs; it does
-not start the old agbrowse runtime or reuse its state directory.
-
-```bash
-agbrowse start --headed
-agbrowse new-tab https://example.com --json
-agbrowse snapshot --interactive --json
-agbrowse click e1 --json
-agbrowse stop --json
-```
-
-`compat/agbrowse-manifest.json` is the machine-readable replacement ledger.
-`npm run test:compat` verifies the implemented browser rows. Commands whose
-required capability is not implemented fail with `compatibility.unsupported`
-instead of silently approximating old behavior.
-
-Normal ChatGPT, Gemini, and Grok sessions are available through both the
-canonical team/session commands and the legacy web-ai grammar:
-
-```bash
-agbrowse web-ai send --vendor gemini --prompt "..." --json
-agbrowse web-ai poll --vendor gemini --session <sessionId> --json
-agbrowse web-ai query --vendor grok --prompt "..." --json
-```
-
-These aliases create or resume durable SessionPlane sessions and share the same
-generation, idempotency, wait, observer, and restart contracts as `sessplane`.
+`compat/agbrowse-manifest.json` and the compatibility tests remain in the
+source tree only as a migration ledger for behavior inherited from the retired
+standalone agbrowse runtime. SessionPlane does **not** install or expose an
+`agbrowse` executable. `npm run test:compat` verifies that required migration
+semantics remain covered by the canonical SessionPlane core without creating a
+second public CLI surface.
 
 ## Context packages and bundled skills
 
@@ -294,26 +252,14 @@ sessplane send --session <sessionId> --prompt "Review this repository" \
   --context-transport upload --json
 ```
 
-The legacy utility grammar is preserved:
-
-```bash
-agbrowse web-ai context-dry-run --context-from-files 'src/**/*.ts' --json
-agbrowse web-ai context-render --context-file context-files.txt \
-  --context-transport inline --json
-```
-
-Bundled SessionPlane skills can be inspected or installed without the old
-agbrowse package:
+Bundled SessionPlane skills can be inspected or installed directly from the
+SessionPlane package:
 
 ```bash
 sessplane skills list --json
 sessplane skills get core --full
 sessplane skills path web-ai
 sessplane skills install --target ~/.codex/skills --skill browser --skill web-ai
-
-# Compatible aliases
-agbrowse skills get core --full
-agbrowse install-skills --target ~/.codex/skills --link
 ```
 
 Installation never replaces an existing skill unless `--force` is explicit.
@@ -347,14 +293,6 @@ sessplane research normalize-results --query "Node.js 24 SQLite changes" \
 sessplane research enrich-fetch --plan plan.json --results candidates.json \
   --json > enrichment.json
 sessplane research browse-plan --plan plan.json --enrichment enrichment.json --json
-```
-
-The same grammar is exposed by the `agbrowse` compatibility bin:
-
-```bash
-agbrowse fetch https://example.com --json
-agbrowse search "Node.js 24 node:sqlite" --json
-agbrowse research plan --query "Node.js 24 SQLite changes" --json
 ```
 
 `SESSIONPLANE_FETCH_ALLOW_PRIVATE=true` exists only for isolated local fixtures

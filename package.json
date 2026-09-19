@@ -8,11 +8,11 @@
     "node": ">=24.15 <25"
   },
   "bin": {
-    "sessplane": "bin/sessplane.mjs",
-    "agbrowse": "bin/agbrowse.mjs"
+    "sessplane": "bin/sessplane.mjs"
   },
   "files": [
-    "bin",
+    "bin/sessplane.mjs",
+    "bin/runtime-state.mjs",
     "dist",
     "compat",
     "skills",

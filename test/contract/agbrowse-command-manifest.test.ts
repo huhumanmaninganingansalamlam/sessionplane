@@ -11,11 +11,16 @@ import {
 
 test('npm distribution ships the built runtime instead of TypeScript source', () => {
   const packageJson = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8')) as {
+    readonly bin?: Readonly<Record<string, string>>;
     readonly files?: readonly string[];
     readonly scripts?: Readonly<Record<string, string>>;
   };
+  assert.deepEqual(packageJson.bin, {
+    sessplane: 'bin/sessplane.mjs',
+  });
   assert.deepEqual(packageJson.files, [
-    'bin',
+    'bin/sessplane.mjs',
+    'bin/runtime-state.mjs',
     'dist',
     'compat',
     'skills',

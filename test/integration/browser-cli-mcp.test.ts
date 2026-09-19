@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,7 +20,7 @@ interface BrowserSnapshot {
   }>;
 }
 
-test('agbrowse-compatible CLI and MCP share one explicit browser Page and snapshot refs', async () => {
+test('canonical CLI and MCP share one explicit browser Page and snapshot refs', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-cli-mcp-'));
   const fixture = await startFixtureServer();
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
@@ -173,14 +172,10 @@ test('agbrowse-compatible CLI and MCP share one explicit browser Page and snapsh
     assert.equal(bundle.structuredContent.pageKey, snapshot.pageKey);
     assert.equal(bundle.structuredContent.schemaVersion, 'observation-bundle-v1');
 
-    const compatibilityHelp = spawnSync(
-      process.execPath,
-      [path.resolve(process.cwd(), 'bin/agbrowse.mjs'), '--help'],
-      { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env } },
-    );
-    assert.equal(compatibilityHelp.status, 0, compatibilityHelp.stderr);
-    assert.match(compatibilityHelp.stdout, /Browser compatibility:/);
-    assert.match(compatibilityHelp.stdout, /snapshot/);
+    const publicHelp = await runCliJson(['--help']);
+    assert.equal(publicHelp.code, 0, publicHelp.stderr);
+    assert.match(publicHelp.stdout, /Browser compatibility:/);
+    assert.match(publicHelp.stdout, /snapshot/);
   } finally {
     await service.close();
     await closeServer(fixture.server);
