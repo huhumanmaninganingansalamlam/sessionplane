@@ -23,8 +23,23 @@ jobs:
       - name: Verify tag matches package version
         run: |
           test "$GITHUB_REF_NAME" = "v$(node -p "require('./package.json').version")"
-      - run: npm run verify:clean
       - run: npm ci
+      - run: npm run typecheck
+      - name: Test
+        shell: bash
+        run: |
+          set +e
+          npm run test:ci 2>&1 | tee "$RUNNER_TEMP/sessionplane-test.log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            message="$(tail -n 40 "$RUNNER_TEMP/sessionplane-test.log" | tr '\n' ' ')"
+            echo "::error title=npm test failed::$message"
+            exit "$status"
+          fi
+      - run: npm run build
+      - run: npm run doctor
+        env:
+          SESSIONPLANE_STATE_DIR: ${{ runner.temp }}/sessionplane-doctor-state
       - id: pack
         name: Build release package
         run: |

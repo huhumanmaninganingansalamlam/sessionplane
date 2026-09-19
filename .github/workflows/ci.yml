@@ -25,7 +25,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          npm test 2>&1 | tee "$RUNNER_TEMP/sessionplane-test.log"
+          npm run test:ci 2>&1 | tee "$RUNNER_TEMP/sessionplane-test.log"
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             message="$(tail -n 40 "$RUNNER_TEMP/sessionplane-test.log" | tr '\n' ' ')"

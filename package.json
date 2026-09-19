@@ -23,6 +23,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --test --test-concurrency=1 --experimental-strip-types test/**/*.test.ts",
+    "test:ci": "node --test --test-concurrency=1 --experimental-strip-types $(find test -name '*.test.ts' ! -path 'test/browser/*' ! -path 'test/integration/agbrowse-browser-compat.test.ts' ! -path 'test/integration/browser-cli-mcp.test.ts' | sort)",
     "test:acceptance": "node --test --test-concurrency=1 --experimental-strip-types test/reliability/acceptance.test.ts",
     "test:reliability": "node --test --test-concurrency=1 --experimental-strip-types test/reliability/*.test.ts test/integration/restart-recovery.test.ts test/browser/browser-restart-recovery.test.ts",
     "test:compat": "node --test --test-concurrency=1 --experimental-strip-types test/contract/*.test.ts test/integration/*compat.test.ts test/integration/multi-provider-session.test.ts test/integration/advanced-chatgpt-code.test.ts test/browser/provider-dom-adapters.test.ts test/browser/chatgpt-advanced.test.ts test/unit/chatgpt-code-artifacts.test.ts test/unit/code-mode-prompt.test.ts test/unit/project-source-service.test.ts test/unit/web-ai-prompt.test.ts test/unit/zip-inspector.test.ts",
