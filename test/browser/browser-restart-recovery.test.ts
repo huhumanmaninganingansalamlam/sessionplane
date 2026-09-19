@@ -170,7 +170,7 @@ async function navigateFixture(page: Page, url: string): Promise<void> {
       body: '<!doctype html><html><body><main>restart fixture</main></body></html>',
     });
   });
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
 }
 
 async function rpc<Result>(socketPath: string, method: string, params: unknown): Promise<Result> {

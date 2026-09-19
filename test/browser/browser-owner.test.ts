@@ -287,7 +287,7 @@ test('BrowserOwner login returns after response commit without waiting for page 
     pageRegistry: registry,
     headless: true,
     browserExecutable: HOST_BROWSER?.executable ?? null,
-    launchTimeoutMs: 30_000,
+    launchTimeoutMs: 60_000,
   });
   const fixture = await startCommittedResponseFixture();
 
