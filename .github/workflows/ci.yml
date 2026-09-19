@@ -19,4 +19,21 @@ jobs:
         with:
           node-version: 24.21.0
           cache: npm
-      - run: npm run verify:clean
+      - run: npm ci
+      - run: npm run typecheck
+      - name: Test
+        shell: bash
+        run: |
+          set +e
+          npm test 2>&1 | tee "$RUNNER_TEMP/sessionplane-test.log"
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            message="$(tail -n 40 "$RUNNER_TEMP/sessionplane-test.log" | tr '\n' ' ')"
+            echo "::error title=npm test failed::$message"
+            exit "$status"
+          fi
+      - run: npm run build
+      - run: npm run doctor
+        env:
+          SESSIONPLANE_STATE_DIR: ${{ runner.temp }}/sessionplane-doctor-state
+      - run: npm run test:package
