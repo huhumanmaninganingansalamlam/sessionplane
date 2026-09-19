@@ -13,6 +13,22 @@ and recovery. The `sessplane` CLI and MCP adapter are thin Unix-socket clients.
 - A user-installed Google Chrome, Chromium, Microsoft Edge, or Brave browser
 - A Unix-like operating system with Unix domain sockets
 
+## Installation
+
+Tagged releases attach a prebuilt npm package and SHA-256 checksum. Install the
+release package globally, then run the built-in doctor:
+
+```bash
+curl -fLO https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v0.1.0/sessionplane-0.1.0.tgz
+curl -fLO https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v0.1.0/sessionplane-0.1.0.tgz.sha256
+sha256sum -c sessionplane-0.1.0.tgz.sha256
+npm install -g ./sessionplane-0.1.0.tgz
+sessplane doctor --json
+```
+
+The package exposes only the `sessplane` executable. The retired `agbrowse`
+command is not installed.
+
 ## Development
 
 ```bash

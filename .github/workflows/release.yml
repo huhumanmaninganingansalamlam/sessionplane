@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.21.0
+          cache: npm
+      - name: Verify tag matches package version
+        run: |
+          test "$GITHUB_REF_NAME" = "v$(node -p "require('./package.json').version")"
+      - run: npm run verify:clean
+      - run: npm ci
+      - id: pack
+        name: Build release package
+        run: |
+          package="$(npm pack --silent)"
+          sha256sum "$package" > "$package.sha256"
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+      - name: Smoke test release package
+        env:
+          PACKAGE: ${{ steps.pack.outputs.package }}
+        run: |
+          prefix="$RUNNER_TEMP/sessionplane-release-install"
+          npm install -g --prefix "$prefix" "./$PACKAGE"
+          test -x "$prefix/bin/sessplane"
+          test ! -e "$prefix/bin/agbrowse"
+          test ! -e "$prefix/lib/node_modules/sessionplane/bin/agbrowse.mjs"
+          "$prefix/bin/sessplane" --help >/dev/null
+          SESSIONPLANE_STATE_DIR="$RUNNER_TEMP/sessionplane-release-state" \
+            "$prefix/bin/sessplane" doctor --json >/dev/null
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ steps.pack.outputs.package }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "$PACKAGE" "$PACKAGE.sha256" \
+            --verify-tag \
+            --generate-notes \
+            --title "SessionPlane $GITHUB_REF_NAME"

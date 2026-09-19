@@ -30,6 +30,7 @@ try {
     ['npm', ['test']],
     ['npm', ['run', 'build']],
     ['npm', ['run', 'doctor']],
+    ['npm', ['run', 'test:package']],
   ]) {
     const result = spawnSync(command, args, {
       cwd: checkoutRoot,
