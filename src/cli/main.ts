@@ -383,13 +383,34 @@ async function runBrowserCommand(
       return await printRpc(io, parsed, config, 'browser.runtime.status', {});
     case 'browser-start':
       await assertCoreBrowserSelection(config);
-      return await printRpc(io, parsed, config, 'browser.runtime.start', {});
+      return await printRpc(
+        io,
+        parsed,
+        config,
+        'browser.runtime.start',
+        {},
+        browserRuntimeRpcTimeoutMs(config),
+      );
     case 'browser-stop':
-      return await printRpc(io, parsed, config, 'browser.runtime.stop', {});
+      return await printRpc(
+        io,
+        parsed,
+        config,
+        'browser.runtime.stop',
+        {},
+        browserRuntimeRpcTimeoutMs(config),
+      );
     case 'browser-reset':
-      return await printRpc(io, parsed, config, 'browser.runtime.reset', {
-        force: parsed.options.force === 'true',
-      });
+      return await printRpc(
+        io,
+        parsed,
+        config,
+        'browser.runtime.reset',
+        {
+          force: parsed.options.force === 'true',
+        },
+        browserRuntimeRpcTimeoutMs(config),
+      );
     case 'tabs':
     case 'active-tab':
       return await printRpc(io, parsed, config, 'browser.tabs', {});
@@ -399,10 +420,17 @@ async function runBrowserCommand(
         pageKey: requirePositional(rest, 0, 'pageKey'),
       });
     case 'new-tab':
-      return await printRpc(io, parsed, config, 'browser.new', {
-        ...optionalParam('url', rest[0] ?? parsed.options.url),
-        activate: parsed.options['no-activate'] !== 'true',
-      });
+      return await printRpc(
+        io,
+        parsed,
+        config,
+        'browser.new',
+        {
+          ...optionalParam('url', rest[0] ?? parsed.options.url),
+          activate: parsed.options['no-activate'] !== 'true',
+        },
+        browserNavigationRpcTimeoutMs(config),
+      );
     case 'tab-close':
       return await printRpc(io, parsed, config, 'browser.close', {
         ...optionalParam('pageKey', rest[0] ?? pageKey),
@@ -412,14 +440,28 @@ async function runBrowserCommand(
         ...optionalParam('keepPageKey', pageKey),
       });
     case 'navigate':
-      return await printRpc(io, parsed, config, 'browser.navigate', {
-        ...page,
-        url: requirePositional(rest, 0, 'url'),
-      });
+      return await printRpc(
+        io,
+        parsed,
+        config,
+        'browser.navigate',
+        {
+          ...page,
+          url: requirePositional(rest, 0, 'url'),
+        },
+        browserNavigationRpcTimeoutMs(config),
+      );
     case 'reload':
     case 'back':
     case 'forward':
-      return await printRpc(io, parsed, config, `browser.${command}`, page);
+      return await printRpc(
+        io,
+        parsed,
+        config,
+        `browser.${command}`,
+        page,
+        browserNavigationRpcTimeoutMs(config),
+      );
     case 'resize':
       return await printRpc(io, parsed, config, 'browser.resize', {
         ...page,
@@ -734,6 +776,22 @@ export function sessionSendRpcTimeoutMs(
   return Math.max(
     config.rpcRequestTimeoutMs,
     config.browserLaunchTimeoutMs + config.submissionAckTimeoutMs + 30_000,
+  );
+}
+
+export function browserNavigationRpcTimeoutMs(
+  config: Pick<SessionPlaneConfig, 'rpcRequestTimeoutMs'>,
+): number {
+  return Math.max(config.rpcRequestTimeoutMs, 35_000);
+}
+
+export function browserRuntimeRpcTimeoutMs(
+  config: Pick<SessionPlaneConfig, 'rpcRequestTimeoutMs' | 'browserLaunchTimeoutMs'>,
+): number {
+  return Math.max(
+    config.rpcRequestTimeoutMs,
+    config.browserLaunchTimeoutMs + 5_000,
+    300_000,
   );
 }
 

@@ -1,9 +1,19 @@
-import { chmodSync, mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import type { BrowserPreference } from './browser/browser-health.ts';
 
-export const SESSIONPLANE_VERSION = '0.1.0';
+export const SESSIONPLANE_VERSION = readSessionPlaneVersion();
+
+function readSessionPlaneVersion(): string {
+  const packageJson = JSON.parse(
+    readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+  ) as { readonly version?: unknown };
+  if (typeof packageJson.version !== 'string' || packageJson.version.trim() === '') {
+    throw new Error('package.json must define a nonempty version');
+  }
+  return packageJson.version;
+}
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 

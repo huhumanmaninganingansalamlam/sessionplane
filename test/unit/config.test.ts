@@ -1,11 +1,26 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { sessionSendRpcTimeoutMs } from '../../src/cli/main.ts';
-import { prepareRuntimeDirectories, resolveConfig } from '../../src/config.ts';
+import {
+  browserNavigationRpcTimeoutMs,
+  browserRuntimeRpcTimeoutMs,
+  sessionSendRpcTimeoutMs,
+} from '../../src/cli/main.ts';
+import {
+  prepareRuntimeDirectories,
+  resolveConfig,
+  SESSIONPLANE_VERSION,
+} from '../../src/config.ts';
+
+test('runtime version is sourced from package.json', () => {
+  const packageJson = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8')) as {
+    readonly version?: unknown;
+  };
+  assert.equal(SESSIONPLANE_VERSION, packageJson.version);
+});
 
 test('session.send RPC timeout covers browser setup and provider acknowledgement', () => {
   const config = resolveConfig({
@@ -23,6 +38,31 @@ test('session.send RPC timeout covers browser setup and provider acknowledgement
     submissionAckTimeoutMs: 12_000,
   });
   assert.equal(sessionSendRpcTimeoutMs(slowerClient), 90_000);
+});
+
+test('browser RPC timeouts cover navigation and runtime launch budgets', () => {
+  const config = resolveConfig({
+    env: {},
+    rpcRequestTimeoutMs: 10_000,
+    browserLaunchTimeoutMs: 30_000,
+  });
+  assert.equal(browserNavigationRpcTimeoutMs(config), 35_000);
+  assert.equal(browserRuntimeRpcTimeoutMs(config), 300_000);
+
+  const slowerClient = resolveConfig({
+    env: {},
+    rpcRequestTimeoutMs: 60_000,
+    browserLaunchTimeoutMs: 30_000,
+  });
+  assert.equal(browserNavigationRpcTimeoutMs(slowerClient), 60_000);
+  assert.equal(browserRuntimeRpcTimeoutMs(slowerClient), 300_000);
+
+  const verySlowClient = resolveConfig({
+    env: {},
+    rpcRequestTimeoutMs: 600_000,
+    browserLaunchTimeoutMs: 30_000,
+  });
+  assert.equal(browserRuntimeRpcTimeoutMs(verySlowClient), 600_000);
 });
 
 test('resolveConfig anchors runtime paths under an explicit state directory', () => {

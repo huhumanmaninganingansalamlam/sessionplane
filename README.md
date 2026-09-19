@@ -19,10 +19,11 @@ Tagged releases attach a prebuilt npm package and SHA-256 checksum. Install the
 release package globally, then run the built-in doctor:
 
 ```bash
-curl -fLO https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v0.1.0/sessionplane-0.1.0.tgz
-curl -fLO https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v0.1.0/sessionplane-0.1.0.tgz.sha256
-sha256sum -c sessionplane-0.1.0.tgz.sha256
-npm install -g ./sessionplane-0.1.0.tgz
+VERSION=0.1.1
+curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz"
+curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz.sha256"
+sha256sum -c "sessionplane-$VERSION.tgz.sha256"
+npm install -g "./sessionplane-$VERSION.tgz"
 sessplane doctor --json
 ```
 
