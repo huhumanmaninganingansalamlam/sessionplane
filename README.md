@@ -50,6 +50,23 @@ with a user-installed Chromium-family browser. GitHub-hosted CI runs
 runner sandbox is not the SessionPlane runtime environment. Tagged releases
 repeat the deterministic CI suite and smoke-test the exact packaged tarball.
 
+Maintainer release flow:
+
+```bash
+npm run release:preflight
+VERSION="$(node -p "require('./package.json').version")"
+git tag -a "v$VERSION" -m "SessionPlane v$VERSION"
+git push origin "v$VERSION"
+```
+
+`release:preflight` requires a clean `main` checkout at exactly
+`origin/main`, runs the full host-browser clean-checkout gate, and verifies
+that two independent `npm pack` outputs are byte-for-byte identical. The
+tagged Release workflow separately requires the tag commit to be on
+`origin/main`, audits dependencies, reruns the hosted CI suite, rebuilds and
+smoke-tests the package, verifies reproducible packing, and publishes the
+tarball plus its SHA-256 checksum as GitHub Release assets.
+
 Start the core in one terminal:
 
 ```bash

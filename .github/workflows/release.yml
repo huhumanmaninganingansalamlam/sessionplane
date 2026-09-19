@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-24.04
@@ -23,7 +27,12 @@ jobs:
       - name: Verify tag matches package version
         run: |
           test "$GITHUB_REF_NAME" = "v$(node -p "require('./package.json').version")"
+      - name: Verify release commit is on main
+        run: |
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - run: npm ci
+      - run: npm audit --audit-level=high
       - run: npm run typecheck
       - name: Test
         shell: bash
@@ -40,10 +49,14 @@ jobs:
       - run: npm run doctor
         env:
           SESSIONPLANE_STATE_DIR: ${{ runner.temp }}/sessionplane-doctor-state
+      - run: npm run test:package
       - id: pack
         name: Build release package
         run: |
           package="$(npm pack --silent)"
+          mkdir -p "$RUNNER_TEMP/repro-pack"
+          repro_package="$(npm pack --silent --pack-destination "$RUNNER_TEMP/repro-pack")"
+          cmp "$package" "$RUNNER_TEMP/repro-pack/$repro_package"
           sha256sum "$package" > "$package.sha256"
           echo "package=$package" >> "$GITHUB_OUTPUT"
       - name: Smoke test release package
