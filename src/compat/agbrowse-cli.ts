@@ -45,8 +45,18 @@ export async function runAgbrowseCli(
   ) {
     return writeCompatibilityUnsupported(io, json, command, capability.id, capability.status);
   }
+  if (command === 'fetch' && hasDeferredLegacyFetchOption(argv.slice(1))) {
+    return writeCompatibilityUnsupported(
+      io,
+      json,
+      'fetch',
+      'fetch.experimental-escalation',
+      'deferred',
+    );
+  }
 
   try {
+    assertSupportedLegacyBrowserOptions(command, argv.slice(1));
     switch (command) {
       case 'start':
         return await startCompatibilityCore(argv.slice(1), io, json);
@@ -66,12 +76,27 @@ export async function runAgbrowseCli(
       case 'active-tab':
         return await runTransformedBrowserRead(command, argv.slice(1), io, json);
       case 'tab-switch':
+        return await runTabSelect(argv.slice(1), io, json, false);
       case 'select-tab':
-        return await runTabSelect(argv.slice(1), io, json);
+        return await runTabSelect(argv.slice(1), io, json, true);
       case 'new-tab':
-        return await runTransformedBrowserRead('new-tab', stripFlag(argv.slice(1), '--no-activate'), io, json);
+        return await runTransformedBrowserRead('new-tab', argv.slice(1), io, json);
       case 'snapshot':
-        return await runTransformedBrowserRead('snapshot', argv.slice(1), io, json);
+        return await runTransformedBrowserRead(
+          'snapshot',
+          translateLegacySnapshotArgs(argv.slice(1)),
+          io,
+          json,
+        );
+      case 'observe-bundle':
+        return await runTransformedBrowserRead(
+          'observe-bundle',
+          translateLegacyObserveBundleArgs(argv.slice(1)),
+          io,
+          json,
+        );
+      case 'console':
+        return await runCli(['console', ...translateLegacyConsoleArgs(argv.slice(1))], io);
       case 'click':
         return await runCli(translateClick(argv), io);
       case 'type':
@@ -81,8 +106,16 @@ export async function runAgbrowseCli(
       case 'hover':
       case 'check':
       case 'uncheck':
-      case 'wait-for':
         return await runCli(translateFirstRef(argv), io);
+      case 'wait-for':
+        return await runCli(translateLegacyTimeoutArgs(translateFirstRef(argv)), io);
+      case 'wait-for-selector':
+        return await runCli([
+          'wait-for-selector',
+          ...translateLegacyTimeoutArgs(argv.slice(1)),
+        ], io);
+      case 'wait-for-text':
+        return await runCli(translateLegacyWaitForTextArgs(argv), io);
       case 'drag':
         return await runCli(translateDrag(argv), io);
       case 'scroll':
@@ -141,6 +174,15 @@ async function runWebAiCompatibility(
       'deferred',
     );
   }
+  if (action === 'watch') {
+    return writeCompatibilityUnsupported(
+      io,
+      json,
+      'web-ai watch',
+      'web-ai.watch',
+      'deferred',
+    );
+  }
   assertSupportedLegacyWebAiOptions(argv);
 
   const config = configFromArgs(argv);
@@ -156,7 +198,13 @@ async function runWebAiCompatibility(
       return await runLegacyProjectSources(argv.slice(1), config, clientId, io, json);
     case 'render': {
       const vendor = providerOption(argv);
-      const rendered = renderPromptFromArgs(argv, vendor, legacyPromptText(argv));
+      const prepared = prepareLegacyContext(argv, config);
+      const rendered = renderPromptFromArgs(
+        argv,
+        vendor,
+        legacyPromptText(argv),
+        prepared.inlineContext,
+      );
       writeCliResult(io, json, {
         ok: true,
         status: 'rendered',
@@ -166,7 +214,7 @@ async function runWebAiCompatibility(
         model: optionValue(argv, '--model') ?? optionValue(argv, '--family') ?? null,
         effort: optionValue(argv, '--effort') ?? optionValue(argv, '--reasoning-effort') ?? null,
         surface: resolveLegacySurface(argv, vendor),
-        files: optionValues(argv, '--file'),
+        files: prepared.files,
       });
       return 0;
     }
@@ -240,15 +288,14 @@ async function runWebAiCompatibility(
       });
       return 0;
     }
-    case 'poll':
-    case 'watch': {
+    case 'poll': {
       const sessionId = requireArgOption(argv, '--session');
       const current = await getSession(config, clientId, sessionId);
       const terminal = await pollWebAi(
         config,
         clientId,
         sessionId,
-        numberOption(argv, '--timeout', action === 'watch' ? 1_200 : 30) * 1_000,
+        numberOption(argv, '--timeout', 30) * 1_000,
         Number(current.generation),
       );
       writeCliResult(io, json, legacyWebAiEnvelope(terminal));
@@ -324,26 +371,8 @@ async function runLegacyCode(
     throw new Error('web-ai code is ChatGPT-only');
   }
   const basePrompt = legacyPromptText(argv);
-  let inlineContext = '';
-  const files = [...optionValues(argv, '--file')];
-  if (hasLegacyContext(argv)) {
-    const contextPackages = new ContextPackageService({ stateDir: config.stateDir });
-    const contextFile = optionValue(argv, '--context-file');
-    const context = contextPackages.render({
-      root: optionValue(argv, '--root') ?? process.cwd(),
-      includes: optionValues(argv, '--context-from-files'),
-      excludes: optionValues(argv, '--context-exclude'),
-      ...(contextFile === undefined ? {} : { contextFile }),
-      prompt: '',
-      transport: legacyTransport(optionValue(argv, '--context-transport')),
-      transform: legacyTransform(optionValue(argv, '--context-transform')),
-      maxInputTokens: numberOption(argv, '--max-input', 120_000),
-      maxFileBytes: legacyContextMaxFileBytes(argv),
-      maxTotalBytes: numberOption(argv, '--max-total-size', 20 * 1024 * 1024),
-    });
-    if (context.transport === 'inline') inlineContext = context.composerText;
-    else if (context.artifactPath !== null) files.push(context.artifactPath);
-  }
+  const prepared = prepareLegacyContext(argv, config);
+  const { inlineContext, files } = prepared;
   if (argv.includes('--inline-only') && files.length > 0) {
     throw new Error('--inline-only cannot be combined with uploaded files or context packages');
   }
@@ -469,40 +498,28 @@ async function sendWebAi(
   config: SessionPlaneConfig,
   clientId: string,
 ): Promise<Record<string, unknown>> {
-  const provider = providerOption(argv);
-  const basePrompt = legacyPromptText(argv);
-  let inlineContext = '';
-  const files = [...optionValues(argv, '--file')];
-  if (hasLegacyContext(argv)) {
-    const contextPackages = new ContextPackageService({ stateDir: config.stateDir });
-    const contextFile = optionValue(argv, '--context-file');
-    const context = contextPackages.render({
-      root: optionValue(argv, '--root') ?? process.cwd(),
-      includes: optionValues(argv, '--context-from-files'),
-      excludes: optionValues(argv, '--context-exclude'),
-      ...(contextFile === undefined ? {} : { contextFile }),
-      prompt: '',
-      transport: legacyTransport(optionValue(argv, '--context-transport')),
-      transform: legacyTransform(optionValue(argv, '--context-transform')),
-      maxInputTokens: numberOption(argv, '--max-input', 120_000),
-      maxFileBytes: legacyContextMaxFileBytes(argv),
-      maxTotalBytes: numberOption(argv, '--max-total-size', 20 * 1024 * 1024),
-    });
-    if (context.transport === 'inline') inlineContext = context.composerText;
-    else if (context.artifactPath !== null) files.push(context.artifactPath);
+  const resolvedTarget = await resolveWebAiSendTarget(argv, config, clientId);
+  const provider = resolvedTarget.provider;
+  if (
+    provider === 'grok' &&
+    hasLegacyContextPackaging(argv) &&
+    !argv.includes('--allow-grok-context-pack')
+  ) {
+    throw new Error(
+      'Grok context-pack is disabled by default; pass --allow-grok-context-pack to opt in',
+    );
   }
+  const basePrompt = legacyPromptText(argv);
+  const prepared = prepareLegacyContext(argv, config);
+  const { inlineContext, files } = prepared;
   if (argv.includes('--inline-only') && files.length > 0) {
     throw new Error('--inline-only cannot be combined with uploaded files or context packages');
   }
   const prompt = renderPromptFromArgs(argv, provider, basePrompt, inlineContext).composerText;
   const requestId = optionValue(argv, '--request-id') ?? randomUUID();
-  const sessionId = await ensureWebAiSession(
-    argv,
-    config,
-    clientId,
-    provider,
-    requestId,
-  );
+  const sessionId =
+    resolvedTarget.sessionId ??
+    await ensureWebAiSession(argv, config, clientId, provider, requestId);
   return await callRpc<Record<string, unknown>>({
     socketPath: config.socketPath,
     method: 'session.send',
@@ -520,6 +537,36 @@ async function sendWebAi(
     timeoutMs: Math.max(config.rpcRequestTimeoutMs, config.submissionAckTimeoutMs + 5_000),
     maxLineBytes: config.rpcMaxLineBytes,
   });
+}
+
+async function resolveWebAiSendTarget(
+  argv: readonly string[],
+  config: SessionPlaneConfig,
+  clientId: string,
+): Promise<{
+  readonly provider: 'chatgpt' | 'gemini' | 'grok';
+  readonly sessionId?: string;
+}> {
+  const requested = optionValue(argv, '--session');
+  if (requested === undefined) return { provider: providerOption(argv) };
+
+  const existing = await getSession(config, clientId, requested);
+  const provider = storedProvider(existing.provider);
+  const explicitProvider = optionValue(argv, '--vendor');
+  if (explicitProvider !== undefined) {
+    const validated = providerOption(['--vendor', explicitProvider]);
+    if (validated !== provider) {
+      throw new Error(
+        `Session ${requested} belongs to ${provider}, not ${validated}`,
+      );
+    }
+  }
+  return { provider, sessionId: requested };
+}
+
+function storedProvider(value: unknown): 'chatgpt' | 'gemini' | 'grok' {
+  if (value === 'chatgpt' || value === 'gemini' || value === 'grok') return value;
+  throw new Error(`Unsupported provider in stored session: ${String(value)}`);
 }
 
 async function ensureWebAiSession(
@@ -661,14 +708,38 @@ async function runWebAiSessions(
   const action = argv[0] ?? 'list';
   if (action === 'list') {
     const result = await listSessions(config, clientId);
-    writeCliResult(io, json, { ok: true, status: 'sessions', ...result });
+    const vendor = optionValue(argv, '--vendor');
+    if (vendor !== undefined && !['chatgpt', 'gemini', 'grok'].includes(vendor)) {
+      throw new Error(`Unsupported provider: ${vendor}`);
+    }
+    const status = optionValue(argv, '--status');
+    const limit = optionalPositiveIntegerOption(argv, '--limit');
+    const sessions = (Array.isArray(result.sessions) ? result.sessions : [])
+      .filter(
+        (entry): entry is Record<string, unknown> =>
+          typeof entry === 'object' && entry !== null,
+      )
+      .map(legacySessionListRow)
+      .filter((entry) => vendor === undefined || entry.provider === vendor)
+      .filter((entry) => status === undefined || entry.status === status);
+    writeCliResult(io, json, {
+      ...result,
+      ok: true,
+      status: 'list',
+      sessions: limit === undefined ? sessions : sessions.slice(-limit),
+    });
     return 0;
   }
   const sessionId = optionValue(argv, '--session') ?? argv[1];
   if (action === 'show') {
     if (sessionId === undefined) throw new Error('web-ai sessions show requires session id');
     const result = await getSession(config, clientId, sessionId);
-    writeCliResult(io, json, legacyWebAiEnvelope(result));
+    writeCliResult(io, json, {
+      ok: result.requestOk !== false,
+      requestOk: result.requestOk !== false,
+      status: 'show',
+      session: legacySessionListRow(result),
+    });
     return 0;
   }
   if (action === 'resume') {
@@ -748,33 +819,43 @@ async function buildWebAiSessionDoctor(
     ? undefined
     : tabs.find((entry) => entry.pageKey === pageKey);
   const issues: string[] = [];
-  if (pageKey === null) {
-    issues.push('session.page-key-missing');
-  } else if (page === undefined) {
-    issues.push('session.page-not-registered');
-  } else {
-    if (page.sessionId !== session.sessionId) issues.push('session.page-session-mismatch');
-    if (Number(page.generation) !== Number(session.generation)) {
-      issues.push('session.page-generation-mismatch');
-    }
-    if ((page.conversationId ?? null) !== (session.conversationId ?? null)) {
-      issues.push('session.page-conversation-mismatch');
+  const bindingRequired = session.terminal !== true;
+  if (bindingRequired) {
+    if (pageKey === null) {
+      issues.push('session.page-key-missing');
+    } else if (page === undefined) {
+      issues.push('session.page-not-registered');
+    } else {
+      if (page.sessionId !== session.sessionId) issues.push('session.page-session-mismatch');
+      if (Number(page.generation) !== Number(session.generation)) {
+        issues.push('session.page-generation-mismatch');
+      }
+      if ((page.conversationId ?? null) !== (session.conversationId ?? null)) {
+        issues.push('session.page-conversation-mismatch');
+      }
     }
   }
   const browser =
     typeof health.browser === 'object' && health.browser !== null
       ? health.browser as Record<string, unknown>
       : null;
-  if (browser?.state !== 'ready') issues.push('browser.not-ready');
+  if (bindingRequired && browser?.state !== 'ready') issues.push('browser.not-ready');
   if (typeof session.errorCode === 'string' && session.errorCode.length > 0) {
     issues.push(`session.error:${session.errorCode}`);
   }
+  const summary =
+    issues.length > 0
+      ? 'issues detected'
+      : bindingRequired
+        ? 'exact binding healthy'
+        : 'terminal session healthy; live binding not required';
   return {
     ok: true,
     requestOk: true,
     status: 'session-doctor',
     sessionId,
-    summary: issues.length === 0 ? 'exact binding healthy' : 'issues detected',
+    summary,
+    bindingRequired,
     recoveryMode: 'automatic-on-core-and-browser-start',
     issues,
     session,
@@ -815,16 +896,39 @@ async function getSession(
 }
 
 function legacyWebAiEnvelope(value: Record<string, unknown>): Record<string, unknown> {
+  const sessionLike =
+    typeof value.sessionState === 'string' || typeof value.providerState === 'string';
+  const status = sessionLike
+    ? legacySessionStatus(value)
+    : typeof value.status === 'string'
+      ? value.status
+      : 'ok';
   return {
-    ok: value.requestOk !== false,
-    status:
-      typeof value.sessionState === 'string'
-        ? value.sessionState
-        : typeof value.status === 'string'
-          ? value.status
-          : 'ok',
     ...value,
+    ok: value.requestOk !== false,
+    status,
   };
+}
+
+function legacySessionListRow(value: Record<string, unknown>): Record<string, unknown> {
+  return {
+    ...value,
+    vendor: value.provider,
+    status: legacySessionStatus(value),
+    targetId: value.pageKey ?? null,
+  };
+}
+
+function legacySessionStatus(value: Record<string, unknown>): string {
+  const sessionState = typeof value.sessionState === 'string' ? value.sessionState : '';
+  const providerState = typeof value.providerState === 'string' ? value.providerState : '';
+  if (sessionState === 'complete' || providerState === 'complete') return 'complete';
+  if (providerState === 'stopped' || sessionState === 'cancelled') return 'stopped';
+  if (providerState === 'blocked') return 'blocked';
+  if (providerState === 'error' || sessionState === 'failed') return 'error';
+  if (sessionState === 'observing') return 'polling';
+  if (['submitting', 'submitted', 'ready', 'created'].includes(sessionState)) return 'sent';
+  return sessionState || providerState || 'unknown';
 }
 
 function providerOption(argv: readonly string[]): 'chatgpt' | 'gemini' | 'grok' {
@@ -963,6 +1067,24 @@ function assertSupportedLegacyWebAiOptions(argv: readonly string[]): void {
     '--attachment-upload-timeout-ms',
     '--power',
     '--speed',
+    '--navigate',
+    '--diagnostics',
+    '--archive',
+    '--thinking-time',
+    '--probe',
+    '--interval',
+    '--poll-timeout',
+    '--max-iterations',
+    '--once',
+    '--interactive',
+    '--compact',
+    '--snapshot',
+    '--max-depth',
+    '--root-selector',
+    '--full',
+    '--cache-metrics',
+    '--reuse-tab',
+    '--control-summary',
   ] as const;
   for (const option of unsupported) {
     if (hasOption(argv, option)) {
@@ -973,6 +1095,9 @@ function assertSupportedLegacyWebAiOptions(argv: readonly string[]): void {
   const action = argv[0] ?? 'status';
   if (action !== 'query' && hasOption(argv, '--follow-up')) {
     throw new Error('--follow-up is supported only by web-ai query');
+  }
+  if (action !== 'query' && hasOption(argv, '--output-image')) {
+    throw new Error('--output-image is supported only by web-ai query');
   }
   if (
     !['render', 'send', 'query', 'code'].includes(action) &&
@@ -1001,17 +1126,26 @@ function agbrowseCompatibilityHelp(): string {
 
 Usage:
   agbrowse start [--headed|--headless] [--browser NAME]
-                 [--browser-executable PATH] [--json]
+                 [--chrome-path PATH|--browser-executable PATH] [--json]
   agbrowse status|stop|reset
   agbrowse browser-list [--browser NAME] [--browser-executable PATH]
 
 Browser compatibility:
-  agbrowse tabs|new-tab|tab-switch|tab-close|tab-cleanup
+  agbrowse tabs|new-tab [URL] [--no-activate]|tab-switch|tab-close|tab-cleanup
   agbrowse navigate|snapshot|click|type|press|hover|select|upload
   agbrowse screenshot|text|get-dom|console|network|evaluate
   agbrowse fetch|extract|search|research
   agbrowse web-ai <command> [options]
   agbrowse skills|install-skills
+
+Compatibility notes:
+  snapshot defaults to all accessibility nodes; pass --interactive to restrict it.
+  new-tab --no-activate preserves SessionPlane's logical selected-page target.
+  get-dom --selector and console --limit retain the legacy read semantics.
+  advanced fetch escalation options fail closed instead of changing meaning.
+  legacy tab-cleanup policy/dry-run flags fail closed; plain tab-cleanup uses
+  SessionPlane ownership-aware cleanup. start --port is unsupported because
+  SessionPlane reserves its own private loopback CDP port.
 
 Legacy-only surfaces that violate SessionPlane ownership or are intentionally
 out of scope fail closed with compatibility.unsupported (for example connect,
@@ -1031,9 +1165,10 @@ function agbrowseWebAiHelp(): string {
 
 Usage:
   agbrowse web-ai render --vendor chatgpt|gemini|grok --prompt TEXT
-  agbrowse web-ai send|query --vendor PROVIDER --prompt TEXT [--session ID]
-  agbrowse web-ai poll|watch|status|snapshot|stop --session ID
-  agbrowse web-ai sessions list|show|resume|doctor
+  agbrowse web-ai send|query [--vendor PROVIDER] --prompt TEXT [--session ID]
+  agbrowse web-ai poll|status|snapshot|stop --session ID
+  agbrowse web-ai sessions list [--vendor PROVIDER] [--status STATUS] [--limit N]
+  agbrowse web-ai sessions show|resume|doctor SESSION_ID
   agbrowse web-ai project-sources list|add --chatgpt-url URL
   agbrowse web-ai code --vendor chatgpt --prompt TEXT --output-zip PATH
   agbrowse web-ai code-extract --vendor chatgpt --session ID
@@ -1043,6 +1178,14 @@ Common options:
   --model MODEL --effort EFFORT --surface chat|deep-research|create-image
   --file PATH --context-from-files GLOB --context-transport inline|upload
   --timeout SEC --deadline ISO_TIME --request-id ID --json
+
+Session semantics:
+  With --session and no --vendor, the stored session provider is inferred.
+  An explicit conflicting --vendor fails before submission.
+  render and send/query share the same context preparation path.
+  Grok context-pack input requires explicit --allow-grok-context-pack opt-in.
+  legacy web-ai watch is a streaming watcher with lifecycle/lock/event semantics
+  that SessionPlane does not approximate; it fails closed as a deferred surface.
 
 ChatGPT is Chat-only. "agbrowse web-ai work", --power, --speed, and an active
 Work composer fail before prompt fill or submit. Manual sessions reattach is
@@ -1080,6 +1223,19 @@ function numberOption(argv: readonly string[], name: string, fallback: number): 
   return value;
 }
 
+function optionalPositiveIntegerOption(
+  argv: readonly string[],
+  name: string,
+): number | undefined {
+  const raw = optionValue(argv, name);
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
 function legacyContextMaxFileBytes(argv: readonly string[]): number {
   return hasOption(argv, '--max-context-file-size')
     ? numberOption(argv, '--max-context-file-size', 2 * 1024 * 1024)
@@ -1103,6 +1259,41 @@ function hasLegacyContext(argv: readonly string[]): boolean {
     optionValues(argv, '--context-exclude').length > 0 ||
     optionValue(argv, '--context-file') !== undefined
   );
+}
+
+function hasLegacyContextPackaging(argv: readonly string[]): boolean {
+  return (
+    optionValues(argv, '--context-from-files').length > 0 ||
+    optionValue(argv, '--context-file') !== undefined ||
+    optionValue(argv, '--context-transform') === 'repomix'
+  );
+}
+
+function prepareLegacyContext(
+  argv: readonly string[],
+  config: SessionPlaneConfig,
+): { readonly inlineContext: string; readonly files: readonly string[] } {
+  let inlineContext = '';
+  const files = [...optionValues(argv, '--file')];
+  if (!hasLegacyContext(argv)) return { inlineContext, files };
+
+  const contextPackages = new ContextPackageService({ stateDir: config.stateDir });
+  const contextFile = optionValue(argv, '--context-file');
+  const context = contextPackages.render({
+    root: optionValue(argv, '--root') ?? process.cwd(),
+    includes: optionValues(argv, '--context-from-files'),
+    excludes: optionValues(argv, '--context-exclude'),
+    ...(contextFile === undefined ? {} : { contextFile }),
+    prompt: '',
+    transport: legacyTransport(optionValue(argv, '--context-transport')),
+    transform: legacyTransform(optionValue(argv, '--context-transform')),
+    maxInputTokens: numberOption(argv, '--max-input', 120_000),
+    maxFileBytes: legacyContextMaxFileBytes(argv),
+    maxTotalBytes: numberOption(argv, '--max-total-size', 20 * 1024 * 1024),
+  });
+  if (context.transport === 'inline') inlineContext = context.composerText;
+  else if (context.artifactPath !== null) files.push(context.artifactPath);
+  return { inlineContext, files };
 }
 
 function legacyTransport(value: string | undefined): 'inline' | 'upload' {
@@ -1164,20 +1355,21 @@ async function startCompatibilityCore(
   io: CliIo,
   json: boolean,
 ): Promise<number> {
-  const config = configFromArgs(argv);
+  const normalizedArgv = normalizeLegacyStartArgs(argv);
+  const config = configFromArgs(normalizedArgv);
   let health = await tryHealth(config);
   if (health === null) {
     const cliPath = fileURLToPath(new URL('../cli/main.ts', import.meta.url));
     const child = spawn(
       process.execPath,
-      ['--experimental-strip-types', cliPath, 'serve', ...globalArgs(argv)],
+      ['--experimental-strip-types', cliPath, 'serve', ...globalArgs(normalizedArgv)],
       {
         detached: true,
         stdio: 'ignore',
         env: {
           ...process.env,
           SESSIONPLANE_LOG_LEVEL: process.env.SESSIONPLANE_LOG_LEVEL ?? 'warn',
-          ...(argv.includes('--headless') ? { SESSIONPLANE_BROWSER_HEADLESS: '1' } : {}),
+          ...(normalizedArgv.includes('--headless') ? { SESSIONPLANE_BROWSER_HEADLESS: '1' } : {}),
         },
       },
     );
@@ -1193,6 +1385,7 @@ async function startCompatibilityCore(
   }
 
   assertCompatibilityCoreBrowserSelection(config, health);
+  assertCompatibilityBrowserMode(health, normalizedArgv);
   const browser = health.browser as { state?: string } | undefined;
   if (browser?.state === 'stopped' || browser?.state === 'not_started') {
     await callRpc({
@@ -1204,6 +1397,7 @@ async function startCompatibilityCore(
     });
     health = await requireHealth(config);
   }
+  assertCompatibilityBrowserMode(health, normalizedArgv);
   writeCliResult(io, json, {
     requestOk: true,
     status: 'running',
@@ -1213,6 +1407,123 @@ async function startCompatibilityCore(
     socket: health.socket,
   });
   return 0;
+}
+
+function assertSupportedLegacyBrowserOptions(
+  command: string,
+  argv: readonly string[],
+): void {
+  const unsupported: readonly string[] = command === 'tab-cleanup'
+    ? [
+        '--idle-after',
+        '--max-tabs',
+        '--include-untracked',
+        '--provider',
+        '--keep-provider-tabs',
+        '--force',
+        '--dry-run',
+      ]
+    : command === 'tab-switch' || command === 'select-tab'
+      ? ['--force']
+      : command === 'console'
+        ? ['--duration', '--expression', '--reload']
+        : command === 'network'
+          ? ['--duration', '--filter', '--live-only', '--reload']
+          : command === 'navigate'
+            ? ['--timeout', '--wait-until']
+            : [];
+  for (const option of unsupported) {
+    if (hasOption(argv, option)) {
+      throw new Error(
+        `${option} is not supported by the SessionPlane compatibility runtime; ` +
+          `${command} only accepts options with exact SessionPlane semantics`,
+      );
+    }
+  }
+}
+
+function hasDeferredLegacyFetchOption(argv: readonly string[]): boolean {
+  return [
+    '--trace',
+    '--browser',
+    '--browser-session',
+    '--identity',
+    '--no-browser',
+    '--selector',
+    '--no-public-endpoints',
+    '--allow-third-party-reader',
+    '--allow-archive',
+  ].some((option) => hasOption(argv, option));
+}
+
+function normalizeLegacyStartArgs(argv: readonly string[]): readonly string[] {
+  if (argv.includes('--headless') && argv.includes('--headed')) {
+    throw new Error('--headless and --headed are mutually exclusive');
+  }
+  for (const option of [
+    '--port',
+    '--heavy-site-compat',
+    '--keep-bg-networking',
+    '--profile',
+  ] as const) {
+    if (hasOption(argv, option)) {
+      throw new Error(
+        `${option} is not supported by the SessionPlane compatibility runtime; ` +
+          'SessionPlane owns a dedicated profile and reserves a private loopback CDP port',
+      );
+    }
+  }
+
+  const chromePath = optionValue(argv, '--chrome-path');
+  const browserExecutable = optionValue(argv, '--browser-executable');
+  if (
+    chromePath !== undefined &&
+    browserExecutable !== undefined &&
+    chromePath !== browserExecutable
+  ) {
+    throw new Error('--chrome-path and --browser-executable must refer to the same executable');
+  }
+  if (chromePath === undefined) return argv;
+
+  const result: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const value = argv[index];
+    if (value === '--chrome-path') {
+      const next = argv[index + 1];
+      if (next === undefined || next.startsWith('--')) {
+        throw new Error('--chrome-path requires a value');
+      }
+      result.push('--browser-executable', next);
+      index += 1;
+    } else if (value?.startsWith('--chrome-path=')) {
+      result.push('--browser-executable', value.slice('--chrome-path='.length));
+    } else if (value !== undefined) {
+      result.push(value);
+    }
+  }
+  return result;
+}
+
+function assertCompatibilityBrowserMode(
+  health: Readonly<Record<string, unknown>>,
+  argv: readonly string[],
+): void {
+  const requested = argv.includes('--headless')
+    ? true
+    : argv.includes('--headed')
+      ? false
+      : null;
+  if (requested === null) return;
+  const browser =
+    typeof health.browser === 'object' && health.browser !== null
+      ? (health.browser as { readonly headless?: unknown })
+      : null;
+  if (typeof browser?.headless === 'boolean' && browser.headless !== requested) {
+    throw new Error(
+      `The running SessionPlane browser is ${browser.headless ? 'headless' : 'headed'}; ` +
+        `agbrowse start requested ${requested ? 'headless' : 'headed'} mode`,
+    );
+  }
 }
 
 async function runTransformedBrowserRead(
@@ -1238,15 +1549,50 @@ async function runTransformedBrowserRead(
       };
     });
   }
-  if ((command === 'tabs' || command === 'active-tab') && Array.isArray(value.tabs)) {
-    value.tabs = value.tabs.map((entry, index) => {
-      const tab = entry as Record<string, unknown>;
-      return { index, targetId: tab.pageKey, ...tab };
+  if (command === 'observe-bundle' && Array.isArray(value.refs)) {
+    value.refs = value.refs.map((entry) => {
+      const node = entry as Record<string, unknown>;
+      const ref = typeof node.ref === 'string' ? node.ref : '';
+      return {
+        ...node,
+        ref: legacyRef(ref),
+        canonicalRef: ref,
+      };
     });
-    value.activeTargetId = value.selectedPageKey ?? null;
   }
-  if (command === 'new-tab' && typeof value.selectedPageKey === 'string') {
-    value.targetId = value.selectedPageKey;
+  if ((command === 'tabs' || command === 'active-tab') && Array.isArray(value.tabs)) {
+    const tabs = value.tabs.map((entry, index) => {
+      const tab = entry as Record<string, unknown>;
+      return { index: index + 1, targetId: tab.pageKey, ...tab };
+    });
+    if (command === 'tabs') {
+      writeCliResult(io, json, tabs);
+      return 0;
+    }
+    const selectedPageKey =
+      typeof value.selectedPageKey === 'string' ? value.selectedPageKey : null;
+    const selected = tabs.find((tab) => tab.targetId === selectedPageKey);
+    if (selected === undefined) {
+      writeCliResult(io, json, { targetId: null });
+      return 0;
+    }
+    const { index: _index, ...active } = selected;
+    writeCliResult(io, json, active);
+    return 0;
+  }
+  if (command === 'new-tab') {
+    const binding =
+      typeof value.binding === 'object' && value.binding !== null
+        ? value.binding as { readonly pageKey?: unknown }
+        : null;
+    const createdPageKey =
+      typeof value.createdPageKey === 'string'
+        ? value.createdPageKey
+        : typeof binding?.pageKey === 'string'
+          ? binding.pageKey
+          : null;
+    if (createdPageKey !== null) value.targetId = createdPageKey;
+    value.status = 'created';
   }
   writeCliResult(io, json, value);
   return 0;
@@ -1256,17 +1602,20 @@ async function runTabSelect(
   args: readonly string[],
   io: CliIo,
   json: boolean,
+  selectAlias: boolean,
 ): Promise<number> {
   const target = args.find((arg) => !arg.startsWith('--'));
   if (target === undefined) throw new Error('tab target is required');
   let pageKey = target;
   if (/^\d+$/.test(target)) {
+    const legacyIndex = Number(target);
+    if (legacyIndex < 1) throw new Error(`Unknown tab index: ${target}`);
     const tabs = await captureCli(['tabs', ...globalArgs(args), '--json']);
     if (tabs.code !== 0) throw new Error(tabs.stderr);
     const parsed = JSON.parse(tabs.stdout) as {
       tabs: ReadonlyArray<{ pageKey: string }>;
     };
-    const selected = parsed.tabs[Number(target)];
+    const selected = parsed.tabs[legacyIndex - 1];
     if (selected === undefined) throw new Error(`Unknown tab index: ${target}`);
     pageKey = selected.pageKey;
   }
@@ -1276,20 +1625,60 @@ async function runTabSelect(
     return run.code;
   }
   const value = JSON.parse(run.stdout) as Record<string, unknown>;
+  const binding =
+    typeof value.binding === 'object' && value.binding !== null
+      ? value.binding as { readonly title?: unknown }
+      : null;
+  value.ok = value.requestOk !== false;
+  value.tab = /^\d+$/.test(target) ? Number(target) : null;
   value.targetId = value.selectedPageKey;
+  if (typeof binding?.title === 'string') value.title = binding.title;
+  if (selectAlias) value.alias = 'select-tab';
   writeCliResult(io, json, value);
   return 0;
 }
 
 async function runLegacyType(argv: readonly string[], io: CliIo): Promise<number> {
   const ref = normalizeRef(argv[1]);
-  const text = argv[2];
-  if (ref === undefined || text === undefined) throw new Error('type requires ref and text');
-  const submit = argv.includes('--submit');
-  const passthrough = translateFlags(argv.slice(3).filter((arg) => arg !== '--submit'));
-  const first = await runCli(['type', ref, '--text', text, ...passthrough], io);
+  if (ref === undefined) throw new Error('type requires ref and text');
+  const valueOptions = new Set([
+    '--state-dir',
+    '--socket',
+    '--browser',
+    '--browser-executable',
+    '--page',
+    '--snapshot-id',
+  ]);
+  const textParts: string[] = [];
+  const passthrough: string[] = [];
+  let submit = false;
+  const args = argv.slice(2);
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === undefined) continue;
+    if (value === '--submit') {
+      submit = true;
+      continue;
+    }
+    if (valueOptions.has(value)) {
+      const next = args[index + 1];
+      if (next === undefined) throw new Error(`${value} requires a value`);
+      passthrough.push(value, next);
+      index += 1;
+      continue;
+    }
+    if (value.startsWith('--')) {
+      passthrough.push(value);
+      continue;
+    }
+    textParts.push(value);
+  }
+  if (textParts.length === 0) throw new Error('type requires ref and text');
+  const text = textParts.join(' ');
+  const translatedPassthrough = translateFlags(passthrough);
+  const first = await runCli(['type', ref, '--text', text, ...translatedPassthrough], io);
   if (first !== 0 || !submit) return first;
-  return await runCli(['press', ref, 'Enter', ...passthrough], io);
+  return await runCli(['press', ref, 'Enter', ...translatedPassthrough], io);
 }
 
 async function runLegacyWait(
@@ -1384,6 +1773,78 @@ function translateFlags(argv: readonly string[]): readonly string[] {
   return argv
     .filter((arg) => !['--headed', '--headless', '--no-activate', '--force'].includes(arg) || arg === '--force')
     .map((arg) => (/^e\d+$/.test(arg) ? `@${arg}` : arg));
+}
+
+function translateLegacySnapshotArgs(argv: readonly string[]): readonly string[] {
+  const interactive = argv.includes('--interactive');
+  const translated = argv.filter((value) => value !== '--interactive');
+  return interactive || translated.includes('--all-nodes')
+    ? translated
+    : [...translated, '--all-nodes'];
+}
+
+function translateLegacyObserveBundleArgs(argv: readonly string[]): readonly string[] {
+  return argv.map((value) => {
+    if (value === '--max-text-chars') return '--max-chars';
+    if (value.startsWith('--max-text-chars=')) {
+      return `--max-chars=${value.slice('--max-text-chars='.length)}`;
+    }
+    return value;
+  });
+}
+
+function translateLegacyConsoleArgs(argv: readonly string[]): readonly string[] {
+  const translated = translateFlags(argv);
+  return hasOption(translated, '--limit') ? translated : [...translated, '--limit', '50'];
+}
+
+function translateLegacyTimeoutArgs(argv: readonly string[]): readonly string[] {
+  return translateFlags(argv).map((value) => {
+    if (value === '--timeout') return '--timeout-ms';
+    if (value.startsWith('--timeout=')) {
+      return `--timeout-ms=${value.slice('--timeout='.length)}`;
+    }
+    return value;
+  });
+}
+
+function translateLegacyWaitForTextArgs(argv: readonly string[]): readonly string[] {
+  const args = argv.slice(1);
+  const valueOptions = new Set([
+    '--timeout',
+    '--state-dir',
+    '--socket',
+    '--browser',
+    '--browser-executable',
+    '--page',
+  ]);
+  const positional: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === undefined) continue;
+    if (valueOptions.has(value)) {
+      index += 1;
+      continue;
+    }
+    if (value.startsWith('--')) continue;
+    positional.push(value);
+  }
+  if (positional.length === 0) throw new Error('wait-for-text requires text');
+
+  const result = ['wait-for-text', '--text', positional.join(' ')];
+  for (const [legacy, canonical] of [
+    ['--timeout', '--timeout-ms'],
+    ['--state-dir', '--state-dir'],
+    ['--socket', '--socket'],
+    ['--browser', '--browser'],
+    ['--browser-executable', '--browser-executable'],
+    ['--page', '--page'],
+  ] as const) {
+    const value = optionValue(args, legacy);
+    if (value !== undefined) result.push(canonical, value);
+  }
+  if (args.includes('--json')) result.push('--json');
+  return result;
 }
 
 function globalArgs(argv: readonly string[]): readonly string[] {

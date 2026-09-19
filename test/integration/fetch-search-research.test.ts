@@ -121,6 +121,29 @@ test('fetch, extract, search, and research share bounded original-page evidence'
     assert.equal(compatibleFetch.code, 0);
     assert.equal(JSON.parse(compatibleFetch.stdout).schemaVersion, 'sessionplane-adaptive-fetch-v1');
 
+    for (const args of [
+      ['--selector', 'article'],
+      ['--browser', 'never'],
+      ['--trace'],
+    ] as const) {
+      const deferredFetch = await captureAgbrowse([
+        'fetch',
+        `${fixture.baseUrl}/article`,
+        ...args,
+        '--socket',
+        config.socketPath,
+        '--json',
+      ]);
+      assert.equal(deferredFetch.code, 2, deferredFetch.stderr);
+      const error = JSON.parse(deferredFetch.stderr) as {
+        readonly errorCode: string;
+        readonly details: { readonly capabilityId: string; readonly status: string };
+      };
+      assert.equal(error.errorCode, 'compatibility.unsupported');
+      assert.equal(error.details.capabilityId, 'fetch.experimental-escalation');
+      assert.equal(error.details.status, 'deferred');
+    }
+
     const compatiblePlan = await captureAgbrowse([
       'research',
       'plan',

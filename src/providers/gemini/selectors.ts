@@ -16,6 +16,7 @@ export const GEMINI_SELECTORS = {
     '.user-query-container',
     '[data-message-author-role="user"]',
   ],
+  userTextLines: ['.query-text-line'],
   assistantMessages: [
     'model-response',
     '[data-response-index]',

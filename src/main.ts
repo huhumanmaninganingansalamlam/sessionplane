@@ -197,6 +197,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     scheduler: actorScheduler,
     observations: observationService,
     chatgptUrl: config.chatgptUrl,
+    geminiUrl: config.geminiUrl,
+    grokUrl: config.grokUrl,
     metrics,
     logger,
     ...(options.recoveryNavigatePage === undefined

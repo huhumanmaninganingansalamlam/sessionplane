@@ -42,8 +42,14 @@ export function registerBrowserControlMethods(
   );
   router.register(
     'browser.new',
-    z.object({ url: z.string().url().optional() }).strict(),
-    async ({ url }) => await browser.newPage(url),
+    z.object({
+      url: z.string().url().optional(),
+      activate: z.boolean().optional(),
+    }).strict(),
+    async ({ url, activate }) => await browser.newPage(
+      url,
+      activate === undefined ? undefined : { activate },
+    ),
   );
   router.register(
     'browser.close',
@@ -256,6 +262,7 @@ export function registerBrowserControlMethods(
     z
       .object({
         ...OptionalPage,
+        selector: z.string().min(1).max(10_000).optional(),
         maxChars: z.number().int().min(1).max(4_000_000).default(500_000),
       })
       .strict(),
@@ -273,7 +280,11 @@ export function registerBrowserControlMethods(
   );
   router.register(
     'browser.console',
-    z.object({ ...OptionalPage, clear: z.boolean().default(false) }).strict(),
+    z.object({
+      ...OptionalPage,
+      clear: z.boolean().default(false),
+      limit: z.number().int().min(1).max(10_000).optional(),
+    }).strict(),
     (params) => wrapSync(() => browser.console(params)),
   );
   router.register(
@@ -289,6 +300,7 @@ export function registerBrowserControlMethods(
         screenshotPath: z.string().min(1).max(10_000).optional(),
         includeBoxes: z.boolean().default(true),
         maxTextChars: z.number().int().min(1).max(2_000_000).default(2_000),
+        maxNodes: z.number().int().min(1).max(5_000).default(250),
       })
       .strict(),
     async (params) => await wrap(() => browser.observationBundle(params)),

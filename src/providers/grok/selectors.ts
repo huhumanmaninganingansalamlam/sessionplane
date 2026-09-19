@@ -9,6 +9,7 @@ export const GROK_SELECTORS = {
     'button[aria-label*="Send" i]',
     '[data-testid="send-button"]',
   ],
+  authenticationRequired: ['a[href^="/sign-in"]'],
   userMessages: ['[data-testid="user-message"]', '[data-message-author-role="user"]'],
   assistantMessages: [
     '[data-testid="assistant-message"]',

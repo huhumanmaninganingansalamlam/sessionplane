@@ -1,6 +1,7 @@
 import type { Page } from 'playwright-core';
 
 import type { BrowserOwner } from '../browser/browser-owner.ts';
+import { isProviderUrl } from '../browser/page-binding.ts';
 import { PageRegistryError, type PageRegistry } from '../browser/page-registry.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
 import type { Logger } from '../logging.ts';
@@ -27,6 +28,8 @@ export interface RecoveryServiceOptions {
   readonly scheduler: ActorScheduler;
   readonly observations: ObservationService;
   readonly chatgptUrl: string;
+  readonly geminiUrl: string;
+  readonly grokUrl: string;
   readonly metrics?: RuntimeMetrics;
   readonly logger?: Logger;
   readonly now?: () => Date;
@@ -39,7 +42,7 @@ export class RecoveryService {
   readonly #scheduler: ActorScheduler;
   readonly #observations: ObservationService;
   readonly #sessions: SessionRepository;
-  readonly #chatgptUrl: string;
+  readonly #providerUrls: RecoveryProviderUrls;
   readonly #metrics: RuntimeMetrics | null;
   readonly #logger: Logger | null;
   readonly #now: () => Date;
@@ -52,7 +55,11 @@ export class RecoveryService {
     this.#scheduler = options.scheduler;
     this.#observations = options.observations;
     this.#sessions = new SessionRepository(options.database.raw);
-    this.#chatgptUrl = options.chatgptUrl;
+    this.#providerUrls = {
+      chatgptUrl: options.chatgptUrl,
+      geminiUrl: options.geminiUrl,
+      grokUrl: options.grokUrl,
+    };
     this.#metrics = options.metrics ?? null;
     this.#logger = options.logger ?? null;
     this.#now = options.now ?? (() => new Date());
@@ -125,7 +132,9 @@ export class RecoveryService {
     if (conversationId === null) {
       return result(snapshot);
     }
-    const matches = this.#pageRegistry.findByConversation(conversationId);
+    const matches = this.#pageRegistry
+      .findByConversation(conversationId)
+      .filter((page) => isProviderUrl(snapshot.provider, page.url));
     if (matches.length > 1) {
       const updated = await this.#recordPageState(snapshot, {
         pageKey: null,
@@ -169,7 +178,7 @@ export class RecoveryService {
         generation: snapshot.generation,
         conversationId: null,
       });
-      const target = new URL(`/c/${encodeURIComponent(conversationId)}`, this.#chatgptUrl).href;
+      const target = providerConversationUrl(snapshot.provider, conversationId, this.#providerUrls);
       await this.#navigatePage(created.page, target);
       this.#pageRegistry.refreshPage(created.binding.pageKey);
       this.#pageRegistry.bindPage(created.binding.pageKey, {
@@ -233,6 +242,30 @@ export class RecoveryService {
       eventType,
     );
   }
+}
+
+export interface RecoveryProviderUrls {
+  readonly chatgptUrl: string;
+  readonly geminiUrl: string;
+  readonly grokUrl: string;
+}
+
+export function providerConversationUrl(
+  provider: string,
+  conversationId: string,
+  urls: RecoveryProviderUrls,
+): string {
+  const encoded = encodeURIComponent(conversationId);
+  if (provider === 'chatgpt') {
+    return new URL(`/c/${encoded}`, urls.chatgptUrl).href;
+  }
+  if (provider === 'gemini') {
+    return new URL(`/app/${encoded}`, urls.geminiUrl).href;
+  }
+  if (provider === 'grok') {
+    return new URL(`/c/${encoded}`, urls.grokUrl).href;
+  }
+  throw new Error(`Unsupported provider recovery URL: ${provider}`);
 }
 
 function isObservationReady(snapshot: SessionSnapshot): boolean {

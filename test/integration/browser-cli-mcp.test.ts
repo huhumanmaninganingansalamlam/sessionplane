@@ -126,6 +126,42 @@ test('agbrowse-compatible CLI and MCP share one explicit browser Page and snapsh
     assert.equal(evaluated.code, 0, evaluated.stderr);
     assert.deepEqual(JSON.parse(evaluated.stdout).value, { name: 'Ada', count: 1 });
 
+    const attachConsole = await runCliJson([
+      'console',
+      '--clear',
+      '--page',
+      snapshot.pageKey,
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(attachConsole.code, 0, attachConsole.stderr);
+    const emittedConsole = await runCliJson([
+      'evaluate',
+      '--script',
+      `for (let index = 0; index < 60; index += 1) console.log('canonical-' + index)`,
+      '--page',
+      snapshot.pageKey,
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(emittedConsole.code, 0, emittedConsole.stderr);
+    const canonicalConsole = await runCliJson([
+      'console',
+      '--page',
+      snapshot.pageKey,
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(canonicalConsole.code, 0, canonicalConsole.stderr);
+    assert.equal(
+      (JSON.parse(canonicalConsole.stdout) as { entries: readonly unknown[] }).entries.length,
+      60,
+      'canonical SessionPlane console keeps its all-buffer default',
+    );
+
     const bundle = await invokeMcpTool({
       name: 'browser_observe_bundle',
       arguments: { pageKey: snapshot.pageKey, includeBoxes: true, maxTextChars: 500 },

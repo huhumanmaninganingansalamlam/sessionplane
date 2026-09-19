@@ -33,7 +33,9 @@ import { assertNoHumanVerification } from './human-verification.ts';
 export interface ProviderDomSelectors {
   readonly composer: readonly string[];
   readonly sendButton: readonly string[];
+  readonly authenticationRequired?: readonly string[];
   readonly userMessages: readonly string[];
+  readonly userTextLines?: readonly string[];
   readonly assistantMessages: readonly string[];
   readonly assistantText: readonly string[];
   readonly completion: readonly string[];
@@ -340,6 +342,22 @@ class DomProviderSubmission implements ProviderSubmission {
       provider: this.provider,
       pageKey: this.pageKey,
     });
+    if (
+      this.#selectors.authenticationRequired !== undefined &&
+      (await anyVisible(this.#page, this.#selectors.authenticationRequired))
+    ) {
+      throw new ProviderSubmissionError(
+        'provider.authentication-required',
+        `${this.provider} authentication is required before submission`,
+        {
+          details: {
+            provider: this.provider,
+            pageKey: this.pageKey,
+            requiresHumanAction: true,
+          },
+        },
+      );
+    }
     if (this.#request.model !== null) {
       await selectExactModel(this.#page, this.#selectors, this.#request.model);
     }
@@ -349,8 +367,8 @@ class DomProviderSubmission implements ProviderSubmission {
       }
     }
 
-    const composer = await firstVisible(this.#page, this.#selectors.composer);
-    if (composer === null || !(await composer.isEditable().catch(() => false))) {
+    const composer = await firstEditable(this.#page, this.#selectors.composer, 5_000);
+    if (composer === null) {
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         `${this.provider} composer is not editable`,
@@ -364,19 +382,14 @@ class DomProviderSubmission implements ProviderSubmission {
       await uploadAttachments(this.#page, this.#selectors, attachments);
     }
     await composer.fill(this.#request.prompt);
-    const actual = await readComposerValue(composer);
-    if (normalizeText(actual) !== normalizeText(this.#request.prompt)) {
+    if (!(await waitForComposerValue(composer, this.#request.prompt, 2_000))) {
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         `${this.provider} composer value did not match the requested prompt`,
       );
     }
-    const sendButton = await firstVisible(this.#page, this.#selectors.sendButton);
-    if (
-      sendButton === null ||
-      !(await sendButton.isEnabled().catch(() => false)) ||
-      (await sendButton.isDisabled().catch(() => true))
-    ) {
+    const sendButton = await firstEnabled(this.#page, this.#selectors.sendButton, 5_000);
+    if (sendButton === null) {
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         `${this.provider} send control is unavailable`,
@@ -654,35 +667,46 @@ async function readTurns(
   role?: 'user' | 'assistant',
 ): Promise<readonly DomTurn[]> {
   const raw = await page.evaluate(
-    ({ userSelectors, assistantSelectors, textSelectors }) => {
+    ({ userSelectors, userTextLineSelectors, assistantSelectors, textSelectors }) => {
       const normalize = (value: string | null | undefined): string =>
         (value ?? '').replaceAll(/\s+/g, ' ').trim();
       const userSelector = userSelectors.join(', ');
       const assistantSelector = assistantSelectors.join(', ');
       const allSelector = [...userSelectors, ...assistantSelectors].join(', ');
       if (allSelector.length === 0) return [];
+      const roleOf = (element: Element): 'user' | 'assistant' =>
+        userSelector.length > 0 && element.matches(userSelector) ? 'user' : 'assistant';
+      const elements = [...document.querySelectorAll(allSelector)].filter((element) => {
+        const parentMatch = element.parentElement?.closest(allSelector) ?? null;
+        return parentMatch === null || roleOf(parentMatch) !== roleOf(element);
+      });
       let userIndex = 0;
       let assistantIndex = 0;
-      return [...document.querySelectorAll(allSelector)].map((element) => {
-        const isUser = userSelector.length > 0 && element.matches(userSelector);
+      return elements.map((element) => {
+        const isUser = roleOf(element) === 'user';
         const roleValue = isUser ? 'user' : 'assistant';
         const index = isUser ? userIndex++ : assistantIndex++;
-        const identityNode =
-          element.closest('[data-message-id], [data-turn-id], [data-testid], [id]') ?? element;
         const messageId =
-          identityNode.getAttribute('data-message-id') ??
-          identityNode.getAttribute('data-response-id') ??
-          identityNode.getAttribute('data-testid') ??
-          identityNode.id ??
+          element.getAttribute('data-message-id') ??
+          element.getAttribute('data-response-id') ??
+          element.id ??
           null;
         const turnId =
-          identityNode.getAttribute('data-turn-id') ??
-          identityNode.getAttribute('data-message-id') ??
-          identityNode.getAttribute('data-testid') ??
-          identityNode.id ??
+          element.getAttribute('data-turn-id') ??
+          element.getAttribute('data-message-id') ??
+          element.getAttribute('data-response-id') ??
+          element.id ??
           null;
-        let textNode: Element = element;
-        if (!isUser) {
+        let text = normalize(element.textContent);
+        if (isUser && userTextLineSelectors.length > 0) {
+          for (const selector of userTextLineSelectors) {
+            const lines = [...element.querySelectorAll(selector)];
+            if (lines.length === 0) continue;
+            text = normalize(lines.map((line) => line.textContent ?? '').join('\n'));
+            break;
+          }
+        } else if (!isUser) {
+          let textNode: Element = element;
           for (const selector of textSelectors) {
             const candidate = element.querySelector(selector);
             if (candidate !== null) {
@@ -690,13 +714,14 @@ async function readTurns(
               break;
             }
           }
+          text = normalize(textNode.textContent);
         }
         const status = (element.getAttribute('data-status') ?? '').toLowerCase();
         const state = (element.getAttribute('data-state') ?? '').toLowerCase();
         return {
           role: roleValue,
           index,
-          text: normalize(textNode.textContent),
+          text,
           messageId,
           turnId,
           terminalAttribute:
@@ -714,6 +739,7 @@ async function readTurns(
     },
     {
       userSelectors: [...selectors.userMessages],
+      userTextLineSelectors: [...(selectors.userTextLines ?? [])],
       assistantSelectors: [...selectors.assistantMessages],
       textSelectors: [...selectors.assistantText],
     },
@@ -970,6 +996,42 @@ async function firstVisible(page: Page, selectors: readonly string[]): Promise<L
   return null;
 }
 
+async function firstEditable(
+  page: Page,
+  selectors: readonly string[],
+  timeoutMs: number,
+): Promise<Locator | null> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const candidate = await firstVisible(page, selectors);
+    if (candidate !== null && (await candidate.isEditable().catch(() => false))) {
+      return candidate;
+    }
+    if (Date.now() >= deadline) return null;
+    await page.waitForTimeout(50);
+  } while (true);
+}
+
+async function firstEnabled(
+  page: Page,
+  selectors: readonly string[],
+  timeoutMs: number,
+): Promise<Locator | null> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const candidate = await firstVisible(page, selectors);
+    if (
+      candidate !== null &&
+      (await candidate.isEnabled().catch(() => false)) &&
+      !(await candidate.isDisabled().catch(() => true))
+    ) {
+      return candidate;
+    }
+    if (Date.now() >= deadline) return null;
+    await page.waitForTimeout(50);
+  } while (true);
+}
+
 async function firstExisting(page: Page, selectors: readonly string[]): Promise<Locator | null> {
   for (const selector of selectors) {
     const candidate = page.locator(selector).first();
@@ -1000,6 +1062,20 @@ async function readComposerValue(composer: Locator): Promise<string> {
     }
     return element instanceof HTMLElement ? element.innerText : element.textContent ?? '';
   });
+}
+
+async function waitForComposerValue(
+  composer: Locator,
+  expected: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const actual = await readComposerValue(composer).catch(() => null);
+    if (actual !== null && normalizeText(actual) === normalizeText(expected)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  } while (true);
 }
 
 function normalizeText(value: string): string {

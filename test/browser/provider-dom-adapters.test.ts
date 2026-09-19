@@ -71,6 +71,13 @@ for (const provider of ['gemini', 'grok'] as const) {
       if (acknowledgement === null) throw new Error('missing acknowledgement');
       submission.bindAcknowledgement(acknowledgement);
       assert.match(acknowledgement.conversationId, new RegExp(`^${provider}-conversation-`));
+      if (provider === 'grok') {
+        assert.notEqual(
+          acknowledgement.submittedUserMessageId,
+          'user-message',
+          'repeated data-testid values are not stable turn identities',
+        );
+      }
       assert.equal(
         await created.page.locator('#attachment-name').textContent(),
         attachment.name,
@@ -178,6 +185,310 @@ for (const provider of ['gemini', 'grok'] as const) {
     }
   });
 }
+
+test('Grok waits for the real composer to hydrate before declaring it unavailable', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-grok-hydration-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://grok.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: `<!doctype html>
+          <html>
+            <body>
+              <div id="root"></div>
+              <script>
+                setTimeout(() => {
+                  const composer = document.createElement('div');
+                  composer.className = 'tiptap ProseMirror query-bar-editor';
+                  composer.contentEditable = 'true';
+                  composer.setAttribute('role', 'textbox');
+                  composer.setAttribute('aria-label', 'Ask Grok anything');
+                  const button = document.createElement('button');
+                  button.type = 'submit';
+                  button.disabled = true;
+                  button.textContent = 'Send';
+                  composer.addEventListener('input', () => {
+                    setTimeout(() => { button.disabled = false; }, 100);
+                  });
+                  document.querySelector('#root').append(composer, button);
+                }, 200);
+              </script>
+            </body>
+          </html>`,
+      });
+    });
+    await created.page.goto('https://grok.com/');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'grok-hydration-session',
+      generation: 1,
+      conversationId: null,
+    });
+
+    const adapter = createAdapter('grok', owner, registry);
+    const submission = await adapter.openSubmission({
+      session: {
+        ...sessionSnapshot('grok', created.binding.pageKey),
+        sessionId: 'grok-hydration-session',
+      },
+      generation: 1,
+      prompt: 'Hydrated Grok prompt',
+      model: null,
+    });
+    await submission.prepare();
+    assert.equal(
+      await created.page.locator('[role="textbox"]').innerText(),
+      'Hydrated Grok prompt',
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Gemini waits for an async composer DOM commit before validating the prompt', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-gemini-composer-commit-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://gemini.google.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: `<!doctype html>
+          <html>
+            <body>
+              <rich-textarea>
+                <div class="ql-editor" contenteditable="true" role="textbox" aria-label="Gemini prompt"></div>
+              </rich-textarea>
+              <button class="send-button" type="button">Send</button>
+              <script>
+                const composer = document.querySelector('.ql-editor');
+                composer.addEventListener('input', () => {
+                  composer.textContent = 'pending framework commit';
+                  setTimeout(() => {
+                    composer.textContent = 'Delayed Gemini prompt';
+                  }, 120);
+                });
+              </script>
+            </body>
+          </html>`,
+      });
+    });
+    await created.page.goto('https://gemini.google.com/app');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'gemini-composer-commit-session',
+      generation: 1,
+      conversationId: null,
+    });
+
+    const adapter = createAdapter('gemini', owner, registry);
+    const submission = await adapter.openSubmission({
+      session: {
+        ...sessionSnapshot('gemini', created.binding.pageKey),
+        sessionId: 'gemini-composer-commit-session',
+      },
+      generation: 1,
+      prompt: 'Delayed Gemini prompt',
+      model: null,
+    });
+    await submission.prepare();
+    assert.equal(
+      await created.page.locator('.ql-editor').innerText(),
+      'Delayed Gemini prompt',
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Gemini keeps stable identities when a shared turn wrapper gains its id after acknowledgement', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-gemini-shared-turn-id-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://gemini.google.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: `<!doctype html>
+          <html>
+            <body>
+              <rich-textarea>
+                <div class="ql-editor" contenteditable="true" role="textbox" aria-label="Gemini prompt"></div>
+              </rich-textarea>
+              <button class="send-button" type="button">Send</button>
+              <section id="messages"></section>
+              <script>
+                const composer = document.querySelector('.ql-editor');
+                document.querySelector('button').addEventListener('click', () => {
+                  history.pushState({}, '', '/app/shared-turn-conversation-123456');
+                  const pair = document.createElement('div');
+                  const user = document.createElement('user-query');
+                  user.textContent = composer.textContent;
+                  pair.append(user);
+                  document.querySelector('#messages').appendChild(pair);
+                  setTimeout(() => {
+                    pair.id = 'shared-turn-pair-1';
+                    const assistant = document.createElement('model-response');
+                    assistant.setAttribute('data-complete', 'true');
+                    const content = document.createElement('div');
+                    content.className = 'markdown';
+                    content.textContent = 'Shared turn final';
+                    assistant.appendChild(content);
+                    pair.appendChild(assistant);
+                  }, 250);
+                });
+              </script>
+            </body>
+          </html>`,
+      });
+    });
+    await created.page.goto('https://gemini.google.com/app');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'gemini-shared-turn-session',
+      generation: 1,
+      conversationId: null,
+    });
+
+    const adapter = createAdapter('gemini', owner, registry);
+    const base = {
+      ...sessionSnapshot('gemini', created.binding.pageKey),
+      sessionId: 'gemini-shared-turn-session',
+    };
+    const submission = await adapter.openSubmission({
+      session: base,
+      generation: 1,
+      prompt: 'Shared turn prompt',
+      model: null,
+    });
+    await submission.prepare();
+    await submission.submitOnce();
+    const acknowledgement = await submission.captureAcknowledgement();
+    assert.notEqual(acknowledgement, null);
+    if (acknowledgement === null) throw new Error('missing acknowledgement');
+    submission.bindAcknowledgement(acknowledgement);
+    await created.page.waitForTimeout(350);
+
+    const observedSession: SessionSnapshot = {
+      ...base,
+      conversationId: acknowledgement.conversationId,
+      submittedUserMessageId: acknowledgement.submittedUserMessageId,
+      submittedUserTurnId: acknowledgement.submittedUserTurnId,
+      promptSubmitted: true,
+      sessionState: 'submitted',
+      providerState: 'generating',
+    };
+    const source = await adapter.openObservation({ session: observedSession, generation: 1 });
+    const first = await source.observe();
+    const second = await source.observe();
+    source.close();
+
+    assert.equal(first.submittedUserFound, true);
+    assert.equal(first.candidate?.answerText, 'Shared turn final');
+    assert.notEqual(first.candidate?.responseMessageId, acknowledgement.submittedUserMessageId);
+    assert.equal(second.candidate?.responseMessageId, first.candidate?.responseMessageId);
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Grok refuses the anonymous composer before mutating or submitting a prompt', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-grok-auth-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://grok.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: `<!doctype html>
+          <html>
+            <body>
+              <a href="/sign-in?return_to=%2F">Log in</a>
+              <a href="/sign-up?return_to=%2F">Sign up</a>
+              <div class="ProseMirror" contenteditable="true" role="textbox"></div>
+              <button type="submit">Send</button>
+              <script>
+                window.sendCount = 0;
+                document.querySelector('button').addEventListener('click', () => {
+                  window.sendCount += 1;
+                });
+              </script>
+            </body>
+          </html>`,
+      });
+    });
+    await created.page.goto('https://grok.com/');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'grok-auth-session',
+      generation: 1,
+      conversationId: null,
+    });
+
+    const adapter = createAdapter('grok', owner, registry);
+    const submission = await adapter.openSubmission({
+      session: {
+        ...sessionSnapshot('grok', created.binding.pageKey),
+        sessionId: 'grok-auth-session',
+      },
+      generation: 1,
+      prompt: 'Never submit anonymously',
+      model: null,
+    });
+    await assert.rejects(
+      submission.prepare(),
+      (error: unknown) =>
+        error instanceof Error &&
+        'errorCode' in error &&
+        error.errorCode === 'provider.authentication-required',
+    );
+    assert.equal(await created.page.locator('[role="textbox"]').textContent(), '');
+    assert.equal(
+      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
+      0,
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('generic provider verification fails closed before prompt or submit mutation', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-provider-verification-'));
@@ -299,7 +610,9 @@ function fixtureHtml(provider: ProviderName): string {
         ${composer}
         ${send}
         <input id="upload" type="file">
-        <div id="attachment-name"></div>
+        <input-area-v2>
+          <div id="attachment-name" data-test-id="attachment-chip" data-testid="attachment-chip"></div>
+        </input-area-v2>
         <section id="messages"></section>
         <script>
           const provider = ${JSON.stringify(provider)};
@@ -314,7 +627,28 @@ function fixtureHtml(provider: ProviderName): string {
             const user = document.createElement(provider === 'gemini' ? 'user-query' : 'article');
             if (provider === 'grok') user.setAttribute('data-testid', 'user-message');
             user.id = provider + '-user-1';
-            user.textContent = composer.textContent;
+            if (provider === 'gemini') {
+              const hidden = document.createElement('h5');
+              hidden.className = 'screen-reader-user-query-label';
+              hidden.textContent = 'What you said ' + composer.textContent.slice(0, 24) + '…';
+              const queryText = document.createElement('div');
+              queryText.className = 'query-text';
+              for (const line of composer.textContent.split(String.fromCharCode(10))) {
+                const paragraph = document.createElement('p');
+                paragraph.className = 'query-text-line';
+                paragraph.textContent = line;
+                queryText.appendChild(paragraph);
+              }
+              const outer = document.createElement('span');
+              outer.className = 'user-query-container';
+              const content = document.createElement('div');
+              content.className = 'user-query-container';
+              content.append(hidden, queryText);
+              outer.append(content);
+              user.append(outer);
+            } else {
+              user.textContent = composer.textContent;
+            }
             document.querySelector('#messages').appendChild(user);
           });
         </script>

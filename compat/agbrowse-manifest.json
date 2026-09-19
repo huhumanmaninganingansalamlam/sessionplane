@@ -259,6 +259,16 @@
       ]
     },
     {
+      "id": "web-ai.watch",
+      "category": "deferred",
+      "required": false,
+      "status": "deferred",
+      "legacyCommands": ["web-ai watch"],
+      "canonicalCommands": [],
+      "rpcMethods": [],
+      "contracts": []
+    },
+    {
       "id": "web-ai.manual-reattach",
       "category": "deferred",
       "required": false,

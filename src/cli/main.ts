@@ -54,6 +54,7 @@ const FLAG_OPTIONS = new Set([
   'dry-run',
   'manual',
   'resume',
+  'no-activate',
 ]);
 const MULTI_VALUE_OPTIONS = new Set(['file', 'context-from-files', 'context-exclude', 'skill']);
 const VALUE_OPTIONS = new Set([
@@ -400,6 +401,7 @@ async function runBrowserCommand(
     case 'new-tab':
       return await printRpc(io, parsed, config, 'browser.new', {
         ...optionalParam('url', rest[0] ?? parsed.options.url),
+        activate: parsed.options['no-activate'] !== 'true',
       });
     case 'tab-close':
       return await printRpc(io, parsed, config, 'browser.close', {
@@ -445,6 +447,7 @@ async function runBrowserCommand(
     case 'get-dom':
       return await printRpc(io, parsed, config, 'browser.dom', {
         ...page,
+        ...optionalParam('selector', parsed.options.selector),
         maxChars: integerOption(parsed, 'max-chars', 500_000, 1, 4_000_000),
       });
     case 'click':
@@ -564,8 +567,13 @@ async function runBrowserCommand(
       }, timeoutMs + 5_000);
     }
     case 'console':
+      return await printRpc(io, parsed, config, 'browser.console', {
+        ...page,
+        clear: parsed.options.clear === 'true',
+        ...optionalIntegerParam(parsed, 'limit', 'limit', 1, 10_000),
+      });
     case 'network':
-      return await printRpc(io, parsed, config, `browser.${command}`, {
+      return await printRpc(io, parsed, config, 'browser.network', {
         ...page,
         clear: parsed.options.clear === 'true',
       });
@@ -582,6 +590,7 @@ async function runBrowserCommand(
           : {}),
         includeBoxes: parsed.options.boxes === 'true',
         maxTextChars: integerOption(parsed, 'max-chars', 2_000, 1, 2_000_000),
+        maxNodes: integerOption(parsed, 'max-nodes', 250, 1, 5_000),
       });
     case 'observe-actions':
       return await printRpc(io, parsed, config, 'browser.observeActions', {
@@ -1449,11 +1458,11 @@ Browser compatibility:
   sessplane browser-status | browser-start | browser-stop
   sessplane browser-reset --force
   sessplane tabs | active-tab
-  sessplane new-tab [URL]
+  sessplane new-tab [URL] [--no-activate]
   sessplane select-tab PAGE_KEY
   sessplane tab-close [PAGE_KEY]
   sessplane navigate URL [--page PAGE_KEY]
-  sessplane snapshot [--page PAGE_KEY] [--max-nodes N]
+  sessplane snapshot [--page PAGE_KEY] [--all-nodes] [--max-nodes N]
   sessplane click REF [--snapshot-id ID]
   sessplane type REF --text TEXT
   sessplane press [REF] KEY
@@ -1462,10 +1471,10 @@ Browser compatibility:
   sessplane upload REF FILE...
   sessplane drag SOURCE_REF TARGET_REF
   sessplane screenshot --out PATH [--full-page]
-  sessplane text [--selector CSS] | get-dom
-  sessplane console | network | evaluate --script JS
+  sessplane text [--selector CSS] | get-dom [--selector CSS] [--max-chars N]
+  sessplane console [--limit N] [--clear] | network [--clear] | evaluate --script JS
   sessplane wait-for-selector CSS | wait-for-text TEXT | wait-for REF_OR_TEXT
-  sessplane observe-bundle [--screenshot --out PATH --boxes]
+  sessplane observe-bundle [--screenshot --out PATH --boxes] [--max-chars N] [--max-nodes N]
   sessplane observe-actions INSTRUCTION [--top-n N]
 
 Fetch, search, and research:

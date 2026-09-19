@@ -222,6 +222,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
         screenshotPath: stringProperty('Optional local screenshot path.'),
         includeBoxes: { type: 'boolean', default: true },
         maxTextChars: { type: 'integer', minimum: 1, maximum: 2_000_000, default: 2_000 },
+        maxNodes: { type: 'integer', minimum: 1, maximum: 5_000, default: 250 },
       },
       [],
     ),

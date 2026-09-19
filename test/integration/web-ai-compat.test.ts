@@ -69,11 +69,62 @@ test('agbrowse web-ai normal chat compatibility uses durable multi-provider sess
     assert.match(renderedValue.composerText, /\[INSTRUCTIONS\][\s\S]*Cite the sources inline/);
     assert.deepEqual(renderedValue.warnings, []);
 
+    const renderContextPath = path.join(root, 'render-context.txt');
+    writeFileSync(renderContextPath, 'RENDER_CONTEXT_SENTINEL_0919', 'utf8');
+    const renderedWithContext = await runJson([
+      'web-ai',
+      'render',
+      '--vendor',
+      'chatgpt',
+      '--prompt',
+      'Use the provided context.',
+      '--context-from-files',
+      'render-context.txt',
+      '--context-transport',
+      'inline',
+      '--root',
+      root,
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(renderedWithContext.code, 0, renderedWithContext.stderr);
+    assert.match(
+      JSON.parse(renderedWithContext.stdout).composerText,
+      /RENDER_CONTEXT_SENTINEL_0919/,
+    );
+
+    const grokContextWithoutOptIn = await runJson([
+      'web-ai',
+      'send',
+      '--vendor',
+      'grok',
+      '--prompt',
+      'Do not submit without explicit context-pack opt-in.',
+      '--context-from-files',
+      'render-context.txt',
+      '--context-transport',
+      'inline',
+      '--root',
+      root,
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(grokContextWithoutOptIn.code, 2);
+    assert.match(
+      JSON.parse(grokContextWithoutOptIn.stderr).message,
+      /grok context-pack.*--allow-grok-context-pack/i,
+    );
+    assert.equal(grok.submitCount, 0);
+
     const queried = await runJson([
       'web-ai',
       'query',
       '--vendor',
       'chatgpt',
+      '--new-tab',
+      '--parallel',
       '--prompt',
       'Query prompt',
       '--timeout',
@@ -196,8 +247,10 @@ test('agbrowse web-ai normal chat compatibility uses durable multi-provider sess
       sessionId: string;
       generation: number;
       provider: string;
+      status: string;
     };
     assert.equal(sentValue.provider, 'gemini');
+    assert.equal(sentValue.status, 'sent');
     gemini.emitObservation(sentValue.sessionId, {
       candidate: {
         responseMessageId: 'gemini-final-1',
@@ -223,6 +276,49 @@ test('agbrowse web-ai normal chat compatibility uses durable multi-provider sess
     assert.equal(polled.code, 0, polled.stderr);
     assert.equal(JSON.parse(polled.stdout).answerText, 'Gemini final');
     assert.equal(gemini.submissionRequests[0]?.attachments?.length, 1);
+
+    gemini.autoFinalText = 'Gemini inferred-session final';
+    const inferredProviderQuery = await runJson([
+      'web-ai',
+      'query',
+      '--session',
+      sentValue.sessionId,
+      '--prompt',
+      'Continue this exact Gemini session.',
+      '--timeout',
+      '2',
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(inferredProviderQuery.code, 0, inferredProviderQuery.stderr);
+    const inferredProviderValue = JSON.parse(inferredProviderQuery.stdout) as {
+      readonly provider: string;
+      readonly sessionId: string;
+      readonly answerText: string;
+    };
+    assert.equal(inferredProviderValue.provider, 'gemini');
+    assert.equal(inferredProviderValue.sessionId, sentValue.sessionId);
+    assert.equal(inferredProviderValue.answerText, 'Gemini inferred-session final');
+    gemini.autoFinalText = null;
+
+    const geminiSubmitsBeforeMismatch = gemini.submitCount;
+    const explicitProviderMismatch = await runJson([
+      'web-ai',
+      'send',
+      '--vendor',
+      'chatgpt',
+      '--session',
+      sentValue.sessionId,
+      '--prompt',
+      'This must not submit to the wrong provider.',
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(explicitProviderMismatch.code, 2);
+    assert.match(JSON.parse(explicitProviderMismatch.stderr).message, /belongs to gemini, not chatgpt/i);
+    assert.equal(gemini.submitCount, geminiSubmitsBeforeMismatch);
 
     const resumeSent = await runJson([
       'web-ai',
@@ -277,18 +373,29 @@ test('agbrowse web-ai normal chat compatibility uses durable multi-provider sess
       readonly status: string;
       readonly sessionId: string;
       readonly recoveryMode: string;
+      readonly bindingRequired: boolean;
+      readonly summary: string;
       readonly issues: readonly string[];
     };
     assert.equal(doctorValue.status, 'session-doctor');
     assert.equal(doctorValue.sessionId, resumeSessionId);
     assert.equal(doctorValue.recoveryMode, 'automatic-on-core-and-browser-start');
-    assert.ok(Array.isArray(doctorValue.issues));
+    assert.equal(doctorValue.bindingRequired, false);
+    assert.equal(doctorValue.summary, 'terminal session healthy; live binding not required');
+    assert.deepEqual(doctorValue.issues, []);
 
     const grokSend = await runJson([
       'web-ai',
       'send',
       '--vendor',
       'grok',
+      '--allow-grok-context-pack',
+      '--context-from-files',
+      'render-context.txt',
+      '--context-transport',
+      'inline',
+      '--root',
+      root,
       '--prompt',
       'Stop this Grok generation',
       '--state-dir',
@@ -310,6 +417,7 @@ test('agbrowse web-ai normal chat compatibility uses durable multi-provider sess
     ]);
     assert.equal(stopped.code, 0, stopped.stderr);
     assert.equal(JSON.parse(stopped.stdout).providerState, 'stopped');
+    assert.equal(JSON.parse(stopped.stdout).status, 'stopped');
     assert.equal(grok.stopCount, 1);
 
     const sessions = await runJson([
@@ -321,7 +429,92 @@ test('agbrowse web-ai normal chat compatibility uses durable multi-provider sess
       '--json',
     ]);
     assert.equal(sessions.code, 0, sessions.stderr);
-    assert.equal(JSON.parse(sessions.stdout).sessions.length, 4);
+    const sessionsValue = JSON.parse(sessions.stdout) as {
+      readonly status: string;
+      readonly sessions: readonly unknown[];
+    };
+    assert.equal(sessionsValue.status, 'list');
+    assert.equal(sessionsValue.sessions.length, 4);
+
+    const shown = await runJson([
+      'web-ai',
+      'sessions',
+      'show',
+      sentValue.sessionId,
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(shown.code, 0, shown.stderr);
+    const shownValue = JSON.parse(shown.stdout) as {
+      readonly status: string;
+      readonly session: { readonly sessionId: string; readonly vendor: string };
+    };
+    assert.equal(shownValue.status, 'show');
+    assert.equal(shownValue.session.sessionId, sentValue.sessionId);
+    assert.equal(shownValue.session.vendor, 'gemini');
+
+    const latestGemini = await runJson([
+      'web-ai',
+      'sessions',
+      'list',
+      '--vendor',
+      'gemini',
+      '--limit',
+      '1',
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(latestGemini.code, 0, latestGemini.stderr);
+    const latestGeminiRows = JSON.parse(latestGemini.stdout).sessions as readonly Array<{
+      readonly provider: string;
+      readonly status: string;
+    }>;
+    assert.equal(latestGeminiRows.length, 1);
+    assert.equal(latestGeminiRows[0]?.provider, 'gemini');
+    assert.equal(typeof latestGeminiRows[0]?.status, 'string');
+
+    const completedGemini = await runJson([
+      'web-ai',
+      'sessions',
+      'list',
+      '--vendor=gemini',
+      '--status',
+      'complete',
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(completedGemini.code, 0, completedGemini.stderr);
+    const completedGeminiRows = JSON.parse(completedGemini.stdout).sessions as readonly Array<{
+      readonly provider: string;
+      readonly status: string;
+    }>;
+    assert.ok(completedGeminiRows.length >= 1);
+    assert.ok(
+      completedGeminiRows.every(
+        (session) => session.provider === 'gemini' && session.status === 'complete',
+      ),
+    );
+
+    const watch = await runJson([
+      'web-ai',
+      'watch',
+      '--session',
+      sentValue.sessionId,
+      '--state-dir',
+      config.stateDir,
+      '--json',
+    ]);
+    assert.equal(watch.code, 2);
+    const watchError = JSON.parse(watch.stderr) as {
+      readonly errorCode: string;
+      readonly details: { readonly capabilityId: string; readonly status: string };
+    };
+    assert.equal(watchError.errorCode, 'compatibility.unsupported');
+    assert.equal(watchError.details.capabilityId, 'web-ai.watch');
+    assert.equal(watchError.details.status, 'deferred');
 
     const status = await runJson([
       'web-ai',
@@ -333,7 +526,7 @@ test('agbrowse web-ai normal chat compatibility uses durable multi-provider sess
       '--json',
     ]);
     assert.equal(status.code, 0, status.stderr);
-    assert.equal(JSON.parse(status.stdout).answerText, 'Gemini final');
+    assert.equal(JSON.parse(status.stdout).answerText, 'Gemini inferred-session final');
 
     const projectSource = path.join(root, 'project-source.md');
     writeFileSync(projectSource, '# Project source\n', 'utf8');
@@ -487,6 +680,22 @@ test('agbrowse compatibility fails closed on intentionally unsupported legacy su
     assert.equal(error.errorCode, 'compatibility.unsupported', item.argv.join(' '));
     assert.equal(error.details?.capabilityId, item.capabilityId, item.argv.join(' '));
     assert.equal(error.details?.status, 'deferred', item.argv.join(' '));
+  }
+});
+
+test('agbrowse web-ai fails closed on legacy options whose semantics are not implemented', async () => {
+  const cases = [
+    ['web-ai', 'send', '--prompt', 'do not submit', '--diagnostics', '--json'],
+    ['web-ai', 'status', '--full', '--json'],
+  ] as const;
+
+  for (const argv of cases) {
+    const result = await runJson(argv);
+    assert.equal(result.code, 2, `${argv.join(' ')}: ${result.stderr}`);
+    assert.match(
+      JSON.parse(result.stderr).message,
+      /not supported by the SessionPlane compatibility runtime/i,
+    );
   }
 });
 

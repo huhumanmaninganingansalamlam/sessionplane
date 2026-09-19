@@ -149,10 +149,14 @@ export class BrowserControlService {
     };
   }
 
-  async newPage(url?: string): Promise<Readonly<Record<string, unknown>>> {
+  async newPage(
+    url?: string,
+    options: { readonly activate?: boolean } = {},
+  ): Promise<Readonly<Record<string, unknown>>> {
     const owner = this.#requireBrowserOwner();
+    const activate = options.activate ?? true;
     const created = await owner.createPage();
-    this.#selectedPageKey = created.binding.pageKey;
+    if (activate) this.#selectedPageKey = created.binding.pageKey;
     this.#attachDiagnostics(created.binding.pageKey, created.page);
     if (url !== undefined) {
       await created.page.goto(validateNavigationUrl(url), {
@@ -163,7 +167,9 @@ export class BrowserControlService {
     const binding = this.#pageRegistry.refreshPage(created.binding.pageKey);
     return {
       requestOk: true,
-      selectedPageKey: binding.pageKey,
+      createdPageKey: binding.pageKey,
+      selectedPageKey: this.#selectedPageKey,
+      activated: activate,
       binding,
       title: await created.page.title().catch(() => ''),
     };
@@ -596,11 +602,17 @@ export class BrowserControlService {
 
   async dom(input: {
     readonly pageKey?: string | undefined;
+    readonly selector?: string | undefined;
     readonly maxChars?: number | undefined;
   } = {}): Promise<Readonly<Record<string, unknown>>> {
     const resolved = this.#resolvePage(input.pageKey);
     const maxChars = Math.max(1, Math.min(4_000_000, input.maxChars ?? 500_000));
-    const html = await resolved.page.content();
+    const html = input.selector === undefined
+      ? await resolved.page.content()
+      : await resolved.page
+          .locator(input.selector)
+          .first()
+          .evaluate((node) => (node as Element).outerHTML);
     return {
       requestOk: true,
       pageKey: resolved.binding.pageKey,
@@ -622,11 +634,15 @@ export class BrowserControlService {
   console(input: {
     readonly pageKey?: string | undefined;
     readonly clear?: boolean | undefined;
+    readonly limit?: number | undefined;
   } = {}): Readonly<Record<string, unknown>> {
     const resolved = this.#resolvePage(input.pageKey);
     this.#attachDiagnostics(resolved.binding.pageKey, resolved.page);
     const buffer = this.#diagnostics.get(resolved.binding.pageKey) as DiagnosticBuffer;
-    const entries = [...buffer.console];
+    const entries =
+      input.limit === undefined
+        ? [...buffer.console]
+        : buffer.console.slice(-Math.max(1, Math.min(10_000, input.limit)));
     if (input.clear === true) buffer.console.length = 0;
     return { requestOk: true, pageKey: resolved.binding.pageKey, entries };
   }
@@ -648,8 +664,13 @@ export class BrowserControlService {
     readonly screenshotPath?: string | undefined;
     readonly includeBoxes?: boolean | undefined;
     readonly maxTextChars?: number | undefined;
+    readonly maxNodes?: number | undefined;
   } = {}): Promise<Readonly<Record<string, unknown>>> {
-    const snapshot = await this.snapshot({ pageKey: input.pageKey, interactive: true });
+    const snapshot = await this.snapshot({
+      pageKey: input.pageKey,
+      interactive: true,
+      maxNodes: input.maxNodes,
+    });
     const text = await this.text({
       pageKey: snapshot.pageKey,
       maxChars: input.maxTextChars ?? 2_000,

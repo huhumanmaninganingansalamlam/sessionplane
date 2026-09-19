@@ -44,6 +44,10 @@ test('agbrowse compatibility manifest is source-bound and browser-complete', () 
     assert.equal(boundary?.required, false, id);
     assert.equal(boundary?.status, 'deferred', id);
   }
+  const watch = manifest.commands.find((command) => command.id === 'web-ai.watch');
+  assert.equal(watch?.required, false);
+  assert.equal(watch?.status, 'deferred');
+  assert.deepEqual(watch?.legacyCommands, ['web-ai watch']);
   const mcpServer = manifest.commands.find((command) => command.id === 'web-ai.mcp-server');
   assert.equal(mcpServer?.required, true);
   assert.equal(mcpServer?.status, 'implemented');
