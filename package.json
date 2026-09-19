@@ -11,7 +11,15 @@
     "sessplane": "bin/sessplane.mjs",
     "agbrowse": "bin/agbrowse.mjs"
   },
+  "files": [
+    "bin",
+    "dist",
+    "compat",
+    "skills",
+    "README.md"
+  ],
   "scripts": {
+    "prepack": "npm run build",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --test --test-concurrency=1 --experimental-strip-types test/**/*.test.ts",

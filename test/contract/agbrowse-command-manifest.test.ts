@@ -9,6 +9,22 @@ import {
   requiredIncomplete,
 } from '../../src/compat/agbrowse-manifest.ts';
 
+test('npm distribution ships the built runtime instead of TypeScript source', () => {
+  const packageJson = JSON.parse(readFileSync(path.resolve('package.json'), 'utf8')) as {
+    readonly files?: readonly string[];
+    readonly scripts?: Readonly<Record<string, string>>;
+  };
+  assert.deepEqual(packageJson.files, [
+    'bin',
+    'dist',
+    'compat',
+    'skills',
+    'README.md',
+  ]);
+  assert.equal(packageJson.scripts?.prepack, 'npm run build');
+  assert.equal(packageJson.files?.includes('src'), false);
+});
+
 test('agbrowse compatibility manifest is source-bound and browser-complete', () => {
   const manifest = loadAgbrowseManifest();
   assert.equal(manifest.source.commit, '55150e1fe048b81121b952fe8eb965c755c0fd19');
