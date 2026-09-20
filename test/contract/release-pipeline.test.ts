@@ -25,6 +25,10 @@ test('CI verifies the clean GitHub checkout on the supported Node 24 runtime', (
     assert.match(workflow, new RegExp(command.replaceAll(/[.*+?^$()|[\]{}\\]/g, '\\$&')));
   }
   assert.match(workflow, /::error title=npm test failed::/);
+
+  const dependabot = readFileSync(path.resolve('.github/dependabot.yml'), 'utf8');
+  assert.match(dependabot, /dependency-name: "@types\/node"/);
+  assert.match(dependabot, /version-update:semver-major/);
 });
 
 test('tagged releases verify, pack, smoke test, checksum, and publish artifacts', () => {
@@ -93,4 +97,7 @@ test('release preflight gates a clean main checkout with full host-browser verif
 
   const cleanGate = readFileSync(path.resolve('scripts/clean-checkout-gate.mjs'), 'utf8');
   assert.match(cleanGate, /npm['"], \['ci', '--ignore-scripts'\]/);
+
+  const readme = readFileSync(path.resolve('README.md'), 'utf8');
+  assert.match(readme, /npm uninstall -g agbrowse/);
 });

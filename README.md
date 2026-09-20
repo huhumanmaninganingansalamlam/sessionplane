@@ -19,10 +19,11 @@ Tagged releases attach a prebuilt npm package and SHA-256 checksum. Install the
 release package globally, then run the built-in doctor:
 
 ```bash
-VERSION=0.1.3
+VERSION=0.1.4
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz"
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz.sha256"
 sha256sum -c "sessionplane-$VERSION.tgz.sha256"
+npm uninstall -g agbrowse >/dev/null 2>&1 || true
 npm install -g "./sessionplane-$VERSION.tgz"
 sessplane doctor --json
 ```
@@ -36,7 +37,8 @@ gh attestation verify "sessionplane-$VERSION.tgz" \
 ```
 
 The package exposes only the `sessplane` executable. The retired `agbrowse`
-command is not installed.
+command is not installed. `sessplane doctor` also fails closed when an older
+standalone `agbrowse` executable is still present on `PATH`.
 
 ## Development
 
