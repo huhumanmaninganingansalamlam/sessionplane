@@ -174,7 +174,7 @@ test('canonical CLI and MCP share one explicit browser Page and snapshot refs', 
 
     const publicHelp = await runCliJson(['--help']);
     assert.equal(publicHelp.code, 0, publicHelp.stderr);
-    assert.match(publicHelp.stdout, /Browser compatibility:/);
+    assert.match(publicHelp.stdout, /Browser automation:/);
     assert.match(publicHelp.stdout, /snapshot/);
   } finally {
     await service.close();

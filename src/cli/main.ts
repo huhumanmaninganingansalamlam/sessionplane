@@ -1512,7 +1512,7 @@ Usage:
   sessplane browser-list [--browser NAME] [--browser-executable PATH]
   sessplane login [--manual|--resume] [--json] [--url HTTPS_URL]
 
-Browser compatibility:
+Browser automation:
   sessplane browser-status | browser-start | browser-stop
   sessplane browser-reset --force
   sessplane tabs | active-tab
