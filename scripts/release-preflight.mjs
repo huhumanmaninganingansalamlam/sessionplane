@@ -9,6 +9,12 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const packageJson = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
+const [nodeMajor, nodeMinor] = process.versions.node.split('.').map((value) => Number(value));
+if (nodeMajor !== 24 || nodeMinor < 15) {
+  throw new Error(
+    `release preflight requires Node >=24.15 <25, found ${process.versions.node}`,
+  );
+}
 const version = String(packageJson.version ?? '');
 if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
   throw new Error(`package version is not release-safe semver: ${version}`);
@@ -45,6 +51,7 @@ if (existingTag.trim() !== '') {
   throw new Error(`release tag already exists on origin: ${tag}`);
 }
 
+run('npm', ['audit', '--audit-level=high'], 'npm audit --audit-level=high');
 run('npm', ['run', 'verify:clean'], 'npm run verify:clean');
 
 const temporaryRoot = mkdtempSync(path.join(tmpdir(), 'sessionplane-release-preflight-'));

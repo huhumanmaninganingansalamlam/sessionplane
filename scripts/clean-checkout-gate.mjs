@@ -25,7 +25,7 @@ try {
   });
 
   for (const [command, args] of [
-    ['npm', ['ci']],
+    ['npm', ['ci', '--ignore-scripts']],
     ['npm', ['run', 'typecheck']],
     ['npm', ['test']],
     ['npm', ['run', 'build']],

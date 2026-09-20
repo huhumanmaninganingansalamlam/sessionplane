@@ -19,12 +19,20 @@ Tagged releases attach a prebuilt npm package and SHA-256 checksum. Install the
 release package globally, then run the built-in doctor:
 
 ```bash
-VERSION=0.1.1
+VERSION=0.1.2
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz"
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz.sha256"
 sha256sum -c "sessionplane-$VERSION.tgz.sha256"
 npm install -g "./sessionplane-$VERSION.tgz"
 sessplane doctor --json
+```
+
+For releases that include GitHub artifact attestations, GitHub CLI can also
+verify that the tarball was produced by this repository's Release workflow:
+
+```bash
+gh attestation verify "sessionplane-$VERSION.tgz" \
+  --repo huhumanmaninganingansalamlam/sessionplane
 ```
 
 The package exposes only the `sessplane` executable. The retired `agbrowse`
@@ -60,13 +68,19 @@ git tag -a "v$VERSION" -m "SessionPlane v$VERSION"
 git push origin "v$VERSION"
 ```
 
-`release:preflight` requires a clean `main` checkout at exactly
-`origin/main`, runs the full host-browser clean-checkout gate, and verifies
-that two independent `npm pack` outputs are byte-for-byte identical. The
-tagged Release workflow separately requires the tag commit to be on
-`origin/main`, audits dependencies, reruns the hosted CI suite, rebuilds and
-smoke-tests the package, verifies reproducible packing, and publishes the
-tarball plus its SHA-256 checksum as GitHub Release assets.
+`release:preflight` requires a supported Node 24 runtime, a clean `main`
+checkout at exactly `origin/main`, a high-severity dependency audit, the full
+host-browser clean-checkout gate, and two byte-for-byte identical `npm pack`
+outputs. The tagged Release workflow separately requires the tag commit to be
+the current `origin/main`, performs verification with read-only repository
+permissions, transfers only the verified tarball/checksum into a privileged
+publish job, rechecks the SHA-256 digest, creates a signed GitHub artifact
+attestation, and publishes the tarball plus checksum as GitHub Release assets.
+
+The release artifact is the CD boundary. SessionPlane intentionally does not
+auto-deploy onto user machines because each installation owns local browser
+state and a dedicated persistent profile; host upgrades remain an explicit,
+checksum-verifiable install action.
 
 Start the core in one terminal:
 
