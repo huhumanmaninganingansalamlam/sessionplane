@@ -64,6 +64,7 @@ test('tagged releases verify, pack, smoke test, checksum, and publish artifacts'
   assert.match(workflow, /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/);
   assert.match(workflow, /actions\/attest@1e69f48acb82d1966a394da916b4c1698aa569d6/);
   assert.match(workflow, /sha256sum -c/);
+  assert.match(workflow, /GH_REPO: \$\{\{ github\.repository \}\}/);
   assert.match(workflow, /gh release create "\$GITHUB_REF_NAME"/);
   assert.doesNotMatch(workflow, /^\s*\+\s+/m);
 });
