@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const packageJson = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
+const readme = readFileSync(path.join(root, 'README.md'), 'utf8');
 const [nodeMajor, nodeMinor] = process.versions.node.split('.').map((value) => Number(value));
 if (nodeMajor !== 24 || nodeMinor < 15) {
   throw new Error(
@@ -18,6 +19,14 @@ if (nodeMajor !== 24 || nodeMinor < 15) {
 const version = String(packageJson.version ?? '');
 if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
   throw new Error(`package version is not release-safe semver: ${version}`);
+}
+const documentedVersion = readme.match(
+  /^VERSION=(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/m,
+)?.[1];
+if (documentedVersion !== version) {
+  throw new Error(
+    `documented release install version ${documentedVersion ?? '(missing)'} does not match package version ${version}`,
+  );
 }
 const tag = `v${version}`;
 

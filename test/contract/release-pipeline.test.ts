@@ -82,6 +82,8 @@ test('release preflight gates a clean main checkout with full host-browser verif
   const source = readFileSync(path.resolve('scripts/release-preflight.mjs'), 'utf8');
   for (const expected of [
     'process.versions.node',
+    'README.md',
+    'documented release install version',
     'git status --porcelain',
     'git branch --show-current',
     'git fetch origin main --quiet',
