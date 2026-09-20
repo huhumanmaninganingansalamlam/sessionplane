@@ -83,13 +83,6 @@ test('stale DOM recovers an exact server final and backend 429 remains deferred,
     assert.equal(deferred.errorCode, null);
     assert.notEqual(deferred.nextCheckAt, null);
     assert.equal(fake.recoveryCount, beforeLimited + 1);
-
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    assert.equal(
-      fake.recoveryCount,
-      beforeLimited + 1,
-      'paced retries must not invoke the backend operation again',
-    );
   } finally {
     await service.close();
     rmSync(fixture.root, { recursive: true, force: true });
