@@ -8,7 +8,6 @@ product scope.
 
 | Project | Revision | Relevant pattern |
 | --- | --- | --- |
-| agbrowse | `55150e1` | dedicated profile, minimal native browser launch, positive CDP port, later Playwright attachment |
 | Proxima | `1113686` | persistent provider partitions and serialized mutations, plus broad fingerprint and OAuth header rewriting |
 | browser-use | `d8110c5` | profile-copy validation, `Local State` preservation, live-profile lock refusal, CDP reconnect |
 | Stagehand | `e7e5b67` | random loopback port, launched-vs-connected ownership, supervised shutdown |
@@ -24,13 +23,6 @@ The checked source snapshots are references only and are not runtime
 dependencies.
 
 ## Authentication findings
-
-### agbrowse
-
-agbrowse does not solve Google or provider authentication. It launches the
-host browser itself with a dedicated profile and a small argument set, then
-attaches Playwright with `connectOverCDP()`. `--enable-automation` and
-`--no-sandbox` are opt-in environment overrides rather than defaults.
 
 ### Chrome DevTools MCP and BrowserSkill
 

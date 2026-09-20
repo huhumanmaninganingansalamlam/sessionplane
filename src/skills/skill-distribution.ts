@@ -188,7 +188,7 @@ function renderCoreIndex(skills: readonly SkillDescriptor[]): string {
   const lines = [
     '# SessionPlane bundled skills',
     '',
-    'Install or inspect these skills through `sessplane skills` or the `agbrowse skills` compatibility alias.',
+    'Install or inspect these skills through `sessplane skills`.',
     '',
   ];
   for (const skill of skills) {

@@ -1,5 +1,4 @@
-import { accessSync, constants, existsSync, statSync } from 'node:fs';
-import path from 'node:path';
+import { existsSync, statSync } from 'node:fs';
 
 import { findHostBrowser, listHostBrowsers } from '../../browser/browser-health.ts';
 import {
@@ -28,20 +27,6 @@ export async function runDoctor(config: SessionPlaneConfig): Promise<DoctorRepor
     ok: major === 24 && minor >= 15,
     version: process.version,
     expected: '>=24.15 <25',
-  });
-
-  const retiredAgbrowse = findRetiredAgbrowseExecutable();
-  checks.push({
-    name: 'retired-agbrowse',
-    required: true,
-    ok: retiredAgbrowse === null,
-    executable: retiredAgbrowse,
-    ...(retiredAgbrowse === null
-      ? {}
-      : {
-          reason:
-            'The retired standalone agbrowse executable is still on PATH; run `npm uninstall -g agbrowse`, refresh the shell command cache, and remove any stale agbrowse shim before using SessionPlane.',
-        }),
   });
 
   const availableBrowsers = listHostBrowsers();
@@ -170,21 +155,5 @@ export async function runDoctor(config: SessionPlaneConfig): Promise<DoctorRepor
     checks,
     pageBindings,
   };
-}
-
-export function findRetiredAgbrowseExecutable(
-  pathValue: string = process.env.PATH ?? '',
-): string | null {
-  for (const entry of pathValue.split(path.delimiter)) {
-    if (entry.trim() === '') continue;
-    const candidate = path.join(entry, 'agbrowse');
-    try {
-      accessSync(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      // Keep searching the remaining PATH entries.
-    }
-  }
-  return null;
 }
 

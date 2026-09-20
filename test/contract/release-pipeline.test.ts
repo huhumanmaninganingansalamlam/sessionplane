@@ -62,7 +62,6 @@ test('tagged releases verify, pack, smoke test, checksum, and publish artifacts'
   assert.match(workflow, /--pack-destination "\$RUNNER_TEMP\/repro-pack"/);
   assert.match(workflow, /cmp "\$package" "\$RUNNER_TEMP\/repro-pack\/\$repro_package"/);
   assert.match(workflow, /sha256sum "\$package"/);
-  assert.match(workflow, /test ! -e "\$prefix\/bin\/agbrowse"/);
   assert.match(workflow, /sessplane" doctor --json/);
   assert.match(workflow, /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/);
   assert.match(workflow, /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/);
@@ -100,6 +99,4 @@ test('release preflight gates a clean main checkout with full host-browser verif
   const cleanGate = readFileSync(path.resolve('scripts/clean-checkout-gate.mjs'), 'utf8');
   assert.match(cleanGate, /npm['"], \['ci', '--ignore-scripts'\]/);
 
-  const readme = readFileSync(path.resolve('README.md'), 'utf8');
-  assert.match(readme, /npm uninstall -g agbrowse/);
 });

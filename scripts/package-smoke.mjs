@@ -25,12 +25,6 @@ try {
   const sessplane = path.join(prefix, 'bin', 'sessplane');
   const installedRoot = path.join(prefix, 'lib', 'node_modules', 'sessionplane');
   if (!existsSync(sessplane)) throw new Error('installed sessplane executable is missing');
-  if (existsSync(path.join(prefix, 'bin', 'agbrowse'))) {
-    throw new Error('retired agbrowse executable was installed');
-  }
-  if (existsSync(path.join(installedRoot, 'bin', 'agbrowse.mjs'))) {
-    throw new Error('retired agbrowse entrypoint was packaged');
-  }
   if (existsSync(path.join(installedRoot, 'src'))) {
     throw new Error('TypeScript source must not be shipped in the runtime package');
   }

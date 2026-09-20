@@ -69,8 +69,6 @@ jobs:
           prefix="$RUNNER_TEMP/sessionplane-release-install"
           npm install -g --prefix "$prefix" "./$PACKAGE"
           test -x "$prefix/bin/sessplane"
-          test ! -e "$prefix/bin/agbrowse"
-          test ! -e "$prefix/lib/node_modules/sessionplane/bin/agbrowse.mjs"
           "$prefix/bin/sessplane" --help >/dev/null
           SESSIONPLANE_STATE_DIR="$RUNNER_TEMP/sessionplane-release-state" \
             "$prefix/bin/sessplane" doctor --json >/dev/null

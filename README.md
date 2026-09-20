@@ -6,6 +6,8 @@ coordinates durable, role-addressed AI chat sessions for multiple clients.
 
 The core process owns browser state, SQLite state, session actors, observation,
 and recovery. The `sessplane` CLI and MCP adapter are thin Unix-socket clients.
+SessionPlane is maintained as an independent project with one canonical CLI
+and one runtime contract.
 
 ## Requirements
 
@@ -23,7 +25,6 @@ VERSION=0.1.6
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz"
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz.sha256"
 sha256sum -c "sessionplane-$VERSION.tgz.sha256"
-npm uninstall -g agbrowse >/dev/null 2>&1 || true
 npm install -g "./sessionplane-$VERSION.tgz"
 sessplane doctor --json
 ```
@@ -36,9 +37,7 @@ gh attestation verify "sessionplane-$VERSION.tgz" \
   --repo huhumanmaninganingansalamlam/sessionplane
 ```
 
-The package exposes only the `sessplane` executable. The retired `agbrowse`
-command is not installed. `sessplane doctor` also fails closed when an older
-standalone `agbrowse` executable is still present on `PATH`.
+The package exposes only the `sessplane` executable.
 
 ## Development
 
@@ -98,10 +97,9 @@ sessplane health --json
 
 ## Generic browser automation
 
-The same long-running core also exposes the browser primitives needed to
-replace the standalone agbrowse browser workflow. Pages are addressed by the
-opaque `pageKey` returned by `tabs`; browser focus, title, recency, and page
-array order are never identity.
+The same long-running core exposes generic browser primitives. Pages are
+addressed by the opaque `pageKey` returned by `tabs`; browser focus, title,
+recency, and page array order are never identity.
 
 The core launches a browser already installed by the user with a minimal,
 positive loopback CDP endpoint and then controls its persistent default context
@@ -256,9 +254,7 @@ sessplane code extract --conversation "https://chatgpt.com/c/<conversation-id>" 
 ```
 
 The same Project Sources, code generation, and code extraction methods are
-available through the thin MCP adapter. `compat/agbrowse-manifest.json`
-binds every required agbrowse replacement row to executable contracts; the
-compatibility contract fails when any required row is not implemented.
+available through the thin MCP adapter.
 
 `browser-list --json` shows the supported host browsers and the exact selected
 executable. `doctor --json` verifies that selection and, when the core is
@@ -272,15 +268,6 @@ instances are needed. The artifact store defaults to `<state-dir>/artifacts/`;
 override it with `SESSIONPLANE_ARTIFACT_DIR`. Use
 `SESSIONPLANE_MAX_ARTIFACT_FILE_BYTES` to set the fail-closed per-artifact
 download limit.
-
-## Legacy migration contract
-
-`compat/agbrowse-manifest.json` and the compatibility tests remain in the
-source tree only as a migration ledger for behavior inherited from the retired
-standalone agbrowse runtime. SessionPlane does **not** install or expose an
-`agbrowse` executable. `npm run test:compat` verifies that required migration
-semantics remain covered by the canonical SessionPlane core without creating a
-second public CLI surface.
 
 ## Context packages and bundled skills
 
@@ -323,10 +310,10 @@ Installation never replaces an existing skill unless `--force` is explicit.
 
 ## Adaptive fetch, extraction, search, and research
 
-SessionPlane owns the replacement fetch pipeline instead of shelling out to the
-old agbrowse runtime. Each HTTP redirect is revalidated, DNS answers are pinned
-to the requested connection, private/link-local/documentation/multicast ranges
-are blocked by default, and response and extraction sizes are bounded.
+SessionPlane owns its fetch pipeline. Each HTTP redirect is revalidated, DNS
+answers are pinned to the requested connection, private/link-local/
+documentation/multicast ranges are blocked by default, and response and
+extraction sizes are bounded.
 
 ```bash
 sessplane fetch https://example.com --json

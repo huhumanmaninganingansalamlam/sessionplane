@@ -7,7 +7,7 @@ import { Readable, Writable } from 'node:stream';
 import test from 'node:test';
 
 import { callRpc } from '../../src/cli/client.ts';
-import { runAgbrowseCli } from '../../src/compat/agbrowse-cli.ts';
+import { runCli } from '../../src/cli/main.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore, type CoreService } from '../../src/main.ts';
 
@@ -111,40 +111,17 @@ test('fetch, extract, search, and research share bounded original-page evidence'
     assert.equal(browsePlan.schemaVersion, 'sessionplane-research-browse-plan-v1');
     assert.ok((browsePlan.actions as unknown[]).length >= 1);
 
-    const compatibleFetch = await captureAgbrowse([
+    const cliFetch = await captureCli([
       'fetch',
       `${fixture.baseUrl}/article`,
       '--socket',
       config.socketPath,
       '--json',
     ]);
-    assert.equal(compatibleFetch.code, 0);
-    assert.equal(JSON.parse(compatibleFetch.stdout).schemaVersion, 'sessionplane-adaptive-fetch-v1');
+    assert.equal(cliFetch.code, 0, cliFetch.stderr);
+    assert.equal(JSON.parse(cliFetch.stdout).schemaVersion, 'sessionplane-adaptive-fetch-v1');
 
-    for (const args of [
-      ['--selector', 'article'],
-      ['--browser', 'never'],
-      ['--trace'],
-    ] as const) {
-      const deferredFetch = await captureAgbrowse([
-        'fetch',
-        `${fixture.baseUrl}/article`,
-        ...args,
-        '--socket',
-        config.socketPath,
-        '--json',
-      ]);
-      assert.equal(deferredFetch.code, 2, deferredFetch.stderr);
-      const error = JSON.parse(deferredFetch.stderr) as {
-        readonly errorCode: string;
-        readonly details: { readonly capabilityId: string; readonly status: string };
-      };
-      assert.equal(error.errorCode, 'compatibility.unsupported');
-      assert.equal(error.details.capabilityId, 'fetch.experimental-escalation');
-      assert.equal(error.details.status, 'deferred');
-    }
-
-    const compatiblePlan = await captureAgbrowse([
+    const cliPlan = await captureCli([
       'research',
       'plan',
       '--query',
@@ -153,8 +130,8 @@ test('fetch, extract, search, and research share bounded original-page evidence'
       config.socketPath,
       '--json',
     ]);
-    assert.equal(compatiblePlan.code, 0);
-    assert.equal(JSON.parse(compatiblePlan.stdout).schemaVersion, 'sessionplane-research-plan-v1');
+    assert.equal(cliPlan.code, 0, cliPlan.stderr);
+    assert.equal(JSON.parse(cliPlan.stdout).schemaVersion, 'sessionplane-research-plan-v1');
   } finally {
     await service.close();
     await fixture.close();
@@ -242,14 +219,14 @@ function silentLogger() {
   return { debug() {}, info() {}, warn() {}, error() {} };
 }
 
-async function captureAgbrowse(argv: readonly string[]): Promise<{
+async function captureCli(argv: readonly string[]): Promise<{
   readonly code: number;
   readonly stdout: string;
   readonly stderr: string;
 }> {
   const stdout = new CaptureWritable();
   const stderr = new CaptureWritable();
-  const code = await runAgbrowseCli(argv, {
+  const code = await runCli(argv, {
     stdin: Readable.from([]),
     stdout,
     stderr,

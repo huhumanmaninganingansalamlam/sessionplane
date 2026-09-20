@@ -7,13 +7,12 @@ import test from 'node:test';
 
 import { callRpc } from '../../src/cli/client.ts';
 import { runCli } from '../../src/cli/main.ts';
-import { runAgbrowseCli } from '../../src/compat/agbrowse-cli.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
-test('canonical RPC and legacy CLI share deterministic context package semantics', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-context-compat-'));
+test('RPC and CLI share deterministic context package semantics', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-context-cli-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const fake = new FakeProviderAdapter('chatgpt');
   writeFileSync(path.join(root, 'alpha.ts'), 'export const alpha = 1;\n');
@@ -67,11 +66,9 @@ test('canonical RPC and legacy CLI share deterministic context package semantics
     assert.equal(canonicalValue.packageSha256, rpcDry.packageSha256);
     assert.deepEqual(canonicalValue.files.map((file) => file.path), ['alpha.ts']);
 
-    const legacy = await runAgbrowse([
-      'web-ai',
-      'context-render',
-      '--vendor',
-      'chatgpt',
+    const rendered = await runSessplane([
+      'context',
+      'render',
       '--root',
       root,
       '--context-from-files',
@@ -84,17 +81,17 @@ test('canonical RPC and legacy CLI share deterministic context package semantics
       'Review.',
       '--json',
     ]);
-    assert.equal(legacy.code, 0, legacy.stderr);
-    const legacyValue = JSON.parse(legacy.stdout) as {
+    assert.equal(rendered.code, 0, rendered.stderr);
+    const renderedValue = JSON.parse(rendered.stdout) as {
       readonly composerText: string;
       readonly transform: string;
     };
-    assert.equal(legacyValue.transform, 'repomix');
-    assert.match(legacyValue.composerText, /^Review\.\n\n<repository/);
+    assert.equal(renderedValue.transform, 'repomix');
+    assert.match(renderedValue.composerText, /^Review\.\n\n<repository/);
 
-    const upload = await runAgbrowse([
-      'web-ai',
-      'context-render',
+    const upload = await runSessplane([
+      'context',
+      'render',
       '--root',
       root,
       '--context-from-files',
@@ -167,10 +164,10 @@ test('canonical RPC and legacy CLI share deterministic context package semantics
   }
 });
 
-test('agbrowse skills and install-skills are served by the SessionPlane package', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-skill-compat-'));
+test('bundled skills are served and installed by the SessionPlane CLI', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-skills-'));
   try {
-    const listed = await runAgbrowse(['skills', 'list', '--json']);
+    const listed = await runSessplane(['skills', 'list', '--json']);
     assert.equal(listed.code, 0, listed.stderr);
     const names = (JSON.parse(listed.stdout) as {
       readonly skills: readonly Array<{ readonly name: string }>;
@@ -179,13 +176,14 @@ test('agbrowse skills and install-skills are served by the SessionPlane package'
       assert.equal(names.includes(name), true, name);
     }
 
-    const core = await runAgbrowse(['skills', 'get', 'core', '--full', '--json']);
+    const core = await runSessplane(['skills', 'get', 'core', '--full', '--json']);
     assert.equal(core.code, 0, core.stderr);
     assert.match((JSON.parse(core.stdout) as { readonly content: string }).content, /skill:browser/);
 
     const target = path.join(root, 'skills');
-    const installed = await runAgbrowse([
-      'install-skills',
+    const installed = await runSessplane([
+      'skills',
+      'install',
       '--target',
       target,
       '--skill',
@@ -198,8 +196,9 @@ test('agbrowse skills and install-skills are served by the SessionPlane package'
     assert.equal(existsSync(path.join(target, 'browser', 'SKILL.md')), true);
     assert.equal(existsSync(path.join(target, 'web-ai', 'SKILL.md')), true);
 
-    const protectedRun = await runAgbrowse([
-      'install-skills',
+    const protectedRun = await runSessplane([
+      'skills',
+      'install',
       '--target',
       target,
       '--skill',
@@ -230,13 +229,6 @@ async function runSessplane(argv: readonly string[]) {
   const stdout = new CaptureWritable();
   const stderr = new CaptureWritable();
   const code = await runCli(argv, { stdin: Readable.from([]), stdout, stderr });
-  return { code, stdout: stdout.value.trim(), stderr: stderr.value.trim() };
-}
-
-async function runAgbrowse(argv: readonly string[]) {
-  const stdout = new CaptureWritable();
-  const stderr = new CaptureWritable();
-  const code = await runAgbrowseCli(argv, { stdin: Readable.from([]), stdout, stderr });
   return { code, stdout: stdout.value.trim(), stderr: stderr.value.trim() };
 }
 
