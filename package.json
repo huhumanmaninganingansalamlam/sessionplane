@@ -1,6 +1,6 @@
 {
   "name": "sessionplane",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Durable local runtime for role-addressed browser-backed AI chat sessions",
   "private": true,
   "type": "module",
