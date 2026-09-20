@@ -3,10 +3,10 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
-test('CI verifies the clean GitHub checkout on the supported Node 24 runtime', () => {
+test('CI verifies main and dev pushes and pull requests on the supported Node 24 runtime', () => {
   const workflow = readFileSync(path.resolve('.github/workflows/ci.yml'), 'utf8');
   assert.match(workflow, /permissions:\s*\n\s*contents: read/);
-  assert.match(workflow, /branches: \[main\]/);
+  assert.match(workflow, /push:\s*\n\s*branches: \[main, dev\]/);
   assert.match(workflow, /pull_request:/);
   assert.match(workflow, /actions\/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1/);
   assert.match(workflow, /persist-credentials: false/);

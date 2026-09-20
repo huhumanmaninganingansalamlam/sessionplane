@@ -20,6 +20,13 @@ precedence over implementation convenience.
 
 ## Development
 
+- Start routine development on `dev` (or a task branch based on `dev`), not on
+  `main`. Check the current branch before editing and never discard existing work
+  to switch branches.
+- Push development changes to `origin/dev`; CI must pass there. Promote release
+  candidates through a pull request from `dev` to `main`.
+- `main` is the release line. Run release preflight and create version tags only
+  from a clean `main` matching `origin/main`. Never move a published release tag.
 - Runtime: Node.js 24, TypeScript, ESM.
 - Browser integration uses `playwright-core` only as the controller for an explicitly selected user-installed Chrome, Chromium, Edge, Brave, or custom Chromium-family executable. SessionPlane never downloads or installs a browser and never attaches to the user's personal/default profile.
 - SessionPlane launches the selected host browser itself with a positive

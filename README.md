@@ -41,7 +41,14 @@ The package exposes only the `sessplane` executable.
 
 ## Development
 
+Use `dev` for ongoing development. Keep `main` as the release line and published
+version tags immutable. Begin from a clean checkout; preserve uncommitted work
+before switching branches.
+
 ```bash
+git fetch origin
+git switch dev
+git pull --ff-only origin dev
 npm ci
 npm run typecheck
 npm test
@@ -60,13 +67,25 @@ with a user-installed Chromium-family browser. GitHub-hosted CI runs
 runner sandbox is not the SessionPlane runtime environment. Tagged releases
 repeat the deterministic CI suite and smoke-test the exact packaged tarball.
 
+CI runs on pushes to `dev` and `main`, and on pull requests. Push development to
+`origin/dev`; promote a verified release candidate through a `dev` → `main` pull
+request. This workflow configuration does not itself enable GitHub branch
+protection; repository settings must enforce required CI checks and prohibit
+force pushes and branch deletion on `main`.
+
 Maintainer release flow:
 
 ```bash
+# After the dev → main pull request has merged:
+git switch main
+git pull --ff-only origin main
 npm run release:preflight
 VERSION="$(node -p "require('./package.json').version")"
 git tag -a "v$VERSION" -m "SessionPlane v$VERSION"
 git push origin "v$VERSION"
+# Return to development after the release workflow completes:
+git switch dev
+git pull --ff-only origin dev
 ```
 
 `release:preflight` requires a supported Node 24 runtime, a clean `main`
