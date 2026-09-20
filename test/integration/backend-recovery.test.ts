@@ -105,12 +105,16 @@ test('strong exact generation activity suppresses backend recovery until activit
     });
     await send(config.socketPath, session.sessionId, 'strong-activity');
 
-    const interval = setInterval(() => {
+    const emitStrongActivity = () => {
       fake.emitObservation(session.sessionId, {
         activity: 'strong',
         candidate: null,
         networkActivity: false,
       });
+    };
+    emitStrongActivity();
+    const interval = setInterval(() => {
+      emitStrongActivity();
     }, 5);
     try {
       await new Promise((resolve) => setTimeout(resolve, 100));
