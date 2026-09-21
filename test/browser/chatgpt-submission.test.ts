@@ -565,6 +565,65 @@ test('ChatGPT submission falls back to the next enabled Pro model', async () => 
   }
 });
 
+test('ChatGPT submission extends acknowledgement while exact user identity hydrates', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-late-ack-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: chatGptFixture(false, true, false, '', false, false, false, false, null, 180),
+      });
+    });
+    await created.page.goto('https://chatgpt.com/');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'session-late-ack',
+      generation: 1,
+      conversationId: null,
+    });
+    const submission = new ChatGptSubmission({
+      page: created.page,
+      pageKey: created.binding.pageKey,
+      pageRegistry: registry,
+      request: {
+        session: sessionSnapshot({
+          sessionId: 'session-late-ack',
+          pageKey: created.binding.pageKey,
+        }),
+        generation: 1,
+        prompt: 'Exact prompt whose user identity hydrates late',
+        model: null,
+      },
+      acknowledgementTimeoutMs: 100,
+    });
+
+    await submission.prepare();
+    await submission.submitOnce();
+    assert.deepEqual(await submission.captureAcknowledgement(), {
+      conversationId: 'conversation-123456',
+      submittedUserMessageId: 'user-message-1',
+      submittedUserTurnId: 'user-turn-1',
+    });
+    assert.equal(
+      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
+      1,
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ChatGPT submission verifies that model selection actually took effect', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-model-ack-'));
   const registry = new PageRegistry();
@@ -668,6 +727,7 @@ function chatGptFixture(
     readonly current: string;
     readonly options: readonly { readonly label: string; readonly disabled?: boolean }[];
   } | null = null,
+  acknowledgementIdentityDelayMs = 0,
 ): string {
   const modelState = modelFixture ?? {
     current: 'Model A',
@@ -766,8 +826,15 @@ function chatGptFixture(
             history.pushState({}, '', '/c/conversation-123456');
             const message = document.createElement('article');
             message.setAttribute('data-message-author-role', 'user');
-            message.setAttribute('data-message-id', 'user-message-1');
-            message.setAttribute('data-turn-id', 'user-turn-1');
+            const hydrateIdentity = () => {
+              message.setAttribute('data-message-id', 'user-message-1');
+              message.setAttribute('data-turn-id', 'user-turn-1');
+            };
+            if (${acknowledgementIdentityDelayMs} > 0) {
+              setTimeout(hydrateIdentity, ${acknowledgementIdentityDelayMs});
+            } else {
+              hydrateIdentity();
+            }
             if (${proseMirrorBlocks}) {
               const content = document.createElement('div');
               content.setAttribute('data-testid', 'collapsible-user-message-content');

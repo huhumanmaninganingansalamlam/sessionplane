@@ -41,6 +41,7 @@ export class ChatGptSubmission implements ProviderSubmission {
   readonly #acknowledgementTimeoutMs: number;
   readonly #initialUrl: string | null;
   #sendButton: Locator | null = null;
+  #baselineConversationId: string | null = null;
   #baselineUserIds = new Set<string>();
 
   constructor(options: ChatGptSubmissionOptions) {
@@ -107,6 +108,7 @@ export class ChatGptSubmission implements ProviderSubmission {
       );
     }
 
+    this.#baselineConversationId = parseChatGptConversationId(this.#page.url());
     this.#baselineUserIds = await captureUserIdentitySet(this.#page);
     const attachments = this.#request.attachments ?? [];
     if (attachments.length > 0) {
@@ -147,21 +149,35 @@ export class ChatGptSubmission implements ProviderSubmission {
   }
 
   async captureAcknowledgement(): Promise<ProviderSubmissionAcknowledgement | null> {
-    const deadline = Date.now() + this.#acknowledgementTimeoutMs;
+    let deadline = Date.now() + this.#acknowledgementTimeoutMs;
+    let hydrationGraceApplied = false;
+    const hydrationGraceMs = acknowledgementHydrationGraceMs(this.#acknowledgementTimeoutMs);
     while (Date.now() < deadline) {
       const conversationId = parseChatGptConversationId(this.#page.url());
+      if (
+        hydrationGraceApplied === false &&
+        conversationId !== null &&
+        conversationId !== this.#baselineConversationId
+      ) {
+        deadline = Math.max(deadline, Date.now() + hydrationGraceMs);
+        hydrationGraceApplied = true;
+      }
       const messages = this.#page.locator(CHATGPT_SELECTORS.userMessages);
       const count = await messages.count().catch(() => 0);
       for (let index = Math.max(0, count - 8); index < count; index += 1) {
         const message = messages.nth(index);
-        const identity = await readUserIdentity(message);
-        if (identity === null || this.#baselineUserIds.has(identity.identityKey)) {
+        if ((await messageHasExactPrompt(message, this.#request.prompt)) === false) {
           continue;
         }
-        if (
-          !(await messageHasExactPrompt(message, this.#request.prompt)) ||
-          conversationId === null
-        ) {
+        const identity = await readUserIdentity(message);
+        if (identity !== null && this.#baselineUserIds.has(identity.identityKey)) {
+          continue;
+        }
+        if (identity === null || conversationId === null) {
+          if (hydrationGraceApplied === false) {
+            deadline = Math.max(deadline, Date.now() + hydrationGraceMs);
+            hydrationGraceApplied = true;
+          }
           continue;
         }
         return {
@@ -809,6 +825,10 @@ async function readUserIdentity(locator: Locator): Promise<{
 
 function normalizeLineEndings(value: string): string {
   return value.replaceAll('\r\n', '\n');
+}
+
+function acknowledgementHydrationGraceMs(acknowledgementTimeoutMs: number): number {
+  return Math.min(30_000, Math.max(500, acknowledgementTimeoutMs));
 }
 
 function normalizeLabel(value: string): string {
