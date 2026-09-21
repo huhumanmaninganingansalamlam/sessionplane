@@ -1,4 +1,14 @@
 export const CHATGPT_SELECTORS = {
+  chatSurfaceRadios:
+    '[role="radiogroup"] [role="radio"][aria-checked="true"], [role="radiogroup"] [role="radio"][data-state="on"]',
+  intelligenceSwitcher: [
+    'form button[aria-haspopup="menu"][data-state]:not([data-testid="composer-plus-btn"])',
+  ],
+  intelligenceContent: '[data-testid="composer-intelligence-picker-content"]',
+  intelligenceSimpleView: '[data-testid="composer-model-picker-slider-simple-view"]',
+  intelligenceAdvancedView: '[data-testid="composer-model-picker-slider-advanced-view"]',
+  intelligenceSlider: '[data-model-reasoning-effort-slider] [role="slider"]',
+  intelligenceDots: '[data-model-reasoning-effort-slider] span[data-locked][data-selected]',
   composer: [
     '#prompt-textarea',
     '[data-testid="prompt-textarea"]',
@@ -29,10 +39,6 @@ export const CHATGPT_SELECTORS = {
     '[data-testid*="tools-button"]',
     'button[aria-label*="tools" i]',
     'button[aria-label*="mode" i]',
-  ],
-  unsupportedWorkSurfaceMarkers: [
-    '[data-testid="composer-model-picker-slider-simple-view"]',
-    '[data-testid="composer-model-picker-slider-advanced-view"]',
   ],
   namedModeOptions:
     '[role="menuitem"], [role="option"], [data-testid*="tool"], [data-testid*="mode"], [role="menu"] button',

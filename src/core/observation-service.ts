@@ -195,9 +195,14 @@ export class ObservationService {
           lastExactProgressAtMs = this.#now().getTime();
         }
 
+        const backendRecoveryPaced =
+          persisted.nextCheckAt !== null &&
+          Number.isFinite(Date.parse(persisted.nextCheckAt)) &&
+          Date.parse(persisted.nextCheckAt) > this.#now().getTime();
         if (
           decision.kind !== 'blocked' &&
           decision.kind !== 'interstitial' &&
+          !backendRecoveryPaced &&
           this.#now().getTime() - lastExactProgressAtMs >= this.#backendRecoveryAfterMs
         ) {
           const recovery = await this.#recover(persisted);

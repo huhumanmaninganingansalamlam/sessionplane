@@ -146,6 +146,75 @@ test('strong exact generation activity suppresses backend recovery until activit
   }
 });
 
+
+test('future probe nextCheckAt suppresses repeated paced recovery calls until due', async () => {
+  const fixture = await createFixture(
+    'sessionplane-backend-pacing-',
+    new FakeProviderAdapter(),
+    {
+      backendRecoveryAfterMs: 15,
+      observationActiveSweepMs: 5,
+      observationQuietSweepMs: 5,
+      probeSuccessIntervalMs: 180,
+    },
+  );
+  const { config, fake, service } = fixture;
+  try {
+    const { session } = await createSession(config.socketPath, 'main', 'pacing');
+    fake.queueRecovery(session.sessionId, {
+      kind: 'pending',
+      observationTransport: 'fresh',
+      responseMessageId: null,
+      answerText: null,
+      reason: 'backend-pending',
+      retryAfterMs: null,
+      nextCheckAt: null,
+    });
+    fake.queueRecovery(session.sessionId, {
+      kind: 'complete',
+      observationTransport: 'fresh',
+      responseMessageId: 'server-after-pacing',
+      answerText: 'Recovered after pacing window',
+      reason: 'backend-exact-final',
+      retryAfterMs: null,
+      nextCheckAt: null,
+    });
+
+    await send(config.socketPath, session.sessionId, 'paced-recovery');
+    const paced = await waitForSnapshot(
+      config.socketPath,
+      session.sessionId,
+      (snapshot) => snapshot.nextCheckAt !== null && snapshot.terminal === false,
+    );
+    assert.notEqual(paced.nextCheckAt, null);
+    assert.equal(fake.recoveryCount, 1);
+
+    const before = await rpc<{
+      readonly metrics: Readonly<Record<string, number>>;
+    }>(config.socketPath, 'system.health', {});
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    const during = await rpc<{
+      readonly metrics: Readonly<Record<string, number>>;
+    }>(config.socketPath, 'system.health', {});
+    assert.equal(
+      during.metrics.backend_probe_deferred_total,
+      before.metrics.backend_probe_deferred_total,
+    );
+    assert.equal(fake.recoveryCount, 1);
+
+    const complete = await waitForSnapshot(
+      config.socketPath,
+      session.sessionId,
+      (snapshot) => snapshot.terminal,
+    );
+    assert.equal(complete.answerText, 'Recovered after pacing window');
+    assert.equal(fake.recoveryCount, 2);
+  } finally {
+    await service.close();
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('concurrent same-account recovery preserves each session final', async () => {
   const fake = new DelayedPerSessionRecoveryAdapter(80);
   const fixture = await createFixture('sessionplane-backend-isolation-', fake);
@@ -178,17 +247,23 @@ test('concurrent same-account recovery preserves each session final', async () =
 async function createFixture(
   prefix: string,
   fake: FakeProviderAdapter = new FakeProviderAdapter(),
+  timing: {
+    readonly observationActiveSweepMs?: number;
+    readonly observationQuietSweepMs?: number;
+    readonly backendRecoveryAfterMs?: number;
+    readonly probeSuccessIntervalMs?: number;
+  } = {},
 ) {
   const root = mkdtempSync(path.join(tmpdir(), prefix));
   const config = resolveConfig({
     cwd: root,
     env: {},
     stateDir: '.state',
-    observationActiveSweepMs: 10,
-    observationQuietSweepMs: 10,
+    observationActiveSweepMs: timing.observationActiveSweepMs ?? 10,
+    observationQuietSweepMs: timing.observationQuietSweepMs ?? 10,
     observationQuietWindowMs: 5,
-    backendRecoveryAfterMs: 30,
-    probeSuccessIntervalMs: 1,
+    backendRecoveryAfterMs: timing.backendRecoveryAfterMs ?? 30,
+    probeSuccessIntervalMs: timing.probeSuccessIntervalMs ?? 1,
     probeMin429BackoffMs: 100,
     probeMax429BackoffMs: 100,
   });

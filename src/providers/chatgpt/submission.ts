@@ -84,20 +84,28 @@ export class ChatGptSubmission implements ProviderSubmission {
       );
     }
 
+    let modelSelection: ModelSelectionMode | null = null;
     if (this.#request.model !== null) {
-      await this.#selectModel(this.#request.model);
+      modelSelection = await this.#selectModel(this.#request.model);
     }
     if (
       this.#request.effort !== undefined &&
       this.#request.effort !== null &&
-      normalizeLabel(this.#request.effort) !== ''
+      normalizeLabel(this.#request.effort) !== '' &&
+      modelSelection !== 'intelligence-pro'
     ) {
-      await selectNamedMode(
+      const selectedByIntelligence = await selectIntelligenceEffort(
         this.#page,
-        CHATGPT_SELECTORS.effortSwitcher,
         this.#request.effort,
-        'effort',
       );
+      if (!selectedByIntelligence) {
+        await selectNamedMode(
+          this.#page,
+          CHATGPT_SELECTORS.effortSwitcher,
+          this.#request.effort,
+          'effort',
+        );
+      }
     }
 
     const composer = await firstVisibleComposer(this.#page);
@@ -214,12 +222,23 @@ export class ChatGptSubmission implements ProviderSubmission {
     });
   }
 
-  async #selectModel(requestedModel: string): Promise<void> {
+  async #selectModel(requestedModel: string): Promise<ModelSelectionMode> {
+    if (isIntelligenceProRequest(requestedModel)) {
+      const intelligenceSwitcher = await firstVisible(
+        this.#page,
+        CHATGPT_SELECTORS.intelligenceSwitcher,
+      );
+      if (intelligenceSwitcher !== null) {
+        await selectIntelligencePro(this.#page, intelligenceSwitcher, requestedModel);
+        return 'intelligence-pro';
+      }
+    }
+
     const switcher = await firstVisible(this.#page, CHATGPT_SELECTORS.modelSwitcher);
     if (switcher === null) {
       throw new ProviderSubmissionError(
         'provider.model-unavailable',
-        `Requested model is unavailable: ${requestedModel}`,
+        'Requested model is unavailable: ' + requestedModel,
       );
     }
     if (
@@ -228,7 +247,7 @@ export class ChatGptSubmission implements ProviderSubmission {
     ) {
       throw new ProviderSubmissionError(
         'provider.model-unavailable',
-        `Requested model is unavailable: ${requestedModel}`,
+        'Requested model is unavailable: ' + requestedModel,
       );
     }
     await switcher.click({ timeout: 5_000 });
@@ -237,16 +256,383 @@ export class ChatGptSubmission implements ProviderSubmission {
     if (selected === null) {
       throw new ProviderSubmissionError(
         'provider.model-unavailable',
-        `Requested model is absent or disabled: ${requestedModel}`,
+        'Requested model is absent or disabled: ' + requestedModel,
       );
     }
     await selected.locator.click({ timeout: 5_000 });
     if (!(await waitForModelLabel(this.#page, switcher, selected.label))) {
       throw new ProviderSubmissionError(
         'provider.model-unavailable',
-        `Requested model selection was not acknowledged: ${selected.label}`,
+        'Requested model selection was not acknowledged: ' + selected.label,
       );
     }
+    return 'legacy';
+  }
+
+}
+
+type ModelSelectionMode = 'legacy' | 'intelligence-pro';
+
+interface IntelligencePreset {
+  readonly title: string;
+  readonly selectedDisplayTitle: string | null;
+  readonly selectedDisplayVersion: string | null;
+  readonly modelSlug: string;
+  readonly lane: string;
+  readonly presetType: string;
+  readonly thinkingEffort: string | null;
+}
+
+interface IntelligenceVersion {
+  readonly id: string;
+  readonly displayText: string;
+  readonly displayTextForIntelligence: string;
+  readonly enabled: boolean;
+  readonly presets: readonly IntelligencePreset[];
+}
+
+interface IntelligenceCapabilities {
+  readonly versions: readonly IntelligenceVersion[];
+}
+
+interface IntelligenceTarget {
+  readonly version: IntelligenceVersion;
+  readonly preset: IntelligencePreset;
+  readonly presetIndex: number;
+}
+
+async function selectIntelligencePro(
+  page: Page,
+  switcher: Locator,
+  requestedModel: string,
+): Promise<void> {
+  const capabilities = await readIntelligenceCapabilities(page);
+  if (capabilities === null) {
+    throw new ProviderSubmissionError(
+      'provider.model-unavailable',
+      'ChatGPT model capabilities are unavailable for: ' + requestedModel,
+    );
+  }
+  const targets = intelligenceProTargets(capabilities, requestedModel);
+  const attempted: string[] = [];
+  for (const target of targets) {
+    const result = await selectIntelligenceTarget(page, switcher, target);
+    attempted.push(
+      target.version.id + ':' + String(target.presetIndex) + ':' + result.reason,
+    );
+    if (result.selected) return;
+  }
+  throw new ProviderSubmissionError(
+    'provider.model-unavailable',
+    'No available ChatGPT Pro preset could satisfy: ' + requestedModel,
+    { details: { attempted } },
+  );
+}
+
+async function selectIntelligenceEffort(page: Page, requestedEffort: string): Promise<boolean> {
+  const switcher = await firstVisible(page, CHATGPT_SELECTORS.intelligenceSwitcher);
+  if (switcher === null) return false;
+  const effort = intelligenceThinkingEffort(requestedEffort);
+  if (effort === null) return false;
+  const capabilities = await readIntelligenceCapabilities(page);
+  if (capabilities === null) {
+    throw new ProviderSubmissionError(
+      'provider.mode-unavailable',
+      'ChatGPT intelligence capabilities are unavailable for effort: ' + requestedEffort,
+    );
+  }
+  const targets = intelligenceEffortTargets(capabilities, effort);
+  for (const target of targets) {
+    if ((await selectIntelligenceTarget(page, switcher, target)).selected) return true;
+  }
+  throw new ProviderSubmissionError(
+    'provider.mode-unavailable',
+    'Requested ChatGPT effort is unavailable: ' + requestedEffort,
+  );
+}
+
+async function readIntelligenceCapabilities(page: Page): Promise<IntelligenceCapabilities | null> {
+  return await page
+    .evaluate(async () => {
+      let response = await fetch('/backend-api/models', { credentials: 'include' }).catch(() => null);
+      if (response === null || !response.ok) {
+        const auth = await fetch('/api/auth/session', { credentials: 'include' }).catch(() => null);
+        if (auth === null || !auth.ok) return null;
+        const session = (await auth.json().catch(() => null)) as { accessToken?: unknown } | null;
+        const accessToken =
+          session !== null && typeof session.accessToken === 'string' ? session.accessToken : null;
+        if (accessToken === null || accessToken.length < 8) return null;
+        response = await fetch('/backend-api/models', {
+          credentials: 'include',
+          headers: { Authorization: 'Bearer ' + accessToken },
+        }).catch(() => null);
+      }
+      if (response === null || !response.ok) return null;
+      const body = (await response.json().catch(() => null)) as {
+        versions?: unknown;
+      } | null;
+      if (body === null || !Array.isArray(body.versions)) return null;
+      const versions = body.versions.flatMap((rawVersion) => {
+        if (rawVersion === null || typeof rawVersion !== 'object') return [];
+        const record = rawVersion as Record<string, unknown>;
+        const id = typeof record.id === 'string' ? record.id : '';
+        const rawPresets = Array.isArray(record.intelligence_presets)
+          ? record.intelligence_presets
+          : [];
+        if (id === '' || rawPresets.length === 0) return [];
+        const presets = rawPresets.flatMap((rawPreset) => {
+          if (rawPreset === null || typeof rawPreset !== 'object') return [];
+          const preset = rawPreset as Record<string, unknown>;
+          const modelSlug = typeof preset.model_slug === 'string' ? preset.model_slug : '';
+          const lane = typeof preset.lane === 'string' ? preset.lane : '';
+          if (modelSlug === '' || lane === '') return [];
+          return [
+            {
+              title: typeof preset.title === 'string' ? preset.title : '',
+              selectedDisplayTitle:
+                typeof preset.selected_display_title === 'string'
+                  ? preset.selected_display_title
+                  : null,
+              selectedDisplayVersion:
+                typeof preset.selected_display_version === 'string'
+                  ? preset.selected_display_version
+                  : null,
+              modelSlug,
+              lane,
+              presetType:
+                typeof preset.preset_type === 'string' ? preset.preset_type : 'available',
+              thinkingEffort:
+                typeof preset.thinking_effort === 'string' ? preset.thinking_effort : null,
+            },
+          ];
+        });
+        return [
+          {
+            id,
+            displayText:
+              typeof record.display_text === 'string' ? record.display_text : id,
+            displayTextForIntelligence:
+              typeof record.display_text_for_intelligence === 'string'
+                ? record.display_text_for_intelligence
+                : typeof record.display_text === 'string'
+                  ? record.display_text
+                  : id,
+            enabled: record.enabled !== false,
+            presets,
+          },
+        ];
+      });
+      return { versions };
+    })
+    .catch(() => null);
+}
+
+function intelligenceProTargets(
+  capabilities: IntelligenceCapabilities,
+  requestedModel: string,
+): readonly IntelligenceTarget[] {
+  const request = normalizeModelIdentity(requestedModel);
+  const targets: IntelligenceTarget[] = [];
+  for (const version of capabilities.versions) {
+    if (!version.enabled) continue;
+    version.presets.forEach((preset, presetIndex) => {
+      if (preset.lane !== 'pro' || preset.presetType !== 'available') return;
+      if (request !== 'pro') {
+        const identities = [
+          preset.modelSlug,
+          (preset.selectedDisplayVersion ?? version.displayText) + ' Pro',
+          'GPT-' + (preset.selectedDisplayVersion ?? version.displayText) + ' Pro',
+        ].map(normalizeModelIdentity);
+        if (!identities.some((identity) => identity === request)) return;
+      }
+      targets.push({ version, preset, presetIndex });
+    });
+  }
+  return targets.sort(compareIntelligenceTargets);
+}
+
+function intelligenceEffortTargets(
+  capabilities: IntelligenceCapabilities,
+  effort: string,
+): readonly IntelligenceTarget[] {
+  const targets: IntelligenceTarget[] = [];
+  for (const version of capabilities.versions) {
+    if (!version.enabled) continue;
+    version.presets.forEach((preset, presetIndex) => {
+      if (
+        preset.lane === 'thinking' &&
+        preset.presetType === 'available' &&
+        preset.thinkingEffort === effort
+      ) {
+        targets.push({ version, preset, presetIndex });
+      }
+    });
+  }
+  return targets.sort(compareIntelligenceTargets);
+}
+
+function compareIntelligenceTargets(left: IntelligenceTarget, right: IntelligenceTarget): number {
+  const leftVersion =
+    left.preset.selectedDisplayVersion ?? left.version.id.replace(/[^0-9.]/g, '');
+  const rightVersion =
+    right.preset.selectedDisplayVersion ?? right.version.id.replace(/[^0-9.]/g, '');
+  return compareVersionParts(modelVersionParts(rightVersion), modelVersionParts(leftVersion));
+}
+
+async function selectIntelligenceTarget(
+  page: Page,
+  switcher: Locator,
+  target: IntelligenceTarget,
+): Promise<{ readonly selected: boolean; readonly reason: string }> {
+  if (!(await ensureIntelligencePickerOpen(page, switcher))) {
+    return { selected: false, reason: 'picker-not-open' };
+  }
+  if (!(await selectIntelligenceVersion(page, target.version))) {
+    return { selected: false, reason: 'version-not-selected' };
+  }
+  if (!(await ensureIntelligencePickerOpen(page, switcher))) {
+    return { selected: false, reason: 'picker-reopen-failed' };
+  }
+
+  const slider = page.locator(CHATGPT_SELECTORS.intelligenceSlider).first();
+  if (!(await slider.isVisible().catch(() => false))) {
+    return { selected: false, reason: 'slider-not-visible' };
+  }
+  const dots = page.locator(CHATGPT_SELECTORS.intelligenceDots);
+  const dotCount = await dots.count().catch(() => 0);
+  if (target.presetIndex >= dotCount) {
+    return { selected: false, reason: 'preset-index-out-of-range-' + String(dotCount) };
+  }
+  if ((await dots.nth(target.presetIndex).getAttribute('data-locked').catch(() => null)) === 'true') {
+    return { selected: false, reason: 'preset-locked' };
+  }
+
+  const maximum = Number(await slider.getAttribute('aria-valuemax').catch(() => null));
+  let current = Number(await slider.getAttribute('aria-valuenow').catch(() => null));
+  if (
+    !Number.isInteger(current) ||
+    !Number.isInteger(maximum) ||
+    target.presetIndex < 0 ||
+    target.presetIndex > maximum
+  ) {
+    return {
+      selected: false,
+      reason: 'invalid-slider-bounds-' + String(current) + '-' + String(maximum),
+    };
+  }
+  const key = target.presetIndex > current ? 'ArrowRight' : 'ArrowLeft';
+  for (let attempts = 0; attempts < 8 && current !== target.presetIndex; attempts += 1) {
+    await slider.press(key);
+    await page.waitForTimeout(25);
+    current = Number(await slider.getAttribute('aria-valuenow').catch(() => null));
+  }
+  return {
+    selected: current === target.presetIndex,
+    reason: current === target.presetIndex ? 'selected' : 'slider-stuck-' + String(current),
+  };
+}
+
+async function ensureIntelligencePickerOpen(page: Page, switcher: Locator): Promise<boolean> {
+  const content = page.locator(CHATGPT_SELECTORS.intelligenceContent).first();
+  if (await content.isVisible().catch(() => false)) return true;
+  await switcher.click({ timeout: 5_000 }).catch(() => undefined);
+  return await waitForVisible(content, 2_000);
+}
+
+async function selectIntelligenceVersion(
+  page: Page,
+  version: IntelligenceVersion,
+): Promise<boolean> {
+  const advanced = page.locator(CHATGPT_SELECTORS.intelligenceAdvancedView).first();
+  const options = advanced.locator('[role="menuitemradio"]');
+  let target = await matchingVersionOption(options, version);
+  if (target !== null && (await target.getAttribute('aria-checked').catch(() => null)) === 'true') {
+    return true;
+  }
+
+  const content = page.locator(CHATGPT_SELECTORS.intelligenceContent).first();
+  const opener = content.locator('[role="menuitem"]').first();
+  if (!(await opener.isVisible().catch(() => false))) return false;
+  await opener.click({ timeout: 5_000 });
+  if (!(await waitForAttribute(advanced, 'data-active', 'true', 2_000))) return false;
+  target = await matchingVersionOption(options, version);
+  if (target === null || !(await target.isVisible().catch(() => false))) return false;
+  await target.click({ timeout: 5_000 });
+
+  const simple = page.locator(CHATGPT_SELECTORS.intelligenceSimpleView).first();
+  if (!(await waitForAttribute(simple, 'data-active', 'true', 2_000))) return false;
+  return await waitForAttribute(target, 'aria-checked', 'true', 2_000);
+}
+
+async function matchingVersionOption(
+  options: Locator,
+  version: IntelligenceVersion,
+): Promise<Locator | null> {
+  const count = await options.count().catch(() => 0);
+  const labels = [
+    normalizeLabel(version.displayTextForIntelligence),
+    normalizeLabel(version.displayText),
+  ].filter((label) => label !== '');
+  for (let index = 0; index < count; index += 1) {
+    const option = options.nth(index);
+    const id = await option.getAttribute('data-version-id').catch(() => null);
+    if (id === version.id) return option;
+    const text = normalizeLabel((await option.textContent().catch(() => null)) ?? '');
+    if (labels.some((label) => text === label || modelLabelMatches(text, label))) return option;
+  }
+  return null;
+}
+
+async function waitForAttribute(
+  locator: Locator,
+  attribute: string,
+  expected: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if ((await locator.getAttribute(attribute).catch(() => null)) === expected) return true;
+    await locator.page().waitForTimeout(25);
+  } while (Date.now() < deadline);
+  return false;
+}
+
+async function waitForVisible(locator: Locator, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await locator.isVisible().catch(() => false)) return true;
+    await locator.page().waitForTimeout(25);
+  } while (Date.now() < deadline);
+  return false;
+}
+
+function isIntelligenceProRequest(value: string): boolean {
+  const normalized = normalizeModelIdentity(value);
+  return normalized === 'pro' || (normalized.startsWith('gpt ') && normalized.endsWith(' pro'));
+}
+
+function normalizeModelIdentity(value: string): string {
+  return normalizeLabel(value).replaceAll('-', ' ');
+}
+
+function intelligenceThinkingEffort(value: string): string | null {
+  const normalized = normalizeLabel(value).replaceAll('_', '-');
+  switch (normalized) {
+    case 'medium':
+    case 'standard':
+      return 'standard';
+    case 'high':
+    case 'extended':
+      return 'extended';
+    case 'extra-high':
+    case 'extra high':
+    case 'very-high':
+    case 'very high':
+    case 'max':
+    case 'maximum':
+      return 'max';
+    default:
+      return null;
   }
 }
 
@@ -335,12 +721,24 @@ function compareVersionParts(left: readonly number[], right: readonly number[]):
 }
 
 async function assertChatOnlySurface(page: Page): Promise<void> {
-  for (const selector of CHATGPT_SELECTORS.unsupportedWorkSurfaceMarkers) {
-    if (await page.locator(selector).first().isVisible().catch(() => false)) {
+  const selectedSurfaceRadios = page.locator(CHATGPT_SELECTORS.chatSurfaceRadios);
+  const selectedCount = await selectedSurfaceRadios.count().catch(() => 0);
+  for (let index = 0; index < selectedCount; index += 1) {
+    const radio = selectedSurfaceRadios.nth(index);
+    if (!(await radio.isVisible().catch(() => false))) continue;
+    const label = normalizeLabel(
+      (await radio.getAttribute('aria-label').catch(() => null)) ??
+        (await radio.textContent().catch(() => null)) ??
+        '',
+    );
+    if (label === 'work' || modelLabelMatches(label, 'work')) {
       throw new ProviderSubmissionError(
         'capability.unsupported',
         'The active ChatGPT composer is Work; SessionPlane supports Chat only',
       );
+    }
+    if (label === 'chat' || label === 'normal' || modelLabelMatches(label, 'chat')) {
+      return;
     }
   }
 
