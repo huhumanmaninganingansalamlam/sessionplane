@@ -24,7 +24,7 @@ export class ProbeCoordinator {
   readonly #now: () => Date;
   readonly #random: () => number;
   readonly #metrics: RuntimeMetrics | null;
-  readonly #inFlight = new Map<string, Promise<ProviderRecoveryResult>>();
+  readonly #tails = new Map<string, Promise<void>>();
 
   constructor(options: ProbeCoordinatorOptions) {
     if (options.min429BackoffMs > options.max429BackoffMs) {
@@ -49,18 +49,23 @@ export class ProbeCoordinator {
     if (normalizedScope.length === 0) {
       return Promise.reject(new Error('Probe scope must not be empty'));
     }
-    const existing = this.#inFlight.get(normalizedScope);
-    if (existing !== undefined) {
-      return existing;
-    }
-
-    const promise = this.#run(normalizedScope, operation).finally(() => {
-      if (this.#inFlight.get(normalizedScope) === promise) {
-        this.#inFlight.delete(normalizedScope);
-      }
+    const previous = this.#tails.get(normalizedScope) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
     });
-    this.#inFlight.set(normalizedScope, promise);
-    return promise;
+    const tail = previous.catch(() => undefined).then(() => gate);
+    this.#tails.set(normalizedScope, tail);
+
+    return previous
+      .catch(() => undefined)
+      .then(() => this.#run(normalizedScope, operation))
+      .finally(() => {
+        release();
+        if (this.#tails.get(normalizedScope) === tail) {
+          this.#tails.delete(normalizedScope);
+        }
+      });
   }
 
   #run(

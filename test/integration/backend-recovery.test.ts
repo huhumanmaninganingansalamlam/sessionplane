@@ -8,6 +8,10 @@ import { callRpc } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
+import type {
+  ProviderRecoveryRequest,
+  ProviderRecoveryResult,
+} from '../../src/providers/provider-adapter.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 interface TeamSnapshot {
@@ -142,7 +146,39 @@ test('strong exact generation activity suppresses backend recovery until activit
   }
 });
 
-async function createFixture(prefix: string) {
+test('concurrent same-account recovery preserves each session final', async () => {
+  const fake = new DelayedPerSessionRecoveryAdapter(80);
+  const fixture = await createFixture('sessionplane-backend-isolation-', fake);
+  const { config, service } = fixture;
+  try {
+    const alpha = await createSession(config.socketPath, 'alpha', 'isolation-alpha');
+    const beta = await createSession(config.socketPath, 'beta', 'isolation-beta');
+
+    await Promise.all([
+      send(config.socketPath, alpha.session.sessionId, 'isolation-alpha'),
+      send(config.socketPath, beta.session.sessionId, 'isolation-beta'),
+    ]);
+
+    const [alphaFinal, betaFinal] = await Promise.all([
+      waitForSnapshot(config.socketPath, alpha.session.sessionId, (snapshot) => snapshot.terminal),
+      waitForSnapshot(config.socketPath, beta.session.sessionId, (snapshot) => snapshot.terminal),
+    ]);
+
+    assert.equal(alphaFinal.answerText, `answer:${alpha.session.sessionId}`);
+    assert.equal(betaFinal.answerText, `answer:${beta.session.sessionId}`);
+    assert.equal(alphaFinal.responseMessageId, `response:${alpha.session.sessionId}`);
+    assert.equal(betaFinal.responseMessageId, `response:${beta.session.sessionId}`);
+    assert.equal(fake.recoveryCount, 2);
+  } finally {
+    await service.close();
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+async function createFixture(
+  prefix: string,
+  fake: FakeProviderAdapter = new FakeProviderAdapter(),
+) {
   const root = mkdtempSync(path.join(tmpdir(), prefix));
   const config = resolveConfig({
     cwd: root,
@@ -156,7 +192,6 @@ async function createFixture(prefix: string) {
     probeMin429BackoffMs: 100,
     probeMax429BackoffMs: 100,
   });
-  const fake = new FakeProviderAdapter();
   const service = await startCore({
     config,
     startBrowser: false,
@@ -164,6 +199,29 @@ async function createFixture(prefix: string) {
     logger: silentLogger(),
   });
   return { root, config, fake, service };
+}
+
+class DelayedPerSessionRecoveryAdapter extends FakeProviderAdapter {
+  readonly #delayMs: number;
+
+  constructor(delayMs: number) {
+    super('chatgpt');
+    this.#delayMs = delayMs;
+  }
+
+  override async recover(request: ProviderRecoveryRequest): Promise<ProviderRecoveryResult> {
+    this.recoveryCount += 1;
+    await new Promise((resolve) => setTimeout(resolve, this.#delayMs));
+    return {
+      kind: 'complete',
+      observationTransport: 'fresh',
+      responseMessageId: `response:${request.session.sessionId}`,
+      answerText: `answer:${request.session.sessionId}`,
+      reason: 'fake-session-isolated-final',
+      retryAfterMs: null,
+      nextCheckAt: null,
+    };
+  }
 }
 
 async function createSession(socketPath: string, roleKey: string, suffix: string) {

@@ -9,7 +9,7 @@ import { ProbeCoordinator } from '../../src/scheduler/probe-coordinator.ts';
 import { SessionPlaneDatabase } from '../../src/storage/database.ts';
 import { ProbeBudgetRepository } from '../../src/storage/probe-budget-repository.ts';
 
-test('ProbeCoordinator enforces account single-flight and durable success pacing', async () => {
+test('ProbeCoordinator serializes account probes and preserves caller isolation', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-probe-'));
   const database = SessionPlaneDatabase.open(path.join(root, 'sessionplane.sqlite'));
   let nowMs = Date.parse('2026-09-17T00:00:00.000Z');
@@ -28,11 +28,12 @@ test('ProbeCoordinator enforces account single-flight and durable success pacing
   try {
     const first = coordinator.run('chatgpt:default', operation);
     const second = coordinator.run('chatgpt:default', operation);
-    assert.strictEqual(first, second);
+    assert.notEqual(first, second);
+    await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(calls, 1);
     release();
     assert.equal((await first).kind, 'pending');
-    assert.equal((await second).kind, 'pending');
+    assert.equal((await second).kind, 'deferred');
 
     const paced = await coordinator.run('chatgpt:default', async () => {
       calls += 1;
