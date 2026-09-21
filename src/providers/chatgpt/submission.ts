@@ -20,6 +20,8 @@ const COMPOSER_STABLE_WINDOW_MS = 250;
 const COMPOSER_WRITE_ATTEMPTS = 2;
 const VISIBLE_SELECTOR_TIMEOUT_MS = 5_000;
 const VISIBLE_SELECTOR_POLL_MS = 50;
+const MODEL_OPTION_DISCOVERY_TIMEOUT_MS = 2_000;
+const MODEL_OPTION_DISCOVERY_POLL_MS = 50;
 
 export interface ChatGptSubmissionOptions {
   readonly page: Page;
@@ -213,44 +215,107 @@ export class ChatGptSubmission implements ProviderSubmission {
         `Requested model is unavailable: ${requestedModel}`,
       );
     }
-    const currentText = normalizeLabel((await switcher.textContent().catch(() => null)) ?? '');
-    if (modelLabelMatches(currentText, requestedModel)) {
-      return;
-    }
-
     await switcher.click({ timeout: 5_000 });
-    const options = this.#page.locator(CHATGPT_SELECTORS.modelOptions);
-    const optionCount = await options.count();
-    let exactOption: Locator | null = null;
-    for (let index = 0; index < optionCount; index += 1) {
-      const candidate = options.nth(index);
-      if (!(await candidate.isVisible().catch(() => false))) {
-        continue;
-      }
-      const label = normalizeLabel((await candidate.textContent().catch(() => null)) ?? '');
-      if (label === normalizeLabel(requestedModel)) {
-        exactOption = candidate;
-        break;
-      }
-    }
-    if (
-      exactOption === null ||
-      (await exactOption.getAttribute('aria-disabled')) === 'true' ||
-      (await exactOption.isDisabled().catch(() => false))
-    ) {
+    const discovered = await discoverModelOptions(this.#page);
+    const selected = resolveRequestedModel(discovered, requestedModel);
+    if (selected === null) {
       throw new ProviderSubmissionError(
         'provider.model-unavailable',
         `Requested model is absent or disabled: ${requestedModel}`,
       );
     }
-    await exactOption.click({ timeout: 5_000 });
-    if (!(await waitForModelLabel(this.#page, switcher, requestedModel))) {
+    await selected.locator.click({ timeout: 5_000 });
+    if (!(await waitForModelLabel(this.#page, switcher, selected.label))) {
       throw new ProviderSubmissionError(
         'provider.model-unavailable',
-        `Requested model selection was not acknowledged: ${requestedModel}`,
+        `Requested model selection was not acknowledged: ${selected.label}`,
       );
     }
   }
+}
+
+interface DiscoveredModelOption {
+  readonly locator: Locator;
+  readonly label: string;
+  readonly normalizedLabel: string;
+  readonly disabled: boolean;
+  readonly index: number;
+}
+
+async function discoverModelOptions(page: Page): Promise<readonly DiscoveredModelOption[]> {
+  const deadline = Date.now() + MODEL_OPTION_DISCOVERY_TIMEOUT_MS;
+  const options = page.locator(CHATGPT_SELECTORS.modelOptions);
+  do {
+    const discovered: DiscoveredModelOption[] = [];
+    const count = await options.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      const locator = options.nth(index);
+      if (!(await locator.isVisible().catch(() => false))) continue;
+      const label = ((await locator.textContent().catch(() => null)) ?? '').trim();
+      const normalizedLabel = normalizeLabel(label);
+      if (normalizedLabel === '') continue;
+      discovered.push({
+        locator,
+        label,
+        normalizedLabel,
+        disabled:
+          (await locator.getAttribute('aria-disabled').catch(() => null)) === 'true' ||
+          (await locator.isDisabled().catch(() => false)),
+        index,
+      });
+    }
+    if (discovered.length > 0) return discovered;
+    await page.waitForTimeout(MODEL_OPTION_DISCOVERY_POLL_MS);
+  } while (Date.now() < deadline);
+  return [];
+}
+
+function resolveRequestedModel(
+  options: readonly DiscoveredModelOption[],
+  requestedModel: string,
+): DiscoveredModelOption | null {
+  const normalizedRequest = normalizeLabel(requestedModel);
+  if (normalizedRequest === 'pro') {
+    return [...options]
+      .filter((option) => !option.disabled && isProModelLabel(option.normalizedLabel))
+      .sort(compareProModelOptions)[0] ?? null;
+  }
+
+  return options.find(
+    (option) =>
+      !option.disabled &&
+      (option.normalizedLabel === normalizedRequest ||
+        modelLabelMatches(option.normalizedLabel, normalizedRequest)),
+  ) ?? null;
+}
+
+function isProModelLabel(value: string): boolean {
+  return /\bpro\b/.test(normalizeLabel(value));
+}
+
+function compareProModelOptions(left: DiscoveredModelOption, right: DiscoveredModelOption): number {
+  const versionOrder = compareVersionParts(
+    modelVersionParts(right.normalizedLabel),
+    modelVersionParts(left.normalizedLabel),
+  );
+  if (versionOrder !== 0) return versionOrder;
+  return left.index - right.index;
+}
+
+function modelVersionParts(value: string): readonly number[] {
+  const match = normalizeLabel(value).match(/\d+(?:\.\d+)*/);
+  return match === null ? [] : match[0].split('.').map((part) => Number(part));
+}
+
+function compareVersionParts(left: readonly number[], right: readonly number[]): number {
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  if (left.length === 0 && right.length > 0) return -1;
+  if (right.length === 0 && left.length > 0) return 1;
+  return 0;
 }
 
 async function assertChatOnlySurface(page: Page): Promise<void> {

@@ -443,6 +443,128 @@ test('ChatGPT submission refuses a disabled requested model before send', async 
   }
 });
 
+test('ChatGPT submission resolves Pro family to the highest enabled discovered model', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-pro-family-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: chatGptModelFixture('5.6 Pro', [
+          { label: '5.6 Pro' },
+          { label: '6 Pro' },
+          { label: 'Instant' },
+        ]),
+      });
+    });
+    await created.page.goto('https://chatgpt.com/');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'session-pro-family-highest',
+      generation: 1,
+      conversationId: null,
+    });
+    const submission = new ChatGptSubmission({
+      page: created.page,
+      pageKey: created.binding.pageKey,
+      pageRegistry: registry,
+      request: {
+        session: sessionSnapshot({
+          sessionId: 'session-pro-family-highest',
+          pageKey: created.binding.pageKey,
+        }),
+        generation: 1,
+        prompt: 'Use the best available Pro model',
+        model: 'Pro',
+      },
+      acknowledgementTimeoutMs: 500,
+    });
+
+    await submission.prepare();
+    assert.equal(
+      await created.page.locator('[data-testid="model-switcher-dropdown-button"]').textContent(),
+      '6 Pro',
+    );
+    assert.equal(
+      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
+      0,
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ChatGPT submission falls back to the next enabled Pro model', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-pro-fallback-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: chatGptModelFixture('6 Pro', [
+          { label: '6 Pro', disabled: true },
+          { label: '5.6 Pro' },
+          { label: 'Instant' },
+        ]),
+      });
+    });
+    await created.page.goto('https://chatgpt.com/');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'session-pro-family-fallback',
+      generation: 1,
+      conversationId: null,
+    });
+    const submission = new ChatGptSubmission({
+      page: created.page,
+      pageKey: created.binding.pageKey,
+      pageRegistry: registry,
+      request: {
+        session: sessionSnapshot({
+          sessionId: 'session-pro-family-fallback',
+          pageKey: created.binding.pageKey,
+        }),
+        generation: 1,
+        prompt: 'Fall back within the Pro family',
+        model: 'Pro',
+      },
+      acknowledgementTimeoutMs: 500,
+    });
+
+    await submission.prepare();
+    assert.equal(
+      await created.page.locator('[data-testid="model-switcher-dropdown-button"]').textContent(),
+      '5.6 Pro',
+    );
+    assert.equal(
+      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
+      0,
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ChatGPT submission verifies that model selection actually took effect', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-model-ack-'));
   const registry = new PageRegistry();
@@ -542,7 +664,21 @@ function chatGptFixture(
   replaceComposerOnInput = false,
   delayedComposerVisibility = false,
   proseMirrorBlocks = false,
+  modelFixture: {
+    readonly current: string;
+    readonly options: readonly { readonly label: string; readonly disabled?: boolean }[];
+  } | null = null,
 ): string {
+  const modelState = modelFixture ?? {
+    current: 'Model A',
+    options: [{ label: 'Model B', disabled: disabledModel }],
+  };
+  const modelOptionsMarkup = modelState.options
+    .map(
+      (option) =>
+        `<button role="menuitem" type="button" aria-disabled="${option.disabled === true ? 'true' : 'false'}">${escapeHtml(option.label)}</button>`,
+    )
+    .join('');
   const initialComposerMarkup = proseMirrorBlocks
     ? initialComposerText
         .split('\n')
@@ -556,9 +692,9 @@ function chatGptFixture(
   return `<!doctype html>
     <html>
       <body>
-        <button data-testid="model-switcher-dropdown-button" type="button">Model A</button>
+        <button data-testid="model-switcher-dropdown-button" type="button">${escapeHtml(modelState.current)}</button>
         <div id="model-menu" role="menu" hidden>
-          <button role="menuitem" type="button" aria-disabled="${disabledModel ? 'true' : 'false'}">Model B</button>
+          ${modelOptionsMarkup}
         </div>
         ${delayedComposerVisibility ? '<form><textarea placeholder="Proxy composer"></textarea></form>' : ''}
         <div id="prompt-textarea" data-testid="prompt-textarea" contenteditable="true">${initialComposerMarkup}</div>
@@ -568,14 +704,15 @@ function chatGptFixture(
           window.sendCount = 0;
           const switcher = document.querySelector('[data-testid="model-switcher-dropdown-button"]');
           const menu = document.querySelector('#model-menu');
-          const option = menu.querySelector('[role="menuitem"]');
           switcher.addEventListener('click', () => { menu.hidden = false; });
-          option.addEventListener('click', () => {
-            if (option.getAttribute('aria-disabled') === 'true') return;
-            if (!${applyModelSelection}) return;
-            switcher.textContent = option.textContent;
-            menu.hidden = true;
-          });
+          for (const option of menu.querySelectorAll('[role="menuitem"]')) {
+            option.addEventListener('click', () => {
+              if (option.getAttribute('aria-disabled') === 'true') return;
+              if (!${applyModelSelection}) return;
+              switcher.textContent = option.textContent;
+              menu.hidden = true;
+            });
+          }
           const composer = document.querySelector('#prompt-textarea');
           if (${delayedComposerVisibility}) {
             composer.setAttribute('hidden', '');
@@ -649,6 +786,16 @@ function chatGptFixture(
         </script>
       </body>
     </html>`;
+}
+
+function chatGptModelFixture(
+  current: string,
+  options: readonly { readonly label: string; readonly disabled?: boolean }[],
+): string {
+  return chatGptFixture(false, true, false, '', false, false, false, false, {
+    current,
+    options,
+  });
 }
 
 function escapeHtml(value: string): string {
