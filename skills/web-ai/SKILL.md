@@ -24,6 +24,21 @@ sessplane wait --session "$SESSION_ID" --generation "$GENERATION" --json
 `submission_unknown` must never be automatically resent. Use a stable
 `requestId` only for an exact retry of the same mutation.
 
+## Provider continuity and model families
+
+Keep a role on its current provider when a generation must be reconstructed or
+replaced. Never use Gemini or Grok as an implicit fallback for ChatGPT because
+of `submission_unknown`, model unavailability, a consent/interstitial page,
+rate limiting, wait expiry, or observation trouble. Change provider only when
+the user or caller explicitly requested a different provider.
+
+For ChatGPT, pass `--model Pro` when the intent is the best currently available
+Pro-family model. SessionPlane discovers the live model menu, selects the
+highest enabled Pro-family option, and falls back to the next enabled Pro option
+before submit. Do not encode version labels such as `6 Pro` or `5.6 Pro` in the
+agent workflow. If no Pro option is available, report the typed pre-submit error
+instead of silently opening another provider.
+
 `provider.human-action-required` means a visible browser verification is open.
 Do not retry in a loop and do not attempt to click or bypass it. Ask the user to
 complete it in the headed SessionPlane Chrome window, then rerun the submission

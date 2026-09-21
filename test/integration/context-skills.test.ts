@@ -190,11 +190,20 @@ test('bundled skills are served and installed by the SessionPlane CLI', async ()
       'browser',
       '--skill',
       'web-ai',
+      '--skill',
+      'sessionplane',
       '--json',
     ]);
     assert.equal(installed.code, 0, installed.stderr);
     assert.equal(existsSync(path.join(target, 'browser', 'SKILL.md')), true);
     assert.equal(existsSync(path.join(target, 'web-ai', 'SKILL.md')), true);
+    assert.equal(existsSync(path.join(target, 'sessionplane', 'SKILL.md')), true);
+    const webAiSkill = readFileSync(path.join(target, 'web-ai', 'SKILL.md'), 'utf8');
+    const coreSkill = readFileSync(path.join(target, 'sessionplane', 'SKILL.md'), 'utf8');
+    assert.match(webAiSkill, /Never use Gemini or Grok as an implicit fallback for ChatGPT/);
+    assert.match(webAiSkill, /pass `--model Pro`/);
+    assert.match(coreSkill, /Never switch providers as recovery/);
+    assert.match(coreSkill, /`model=Pro` is a model-family intent/);
 
     const protectedRun = await runSessplane([
       'skills',

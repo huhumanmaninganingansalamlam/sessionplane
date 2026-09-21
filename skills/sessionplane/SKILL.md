@@ -24,6 +24,14 @@ SessionPlane is a thin client workflow over one long-running local core. The cor
 - `providerState: "blocked"` is accepted only when returned as structured core state from verified visible provider evidence.
 - `submission_unknown` means a submit may have occurred. Never issue a new requestId automatically to resend it.
 
+## Provider continuity and ChatGPT Pro
+
+- Provider is part of durable session identity. Preserve the current provider when reconstructing or replacing a session. Never switch providers as recovery for `waitExpired`, `submission_unknown`, model unavailability, consent/interstitial UI, rate limits, or observation failure. Use another provider only when the user or caller explicitly requested that provider.
+- For ChatGPT, `model=Pro` is a model-family intent, not a version string. Let SessionPlane inspect the current model menu and choose the highest enabled Pro-family option; if the highest option is unavailable or disabled before submit, use the next enabled Pro-family option.
+- Do not hard-code labels such as `6 Pro`, `5.6 Pro`, or future version numbers into agent logic. Preserve the `Pro` intent across fresh sessions and generations.
+- If no enabled Pro-family option is available before submit, propagate the typed model-unavailable result. Do not silently create a Gemini or Grok session.
+- Once submit may have happened, provider/model fallback must not resend the prompt. Keep the exact `sessionId + generation` and observe or surface the ambiguity.
+
 ## Team coordination
 
 - A team contains one primary role and directly attached expert, reviewer, or custom roles.
