@@ -227,18 +227,26 @@ export class RecoveryService {
     },
     eventType: string,
   ): Promise<SessionSnapshot> {
+    const effectiveUpdate: typeof update =
+      snapshot.errorCode === 'session.submission-unknown' && update.errorCode === null
+        ? {
+            ...update,
+            reason: snapshot.reason ?? update.reason,
+            errorCode: snapshot.errorCode,
+          }
+        : update;
     if (
-      snapshot.pageKey === update.pageKey &&
-      snapshot.observationTransport === update.observationTransport &&
-      snapshot.reason === update.reason &&
-      snapshot.errorCode === update.errorCode
+      snapshot.pageKey === effectiveUpdate.pageKey &&
+      snapshot.observationTransport === effectiveUpdate.observationTransport &&
+      snapshot.reason === effectiveUpdate.reason &&
+      snapshot.errorCode === effectiveUpdate.errorCode
     ) {
       return snapshot;
     }
     return await this.#scheduler.updateGeneration(
       snapshot.sessionId,
       snapshot.generation,
-      update,
+      effectiveUpdate,
       eventType,
     );
   }

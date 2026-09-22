@@ -162,6 +162,114 @@ test('browser restart rebinds the exact conversation without resending and quara
   }
 });
 
+test('service restart preserves submission-unknown diagnostics while reopening the exact conversation', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-core-restart-ambiguous-browser-'));
+  const config = resolveConfig({
+    cwd: root,
+    env: {},
+    stateDir: '.state',
+    backendRecoveryAfterMs: 10_000,
+  });
+  const beforeRestart = new FakeProviderAdapter();
+  let service = await startCore({
+    config,
+    browserHeadless: true,
+    providerAdapters: [beforeRestart],
+    recoveryNavigatePage: navigateFixture,
+    logger: silentLogger(),
+  });
+
+  try {
+    const team = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'ambiguous-browser-restart-client',
+      requestId: 'ambiguous-browser-restart-team',
+      primaryRoleKey: 'main',
+    });
+    const session = await rpc<SessionSnapshot>(config.socketPath, 'session.create', {
+      clientId: 'ambiguous-browser-restart-client',
+      requestId: 'ambiguous-browser-restart-session',
+      teamId: team.teamId,
+      roleKey: 'main',
+      provider: 'chatgpt',
+    });
+    const submitted = await rpc<SessionSnapshot>(config.socketPath, 'session.send', {
+      clientId: 'ambiguous-browser-restart-client',
+      requestId: 'ambiguous-browser-restart-send',
+      sessionId: session.sessionId,
+      prompt: 'Keep the ambiguous diagnostic through an exact core restart.',
+      sessionDeadlineSec: 600,
+    });
+    assert.notEqual(submitted.conversationId, null);
+    const conversationId = submitted.conversationId as string;
+    const ambiguous = await service.actorScheduler.updateGeneration(
+      submitted.sessionId,
+      submitted.generation,
+      {
+        submissionState: 'submission_unknown',
+        pageKey: null,
+        submittedUserMessageId: null,
+        submittedUserTurnId: null,
+        reason: 'submit-unacknowledged',
+        errorCode: 'session.submission-unknown',
+        promptSubmitted: true,
+      },
+      'generation.core-restart-test-submission-unknown',
+    );
+    assert.equal(ambiguous.errorCode, 'session.submission-unknown');
+    assert.equal(ambiguous.reason, 'submit-unacknowledged');
+    assert.equal(ambiguous.pageKey, null);
+    const generationBefore = submitted.generation;
+    const submitCountBefore = beforeRestart.submitCount;
+
+    await service.close();
+
+    const afterRestart = new FakeProviderAdapter();
+    service = await startCore({
+      config,
+      browserHeadless: true,
+      providerAdapters: [afterRestart],
+      recoveryNavigatePage: navigateFixture,
+      logger: silentLogger(),
+    });
+
+    const restored = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'ambiguous-browser-restart-client',
+      sessionId: submitted.sessionId,
+    });
+    assert.equal(restored.generation, generationBefore);
+    assert.equal(restored.conversationId, conversationId);
+    assert.notEqual(restored.pageKey, null);
+    assert.equal(restored.observationTransport, 'fresh');
+    assert.equal(restored.errorCode, 'session.submission-unknown');
+    assert.equal(restored.reason, 'submit-unacknowledged');
+    assert.equal(restored.promptSubmitted, true);
+    assert.equal(afterRestart.openCount, 0);
+    assert.equal(afterRestart.submitCount, 0);
+    assert.equal(afterRestart.observationOpenCount, 0);
+    assert.equal(beforeRestart.submitCount, submitCountBefore);
+
+    const generation = service.database.raw
+      .prepare(`
+        SELECT submission_state AS submissionState, reason, error_code AS errorCode, prompt_submitted AS promptSubmitted
+        FROM generations
+        WHERE session_id = ? AND generation = ?
+      `)
+      .get(submitted.sessionId, generationBefore) as {
+        submissionState: string;
+        reason: string | null;
+        errorCode: string | null;
+        promptSubmitted: number;
+      };
+    assert.equal(generation.submissionState, 'submission_unknown');
+    assert.equal(generation.reason, 'submit-unacknowledged');
+    assert.equal(generation.errorCode, 'session.submission-unknown');
+    assert.equal(generation.promptSubmitted, 1);
+  } finally {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 async function navigateFixture(page: Page, url: string): Promise<void> {
   await page.route('https://chatgpt.com/**', async (route) => {
     await route.fulfill({
