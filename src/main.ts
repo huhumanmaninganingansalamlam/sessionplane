@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { Page } from 'playwright-core';
 
@@ -85,6 +87,7 @@ export interface StartCoreOptions {
   readonly browserHeadless?: boolean;
   readonly providerAdapters?: readonly ProviderAdapter[];
   readonly recoveryNavigatePage?: (page: Page, url: string) => Promise<void>;
+  readonly enableInternalBrowserControlRpc?: boolean;
 }
 
 export async function startCore(options: StartCoreOptions = {}): Promise<CoreService> {
@@ -271,7 +274,9 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     loginUrl: config.chatgptUrl,
     profileDir: config.profileDir,
   });
-  registerBrowserControlMethods(router, browserControl);
+  if (options.enableInternalBrowserControlRpc === true) {
+    registerBrowserControlMethods(router, browserControl);
+  }
   registerArtifactMethods(router, artifactService);
   registerChatGptMethods(router, projectSources);
   registerCodeMethods(router, chatgptWorkflows);
@@ -387,7 +392,10 @@ function isDirectExecution(): boolean {
 }
 
 if (isDirectExecution()) {
-  serveForever().catch((error: unknown) => {
+  const config = resolveConfig({
+    stateDir: path.join(homedir(), '.local', 'state', 'sessionplane'),
+  });
+  serveForever(config).catch((error: unknown) => {
     const message = error instanceof Error ? error.stack ?? error.message : String(error);
     process.stderr.write(`${message}\n`);
     process.exitCode = 1;

@@ -19,7 +19,11 @@ test('generic browser control exposes snapshot-bound refs without focus identity
     pageRegistry: registry,
     headless: true,
   });
-  const browser = new BrowserControlService({ browserOwner: owner, pageRegistry: registry });
+  const browser = new BrowserControlService({
+    browserOwner: owner,
+    pageRegistry: registry,
+    genericMutationsEnabled: true,
+  });
 
   try {
     await owner.start();
@@ -123,6 +127,56 @@ test('generic browser control exposes snapshot-bound refs without focus identity
   }
 });
 
+test('production browser control rejects generic mutation while preserving observation', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-provider-only-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+  const browser = new BrowserControlService({ browserOwner: owner, pageRegistry: registry });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://browser.test/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: fixtureHtml(),
+      });
+    });
+    await created.page.goto('https://browser.test/start');
+    registry.refreshPage(created.binding.pageKey);
+    await browser.select(created.binding.pageKey);
+
+    const snapshot = await browser.snapshot({ maxNodes: 50 });
+    assert.equal(snapshot.pageKey, created.binding.pageKey);
+    const button = snapshot.nodes.find((node) => node.name === 'Increment');
+
+    for (const operation of [
+      () => browser.newPage('https://example.com/'),
+      () => browser.navigate({ url: 'https://example.com/' }),
+      () => browser.click({ ref: button?.ref ?? '', snapshotId: snapshot.snapshotId }),
+      () => browser.evaluate({ script: 'document.body.textContent = "mutated"' }),
+      () => browser.resetRuntime(true),
+    ]) {
+      await assert.rejects(
+        operation(),
+        (error: unknown) =>
+          error instanceof BrowserControlError && error.errorCode === 'capability.unsupported',
+      );
+    }
+
+    const text = await browser.text({ maxChars: 100 });
+    assert.match(String(text.text), /Increment/);
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('multiple generic Pages require an explicit selected pageKey', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-selection-'));
   const registry = new PageRegistry();
@@ -165,6 +219,7 @@ test('browser lifecycle stop, start, and forced profile reset stay core-owned', 
     browserOwner: owner,
     pageRegistry: registry,
     onStarted: async () => ({ recovery: ++recoveries }),
+    genericMutationsEnabled: true,
   });
 
   try {

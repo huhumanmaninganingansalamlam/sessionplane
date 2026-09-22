@@ -27,14 +27,21 @@ interface SessionSnapshot {
 }
 
 test('MCP tool catalogue exposes unique core mappings and exact selector schemas', () => {
-  assert.ok(MCP_TOOLS.length >= 40);
+  assert.ok(MCP_TOOLS.length >= 25);
   assert.equal(new Set(MCP_TOOLS.map((tool) => tool.name)).size, MCP_TOOLS.length);
   assert.equal(new Set(MCP_TOOLS.map((tool) => tool.rpcMethod)).size, MCP_TOOLS.length);
   assert.equal(getMcpTool('sessionplane_send')?.rpcMethod, 'session.send');
-  assert.equal(getMcpTool('browser_snapshot')?.rpcMethod, 'browser.snapshot');
-  assert.equal(getMcpTool('browser_click_ref')?.rpcMethod, 'browser.click');
-  assert.equal(getMcpTool('browser_observe_bundle')?.rpcMethod, 'browser.observeBundle');
-  assert.equal(getMcpTool('browser_upload_ref')?.rpcMethod, 'browser.upload');
+  for (const name of [
+    'browser_tabs',
+    'browser_snapshot',
+    'browser_click_ref',
+    'browser_observe_bundle',
+    'browser_upload_ref',
+    'browser_network',
+  ]) {
+    assert.equal(getMcpTool(name), null, name);
+  }
+  assert.equal(MCP_TOOLS.every((definition) => definition.name.startsWith('sessionplane_')), true);
   assert.equal(
     getMcpTool('sessionplane_artifact_capture')?.rpcMethod,
     'artifact.capture',
@@ -49,7 +56,6 @@ test('MCP tool catalogue exposes unique core mappings and exact selector schemas
   );
   assert.equal(getMcpTool('sessionplane_code_generate')?.rpcMethod, 'code.generate');
   assert.equal(getMcpTool('sessionplane_code_extract')?.rpcMethod, 'code.extract');
-  assert.equal(getMcpTool('browser_network')?.rpcMethod, 'browser.network');
   const sessionCreate = getMcpTool('sessionplane_session_create');
   const providerSchema = (sessionCreate?.inputSchema.properties as Record<string, unknown>)
     .provider as { enum?: readonly string[] };

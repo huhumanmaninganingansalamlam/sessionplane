@@ -114,109 +114,42 @@ Query it from another terminal:
 sessplane health --json
 ```
 
-## Generic browser automation
+## Provider-owned browser runtime
 
-The same long-running core exposes generic browser primitives. Pages are
-addressed by the opaque `pageKey` returned by `tabs`; browser focus, title,
-recency, and page array order are never identity.
+SessionPlane owns one persistent Chromium-family profile only to run supported
+AI provider sessions and preserve their exact durable identity. It is not a
+general browser automation tool. Do not use SessionPlane for arbitrary website
+navigation, Notion/GitHub login, form automation, or generic browser tasks.
+Use Playwright or the installed general browser skill for those workflows.
 
-The core launches a browser already installed by the user with a minimal,
-positive loopback CDP endpoint and then controls its persistent default context
-with `playwright-core` through `chromium.connectOverCDP()`. SessionPlane never
-downloads, installs, upgrades, or silently falls back to a Playwright-managed
-browser. The default selection is the user-installed Google Chrome Stable. Chromium,
-Edge, Brave, and custom Chromium-family executables remain explicit choices.
-The default never falls back silently to another browser. Select explicitly with
-`--browser chrome|chromium|edge|brave`, use `--browser auto` to opt into the
-Chromium, Chrome, Edge, then Brave fallback order, or use
-`--browser custom --browser-executable /absolute/path`. Every selection uses
-the dedicated SessionPlane profile; the user's normal browser profile and open
-tabs are never attached. No custom fingerprint patches are injected.
+Internally, SessionPlane controls its dedicated provider profile with
+playwright-core through a positive loopback CDP endpoint. It never attaches to
+the user's normal browser profile. Chrome is the default host browser;
+Chromium, Edge, Brave, and custom Chromium-family executables are explicit
+operator configuration choices.
 
-Host Chromium-family browsers always run with their native process sandbox
-enabled. SessionPlane launches only the profile, positive loopback CDP,
-first-run, window-size, and optional headless arguments it owns. It never adds
-`--enable-automation`, `--no-sandbox`, `--disable-setuid-sandbox`, warning-UI
-suppression, or a silent unsandboxed fallback. A headed startup is rejected if
-the resulting browser reports `navigator.webdriver !== false`.
+Host Chromium-family browsers run with their native process sandbox enabled.
+SessionPlane never adds automation-identifying or sandbox-disabling launch
+switches, warning-UI suppression, or a silent unsandboxed fallback.
 
-Browser selection is a core-startup setting:
+Browser selection is an operator/core-startup setting:
 
-```bash
-sessplane browser-list --json
-sessplane serve --browser chrome
-sessplane serve --browser chromium
-sessplane serve --browser custom \
-  --browser-executable /opt/browser/chrome
-```
+    sessplane browser-list --json
+    sessplane serve --browser chrome
+    sessplane serve --browser chromium
+    sessplane serve --browser custom --browser-executable /opt/browser/chrome
 
-The equivalent environment variables are `SESSIONPLANE_BROWSER` and
-`SESSIONPLANE_BROWSER_EXECUTABLE`. Stop the existing core before changing the
-selection. By default profiles are isolated automatically under
-`$SESSIONPLANE_STATE_DIR/profiles/<product>/`, so Chrome, Chromium, Edge, and
-Brave never open each other's SessionPlane data. An explicit
-`SESSIONPLANE_PROFILE_DIR` opts out of that automatic product subdirectory but
-still records the browser product and fails closed on a mismatch. Known
-personal/default profile roots for all supported browsers are rejected.
+Provider adapters, recovery, and login own browser mutation. Public generic
+navigation, click, type, screenshot, and JavaScript-evaluation tooling is not
+part of the SessionPlane runtime surface.
 
-```bash
-sessplane tabs --json
-sessplane new-tab https://example.com --json
-sessplane snapshot --page <pageKey> --max-nodes 120 --json
-sessplane click @e1 --page <pageKey> --snapshot-id <snapshotId> --json
-sessplane type @e2 --text "hello" --page <pageKey> --snapshot-id <snapshotId> --json
-sessplane screenshot --page <pageKey> --out /tmp/page.png --json
-```
-
-Available browser surfaces include tabs and navigation, snapshot-bound refs,
-click/type/press/hover/select/check/upload/drag, coordinate mouse input,
-scroll and waits, screenshots, text/DOM reads, console/network diagnostics,
-JavaScript evaluation, ObservationBundleV1, and ranked action candidates.
-
-SessionPlane keeps these generic browser commands and role-addressed AI
-sessions on the same persistent profile and PageRegistry.
-
-Open or reuse the dedicated ChatGPT page during normal automated operation:
-
-```bash
-sessplane login --json
-```
-
-For Google OAuth or another sign-in flow that rejects an attached automation
-transport, use the explicit manual handoff. SessionPlane first closes its CDP
-browser and starts the same host browser with the same product-scoped
-SessionPlane profile, but with no CDP endpoint or Playwright attachment:
-
-```bash
-sessplane login --manual --json
-# Complete login in the visible dedicated browser window.
-sessplane login --resume --json
-```
-
-`--manual` refuses to interrupt bound session Pages. `--resume` closes only the
-exact SessionPlane-owned manual browser and relaunches the normal positive-port
-CDP runtime. Neither phase uses or mutates the user's personal/default browser
-profile, and neither performs CAPTCHA, OTP, or provider challenge bypass.
+Open or reuse the dedicated ChatGPT page during normal operation with
+sessplane login --json. For a ChatGPT sign-in flow that rejects attached
+automation transport, use sessplane login --manual --json, complete sign-in in
+the visible dedicated provider window, then run sessplane login --resume --json.
 
 Provider sessions support ChatGPT, Gemini, and Grok, including exact local file
-uploads. Provider-created downloadable files are captured into an owner-only,
-content-addressed artifact store and remain queryable after core restart:
-
-```bash
-sessplane send --session <sessionId> \
-  --prompt "Use the attached context and create result.zip" \
-  --file ./context.md --json
-
-sessplane artifact discover --session <sessionId> --json
-sessplane artifact capture --session <sessionId> --json
-sessplane artifact list --session <sessionId> --json
-sessplane artifact export <artifactId> --out ./result.zip
-```
-
-Artifact descriptors are bound to the exact `sessionId + generation` and store
-the provider identity, source descriptor, byte length, SHA-256, and durable
-relative path. Existing output files are never replaced unless `--overwrite`
-is explicit.
+uploads and durable artifact capture.
 
 ## Advanced ChatGPT Chat and code artifacts
 
@@ -279,14 +212,12 @@ available through the thin MCP adapter.
 executable. `doctor --json` verifies that selection and, when the core is
 running, reports the current Page bindings without changing browser focus.
 
-Installed or linked `sessplane` commands use one stable runtime directory
-independent of the caller's current directory:
-`${XDG_STATE_HOME:-$HOME/.local/state}/sessionplane`. Override it with
-`SESSIONPLANE_STATE_DIR` or `--state-dir` when tests or multiple isolated
-instances are needed. The artifact store defaults to `<state-dir>/artifacts/`;
-override it with `SESSIONPLANE_ARTIFACT_DIR`. Use
-`SESSIONPLANE_MAX_ARTIFACT_FILE_BYTES` to set the fail-closed per-artifact
-download limit.
+Installed or linked sessplane commands use exactly one production runtime
+directory: $HOME/.local/state/sessionplane. Production callers cannot create
+competing SessionPlane cores or profiles with --state-dir,
+SESSIONPLANE_STATE_DIR, or XDG_STATE_HOME; isolated runtime state is reserved
+for automated tests. The artifact store defaults under the canonical state
+directory and keeps the same configured per-artifact limits.
 
 ## Context packages and bundled skills
 

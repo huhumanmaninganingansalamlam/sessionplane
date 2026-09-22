@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url';
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temporaryRoot = mkdtempSync(path.join(tmpdir(), 'sessionplane-package-smoke-'));
 const prefix = path.join(temporaryRoot, 'global');
-const stateDir = path.join(temporaryRoot, 'state');
 
 try {
   const packed = run('npm', ['pack', '--silent', '--pack-destination', temporaryRoot], {
@@ -39,10 +38,14 @@ try {
     throw new Error('installed package must expose only the sessplane executable');
   }
 
-  run(sessplane, ['--help'], { cwd: temporaryRoot, capture: true });
+  const runtimeEnv = { ...process.env, HOME: temporaryRoot };
+  delete runtimeEnv.SESSIONPLANE_STATE_DIR;
+  delete runtimeEnv.XDG_STATE_HOME;
+
+  run(sessplane, ['--help'], { cwd: temporaryRoot, env: runtimeEnv, capture: true });
   const doctor = JSON.parse(run(sessplane, ['doctor', '--json'], {
     cwd: temporaryRoot,
-    env: { ...process.env, SESSIONPLANE_STATE_DIR: stateDir },
+    env: runtimeEnv,
     capture: true,
   }));
   if (doctor.requestOk !== true) throw new Error('installed sessplane doctor failed');

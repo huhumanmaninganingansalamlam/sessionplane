@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import test from 'node:test';
 
+import { callRpc, RpcClientError } from '../../src/cli/client.ts';
 import { runCli } from '../../src/cli/main.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
-import { invokeMcpTool } from '../../src/mcp/tools.ts';
+import { invokeMcpTool, McpToolNotFoundError } from '../../src/mcp/tools.ts';
 
 interface BrowserSnapshot {
   readonly snapshotId: string;
@@ -20,13 +21,14 @@ interface BrowserSnapshot {
   }>;
 }
 
-test('canonical CLI and MCP share one explicit browser Page and snapshot refs', async () => {
+test('internal browser diagnostics remain test-only while public browser tooling is absent', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-cli-mcp-'));
   const fixture = await startFixtureServer();
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const service = await startCore({
     config,
     browserHeadless: true,
+    enableInternalBrowserControlRpc: true,
     logger: silentLogger(),
   });
 
@@ -55,30 +57,33 @@ test('canonical CLI and MCP share one explicit browser Page and snapshot refs', 
       'browser.manual-login-unavailable',
     );
 
-    const createdRun = await runCliJson([
+    const blockedNewTab = await runCliJson([
       'new-tab',
       fixture.url,
       '--state-dir',
       config.stateDir,
       '--json',
     ]);
-    assert.equal(createdRun.code, 0, createdRun.stderr);
-    const created = JSON.parse(createdRun.stdout) as {
-      selectedPageKey: string;
-    };
+    assert.equal(blockedNewTab.code, 2);
+    assert.match(blockedNewTab.stderr, /Use Playwright for general browser automation/);
 
-    const snapshotRun = await runCliJson([
-      'snapshot',
-      '--page',
-      created.selectedPageKey,
-      '--max-nodes',
-      '30',
-      '--state-dir',
-      config.stateDir,
-      '--json',
-    ]);
-    assert.equal(snapshotRun.code, 0, snapshotRun.stderr);
-    const snapshot = JSON.parse(snapshotRun.stdout) as BrowserSnapshot;
+    const browserOwner = service.browserOwner;
+    assert.notEqual(browserOwner, null);
+    if (browserOwner === null) assert.fail('Expected browser owner');
+    const created = await browserOwner.createPage();
+    await created.page.goto(fixture.url, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    });
+    service.pageRegistry.refreshPage(created.binding.pageKey);
+
+    const snapshot = (await callRpc({
+      socketPath: config.socketPath,
+      method: 'browser.snapshot',
+      params: { pageKey: created.binding.pageKey, interactive: true, maxNodes: 30 },
+      timeoutMs: 5_000,
+      maxLineBytes: config.rpcMaxLineBytes,
+    })) as BrowserSnapshot;
     const input = snapshot.nodes.find((node) => node.name === 'Name');
     const button = snapshot.nodes.find((node) => node.name === 'Increment');
     assert.notEqual(input, undefined);
@@ -97,88 +102,123 @@ test('canonical CLI and MCP share one explicit browser Page and snapshot refs', 
       config.stateDir,
       '--json',
     ]);
-    assert.equal(typed.code, 0, typed.stderr);
+    assert.equal(typed.code, 2);
+    assert.match(typed.stderr, /Use Playwright for general browser automation/);
 
-    const clicked = await invokeMcpTool({
-      name: 'browser_click_ref',
-      arguments: {
-        pageKey: snapshot.pageKey,
-        snapshotId: snapshot.snapshotId,
-        ref: button?.ref,
-      },
-      socketPath: config.socketPath,
-      timeoutMs: 5_000,
-      maxLineBytes: config.rpcMaxLineBytes,
-    });
-    assert.equal(clicked.isError, false);
+    await assert.rejects(
+      invokeMcpTool({
+        name: 'browser_click_ref',
+        arguments: {
+          pageKey: snapshot.pageKey,
+          snapshotId: snapshot.snapshotId,
+          ref: button?.ref,
+        },
+        socketPath: config.socketPath,
+        timeoutMs: 5_000,
+        maxLineBytes: config.rpcMaxLineBytes,
+      }),
+      (error: unknown) => error instanceof McpToolNotFoundError,
+    );
 
     const evaluated = await runCliJson([
       'evaluate',
       '--script',
-      `({ name: document.querySelector('#name').value, count: window.count })`,
+      "document.body.textContent = 'mutated'",
       '--page',
       snapshot.pageKey,
       '--state-dir',
       config.stateDir,
       '--json',
     ]);
-    assert.equal(evaluated.code, 0, evaluated.stderr);
-    assert.deepEqual(JSON.parse(evaluated.stdout).value, { name: 'Ada', count: 1 });
+    assert.equal(evaluated.code, 2);
+    assert.match(evaluated.stderr, /Use Playwright for general browser automation/);
 
-    const attachConsole = await runCliJson([
-      'console',
-      '--clear',
-      '--page',
-      snapshot.pageKey,
-      '--state-dir',
-      config.stateDir,
-      '--json',
-    ]);
-    assert.equal(attachConsole.code, 0, attachConsole.stderr);
-    const emittedConsole = await runCliJson([
-      'evaluate',
-      '--script',
-      `for (let index = 0; index < 60; index += 1) console.log('canonical-' + index)`,
-      '--page',
-      snapshot.pageKey,
-      '--state-dir',
-      config.stateDir,
-      '--json',
-    ]);
-    assert.equal(emittedConsole.code, 0, emittedConsole.stderr);
-    const canonicalConsole = await runCliJson([
-      'console',
-      '--page',
-      snapshot.pageKey,
-      '--state-dir',
-      config.stateDir,
-      '--json',
-    ]);
-    assert.equal(canonicalConsole.code, 0, canonicalConsole.stderr);
+    await callRpc({
+      socketPath: config.socketPath,
+      method: 'browser.console',
+      params: { pageKey: snapshot.pageKey, clear: true },
+      timeoutMs: 5_000,
+      maxLineBytes: config.rpcMaxLineBytes,
+    });
+    await created.page.evaluate(() => {
+      for (let index = 0; index < 60; index += 1) console.log('canonical-' + index);
+    });
+    const canonicalConsole = (await callRpc({
+      socketPath: config.socketPath,
+      method: 'browser.console',
+      params: { pageKey: snapshot.pageKey, clear: false },
+      timeoutMs: 5_000,
+      maxLineBytes: config.rpcMaxLineBytes,
+    })) as { entries: readonly unknown[] };
     assert.equal(
-      (JSON.parse(canonicalConsole.stdout) as { entries: readonly unknown[] }).entries.length,
+      canonicalConsole.entries.length,
       60,
       'canonical SessionPlane console keeps its all-buffer default',
     );
 
-    const bundle = await invokeMcpTool({
-      name: 'browser_observe_bundle',
-      arguments: { pageKey: snapshot.pageKey, includeBoxes: true, maxTextChars: 500 },
-      socketPath: config.socketPath,
-      timeoutMs: 5_000,
-      maxLineBytes: config.rpcMaxLineBytes,
-    });
-    assert.equal(bundle.isError, false);
-    assert.equal(bundle.structuredContent.pageKey, snapshot.pageKey);
-    assert.equal(bundle.structuredContent.schemaVersion, 'observation-bundle-v1');
+    await assert.rejects(
+      invokeMcpTool({
+        name: 'browser_observe_bundle',
+        arguments: { pageKey: snapshot.pageKey, includeBoxes: true, maxTextChars: 500 },
+        socketPath: config.socketPath,
+        timeoutMs: 5_000,
+        maxLineBytes: config.rpcMaxLineBytes,
+      }),
+      (error: unknown) => error instanceof McpToolNotFoundError,
+    );
 
     const publicHelp = await runCliJson(['--help']);
     assert.equal(publicHelp.code, 0, publicHelp.stderr);
-    assert.match(publicHelp.stdout, /Browser automation:/);
-    assert.match(publicHelp.stdout, /snapshot/);
+    assert.doesNotMatch(publicHelp.stdout, /Browser automation:|new-tab|snapshot|mouse-click/);
+    assert.match(publicHelp.stdout, /use Playwright/i);
+    assert.doesNotMatch(publicHelp.stdout, /--state-dir/);
+
+    const publicBrowser = await runCliJson(['new-tab', fixture.url, '--json']);
+    assert.equal(publicBrowser.code, 2);
+    assert.match(publicBrowser.stderr, /Use Playwright for general browser automation/);
+
+    const competingState = path.join(root, 'competing-sessionplane-state');
+    const competingServe = await runCliJson([
+      'serve',
+      '--state-dir',
+      competingState,
+      '--json',
+    ]);
+    assert.equal(competingServe.code, 2);
+    assert.match(competingServe.stderr, /one canonical runtime state/);
+    assert.equal(existsSync(competingState), false);
   } finally {
     await service.close();
     await closeServer(fixture.server);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('production core omits generic browser RPC methods', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-provider-only-rpc-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const service = await startCore({
+    config,
+    startBrowser: false,
+    logger: silentLogger(),
+  });
+
+  try {
+    await assert.rejects(
+      callRpc({
+        socketPath: config.socketPath,
+        method: 'browser.tabs',
+        params: {},
+        timeoutMs: 5_000,
+        maxLineBytes: config.rpcMaxLineBytes,
+      }),
+      (error: unknown) =>
+        error instanceof RpcClientError &&
+        error.code === -32601 &&
+        (error.data as Record<string, unknown>).errorCode === 'input.invalid',
+    );
+  } finally {
+    await service.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

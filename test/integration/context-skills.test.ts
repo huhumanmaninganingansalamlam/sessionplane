@@ -172,13 +172,18 @@ test('bundled skills are served and installed by the SessionPlane CLI', async ()
     const names = (JSON.parse(listed.stdout) as {
       readonly skills: readonly Array<{ readonly name: string }>;
     }).skills.map((skill) => skill.name);
-    for (const name of ['browser', 'search', 'sessionplane', 'vision-click', 'web-ai']) {
+    for (const name of ['search', 'sessionplane', 'web-ai']) {
       assert.equal(names.includes(name), true, name);
     }
+    assert.equal(names.includes('browser'), false);
+    assert.equal(names.includes('vision-click'), false);
 
     const core = await runSessplane(['skills', 'get', 'core', '--full', '--json']);
     assert.equal(core.code, 0, core.stderr);
-    assert.match((JSON.parse(core.stdout) as { readonly content: string }).content, /skill:browser/);
+    assert.doesNotMatch(
+      (JSON.parse(core.stdout) as { readonly content: string }).content,
+      /skill:(?:browser|vision-click)/,
+    );
 
     const target = path.join(root, 'skills');
     const installed = await runSessplane([
@@ -187,15 +192,14 @@ test('bundled skills are served and installed by the SessionPlane CLI', async ()
       '--target',
       target,
       '--skill',
-      'browser',
-      '--skill',
       'web-ai',
       '--skill',
       'sessionplane',
       '--json',
     ]);
     assert.equal(installed.code, 0, installed.stderr);
-    assert.equal(existsSync(path.join(target, 'browser', 'SKILL.md')), true);
+    assert.equal(existsSync(path.join(target, 'browser', 'SKILL.md')), false);
+    assert.equal(existsSync(path.join(target, 'vision-click', 'SKILL.md')), false);
     assert.equal(existsSync(path.join(target, 'web-ai', 'SKILL.md')), true);
     assert.equal(existsSync(path.join(target, 'sessionplane', 'SKILL.md')), true);
     const webAiSkill = readFileSync(path.join(target, 'web-ai', 'SKILL.md'), 'utf8');
@@ -203,6 +207,8 @@ test('bundled skills are served and installed by the SessionPlane CLI', async ()
     assert.match(webAiSkill, /Never use Gemini or Grok as an implicit fallback for ChatGPT/);
     assert.match(webAiSkill, /pass `--model Pro`/);
     assert.match(coreSkill, /Never switch providers as recovery/);
+    assert.match(coreSkill, /general browser skill/);
+    assert.match(webAiSkill, /browser automation belongs to Playwright/);
     assert.match(coreSkill, /`model=Pro` is a model-family intent/);
 
     const protectedRun = await runSessplane([
@@ -215,7 +221,8 @@ test('bundled skills are served and installed by the SessionPlane CLI', async ()
       '--json',
     ]);
     assert.equal(protectedRun.code, 2);
-    assert.match(protectedRun.stderr, /input\.output-exists|Refusing to replace/);
+    assert.match(protectedRun.stderr, /input\.skill-not-found|Unknown skill: browser/);
+    assert.equal(existsSync(path.join(target, 'browser')), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -46,22 +46,22 @@ export function registerBrowserControlMethods(
       url: z.string().url().optional(),
       activate: z.boolean().optional(),
     }).strict(),
-    async ({ url, activate }) => await browser.newPage(
+    async ({ url, activate }) => await wrap(() => browser.newPage(
       url,
       activate === undefined ? undefined : { activate },
-    ),
+    )),
   );
   router.register(
     'browser.close',
     z.object(OptionalPage).strict(),
-    async ({ pageKey }) => await browser.closePage(pageKey),
+    async ({ pageKey }) => await wrap(() => browser.closePage(pageKey)),
   );
   router.register(
     'browser.cleanup',
     z.object({ keepPageKey: PageKey.optional() }).strict(),
-    async ({ keepPageKey }) => await browser.cleanup({
+    async ({ keepPageKey }) => await wrap(() => browser.cleanup({
       ...(keepPageKey === undefined ? {} : { keepPageKey }),
-    }),
+    })),
   );
   router.register(
     'browser.navigate',

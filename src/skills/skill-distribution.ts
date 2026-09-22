@@ -14,6 +14,8 @@ import { fileURLToPath } from 'node:url';
 
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 
+const RETIRED_SKILL_NAMES = new Set(['browser', 'vision-click']);
+
 export interface SkillDescriptor {
   readonly name: string;
   readonly path: string;
@@ -147,6 +149,7 @@ export class SkillDistributionService {
   }
 
   #descriptor(name: string): SkillDescriptor | null {
+    if (RETIRED_SKILL_NAMES.has(name)) return null;
     const directory = path.join(this.#skillsDir, name);
     const skillFile = path.join(directory, 'SKILL.md');
     if (!existsSync(skillFile) || !lstatSync(skillFile).isFile()) return null;

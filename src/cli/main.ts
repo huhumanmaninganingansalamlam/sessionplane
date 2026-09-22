@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import {
@@ -145,6 +147,51 @@ const VALUE_OPTIONS = new Set([
   'project-url',
 ]);
 
+const INTERNAL_BROWSER_COMMANDS = new Set([
+  'tabs',
+  'browser-status',
+  'browser-start',
+  'browser-stop',
+  'browser-reset',
+  'active-tab',
+  'select-tab',
+  'tab-switch',
+  'new-tab',
+  'tab-close',
+  'tab-cleanup',
+  'navigate',
+  'reload',
+  'back',
+  'forward',
+  'resize',
+  'snapshot',
+  'screenshot',
+  'text',
+  'get-dom',
+  'click',
+  'type',
+  'press',
+  'hover',
+  'select',
+  'check',
+  'uncheck',
+  'upload',
+  'drag',
+  'mouse-click',
+  'move-mouse',
+  'mouse-down',
+  'mouse-up',
+  'scroll',
+  'wait-for-selector',
+  'wait-for-text',
+  'wait-for',
+  'console',
+  'network',
+  'evaluate',
+  'observe-bundle',
+  'observe-actions',
+]);
+
 export async function runCli(
   argv: readonly string[],
   io: CliIo = {
@@ -161,10 +208,32 @@ export async function runCli(
     return 2;
   }
 
+  const command = parsed.words[0] ?? 'help';
+  let stateDir = parsed.options['state-dir'];
+  if (command === 'serve') {
+    const canonical = path.join(homedir(), '.local', 'state', 'sessionplane');
+    const requested = stateDir ?? process.env.SESSIONPLANE_STATE_DIR;
+    if (
+      requested !== undefined &&
+      requested !== '' &&
+      path.resolve(requested) !== canonical
+    ) {
+      writeCliError(
+        io,
+        parsed.json,
+        new Error(
+          'Installed SessionPlane uses one canonical runtime state: ' +
+            canonical +
+            '. Isolated --state-dir runtimes are test-only.',
+        ),
+      );
+      return 2;
+    }
+    stateDir = canonical;
+  }
+
   const config = resolveConfig({
-    ...(parsed.options['state-dir'] === undefined
-      ? {}
-      : { stateDir: parsed.options['state-dir'] }),
+    ...(stateDir === undefined ? {} : { stateDir }),
     ...(parsed.options.socket === undefined ? {} : { socketPath: parsed.options.socket }),
     ...(parsed.options.browser === undefined
       ? {}
@@ -175,7 +244,12 @@ export async function runCli(
   });
 
   try {
-    const command = parsed.words[0] ?? 'help';
+    if (INTERNAL_BROWSER_COMMANDS.has(command)) {
+      throw new Error(
+        `Generic browser command is not part of the public SessionPlane runtime: ${command}. ` +
+          'Use Playwright for general browser automation.',
+      );
+    }
     switch (command) {
       case 'serve':
         await serveForever(config);
@@ -1506,34 +1580,15 @@ function helpText(): string {
   return `SessionPlane ${SESSIONPLANE_VERSION}
 
 Usage:
-  sessplane serve [--state-dir PATH]
+  sessplane serve
   sessplane health [--json] [--socket PATH]
-  sessplane doctor [--json] [--state-dir PATH]
+  sessplane doctor [--json]
   sessplane browser-list [--browser NAME] [--browser-executable PATH]
   sessplane login [--manual|--resume] [--json] [--url HTTPS_URL]
 
-Browser automation:
-  sessplane browser-status | browser-start | browser-stop
-  sessplane browser-reset --force
-  sessplane tabs | active-tab
-  sessplane new-tab [URL] [--no-activate]
-  sessplane select-tab PAGE_KEY
-  sessplane tab-close [PAGE_KEY]
-  sessplane navigate URL [--page PAGE_KEY]
-  sessplane snapshot [--page PAGE_KEY] [--all-nodes] [--max-nodes N]
-  sessplane click REF [--snapshot-id ID]
-  sessplane type REF --text TEXT
-  sessplane press [REF] KEY
-  sessplane hover|check|uncheck REF
-  sessplane select REF --value VALUE[,VALUE]
-  sessplane upload REF FILE...
-  sessplane drag SOURCE_REF TARGET_REF
-  sessplane screenshot --out PATH [--full-page]
-  sessplane text [--selector CSS] | get-dom [--selector CSS] [--max-chars N]
-  sessplane console [--limit N] [--clear] | network [--clear] | evaluate --script JS
-  sessplane wait-for-selector CSS | wait-for-text TEXT | wait-for REF_OR_TEXT
-  sessplane observe-bundle [--screenshot --out PATH --boxes] [--max-chars N] [--max-nodes N]
-  sessplane observe-actions INSTRUCTION [--top-n N]
+Provider browser runtime:
+  SessionPlane owns browser state only for supported AI provider sessions.
+  General website automation is intentionally not exposed; use Playwright.
 
 Fetch, search, and research:
   sessplane fetch URL [--max-bytes N] [--max-redirects N] [--include-html]
@@ -1595,9 +1650,7 @@ Skill distribution:
 Global options:
   --client-id ID       Stable caller identity
   --request-id ID      Stable mutation identity for exact retries
-  --page PAGE_KEY      Explicit browser Page identity
   --json               Emit one compact JSON object
-  --state-dir PATH     Override runtime state directory
   --socket PATH        Override core Unix socket
   --browser NAME       auto|chrome|chromium|edge|brave|custom
   --browser-executable PATH  Explicit host Chromium-family executable

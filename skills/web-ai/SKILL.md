@@ -9,6 +9,11 @@ The core owns provider Pages and continues observation after the calling shell
 or MCP subprocess exits. Preserve `teamId`, `roleKey`, `sessionId`, and
 `generation`; never select a chat by active tab or title.
 
+Use SessionPlane only for ChatGPT, Gemini, and Grok provider workflows. General
+browser automation belongs to Playwright/the general browser skill. Do not
+start another SessionPlane core, do not pass --state-dir, and do not use
+SessionPlane to log into or manipulate unrelated websites.
+
 ```bash
 sessplane team create --name issue-123 --request-id issue-123-team --json
 sessplane role add "$TEAM_ID" expert.backend --type expert \

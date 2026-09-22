@@ -7,6 +7,14 @@ description: Route durable role-addressed AI chat sessions through the SessionPl
 
 SessionPlane is a thin client workflow over one long-running local core. The core owns the browser profile, exact Playwright Pages, SQLite state, session actors, observers, recovery probes, and mutation serialization. Do not create competing browser, database, actor, or observer state in the agent process.
 
+SessionPlane is provider-only, not a general browser tool. Use it only for
+durable ChatGPT, Gemini, and Grok workflows. For Notion, GitHub, arbitrary
+website login/navigation, forms, screenshots, or other browser automation, use
+the installed Playwright/general browser skill instead. Never start a second
+SessionPlane core, never pass --state-dir, and never use SessionPlane browser
+primitives as a substitute for Playwright. If the canonical core is
+unavailable, surface that condition instead of creating an isolated runtime.
+
 ## Required identity workflow
 
 1. Preserve the durable `teamId` in task state.

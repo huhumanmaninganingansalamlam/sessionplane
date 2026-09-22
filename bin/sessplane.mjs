@@ -2,11 +2,10 @@
 
 import { ensureSessionPlaneStateDir } from './runtime-state.mjs';
 
-ensureSessionPlaneStateDir();
-
 const cliUrl = new URL('../dist/cli/main.js', import.meta.url);
 
 try {
+  ensureSessionPlaneStateDir();
   const { main } = await import(cliUrl.href);
   await main();
 } catch (error) {

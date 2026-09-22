@@ -57,6 +57,7 @@ export class BrowserControlService {
   readonly #browserOwner: BrowserOwner | null;
   readonly #pageRegistry: PageRegistry;
   readonly #onStarted: (() => Promise<unknown>) | null;
+  readonly #genericMutationsEnabled: boolean;
   readonly #refs = new BrowserRefSnapshotStore();
   readonly #diagnostics = new Map<string, DiagnosticBuffer>();
   readonly #attachedPages = new WeakSet<Page>();
@@ -66,10 +67,12 @@ export class BrowserControlService {
     readonly browserOwner: BrowserOwner | null;
     readonly pageRegistry: PageRegistry;
     readonly onStarted?: (() => Promise<unknown>) | undefined;
+    readonly genericMutationsEnabled?: boolean | undefined;
   }) {
     this.#browserOwner = options.browserOwner;
     this.#pageRegistry = options.pageRegistry;
     this.#onStarted = options.onStarted ?? null;
+    this.#genericMutationsEnabled = options.genericMutationsEnabled ?? false;
   }
 
   runtimeStatus(): Readonly<Record<string, unknown>> {
@@ -104,6 +107,7 @@ export class BrowserControlService {
   }
 
   async resetRuntime(force: boolean): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('browser-reset');
     if (!force) {
       throw new BrowserControlError(
         'input.confirmation-required',
@@ -153,6 +157,7 @@ export class BrowserControlService {
     url?: string,
     options: { readonly activate?: boolean } = {},
   ): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('new-tab');
     const owner = this.#requireBrowserOwner();
     const activate = options.activate ?? true;
     const created = await owner.createPage();
@@ -176,6 +181,7 @@ export class BrowserControlService {
   }
 
   async closePage(pageKey?: string): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('tab-close');
     const resolved = this.#resolvePage(pageKey);
     await resolved.page.close();
     this.#refs.clear(resolved.binding.pageKey);
@@ -194,6 +200,7 @@ export class BrowserControlService {
   async cleanup(options: {
     readonly keepPageKey?: string | undefined;
   } = {}): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('browser-cleanup');
     const keepPageKey = options.keepPageKey ?? this.#selectedPageKey;
     const bindings = this.#pageRegistry.listBindings({ includeClosed: false });
     const closed: string[] = [];
@@ -216,6 +223,7 @@ export class BrowserControlService {
     readonly pageKey?: string | undefined;
     readonly url: string;
   }): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('navigate');
     const resolved = this.#resolvePage(input.pageKey);
     await resolved.page.goto(validateNavigationUrl(input.url), {
       waitUntil: 'domcontentloaded',
@@ -226,6 +234,7 @@ export class BrowserControlService {
   }
 
   async reload(pageKey?: string): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('reload');
     const resolved = this.#resolvePage(pageKey);
     await resolved.page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
     const binding = this.#pageRegistry.refreshPage(resolved.binding.pageKey);
@@ -236,6 +245,7 @@ export class BrowserControlService {
     direction: 'back' | 'forward',
     pageKey?: string,
   ): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('history');
     const resolved = this.#resolvePage(pageKey);
     if (direction === 'back') {
       await resolved.page.goBack({ waitUntil: 'domcontentloaded', timeout: 30_000 });
@@ -251,6 +261,7 @@ export class BrowserControlService {
     readonly width: number;
     readonly height: number;
   }): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('resize');
     const resolved = this.#resolvePage(input.pageKey);
     await resolved.page.setViewportSize({ width: input.width, height: input.height });
     return {
@@ -283,6 +294,7 @@ export class BrowserControlService {
     readonly button?: 'left' | 'right' | 'middle' | undefined;
     readonly clickCount?: number | undefined;
   }): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('click');
     return await this.#withElement(input, async (element, pageKey) => {
       await element.click({
         button: input.button ?? 'left',
@@ -300,6 +312,7 @@ export class BrowserControlService {
     readonly text: string;
     readonly append?: boolean | undefined;
   }): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('type');
     return await this.#withElement(input, async (element, pageKey) => {
       if (input.append === true) {
         await element.type(input.text, { timeout: 10_000 });
@@ -321,6 +334,7 @@ export class BrowserControlService {
     readonly snapshotId?: string | undefined;
     readonly key: string;
   }): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('press');
     if (input.ref !== undefined) {
       return await this.#withElement(
         { ...input, ref: input.ref },
@@ -345,6 +359,7 @@ export class BrowserControlService {
     readonly ref: string;
     readonly snapshotId?: string | undefined;
   }): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('hover');
     return await this.#withElement(input, async (element, pageKey) => {
       await element.hover({ timeout: 10_000 });
       return { requestOk: true, pageKey, ref: input.ref, action: 'hover' };
@@ -357,6 +372,7 @@ export class BrowserControlService {
     readonly snapshotId?: string | undefined;
     readonly values: readonly string[];
   }): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('select');
     return await this.#withElement(input, async (element, pageKey) => {
       const selected = await element.selectOption(input.values.map((value) => ({ value })));
       return { requestOk: true, pageKey, ref: input.ref, action: 'select', selected };
@@ -369,6 +385,7 @@ export class BrowserControlService {
     readonly snapshotId?: string | undefined;
     readonly checked: boolean;
   }): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation(input.checked ? 'check' : 'uncheck');
     return await this.#withElement(input, async (element, pageKey) => {
       if (input.checked) {
         await element.check({ timeout: 10_000 });
@@ -390,6 +407,7 @@ export class BrowserControlService {
     readonly snapshotId?: string | undefined;
     readonly files: readonly string[];
   }): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('upload');
     const files = input.files.map((file) => path.resolve(file));
     for (const file of files) {
       if (!existsSync(file)) {
@@ -415,6 +433,7 @@ export class BrowserControlService {
     readonly targetRef: string;
     readonly snapshotId?: string | undefined;
   }): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('drag');
     const resolved = this.#resolvePage(input.pageKey);
     const binding = this.#pageRegistry.refreshPage(resolved.binding.pageKey);
     const source = await this.#refs.resolve({
@@ -471,6 +490,7 @@ export class BrowserControlService {
     readonly y?: number | undefined;
     readonly button?: 'left' | 'right' | 'middle' | undefined;
   }): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('mouse');
     const resolved = this.#resolvePage(input.pageKey);
     if (input.action === 'click' || input.action === 'move') {
       if (input.x === undefined || input.y === undefined) {
@@ -502,6 +522,7 @@ export class BrowserControlService {
     readonly deltaX: number;
     readonly deltaY: number;
   }): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('scroll');
     const resolved = this.#resolvePage(input.pageKey);
     await resolved.page.mouse.wheel(input.deltaX, input.deltaY);
     return {
@@ -626,6 +647,7 @@ export class BrowserControlService {
     readonly pageKey?: string | undefined;
     readonly script: string;
   }): Promise<Readonly<Record<string, unknown>>> {
+    this.#requireGenericMutation('evaluate');
     const resolved = this.#resolvePage(input.pageKey);
     const value = await resolved.page.evaluate((source) => (0, eval)(source), input.script);
     return { requestOk: true, pageKey: resolved.binding.pageKey, value };
@@ -738,6 +760,15 @@ export class BrowserControlService {
       throw new BrowserControlError('browser.unavailable', 'Browser owner is disabled');
     }
     return this.#browserOwner;
+  }
+
+  #requireGenericMutation(action: string): void {
+    if (this.#genericMutationsEnabled) return;
+    throw new BrowserControlError(
+      'capability.unsupported',
+      `Generic browser mutation is disabled in SessionPlane runtime: ${action}. ` +
+        'Use Playwright for general browser automation.',
+    );
   }
 
   #resolvePage(pageKey?: string): {
