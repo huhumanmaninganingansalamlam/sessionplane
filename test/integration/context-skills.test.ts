@@ -210,6 +210,12 @@ test('bundled skills are served and installed by the SessionPlane CLI', async ()
     assert.match(coreSkill, /general browser skill/);
     assert.match(webAiSkill, /browser automation belongs to Playwright/);
     assert.match(coreSkill, /`model=Pro` is a model-family intent/);
+    assert.match(coreSkill, /Do not preflight or infer Pro availability from `\/backend-api\/models`/);
+    assert.match(coreSkill, /catalog omission alone is not a blocker/);
+    assert.match(webAiSkill, /Do not inspect `\/backend-api\/models`/);
+    assert.match(webAiSkill, /Instant-only capability feed while the live composer picker still exposes Pro/);
+    assert.match(webAiSkill, /Only a typed pre-submit `provider\.model-unavailable`/);
+    assert.match(webAiSkill, /Do not call it a rate limit unless SessionPlane reports/);
 
     const protectedRun = await runSessplane([
       'skills',

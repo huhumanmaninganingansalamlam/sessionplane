@@ -36,8 +36,10 @@ unavailable, surface that condition instead of creating an isolated runtime.
 
 - Provider is part of durable session identity. Preserve the current provider when reconstructing or replacing a session. Never switch providers as recovery for `waitExpired`, `submission_unknown`, model unavailability, consent/interstitial UI, rate limits, or observation failure. Use another provider only when the user or caller explicitly requested that provider.
 - For ChatGPT, `model=Pro` is a model-family intent, not a version string. Let SessionPlane inspect the current model menu and choose the highest enabled Pro-family option; if the highest option is unavailable or disabled before submit, use the next enabled Pro-family option.
+- Do not preflight or infer Pro availability from `/backend-api/models`, a partial model list, or one visible picker snapshot. ChatGPT can expose an Instant-only capability feed while the live composer picker still offers Pro. Submit the semantic `model=Pro` request through SessionPlane and let the provider adapter reconcile capability data with the live picker.
 - Do not hard-code labels such as `6 Pro`, `5.6 Pro`, or future version numbers into agent logic. Preserve the `Pro` intent across fresh sessions and generations.
-- If no enabled Pro-family option is available before submit, propagate the typed model-unavailable result. Do not silently create a Gemini or Grok session.
+- Treat Pro as unavailable only when the current SessionPlane submission itself returns the typed pre-submit `provider.model-unavailable` result after its live-picker fallback. A catalog omission alone is not a blocker and must not be used to mark the task or product blocked. Do not silently create a Gemini or Grok session.
+- Do not diagnose a rate limit from missing model entries. Call it rate limiting only when SessionPlane returns structured 429/deferred evidence or verified visible provider rate-limit evidence.
 - Once submit may have happened, provider/model fallback must not resend the prompt. Keep the exact `sessionId + generation` and observe or surface the ambiguity.
 
 ## Team coordination

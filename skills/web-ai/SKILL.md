@@ -41,8 +41,16 @@ For ChatGPT, pass `--model Pro` when the intent is the best currently available
 Pro-family model. SessionPlane discovers the live model menu, selects the
 highest enabled Pro-family option, and falls back to the next enabled Pro option
 before submit. Do not encode version labels such as `6 Pro` or `5.6 Pro` in the
-agent workflow. If no Pro option is available, report the typed pre-submit error
-instead of silently opening another provider.
+agent workflow.
+
+Do not inspect `/backend-api/models`, a partial model list, or one picker snapshot
+and declare Pro unavailable before calling SessionPlane. ChatGPT can return an
+Instant-only capability feed while the live composer picker still exposes Pro.
+Let `sessplane send --model Pro` perform both capability and live-picker
+reconciliation. Only a typed pre-submit `provider.model-unavailable` returned by
+that current submission establishes Pro unavailability. A missing catalog entry
+is not a task blocker. Do not call it a rate limit unless SessionPlane reports
+structured 429/deferred evidence or verified visible provider rate-limit evidence.
 
 `provider.human-action-required` means a visible browser verification is open.
 Do not retry in a loop and do not attempt to click or bypass it. Ask the user to
