@@ -695,6 +695,104 @@ test('ChatGPT submission falls back from a locked latest Pro preset to the next 
     rmSync(root, { recursive: true, force: true });
   }
 });
+test('ChatGPT submission uses live intelligence slider when capability feed exposes only Instant', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-live-slider-fallback-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  const cases = [
+    {
+      name: 'semantic Pro',
+      model: 'Pro',
+      effort: null,
+      expectedVersion: 'latest',
+      expectedPreset: '4',
+    },
+    {
+      name: 'exact GPT-5.6 Pro',
+      model: 'GPT-5.6 Pro',
+      effort: null,
+      expectedVersion: '5.6',
+      expectedPreset: '4',
+    },
+    {
+      name: 'Extra High effort',
+      model: null,
+      effort: 'Extra High',
+      expectedVersion: 'latest',
+      expectedPreset: '3',
+    },
+  ] as const;
+
+  try {
+    await owner.start();
+    for (const [index, testCase] of cases.entries()) {
+      const created = await owner.createPage();
+      await routeIntelligenceFixture(created.page, {
+        latestProLocked: false,
+        selectedVersion: 'latest',
+        selectedPreset: 0,
+        backendPresets: 'instant-only',
+      });
+      await created.page.goto('https://chatgpt.com/');
+      registry.refreshPage(created.binding.pageKey);
+      const sessionId = 'session-live-slider-fallback-' + String(index);
+      registry.reservePage(created.binding.pageKey, {
+        sessionId,
+        generation: 1,
+        conversationId: null,
+      });
+      const submission = new ChatGptSubmission({
+        page: created.page,
+        pageKey: created.binding.pageKey,
+        pageRegistry: registry,
+        request: {
+          session: sessionSnapshot({
+            sessionId,
+            pageKey: created.binding.pageKey,
+          }),
+          generation: 1,
+          prompt: 'Prepare only with incomplete capabilities: ' + testCase.name,
+          model: testCase.model,
+          effort: testCase.effort,
+        },
+        acknowledgementTimeoutMs: 500,
+      });
+
+      await submission.prepare();
+      assert.equal(
+        await created.page
+          .locator('[data-model-reasoning-effort-slider] [role="slider"]')
+          .getAttribute('aria-valuenow'),
+        testCase.expectedPreset,
+        testCase.name,
+      );
+      assert.equal(
+        await created.page
+          .locator(
+            '[data-testid="composer-model-picker-slider-advanced-view"] [role="menuitemradio"][aria-checked="true"]',
+          )
+          .getAttribute('data-version-id'),
+        testCase.expectedVersion,
+        testCase.name,
+      );
+      assert.equal(
+        await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
+        0,
+        testCase.name,
+      );
+      await created.page.close();
+    }
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ChatGPT submission does not classify the ordinary intelligence picker as Work', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-intelligence-chat-'));
   const registry = new PageRegistry();
@@ -1063,6 +1161,7 @@ async function routeIntelligenceFixture(
     readonly latestProLocked: boolean;
     readonly selectedVersion: 'latest' | '5.6';
     readonly selectedPreset: number;
+    readonly backendPresets?: 'complete' | 'instant-only';
   },
 ): Promise<void> {
   await page.route('https://chatgpt.com/**', async (route) => {
@@ -1079,7 +1178,7 @@ async function routeIntelligenceFixture(
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify(intelligenceModelsFixture()),
+        body: JSON.stringify(intelligenceModelsFixture(options.backendPresets ?? 'complete')),
       });
       return;
     }
@@ -1091,7 +1190,30 @@ async function routeIntelligenceFixture(
   });
 }
 
-function intelligenceModelsFixture() {
+function intelligenceModelsFixture(mode: 'complete' | 'instant-only' = 'complete') {
+  if (mode === 'instant-only') {
+    return {
+      default_model_slug: 'auto',
+      model_picker_version: 2,
+      versions: [
+        {
+          id: '5.6',
+          display_text: 'Latest • 5.6',
+          display_text_for_intelligence: 'GPT-5.6 Sol',
+          enabled: true,
+          intelligence_presets: [
+            {
+              title: 'Instant',
+              model_slug: 'gpt-5-6',
+              lane: 'instant',
+              preset_type: 'available',
+            },
+          ],
+        },
+        { id: 'auto', display_text: 'Auto', enabled: true, intelligence_presets: [] },
+      ],
+    };
+  }
   return {
     default_model_slug: 'gpt-5-6',
     model_picker_version: 2,
@@ -1209,11 +1331,14 @@ function chatGptIntelligenceFixture(options: {
     '<div data-testid="composer-intelligence-picker-content" role="group">',
     '<div id="picker-root" data-expanded="false"><div role="menuitem" tabindex="0">Model selection</div></div>',
     '<div data-testid="composer-model-picker-slider-simple-view" data-active="true">',
+    '<div id="slider-control" role="menuitem" tabindex="0" aria-label="Performance">',
     '<div data-model-reasoning-effort-slider><span data-locked="false"></span>',
     dots,
     '<span role="slider" tabindex="-1" style="display:inline-block;width:120px;height:20px" aria-valuemin="0" aria-valuemax="4" aria-valuenow="' +
       String(options.selectedPreset) +
       '"></span></div></div>',
+    '<span id="slider-announcement"></span>',
+    '</div>',
     '<div data-testid="composer-model-picker-slider-advanced-view" data-active="false">',
     '<div role="menuitemradio" data-version-id="latest" aria-checked="' +
       String(options.selectedVersion === 'latest') +
@@ -1240,6 +1365,8 @@ function chatGptIntelligenceFixture(options: {
     'const simple=document.querySelector("[data-testid=\\"composer-model-picker-slider-simple-view\\"]");',
     'const advanced=document.querySelector("[data-testid=\\"composer-model-picker-slider-advanced-view\\"]");',
     'const slider=document.querySelector("[role=\\"slider\\"]");',
+    'const sliderControl=document.querySelector("#slider-control");',
+    'const announcement=document.querySelector("#slider-announcement");',
     'const dotNodes=Array.from(document.querySelectorAll("[data-dot]"));',
     'const update=()=>{button.textContent=labels[selectedPreset];slider.setAttribute("aria-valuenow",String(selectedPreset));dotNodes.forEach((dot,index)=>{dot.setAttribute("data-locked",String(lockedByVersion[selectedVersion][index]));dot.setAttribute("data-selected",String(index<=selectedPreset));});for(const radio of advanced.querySelectorAll("[role=\\"menuitemradio\\"]")){const checked=radio.getAttribute("data-version-id")===selectedVersion;radio.setAttribute("aria-checked",String(checked));radio.setAttribute("data-state",checked?"checked":"unchecked");}};',
     'button.addEventListener("click",()=>{menu.hidden=false;menu.setAttribute("data-state","open");button.setAttribute("data-state","open");});',
@@ -1247,7 +1374,8 @@ function chatGptIntelligenceFixture(options: {
     'for(const radio of advanced.querySelectorAll("[role=\\"menuitemradio\\"]")){radio.addEventListener("click",()=>{selectedVersion=radio.getAttribute("data-version-id");selectedPreset=Math.min(selectedPreset,3);root.setAttribute("data-expanded","false");simple.setAttribute("data-active","true");advanced.setAttribute("data-active","false");update();});}',
     'slider.addEventListener("keydown",(event)=>{if(event.key!=="ArrowLeft"&&event.key!=="ArrowRight")return;const direction=event.key==="ArrowRight"?1:-1;const next=Math.max(0,Math.min(4,selectedPreset+direction));if(lockedByVersion[selectedVersion][next])return;selectedPreset=next;update();});',
     'document.querySelector("[data-testid=\\"send-button\\"]").addEventListener("click",()=>{window.sendCount+=1;});',
-    'update();',
+    'sliderControl.addEventListener("keydown",(event)=>{if(event.key!=="ArrowLeft"&&event.key!=="ArrowRight")return;const direction=event.key==="ArrowRight"?1:-1;const next=Math.max(0,Math.min(4,selectedPreset+direction));if(lockedByVersion[selectedVersion][next])return;selectedPreset=next;update();announcement.textContent=labels[selectedPreset]+", 5 of 5.";});',
+    'update();announcement.textContent=labels[selectedPreset]+", 5 of 5.";',
     '</script></body></html>',
   ].join('');
 }

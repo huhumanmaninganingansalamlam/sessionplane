@@ -307,13 +307,8 @@ async function selectIntelligencePro(
   requestedModel: string,
 ): Promise<void> {
   const capabilities = await readIntelligenceCapabilities(page);
-  if (capabilities === null) {
-    throw new ProviderSubmissionError(
-      'provider.model-unavailable',
-      'ChatGPT model capabilities are unavailable for: ' + requestedModel,
-    );
-  }
-  const targets = intelligenceProTargets(capabilities, requestedModel);
+  const targets =
+    capabilities === null ? [] : intelligenceProTargets(capabilities, requestedModel);
   const attempted: string[] = [];
   for (const target of targets) {
     const result = await selectIntelligenceTarget(page, switcher, target);
@@ -322,6 +317,9 @@ async function selectIntelligencePro(
     );
     if (result.selected) return;
   }
+  const liveResult = await selectLiveIntelligencePro(page, switcher, requestedModel);
+  attempted.push('live:' + liveResult.reason);
+  if (liveResult.selected) return;
   throw new ProviderSubmissionError(
     'provider.model-unavailable',
     'No available ChatGPT Pro preset could satisfy: ' + requestedModel,
@@ -335,19 +333,21 @@ async function selectIntelligenceEffort(page: Page, requestedEffort: string): Pr
   const effort = intelligenceThinkingEffort(requestedEffort);
   if (effort === null) return false;
   const capabilities = await readIntelligenceCapabilities(page);
-  if (capabilities === null) {
-    throw new ProviderSubmissionError(
-      'provider.mode-unavailable',
-      'ChatGPT intelligence capabilities are unavailable for effort: ' + requestedEffort,
-    );
-  }
-  const targets = intelligenceEffortTargets(capabilities, effort);
+  const targets =
+    capabilities === null ? [] : intelligenceEffortTargets(capabilities, effort);
+  const attempted: string[] = [];
   for (const target of targets) {
-    if ((await selectIntelligenceTarget(page, switcher, target)).selected) return true;
+    const result = await selectIntelligenceTarget(page, switcher, target);
+    attempted.push(target.version.id + ':' + String(target.presetIndex) + ':' + result.reason);
+    if (result.selected) return true;
   }
+  const liveResult = await selectLiveIntelligenceEffort(page, switcher, effort);
+  attempted.push('live:' + liveResult.reason);
+  if (liveResult.selected) return true;
   throw new ProviderSubmissionError(
     'provider.mode-unavailable',
     'Requested ChatGPT effort is unavailable: ' + requestedEffort,
+    { details: { attempted } },
   );
 }
 
@@ -493,42 +493,207 @@ async function selectIntelligenceTarget(
   if (!(await ensureIntelligencePickerOpen(page, switcher))) {
     return { selected: false, reason: 'picker-reopen-failed' };
   }
+  return await selectLiveIntelligenceSliderIndex(page, target.presetIndex);
+}
 
-  const slider = page.locator(CHATGPT_SELECTORS.intelligenceSlider).first();
-  if (!(await slider.isVisible().catch(() => false))) {
+async function selectLiveIntelligencePro(
+  page: Page,
+  switcher: Locator,
+  requestedModel: string,
+): Promise<{ readonly selected: boolean; readonly reason: string }> {
+  if (!(await ensureIntelligencePickerOpen(page, switcher))) {
+    return { selected: false, reason: 'picker-not-open' };
+  }
+
+  if (normalizeModelIdentity(requestedModel) !== 'pro') {
+    const versionResult = await selectLiveIntelligenceVersion(page, requestedModel);
+    if (!versionResult.selected) {
+      return { selected: false, reason: 'version-' + versionResult.reason };
+    }
+    if (!(await ensureIntelligencePickerOpen(page, switcher))) {
+      return { selected: false, reason: 'picker-reopen-failed' };
+    }
+  }
+
+  const state = await readLiveIntelligenceSlider(page);
+  if (state === null) {
     return { selected: false, reason: 'slider-not-visible' };
   }
+  const initialIndex = state.current;
+  const result = await selectLiveIntelligenceSliderIndex(page, state.maximum);
+  if (!result.selected) return result;
+
+  const simpleText = normalizeLabel(
+    (await page
+      .locator(CHATGPT_SELECTORS.intelligenceSimpleView)
+      .first()
+      .textContent()
+      .catch(() => null)) ?? '',
+  );
+  if (isProModelLabel(simpleText)) {
+    return { selected: true, reason: 'selected-live-pro' };
+  }
+
+  if (initialIndex !== state.maximum) {
+    await selectLiveIntelligenceSliderIndex(page, initialIndex);
+  }
+  return { selected: false, reason: 'slider-maximum-not-pro' };
+}
+
+async function selectLiveIntelligenceVersion(
+  page: Page,
+  requestedModel: string,
+): Promise<{ readonly selected: boolean; readonly reason: string }> {
+  const requestedVersion = modelVersionParts(requestedModel);
+  if (requestedVersion.length === 0) {
+    return { selected: false, reason: 'requested-version-missing' };
+  }
+
+  const advanced = page.locator(CHATGPT_SELECTORS.intelligenceAdvancedView).first();
+  const options = advanced.locator('[role="menuitemradio"]');
+  const findTarget = async (): Promise<Locator | null> => {
+    const count = await options.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      const option = options.nth(index);
+      const parts = modelVersionParts((await option.textContent().catch(() => null)) ?? '');
+      if (parts.length > 0 && compareVersionParts(parts, requestedVersion) === 0) {
+        return option;
+      }
+    }
+    return null;
+  };
+
+  let target = await findTarget();
+  if (target !== null && (await target.getAttribute('aria-checked').catch(() => null)) === 'true') {
+    return { selected: true, reason: 'already-selected' };
+  }
+
+  const content = page.locator(CHATGPT_SELECTORS.intelligenceContent).first();
+  const opener = content.locator('[role="menuitem"]').first();
+  if (!(await opener.isVisible().catch(() => false))) {
+    return { selected: false, reason: 'version-opener-not-visible' };
+  }
+  await opener.click({ timeout: 5_000 }).catch(() => undefined);
+  if (!(await waitForAttribute(advanced, 'data-active', 'true', 2_000))) {
+    return { selected: false, reason: 'advanced-view-not-active' };
+  }
+
+  target = await findTarget();
+  if (target === null || !(await target.isVisible().catch(() => false))) {
+    return { selected: false, reason: 'requested-version-not-visible' };
+  }
+  await target.click({ timeout: 5_000 });
+  const simple = page.locator(CHATGPT_SELECTORS.intelligenceSimpleView).first();
+  if (!(await waitForAttribute(simple, 'data-active', 'true', 2_000))) {
+    return { selected: false, reason: 'simple-view-not-restored' };
+  }
+  if (!(await waitForAttribute(target, 'aria-checked', 'true', 2_000))) {
+    return { selected: false, reason: 'version-not-acknowledged' };
+  }
+  return { selected: true, reason: 'selected' };
+}
+
+async function selectLiveIntelligenceEffort(
+  page: Page,
+  switcher: Locator,
+  effort: string,
+): Promise<{ readonly selected: boolean; readonly reason: string }> {
+  if (!(await ensureIntelligencePickerOpen(page, switcher))) {
+    return { selected: false, reason: 'picker-not-open' };
+  }
+  const state = await readLiveIntelligenceSlider(page);
+  if (
+    state === null ||
+    state.minimum !== 0 ||
+    state.maximum !== 4 ||
+    state.dotCount !== 5
+  ) {
+    return { selected: false, reason: 'unsupported-slider-shape' };
+  }
+  const targetIndex =
+    effort === 'standard' ? 1 : effort === 'extended' ? 2 : effort === 'max' ? 3 : null;
+  if (targetIndex === null) {
+    return { selected: false, reason: 'unsupported-effort' };
+  }
+  const result = await selectLiveIntelligenceSliderIndex(page, targetIndex);
+  return result.selected
+    ? { selected: true, reason: 'selected-live-effort-' + String(targetIndex) }
+    : result;
+}
+
+interface LiveIntelligenceSliderState {
+  readonly slider: Locator;
+  readonly control: Locator;
+  readonly dots: Locator;
+  readonly minimum: number;
+  readonly maximum: number;
+  readonly current: number;
+  readonly dotCount: number;
+}
+
+async function readLiveIntelligenceSlider(
+  page: Page,
+): Promise<LiveIntelligenceSliderState | null> {
+  const slider = page.locator(CHATGPT_SELECTORS.intelligenceSlider).first();
+  if (!(await slider.isVisible().catch(() => false))) return null;
+
   const dots = page.locator(CHATGPT_SELECTORS.intelligenceDots);
   const dotCount = await dots.count().catch(() => 0);
-  if (target.presetIndex >= dotCount) {
-    return { selected: false, reason: 'preset-index-out-of-range-' + String(dotCount) };
+  const minimum = Number(await slider.getAttribute('aria-valuemin').catch(() => null));
+  const maximum = Number(await slider.getAttribute('aria-valuemax').catch(() => null));
+  const current = Number(await slider.getAttribute('aria-valuenow').catch(() => null));
+  if (
+    !Number.isInteger(minimum) ||
+    !Number.isInteger(current) ||
+    !Number.isInteger(maximum) ||
+    minimum < 0 ||
+    current < minimum ||
+    current > maximum ||
+    maximum < minimum ||
+    dotCount !== maximum - minimum + 1
+  ) {
+    return null;
   }
-  if ((await dots.nth(target.presetIndex).getAttribute('data-locked').catch(() => null)) === 'true') {
+
+  const root = page.locator('[data-model-reasoning-effort-slider]').first();
+  const ancestorControl = root.locator('xpath=ancestor::*[@role="menuitem"][1]').first();
+  const control = (await ancestorControl.isVisible().catch(() => false)) ? ancestorControl : slider;
+  return { slider, control, dots, minimum, maximum, current, dotCount };
+}
+
+async function selectLiveIntelligenceSliderIndex(
+  page: Page,
+  targetIndex: number,
+): Promise<{ readonly selected: boolean; readonly reason: string }> {
+  const state = await readLiveIntelligenceSlider(page);
+  if (state === null) {
+    return { selected: false, reason: 'slider-not-visible-or-invalid' };
+  }
+  if (targetIndex < state.minimum || targetIndex > state.maximum) {
+    return {
+      selected: false,
+      reason: 'preset-index-out-of-range-' + String(state.dotCount),
+    };
+  }
+
+  const dotIndex = targetIndex - state.minimum;
+  if (
+    (await state.dots.nth(dotIndex).getAttribute('data-locked').catch(() => null)) === 'true'
+  ) {
     return { selected: false, reason: 'preset-locked' };
   }
 
-  const maximum = Number(await slider.getAttribute('aria-valuemax').catch(() => null));
-  let current = Number(await slider.getAttribute('aria-valuenow').catch(() => null));
-  if (
-    !Number.isInteger(current) ||
-    !Number.isInteger(maximum) ||
-    target.presetIndex < 0 ||
-    target.presetIndex > maximum
-  ) {
-    return {
-      selected: false,
-      reason: 'invalid-slider-bounds-' + String(current) + '-' + String(maximum),
-    };
-  }
-  const key = target.presetIndex > current ? 'ArrowRight' : 'ArrowLeft';
-  for (let attempts = 0; attempts < 8 && current !== target.presetIndex; attempts += 1) {
-    await slider.press(key);
-    await page.waitForTimeout(25);
-    current = Number(await slider.getAttribute('aria-valuenow').catch(() => null));
+  let current = state.current;
+  const key = targetIndex > current ? 'ArrowRight' : 'ArrowLeft';
+  const maxAttempts = state.maximum - state.minimum + 2;
+  for (let attempts = 0; attempts < maxAttempts && current !== targetIndex; attempts += 1) {
+    await state.control.press(key);
+    await page.waitForTimeout(50);
+    current = Number(await state.slider.getAttribute('aria-valuenow').catch(() => null));
   }
   return {
-    selected: current === target.presetIndex,
-    reason: current === target.presetIndex ? 'selected' : 'slider-stuck-' + String(current),
+    selected: current === targetIndex,
+    reason: current === targetIndex ? 'selected' : 'slider-stuck-' + String(current),
   };
 }
 
