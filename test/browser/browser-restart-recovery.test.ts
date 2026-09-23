@@ -300,7 +300,7 @@ test('service restart preserves submission-unknown diagnostics while reopening t
   }
 });
 
-test('restart never prompt-matches an ambiguous follow-up onto an older generation', async () => {
+test('restart recovers a unique ambiguous follow-up acknowledgement without resending', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-core-restart-followup-ambiguous-'));
   const config = resolveConfig({
     cwd: root,
@@ -330,13 +330,13 @@ test('restart never prompt-matches an ambiguous follow-up onto an older generati
       roleKey: 'main',
       provider: 'chatgpt',
     });
-    const repeatedPrompt =
-      'Do not confuse this older identical prompt with a later ambiguous submit.';
+    const firstPrompt = 'Establish an older exact generation before the ambiguous follow-up.';
+    const secondPrompt = 'Recover this unique ambiguous follow-up without resending it.';
     const first = await rpc<SessionSnapshot>(config.socketPath, 'session.send', {
       clientId: 'followup-ambiguous-client',
       requestId: 'followup-ambiguous-first',
       sessionId: session.sessionId,
-      prompt: repeatedPrompt,
+      prompt: firstPrompt,
       sessionDeadlineSec: 600,
     });
     await service.actorScheduler.updateGeneration(
@@ -352,7 +352,7 @@ test('restart never prompt-matches an ambiguous follow-up onto an older generati
         reason: 'test-complete',
         errorCode: null,
       },
-      'generation.followup-ambiguous-first-complete',
+      'generation.followup-recovery-first-complete',
     );
 
     beforeRestart.acknowledgementMode = 'missing';
@@ -361,7 +361,7 @@ test('restart never prompt-matches an ambiguous follow-up onto an older generati
         clientId: 'followup-ambiguous-client',
         requestId: 'followup-ambiguous-second',
         sessionId: session.sessionId,
-        prompt: repeatedPrompt,
+        prompt: secondPrompt,
         sessionDeadlineSec: 600,
       }),
       (error: unknown) => {
@@ -381,6 +381,7 @@ test('restart never prompt-matches an ambiguous follow-up onto an older generati
 
     await service.close();
     const afterRestart = new FakeProviderAdapter();
+    afterRestart.acknowledgementRecoveryMode = 'success';
     service = await startCore({
       config,
       browserHeadless: true,
@@ -394,12 +395,13 @@ test('restart never prompt-matches an ambiguous follow-up onto an older generati
       sessionId: session.sessionId,
     });
     assert.equal(restored.generation, 2);
-    assert.equal(restored.submissionState, 'submission_unknown');
-    assert.equal(restored.errorCode, 'session.submission-unknown');
-    assert.equal(restored.submittedUserMessageId, null);
-    assert.equal(restored.submittedUserTurnId, null);
-    assert.equal(afterRestart.acknowledgementRecoveryCount, 0);
+    assert.equal(restored.submissionState, 'submitted');
+    assert.equal(restored.errorCode, null);
+    assert.equal(restored.submittedUserMessageId, 'recovered-user-message-2');
+    assert.equal(restored.submittedUserTurnId, 'recovered-user-turn-2');
+    assert.equal(afterRestart.acknowledgementRecoveryCount, 1);
     assert.equal(afterRestart.submitCount, 0);
+    assert.ok(afterRestart.observationOpenCount >= 1);
   } finally {
     await service.close();
     rmSync(root, { recursive: true, force: true });

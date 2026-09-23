@@ -217,7 +217,6 @@ export class SubmissionService {
 
   async recoverAcknowledgement(snapshot: SessionSnapshot): Promise<SessionSnapshot> {
     if (
-      snapshot.generation !== 1 ||
       snapshot.submissionState !== 'submission_unknown' ||
       !snapshot.promptSubmitted ||
       snapshot.pageKey === null ||
@@ -239,7 +238,6 @@ export class SubmissionService {
     return await actor.enqueue(async () => {
       const current = this.#requireSnapshot(snapshot.sessionId);
       if (
-        current.generation !== 1 ||
         current.generation !== snapshot.generation ||
         current.submissionState !== 'submission_unknown' ||
         !current.promptSubmitted ||
