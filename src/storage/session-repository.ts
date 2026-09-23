@@ -80,6 +80,24 @@ const QUALIFIED_SESSION_COLUMNS = `
   s.updated_at AS updatedAt
 `;
 
+const SNAPSHOT_SELECT = `
+  SELECT
+    ${QUALIFIED_SESSION_COLUMNS},
+    r.role_key AS roleKey,
+    g.submission_state AS submissionState,
+    g.submitted_user_message_id AS submittedUserMessageId,
+    g.submitted_user_turn_id AS submittedUserTurnId,
+    g.response_message_id AS responseMessageId,
+    g.answer_text AS answerText,
+    g.reason AS reason,
+    g.error_code AS errorCode,
+    g.prompt_submitted AS promptSubmitted
+  FROM sessions s
+  JOIN team_roles r ON r.role_id = s.role_id
+  LEFT JOIN generations g
+    ON g.session_id = s.session_id AND g.generation = s.current_generation
+`;
+
 export class SessionRepository {
   readonly #database: DatabaseSync;
 
@@ -122,15 +140,16 @@ export class SessionRepository {
     return row ?? null;
   }
 
-  listSessionsForRole(roleId: string): readonly SessionRecord[] {
-    return this.#database
+  listCurrentSessionsForTeam(teamId: string): ReadonlyMap<string, SessionRecord> {
+    const rows = this.#database
       .prepare(`
-        SELECT ${SESSION_COLUMNS}
-        FROM sessions
-        WHERE role_id = ?
-        ORDER BY created_at, session_id
+        SELECT ${QUALIFIED_SESSION_COLUMNS}
+        FROM team_roles r
+        JOIN sessions s ON s.session_id = r.current_session_id
+        WHERE r.team_id = ?
       `)
-      .all(roleId) as unknown as SessionRow[];
+      .all(teamId) as unknown as SessionRow[];
+    return new Map(rows.map((row) => [row.sessionId, row]));
   }
 
   listNonterminalSessionIds(): readonly string[] {
@@ -145,28 +164,28 @@ export class SessionRepository {
     return rows.map((row) => row.sessionId);
   }
 
-  listSessionIdsForOwner(ownerClientId: string): readonly string[] {
+  listSnapshotsForOwner(ownerClientId: string): readonly SessionSnapshot[] {
     const rows = this.#database
       .prepare(`
-        SELECT s.session_id AS sessionId
-        FROM sessions s
+        ${SNAPSHOT_SELECT}
         JOIN teams t ON t.team_id = s.team_id
         WHERE t.owner_client_id = ?
         ORDER BY s.created_at, s.session_id
       `)
-      .all(ownerClientId) as unknown as Array<{ sessionId: string }>;
-    return rows.map((row) => row.sessionId);
+      .all(ownerClientId) as unknown as SnapshotRow[];
+    return rows.map(toSnapshot);
   }
 
   listRecoverableSnapshots(): readonly SessionSnapshot[] {
-    const snapshots: SessionSnapshot[] = [];
-    for (const sessionId of this.listNonterminalSessionIds()) {
-      const snapshot = this.getSnapshot(sessionId);
-      if (snapshot !== null && snapshot.generation > 0) {
-        snapshots.push(snapshot);
-      }
-    }
-    return snapshots;
+    const rows = this.#database
+      .prepare(`
+        ${SNAPSHOT_SELECT}
+        WHERE s.session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
+          AND s.current_generation > 0
+        ORDER BY s.created_at, s.session_id
+      `)
+      .all() as unknown as SnapshotRow[];
+    return rows.map(toSnapshot);
   }
 
   insertGeneration(generation: GenerationRecord): void {
@@ -311,17 +330,6 @@ export class SessionRepository {
     return true;
   }
 
-  getGenerationSubmissionState(sessionId: string, generation: number): SubmissionState | null {
-    const row = this.#database
-      .prepare(`
-        SELECT submission_state AS submissionState
-        FROM generations
-        WHERE session_id = ? AND generation = ?
-      `)
-      .get(sessionId, generation) as { submissionState: SubmissionState } | undefined;
-    return row?.submissionState ?? null;
-  }
-
   transitionToSuperseded(sessionId: string, updatedAt: string): void {
     const session = this.getSession(sessionId);
     if (session === null || isTerminalSessionState(session.sessionState)) {
@@ -353,54 +361,41 @@ export class SessionRepository {
   getSnapshot(sessionId: string): SessionSnapshot | null {
     const row = this.#database
       .prepare(`
-        SELECT
-          ${QUALIFIED_SESSION_COLUMNS},
-          r.role_key AS roleKey,
-          g.submission_state AS submissionState,
-          g.submitted_user_message_id AS submittedUserMessageId,
-          g.submitted_user_turn_id AS submittedUserTurnId,
-          g.response_message_id AS responseMessageId,
-          g.answer_text AS answerText,
-          g.reason AS reason,
-          g.error_code AS errorCode,
-          g.prompt_submitted AS promptSubmitted
-        FROM sessions s
-        JOIN team_roles r ON r.role_id = s.role_id
-        LEFT JOIN generations g
-          ON g.session_id = s.session_id AND g.generation = s.current_generation
+        ${SNAPSHOT_SELECT}
         WHERE s.session_id = ?
       `)
       .get(sessionId) as SnapshotRow | undefined;
-    if (row === undefined) {
-      return null;
-    }
-    return {
-      requestOk: true,
-      teamId: row.teamId,
-      roleId: row.roleId,
-      roleKey: row.roleKey,
-      sessionId: row.sessionId,
-      predecessorSessionId: row.predecessorSessionId,
-      provider: row.provider,
-      generation: Number(row.currentGeneration),
-      submissionState: row.submissionState,
-      sessionState: row.sessionState,
-      providerState: row.providerState,
-      observationTransport: row.observationTransport,
-      terminal: isTerminalSessionState(row.sessionState),
-      waitExpired: false,
-      nextCheckAt: row.nextCheckAt,
-      conversationId: row.conversationId,
-      pageKey: row.pageKey,
-      submittedUserMessageId: row.submittedUserMessageId,
-      submittedUserTurnId: row.submittedUserTurnId,
-      responseMessageId: row.responseMessageId,
-      answerText: row.answerText,
-      reason: row.reason,
-      errorCode: row.errorCode,
-      promptSubmitted: Number(row.promptSubmitted) === 1,
-    };
+    return row === undefined ? null : toSnapshot(row);
   }
+}
+
+function toSnapshot(row: SnapshotRow): SessionSnapshot {
+  return {
+    requestOk: true,
+    teamId: row.teamId,
+    roleId: row.roleId,
+    roleKey: row.roleKey,
+    sessionId: row.sessionId,
+    predecessorSessionId: row.predecessorSessionId,
+    provider: row.provider,
+    generation: Number(row.currentGeneration),
+    submissionState: row.submissionState,
+    sessionState: row.sessionState,
+    providerState: row.providerState,
+    observationTransport: row.observationTransport,
+    terminal: isTerminalSessionState(row.sessionState),
+    waitExpired: false,
+    nextCheckAt: row.nextCheckAt,
+    conversationId: row.conversationId,
+    pageKey: row.pageKey,
+    submittedUserMessageId: row.submittedUserMessageId,
+    submittedUserTurnId: row.submittedUserTurnId,
+    responseMessageId: row.responseMessageId,
+    answerText: row.answerText,
+    reason: row.reason,
+    errorCode: row.errorCode,
+    promptSubmitted: Number(row.promptSubmitted) === 1,
+  };
 }
 
 function appendAssignment(
@@ -415,4 +410,3 @@ function appendAssignment(
   assignments.push(`${column} = ?`);
   values.push(value);
 }
-

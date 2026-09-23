@@ -13,11 +13,7 @@ import {
   type RoleType,
   type TeamRoleSnapshot,
 } from '../domain/role.ts';
-import {
-  isTerminalSessionState,
-  type SessionRecord,
-  type SessionSnapshot,
-} from '../domain/session.ts';
+import { isTerminalSessionState, type SessionSnapshot } from '../domain/session.ts';
 import type { TeamListResult, TeamRecord, TeamSnapshot } from '../domain/team.ts';
 import { PROVIDERS, type ProviderName } from '../providers/provider-adapter.ts';
 
@@ -100,13 +96,33 @@ export class TeamDirectory {
 
   getTeam(teamId: string): TeamSnapshot {
     const team = this.#requireTeam(teamId);
-    const primaryRole = team.primaryRoleId === null ? null : this.#teams.getRoleById(team.primaryRoleId);
+    const roleRecords = this.#teams.listRoles(teamId);
+    const primaryRole = roleRecords.find((role) => role.roleId === team.primaryRoleId);
     assertDomain(
-      primaryRole !== null,
+      primaryRole !== undefined,
       'internal.invariant-violation',
       `Team ${teamId} has no valid primary role`,
     );
-    const roles = this.#teams.listRoles(teamId).map((role) => this.#roleSnapshot(role));
+    const currentSessions = this.#sessions.listCurrentSessionsForTeam(teamId);
+    const roles = roleRecords.map((role): TeamRoleSnapshot => {
+      const session = role.currentSessionId === null
+        ? null
+        : currentSessions.get(role.currentSessionId) ?? null;
+      return {
+        roleId: role.roleId,
+        roleKey: role.roleKey,
+        roleType: role.roleType,
+        roleState: role.roleState,
+        displayName: role.displayName,
+        reportsToRoleId: role.reportsToRoleId,
+        currentSessionId: role.currentSessionId,
+        provider: session?.provider ?? null,
+        generation: session === null ? null : Number(session.currentGeneration),
+        sessionState: session?.sessionState ?? null,
+        providerState: session?.providerState ?? null,
+        terminal: session === null ? null : isTerminalSessionState(session.sessionState),
+      };
+    });
     return {
       requestOk: true,
       teamId: team.teamId,
@@ -317,9 +333,7 @@ export class TeamDirectory {
 
   listSessions(ownerClientId: string): readonly SessionSnapshot[] {
     const clientId = requireNonEmpty(ownerClientId, 'clientId');
-    return this.#sessions
-      .listSessionIdsForOwner(clientId)
-      .map((sessionId) => this.getSession(sessionId));
+    return this.#sessions.listSnapshotsForOwner(clientId);
   }
 
   listEvents(teamId: string, afterSequence = 0, limit = 200): EventListResult {
@@ -351,24 +365,6 @@ export class TeamDirectory {
     }
     return role;
   }
-
-  #roleSnapshot(role: RoleRecord): TeamRoleSnapshot {
-    const session = role.currentSessionId === null ? null : this.#sessions.getSession(role.currentSessionId);
-    return {
-      roleId: role.roleId,
-      roleKey: role.roleKey,
-      roleType: role.roleType,
-      roleState: role.roleState,
-      displayName: role.displayName,
-      reportsToRoleId: role.reportsToRoleId,
-      currentSessionId: role.currentSessionId,
-      provider: session?.provider ?? null,
-      generation: session === null ? null : Number(session.currentGeneration),
-      sessionState: session?.sessionState ?? null,
-      providerState: session?.providerState ?? null,
-      terminal: session === null ? null : isTerminalSessionState(session.sessionState),
-    };
-  }
 }
 
 function requireNonEmpty(value: string, name: string): string {
@@ -386,4 +382,3 @@ function normalizeOptionalText(value: string | null | undefined): string | null 
   const normalized = value.trim();
   return normalized.length === 0 ? null : normalized;
 }
-
