@@ -28,12 +28,14 @@ export class SessionActor {
   #queueDepth = 0;
   #nextWaiterId = 1;
   readonly #waiters = new Map<number, Waiter>();
+  readonly #onIdleTerminal: (() => void) | null;
   #closed = false;
 
-  constructor(snapshot: SessionSnapshot, revision: number) {
+  constructor(snapshot: SessionSnapshot, revision: number, onIdleTerminal?: () => void) {
     this.sessionId = snapshot.sessionId;
     this.#snapshot = snapshot;
     this.#revision = revision;
+    this.#onIdleTerminal = onIdleTerminal ?? null;
   }
 
   get revision(): number {
@@ -66,6 +68,7 @@ export class SessionActor {
     );
     return scheduled.finally(() => {
       this.#queueDepth -= 1;
+      this.#retireIfIdleTerminal();
     });
   }
 
@@ -103,13 +106,16 @@ export class SessionActor {
         waiter.resolve(this.#decorate(snapshot, false));
       }
     }
+    this.#retireIfIdleTerminal();
   }
 
   async wait(options: SessionWaitOptions): Promise<SessionWaitSnapshot> {
     this.#assertGeneration(options.expectedGeneration);
     const afterRevision = options.afterRevision ?? this.#revision;
     if (this.#snapshot.terminal || this.#revision > afterRevision) {
-      return this.#decorate(this.#snapshot, false);
+      const snapshot = this.#decorate(this.#snapshot, false);
+      this.#retireIfIdleTerminal();
+      return snapshot;
     }
     if (options.waitMs <= 0 || this.#closed) {
       return this.#decorate(this.#snapshot, true);
@@ -131,6 +137,7 @@ export class SessionActor {
           this.#waiters.delete(waiterId);
         }
         resolve(this.#decorate(this.#snapshot, waitExpired));
+        this.#retireIfIdleTerminal();
       };
       const timer = setTimeout(() => {
         finish(true);
@@ -161,6 +168,17 @@ export class SessionActor {
       waiter.cleanup();
       this.#waiters.delete(waiterId);
       waiter.resolve(this.#decorate(this.#snapshot, true));
+    }
+  }
+
+  #retireIfIdleTerminal(): void {
+    if (
+      !this.#closed &&
+      this.#snapshot.terminal &&
+      this.#queueDepth === 0 &&
+      this.#waiters.size === 0
+    ) {
+      this.#onIdleTerminal?.();
     }
   }
 

@@ -63,7 +63,13 @@ export class ActorScheduler {
   actorFor(sessionId: string): SessionActor {
     return this.#actors.getOrCreate(sessionId, () => {
       const snapshot = this.#requireSnapshot(sessionId);
-      return new SessionActor(snapshot, this.#events.latestSequenceForSession(sessionId));
+      let actor!: SessionActor;
+      actor = new SessionActor(
+        snapshot,
+        this.#events.latestSequenceForSession(sessionId),
+        () => this.#retireActor(sessionId, actor),
+      );
+      return actor;
     });
   }
 
@@ -212,6 +218,19 @@ export class ActorScheduler {
     for (const [, actor] of this.#actors.entries()) {
       actor.close();
     }
+  }
+
+  #retireActor(sessionId: string, actor: SessionActor): void {
+    if (
+      this.#actors.get(sessionId) !== actor ||
+      actor.queueDepth !== 0 ||
+      actor.subscriberCount !== 0 ||
+      !actor.snapshot().terminal
+    ) {
+      return;
+    }
+    actor.close();
+    this.#actors.delete(sessionId);
   }
 
   #requireSnapshot(sessionId: string): SessionSnapshot {

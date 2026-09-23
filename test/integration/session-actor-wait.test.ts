@@ -198,6 +198,73 @@ test('one actor serves concurrent waits, preserves provider lifetime, and restor
   }
 });
 
+test('idle terminal actors retire and rehydrate from durable state when new work arrives', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-terminal-actor-retire-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const service = await startCore({
+    config,
+    startBrowser: false,
+    logger: silentLogger(),
+  });
+
+  try {
+    const team = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'terminal-actor-client',
+      requestId: 'terminal-actor-team',
+      primaryRoleKey: 'main',
+    });
+    const session = await rpc<SessionSnapshot>(config.socketPath, 'session.create', {
+      clientId: 'terminal-actor-client',
+      requestId: 'terminal-actor-session',
+      teamId: team.teamId,
+      roleKey: 'main',
+      provider: 'chatgpt',
+    });
+    await service.actorScheduler.startGeneration({
+      sessionId: session.sessionId,
+      expectedGeneration: 0,
+      teamBriefVersion: 0,
+      promptHash: 'sha256:terminal-actor-generation-1',
+    });
+    const complete = await service.actorScheduler.updateGeneration(
+      session.sessionId,
+      1,
+      {
+        sessionState: 'complete',
+        providerState: 'complete',
+        observationTransport: 'fresh',
+        completedAt: new Date().toISOString(),
+      },
+      'generation.test-complete',
+    );
+    assert.equal(complete.terminal, true);
+    assert.equal(service.actorScheduler.actorCount, 0);
+
+    const waited = await rpc<SessionSnapshot>(config.socketPath, 'session.wait', {
+      clientId: 'terminal-actor-client',
+      sessionId: session.sessionId,
+      generation: 1,
+      waitMs: 0,
+    });
+    assert.equal(waited.terminal, true);
+    assert.equal(waited.waitExpired, false);
+    assert.equal(service.actorScheduler.actorCount, 0);
+
+    const next = await service.actorScheduler.startGeneration({
+      sessionId: session.sessionId,
+      expectedGeneration: 1,
+      teamBriefVersion: 0,
+      promptHash: 'sha256:terminal-actor-generation-2',
+    });
+    assert.equal(next.generation, 2);
+    assert.equal(next.sessionState, 'submitting');
+    assert.equal(service.actorScheduler.actorCount, 1);
+  } finally {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 async function rpc<Result = Readonly<Record<string, unknown>>>(
   socketPath: string,
   method: string,
