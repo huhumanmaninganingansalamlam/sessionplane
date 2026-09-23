@@ -836,6 +836,64 @@ test('ChatGPT submission uses live intelligence slider when capability feed expo
   }
 });
 
+test('ChatGPT submission classifies a proven logged-out auth session before model selection', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-auth-required-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await routeIntelligenceFixture(created.page, {
+      latestProLocked: false,
+      selectedVersion: 'latest',
+      selectedPreset: 0,
+      authenticated: false,
+    });
+    await created.page.goto('https://chatgpt.com/');
+    registry.refreshPage(created.binding.pageKey);
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'session-auth-required',
+      generation: 1,
+      conversationId: null,
+    });
+    const submission = new ChatGptSubmission({
+      page: created.page,
+      pageKey: created.binding.pageKey,
+      pageRegistry: registry,
+      request: {
+        session: sessionSnapshot({
+          sessionId: 'session-auth-required',
+          pageKey: created.binding.pageKey,
+        }),
+        generation: 1,
+        prompt: 'This must not reach model selection or submit.',
+        model: 'Pro',
+      },
+      acknowledgementTimeoutMs: 500,
+    });
+
+    await assert.rejects(
+      submission.prepare(),
+      (error: unknown) =>
+        error instanceof ProviderSubmissionError &&
+        error.errorCode === 'provider.authentication-required' &&
+        error.promptSubmitted === false,
+    );
+    assert.equal(
+      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
+      0,
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ChatGPT submission does not classify the ordinary intelligence picker as Work', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-intelligence-chat-'));
   const registry = new PageRegistry();
@@ -1205,6 +1263,7 @@ async function routeIntelligenceFixture(
     readonly selectedVersion: 'latest' | '5.6';
     readonly selectedPreset: number;
     readonly backendPresets?: 'complete' | 'instant-only';
+    readonly authenticated?: boolean;
   },
 ): Promise<void> {
   await page.route('https://chatgpt.com/**', async (route) => {
@@ -1213,7 +1272,14 @@ async function routeIntelligenceFixture(
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ WARNING_BANNER: 'no access token required for same-origin models' }),
+        body: JSON.stringify(
+          options.authenticated === false
+            ? { WARNING_BANNER: 'fixture logged out' }
+            : {
+                user: { id: 'fixture-user' },
+                WARNING_BANNER: 'no access token required for same-origin models',
+              },
+        ),
       });
       return;
     }

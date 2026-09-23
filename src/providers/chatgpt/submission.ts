@@ -80,6 +80,7 @@ export class ChatGptSubmission implements ProviderSubmission {
       provider: this.provider,
       pageKey: this.pageKey,
     });
+    await assertChatGptAuthenticated(this.#page);
     const surface = normalizeLabel(this.#request.surface ?? '');
     if (surface === 'work') {
       throw new ProviderSubmissionError(
@@ -395,6 +396,41 @@ async function selectIntelligenceEffort(page: Page, requestedEffort: string): Pr
     'provider.mode-unavailable',
     'Requested ChatGPT effort is unavailable: ' + requestedEffort,
     { details: { attempted } },
+  );
+}
+
+async function assertChatGptAuthenticated(page: Page): Promise<void> {
+  const state = await page
+    .evaluate(async () => {
+      const response = await fetch('/api/auth/session', { credentials: 'include' }).catch(
+        () => null,
+      );
+      if (response === null || !response.ok) return 'unknown';
+      const body = (await response.json().catch(() => null)) as unknown;
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+        return 'unknown';
+      }
+      const session = body as Record<string, unknown>;
+      const accessToken =
+        typeof session.accessToken === 'string' ? session.accessToken.trim() : '';
+      if (accessToken.length >= 8) return 'authenticated';
+
+      const user = session.user;
+      if (
+        user !== null &&
+        typeof user === 'object' &&
+        !Array.isArray(user) &&
+        Object.keys(user as Record<string, unknown>).length > 0
+      ) {
+        return 'authenticated';
+      }
+      return 'unauthenticated';
+    })
+    .catch(() => 'unknown');
+  if (state !== 'unauthenticated') return;
+  throw new ProviderSubmissionError(
+    'provider.authentication-required',
+    'The dedicated ChatGPT profile is not authenticated',
   );
 }
 
