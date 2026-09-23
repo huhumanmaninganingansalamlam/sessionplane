@@ -259,7 +259,14 @@ export class BrowserOwner {
   async openLoginPage(loginUrl: string): Promise<PageBindingSnapshot> {
     const existing = this.#pageRegistry
       .listBindings({ includeClosed: false })
-      .find((binding) => isChatGptUrl(binding.url));
+      .find(
+        (binding) =>
+          binding.state === 'unbound' &&
+          binding.sessionId === null &&
+          binding.generation === null &&
+          binding.expectedConversationId === null &&
+          isChatGptUrl(binding.url),
+      );
     if (existing !== undefined) return existing;
 
     const { page, binding } = await this.createPage();

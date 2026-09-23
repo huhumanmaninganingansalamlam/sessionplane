@@ -303,6 +303,57 @@ test('BrowserOwner login returns after response commit without waiting for page 
   }
 });
 
+test('BrowserOwner login does not reuse a session-owned identity-lost ChatGPT Page', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-login-owned-page-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+    browserExecutable: HOST_BROWSER?.executable ?? null,
+    launchTimeoutMs: 60_000,
+  });
+  const conversationId = '11111111-1111-4111-8111-111111111111';
+
+  try {
+    await owner.start();
+    const owned = await owner.createPage();
+    await owned.page.context().route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: '<!doctype html><html><body>login ownership fixture</body></html>',
+      });
+    });
+    await owned.page.goto(`https://chatgpt.com/c/${conversationId}`);
+    registry.refreshPage(owned.binding.pageKey);
+    registry.reservePage(owned.binding.pageKey, {
+      sessionId: 'login-owned-session',
+      generation: 1,
+      conversationId,
+    });
+    registry.bindPage(owned.binding.pageKey, {
+      sessionId: 'login-owned-session',
+      generation: 1,
+      conversationId,
+    });
+    await owned.page.goto('https://chatgpt.com/');
+    const lost = registry.getBinding(owned.binding.pageKey);
+    assert.equal(lost.state, 'identity_lost');
+
+    const login = await owner.openLoginPage('https://chatgpt.com/');
+    assert.notEqual(login.pageKey, owned.binding.pageKey);
+    assert.equal(login.state, 'unbound');
+    assert.equal(login.sessionId, null);
+    assert.equal(login.generation, null);
+    assert.equal(login.expectedConversationId, null);
+    assert.equal(login.url, 'https://chatgpt.com/');
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('BrowserOwner closes a newly created login Page when navigation fails', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-login-failure-'));
   const registry = new PageRegistry();
