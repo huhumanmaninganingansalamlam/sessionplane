@@ -10,6 +10,7 @@ export const SUBMISSION_STATES = [
   'submit_attempted',
   'submitted',
   'submission_unknown',
+  'failed_pre_submit',
 ] as const;
 export type SubmissionState = (typeof SUBMISSION_STATES)[number];
 

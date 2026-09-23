@@ -145,6 +145,7 @@ export class SubmissionService {
           snapshot.sessionState === 'ready' &&
           snapshot.providerState === 'error' &&
           snapshot.observationTransport === 'unavailable' &&
+          snapshot.submissionState === 'failed_pre_submit' &&
           snapshot.promptSubmitted === false &&
           snapshot.errorCode === errorCode &&
           snapshot.reason === reason
@@ -155,6 +156,7 @@ export class SubmissionService {
           sessionState: 'ready',
           providerState: 'error',
           observationTransport: 'unavailable',
+          submissionState: 'failed_pre_submit',
           nextCheckAt: null,
           reason,
           errorCode,
@@ -797,6 +799,7 @@ export class SubmissionService {
           sessionState: 'ready',
           providerState: 'error',
           observationTransport: 'unavailable',
+          submissionState: 'failed_pre_submit',
           reason: 'pre-submit-failure',
           errorCode: classified.errorCode,
           promptSubmitted: false,
@@ -864,6 +867,7 @@ export class SubmissionService {
           sessionState: 'ready',
           providerState: 'error',
           observationTransport: 'unavailable',
+          submissionState: 'failed_pre_submit',
           nextCheckAt: null,
           reason: 'restart-pre-submit-interrupted',
           errorCode: 'browser.unavailable',

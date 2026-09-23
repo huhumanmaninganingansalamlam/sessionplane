@@ -480,7 +480,7 @@ test('service restart preserves a pre-submit failure instead of treating an old 
       sessionId: session.sessionId,
     });
     assert.equal(before.generation, 2);
-    assert.equal(before.submissionState, 'prepared');
+    assert.equal(before.submissionState, 'failed_pre_submit');
     assert.equal(before.promptSubmitted, false);
     assert.equal(before.errorCode, 'provider.model-unavailable');
     assert.equal(before.reason, 'pre-submit-failure');
@@ -517,7 +517,7 @@ test('service restart preserves a pre-submit failure instead of treating an old 
       sessionId: session.sessionId,
     });
     assert.equal(restored.generation, 2);
-    assert.equal(restored.submissionState, 'prepared');
+    assert.equal(restored.submissionState, 'failed_pre_submit');
     assert.equal(restored.promptSubmitted, false);
     assert.equal(restored.errorCode, 'provider.model-unavailable');
     assert.equal(restored.reason, 'pre-submit-failure');

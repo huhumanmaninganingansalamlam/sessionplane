@@ -17,6 +17,7 @@ interface TeamSnapshot {
 interface SessionSnapshot {
   readonly sessionId: string;
   readonly generation: number;
+  readonly submissionState: string | null;
   readonly sessionState: string;
   readonly providerState: string;
   readonly conversationId: string | null;
@@ -151,6 +152,7 @@ test('session.send submits once, persists exact acknowledgement, and never resen
       sessionId: disabled.sessionId,
     });
     assert.equal(disabledSnapshot.sessionState, 'ready');
+    assert.equal(disabledSnapshot.submissionState, 'failed_pre_submit');
     assert.equal(disabledSnapshot.promptSubmitted, false);
     assert.equal(disabledSnapshot.errorCode, 'provider.model-unavailable');
 
@@ -361,6 +363,7 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     );
     assert.equal(recoveredPreSubmitSnapshot.sessionState, 'ready');
     assert.equal(recoveredPreSubmitSnapshot.providerState, 'error');
+    assert.equal(recoveredPreSubmitSnapshot.submissionState, 'failed_pre_submit');
     assert.equal(recoveredPreSubmitSnapshot.promptSubmitted, false);
     assert.equal(recoveredPreSubmitSnapshot.reason, 'restart-pre-submit-interrupted');
     assert.equal(recoveredPreSubmitSnapshot.errorCode, 'browser.unavailable');
