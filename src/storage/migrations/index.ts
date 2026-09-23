@@ -4,6 +4,7 @@ import { initialMigration } from './0001-initial.ts';
 import { runtimeCoordinationMigration } from './0002-runtime-coordination.ts';
 import { submissionOutboxMigration } from './0003-submission-outbox.ts';
 import { providerArtifactsMigration } from './0004-provider-artifacts.ts';
+import { teamOwnerIndexMigration } from './0005-team-owner-index.ts';
 
 export interface Migration {
   readonly version: number;
@@ -16,6 +17,7 @@ export const migrations: readonly Migration[] = [
   runtimeCoordinationMigration,
   submissionOutboxMigration,
   providerArtifactsMigration,
+  teamOwnerIndexMigration,
 ];
 
 export function runMigrations(database: DatabaseSync, now: () => Date = () => new Date()): number {
@@ -56,4 +58,3 @@ export function runMigrations(database: DatabaseSync, now: () => Date = () => ne
     .get() as { version: number };
   return Number(row.version);
 }
-

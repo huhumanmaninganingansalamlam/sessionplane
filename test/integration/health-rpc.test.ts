@@ -31,7 +31,7 @@ test('system.health is served over an owner-only Unix socket and durable SQLite 
 
     assert.equal(result.requestOk, true);
     assert.equal(result.service, 'sessionplane');
-    assert.equal((result.database as Record<string, unknown>).schemaVersion, 4);
+    assert.equal((result.database as Record<string, unknown>).schemaVersion, 5);
     assert.equal((result.database as Record<string, unknown>).journalMode, 'wal');
     assert.equal((result.database as Record<string, unknown>).foreignKeys, true);
     assert.equal((result.database as Record<string, unknown>).integrity, 'ok');
@@ -49,4 +49,3 @@ test('system.health is served over an owner-only Unix socket and durable SQLite 
     rmSync(root, { recursive: true, force: true });
   }
 });
-
