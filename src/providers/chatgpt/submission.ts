@@ -9,7 +9,11 @@ import {
   type ProviderSubmissionAcknowledgement,
   type ProviderSubmissionRequest,
 } from '../provider-adapter.ts';
-import { assertNoHumanVerification } from '../human-verification.ts';
+import {
+  assertNoHumanVerification,
+  navigateProviderPage,
+  waitForProviderPageReady,
+} from '../human-verification.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
 const COMPOSER_HYDRATION_TIMEOUT_MS = 3_000;
@@ -55,11 +59,20 @@ export class ChatGptSubmission implements ProviderSubmission {
 
   async prepare(): Promise<void> {
     if (this.#initialUrl !== null) {
-      await this.#page.goto(this.#initialUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30_000,
+      await navigateProviderPage({
+        page: this.#page,
+        provider: this.provider,
+        pageKey: this.pageKey,
+        url: this.#initialUrl,
+        timeoutMs: 30_000,
       });
       this.#registry.refreshPage(this.pageKey);
+    } else {
+      await waitForProviderPageReady({
+        page: this.#page,
+        provider: this.provider,
+        pageKey: this.pageKey,
+      });
     }
     this.#requireExactPage();
     await assertNoHumanVerification({

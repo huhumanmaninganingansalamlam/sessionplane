@@ -110,7 +110,7 @@ export class ChatGptAdapter implements ProviderAdapter {
           pageKey = created.binding.pageKey;
           await created.page.goto(
             chatGptConversationUrl(this.#loginUrl, request.session.conversationId),
-            { waitUntil: 'domcontentloaded', timeout: 30_000 },
+            { waitUntil: 'commit', timeout: 30_000 },
           );
           this.#pageRegistry.refreshPage(pageKey);
         }

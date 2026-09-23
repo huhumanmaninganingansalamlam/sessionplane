@@ -11,6 +11,15 @@ export interface HumanVerificationEvidence {
   readonly url: string;
 }
 
+interface HumanVerificationContext {
+  readonly page: Page;
+  readonly provider: string;
+  readonly pageKey: string;
+}
+
+const NAVIGATION_POLL_MS = 100;
+const NAVIGATION_SETTLE_MS = 100;
+
 const MARKERS: ReadonlyArray<{
   readonly kind: HumanVerificationKind;
   readonly selector: string;
@@ -83,16 +92,81 @@ export async function detectHumanVerification(
   );
 }
 
-export async function assertNoHumanVerification(input: {
-  readonly page: Page;
-  readonly provider: string;
-  readonly pageKey: string;
-}): Promise<void> {
+export async function navigateProviderPage(
+  input: HumanVerificationContext & {
+    readonly url: string;
+    readonly timeoutMs?: number;
+  },
+): Promise<void> {
+  const timeoutMs = input.timeoutMs ?? 30_000;
+  try {
+    await input.page.goto(input.url, {
+      waitUntil: 'commit',
+      timeout: timeoutMs,
+    });
+  } catch (error) {
+    const evidence = await detectHumanVerification(input.page).catch(() => null);
+    if (evidence !== null) {
+      throwHumanVerification(input, evidence);
+    }
+    throw error;
+  }
+  await waitForProviderPageReady(input, timeoutMs);
+}
+
+export async function waitForProviderPageReady(
+  input: HumanVerificationContext,
+  timeoutMs = 30_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const evidence = await detectHumanVerification(input.page).catch(() => null);
+    if (evidence !== null) {
+      throwHumanVerification(input, evidence);
+    }
+
+    const ready = await input.page
+      .evaluate(() => document.readyState !== 'loading')
+      .catch(() => false);
+    if (ready) {
+      await input.page.waitForTimeout(NAVIGATION_SETTLE_MS);
+      const settledEvidence = await detectHumanVerification(input.page).catch(() => null);
+      if (settledEvidence !== null) {
+        throwHumanVerification(input, settledEvidence);
+      }
+      return;
+    }
+
+    await input.page.waitForTimeout(
+      Math.min(NAVIGATION_POLL_MS, Math.max(1, deadline - Date.now())),
+    );
+  }
+
+  const evidence = await detectHumanVerification(input.page).catch(() => null);
+  if (evidence !== null) {
+    throwHumanVerification(input, evidence);
+  }
+  throw new ProviderSubmissionError(
+    'browser.unavailable',
+    input.provider + ' Page did not reach DOM readiness before the navigation deadline',
+  );
+}
+
+export async function assertNoHumanVerification(
+  input: HumanVerificationContext,
+): Promise<void> {
   const evidence = await detectHumanVerification(input.page);
   if (evidence === null) return;
+  throwHumanVerification(input, evidence);
+}
+
+function throwHumanVerification(
+  input: HumanVerificationContext,
+  evidence: HumanVerificationEvidence,
+): never {
   throw new ProviderSubmissionError(
     'provider.human-action-required',
-    `Visible ${input.provider} browser verification requires human completion before retry`,
+    'Visible ' + input.provider + ' browser verification requires human completion before retry',
     {
       details: {
         provider: input.provider,

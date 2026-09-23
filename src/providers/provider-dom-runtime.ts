@@ -29,7 +29,11 @@ import {
   type ProviderSubmissionRequest,
   type ProviderWakeReason,
 } from './provider-adapter.ts';
-import { assertNoHumanVerification } from './human-verification.ts';
+import {
+  assertNoHumanVerification,
+  navigateProviderPage,
+  waitForProviderPageReady,
+} from './human-verification.ts';
 
 export interface ProviderDomSelectors {
   readonly composer: readonly string[];
@@ -353,11 +357,20 @@ class DomProviderSubmission implements ProviderSubmission {
 
   async prepare(): Promise<void> {
     if (this.#initialUrl !== null) {
-      await this.#page.goto(this.#initialUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30_000,
+      await navigateProviderPage({
+        page: this.#page,
+        provider: this.provider,
+        pageKey: this.pageKey,
+        url: this.#initialUrl,
+        timeoutMs: 30_000,
       });
       this.#pageRegistry.refreshPage(this.pageKey);
+    } else {
+      await waitForProviderPageReady({
+        page: this.#page,
+        provider: this.provider,
+        pageKey: this.pageKey,
+      });
     }
     this.#requireExactPage();
     if (!isProviderUrl(this.provider, this.#page.url())) {

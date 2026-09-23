@@ -11,6 +11,7 @@ import type { SessionSnapshot } from '../../src/domain/session.ts';
 import type { ProviderAttachment } from '../../src/providers/provider-adapter.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { ChatGptSubmission } from '../../src/providers/chatgpt/submission.ts';
+import { navigateProviderPage } from '../../src/providers/human-verification.ts';
 
 test('ChatGPT Chat prepares exact attachments before one submit', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-advanced-'));
@@ -376,6 +377,62 @@ test('ChatGPT Work surface is rejected before composer mutation', async () => {
       await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
       0,
     );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('provider navigation surfaces visible verification before DOM readiness timeout', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-navigation-verification-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+  let slowResourceReleased = false;
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      if (route.request().url().endsWith('/slow-verification.js')) {
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        slowResourceReleased = true;
+        await route.fulfill({
+          status: 200,
+          contentType: 'application/javascript',
+          body: '',
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 403,
+        contentType: 'text/html',
+        body:
+          '<!doctype html>' +
+          '<title>Just a moment...</title>' +
+          '<section id="challenge-stage" style="width:320px;height:120px">Verify</section>' +
+          '<script src="/slow-verification.js"></script>',
+      });
+    });
+
+    await assert.rejects(
+      navigateProviderPage({
+        page: created.page,
+        provider: 'chatgpt',
+        pageKey: created.binding.pageKey,
+        url: 'https://chatgpt.com/',
+        timeoutMs: 5_000,
+      }),
+      (error: unknown) =>
+        error instanceof Error &&
+        'errorCode' in error &&
+        error.errorCode === 'provider.human-action-required',
+    );
+    assert.equal(slowResourceReleased, false);
+    assert.equal(created.page.isClosed(), false);
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });
