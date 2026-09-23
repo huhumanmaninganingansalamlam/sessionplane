@@ -13,7 +13,7 @@ import {
   type RoleType,
   type TeamRoleSnapshot,
 } from '../domain/role.ts';
-import { isTerminalSessionState, type SessionSnapshot } from '../domain/session.ts';
+import { isTerminalSessionState, type SessionRecord, type SessionSnapshot } from '../domain/session.ts';
 import type { TeamListResult, TeamRecord, TeamSnapshot } from '../domain/team.ts';
 import { PROVIDERS, type ProviderName } from '../providers/provider-adapter.ts';
 
@@ -97,13 +97,51 @@ export class TeamDirectory {
   getTeam(teamId: string): TeamSnapshot {
     const team = this.#requireTeam(teamId);
     const roleRecords = this.#teams.listRoles(teamId);
+    return this.#teamSnapshot(
+      team,
+      roleRecords,
+      this.#sessions.listCurrentSessionsForTeam(teamId),
+      this.#events.latestSequence(teamId),
+    );
+  }
+
+  listTeams(ownerClientId: string): TeamListResult {
+    const clientId = requireNonEmpty(ownerClientId, 'clientId');
+    const teams = this.#teams.listTeamsByOwner(clientId);
+    if (teams.length === 0) return { requestOk: true, teams: [] };
+
+    const rolesByTeam = new Map<string, RoleRecord[]>();
+    for (const role of this.#teams.listRolesForOwner(clientId)) {
+      const roles = rolesByTeam.get(role.teamId) ?? [];
+      roles.push(role);
+      rolesByTeam.set(role.teamId, roles);
+    }
+    const sessions = this.#sessions.listCurrentSessionsForOwner(clientId);
+    const sequences = this.#events.latestSequencesForOwner(clientId);
+    return {
+      requestOk: true,
+      teams: teams.map((team) => this.#teamSnapshot(
+        team,
+        rolesByTeam.get(team.teamId) ?? [],
+        sessions,
+        sequences.get(team.teamId) ?? 0,
+      )),
+    };
+  }
+
+  #teamSnapshot(
+    team: TeamRecord,
+    roleRecords: readonly RoleRecord[],
+    currentSessions: ReadonlyMap<string, SessionRecord>,
+    latestEventSequence: number,
+  ): TeamSnapshot {
+    const teamId = team.teamId;
     const primaryRole = roleRecords.find((role) => role.roleId === team.primaryRoleId);
     assertDomain(
       primaryRole !== undefined,
       'internal.invariant-violation',
       `Team ${teamId} has no valid primary role`,
     );
-    const currentSessions = this.#sessions.listCurrentSessionsForTeam(teamId);
     const roles = roleRecords.map((role): TeamRoleSnapshot => {
       const session = role.currentSessionId === null
         ? null
@@ -133,15 +171,7 @@ export class TeamDirectory {
       primaryRoleKey: primaryRole.roleKey,
       sharedBriefVersion: Number(team.sharedBriefVersion),
       roles,
-      latestEventSequence: this.#events.latestSequence(teamId),
-    };
-  }
-
-  listTeams(ownerClientId: string): TeamListResult {
-    const clientId = requireNonEmpty(ownerClientId, 'clientId');
-    return {
-      requestOk: true,
-      teams: this.#teams.listTeamsByOwner(clientId).map((team) => this.getTeam(team.teamId)),
+      latestEventSequence,
     };
   }
 

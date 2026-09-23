@@ -152,6 +152,19 @@ export class SessionRepository {
     return new Map(rows.map((row) => [row.sessionId, row]));
   }
 
+  listCurrentSessionsForOwner(ownerClientId: string): ReadonlyMap<string, SessionRecord> {
+    const rows = this.#database
+      .prepare(`
+        SELECT ${QUALIFIED_SESSION_COLUMNS}
+        FROM team_roles r
+        JOIN teams t ON t.team_id = r.team_id
+        JOIN sessions s ON s.session_id = r.current_session_id
+        WHERE t.owner_client_id = ?
+      `)
+      .all(ownerClientId) as unknown as SessionRow[];
+    return new Map(rows.map((row) => [row.sessionId, row]));
+  }
+
   listNonterminalSessionIds(): readonly string[] {
     const rows = this.#database
       .prepare(`

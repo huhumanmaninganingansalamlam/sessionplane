@@ -56,6 +56,18 @@ export class EventRepository {
     return Number(row.sequence);
   }
 
+  latestSequencesForOwner(ownerClientId: string): ReadonlyMap<string, number> {
+    const rows = this.#database
+      .prepare(`
+        SELECT teams.team_id AS teamId,
+          COALESCE((SELECT MAX(sequence) FROM events WHERE team_id = teams.team_id), 0) AS sequence
+        FROM teams
+        WHERE teams.owner_client_id = ?
+      `)
+      .all(ownerClientId) as unknown as Array<{ teamId: string; sequence: number }>;
+    return new Map(rows.map((row) => [row.teamId, Number(row.sequence)]));
+  }
+
   latestSequenceForSession(sessionId: string): number {
     const row = this.#database
       .prepare('SELECT COALESCE(MAX(sequence), 0) AS sequence FROM events WHERE session_id = ?')
@@ -100,4 +112,3 @@ function parsePayload(value: string): Readonly<Record<string, unknown>> {
     ? parsed as Readonly<Record<string, unknown>>
     : {};
 }
-

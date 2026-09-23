@@ -43,16 +43,16 @@ const TEAM_COLUMNS = `
 `;
 
 const ROLE_COLUMNS = `
-  role_id AS roleId,
-  team_id AS teamId,
-  role_key AS roleKey,
-  role_type AS roleType,
-  display_name AS displayName,
-  reports_to_role_id AS reportsToRoleId,
-  current_session_id AS currentSessionId,
-  role_state AS roleState,
-  created_at AS createdAt,
-  retired_at AS retiredAt
+  team_roles.role_id AS roleId,
+  team_roles.team_id AS teamId,
+  team_roles.role_key AS roleKey,
+  team_roles.role_type AS roleType,
+  team_roles.display_name AS displayName,
+  team_roles.reports_to_role_id AS reportsToRoleId,
+  team_roles.current_session_id AS currentSessionId,
+  team_roles.role_state AS roleState,
+  team_roles.created_at AS createdAt,
+  team_roles.retired_at AS retiredAt
 `;
 
 export class TeamRepository {
@@ -155,6 +155,18 @@ export class TeamRepository {
       .all(teamId) as unknown as RoleRow[];
   }
 
+  listRolesForOwner(ownerClientId: string): readonly RoleRecord[] {
+    return this.#database
+      .prepare(`
+        SELECT ${ROLE_COLUMNS}
+        FROM team_roles
+        JOIN teams ON teams.team_id = team_roles.team_id
+        WHERE teams.owner_client_id = ?
+        ORDER BY teams.created_at, teams.team_id, team_roles.created_at, team_roles.role_key
+      `)
+      .all(ownerClientId) as unknown as RoleRow[];
+  }
+
   setCurrentSession(roleId: string, sessionId: string | null): void {
     this.#database
       .prepare('UPDATE team_roles SET current_session_id = ? WHERE role_id = ?')
@@ -193,4 +205,3 @@ export class TeamRepository {
       .run(objective, version, createdAt, teamId);
   }
 }
-

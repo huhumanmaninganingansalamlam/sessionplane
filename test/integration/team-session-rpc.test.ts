@@ -116,6 +116,22 @@ test('teams, role isolation, session replacement, events, and restart restoratio
     assert.notEqual(teamBBackend.sessionId, firstBackend.sessionId);
     assert.notEqual(teamBBackend.teamId, firstBackend.teamId);
 
+    const teamC = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'client-a',
+      requestId: 'team-c',
+      name: 'Team C',
+    });
+    const listedA = await rpc<{ readonly teams: readonly TeamSnapshot[] }>(config.socketPath, 'team.list', {
+      clientId: 'client-a',
+    });
+    assert.deepEqual(new Set(listedA.teams.map((team) => team.teamId)), new Set([teamA.teamId, teamC.teamId]));
+    assert.deepEqual(listedA.teams.find((team) => team.teamId === teamA.teamId), aggregate);
+    assert.deepEqual(listedA.teams.find((team) => team.teamId === teamC.teamId), teamC);
+    const listedB = await rpc<{ readonly teams: readonly TeamSnapshot[] }>(config.socketPath, 'team.list', {
+      clientId: 'client-b',
+    });
+    assert.deepEqual(listedB.teams.map((team) => team.teamId), [teamB.teamId]);
+
     const replacement = await rpc<SessionSnapshot>(config.socketPath, 'session.create', {
       clientId: 'client-a',
       requestId: 'backend-session-2',
@@ -188,4 +204,3 @@ async function rpc<Result = Readonly<Record<string, unknown>>>(
 ): Promise<Result> {
   return await callRpc<Result>({ socketPath, method, params, timeoutMs: 3_000 });
 }
-
