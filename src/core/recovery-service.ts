@@ -256,8 +256,10 @@ export class RecoveryService {
     if (this.#browserOwner === null) {
       return result(snapshot, { unavailable: true });
     }
+    let createdPage: Page | null = null;
     try {
       const created = await this.#browserOwner.createPage();
+      createdPage = created.page;
       this.#pageRegistry.reservePage(created.binding.pageKey, {
         sessionId: snapshot.sessionId,
         generation: snapshot.generation,
@@ -277,8 +279,10 @@ export class RecoveryService {
         reason: 'restart-page-opened',
         errorCode: null,
       }, 'generation.restart-page-opened');
+      createdPage = null;
       return result(updated, { opened: true, rebound: true });
     } catch (error) {
+      await createdPage?.close().catch(() => undefined);
       return await this.#recordUnavailable(snapshot, classifyPageFailure(error));
     }
   }

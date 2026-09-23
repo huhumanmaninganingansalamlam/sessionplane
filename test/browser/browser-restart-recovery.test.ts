@@ -535,6 +535,87 @@ test('service restart preserves a pre-submit failure instead of treating an old 
   }
 });
 
+test('failed restart navigation closes the newly reserved recovery Page', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-restart-navigation-failure-'));
+  const config = resolveConfig({
+    cwd: root,
+    env: {},
+    stateDir: '.state',
+    backendRecoveryAfterMs: 10_000,
+  });
+  const fake = new FakeProviderAdapter();
+  const service = await startCore({
+    config,
+    browserHeadless: true,
+    providerAdapters: [fake],
+    recoveryNavigatePage: async () => {
+      throw new Error('Synthetic restart navigation failure');
+    },
+    logger: silentLogger(),
+  });
+
+  try {
+    const team = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'restart-navigation-failure-client',
+      requestId: 'restart-navigation-failure-team',
+      primaryRoleKey: 'main',
+    });
+    const session = await rpc<SessionSnapshot>(config.socketPath, 'session.create', {
+      clientId: 'restart-navigation-failure-client',
+      requestId: 'restart-navigation-failure-session',
+      teamId: team.teamId,
+      roleKey: 'main',
+      provider: 'chatgpt',
+    });
+    const submitted = await rpc<SessionSnapshot>(config.socketPath, 'session.send', {
+      clientId: 'restart-navigation-failure-client',
+      requestId: 'restart-navigation-failure-send',
+      sessionId: session.sessionId,
+      prompt: 'Keep the failed recovery Page from leaking.',
+      sessionDeadlineSec: 600,
+    });
+    assert.notEqual(submitted.conversationId, null);
+    service.observationService.stop(submitted.sessionId, submitted.generation);
+    const ambiguous = await service.actorScheduler.updateGeneration(
+      submitted.sessionId,
+      submitted.generation,
+      {
+        submissionState: 'submission_unknown',
+        pageKey: null,
+        submittedUserMessageId: null,
+        submittedUserTurnId: null,
+        sessionState: 'observing',
+        providerState: 'unknown',
+        observationTransport: 'unavailable',
+        reason: 'submit-unacknowledged',
+        errorCode: 'session.submission-unknown',
+        promptSubmitted: true,
+      },
+      'generation.restart-navigation-failure-test',
+    );
+    assert.equal(ambiguous.pageKey, null);
+
+    const before = service.pageRegistry.listBindings({ includeClosed: false }).length;
+    const recovery = await service.recoveryService.restore({ forceObservers: true });
+    const after = service.pageRegistry.listBindings({ includeClosed: false }).length;
+    assert.equal(recovery.unavailable, 1);
+    assert.equal(after, before);
+
+    const restored = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'restart-navigation-failure-client',
+      sessionId: submitted.sessionId,
+    });
+    assert.equal(restored.pageKey, null);
+    assert.equal(restored.observationTransport, 'unavailable');
+    assert.equal(restored.errorCode, 'session.page-identity-unverified');
+    assert.equal(restored.reason, 'restart-page-unavailable');
+    assert.equal(fake.submitCount, 1);
+  } finally {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 async function navigateFixture(page: Page, url: string): Promise<void> {
   await page.route('https://chatgpt.com/**', async (route) => {
     await route.fulfill({
