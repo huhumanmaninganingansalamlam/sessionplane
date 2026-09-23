@@ -270,6 +270,7 @@ test('accelerated two-hour reliability run preserves exact identity across resta
       restartConfig.socketPath,
       (health) =>
         Number(health.metrics.observer_count) === 0 &&
+        Number(health.metrics.session_actor_count) === 0 &&
         Number(health.metrics.wait_subscriber_count) === 0,
     );
     for (const name of [
@@ -280,7 +281,7 @@ test('accelerated two-hour reliability run preserves exact identity across resta
     ] as const) {
       assert.equal(settledHealth.metrics[name], 0, `${name} must remain zero`);
     }
-    assert.equal(settledHealth.metrics.session_actor_count, 4);
+    assert.equal(settledHealth.metrics.session_actor_count, 0);
     assert.equal(settledHealth.metrics.session_actor_queue_depth, 0);
     assert.equal(settledHealth.metrics.wait_subscriber_count, 0);
     assert.equal(settledHealth.metrics.observer_count, 0);
