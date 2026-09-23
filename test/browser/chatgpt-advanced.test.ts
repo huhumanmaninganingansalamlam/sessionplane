@@ -409,6 +409,7 @@ test('provider navigation surfaces visible verification before DOM readiness tim
       }
       await route.fulfill({
         status: 403,
+        headers: { 'cf-mitigated': 'challenge' },
         contentType: 'text/html',
         body:
           '<!doctype html>' +

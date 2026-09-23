@@ -250,6 +250,10 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   });
 
   try {
+    const preSubmitRecovered = await submissionService.recoverInterruptedPreSubmissions();
+    if (preSubmitRecovered > 0) {
+      logger.warn('submission.recovered-pre-submit', { count: preSubmitRecovered });
+    }
     const reconciled = await submissionService.reconcileOutboxDiagnostics();
     if (reconciled > 0) {
       logger.warn('submission.reconciled-diagnostics', { count: reconciled });

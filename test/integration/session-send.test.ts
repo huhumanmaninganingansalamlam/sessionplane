@@ -244,6 +244,54 @@ test('session.send submits once, persists exact acknowledgement, and never resen
         .run(interruptedAt, interrupted.sessionId);
     });
 
+    await createRole(config.socketPath, team.teamId, 'expert.pre-submit-crash', 'pre-submit-crash-role');
+    const preSubmitCrash = await createSession(
+      config.socketPath,
+      team.teamId,
+      'expert.pre-submit-crash',
+      'pre-submit-crash-session',
+    );
+    fake.disabledModels.add('pre-submit-crash-model');
+    const preSubmitCrashRequest = {
+      clientId: 'client-send',
+      requestId: 'send-pre-submit-crash',
+      sessionId: preSubmitCrash.sessionId,
+      prompt: 'This row will simulate a crash before submit_attempted.',
+      model: 'pre-submit-crash-model',
+      sessionDeadlineSec: 600,
+    };
+    await assert.rejects(
+      rpc(config.socketPath, 'session.send', preSubmitCrashRequest),
+      hasRpcError('provider.model-unavailable', false),
+    );
+    const preSubmitCrashAt = new Date().toISOString();
+    service.database.transaction(() => {
+      service.database.raw
+        .prepare(`
+          UPDATE outbox
+          SET submission_state = 'prepared', result_json = NULL,
+              error_code = NULL, prompt_submitted = 0, updated_at = ?
+          WHERE client_id = ? AND request_id = ?
+        `)
+        .run(preSubmitCrashAt, 'client-send', 'send-pre-submit-crash');
+      service.database.raw
+        .prepare(`
+          UPDATE generations
+          SET submission_state = 'prepared', reason = NULL,
+              error_code = NULL, prompt_submitted = 0
+          WHERE session_id = ? AND generation = 1
+        `)
+        .run(preSubmitCrash.sessionId);
+      service.database.raw
+        .prepare(`
+          UPDATE sessions
+          SET session_state = 'submitting', provider_state = 'pending',
+              observation_transport = 'fresh', updated_at = ?
+          WHERE session_id = ? AND current_generation = 1
+        `)
+        .run(preSubmitCrashAt, preSubmitCrash.sessionId);
+    });
+
     await createRole(config.socketPath, team.teamId, 'expert.unknown', 'unknown-role');
     const unknown = await createSession(
       config.socketPath,
@@ -287,6 +335,39 @@ test('session.send submits once, persists exact acknowledgement, and never resen
       providerAdapters: [afterRestart],
       logger: silentLogger(),
     });
+
+    const recoveredPreSubmitOutbox = service.database.raw
+      .prepare(`
+        SELECT submission_state AS submissionState, error_code AS errorCode,
+               prompt_submitted AS promptSubmitted
+        FROM outbox
+        WHERE client_id = ? AND request_id = ?
+      `)
+      .get('client-send', 'send-pre-submit-crash') as {
+        submissionState: string;
+        errorCode: string | null;
+        promptSubmitted: number;
+      };
+    assert.equal(recoveredPreSubmitOutbox.submissionState, 'failed_pre_submit');
+    assert.equal(recoveredPreSubmitOutbox.errorCode, 'browser.unavailable');
+    assert.equal(Number(recoveredPreSubmitOutbox.promptSubmitted), 0);
+    const recoveredPreSubmitSnapshot = await rpc<SessionSnapshot>(
+      config.socketPath,
+      'session.get',
+      {
+        clientId: 'client-send',
+        sessionId: preSubmitCrash.sessionId,
+      },
+    );
+    assert.equal(recoveredPreSubmitSnapshot.sessionState, 'ready');
+    assert.equal(recoveredPreSubmitSnapshot.providerState, 'error');
+    assert.equal(recoveredPreSubmitSnapshot.promptSubmitted, false);
+    assert.equal(recoveredPreSubmitSnapshot.reason, 'restart-pre-submit-interrupted');
+    assert.equal(recoveredPreSubmitSnapshot.errorCode, 'browser.unavailable');
+    await assert.rejects(
+      rpc(config.socketPath, 'session.send', preSubmitCrashRequest),
+      hasRpcError('browser.unavailable', false),
+    );
 
     const recoveredOutbox = service.database.raw
       .prepare(`

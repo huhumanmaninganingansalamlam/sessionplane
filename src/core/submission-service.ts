@@ -83,6 +83,41 @@ export class SubmissionService {
     this.#now = options.now ?? (() => new Date());
   }
 
+  async recoverInterruptedPreSubmissions(): Promise<number> {
+    let recovered = 0;
+    for (const interrupted of this.#outbox.listByStates(['prepared', 'composer_filled'])) {
+      const snapshot = this.#sessions.getSnapshot(interrupted.sessionId);
+      if (
+        snapshot === null ||
+        snapshot.generation !== interrupted.generation ||
+        snapshot.terminal
+      ) {
+        continue;
+      }
+      const actor = this.#scheduler.actorFor(interrupted.sessionId);
+      await actor.enqueue(() => {
+        const current = this.#outbox.requireById(interrupted.outboxId);
+        if (
+          current.submissionState !== 'prepared' &&
+          current.submissionState !== 'composer_filled'
+        ) {
+          return;
+        }
+        if (current.promptSubmitted) {
+          this.#recordSubmissionUnknown(
+            actor,
+            current,
+            'restart-inconsistent-pre-submit-state',
+          );
+        } else {
+          this.#recordInterruptedPreSubmit(actor, current);
+        }
+        recovered += 1;
+      });
+    }
+    return recovered;
+  }
+
   async reconcileOutboxDiagnostics(): Promise<number> {
     let reconciled = 0;
     for (const outbox of this.#outbox.listByStates([
@@ -812,6 +847,70 @@ export class SubmissionService {
       promptSubmitted: false,
       snapshot,
     });
+  }
+
+  #recordInterruptedPreSubmit(
+    actor: SessionActor,
+    outbox: OutboxRecord,
+  ): SessionSnapshot {
+    let snapshot!: SessionSnapshot;
+    let eventSequence = 0;
+    this.#database.transaction(() => {
+      const timestamp = this.#now().toISOString();
+      const updated = this.#sessions.updateCurrentGeneration(
+        outbox.sessionId,
+        outbox.generation,
+        {
+          sessionState: 'ready',
+          providerState: 'error',
+          observationTransport: 'unavailable',
+          nextCheckAt: null,
+          reason: 'restart-pre-submit-interrupted',
+          errorCode: 'browser.unavailable',
+          promptSubmitted: false,
+        },
+        timestamp,
+      );
+      if (!updated) {
+        throw new SessionPlaneDomainError(
+          'session.generation-superseded',
+          `Generation ${outbox.generation} is no longer current`,
+        );
+      }
+      snapshot = this.#requireSnapshot(outbox.sessionId);
+      if (
+        !this.#outbox.transition(
+          outbox.outboxId,
+          ['prepared', 'composer_filled'],
+          'failed_pre_submit',
+          {
+            updatedAt: timestamp,
+            resultJson: JSON.stringify(snapshot),
+            errorCode: 'browser.unavailable',
+            promptSubmitted: false,
+          },
+        )
+      ) {
+        throw new SessionPlaneDomainError(
+          'internal.invariant-violation',
+          `Outbox ${outbox.outboxId} could not record interrupted pre-submit recovery`,
+        );
+      }
+      eventSequence = this.#events.append({
+        teamId: outbox.teamId,
+        roleId: outbox.roleId,
+        sessionId: outbox.sessionId,
+        generation: outbox.generation,
+        eventType: 'generation.pre-submit-interrupted',
+        payload: {
+          errorCode: 'browser.unavailable',
+          promptSubmitted: false,
+        },
+        createdAt: timestamp,
+      });
+    });
+    actor.publish(snapshot, eventSequence);
+    return snapshot;
   }
 
   #recordSubmissionUnknown(
