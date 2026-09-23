@@ -47,6 +47,7 @@ import { GrokAdapter } from './providers/grok/adapter.ts';
 import {
   ProviderAdapterRegistry,
   type ProviderAdapter,
+  type ProviderName,
 } from './providers/provider-adapter.ts';
 import { z } from 'zod';
 
@@ -104,7 +105,9 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageBindings.upsert(binding);
   });
   const pageMutationMutex = new PageMutationMutex();
-  const teamDirectory = new TeamDirectory(database);
+  const teamDirectory = new TeamDirectory(database, {
+    enabledProviders: config.enabledProviders,
+  });
   const receipts = new ReceiptRepository(database);
   const actorScheduler = new ActorScheduler(database);
   const browserOwner =
@@ -131,32 +134,36 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     throw error;
   }
 
-  const providerAdapters = new ProviderAdapterRegistry(
+  const configuredAdapters =
     options.providerAdapters ??
-      (browserOwner === null
-        ? []
-        : [
-            new ChatGptAdapter({
-              browserOwner,
-              pageRegistry,
-              loginUrl: config.chatgptUrl,
-              acknowledgementTimeoutMs: config.submissionAckTimeoutMs,
-              backendRequestTimeoutMs: config.backendRequestTimeoutMs,
-              tokenCacheTtlMs: config.tokenCacheTtlMs,
-            }),
-            new GeminiAdapter({
-              browserOwner,
-              pageRegistry,
-              loginUrl: config.geminiUrl,
-              acknowledgementTimeoutMs: config.submissionAckTimeoutMs,
-            }),
-            new GrokAdapter({
-              browserOwner,
-              pageRegistry,
-              loginUrl: config.grokUrl,
-              acknowledgementTimeoutMs: config.submissionAckTimeoutMs,
-            }),
-          ]),
+    (browserOwner === null
+      ? []
+      : [
+          new ChatGptAdapter({
+            browserOwner,
+            pageRegistry,
+            loginUrl: config.chatgptUrl,
+            acknowledgementTimeoutMs: config.submissionAckTimeoutMs,
+            backendRequestTimeoutMs: config.backendRequestTimeoutMs,
+            tokenCacheTtlMs: config.tokenCacheTtlMs,
+          }),
+          new GeminiAdapter({
+            browserOwner,
+            pageRegistry,
+            loginUrl: config.geminiUrl,
+            acknowledgementTimeoutMs: config.submissionAckTimeoutMs,
+          }),
+          new GrokAdapter({
+            browserOwner,
+            pageRegistry,
+            loginUrl: config.grokUrl,
+            acknowledgementTimeoutMs: config.submissionAckTimeoutMs,
+          }),
+        ]);
+  const providerAdapters = new ProviderAdapterRegistry(
+    configuredAdapters.filter((adapter) =>
+      config.enabledProviders.includes(adapter.provider as ProviderName),
+    ),
   );
   const probeCoordinator = new ProbeCoordinator({
     database,
@@ -199,6 +206,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageRegistry,
     scheduler: actorScheduler,
     observations: observationService,
+    adapters: providerAdapters,
+    submissions: submissionService,
     chatgptUrl: config.chatgptUrl,
     geminiUrl: config.geminiUrl,
     grokUrl: config.grokUrl,
@@ -241,6 +250,10 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   });
 
   try {
+    const reconciled = await submissionService.reconcileOutboxDiagnostics();
+    if (reconciled > 0) {
+      logger.warn('submission.reconciled-diagnostics', { count: reconciled });
+    }
     const recovered = await submissionService.recoverInterruptedSubmissions();
     if (recovered > 0) {
       logger.warn('submission.recovered-ambiguous', { count: recovered });

@@ -1,6 +1,7 @@
 import {
   ProviderSubmissionError,
   type ProviderAdapter,
+  type ProviderAcknowledgementRecoveryRequest,
   type ProviderArtifactCandidate,
   type ProviderArtifactDownload,
   type ProviderArtifactRequest,
@@ -26,6 +27,7 @@ export type FakeAcknowledgementMode = 'success' | 'missing';
 export class FakeProviderAdapter implements ProviderAdapter {
   readonly provider: ProviderName;
   acknowledgementMode: FakeAcknowledgementMode = 'success';
+  acknowledgementRecoveryMode: FakeAcknowledgementMode = 'missing';
   submitThrows = false;
   prepareError: ProviderSubmissionError | null = null;
   readonly disabledModels = new Set<string>();
@@ -34,6 +36,7 @@ export class FakeProviderAdapter implements ProviderAdapter {
   prepareCount = 0;
   submitCount = 0;
   acknowledgementCount = 0;
+  acknowledgementRecoveryCount = 0;
   bindCount = 0;
   observationOpenCount = 0;
   recoveryCount = 0;
@@ -104,6 +107,23 @@ export class FakeProviderAdapter implements ProviderAdapter {
       bindAcknowledgement(): void {
         adapter.bindCount += 1;
       },
+    };
+  }
+
+  async recoverAcknowledgement(
+    request: ProviderAcknowledgementRecoveryRequest,
+  ): Promise<ProviderSubmissionAcknowledgement | null> {
+    this.acknowledgementRecoveryCount += 1;
+    if (
+      this.acknowledgementRecoveryMode === 'missing' ||
+      request.session.conversationId === null
+    ) {
+      return null;
+    }
+    return {
+      conversationId: request.session.conversationId,
+      submittedUserMessageId: 'recovered-user-message-' + String(request.generation),
+      submittedUserTurnId: 'recovered-user-turn-' + String(request.generation),
     };
   }
 

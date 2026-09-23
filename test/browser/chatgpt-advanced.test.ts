@@ -186,6 +186,68 @@ test('ChatGPT replaces only a missing unsubmitted Page after restart', async () 
   }
 });
 
+test('ChatGPT pre-submit retry re-navigates an open blank reserved Page', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-blank-retry-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: advancedFixture(),
+      });
+    });
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'advanced-session',
+      generation: 1,
+      conversationId: null,
+    });
+    const failed: SessionSnapshot = {
+      ...sessionSnapshot(created.binding.pageKey),
+      sessionState: 'ready',
+      providerState: 'error',
+      observationTransport: 'unavailable',
+      errorCode: 'browser.unavailable',
+      reason: 'pre-submit-failure',
+      promptSubmitted: false,
+    };
+    const adapter = new ChatGptAdapter({
+      browserOwner: owner,
+      pageRegistry: registry,
+      loginUrl: 'https://chatgpt.com/',
+      acknowledgementTimeoutMs: 500,
+    });
+    const retry = await adapter.openSubmission({
+      session: failed,
+      generation: 2,
+      prompt: 'Retry safely from the blank Page',
+      model: null,
+    });
+    assert.equal(retry.pageKey, created.binding.pageKey);
+    await retry.prepare();
+    assert.equal(new URL(created.page.url()).origin, 'https://chatgpt.com');
+    assert.equal(
+      await created.page.locator('#prompt-textarea').textContent(),
+      'Retry safely from the blank Page',
+    );
+    assert.equal(
+      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
+      0,
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ChatGPT follow-up reopens the exact conversation when the durable pageKey is stale', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-followup-rebind-'));
   const registry = new PageRegistry();

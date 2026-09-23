@@ -63,6 +63,7 @@ const VALUE_OPTIONS = new Set([
   'state-dir',
   'browser',
   'browser-executable',
+  'providers',
   'socket',
   'url',
   'client-id',
@@ -241,6 +242,9 @@ export async function runCli(
     ...(parsed.options['browser-executable'] === undefined
       ? {}
       : { browserExecutable: parsed.options['browser-executable'] }),
+    ...(parsed.options.providers === undefined
+      ? {}
+      : { enabledProviders: parsed.options.providers.split(',') }),
   });
 
   try {
@@ -1580,7 +1584,7 @@ function helpText(): string {
   return `SessionPlane ${SESSIONPLANE_VERSION}
 
 Usage:
-  sessplane serve
+  sessplane serve [--providers chatgpt,gemini,grok]
   sessplane health [--json] [--socket PATH]
   sessplane doctor [--json]
   sessplane browser-list [--browser NAME] [--browser-executable PATH]
@@ -1589,6 +1593,8 @@ Usage:
 Provider browser runtime:
   SessionPlane owns browser state only for supported AI provider sessions.
   General website automation is intentionally not exposed; use Playwright.
+  ChatGPT is enabled by default; other providers require explicit operator enablement.
+  --providers or SESSIONPLANE_ENABLED_PROVIDERS defines the hard provider allowlist.
 
 Fetch, search, and research:
   sessplane fetch URL [--max-bytes N] [--max-redirects N] [--include-html]
@@ -1654,6 +1660,7 @@ Global options:
   --socket PATH        Override core Unix socket
   --browser NAME       auto|chrome|chromium|edge|brave|custom
   --browser-executable PATH  Explicit host Chromium-family executable
+  --providers LIST     Provider allowlist; default chatgpt, use all to enable every provider
 `;
 }
 

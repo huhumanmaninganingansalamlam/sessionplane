@@ -315,6 +315,7 @@ function updateForDecision(
         responseMessageId: decision.responseMessageId,
         answerText: decision.answerText,
         completedAt: now,
+        nextCheckAt: null,
         reason: decision.reason,
         errorCode: null,
       };

@@ -7,6 +7,7 @@ import { PageRegistryError, type PageRegistry } from '../../browser/page-registr
 import {
   ProviderSubmissionError,
   type ProviderAdapter,
+  type ProviderAcknowledgementRecoveryRequest,
   type ProviderArtifactCandidate,
   type ProviderArtifactDownload,
   type ProviderArtifactRequest,
@@ -21,6 +22,7 @@ import {
   type ProviderStopOperation,
   type ProviderStopRequest,
   type ProviderSubmission,
+  type ProviderSubmissionAcknowledgement,
   type ProviderSubmissionRequest,
   type ProviderWakeReason,
 } from '../provider-adapter.ts';
@@ -37,7 +39,7 @@ import { observeChatGptDialog } from './dialog-observer.ts';
 import { observeChatGptDom, waitForChatGptDomMutation } from './dom-observer.ts';
 import { ChatGptNetworkObserver } from './network-observer.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
-import { ChatGptSubmission } from './submission.ts';
+import { ChatGptSubmission, recoverChatGptAcknowledgement } from './submission.ts';
 
 export interface ChatGptAdapterOptions {
   readonly browserOwner: BrowserOwner;
@@ -79,6 +81,16 @@ export class ChatGptAdapter implements ProviderAdapter {
       ) {
         pageKey = null;
       }
+      if (
+        pageKey !== null &&
+        request.session.conversationId === null &&
+        !request.session.promptSubmitted
+      ) {
+        const binding = this.#pageRegistry.refreshPage(pageKey);
+        if (!sameProviderOrigin(binding.url, this.#loginUrl)) {
+          initialUrl = this.#loginUrl;
+        }
+      }
 
       if (pageKey === null && request.session.conversationId !== null) {
         if (request.session.promptSubmitted) {
@@ -98,7 +110,7 @@ export class ChatGptAdapter implements ProviderAdapter {
           pageKey = created.binding.pageKey;
           await created.page.goto(
             chatGptConversationUrl(this.#loginUrl, request.session.conversationId),
-            { waitUntil: 'domcontentloaded', timeout: 15_000 },
+            { waitUntil: 'domcontentloaded', timeout: 30_000 },
           );
           this.#pageRegistry.refreshPage(pageKey);
         }
@@ -147,6 +159,24 @@ export class ChatGptAdapter implements ProviderAdapter {
       throw new ProviderSubmissionError('browser.unavailable', 'Failed to open exact ChatGPT Page', {
         cause: error,
       });
+    }
+  }
+
+  async recoverAcknowledgement(
+    request: ProviderAcknowledgementRecoveryRequest,
+  ): Promise<ProviderSubmissionAcknowledgement | null> {
+    const pageKey = request.session.pageKey;
+    const conversationId = request.session.conversationId;
+    if (pageKey === null || conversationId === null) return null;
+    try {
+      const page = this.#pageRegistry.requireOwnedPage(pageKey, {
+        sessionId: request.session.sessionId,
+        generation: request.generation,
+        conversationId,
+      });
+      return await recoverChatGptAcknowledgement(page, request.prompt, conversationId);
+    } catch {
+      return null;
     }
   }
 
@@ -384,6 +414,14 @@ function hasOpenPage(pageRegistry: PageRegistry, pageKey: string): boolean {
   } catch (error) {
     if (error instanceof PageRegistryError) return false;
     throw error;
+  }
+}
+
+function sameProviderOrigin(currentUrl: string, loginUrl: string): boolean {
+  try {
+    return new URL(currentUrl).origin === new URL(loginUrl).origin;
+  } catch {
+    return false;
   }
 }
 

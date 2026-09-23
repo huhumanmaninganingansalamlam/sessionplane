@@ -11,6 +11,7 @@ import { PageRegistryError, type PageRegistry } from '../browser/page-registry.t
 import {
   ProviderSubmissionError,
   type ProviderAdapter,
+  type ProviderAcknowledgementRecoveryRequest,
   type ProviderArtifactCandidate,
   type ProviderArtifactDownload,
   type ProviderArtifactRequest,
@@ -125,6 +126,34 @@ export class DomProviderAdapter implements ProviderAdapter {
         { cause: error },
       );
     }
+  }
+
+  async recoverAcknowledgement(
+    request: ProviderAcknowledgementRecoveryRequest,
+  ): Promise<ProviderSubmissionAcknowledgement | null> {
+    const conversationId = request.session.conversationId;
+    if (conversationId === null) return null;
+    let page: Page;
+    try {
+      page = this.#requireOwnedPage(request.session, request.generation);
+    } catch {
+      return null;
+    }
+    if (parseProviderConversationId(page.url()) !== conversationId) return null;
+    const turns = await readTurns(page, this.#selectors, 'user');
+    const matches = new Map<string, DomTurn>();
+    for (const turn of turns) {
+      if (normalizeText(turn.text) !== normalizeText(request.prompt)) continue;
+      matches.set(turn.identityKey, turn);
+    }
+    if (matches.size !== 1) return null;
+    const turn = matches.values().next().value;
+    if (turn === undefined) return null;
+    return {
+      conversationId,
+      submittedUserMessageId: turn.messageId,
+      submittedUserTurnId: turn.turnId,
+    };
   }
 
   async openObservation(request: ProviderObservationRequest): Promise<ProviderObservationSource> {

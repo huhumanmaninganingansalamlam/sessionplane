@@ -87,6 +87,13 @@ export class OutboxRepository {
     return row === undefined ? null : mapRow(row);
   }
 
+  getByGeneration(sessionId: string, generation: number): OutboxRecord | null {
+    const row = this.#database.raw
+      .prepare(`SELECT ${OUTBOX_COLUMNS} FROM outbox WHERE session_id = ? AND generation = ?`)
+      .get(sessionId, generation) as OutboxRow | undefined;
+    return row === undefined ? null : mapRow(row);
+  }
+
   requireById(outboxId: string): OutboxRecord {
     const row = this.#database.raw
       .prepare(`SELECT ${OUTBOX_COLUMNS} FROM outbox WHERE outbox_id = ?`)

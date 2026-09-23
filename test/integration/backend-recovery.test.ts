@@ -215,6 +215,59 @@ test('future probe nextCheckAt suppresses repeated paced recovery calls until du
   }
 });
 
+test('DOM completion clears a previously persisted backend nextCheckAt', async () => {
+  const fixture = await createFixture(
+    'sessionplane-dom-complete-clears-pacing-',
+    new FakeProviderAdapter(),
+    {
+      backendRecoveryAfterMs: 15,
+      observationActiveSweepMs: 5,
+      observationQuietSweepMs: 5,
+      probeSuccessIntervalMs: 5_000,
+    },
+  );
+  const { config, fake, service } = fixture;
+  try {
+    const { session } = await createSession(config.socketPath, 'main', 'dom-clears-pacing');
+    fake.queueRecovery(session.sessionId, {
+      kind: 'pending',
+      observationTransport: 'fresh',
+      responseMessageId: null,
+      answerText: null,
+      reason: 'backend-pending',
+      retryAfterMs: null,
+      nextCheckAt: null,
+    });
+    await send(config.socketPath, session.sessionId, 'dom-clears-pacing');
+    const paced = await waitForSnapshot(
+      config.socketPath,
+      session.sessionId,
+      (snapshot) => snapshot.nextCheckAt !== null && !snapshot.terminal,
+    );
+    assert.notEqual(paced.nextCheckAt, null);
+
+    fake.emitObservation(session.sessionId, {
+      candidate: {
+        responseMessageId: 'dom-final-after-pacing',
+        answerText: 'DOM completed after backend pacing',
+        terminalMarker: true,
+        streamingMarker: false,
+      },
+      activity: 'none',
+    });
+    const complete = await waitForSnapshot(
+      config.socketPath,
+      session.sessionId,
+      (snapshot) => snapshot.terminal,
+    );
+    assert.equal(complete.reason, 'dom-terminal-marker');
+    assert.equal(complete.nextCheckAt, null);
+  } finally {
+    await service.close();
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('concurrent same-account recovery preserves each session final', async () => {
   const fake = new DelayedPerSessionRecoveryAdapter(80);
   const fixture = await createFixture('sessionplane-backend-isolation-', fake);

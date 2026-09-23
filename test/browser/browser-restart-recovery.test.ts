@@ -6,7 +6,7 @@ import test from 'node:test';
 
 import type { Page } from 'playwright-core';
 
-import { callRpc } from '../../src/cli/client.ts';
+import { callRpc, RpcClientError } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
@@ -220,6 +220,11 @@ test('service restart preserves submission-unknown diagnostics while reopening t
     assert.equal(ambiguous.pageKey, null);
     const generationBefore = submitted.generation;
     const submitCountBefore = beforeRestart.submitCount;
+    service.database.raw
+      .prepare(
+        "UPDATE outbox SET submission_state = 'submission_unknown', result_json = NULL, error_code = 'session.submission-unknown', prompt_submitted = 1 WHERE session_id = ? AND generation = ?",
+      )
+      .run(submitted.sessionId, generationBefore);
 
     await service.close();
 
@@ -264,6 +269,264 @@ test('service restart preserves submission-unknown diagnostics while reopening t
     assert.equal(generation.reason, 'submit-unacknowledged');
     assert.equal(generation.errorCode, 'session.submission-unknown');
     assert.equal(generation.promptSubmitted, 1);
+    assert.ok(afterRestart.acknowledgementRecoveryCount >= 1);
+
+    afterRestart.acknowledgementRecoveryMode = 'success';
+    const rerecovery = await service.recoveryService.restore({ forceObservers: true });
+    assert.equal(rerecovery.acknowledgementsRecovered, 1);
+    const recovered = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'ambiguous-browser-restart-client',
+      sessionId: submitted.sessionId,
+    });
+    assert.equal(recovered.submissionState, 'submitted');
+    assert.ok(['submitted', 'observing'].includes(recovered.sessionState));
+    assert.equal(recovered.errorCode, null);
+    assert.equal(recovered.submittedUserMessageId, 'recovered-user-message-' + String(generationBefore));
+    assert.equal(recovered.submittedUserTurnId, 'recovered-user-turn-' + String(generationBefore));
+    assert.equal(afterRestart.submitCount, 0);
+    assert.ok(afterRestart.observationOpenCount >= 1);
+
+    const recoveredOutbox = service.database.raw
+      .prepare('SELECT submission_state AS submissionState, prompt_submitted AS promptSubmitted FROM outbox WHERE session_id = ? AND generation = ?')
+      .get(submitted.sessionId, generationBefore) as {
+        submissionState: string;
+        promptSubmitted: number;
+      };
+    assert.equal(recoveredOutbox.submissionState, 'submitted');
+    assert.equal(recoveredOutbox.promptSubmitted, 1);
+  } finally {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('restart never prompt-matches an ambiguous follow-up onto an older generation', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-core-restart-followup-ambiguous-'));
+  const config = resolveConfig({
+    cwd: root,
+    env: {},
+    stateDir: '.state',
+    backendRecoveryAfterMs: 10_000,
+  });
+  const beforeRestart = new FakeProviderAdapter();
+  let service = await startCore({
+    config,
+    browserHeadless: true,
+    providerAdapters: [beforeRestart],
+    recoveryNavigatePage: navigateFixture,
+    logger: silentLogger(),
+  });
+
+  try {
+    const team = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'followup-ambiguous-client',
+      requestId: 'followup-ambiguous-team',
+      primaryRoleKey: 'main',
+    });
+    const session = await rpc<SessionSnapshot>(config.socketPath, 'session.create', {
+      clientId: 'followup-ambiguous-client',
+      requestId: 'followup-ambiguous-session',
+      teamId: team.teamId,
+      roleKey: 'main',
+      provider: 'chatgpt',
+    });
+    const repeatedPrompt =
+      'Do not confuse this older identical prompt with a later ambiguous submit.';
+    const first = await rpc<SessionSnapshot>(config.socketPath, 'session.send', {
+      clientId: 'followup-ambiguous-client',
+      requestId: 'followup-ambiguous-first',
+      sessionId: session.sessionId,
+      prompt: repeatedPrompt,
+      sessionDeadlineSec: 600,
+    });
+    await service.actorScheduler.updateGeneration(
+      first.sessionId,
+      first.generation,
+      {
+        sessionState: 'complete',
+        providerState: 'complete',
+        observationTransport: 'fresh',
+        responseMessageId: 'followup-first-response',
+        answerText: 'done',
+        completedAt: new Date().toISOString(),
+        reason: 'test-complete',
+        errorCode: null,
+      },
+      'generation.followup-ambiguous-first-complete',
+    );
+
+    beforeRestart.acknowledgementMode = 'missing';
+    await assert.rejects(
+      rpc(config.socketPath, 'session.send', {
+        clientId: 'followup-ambiguous-client',
+        requestId: 'followup-ambiguous-second',
+        sessionId: session.sessionId,
+        prompt: repeatedPrompt,
+        sessionDeadlineSec: 600,
+      }),
+      (error: unknown) => {
+        if (!(error instanceof RpcClientError)) return false;
+        const data = error.data as Record<string, unknown>;
+        return data.errorCode === 'session.submission-unknown';
+      },
+    );
+    const ambiguous = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'followup-ambiguous-client',
+      sessionId: session.sessionId,
+    });
+    assert.equal(ambiguous.generation, 2);
+    assert.equal(ambiguous.submissionState, 'submission_unknown');
+    assert.equal(ambiguous.promptSubmitted, true);
+    assert.notEqual(ambiguous.conversationId, null);
+
+    await service.close();
+    const afterRestart = new FakeProviderAdapter();
+    service = await startCore({
+      config,
+      browserHeadless: true,
+      providerAdapters: [afterRestart],
+      recoveryNavigatePage: navigateFixture,
+      logger: silentLogger(),
+    });
+
+    const restored = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'followup-ambiguous-client',
+      sessionId: session.sessionId,
+    });
+    assert.equal(restored.generation, 2);
+    assert.equal(restored.submissionState, 'submission_unknown');
+    assert.equal(restored.errorCode, 'session.submission-unknown');
+    assert.equal(restored.submittedUserMessageId, null);
+    assert.equal(restored.submittedUserTurnId, null);
+    assert.equal(afterRestart.acknowledgementRecoveryCount, 0);
+    assert.equal(afterRestart.submitCount, 0);
+  } finally {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('service restart preserves a pre-submit failure instead of treating an old conversation as current work', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-core-restart-presubmit-browser-'));
+  const config = resolveConfig({
+    cwd: root,
+    env: {},
+    stateDir: '.state',
+    backendRecoveryAfterMs: 10_000,
+  });
+  const beforeRestart = new FakeProviderAdapter();
+  let service = await startCore({
+    config,
+    browserHeadless: true,
+    providerAdapters: [beforeRestart],
+    recoveryNavigatePage: navigateFixture,
+    logger: silentLogger(),
+  });
+
+  try {
+    const team = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'presubmit-browser-restart-client',
+      requestId: 'presubmit-browser-restart-team',
+      primaryRoleKey: 'main',
+    });
+    const session = await rpc<SessionSnapshot>(config.socketPath, 'session.create', {
+      clientId: 'presubmit-browser-restart-client',
+      requestId: 'presubmit-browser-restart-session',
+      teamId: team.teamId,
+      roleKey: 'main',
+      provider: 'chatgpt',
+    });
+    const first = await rpc<SessionSnapshot>(config.socketPath, 'session.send', {
+      clientId: 'presubmit-browser-restart-client',
+      requestId: 'presubmit-browser-restart-first',
+      sessionId: session.sessionId,
+      prompt: 'Establish one durable conversation before the pre-submit failure.',
+      sessionDeadlineSec: 600,
+    });
+    await service.actorScheduler.updateGeneration(
+      first.sessionId,
+      first.generation,
+      {
+        sessionState: 'complete',
+        providerState: 'complete',
+        observationTransport: 'fresh',
+        responseMessageId: 'presubmit-first-response',
+        answerText: 'done',
+        completedAt: new Date().toISOString(),
+        reason: 'test-complete',
+        errorCode: null,
+      },
+      'generation.presubmit-restart-test-complete',
+    );
+
+    beforeRestart.disabledModels.add('disabled-model');
+    await assert.rejects(
+      rpc(config.socketPath, 'session.send', {
+        clientId: 'presubmit-browser-restart-client',
+        requestId: 'presubmit-browser-restart-second',
+        sessionId: session.sessionId,
+        prompt: 'This prompt must never be submitted.',
+        model: 'disabled-model',
+        sessionDeadlineSec: 600,
+      }),
+      (error: unknown) => {
+        if (!(error instanceof RpcClientError)) return false;
+        const data = error.data as Record<string, unknown>;
+        return data.errorCode === 'provider.model-unavailable';
+      },
+    );
+    const before = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'presubmit-browser-restart-client',
+      sessionId: session.sessionId,
+    });
+    assert.equal(before.generation, 2);
+    assert.equal(before.submissionState, 'prepared');
+    assert.equal(before.promptSubmitted, false);
+    assert.equal(before.errorCode, 'provider.model-unavailable');
+    assert.equal(before.reason, 'pre-submit-failure');
+    const conversationId = before.conversationId;
+    assert.notEqual(conversationId, null);
+
+    service.database.raw
+      .prepare(`
+        UPDATE generations
+        SET reason = 'restart-page-opened', error_code = NULL
+        WHERE session_id = ? AND generation = 2
+      `)
+      .run(session.sessionId);
+    service.database.raw
+      .prepare(`
+        UPDATE sessions
+        SET observation_transport = 'fresh'
+        WHERE session_id = ?
+      `)
+      .run(session.sessionId);
+
+    await service.close();
+    const afterRestart = new FakeProviderAdapter();
+    service = await startCore({
+      config,
+      browserHeadless: true,
+      providerAdapters: [afterRestart],
+      recoveryNavigatePage: navigateFixture,
+      logger: silentLogger(),
+    });
+
+    const restored = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'presubmit-browser-restart-client',
+      sessionId: session.sessionId,
+    });
+    assert.equal(restored.generation, 2);
+    assert.equal(restored.submissionState, 'prepared');
+    assert.equal(restored.promptSubmitted, false);
+    assert.equal(restored.errorCode, 'provider.model-unavailable');
+    assert.equal(restored.reason, 'pre-submit-failure');
+    assert.equal(restored.observationTransport, 'unavailable');
+    assert.equal(restored.conversationId, conversationId);
+    assert.equal(afterRestart.openCount, 0);
+    assert.equal(afterRestart.submitCount, 0);
+    assert.equal(afterRestart.acknowledgementRecoveryCount, 0);
+    assert.equal(afterRestart.observationOpenCount, 0);
   } finally {
     await service.close();
     rmSync(root, { recursive: true, force: true });

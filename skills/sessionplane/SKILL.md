@@ -34,6 +34,8 @@ unavailable, surface that condition instead of creating an isolated runtime.
 
 ## Provider continuity and ChatGPT Pro
 
+- Provider availability is controlled by the running core. ChatGPT is the default enabled provider; Gemini or Grok require explicit operator enablement. Read `system.health.providers.enabled` when provider choice matters. Never create or switch to a provider that is not enabled; a typed `provider.disabled` result is authoritative until the operator changes the core allowlist.
+
 - Provider is part of durable session identity. Preserve the current provider when reconstructing or replacing a session. Never switch providers as recovery for `waitExpired`, `submission_unknown`, model unavailability, consent/interstitial UI, rate limits, or observation failure. Use another provider only when the user or caller explicitly requested that provider.
 - For ChatGPT, `model=Pro` is a model-family intent, not a version string. Let SessionPlane inspect the current model menu and choose the highest enabled Pro-family option; if the highest option is unavailable or disabled before submit, use the next enabled Pro-family option.
 - Do not preflight or infer Pro availability from `/backend-api/models`, a partial model list, or one visible picker snapshot. ChatGPT can expose an Instant-only capability feed while the live composer picker still offers Pro. Submit the semantic `model=Pro` request through SessionPlane and let the provider adapter reconcile capability data with the live picker.

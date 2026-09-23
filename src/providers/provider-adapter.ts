@@ -27,6 +27,12 @@ export interface ProviderSubmissionAcknowledgement {
   readonly submittedUserTurnId: string;
 }
 
+export interface ProviderAcknowledgementRecoveryRequest {
+  readonly session: SessionSnapshot;
+  readonly generation: number;
+  readonly prompt: string;
+}
+
 export interface ProviderSubmission {
   readonly provider: string;
   readonly pageKey: string;
@@ -157,6 +163,9 @@ export interface ProviderStopOperation {
 export interface ProviderAdapter {
   readonly provider: string;
   openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission>;
+  recoverAcknowledgement?(
+    request: ProviderAcknowledgementRecoveryRequest,
+  ): Promise<ProviderSubmissionAcknowledgement | null>;
   openObservation(request: ProviderObservationRequest): Promise<ProviderObservationSource>;
   recover(request: ProviderRecoveryRequest): Promise<ProviderRecoveryResult>;
   openStop(request: ProviderStopRequest): Promise<ProviderStopOperation>;
@@ -206,6 +215,10 @@ export class ProviderAdapterRegistry {
       throw new Error(`Provider adapter already registered: ${adapter.provider}`);
     }
     this.#adapters.set(adapter.provider, adapter);
+  }
+
+  has(provider: string): boolean {
+    return this.#adapters.has(provider);
   }
 
   require(provider: string): ProviderAdapter {

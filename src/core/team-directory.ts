@@ -19,11 +19,12 @@ import {
   type SessionSnapshot,
 } from '../domain/session.ts';
 import type { TeamListResult, TeamRecord, TeamSnapshot } from '../domain/team.ts';
-import { PROVIDERS } from '../providers/provider-adapter.ts';
+import { PROVIDERS, type ProviderName } from '../providers/provider-adapter.ts';
 
 export interface TeamDirectoryOptions {
   readonly now?: () => Date;
   readonly uuid?: () => string;
+  readonly enabledProviders?: readonly ProviderName[];
 }
 
 export class TeamDirectory {
@@ -33,6 +34,7 @@ export class TeamDirectory {
   readonly #events: EventRepository;
   readonly #now: () => Date;
   readonly #uuid: () => string;
+  readonly #enabledProviders: ReadonlySet<ProviderName>;
 
   constructor(database: SessionPlaneDatabase, options: TeamDirectoryOptions = {}) {
     this.#database = database;
@@ -41,6 +43,7 @@ export class TeamDirectory {
     this.#events = new EventRepository(database.raw);
     this.#now = options.now ?? (() => new Date());
     this.#uuid = options.uuid ?? randomUUID;
+    this.#enabledProviders = new Set(options.enabledProviders ?? PROVIDERS);
   }
 
   createTeam(input: {
@@ -247,6 +250,12 @@ export class TeamDirectory {
       'input.invalid',
       `Unsupported provider: ${input.provider}`,
     );
+    const provider = input.provider as ProviderName;
+    assertDomain(
+      this.#enabledProviders.has(provider),
+      'provider.disabled',
+      'Provider is disabled by runtime configuration: ' + provider,
+    );
 
     const timestamp = this.#now().toISOString();
     const sessionId = this.#uuid();
@@ -259,7 +268,7 @@ export class TeamDirectory {
         sessionId,
         teamId: team.teamId,
         roleId: role.roleId,
-        provider: input.provider,
+        provider,
         predecessorSessionId,
         sessionState: 'created',
         providerState: 'unknown',
@@ -279,7 +288,7 @@ export class TeamDirectory {
         sessionId,
         generation: 0,
         eventType: 'session.created',
-        payload: { roleKey: role.roleKey, provider: input.provider, predecessorSessionId },
+        payload: { roleKey: role.roleKey, provider, predecessorSessionId },
         createdAt: timestamp,
       });
     });

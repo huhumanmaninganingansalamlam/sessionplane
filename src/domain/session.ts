@@ -1,3 +1,5 @@
+import type { SubmissionState } from './generation.ts';
+
 export const SESSION_STATES = [
   'created',
   'ready',
@@ -52,6 +54,7 @@ export interface SessionSnapshot {
   readonly predecessorSessionId: string | null;
   readonly provider: string;
   readonly generation: number;
+  readonly submissionState: SubmissionState | null;
   readonly sessionState: SessionState;
   readonly providerState: ProviderState;
   readonly observationTransport: ObservationTransport;

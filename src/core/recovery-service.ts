@@ -5,11 +5,14 @@ import { isProviderUrl } from '../browser/page-binding.ts';
 import { PageRegistryError, type PageRegistry } from '../browser/page-registry.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
 import type { Logger } from '../logging.ts';
+import type { ProviderAdapterRegistry } from '../providers/provider-adapter.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
+import { PageBindingRepository } from '../storage/page-binding-repository.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
 import type { RuntimeMetrics } from '../telemetry/metrics.ts';
 import type { ObservationService } from './observation-service.ts';
+import type { SubmissionService } from './submission-service.ts';
 
 export interface RestartRecoveryReport {
   readonly scanned: number;
@@ -17,6 +20,9 @@ export interface RestartRecoveryReport {
   readonly opened: number;
   readonly conflicts: number;
   readonly unavailable: number;
+  readonly skippedDisabled: number;
+  readonly conversationsRecovered: number;
+  readonly acknowledgementsRecovered: number;
   readonly observersStarted: number;
   readonly durationMs: number;
 }
@@ -27,6 +33,8 @@ export interface RecoveryServiceOptions {
   readonly pageRegistry: PageRegistry;
   readonly scheduler: ActorScheduler;
   readonly observations: ObservationService;
+  readonly adapters: ProviderAdapterRegistry;
+  readonly submissions: SubmissionService;
   readonly chatgptUrl: string;
   readonly geminiUrl: string;
   readonly grokUrl: string;
@@ -41,7 +49,10 @@ export class RecoveryService {
   readonly #pageRegistry: PageRegistry;
   readonly #scheduler: ActorScheduler;
   readonly #observations: ObservationService;
+  readonly #adapters: ProviderAdapterRegistry;
+  readonly #submissions: SubmissionService;
   readonly #sessions: SessionRepository;
+  readonly #pageBindings: PageBindingRepository;
   readonly #providerUrls: RecoveryProviderUrls;
   readonly #metrics: RuntimeMetrics | null;
   readonly #logger: Logger | null;
@@ -54,7 +65,10 @@ export class RecoveryService {
     this.#pageRegistry = options.pageRegistry;
     this.#scheduler = options.scheduler;
     this.#observations = options.observations;
+    this.#adapters = options.adapters;
+    this.#submissions = options.submissions;
     this.#sessions = new SessionRepository(options.database.raw);
+    this.#pageBindings = new PageBindingRepository(options.database.raw);
     this.#providerUrls = {
       chatgptUrl: options.chatgptUrl,
       geminiUrl: options.geminiUrl,
@@ -84,6 +98,9 @@ export class RecoveryService {
     let opened = 0;
     let conflicts = 0;
     let unavailable = 0;
+    let skippedDisabled = 0;
+    let conversationsRecovered = 0;
+    let acknowledgementsRecovered = 0;
     let observersStarted = 0;
     const snapshots = this.#sessions.listRecoverableSnapshots();
 
@@ -91,8 +108,23 @@ export class RecoveryService {
       if (options.forceObservers === true) {
         this.#observations.stop(original.sessionId, original.generation);
       }
+      if (!this.#adapters.has(original.provider)) {
+        skippedDisabled += 1;
+        continue;
+      }
+
       let snapshot = original;
-      if (this.#browserOwner !== null && snapshot.conversationId !== null) {
+      const hadConversation = snapshot.conversationId !== null;
+      snapshot = await this.#recoverConversationIdentity(snapshot);
+      if (!hadConversation && snapshot.conversationId !== null) {
+        conversationsRecovered += 1;
+      }
+
+      if (
+        this.#browserOwner !== null &&
+        shouldRecoverPage(snapshot) &&
+        snapshot.conversationId !== null
+      ) {
         const reconciled = await this.#reconcilePage(snapshot);
         snapshot = reconciled.snapshot;
         rebound += reconciled.rebound ? 1 : 0;
@@ -100,6 +132,24 @@ export class RecoveryService {
         conflicts += reconciled.conflict ? 1 : 0;
         unavailable += reconciled.unavailable ? 1 : 0;
       }
+
+      if (
+        snapshot.submissionState === 'submission_unknown' &&
+        snapshot.pageKey !== null &&
+        snapshot.conversationId !== null &&
+        snapshot.submittedUserMessageId === null &&
+        snapshot.submittedUserTurnId === null
+      ) {
+        const recovered = await this.#submissions.recoverAcknowledgement(snapshot);
+        if (
+          snapshot.submissionState === 'submission_unknown' &&
+          recovered.submissionState === 'submitted'
+        ) {
+          acknowledgementsRecovered += 1;
+        }
+        snapshot = recovered;
+      }
+
       if (isObservationReady(snapshot)) {
         this.#observations.start(snapshot, { force: options.forceObservers === true });
         observersStarted += 1;
@@ -114,11 +164,46 @@ export class RecoveryService {
       opened,
       conflicts,
       unavailable,
+      skippedDisabled,
+      conversationsRecovered,
+      acknowledgementsRecovered,
       observersStarted,
       durationMs,
     };
     this.#logger?.info('recovery.completed', { ...report });
     return report;
+  }
+
+  async #recoverConversationIdentity(snapshot: SessionSnapshot): Promise<SessionSnapshot> {
+    if (
+      snapshot.conversationId !== null ||
+      snapshot.submissionState !== 'submission_unknown'
+    ) {
+      return snapshot;
+    }
+    const conversationIds = [
+      ...new Set(
+        this.#pageBindings
+          .listForSession(snapshot.sessionId)
+          .filter(
+            (binding) =>
+              binding.generation === snapshot.generation &&
+              binding.conversationId !== null &&
+              isProviderUrl(snapshot.provider, binding.url),
+          )
+          .map((binding) => binding.conversationId)
+          .filter((value): value is string => value !== null),
+      ),
+    ];
+    if (conversationIds.length !== 1) return snapshot;
+    const conversationId = conversationIds[0];
+    if (conversationId === undefined) return snapshot;
+    return await this.#scheduler.updateGeneration(
+      snapshot.sessionId,
+      snapshot.generation,
+      { conversationId },
+      'generation.restart-conversation-recovered',
+    );
   }
 
   async #reconcilePage(snapshot: SessionSnapshot): Promise<{
@@ -227,8 +312,11 @@ export class RecoveryService {
     },
     eventType: string,
   ): Promise<SessionSnapshot> {
+    const preserveGenerationDiagnostic =
+      snapshot.submissionState === 'submission_unknown' ||
+      (!snapshot.promptSubmitted && snapshot.errorCode !== null);
     const effectiveUpdate: typeof update =
-      snapshot.errorCode === 'session.submission-unknown' && update.errorCode === null
+      preserveGenerationDiagnostic && update.errorCode === null
         ? {
             ...update,
             reason: snapshot.reason ?? update.reason,
@@ -279,9 +367,18 @@ export function providerConversationUrl(
 function isObservationReady(snapshot: SessionSnapshot): boolean {
   return (
     !snapshot.terminal &&
+    snapshot.submissionState === 'submitted' &&
     snapshot.pageKey !== null &&
     snapshot.conversationId !== null &&
     (snapshot.submittedUserMessageId !== null || snapshot.submittedUserTurnId !== null)
+  );
+}
+
+function shouldRecoverPage(snapshot: SessionSnapshot): boolean {
+  return (
+    snapshot.promptSubmitted ||
+    snapshot.submissionState === 'submitted' ||
+    snapshot.submissionState === 'submission_unknown'
   );
 }
 
@@ -319,6 +416,9 @@ function emptyReport(): RestartRecoveryReport {
     opened: 0,
     conflicts: 0,
     unavailable: 0,
+    skippedDisabled: 0,
+    conversationsRecovered: 0,
+    acknowledgementsRecovered: 0,
     observersStarted: 0,
     durationMs: 0,
   };

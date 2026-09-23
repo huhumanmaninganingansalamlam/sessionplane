@@ -164,6 +164,21 @@ test('submission_unknown remains nonterminal across restart and is never resent'
     );
     assert.equal(beforeRestart.submitCount, 1);
 
+    service.database.raw
+      .prepare(`
+        UPDATE generations
+        SET reason = 'restart-page-opened', error_code = NULL
+        WHERE session_id = ? AND generation = 1
+      `)
+      .run(session.sessionId);
+    service.database.raw
+      .prepare(`
+        UPDATE sessions
+        SET observation_transport = 'fresh'
+        WHERE session_id = ?
+      `)
+      .run(session.sessionId);
+
     await service.close();
     const afterRestart = new FakeProviderAdapter();
     service = await startCore({

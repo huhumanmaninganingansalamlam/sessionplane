@@ -83,6 +83,7 @@ test('resolveConfig anchors runtime paths under an explicit state directory', ()
     assert.equal(config.browserHeadless, false);
     assert.equal(config.browserPreference, 'chrome');
     assert.equal(config.browserExecutable, null);
+    assert.deepEqual(config.enabledProviders, ['chatgpt']);
     assert.equal(config.observationActiveSweepMs, 5_000);
     assert.equal(config.observationQuietSweepMs, 15_000);
     assert.equal(config.observationQuietWindowMs, 1_500);
@@ -157,6 +158,37 @@ test('resolveConfig rejects invalid environment values', () => {
         },
       }),
     /can be combined only/,
+  );
+});
+
+test('resolveConfig validates provider allowlists from env and overrides', () => {
+  assert.deepEqual(
+    resolveConfig({ env: { SESSIONPLANE_ENABLED_PROVIDERS: 'chatgpt' } }).enabledProviders,
+    ['chatgpt'],
+  );
+  assert.deepEqual(
+    resolveConfig({ env: { SESSIONPLANE_ENABLED_PROVIDERS: 'grok, chatgpt,grok' } }).enabledProviders,
+    ['grok', 'chatgpt'],
+  );
+  assert.deepEqual(
+    resolveConfig({ env: { SESSIONPLANE_ENABLED_PROVIDERS: 'all' } }).enabledProviders,
+    ['chatgpt', 'gemini', 'grok'],
+  );
+  assert.deepEqual(
+    resolveConfig({ env: {}, enabledProviders: ['chatgpt', 'gemini'] }).enabledProviders,
+    ['chatgpt', 'gemini'],
+  );
+  assert.deepEqual(
+    resolveConfig({ env: {}, enabledProviders: ['all'] }).enabledProviders,
+    ['chatgpt', 'gemini', 'grok'],
+  );
+  assert.throws(
+    () => resolveConfig({ env: { SESSIONPLANE_ENABLED_PROVIDERS: 'chatgpt,claude' } }),
+    /must contain only/,
+  );
+  assert.throws(
+    () => resolveConfig({ env: {}, enabledProviders: [] }),
+    /must enable at least one provider/,
   );
 });
 

@@ -34,6 +34,7 @@ interface SessionRow {
 
 interface SnapshotRow extends SessionRow {
   readonly roleKey: string;
+  readonly submissionState: SubmissionState | null;
   readonly submittedUserMessageId: string | null;
   readonly submittedUserTurnId: string | null;
   readonly responseMessageId: string | null;
@@ -355,6 +356,7 @@ export class SessionRepository {
         SELECT
           ${QUALIFIED_SESSION_COLUMNS},
           r.role_key AS roleKey,
+          g.submission_state AS submissionState,
           g.submitted_user_message_id AS submittedUserMessageId,
           g.submitted_user_turn_id AS submittedUserTurnId,
           g.response_message_id AS responseMessageId,
@@ -381,6 +383,7 @@ export class SessionRepository {
       predecessorSessionId: row.predecessorSessionId,
       provider: row.provider,
       generation: Number(row.currentGeneration),
+      submissionState: row.submissionState,
       sessionState: row.sessionState,
       providerState: row.providerState,
       observationTransport: row.observationTransport,

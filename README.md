@@ -114,6 +114,26 @@ Query it from another terminal:
 sessplane health --json
 ```
 
+Provider availability is an operator setting. The safe default is ChatGPT-only;
+Gemini and Grok remain supported but are disabled until the operator explicitly
+enables them. Expand the allowlist only when another provider is actually wanted:
+
+```bash
+# Default: ChatGPT only.
+sessplane serve
+# Explicitly enable every bundled provider.
+sessplane serve --providers all
+# Or enable a specific set.
+sessplane serve --providers chatgpt,gemini
+SESSIONPLANE_ENABLED_PROVIDERS=chatgpt sessplane serve
+```
+
+`system.health` reports `providers.supported`, `providers.enabled`, and
+`providers.disabled`. Disabled providers are not registered in the running core,
+new sessions for them fail with `provider.disabled`, and restart recovery does not
+open, observe, or probe their durable sessions. Existing durable records remain
+queryable so re-enabling a provider does not destroy history.
+
 ## Provider-owned browser runtime
 
 SessionPlane owns one persistent Chromium-family profile only to run supported

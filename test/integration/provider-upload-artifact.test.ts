@@ -173,6 +173,7 @@ test('artifact capture fails closed when provider bytes exceed the configured li
     cwd: root,
     env: {},
     stateDir: '.state',
+    enabledProviders: ['gemini'],
     maxArtifactFileBytes: 8,
   });
   const fake = new FakeProviderAdapter('gemini');

@@ -8,7 +8,50 @@ import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry, PageRegistryError } from '../../src/browser/page-registry.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
-import { ChatGptSubmission } from '../../src/providers/chatgpt/submission.ts';
+import { ChatGptSubmission, recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submission.ts';
+
+test('ChatGPT read-only acknowledgement recovery requires one unique exact prompt identity', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-ack-recovery-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: '<html><body><div data-message-author-role="user" data-message-id="user-1" data-turn-id="turn-1"><div class="whitespace-pre-wrap">Recover me exactly</div></div></body></html>',
+      });
+    });
+    await created.page.goto('https://chatgpt.com/c/auditconv123');
+    const recovered = await recoverChatGptAcknowledgement(
+      created.page,
+      'Recover me exactly',
+      'auditconv123',
+    );
+    assert.deepEqual(recovered, {
+      conversationId: 'auditconv123',
+      submittedUserMessageId: 'user-1',
+      submittedUserTurnId: 'turn-1',
+    });
+
+    await created.page.setContent(
+      '<div data-message-author-role="user" data-message-id="user-1" data-turn-id="turn-1"><div class="whitespace-pre-wrap">Recover me exactly</div></div><div data-message-author-role="user" data-message-id="user-2" data-turn-id="turn-2"><div class="whitespace-pre-wrap">Recover me exactly</div></div>',
+    );
+    assert.equal(
+      await recoverChatGptAcknowledgement(created.page, 'Recover me exactly', 'auditconv123'),
+      null,
+    );
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('ChatGPT submission captures exact model, conversation, and user-turn acknowledgement', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-submit-'));

@@ -31,6 +31,8 @@ sessplane wait --session "$SESSION_ID" --generation "$GENERATION" --json
 
 ## Provider continuity and model families
 
+Provider availability is an operator-owned core setting. ChatGPT is enabled by default; Gemini and Grok require explicit operator enablement. Check `system.health.providers.enabled` when choosing a provider. Do not create a session for a disabled provider and do not reinterpret `provider.disabled` as a reason to fall back to another provider.
+
 Keep a role on its current provider when a generation must be reconstructed or
 replaced. Never use Gemini or Grok as an implicit fallback for ChatGPT because
 of `submission_unknown`, model unavailability, a consent/interstitial page,

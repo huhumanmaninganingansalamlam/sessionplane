@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import type { BrowserPreference } from './browser/browser-health.ts';
+import { PROVIDERS, type ProviderName } from './providers/provider-adapter.ts';
 
 export const SESSIONPLANE_VERSION = readSessionPlaneVersion();
 
@@ -32,6 +33,7 @@ export interface SessionPlaneConfig {
   readonly browserHeadless: boolean;
   readonly browserPreference: BrowserPreference;
   readonly browserExecutable: string | null;
+  readonly enabledProviders: readonly ProviderName[];
   readonly submissionAckTimeoutMs: number;
   readonly observationActiveSweepMs: number;
   readonly observationQuietSweepMs: number;
@@ -69,6 +71,7 @@ export interface ConfigOverrides {
   readonly browserHeadless?: boolean;
   readonly browserPreference?: BrowserPreference;
   readonly browserExecutable?: string;
+  readonly enabledProviders?: readonly string[];
   readonly submissionAckTimeoutMs?: number;
   readonly observationActiveSweepMs?: number;
   readonly observationQuietSweepMs?: number;
@@ -155,6 +158,41 @@ function parseBrowserPreference(
   return normalized;
 }
 
+function normalizeEnabledProviders(
+  values: readonly string[],
+  name: string,
+): readonly ProviderName[] {
+  const normalized = [
+    ...new Set(
+      values
+        .map((value) => value.trim().toLowerCase())
+        .filter((value) => value.length > 0),
+    ),
+  ];
+  if (normalized.length === 0) {
+    throw new Error(name + ' must enable at least one provider');
+  }
+  if (normalized.length === 1 && normalized[0] === 'all') {
+    return Object.freeze([...PROVIDERS]);
+  }
+  for (const provider of normalized) {
+    if (!PROVIDERS.includes(provider as ProviderName)) {
+      throw new Error(name + ' must contain only ' + PROVIDERS.join(', '));
+    }
+  }
+  return Object.freeze(normalized as ProviderName[]);
+}
+
+function parseEnabledProviders(value: string | undefined): readonly ProviderName[] {
+  if (value === undefined || value.trim() === '') {
+    return Object.freeze(['chatgpt']);
+  }
+  if (value.trim().toLowerCase() === 'all') {
+    return Object.freeze([...PROVIDERS]);
+  }
+  return normalizeEnabledProviders(value.split(','), 'SESSIONPLANE_ENABLED_PROVIDERS');
+}
+
 export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConfig {
   const env = overrides.env ?? process.env;
   const cwd = path.resolve(overrides.cwd ?? process.cwd());
@@ -200,6 +238,10 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
       'SESSIONPLANE_BROWSER_EXECUTABLE can be combined only with SESSIONPLANE_BROWSER=auto or custom',
     );
   }
+  const enabledProviders =
+    overrides.enabledProviders === undefined
+      ? parseEnabledProviders(env.SESSIONPLANE_ENABLED_PROVIDERS)
+      : normalizeEnabledProviders(overrides.enabledProviders, 'enabledProviders');
   const chatgptUrl = validateChatGptUrl(
     overrides.chatgptUrl ?? env.SESSIONPLANE_CHATGPT_URL ?? 'https://chatgpt.com/',
   );
@@ -241,6 +283,7 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
       parseBoolean(env.SESSIONPLANE_BROWSER_HEADLESS, false, 'SESSIONPLANE_BROWSER_HEADLESS'),
     browserPreference,
     browserExecutable,
+    enabledProviders,
     submissionAckTimeoutMs:
       overrides.submissionAckTimeoutMs ??
       parsePositiveInteger(

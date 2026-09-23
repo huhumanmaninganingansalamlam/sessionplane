@@ -83,6 +83,85 @@ export class SubmissionService {
     this.#now = options.now ?? (() => new Date());
   }
 
+  async reconcileOutboxDiagnostics(): Promise<number> {
+    let reconciled = 0;
+    for (const outbox of this.#outbox.listByStates([
+      'failed_pre_submit',
+      'submission_unknown',
+    ])) {
+      const snapshot = this.#sessions.getSnapshot(outbox.sessionId);
+      if (
+        snapshot === null ||
+        snapshot.generation !== outbox.generation ||
+        snapshot.terminal
+      ) {
+        continue;
+      }
+
+      const stored = tryParseStoredSnapshot(outbox);
+      let update: CurrentGenerationUpdate;
+      if (outbox.submissionState === 'failed_pre_submit') {
+        const errorCode = outbox.errorCode ?? stored?.errorCode ?? null;
+        if (errorCode === null) {
+          continue;
+        }
+        const reason = stored?.reason ?? 'pre-submit-failure';
+        if (
+          snapshot.sessionState === 'ready' &&
+          snapshot.providerState === 'error' &&
+          snapshot.observationTransport === 'unavailable' &&
+          snapshot.promptSubmitted === false &&
+          snapshot.errorCode === errorCode &&
+          snapshot.reason === reason
+        ) {
+          continue;
+        }
+        update = {
+          sessionState: 'ready',
+          providerState: 'error',
+          observationTransport: 'unavailable',
+          nextCheckAt: null,
+          reason,
+          errorCode,
+          promptSubmitted: false,
+        };
+      } else {
+        const errorCode =
+          outbox.errorCode ?? stored?.errorCode ?? 'session.submission-unknown';
+        const reason = stored?.reason ?? 'submit-unacknowledged';
+        if (
+          snapshot.sessionState === 'observing' &&
+          snapshot.providerState === 'unknown' &&
+          snapshot.submissionState === 'submission_unknown' &&
+          snapshot.promptSubmitted &&
+          snapshot.errorCode === errorCode &&
+          snapshot.reason === reason
+        ) {
+          continue;
+        }
+        update = {
+          sessionState: 'observing',
+          providerState: 'unknown',
+          observationTransport: stored?.observationTransport ?? 'unavailable',
+          submissionState: 'submission_unknown',
+          nextCheckAt: null,
+          reason,
+          errorCode,
+          promptSubmitted: true,
+        };
+      }
+
+      await this.#scheduler.updateGeneration(
+        snapshot.sessionId,
+        snapshot.generation,
+        update,
+        'generation.outbox-diagnostic-reconciled',
+      );
+      reconciled += 1;
+    }
+    return reconciled;
+  }
+
   async recoverInterruptedSubmissions(): Promise<number> {
     let recovered = 0;
     for (const interrupted of this.#outbox.listByStates(['submit_attempted'])) {
@@ -97,6 +176,129 @@ export class SubmissionService {
       });
     }
     return recovered;
+  }
+
+  async recoverAcknowledgement(snapshot: SessionSnapshot): Promise<SessionSnapshot> {
+    if (
+      snapshot.generation !== 1 ||
+      snapshot.submissionState !== 'submission_unknown' ||
+      !snapshot.promptSubmitted ||
+      snapshot.pageKey === null ||
+      snapshot.conversationId === null ||
+      !this.#adapters.has(snapshot.provider)
+    ) {
+      return snapshot;
+    }
+    const outbox = this.#outbox.getByGeneration(snapshot.sessionId, snapshot.generation);
+    if (outbox === null || outbox.submissionState !== 'submission_unknown') {
+      return snapshot;
+    }
+    const prompt = promptFromOutbox(outbox);
+    if (prompt === null) return snapshot;
+    const adapter = this.#adapters.require(snapshot.provider);
+    if (adapter.recoverAcknowledgement === undefined) return snapshot;
+
+    const actor = this.#scheduler.actorFor(snapshot.sessionId);
+    return await actor.enqueue(async () => {
+      const current = this.#requireSnapshot(snapshot.sessionId);
+      if (
+        current.generation !== 1 ||
+        current.generation !== snapshot.generation ||
+        current.submissionState !== 'submission_unknown' ||
+        !current.promptSubmitted ||
+        current.pageKey === null ||
+        current.conversationId === null
+      ) {
+        return current;
+      }
+      const currentOutbox = this.#outbox.getByGeneration(current.sessionId, current.generation);
+      if (currentOutbox === null || currentOutbox.submissionState !== 'submission_unknown') {
+        return current;
+      }
+      const currentPrompt = promptFromOutbox(currentOutbox);
+      if (currentPrompt === null) return current;
+
+      return await this.#pageMutex.runExclusive(current.pageKey, async () => {
+        const acknowledgement = await adapter.recoverAcknowledgement?.({
+          session: current,
+          generation: current.generation,
+          prompt: currentPrompt,
+        });
+        if (
+          acknowledgement === undefined ||
+          acknowledgement === null ||
+          acknowledgement.conversationId !== current.conversationId
+        ) {
+          return current;
+        }
+
+        let recovered!: SessionSnapshot;
+        let eventSequence = 0;
+        this.#database.transaction(() => {
+          const timestamp = this.#now().toISOString();
+          const updated = this.#sessions.updateCurrentGeneration(
+            current.sessionId,
+            current.generation,
+            {
+              sessionState: 'submitted',
+              providerState: 'generating',
+              observationTransport: 'fresh',
+              submissionState: 'submitted',
+              conversationId: acknowledgement.conversationId,
+              pageKey: current.pageKey,
+              submittedUserMessageId: acknowledgement.submittedUserMessageId,
+              submittedUserTurnId: acknowledgement.submittedUserTurnId,
+              promptSubmitted: true,
+              reason: 'acknowledgement-recovered',
+              errorCode: null,
+            },
+            timestamp,
+          );
+          if (!updated) {
+            throw new SessionPlaneDomainError(
+              'session.generation-superseded',
+              'Generation changed during acknowledgement recovery',
+            );
+          }
+          recovered = this.#requireSnapshot(current.sessionId);
+          if (
+            !this.#outbox.transition(
+              currentOutbox.outboxId,
+              ['submission_unknown'],
+              'submitted',
+              {
+                updatedAt: timestamp,
+                resultJson: JSON.stringify(recovered),
+                errorCode: null,
+                promptSubmitted: true,
+              },
+            )
+          ) {
+            throw new SessionPlaneDomainError(
+              'internal.invariant-violation',
+              'Ambiguous outbox could not be promoted after acknowledgement recovery',
+            );
+          }
+          eventSequence = this.#events.append({
+            teamId: currentOutbox.teamId,
+            roleId: currentOutbox.roleId,
+            sessionId: current.sessionId,
+            generation: current.generation,
+            eventType: 'generation.acknowledgement-recovered',
+            payload: {
+              hasConversationId: true,
+              hasSubmittedUserMessageId: true,
+              hasSubmittedUserTurnId: true,
+              promptSubmitted: true,
+            },
+            createdAt: timestamp,
+          });
+        });
+        actor.publish(recovered, eventSequence);
+        this.#onSubmitted?.(recovered);
+        return recovered;
+      });
+    });
   }
 
   async send(input: SessionSendInput): Promise<SessionSnapshot> {
@@ -144,6 +346,12 @@ export class SubmissionService {
       }
 
       const selected = this.#resolveSession(input);
+      if (!this.#adapters.has(selected.provider)) {
+        throw new SessionPlaneDomainError(
+          'provider.disabled',
+          'Provider is disabled by runtime configuration: ' + selected.provider,
+        );
+      }
       const actor = this.#scheduler.actorFor(selected.sessionId);
       return await actor.enqueue(async () =>
         await this.#sendLocked(
@@ -772,6 +980,24 @@ export class SubmissionService {
   }
 }
 
+function promptFromOutbox(outbox: OutboxRecord): string | null {
+  try {
+    const payload = JSON.parse(outbox.payloadJson) as unknown;
+    if (
+      payload !== null &&
+      typeof payload === 'object' &&
+      'prompt' in payload &&
+      typeof (payload as { readonly prompt?: unknown }).prompt === 'string'
+    ) {
+      const prompt = (payload as { readonly prompt: string }).prompt;
+      return prompt.length > 0 ? prompt : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function validatePrompt(value: string): string {
   if (value.length === 0 || value.length > 200_000) {
     throw new SessionPlaneDomainError(
@@ -817,6 +1043,18 @@ function preSubmitDetails(value: unknown): Readonly<Record<string, unknown>> {
     return value as Readonly<Record<string, unknown>>;
   }
   return { providerDetails: value };
+}
+
+function tryParseStoredSnapshot(outbox: OutboxRecord): SessionSnapshot | null {
+  if (outbox.resultJson === null) return null;
+  try {
+    const parsed = JSON.parse(outbox.resultJson) as unknown;
+    return parsed !== null && typeof parsed === 'object'
+      ? (parsed as SessionSnapshot)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function parseStoredSnapshot(outbox: OutboxRecord): SessionSnapshot {

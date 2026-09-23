@@ -1,5 +1,6 @@
 import type { SessionPlaneConfig } from '../config.ts';
 import { SESSIONPLANE_VERSION } from '../config.ts';
+import { PROVIDERS } from '../providers/provider-adapter.ts';
 import type { BrowserOwner } from '../browser/browser-owner.ts';
 import { summarizeBrowserHealth } from '../browser/browser-health.ts';
 import type { PageRegistry } from '../browser/page-registry.ts';
@@ -33,6 +34,11 @@ export function getSystemHealth(context: HealthContext): Readonly<Record<string,
     },
     socket: {
       path: context.config.socketPath,
+    },
+    providers: {
+      supported: [...PROVIDERS],
+      enabled: [...context.config.enabledProviders],
+      disabled: PROVIDERS.filter((provider) => !context.config.enabledProviders.includes(provider)),
     },
     database,
     browser: summarizeBrowserHealth(

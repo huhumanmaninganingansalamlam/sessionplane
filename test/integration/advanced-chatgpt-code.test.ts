@@ -26,6 +26,7 @@ test('Chat-only code ZIP generation and extraction use exact durable ChatGPT ses
     cwd: root,
     env: {},
     stateDir: '.state',
+    enabledProviders: ['chatgpt', 'gemini'],
     observationActiveSweepMs: 5,
     observationQuietSweepMs: 5,
     observationQuietWindowMs: 5,

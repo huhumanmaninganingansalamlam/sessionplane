@@ -57,7 +57,7 @@ export class ChatGptSubmission implements ProviderSubmission {
     if (this.#initialUrl !== null) {
       await this.#page.goto(this.#initialUrl, {
         waitUntil: 'domcontentloaded',
-        timeout: 15_000,
+        timeout: 30_000,
       });
       this.#registry.refreshPage(this.pageKey);
     }
@@ -269,6 +269,40 @@ export class ChatGptSubmission implements ProviderSubmission {
     return 'legacy';
   }
 
+}
+
+export async function recoverChatGptAcknowledgement(
+  page: Page,
+  prompt: string,
+  expectedConversationId: string,
+): Promise<ProviderSubmissionAcknowledgement | null> {
+  const conversationId = parseChatGptConversationId(page.url());
+  if (conversationId !== expectedConversationId) return null;
+
+  const messages = page.locator(CHATGPT_SELECTORS.userMessages);
+  const count = await messages.count().catch(() => 0);
+  const matches = new Map<
+    string,
+    { readonly messageId: string; readonly turnId: string }
+  >();
+  for (let index = 0; index < count; index += 1) {
+    const message = messages.nth(index);
+    if (!(await messageHasExactPrompt(message, prompt))) continue;
+    const identity = await readUserIdentity(message);
+    if (identity === null) continue;
+    matches.set(identity.identityKey, {
+      messageId: identity.messageId,
+      turnId: identity.turnId,
+    });
+  }
+  if (matches.size !== 1) return null;
+  const identity = matches.values().next().value;
+  if (identity === undefined) return null;
+  return {
+    conversationId,
+    submittedUserMessageId: identity.messageId,
+    submittedUserTurnId: identity.turnId,
+  };
 }
 
 type ModelSelectionMode = 'legacy' | 'intelligence-pro';
