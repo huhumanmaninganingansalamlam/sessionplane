@@ -31,6 +31,7 @@ unavailable, surface that condition instead of creating an isolated runtime.
 - `observationTransport: "deferred"` with a backend 429 reason is a successful nonterminal observation state, not provider blocking and not a reason to resend.
 - `providerState: "blocked"` is accepted only when returned as structured core state from verified visible provider evidence.
 - `submission_unknown` means a submit may have occurred. Never issue a new requestId automatically to resend it.
+- The core may recover a unique exact-prompt acknowledgement read-only and resume observation on the same generation; keep waiting on its exact `sessionId + generation` and never resend it.
 
 ## Provider continuity and ChatGPT Pro
 

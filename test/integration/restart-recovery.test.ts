@@ -209,6 +209,97 @@ test('submission_unknown remains nonterminal across restart and is never resent'
   }
 });
 
+test('live ambiguous acknowledgement recovery resumes the same generation without resending', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-live-ambiguous-'));
+  const config = resolveConfig({
+    cwd: root,
+    env: {},
+    stateDir: '.state',
+    observationActiveSweepMs: 10,
+    observationQuietSweepMs: 20,
+    observationQuietWindowMs: 10,
+    backendRecoveryAfterMs: 10_000,
+  });
+  const adapter = new FakeProviderAdapter();
+  adapter.acknowledgementMode = 'missing';
+  adapter.autoFinalText = 'Recovered after live acknowledgement appeared';
+  const service = await startCore({
+    config,
+    browserHeadless: true,
+    providerAdapters: [adapter],
+    logger: silentLogger(),
+  });
+
+  try {
+    const team = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'live-ambiguous-client',
+      requestId: 'live-ambiguous-team',
+      primaryRoleKey: 'main',
+    });
+    const session = await rpc<SessionSnapshot>(config.socketPath, 'session.create', {
+      clientId: 'live-ambiguous-client',
+      requestId: 'live-ambiguous-session',
+      teamId: team.teamId,
+      roleKey: 'main',
+      provider: 'chatgpt',
+    });
+    const request = {
+      clientId: 'live-ambiguous-client',
+      requestId: 'live-ambiguous-send',
+      sessionId: session.sessionId,
+      prompt: 'The exact acknowledgement will appear after submission.',
+      sessionDeadlineSec: 600,
+    } as const;
+    await assert.rejects(
+      rpc(config.socketPath, 'session.send', request),
+      hasRpcError('session.submission-unknown'),
+    );
+    assert.equal(adapter.submitCount, 1);
+
+    const conversationId = `conversation-${session.sessionId}`;
+    const browserOwner = service.browserOwner;
+    assert.notEqual(browserOwner, null);
+    if (browserOwner === null) assert.fail('Expected the core-owned browser');
+    const page = await browserOwner.createPage();
+    await page.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: '<!doctype html><html><body><main>acknowledgement fixture</main></body></html>',
+      });
+    });
+    await page.page.goto(`https://chatgpt.com/c/${conversationId}`, {
+      waitUntil: 'domcontentloaded',
+    });
+    service.pageRegistry.refreshPage(page.binding.pageKey);
+    service.pageRegistry.bindPage(page.binding.pageKey, {
+      sessionId: session.sessionId,
+      generation: 1,
+      conversationId,
+    });
+    adapter.acknowledgementRecoveryMode = 'success';
+
+    const complete = await waitForComplete(config.socketPath, session.sessionId, 1);
+    assert.equal(complete.sessionId, session.sessionId);
+    assert.equal(complete.generation, 1);
+    assert.equal(complete.submissionState, 'submitted');
+    assert.equal(complete.conversationId, conversationId);
+    assert.equal(complete.answerText, adapter.autoFinalText);
+    assert.equal(adapter.submitCount, 1);
+    assert.equal(adapter.openCount, 1);
+    assert.ok(adapter.acknowledgementRecoveryCount >= 1);
+    assert.equal(adapter.observationOpenCount, 1);
+
+    const outbox = service.database.raw
+      .prepare('SELECT submission_state AS submissionState FROM outbox WHERE session_id = ?')
+      .get(session.sessionId) as { submissionState: string };
+    assert.equal(outbox.submissionState, 'submitted');
+  } finally {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 async function waitForComplete(
   socketPath: string,
   sessionId: string,

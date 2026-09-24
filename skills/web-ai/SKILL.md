@@ -28,6 +28,9 @@ sessplane wait --session "$SESSION_ID" --generation "$GENERATION" --json
 `waitExpired` and backend observation deferral are nonterminal success states.
 `submission_unknown` must never be automatically resent. Use a stable
 `requestId` only for an exact retry of the same mutation.
+The core may recover a unique exact-prompt acknowledgement read-only and resume
+observation on the same generation; keep waiting on its exact `sessionId` and
+`generation`.
 
 ## Provider continuity and model families
 
@@ -119,4 +122,3 @@ only when recovering legacy archives created before the plan contract.
 sessplane code extract --session "$SESSION_ID" \
   --output-zip ./recovered.zip --require-plan --json
 ```
-

@@ -59,6 +59,7 @@ export class SubmissionService {
   readonly #outbox: OutboxRepository;
   readonly #now: () => Date;
   readonly #onSubmitted: ((snapshot: SessionSnapshot) => void) | null;
+  readonly #onSubmissionUnknown: ((snapshot: SessionSnapshot) => void) | null;
   readonly #maxUploadFileBytes: number;
   readonly #requestTails = new Map<string, Promise<void>>();
 
@@ -70,6 +71,7 @@ export class SubmissionService {
     readonly adapters: ProviderAdapterRegistry;
     readonly maxUploadFileBytes?: number;
     readonly onSubmitted?: (snapshot: SessionSnapshot) => void;
+    readonly onSubmissionUnknown?: (snapshot: SessionSnapshot) => void;
     readonly now?: () => Date;
   }) {
     this.#database = options.database;
@@ -81,6 +83,7 @@ export class SubmissionService {
     this.#events = new EventRepository(options.database.raw);
     this.#outbox = new OutboxRepository(options.database);
     this.#onSubmitted = options.onSubmitted ?? null;
+    this.#onSubmissionUnknown = options.onSubmissionUnknown ?? null;
     this.#maxUploadFileBytes = options.maxUploadFileBytes ?? 100 * 1024 * 1024;
     this.#now = options.now ?? (() => new Date());
   }
@@ -1006,6 +1009,7 @@ export class SubmissionService {
     reason: string,
   ): Promise<never> {
     const snapshot = this.#recordSubmissionUnknown(actor, originalOutbox, reason);
+    this.#onSubmissionUnknown?.(snapshot);
     throw new SessionPlaneDomainError(
       'session.submission-unknown',
       'Submission was attempted but exact provider acknowledgement was not proven',

@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Page } from 'playwright-core';
 
 import type { BrowserOwner } from '../browser/browser-owner.ts';
@@ -41,7 +42,13 @@ export interface RecoveryServiceOptions {
   readonly metrics?: RuntimeMetrics;
   readonly logger?: Logger;
   readonly now?: () => Date;
+  readonly acknowledgementRetryMs?: number;
   readonly navigatePage?: (page: Page, url: string) => Promise<void>;
+}
+
+interface AcknowledgementWatcher {
+  readonly controller: AbortController;
+  promise: Promise<void>;
 }
 
 export class RecoveryService {
@@ -57,7 +64,10 @@ export class RecoveryService {
   readonly #metrics: RuntimeMetrics | null;
   readonly #logger: Logger | null;
   readonly #now: () => Date;
+  readonly #acknowledgementRetryMs: number;
   readonly #navigatePage: (page: Page, url: string) => Promise<void>;
+  readonly #acknowledgementWatchers = new Map<string, AcknowledgementWatcher>();
+  #closed = false;
   #tail: Promise<RestartRecoveryReport> = Promise.resolve(emptyReport());
 
   constructor(options: RecoveryServiceOptions) {
@@ -77,6 +87,7 @@ export class RecoveryService {
     this.#metrics = options.metrics ?? null;
     this.#logger = options.logger ?? null;
     this.#now = options.now ?? (() => new Date());
+    this.#acknowledgementRetryMs = Math.max(1, options.acknowledgementRetryMs ?? 5_000);
     this.#navigatePage =
       options.navigatePage ??
       (async (page, url) => {
@@ -88,6 +99,56 @@ export class RecoveryService {
     const operation = this.#tail.then(async () => await this.#restore(options));
     this.#tail = operation.catch(() => emptyReport());
     return operation;
+  }
+
+  watchAcknowledgementRecovery(
+    snapshot: SessionSnapshot,
+    delayFirstAttempt = false,
+  ): void {
+    if (
+      this.#closed ||
+      !needsAcknowledgementRecovery(snapshot) ||
+      !this.#adapters.has(snapshot.provider)
+    ) {
+      return;
+    }
+    const key = `${snapshot.sessionId}:${snapshot.generation}`;
+    if (this.#acknowledgementWatchers.has(key)) return;
+
+    const controller = new AbortController();
+    const watcher: AcknowledgementWatcher = {
+      controller,
+      promise: Promise.resolve(),
+    };
+    this.#acknowledgementWatchers.set(key, watcher);
+    watcher.promise = this.#watchAcknowledgementRecovery(
+      snapshot,
+      controller.signal,
+      delayFirstAttempt ? this.#acknowledgementRetryMs : 0,
+    )
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          this.#logger?.warn('recovery.acknowledgement-retry-failed', {
+            sessionId: snapshot.sessionId,
+            generation: snapshot.generation,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      })
+      .finally(() => {
+        if (this.#acknowledgementWatchers.get(key) === watcher) {
+          this.#acknowledgementWatchers.delete(key);
+        }
+      });
+  }
+
+  async close(): Promise<void> {
+    if (this.#closed) return;
+    this.#closed = true;
+    const watchers = [...this.#acknowledgementWatchers.values()];
+    for (const watcher of watchers) watcher.controller.abort();
+    await Promise.allSettled(watchers.map((watcher) => watcher.promise));
+    this.#acknowledgementWatchers.clear();
   }
 
   async #restore(options: {
@@ -150,6 +211,10 @@ export class RecoveryService {
         snapshot = recovered;
       }
 
+      if (needsAcknowledgementRecovery(snapshot)) {
+        this.watchAcknowledgementRecovery(snapshot, true);
+      }
+
       if (isObservationReady(snapshot)) {
         this.#observations.start(snapshot, { force: options.forceObservers === true });
         observersStarted += 1;
@@ -172,6 +237,59 @@ export class RecoveryService {
     };
     this.#logger?.info('recovery.completed', { ...report });
     return report;
+  }
+
+  async #watchAcknowledgementRecovery(
+    initial: SessionSnapshot,
+    signal: AbortSignal,
+    initialDelayMs: number,
+  ): Promise<void> {
+    const session = this.#sessions.getSession(initial.sessionId);
+    const deadlineMs = session?.deadlineAt === null || session?.deadlineAt === undefined
+      ? Number.NaN
+      : Date.parse(session.deadlineAt);
+    let delayMs = initialDelayMs;
+    let pageRecoveryAttempted = false;
+    while (!signal.aborted) {
+      if (delayMs > 0) {
+        const remainingMs = deadlineMs - this.#now().getTime();
+        if (!Number.isFinite(remainingMs) || remainingMs <= 0) return;
+        delayMs = Math.min(delayMs, remainingMs);
+        try {
+          await delay(delayMs, undefined, { signal });
+        } catch {
+          return;
+        }
+        if (this.#now().getTime() >= deadlineMs) return;
+      }
+
+      const snapshot = this.#sessions.getSnapshot(initial.sessionId);
+      if (
+        snapshot === null ||
+        snapshot.generation !== initial.generation ||
+        !needsAcknowledgementRecovery(snapshot)
+      ) {
+        return;
+      }
+
+      let identified = await this.#recoverConversationIdentity(snapshot);
+      if (
+        this.#browserOwner !== null &&
+        identified.conversationId !== null &&
+        !pageRecoveryAttempted
+      ) {
+        pageRecoveryAttempted = true;
+        identified = (await this.#reconcilePage(identified)).snapshot;
+      }
+      if (identified.pageKey !== null && identified.conversationId !== null) {
+        const recovered = await this.#submissions.recoverAcknowledgement(identified);
+        if (!needsAcknowledgementRecovery(recovered)) return;
+      }
+
+      const remainingMs = deadlineMs - this.#now().getTime();
+      if (!Number.isFinite(remainingMs) || remainingMs <= 0) return;
+      delayMs = Math.min(this.#acknowledgementRetryMs, remainingMs);
+    }
   }
 
   async #recoverConversationIdentity(snapshot: SessionSnapshot): Promise<SessionSnapshot> {
@@ -434,6 +552,16 @@ function isObservationReady(snapshot: SessionSnapshot): boolean {
     snapshot.pageKey !== null &&
     snapshot.conversationId !== null &&
     (snapshot.submittedUserMessageId !== null || snapshot.submittedUserTurnId !== null)
+  );
+}
+
+function needsAcknowledgementRecovery(snapshot: SessionSnapshot): boolean {
+  return (
+    !snapshot.terminal &&
+    snapshot.submissionState === 'submission_unknown' &&
+    snapshot.promptSubmitted &&
+    snapshot.submittedUserMessageId === null &&
+    snapshot.submittedUserTurnId === null
   );
 }
 
