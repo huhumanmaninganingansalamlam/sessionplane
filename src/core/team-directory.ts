@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { EventRepository } from '../storage/event-repository.ts';
-import { SessionRepository } from '../storage/session-repository.ts';
+import { SessionRepository, type CurrentSessionSummary } from '../storage/session-repository.ts';
 import { TeamRepository } from '../storage/team-repository.ts';
 import { assertDomain, SessionPlaneDomainError } from '../domain/errors.ts';
 import type { EventListResult } from '../domain/events.ts';
@@ -13,7 +13,7 @@ import {
   type RoleType,
   type TeamRoleSnapshot,
 } from '../domain/role.ts';
-import { isTerminalSessionState, type SessionRecord, type SessionSnapshot } from '../domain/session.ts';
+import { isTerminalSessionState, type SessionSnapshot } from '../domain/session.ts';
 import type { TeamListResult, TeamRecord, TeamSnapshot } from '../domain/team.ts';
 import { PROVIDERS, type ProviderName } from '../providers/provider-adapter.ts';
 
@@ -132,7 +132,7 @@ export class TeamDirectory {
   #teamSnapshot(
     team: TeamRecord,
     roleRecords: readonly RoleRecord[],
-    currentSessions: ReadonlyMap<string, SessionRecord>,
+    currentSessions: ReadonlyMap<string, CurrentSessionSummary>,
     latestEventSequence: number,
   ): TeamSnapshot {
     const teamId = team.teamId;

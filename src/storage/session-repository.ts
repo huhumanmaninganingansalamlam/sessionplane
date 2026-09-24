@@ -44,6 +44,11 @@ interface SnapshotRow extends SessionRow {
   readonly promptSubmitted: number;
 }
 
+export type CurrentSessionSummary = Pick<
+  SessionRecord,
+  'sessionId' | 'provider' | 'currentGeneration' | 'sessionState' | 'providerState'
+>;
+
 const SESSION_COLUMNS = `
   session_id AS sessionId,
   team_id AS teamId,
@@ -78,6 +83,14 @@ const QUALIFIED_SESSION_COLUMNS = `
   s.next_check_at AS nextCheckAt,
   s.created_at AS createdAt,
   s.updated_at AS updatedAt
+`;
+
+const CURRENT_SESSION_COLUMNS = `
+  s.session_id AS sessionId,
+  s.provider,
+  s.current_generation AS currentGeneration,
+  s.session_state AS sessionState,
+  s.provider_state AS providerState
 `;
 
 const SNAPSHOT_SELECT = `
@@ -140,28 +153,28 @@ export class SessionRepository {
     return row ?? null;
   }
 
-  listCurrentSessionsForTeam(teamId: string): ReadonlyMap<string, SessionRecord> {
+  listCurrentSessionsForTeam(teamId: string): ReadonlyMap<string, CurrentSessionSummary> {
     const rows = this.#database
       .prepare(`
-        SELECT ${QUALIFIED_SESSION_COLUMNS}
+        SELECT ${CURRENT_SESSION_COLUMNS}
         FROM team_roles r
         JOIN sessions s ON s.session_id = r.current_session_id
         WHERE r.team_id = ?
       `)
-      .all(teamId) as unknown as SessionRow[];
+      .all(teamId) as unknown as CurrentSessionSummary[];
     return new Map(rows.map((row) => [row.sessionId, row]));
   }
 
-  listCurrentSessionsForOwner(ownerClientId: string): ReadonlyMap<string, SessionRecord> {
+  listCurrentSessionsForOwner(ownerClientId: string): ReadonlyMap<string, CurrentSessionSummary> {
     const rows = this.#database
       .prepare(`
-        SELECT ${QUALIFIED_SESSION_COLUMNS}
+        SELECT ${CURRENT_SESSION_COLUMNS}
         FROM team_roles r
         JOIN teams t ON t.team_id = r.team_id
         JOIN sessions s ON s.session_id = r.current_session_id
         WHERE t.owner_client_id = ?
       `)
-      .all(ownerClientId) as unknown as SessionRow[];
+      .all(ownerClientId) as unknown as CurrentSessionSummary[];
     return new Map(rows.map((row) => [row.sessionId, row]));
   }
 
