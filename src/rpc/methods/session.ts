@@ -1,10 +1,9 @@
 import { z } from 'zod';
 
 import type { TeamDirectory } from '../../core/team-directory.ts';
-import { SessionPlaneDomainError } from '../../domain/errors.ts';
 import type { ReceiptRepository } from '../../storage/receipt-repository.ts';
 import { PROVIDERS } from '../../providers/provider-adapter.ts';
-import { RpcMethodError, type RpcRouter } from '../router.ts';
+import type { RpcRouter } from '../router.ts';
 
 const ClientId = z.string().trim().min(1).max(200);
 const RequestId = z.string().trim().min(1).max(300);
@@ -34,15 +33,13 @@ export function registerSessionMethods(
         roleKey: params.roleKey,
         provider: params.provider,
       };
-      return wrapDomain(() =>
-        receipts.execute({
-          clientId: params.clientId,
-          requestId: params.requestId,
-          method: 'session.create',
-          payload: command,
-          operation: () => directory.createSession(command),
-        }),
-      );
+      return receipts.execute({
+        clientId: params.clientId,
+        requestId: params.requestId,
+        method: 'session.create',
+        payload: command,
+        operation: () => directory.createSession(command),
+      });
     },
   );
 
@@ -53,11 +50,9 @@ export function registerSessionMethods(
       z.object({ clientId: ClientId, teamId: TeamId, roleKey: RoleKey }).strict(),
     ]),
     (params) =>
-      wrapDomain(() =>
-        'sessionId' in params
-          ? directory.getSession(params.sessionId)
-          : directory.getCurrentSession(params.teamId, params.roleKey),
-      ),
+      'sessionId' in params
+        ? directory.getSession(params.sessionId)
+        : directory.getCurrentSession(params.teamId, params.roleKey),
   );
 
   router.register(
@@ -76,19 +71,7 @@ export function registerSessionMethods(
         limit: z.number().int().min(1).max(1_000).default(200),
       })
       .strict(),
-    (params) =>
-      wrapDomain(() => directory.listEvents(params.teamId, params.afterSequence, params.limit)),
+    (params) => directory.listEvents(params.teamId, params.afterSequence, params.limit),
   );
-}
-
-function wrapDomain<Result>(operation: () => Result): Result {
-  try {
-    return operation();
-  } catch (error) {
-    if (error instanceof SessionPlaneDomainError) {
-      throw new RpcMethodError(error.errorCode, error.message, { details: error.details });
-    }
-    throw error;
-  }
 }
 

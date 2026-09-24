@@ -4,8 +4,7 @@ import {
   ContextPackageService,
   type ContextPackageInput,
 } from '../../context/context-package.ts';
-import { SessionPlaneDomainError } from '../../domain/errors.ts';
-import { RpcMethodError, type RpcRouter } from '../router.ts';
+import type { RpcRouter } from '../router.ts';
 
 const ContextParams = z
   .object({
@@ -27,10 +26,10 @@ export function registerContextMethods(
   contextPackages: ContextPackageService,
 ): void {
   router.register('context.dryRun', ContextParams, (params) =>
-    wrap(() => contextPackages.dryRun(toInput(params))),
+    contextPackages.dryRun(toInput(params)),
   );
   router.register('context.render', ContextParams, (params) =>
-    wrap(() => contextPackages.render(toInput(params))),
+    contextPackages.render(toInput(params)),
   );
 }
 
@@ -49,16 +48,5 @@ function toInput(params: z.infer<typeof ContextParams>): ContextPackageInput {
     ...(params.maxFileBytes === undefined ? {} : { maxFileBytes: params.maxFileBytes }),
     ...(params.maxTotalBytes === undefined ? {} : { maxTotalBytes: params.maxTotalBytes }),
   };
-}
-
-function wrap<Result>(operation: () => Result): Result {
-  try {
-    return operation();
-  } catch (error) {
-    if (error instanceof SessionPlaneDomainError) {
-      throw new RpcMethodError(error.errorCode, error.message, { details: error.details });
-    }
-    throw error;
-  }
 }
 

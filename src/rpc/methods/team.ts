@@ -1,9 +1,8 @@
 import { z } from 'zod';
 
 import type { TeamDirectory } from '../../core/team-directory.ts';
-import { SessionPlaneDomainError } from '../../domain/errors.ts';
 import type { ReceiptRepository } from '../../storage/receipt-repository.ts';
-import { RpcMethodError, type RpcRouter } from '../router.ts';
+import type { RpcRouter } from '../router.ts';
 
 const ClientId = z.string().trim().min(1).max(200);
 const RequestId = z.string().trim().min(1).max(300);
@@ -29,36 +28,34 @@ export function registerTeamMethods(
       .strict(),
     (params) => {
       const command = {
-          clientId: params.clientId,
-          ...(params.name === undefined ? {} : { name: params.name }),
-          ...(params.objective === undefined ? {} : { objective: params.objective }),
-          ...(params.primaryRoleKey === undefined
-            ? {}
-            : { primaryRoleKey: params.primaryRoleKey }),
-          ...(params.externalRef === undefined ? {} : { externalRef: params.externalRef }),
+        clientId: params.clientId,
+        ...(params.name === undefined ? {} : { name: params.name }),
+        ...(params.objective === undefined ? {} : { objective: params.objective }),
+        ...(params.primaryRoleKey === undefined
+          ? {}
+          : { primaryRoleKey: params.primaryRoleKey }),
+        ...(params.externalRef === undefined ? {} : { externalRef: params.externalRef }),
       };
-      return wrapDomain(() =>
-        receipts.execute({
-          clientId: params.clientId,
-          requestId: params.requestId,
-          method: 'team.create',
-          payload: command,
-          operation: () => directory.createTeam(command),
-        }),
-      );
+      return receipts.execute({
+        clientId: params.clientId,
+        requestId: params.requestId,
+        method: 'team.create',
+        payload: command,
+        operation: () => directory.createTeam(command),
+      });
     },
   );
 
   router.register(
     'team.get',
     z.object({ clientId: ClientId, teamId: TeamId }).strict(),
-    (params) => wrapDomain(() => directory.getTeam(params.teamId)),
+    (params) => directory.getTeam(params.teamId),
   );
 
   router.register(
     'team.list',
     z.object({ clientId: ClientId }).strict(),
-    (params) => wrapDomain(() => directory.listTeams(params.clientId)),
+    (params) => directory.listTeams(params.clientId),
   );
 
   router.register(
@@ -77,23 +74,21 @@ export function registerTeamMethods(
       .strict(),
     (params) => {
       const command = {
-          teamId: params.teamId,
-          roleKey: params.roleKey,
-          roleType: params.roleType,
-          ...(params.displayName === undefined ? {} : { displayName: params.displayName }),
-          ...(params.reportsToRoleKey === undefined
-            ? {}
-            : { reportsToRoleKey: params.reportsToRoleKey }),
+        teamId: params.teamId,
+        roleKey: params.roleKey,
+        roleType: params.roleType,
+        ...(params.displayName === undefined ? {} : { displayName: params.displayName }),
+        ...(params.reportsToRoleKey === undefined
+          ? {}
+          : { reportsToRoleKey: params.reportsToRoleKey }),
       };
-      return wrapDomain(() =>
-        receipts.execute({
-          clientId: params.clientId,
-          requestId: params.requestId,
-          method: 'team.role.create',
-          payload: command,
-          operation: () => directory.createRole(command),
-        }),
-      );
+      return receipts.execute({
+        clientId: params.clientId,
+        requestId: params.requestId,
+        method: 'team.role.create',
+        payload: command,
+        operation: () => directory.createRole(command),
+      });
     },
   );
 
@@ -108,15 +103,13 @@ export function registerTeamMethods(
       })
       .strict(),
     (params) =>
-      wrapDomain(() =>
-        receipts.execute({
-          clientId: params.clientId,
-          requestId: params.requestId,
-          method: 'team.role.retire',
-          payload: { teamId: params.teamId, roleKey: params.roleKey },
-          operation: () => directory.retireRole(params.teamId, params.roleKey),
-        }),
-      ),
+      receipts.execute({
+        clientId: params.clientId,
+        requestId: params.requestId,
+        method: 'team.role.retire',
+        payload: { teamId: params.teamId, roleKey: params.roleKey },
+        operation: () => directory.retireRole(params.teamId, params.roleKey),
+      }),
   );
 
   router.register(
@@ -132,31 +125,18 @@ export function registerTeamMethods(
       .strict(),
     (params) => {
       const command = {
-          teamId: params.teamId,
-          briefText: params.briefText,
-          ...(params.objective === undefined ? {} : { objective: params.objective }),
+        teamId: params.teamId,
+        briefText: params.briefText,
+        ...(params.objective === undefined ? {} : { objective: params.objective }),
       };
-      return wrapDomain(() =>
-        receipts.execute({
-          clientId: params.clientId,
-          requestId: params.requestId,
-          method: 'team.brief.update',
-          payload: command,
-          operation: () => directory.updateBrief(command),
-        }),
-      );
+      return receipts.execute({
+        clientId: params.clientId,
+        requestId: params.requestId,
+        method: 'team.brief.update',
+        payload: command,
+        operation: () => directory.updateBrief(command),
+      });
     },
   );
-}
-
-function wrapDomain<Result>(operation: () => Result): Result {
-  try {
-    return operation();
-  } catch (error) {
-    if (error instanceof SessionPlaneDomainError) {
-      throw new RpcMethodError(error.errorCode, error.message, { details: error.details });
-    }
-    throw error;
-  }
 }
 

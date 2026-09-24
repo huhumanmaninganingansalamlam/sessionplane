@@ -1,8 +1,7 @@
 import { z } from 'zod';
 
 import type { ChatGptWorkflowService } from '../../core/chatgpt-workflow-service.ts';
-import { SessionPlaneDomainError } from '../../domain/errors.ts';
-import { RpcMethodError, type RpcRouter } from '../router.ts';
+import type { RpcRouter } from '../router.ts';
 
 const ClientId = z.string().trim().min(1).max(200);
 const RequestId = z.string().trim().min(1).max(300);
@@ -48,26 +47,24 @@ export function registerCodeMethods(
       z.object({ ...GenerateFields, sessionId: SessionId }).strict(),
       z.object({ ...GenerateFields, teamId: TeamId, roleKey: RoleKey }).strict(),
     ]),
-    async (params) =>
-      await wrap(async () =>
-        await workflows.generateCode({
-          clientId: params.clientId,
-          requestId: params.requestId,
-          prompt: params.prompt,
-          model: params.model ?? null,
-          effort: params.effort ?? null,
-          surface: 'chat',
-          sessionDeadlineSec: params.sessionDeadlineSec,
-          ...(params.files === undefined ? {} : { files: params.files }),
-          ...(params.outputPath === undefined ? {} : { outputPath: params.outputPath }),
-          ...(params.outputDir === undefined ? {} : { outputDir: params.outputDir }),
-          multiZip: params.multiZip,
-          overwrite: params.overwrite,
-          ...('sessionId' in params
-            ? { sessionId: params.sessionId }
-            : { teamId: params.teamId, roleKey: params.roleKey }),
-        }),
-      ),
+    (params) =>
+      workflows.generateCode({
+        clientId: params.clientId,
+        requestId: params.requestId,
+        prompt: params.prompt,
+        model: params.model ?? null,
+        effort: params.effort ?? null,
+        surface: 'chat',
+        sessionDeadlineSec: params.sessionDeadlineSec,
+        ...(params.files === undefined ? {} : { files: params.files }),
+        ...(params.outputPath === undefined ? {} : { outputPath: params.outputPath }),
+        ...(params.outputDir === undefined ? {} : { outputDir: params.outputDir }),
+        multiZip: params.multiZip,
+        overwrite: params.overwrite,
+        ...('sessionId' in params
+          ? { sessionId: params.sessionId }
+          : { teamId: params.teamId, roleKey: params.roleKey }),
+      }),
   );
 
   router.register(
@@ -96,36 +93,23 @@ export function registerCodeMethods(
         .strict(),
       z.object({ ...ExtractFields }).strict(),
     ]),
-    async (params) =>
-      await wrap(async () =>
-        await workflows.extractCode({
-          clientId: params.clientId,
-          ...(params.generation === undefined ? {} : { generation: params.generation }),
-          ...(!('conversationId' in params) || params.conversationId === undefined
-            ? {}
-            : { conversationId: params.conversationId }),
-          ...(params.outputPath === undefined ? {} : { outputPath: params.outputPath }),
-          ...(params.outputDir === undefined ? {} : { outputDir: params.outputDir }),
-          multiZip: params.multiZip,
-          requirePlan: params.requirePlan,
-          overwrite: params.overwrite,
-          ...('sessionId' in params
-            ? { sessionId: params.sessionId }
-            : 'teamId' in params
-              ? { teamId: params.teamId, roleKey: params.roleKey }
-              : {}),
-        }),
-      ),
+    (params) =>
+      workflows.extractCode({
+        clientId: params.clientId,
+        ...(params.generation === undefined ? {} : { generation: params.generation }),
+        ...(!('conversationId' in params) || params.conversationId === undefined
+          ? {}
+          : { conversationId: params.conversationId }),
+        ...(params.outputPath === undefined ? {} : { outputPath: params.outputPath }),
+        ...(params.outputDir === undefined ? {} : { outputDir: params.outputDir }),
+        multiZip: params.multiZip,
+        requirePlan: params.requirePlan,
+        overwrite: params.overwrite,
+        ...('sessionId' in params
+          ? { sessionId: params.sessionId }
+          : 'teamId' in params
+            ? { teamId: params.teamId, roleKey: params.roleKey }
+            : {}),
+      }),
   );
-}
-
-async function wrap<Result>(operation: () => Promise<Result>): Promise<Result> {
-  try {
-    return await operation();
-  } catch (error) {
-    if (error instanceof SessionPlaneDomainError) {
-      throw new RpcMethodError(error.errorCode, error.message, { details: error.details });
-    }
-    throw error;
-  }
 }

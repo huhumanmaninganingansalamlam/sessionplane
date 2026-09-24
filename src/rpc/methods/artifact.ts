@@ -1,8 +1,7 @@
 import { z } from 'zod';
 
 import type { ArtifactService } from '../../core/artifact-service.ts';
-import { SessionPlaneDomainError } from '../../domain/errors.ts';
-import { RpcMethodError, type RpcRouter } from '../router.ts';
+import type { RpcRouter } from '../router.ts';
 
 const ClientId = z.string().trim().min(1).max(200);
 const SessionId = z.string().uuid();
@@ -30,8 +29,8 @@ const SessionSelector = z.union([
 ]);
 
 export function registerArtifactMethods(router: RpcRouter, artifacts: ArtifactService): void {
-  router.register('artifact.discover', SessionSelector, async (params) =>
-    await wrapAsync(async () => await artifacts.discover(selector(params))),
+  router.register('artifact.discover', SessionSelector, (params) =>
+    artifacts.discover(selector(params)),
   );
 
   router.register(
@@ -55,23 +54,19 @@ export function registerArtifactMethods(router: RpcRouter, artifacts: ArtifactSe
         })
         .strict(),
     ]),
-    async (params) =>
-      await wrapAsync(async () =>
-        await artifacts.capture({
-          ...selector(params),
-          ...(params.artifactIds === undefined ? {} : { artifactIds: params.artifactIds }),
-        }),
-      ),
+    (params) =>
+      artifacts.capture({
+        ...selector(params),
+        ...(params.artifactIds === undefined ? {} : { artifactIds: params.artifactIds }),
+      }),
   );
 
-  router.register('artifact.list', SessionSelector, (params) =>
-    wrap(() => artifacts.list(selector(params))),
-  );
+  router.register('artifact.list', SessionSelector, (params) => artifacts.list(selector(params)));
 
   router.register(
     'artifact.get',
     z.object({ clientId: ClientId, artifactId: ArtifactId }).strict(),
-    (params) => wrap(() => artifacts.get(params.artifactId)),
+    (params) => artifacts.get(params.artifactId),
   );
 
   router.register(
@@ -85,13 +80,11 @@ export function registerArtifactMethods(router: RpcRouter, artifacts: ArtifactSe
       })
       .strict(),
     (params) =>
-      wrap(() =>
-        artifacts.export({
-          artifactId: params.artifactId,
-          outputPath: params.outputPath,
-          ...(params.overwrite === undefined ? {} : { overwrite: params.overwrite }),
-        }),
-      ),
+      artifacts.export({
+        artifactId: params.artifactId,
+        outputPath: params.outputPath,
+        ...(params.overwrite === undefined ? {} : { overwrite: params.overwrite }),
+      }),
   );
 }
 
@@ -114,27 +107,5 @@ function selector(
         roleKey: params.roleKey,
         ...(params.generation === undefined ? {} : { generation: params.generation }),
       };
-}
-
-function wrap<Result>(operation: () => Result): Result {
-  try {
-    return operation();
-  } catch (error) {
-    if (error instanceof SessionPlaneDomainError) {
-      throw new RpcMethodError(error.errorCode, error.message, { details: error.details });
-    }
-    throw error;
-  }
-}
-
-async function wrapAsync<Result>(operation: () => Promise<Result>): Promise<Result> {
-  try {
-    return await operation();
-  } catch (error) {
-    if (error instanceof SessionPlaneDomainError) {
-      throw new RpcMethodError(error.errorCode, error.message, { details: error.details });
-    }
-    throw error;
-  }
 }
 

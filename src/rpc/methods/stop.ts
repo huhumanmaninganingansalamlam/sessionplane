@@ -1,8 +1,7 @@
 import { z } from 'zod';
 
 import type { StopService } from '../../core/stop-service.ts';
-import { SessionPlaneDomainError } from '../../domain/errors.ts';
-import { RpcMethodError, type RpcRouter } from '../router.ts';
+import type { RpcRouter } from '../router.ts';
 
 const ClientId = z.string().trim().min(1).max(200);
 const RequestId = z.string().trim().min(1).max(300);
@@ -30,26 +29,13 @@ export function registerStopMethods(router: RpcRouter, stops: StopService): void
         })
         .strict(),
     ]),
-    async (params) =>
-      await wrapDomain(async () =>
-        await stops.stop({
-          clientId: params.clientId,
-          requestId: params.requestId,
-          ...('sessionId' in params
-            ? { sessionId: params.sessionId }
-            : { teamId: params.teamId, roleKey: params.roleKey }),
-        }),
-      ),
+    (params) =>
+      stops.stop({
+        clientId: params.clientId,
+        requestId: params.requestId,
+        ...('sessionId' in params
+          ? { sessionId: params.sessionId }
+          : { teamId: params.teamId, roleKey: params.roleKey }),
+      }),
   );
-}
-
-async function wrapDomain<Result>(operation: () => Promise<Result>): Promise<Result> {
-  try {
-    return await operation();
-  } catch (error) {
-    if (error instanceof SessionPlaneDomainError) {
-      throw new RpcMethodError(error.errorCode, error.message, { details: error.details });
-    }
-    throw error;
-  }
 }

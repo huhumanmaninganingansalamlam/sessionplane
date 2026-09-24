@@ -1,5 +1,7 @@
 import type { ZodType } from 'zod';
 
+import { SessionPlaneDomainError } from '../domain/errors.ts';
+
 import {
   JsonRpcRequestSchema,
   rpcError,
@@ -82,11 +84,13 @@ export class RpcRouter {
       if (request.id === undefined) {
         return null;
       }
-      if (error instanceof RpcMethodError) {
-        return rpcError(request.id, error.rpcCode, error.message, {
-          errorCode: error.errorCode,
-          details: error.details,
-        });
+      if (error instanceof RpcMethodError || error instanceof SessionPlaneDomainError) {
+        return rpcError(
+          request.id,
+          error instanceof RpcMethodError ? error.rpcCode : -32000,
+          error.message,
+          { errorCode: error.errorCode, details: error.details },
+        );
       }
       return rpcError(request.id, -32603, 'Internal error', {
         errorCode: 'internal.invariant-violation',

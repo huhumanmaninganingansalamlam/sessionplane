@@ -1,8 +1,7 @@
 import { z } from 'zod';
 
 import type { SubmissionService } from '../../core/submission-service.ts';
-import { SessionPlaneDomainError } from '../../domain/errors.ts';
-import { RpcMethodError, type RpcRouter } from '../router.ts';
+import type { RpcRouter } from '../router.ts';
 
 const ClientId = z.string().trim().min(1).max(200);
 const RequestId = z.string().trim().min(1).max(300);
@@ -48,33 +47,20 @@ export function registerSendMethods(router: RpcRouter, submissions: SubmissionSe
         })
         .strict(),
     ]),
-    async (params) =>
-      await wrapDomainAsync(async () =>
-        await submissions.send({
-          clientId: params.clientId,
-          requestId: params.requestId,
-          prompt: params.prompt,
-          sessionDeadlineSec: params.sessionDeadlineSec,
-          ...(params.model === undefined ? {} : { model: params.model }),
-          ...(params.effort === undefined ? {} : { effort: params.effort }),
-          ...(params.surface === undefined ? {} : { surface: params.surface }),
-          ...(params.files === undefined ? {} : { files: params.files }),
-          ...('sessionId' in params
-            ? { sessionId: params.sessionId }
-            : { teamId: params.teamId, roleKey: params.roleKey }),
-        }),
-      ),
+    (params) =>
+      submissions.send({
+        clientId: params.clientId,
+        requestId: params.requestId,
+        prompt: params.prompt,
+        sessionDeadlineSec: params.sessionDeadlineSec,
+        ...(params.model === undefined ? {} : { model: params.model }),
+        ...(params.effort === undefined ? {} : { effort: params.effort }),
+        ...(params.surface === undefined ? {} : { surface: params.surface }),
+        ...(params.files === undefined ? {} : { files: params.files }),
+        ...('sessionId' in params
+          ? { sessionId: params.sessionId }
+          : { teamId: params.teamId, roleKey: params.roleKey }),
+      }),
   );
-}
-
-async function wrapDomainAsync<Result>(operation: () => Promise<Result>): Promise<Result> {
-  try {
-    return await operation();
-  } catch (error) {
-    if (error instanceof SessionPlaneDomainError) {
-      throw new RpcMethodError(error.errorCode, error.message, { details: error.details });
-    }
-    throw error;
-  }
 }
 
