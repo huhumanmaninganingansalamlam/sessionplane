@@ -16,7 +16,7 @@ interface TeamSnapshot {
   readonly teamId: string;
 }
 
-test('browser restart rebinds the exact conversation without resending and quarantines duplicates', async () => {
+test('browser disconnect recovers the exact conversation without resending and quarantines duplicates', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-restart-'));
   const config = resolveConfig({
     cwd: root,
@@ -88,12 +88,27 @@ test('browser restart rebinds the exact conversation without resending and quara
     assert.equal(browserBacked.pageKey, exactPage.binding.pageKey);
     const submitCountBeforeRestart = fake.submitCount;
 
-    const restart = await service.restartBrowser();
-    const recovery = restart.recovery as Record<string, number>;
-    assert.equal(recovery.scanned, 1);
-    assert.equal(recovery.conflicts, 0);
-    assert.equal(recovery.unavailable, 0);
-    assert.ok(recovery.rebound + recovery.opened >= 1);
+    const oldBrowserPid = browserOwner.status.browserPid;
+    assert.notEqual(oldBrowserPid, null);
+    process.kill(oldBrowserPid as number, 'SIGTERM');
+    const recoveryDeadline = Date.now() + 15_000;
+    while (Date.now() < recoveryDeadline) {
+      if (
+        browserOwner.status.state === 'ready' &&
+        browserOwner.status.browserPid !== oldBrowserPid &&
+        service.pageRegistry.findByConversation(conversationId).some(
+          (binding) =>
+            binding.state === 'owned' &&
+            binding.sessionId === submitted.sessionId &&
+            binding.generation === submitted.generation,
+        )
+      ) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(browserOwner.status.state, 'ready');
+    assert.notEqual(browserOwner.status.browserPid, oldBrowserPid);
     assert.equal(fake.submitCount, submitCountBeforeRestart);
 
     const rebound = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {

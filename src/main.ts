@@ -329,6 +329,33 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   }
 
   let closed = false;
+  let browserRecovery: Promise<Readonly<Record<string, unknown>>> | null = null;
+  const restartBrowser = (): Promise<Readonly<Record<string, unknown>>> => {
+    if (browserRecovery !== null) return browserRecovery;
+    browserRecovery = (async () => {
+      if (browserOwner === null) throw new Error('Browser owner is disabled');
+      const browser = await browserOwner.restart();
+      const recovery = await recoveryService.restore({ forceObservers: true });
+      return { browser, recovery };
+    })().finally(() => {
+      browserRecovery = null;
+    });
+    return browserRecovery;
+  };
+  const browserRecoveryTimer = browserOwner === null ? null : setInterval(() => {
+    if (closed || browserRecovery !== null) return;
+    const state = browserOwner.status.state;
+    if (state !== 'disconnected' && state !== 'error') return;
+    logger.warn('browser.disconnected', { state });
+    void restartBrowser()
+      .then(({ recovery }) => logger.info('browser.recovered', { recovery }))
+      .catch((error: unknown) =>
+        logger.error('browser.recovery-failed', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+  }, 5_000);
+  browserRecoveryTimer?.unref();
   return {
     config,
     database,
@@ -356,18 +383,15 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     researchService,
     startedAt,
     async restartBrowser(): Promise<Readonly<Record<string, unknown>>> {
-      if (browserOwner === null) {
-        throw new Error('Browser owner is disabled');
-      }
-      const browser = await browserOwner.restart();
-      const recovery = await recoveryService.restore({ forceObservers: true });
-      return { browser, recovery };
+      return await restartBrowser();
     },
     async close(): Promise<void> {
       if (closed) {
         return;
       }
       closed = true;
+      if (browserRecoveryTimer !== null) clearInterval(browserRecoveryTimer);
+      await browserRecovery?.catch(() => undefined);
       await rpcServer.close();
       await observationService.close();
       await browserOwner?.close();
@@ -418,4 +442,3 @@ if (isDirectExecution()) {
     process.exitCode = 1;
   });
 }
-
