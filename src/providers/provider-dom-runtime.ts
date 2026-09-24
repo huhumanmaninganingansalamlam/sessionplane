@@ -113,7 +113,6 @@ export class DomProviderAdapter implements ProviderAdapter {
         page,
         pageKey,
         pageRegistry: this.#pageRegistry,
-        loginUrl: this.#loginUrl,
         request,
         selectors: this.#selectors,
         acknowledgementTimeoutMs: this.#acknowledgementTimeoutMs,
@@ -323,7 +322,6 @@ interface DomProviderSubmissionOptions {
   readonly page: Page;
   readonly pageKey: string;
   readonly pageRegistry: PageRegistry;
-  readonly loginUrl: string;
   readonly request: ProviderSubmissionRequest;
   readonly selectors: ProviderDomSelectors;
   readonly acknowledgementTimeoutMs: number;
@@ -335,7 +333,6 @@ class DomProviderSubmission implements ProviderSubmission {
   readonly pageKey: string;
   readonly #page: Page;
   readonly #pageRegistry: PageRegistry;
-  readonly #loginUrl: string;
   readonly #request: ProviderSubmissionRequest;
   readonly #selectors: ProviderDomSelectors;
   readonly #acknowledgementTimeoutMs: number;
@@ -348,7 +345,6 @@ class DomProviderSubmission implements ProviderSubmission {
     this.pageKey = options.pageKey;
     this.#page = options.page;
     this.#pageRegistry = options.pageRegistry;
-    this.#loginUrl = options.loginUrl;
     this.#request = options.request;
     this.#selectors = options.selectors;
     this.#acknowledgementTimeoutMs = options.acknowledgementTimeoutMs;
@@ -713,7 +709,6 @@ async function readTurns(
       const normalize = (value: string | null | undefined): string =>
         (value ?? '').replaceAll(/\s+/g, ' ').trim();
       const userSelector = userSelectors.join(', ');
-      const assistantSelector = assistantSelectors.join(', ');
       const allSelector = [...userSelectors, ...assistantSelectors].join(', ');
       if (allSelector.length === 0) return [];
       const roleOf = (element: Element): 'user' | 'assistant' =>
