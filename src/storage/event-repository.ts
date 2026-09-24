@@ -75,6 +75,24 @@ export class EventRepository {
     return Number(row.sequence);
   }
 
+  latestSequencesForSessions(sessionIds: readonly string[]): ReadonlyMap<string, number> {
+    const sequences = new Map<string, number>();
+    const batchSize = 900;
+    for (let offset = 0; offset < sessionIds.length; offset += batchSize) {
+      const batch = sessionIds.slice(offset, offset + batchSize);
+      const rows = this.#database
+        .prepare(`
+          SELECT session_id AS sessionId, MAX(sequence) AS sequence
+          FROM events
+          WHERE session_id IN (${batch.map(() => '?').join(', ')})
+          GROUP BY session_id
+        `)
+        .all(...batch) as unknown as Array<{ sessionId: string; sequence: number }>;
+      for (const row of rows) sequences.set(row.sessionId, Number(row.sequence));
+    }
+    return sequences;
+  }
+
   list(teamId: string, afterSequence: number, limit: number): readonly SessionPlaneEvent[] {
     const rows = this.#database
       .prepare(`

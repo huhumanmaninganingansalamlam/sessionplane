@@ -178,16 +178,15 @@ export class SessionRepository {
     return new Map(rows.map((row) => [row.sessionId, row]));
   }
 
-  listNonterminalSessionIds(): readonly string[] {
+  listNonterminalSnapshots(): readonly SessionSnapshot[] {
     const rows = this.#database
       .prepare(`
-        SELECT session_id AS sessionId
-        FROM sessions
-        WHERE session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
-        ORDER BY created_at, session_id
+        ${SNAPSHOT_SELECT}
+        WHERE s.session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
+        ORDER BY s.created_at, s.session_id
       `)
-      .all() as unknown as Array<{ sessionId: string }>;
-    return rows.map((row) => row.sessionId);
+      .all() as unknown as SnapshotRow[];
+    return rows.map(toSnapshot);
   }
 
   listSnapshotsForOwner(ownerClientId: string): readonly SessionSnapshot[] {

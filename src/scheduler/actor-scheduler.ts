@@ -54,23 +54,21 @@ export class ActorScheduler {
   }
 
   restore(): number {
-    for (const sessionId of this.#sessions.listNonterminalSessionIds()) {
-      this.actorFor(sessionId);
+    const snapshots = this.#sessions.listNonterminalSnapshots();
+    const revisions = this.#events.latestSequencesForSessions(snapshots.map((snapshot) => snapshot.sessionId));
+    for (const snapshot of snapshots) {
+      this.#actors.getOrCreate(snapshot.sessionId, () =>
+        this.#createActor(snapshot, revisions.get(snapshot.sessionId) ?? 0));
     }
     return this.#actors.size;
   }
 
   actorFor(sessionId: string): SessionActor {
-    return this.#actors.getOrCreate(sessionId, () => {
-      const snapshot = this.#requireSnapshot(sessionId);
-      let actor!: SessionActor;
-      actor = new SessionActor(
-        snapshot,
+    return this.#actors.getOrCreate(sessionId, () =>
+      this.#createActor(
+        this.#requireSnapshot(sessionId),
         this.#events.latestSequenceForSession(sessionId),
-        () => this.#retireActor(sessionId, actor),
-      );
-      return actor;
-    });
+      ));
   }
 
   waitSession(sessionId: string, options: SessionWaitOptions): Promise<SessionWaitSnapshot> {
@@ -231,6 +229,12 @@ export class ActorScheduler {
     }
     actor.close();
     this.#actors.delete(sessionId);
+  }
+
+  #createActor(snapshot: SessionSnapshot, revision: number): SessionActor {
+    const actor = new SessionActor(snapshot, revision, () =>
+      this.#retireActor(snapshot.sessionId, actor));
+    return actor;
   }
 
   #requireSnapshot(sessionId: string): SessionSnapshot {
