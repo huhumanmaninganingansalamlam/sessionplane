@@ -188,6 +188,7 @@ export class SessionRepository {
       .prepare(`
         ${SNAPSHOT_SELECT}
         WHERE s.session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
+          AND g.submission_state IS NOT 'failed_pre_submit'
         ORDER BY s.created_at, s.session_id
       `)
       .all() as unknown as SnapshotRow[];
@@ -212,6 +213,7 @@ export class SessionRepository {
         ${SNAPSHOT_SELECT}
         WHERE s.session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
           AND s.current_generation > 0
+          AND g.submission_state IS NOT 'failed_pre_submit'
         ORDER BY s.created_at, s.session_id
       `)
       .all() as unknown as SnapshotRow[];

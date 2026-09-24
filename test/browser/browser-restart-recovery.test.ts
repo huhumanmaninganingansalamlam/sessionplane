@@ -544,6 +544,19 @@ test('service restart preserves a pre-submit failure instead of treating an old 
     assert.equal(afterRestart.submitCount, 0);
     assert.equal(afterRestart.acknowledgementRecoveryCount, 0);
     assert.equal(afterRestart.observationOpenCount, 0);
+
+    await service.close();
+    const secondRestart = new FakeProviderAdapter();
+    service = await startCore({
+      config,
+      browserHeadless: true,
+      providerAdapters: [secondRestart],
+      recoveryNavigatePage: navigateFixture,
+      logger: silentLogger(),
+    });
+    assert.equal(service.actorScheduler.actorCount, 0);
+    assert.equal(secondRestart.openCount, 0);
+    assert.equal(secondRestart.submitCount, 0);
   } finally {
     await service.close();
     rmSync(root, { recursive: true, force: true });
