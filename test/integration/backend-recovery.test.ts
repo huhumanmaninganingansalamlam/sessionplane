@@ -423,7 +423,8 @@ async function waitForSnapshot(
   predicate: (snapshot: WaitSnapshot) => boolean,
 ): Promise<WaitSnapshot> {
   let cursor = 0;
-  for (let attempt = 0; attempt < 200; attempt += 1) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
     const snapshot = await rpc<WaitSnapshot>(socketPath, 'session.wait', {
       clientId: 'backend-client',
       sessionId,
