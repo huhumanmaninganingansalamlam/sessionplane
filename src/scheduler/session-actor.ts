@@ -1,6 +1,5 @@
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
-import { reduceWaitState } from '../core/wait-reducer.ts';
 
 export interface SessionWaitSnapshot extends SessionSnapshot {
   readonly latestEventSequence: number;
@@ -192,11 +191,10 @@ export class SessionActor {
   }
 
   #decorate(snapshot: SessionSnapshot, waitExpired: boolean): SessionWaitSnapshot {
-    const reduced = reduceWaitState({ snapshot, clientWaitExpired: waitExpired });
     return {
-      ...reduced,
+      ...snapshot,
+      waitExpired: snapshot.terminal ? false : waitExpired,
       latestEventSequence: this.#revision,
     };
   }
 }
-

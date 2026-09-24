@@ -36,6 +36,7 @@ const CHATGPT_HOSTS = new Set(['chatgpt.com', 'chat.openai.com']);
 const GEMINI_HOSTS = new Set(['gemini.google.com']);
 const GROK_HOSTS = new Set(['grok.com', 'x.com']);
 const CONVERSATION_ID = /^[A-Za-z0-9_-]{6,}$/;
+const CHATGPT_WEB_CONVERSATION_ID = /^WEB:[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
 export function parseChatGptConversationId(value: string): string | null {
   let url: URL;
@@ -63,7 +64,10 @@ export function parseChatGptConversationId(value: string): string | null {
     return null;
   }
   const candidate = segments[conversationMarker + 1];
-  return candidate !== undefined && CONVERSATION_ID.test(candidate) ? candidate : null;
+  return candidate !== undefined &&
+    (CONVERSATION_ID.test(candidate) || CHATGPT_WEB_CONVERSATION_ID.test(candidate))
+    ? candidate
+    : null;
 }
 
 export function isChatGptUrl(value: string): boolean {
@@ -133,4 +137,3 @@ function safeSegments(pathname: string): string[] | null {
     return null;
   }
 }
-

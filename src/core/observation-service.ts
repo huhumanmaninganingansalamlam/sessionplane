@@ -129,6 +129,8 @@ export class ObservationService {
     const tracker = new ExactFinalTracker(this.#quietWindowMs);
     const observationStartedAtMs = this.#now().getTime();
     let lastExactProgressAtMs = this.#now().getTime();
+    const deadlineAt = this.#sessions.getSession(initial.sessionId)?.deadlineAt;
+    const deadlineMs = deadlineAt === null || deadlineAt === undefined ? Infinity : Date.parse(deadlineAt);
     let source: ProviderObservationSource | null = null;
     try {
       while (!signal.aborted) {
@@ -170,7 +172,12 @@ export class ObservationService {
         }
 
         const nowMs = this.#now().getTime();
-        const decision = tracker.evaluate(evidence, nowMs);
+        const observed = tracker.evaluate(evidence, nowMs);
+        const deadlineExpired = nowMs >= deadlineMs && !observed.freshExactProgress;
+        const decision: ExactFinalDecision =
+          deadlineExpired && (observed.kind === 'progress' || observed.kind === 'pending')
+            ? { ...observed, kind: 'unverified', reason: 'session-deadline-unverified' }
+            : observed;
         const preserveBackendDeferral =
           current.observationTransport === 'deferred' &&
           current.nextCheckAt !== null &&
@@ -205,7 +212,11 @@ export class ObservationService {
           !backendRecoveryPaced &&
           this.#now().getTime() - lastExactProgressAtMs >= this.#backendRecoveryAfterMs
         ) {
-          const recovery = await this.#recover(persisted);
+          const recoveredResult = await this.#recover(persisted);
+          const recovery: ProviderRecoveryResult =
+            this.#now().getTime() >= deadlineMs && recoveredResult.kind === 'pending'
+              ? { ...recoveredResult, kind: 'unverified', reason: 'session-deadline-unverified' }
+              : recoveredResult;
           if (signal.aborted) {
             return;
           }

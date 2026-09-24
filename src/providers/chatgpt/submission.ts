@@ -100,13 +100,14 @@ export class ChatGptSubmission implements ProviderSubmission {
 
     let modelSelection: ModelSelectionMode | null = null;
     if (this.#request.model !== null) {
-      modelSelection = await this.#selectModel(this.#request.model);
+      modelSelection = await this.#selectModel(this.#request.model, this.#request.effort ?? null);
     }
     if (
       this.#request.effort !== undefined &&
       this.#request.effort !== null &&
       normalizeLabel(this.#request.effort) !== '' &&
-      modelSelection !== 'intelligence-pro'
+      modelSelection !== 'intelligence-pro' &&
+      modelSelection !== 'intelligence-thinking'
     ) {
       const selectedByIntelligence = await selectIntelligenceEffort(
         this.#page,
@@ -143,15 +144,13 @@ export class ChatGptSubmission implements ProviderSubmission {
       );
     }
 
-    const sendButton = await firstVisible(this.#page, CHATGPT_SELECTORS.sendButton);
-    if (
-      sendButton === null ||
-      (await sendButton.isDisabled().catch(() => true)) ||
-      !(await sendButton.isEnabled().catch(() => false))
-    ) {
+    const sendButton = await waitForEnabledSendButton(this.#page, 60_000);
+    if (sendButton === null) {
+      const visibleControl = await firstVisible(this.#page, CHATGPT_SELECTORS.sendButton);
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         'The exact ChatGPT send control is unavailable',
+        { details: { sendControl: visibleControl === null ? 'absent' : 'disabled' } },
       );
     }
     this.#sendButton = sendButton;
@@ -236,7 +235,23 @@ export class ChatGptSubmission implements ProviderSubmission {
     });
   }
 
-  async #selectModel(requestedModel: string): Promise<ModelSelectionMode> {
+  async #selectModel(requestedModel: string, requestedEffort: string | null): Promise<ModelSelectionMode> {
+    if (normalizeModelIdentity(requestedModel) === 'thinking') {
+      const intelligenceSwitcher = await firstVisible(
+        this.#page,
+        CHATGPT_SELECTORS.intelligenceSwitcher,
+      );
+      if (intelligenceSwitcher !== null) {
+        const effort = requestedEffort?.trim() || 'standard';
+        if (!(await selectIntelligenceEffort(this.#page, effort))) {
+          throw new ProviderSubmissionError(
+            'provider.mode-unavailable',
+            'Requested ChatGPT effort is unavailable: ' + effort,
+          );
+        }
+        return 'intelligence-thinking';
+      }
+    }
     if (isIntelligenceProRequest(requestedModel)) {
       const intelligenceSwitcher = await firstVisible(
         this.#page,
@@ -319,7 +334,7 @@ export async function recoverChatGptAcknowledgement(
   };
 }
 
-type ModelSelectionMode = 'legacy' | 'intelligence-pro';
+type ModelSelectionMode = 'legacy' | 'intelligence-pro' | 'intelligence-thinking';
 
 interface IntelligencePreset {
   readonly title: string;
@@ -657,19 +672,11 @@ async function selectLiveIntelligenceVersion(
     return { selected: false, reason: 'version-opener-not-visible' };
   }
   await opener.click({ timeout: 5_000 }).catch(() => undefined);
-  if (!(await waitForAttribute(advanced, 'data-active', 'true', 2_000))) {
-    return { selected: false, reason: 'advanced-view-not-active' };
-  }
-
   target = await findTarget();
-  if (target === null || !(await target.isVisible().catch(() => false))) {
+  if (target === null || !(await waitForVisible(target, 2_000))) {
     return { selected: false, reason: 'requested-version-not-visible' };
   }
   await target.click({ timeout: 5_000 });
-  const simple = page.locator(CHATGPT_SELECTORS.intelligenceSimpleView).first();
-  if (!(await waitForAttribute(simple, 'data-active', 'true', 2_000))) {
-    return { selected: false, reason: 'simple-view-not-restored' };
-  }
   if (!(await waitForAttribute(target, 'aria-checked', 'true', 2_000))) {
     return { selected: false, reason: 'version-not-acknowledged' };
   }
@@ -802,13 +809,9 @@ async function selectIntelligenceVersion(
   const opener = content.locator('[role="menuitem"]').first();
   if (!(await opener.isVisible().catch(() => false))) return false;
   await opener.click({ timeout: 5_000 });
-  if (!(await waitForAttribute(advanced, 'data-active', 'true', 2_000))) return false;
   target = await matchingVersionOption(options, version);
-  if (target === null || !(await target.isVisible().catch(() => false))) return false;
+  if (target === null || !(await waitForVisible(target, 2_000))) return false;
   await target.click({ timeout: 5_000 });
-
-  const simple = page.locator(CHATGPT_SELECTORS.intelligenceSimpleView).first();
-  if (!(await waitForAttribute(simple, 'data-active', 'true', 2_000))) return false;
   return await waitForAttribute(target, 'aria-checked', 'true', 2_000);
 }
 
@@ -852,6 +855,16 @@ async function waitForVisible(locator: Locator, timeoutMs: number): Promise<bool
     await locator.page().waitForTimeout(25);
   } while (Date.now() < deadline);
   return false;
+}
+
+async function waitForEnabledSendButton(page: Page, timeoutMs: number): Promise<Locator | null> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const button = await firstVisible(page, CHATGPT_SELECTORS.sendButton);
+    if (button !== null && (await button.isEnabled().catch(() => false))) return button;
+    await page.waitForTimeout(100);
+  } while (Date.now() < deadline);
+  return null;
 }
 
 function isIntelligenceProRequest(value: string): boolean {
@@ -1522,4 +1535,3 @@ async function waitForModelLabel(
   } while (Date.now() < deadline);
   return false;
 }
-

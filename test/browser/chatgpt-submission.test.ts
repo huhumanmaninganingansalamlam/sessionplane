@@ -69,7 +69,10 @@ test('ChatGPT submission captures exact model, conversation, and user-turn ackno
       await route.fulfill({
         status: 200,
         contentType: 'text/html',
-        body: chatGptFixture(false),
+        body: chatGptFixture(false).replace(
+          '<button data-testid="send-button" type="button">Send</button>',
+          '<button data-testid="send-button" type="button" disabled>Send</button><script>document.querySelector("#prompt-textarea").addEventListener("input", () => setTimeout(() => document.querySelector("[data-testid=send-button]").disabled = false, 500))</script>',
+        ),
       });
     });
     await created.page.goto('https://chatgpt.com/');
@@ -761,11 +764,19 @@ test('ChatGPT submission uses live intelligence slider when capability feed expo
       effort: null,
       expectedVersion: '5.6',
       expectedPreset: '4',
+      viewStateWithoutDataActive: true,
     },
     {
       name: 'Extra High effort',
       model: null,
       effort: 'Extra High',
+      expectedVersion: 'latest',
+      expectedPreset: '3',
+    },
+    {
+      name: 'Thinking with Extra High effort',
+      model: 'Thinking',
+      effort: 'extra_high',
       expectedVersion: 'latest',
       expectedPreset: '3',
     },
@@ -780,6 +791,7 @@ test('ChatGPT submission uses live intelligence slider when capability feed expo
         selectedVersion: 'latest',
         selectedPreset: 0,
         backendPresets: 'instant-only',
+        viewStateWithoutDataActive: 'viewStateWithoutDataActive' in testCase,
       });
       await created.page.goto('https://chatgpt.com/');
       registry.refreshPage(created.binding.pageKey);
@@ -1264,6 +1276,7 @@ async function routeIntelligenceFixture(
     readonly selectedPreset: number;
     readonly backendPresets?: 'complete' | 'instant-only';
     readonly authenticated?: boolean;
+    readonly viewStateWithoutDataActive?: boolean;
   },
 ): Promise<void> {
   await page.route('https://chatgpt.com/**', async (route) => {
@@ -1411,7 +1424,9 @@ function chatGptIntelligenceFixture(options: {
   readonly latestProLocked: boolean;
   readonly selectedVersion: 'latest' | '5.6';
   readonly selectedPreset: number;
+  readonly viewStateWithoutDataActive?: boolean;
 }): string {
+  const stateAttribute = options.viewStateWithoutDataActive ? 'data-view-state' : 'data-active';
   const dots = [0, 1, 2, 3, 4]
     .map(
       (index) =>
@@ -1439,7 +1454,7 @@ function chatGptIntelligenceFixture(options: {
     '<div id="intelligence-menu" role="menu" data-state="closed" hidden>',
     '<div data-testid="composer-intelligence-picker-content" role="group">',
     '<div id="picker-root" data-expanded="false"><div role="menuitem" tabindex="0">Model selection</div></div>',
-    '<div data-testid="composer-model-picker-slider-simple-view" data-active="true">',
+    '<div data-testid="composer-model-picker-slider-simple-view" ' + stateAttribute + '="true">',
     '<div id="slider-control" role="menuitem" tabindex="0" aria-label="Performance">',
     '<div data-model-reasoning-effort-slider><span data-locked="false"></span>',
     dots,
@@ -1448,7 +1463,7 @@ function chatGptIntelligenceFixture(options: {
       '"></span></div></div>',
     '<span id="slider-announcement"></span>',
     '</div>',
-    '<div data-testid="composer-model-picker-slider-advanced-view" data-active="false">',
+    '<div data-testid="composer-model-picker-slider-advanced-view" ' + stateAttribute + '="false">',
     '<div role="menuitemradio" data-version-id="latest" aria-checked="' +
       String(options.selectedVersion === 'latest') +
       '" data-state="' +
@@ -1479,8 +1494,8 @@ function chatGptIntelligenceFixture(options: {
     'const dotNodes=Array.from(document.querySelectorAll("[data-dot]"));',
     'const update=()=>{button.textContent=labels[selectedPreset];slider.setAttribute("aria-valuenow",String(selectedPreset));dotNodes.forEach((dot,index)=>{dot.setAttribute("data-locked",String(lockedByVersion[selectedVersion][index]));dot.setAttribute("data-selected",String(index<=selectedPreset));});for(const radio of advanced.querySelectorAll("[role=\\"menuitemradio\\"]")){const checked=radio.getAttribute("data-version-id")===selectedVersion;radio.setAttribute("aria-checked",String(checked));radio.setAttribute("data-state",checked?"checked":"unchecked");}};',
     'button.addEventListener("click",()=>{menu.hidden=false;menu.setAttribute("data-state","open");button.setAttribute("data-state","open");});',
-    'root.querySelector("[role=\\"menuitem\\"]").addEventListener("click",()=>{root.setAttribute("data-expanded","true");simple.setAttribute("data-active","false");advanced.setAttribute("data-active","true");});',
-    'for(const radio of advanced.querySelectorAll("[role=\\"menuitemradio\\"]")){radio.addEventListener("click",()=>{selectedVersion=radio.getAttribute("data-version-id");selectedPreset=Math.min(selectedPreset,3);root.setAttribute("data-expanded","false");simple.setAttribute("data-active","true");advanced.setAttribute("data-active","false");update();});}',
+    'root.querySelector("[role=\\"menuitem\\"]").addEventListener("click",()=>{root.setAttribute("data-expanded","true");simple.setAttribute(' + JSON.stringify(stateAttribute) + ',"false");advanced.setAttribute(' + JSON.stringify(stateAttribute) + ',"true");});',
+    'for(const radio of advanced.querySelectorAll("[role=\\"menuitemradio\\"]")){radio.addEventListener("click",()=>{selectedVersion=radio.getAttribute("data-version-id");selectedPreset=Math.min(selectedPreset,3);root.setAttribute("data-expanded","false");simple.setAttribute(' + JSON.stringify(stateAttribute) + ',"true");advanced.setAttribute(' + JSON.stringify(stateAttribute) + ',"false");update();});}',
     'slider.addEventListener("keydown",(event)=>{if(event.key!=="ArrowLeft"&&event.key!=="ArrowRight")return;const direction=event.key==="ArrowRight"?1:-1;const next=Math.max(0,Math.min(4,selectedPreset+direction));if(lockedByVersion[selectedVersion][next])return;selectedPreset=next;update();});',
     'document.querySelector("[data-testid=\\"send-button\\"]").addEventListener("click",()=>{window.sendCount+=1;});',
     'sliderControl.addEventListener("keydown",(event)=>{if(event.key!=="ArrowLeft"&&event.key!=="ArrowRight")return;const direction=event.key==="ArrowRight"?1:-1;const next=Math.max(0,Math.min(4,selectedPreset+direction));if(lockedByVersion[selectedVersion][next])return;selectedPreset=next;update();announcement.textContent=labels[selectedPreset]+", 5 of 5.";});',
@@ -1496,4 +1511,3 @@ function escapeHtml(value: string): string {
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 }
-
