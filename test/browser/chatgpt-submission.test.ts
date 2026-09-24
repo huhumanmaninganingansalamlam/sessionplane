@@ -12,6 +12,7 @@ import { ChatGptSubmission, recoverChatGptAcknowledgement } from '../../src/prov
 
 test('ChatGPT read-only acknowledgement recovery requires one unique exact prompt identity', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-ack-recovery-'));
+  const prompt = 'Recover `C17=B` exactly';
   const registry = new PageRegistry();
   const owner = new BrowserOwner({
     profileDir: path.join(root, 'profile'),
@@ -25,15 +26,11 @@ test('ChatGPT read-only acknowledgement recovery requires one unique exact promp
       await route.fulfill({
         status: 200,
         contentType: 'text/html',
-        body: '<html><body><div data-message-author-role="user" data-message-id="user-1" data-turn-id="turn-1"><div class="whitespace-pre-wrap">Recover me exactly</div></div></body></html>',
+        body: '<html><body><div data-message-author-role="user" data-message-id="user-1" data-turn-id="turn-1"><button aria-expanded="false"></button><div id="prompt" class="whitespace-pre-wrap" hidden>Recover <code>C17=B</code> exactly</div><script>document.querySelector("button").addEventListener("click", () => { document.querySelector("#prompt").hidden = false; });</script></div></body></html>',
       });
     });
     await created.page.goto('https://chatgpt.com/c/auditconv123');
-    const recovered = await recoverChatGptAcknowledgement(
-      created.page,
-      'Recover me exactly',
-      'auditconv123',
-    );
+    const recovered = await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123');
     assert.deepEqual(recovered, {
       conversationId: 'auditconv123',
       submittedUserMessageId: 'user-1',
@@ -41,10 +38,10 @@ test('ChatGPT read-only acknowledgement recovery requires one unique exact promp
     });
 
     await created.page.setContent(
-      '<div data-message-author-role="user" data-message-id="user-1" data-turn-id="turn-1"><div class="whitespace-pre-wrap">Recover me exactly</div></div><div data-message-author-role="user" data-message-id="user-2" data-turn-id="turn-2"><div class="whitespace-pre-wrap">Recover me exactly</div></div>',
+      '<div data-message-author-role="user" data-message-id="user-1" data-turn-id="turn-1"><div class="whitespace-pre-wrap">Recover <code>C17=B</code> exactly</div></div><div data-message-author-role="user" data-message-id="user-2" data-turn-id="turn-2"><div class="whitespace-pre-wrap">Recover <code>C17=B</code> exactly</div></div>',
     );
     assert.equal(
-      await recoverChatGptAcknowledgement(created.page, 'Recover me exactly', 'auditconv123'),
+      await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123'),
       null,
     );
   } finally {

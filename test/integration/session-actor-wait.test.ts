@@ -24,6 +24,11 @@ interface SessionSnapshot {
   readonly latestEventSequence?: number;
 }
 
+interface HealthMetrics {
+  readonly session_actor_count: number;
+  readonly wait_subscriber_count: number;
+}
+
 test('one actor serves concurrent waits, preserves provider lifetime, and restores after restart', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-actor-wait-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
@@ -92,16 +97,20 @@ test('one actor serves concurrent waits, preserves provider lifetime, and restor
       rpc<SessionSnapshot>(config.socketPath, 'session.wait', waitParams),
     );
 
-    const actor = service.actorScheduler.actorFor(session.sessionId);
-    await waitUntil(() => actor.subscriberCount === 20, 1_000);
-    assert.equal(service.actorScheduler.actorCount, 1);
-    assert.equal(actor.subscriberCount, 20);
+    await waitUntil(
+      async () => (await readHealthMetrics(config.socketPath)).wait_subscriber_count === 20,
+      1_000,
+    );
+    assert.equal((await readHealthMetrics(config.socketPath)).session_actor_count, 1);
 
     const timedOut = await Promise.all(waits);
     assert.ok(timedOut.every((snapshot) => snapshot.waitExpired));
     assert.ok(timedOut.every((snapshot) => snapshot.terminal === false));
     assert.ok(timedOut.every((snapshot) => snapshot.generation === 0));
-    assert.equal(actor.subscriberCount, 0);
+    await waitUntil(
+      async () => (await readHealthMetrics(config.socketPath)).wait_subscriber_count === 0,
+      1_000,
+    );
 
     const persistedAfterTimeout = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
       clientId: 'client-a',
@@ -118,7 +127,10 @@ test('one actor serves concurrent waits, preserves provider lifetime, and restor
       afterEventSequence: aggregate.latestEventSequence,
       waitMs: 2_000,
     });
-    await waitUntil(() => actor.subscriberCount === 1, 1_000);
+    await waitUntil(
+      async () => (await readHealthMetrics(config.socketPath)).wait_subscriber_count === 1,
+      1_000,
+    );
     const started = await service.actorScheduler.startGeneration({
       sessionId: session.sessionId,
       expectedGeneration: 0,
@@ -149,7 +161,10 @@ test('one actor serves concurrent waits, preserves provider lifetime, and restor
       afterEventSequence: afterGenerationStart.latestEventSequence,
       waitMs: 2_000,
     });
-    await waitUntil(() => actor.subscriberCount === 1, 1_000);
+    await waitUntil(
+      async () => (await readHealthMetrics(config.socketPath)).wait_subscriber_count === 1,
+      1_000,
+    );
     await service.actorScheduler.updateGeneration(
       session.sessionId,
       1,
@@ -164,7 +179,10 @@ test('one actor serves concurrent waits, preserves provider lifetime, and restor
     const teamWake = await teamWait;
     assert.equal(teamWake.waitExpired, false);
     assert.equal(teamWake.sessions[0]?.sessionState, 'submitted');
-    assert.equal(actor.subscriberCount, 0);
+    await waitUntil(
+      async () => (await readHealthMetrics(config.socketPath)).wait_subscriber_count === 0,
+      1_000,
+    );
 
     await assert.rejects(
       service.actorScheduler.updateGeneration(session.sessionId, 0, {
@@ -182,7 +200,10 @@ test('one actor serves concurrent waits, preserves provider lifetime, and restor
       startBrowser: false,
       logger: silentLogger(),
     });
-    assert.equal(service.actorScheduler.actorCount, 1);
+    await waitUntil(
+      async () => (await readHealthMetrics(config.socketPath)).session_actor_count === 1,
+      1_000,
+    );
     const restored = await rpc<SessionSnapshot>(config.socketPath, 'session.wait', {
       clientId: 'client-a',
       sessionId: session.sessionId,
@@ -238,7 +259,10 @@ test('idle terminal actors retire and rehydrate from durable state when new work
       'generation.test-complete',
     );
     assert.equal(complete.terminal, true);
-    assert.equal(service.actorScheduler.actorCount, 0);
+    await waitUntil(
+      async () => (await readHealthMetrics(config.socketPath)).session_actor_count === 0,
+      1_000,
+    );
 
     const waited = await rpc<SessionSnapshot>(config.socketPath, 'session.wait', {
       clientId: 'terminal-actor-client',
@@ -248,7 +272,6 @@ test('idle terminal actors retire and rehydrate from durable state when new work
     });
     assert.equal(waited.terminal, true);
     assert.equal(waited.waitExpired, false);
-    assert.equal(service.actorScheduler.actorCount, 0);
 
     const next = await service.actorScheduler.startGeneration({
       sessionId: session.sessionId,
@@ -258,7 +281,7 @@ test('idle terminal actors retire and rehydrate from durable state when new work
     });
     assert.equal(next.generation, 2);
     assert.equal(next.sessionState, 'submitting');
-    assert.equal(service.actorScheduler.actorCount, 1);
+    assert.equal((await readHealthMetrics(config.socketPath)).session_actor_count, 1);
   } finally {
     await service.close();
     rmSync(root, { recursive: true, force: true });
@@ -273,14 +296,22 @@ async function rpc<Result = Readonly<Record<string, unknown>>>(
   return await callRpc<Result>({ socketPath, method, params, timeoutMs: 5_000 });
 }
 
-async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<void> {
+async function waitUntil(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() >= deadline) {
       throw new Error('Timed out waiting for test condition');
     }
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+async function readHealthMetrics(socketPath: string): Promise<HealthMetrics> {
+  const health = await rpc<{ readonly metrics: HealthMetrics }>(socketPath, 'system.health', {});
+  return health.metrics;
 }
 
 function silentLogger() {
@@ -291,4 +322,3 @@ function silentLogger() {
     error() {},
   };
 }
-

@@ -1305,6 +1305,41 @@ async function readExactTextCandidates(locator: Locator): Promise<readonly strin
         }
         if (element instanceof HTMLElement) {
           values.push(element.innerText, element.textContent ?? '');
+          const inlineCode = Array.from(element.querySelectorAll('code'));
+          if (
+            inlineCode.length > 0 &&
+            inlineCode.every((code) => code.closest('pre') === null && code.parentElement?.closest('code') === null)
+          ) {
+            const renderedText = element.innerText;
+            const codeRanges: Array<{ start: number; end: number }> = [];
+            for (const code of inlineCode) {
+              const contentRange = document.createRange();
+              contentRange.selectNodeContents(code);
+              const codeText = contentRange.toString();
+              if (codeText.length === 0 || codeText.includes('`')) {
+                codeRanges.length = 0;
+                break;
+              }
+
+              const prefixRange = document.createRange();
+              prefixRange.selectNodeContents(element);
+              prefixRange.setEndBefore(code);
+              const start = prefixRange.toString().length;
+              const end = start + codeText.length;
+              if (renderedText.slice(start, end) !== codeText) {
+                codeRanges.length = 0;
+                break;
+              }
+              codeRanges.push({ start, end });
+            }
+            if (codeRanges.length === inlineCode.length) {
+              let markdownText = renderedText;
+              for (const { start, end } of codeRanges.sort((left, right) => right.start - left.start)) {
+                markdownText = `${markdownText.slice(0, start)}\`${markdownText.slice(start, end)}\`${markdownText.slice(end)}`;
+              }
+              values.push(markdownText);
+            }
+          }
           const blockChildren = Array.from(element.childNodes);
           if (
             blockChildren.length > 0 &&
@@ -1342,18 +1377,27 @@ async function composerHasExactValue(
 
 async function messageHasExactPrompt(message: Locator, expected: string): Promise<boolean> {
   const normalizedExpected = normalizeLineEndings(expected);
-  for (const selector of CHATGPT_SELECTORS.userMessageContent) {
-    const content = message.locator(selector).first();
-    if ((await content.count().catch(() => 0)) === 0) continue;
-    const values = await readExactTextCandidates(content);
-    if (values.some((value) => normalizeLineEndings(value) === normalizedExpected)) {
-      return true;
+  const matchesExactPrompt = async (): Promise<boolean> => {
+    for (const selector of CHATGPT_SELECTORS.userMessageContent) {
+      const content = message.locator(selector).first();
+      if ((await content.count().catch(() => 0)) === 0) continue;
+      const values = await readExactTextCandidates(content);
+      if (values.some((value) => normalizeLineEndings(value) === normalizedExpected)) {
+        return true;
+      }
     }
-  }
-  const fallbackValues = await readExactTextCandidates(message);
-  return fallbackValues.some(
-    (value) => normalizeLineEndings(value) === normalizedExpected,
-  );
+    const fallbackValues = await readExactTextCandidates(message);
+    return fallbackValues.some(
+      (value) => normalizeLineEndings(value) === normalizedExpected,
+    );
+  };
+
+  if (await matchesExactPrompt()) return true;
+
+  const collapsedControl = message.locator(CHATGPT_SELECTORS.userMessageExpansionControls);
+  if ((await collapsedControl.count().catch(() => 0)) !== 1) return false;
+  await collapsedControl.click({ timeout: 1_000 }).catch(() => undefined);
+  return await matchesExactPrompt();
 }
 
 async function writeExactComposerValue(

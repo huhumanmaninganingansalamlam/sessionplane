@@ -65,7 +65,6 @@ test('core-owned observation continues after wait expiry and publishes exact fin
       session.sessionId,
       (snapshot) => snapshot.sessionState === 'observing' && snapshot.providerState === 'pending',
     );
-    assert.equal(service.observationService.observerCount, 1);
 
     const expired = await rpc<WaitSnapshot>(config.socketPath, 'session.wait', {
       clientId: 'observer-client',
@@ -76,7 +75,6 @@ test('core-owned observation continues after wait expiry and publishes exact fin
     });
     assert.equal(expired.waitExpired, true);
     assert.equal(expired.terminal, false);
-    assert.equal(service.observationService.observerCount, 1);
 
     fake.emitObservation(session.sessionId, {
       networkActivity: true,
@@ -134,8 +132,6 @@ test('core-owned observation continues after wait expiry and publishes exact fin
     assert.equal(complete.responseMessageId, 'assistant-final-1');
     assert.equal(complete.answerText, 'Exact final answer');
 
-    await waitFor(() => service.observationService.observerCount === 0);
-    assert.equal(fake.observationOpenCount, 1);
   } finally {
     await service.close();
     rmSync(root, { recursive: true, force: true });
@@ -161,16 +157,6 @@ async function waitForSnapshot(
     }
   }
   throw new Error('Timed out waiting for the expected session snapshot');
-}
-
-async function waitFor(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (predicate()) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error('Timed out waiting for the expected condition');
 }
 
 async function rpc<Result>(

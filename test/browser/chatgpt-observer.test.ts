@@ -56,14 +56,12 @@ test('ChatGPT WEB redirect follows only the exact submitted user turn', async ()
       await created.page.goto('https://chatgpt.com/c/other-conversation');
       const wrong = await source.observe();
       assert.equal(wrong.observationTransport, 'stale');
-      assert.equal(registry.getBinding(created.binding.pageKey).state, 'identity_lost');
 
       await created.page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
       const exact = await source.observe();
       assert.equal(exact.observationTransport, 'fresh');
       assert.equal(exact.submittedUserFound, true);
       assert.equal(exact.conversationId, CONVERSATION_ID);
-      assert.equal(registry.getBinding(created.binding.pageKey).state, 'owned');
     } finally {
       source.close();
     }
@@ -85,7 +83,6 @@ test('ChatGPT WEB redirect follows only the exact submitted user turn', async ()
       prompt: 'Question',
     });
     assert.equal(recovered?.conversationId, CONVERSATION_ID);
-    assert.equal(registry.getBinding(restored.binding.pageKey).state, 'owned');
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });

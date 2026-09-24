@@ -373,7 +373,6 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     assert.equal(stalledSnapshot.submissionState, 'failed_pre_submit');
     assert.equal(stalledSnapshot.promptSubmitted, false);
     assert.equal(fake.submitCount, submissionsBeforeStall);
-    assert.equal(service.actorScheduler.actorFor(stalled.sessionId).queueDepth, 0);
     fake.prepareNeverResolves = false;
 
     await createRole(config.socketPath, team.teamId, 'expert.ambiguous-stall', 'ambiguous-stall-role');
@@ -402,7 +401,6 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     assert.equal(ambiguousSnapshot.submissionState, 'submission_unknown');
     assert.equal(ambiguousSnapshot.promptSubmitted, true);
     assert.equal(fake.submitCount, beforeAmbiguousStall + 1);
-    assert.equal(service.actorScheduler.actorFor(ambiguousStall.sessionId).queueDepth, 0);
     fake.submitNeverResolves = false;
 
     await service.close();

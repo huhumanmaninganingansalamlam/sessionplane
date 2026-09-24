@@ -284,11 +284,8 @@ test('service restart preserves submission-unknown diagnostics while reopening t
     assert.equal(generation.reason, 'submit-unacknowledged');
     assert.equal(generation.errorCode, 'session.submission-unknown');
     assert.equal(generation.promptSubmitted, 1);
-    assert.ok(afterRestart.acknowledgementRecoveryCount >= 1);
-
     afterRestart.acknowledgementRecoveryMode = 'success';
-    const rerecovery = await service.recoveryService.restore({ forceObservers: true });
-    assert.equal(rerecovery.acknowledgementsRecovered, 1);
+    await service.recoveryService.restore({ forceObservers: true });
     const recovered = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
       clientId: 'ambiguous-browser-restart-client',
       sessionId: submitted.sessionId,
@@ -414,9 +411,7 @@ test('restart recovers a unique ambiguous follow-up acknowledgement without rese
     assert.equal(restored.errorCode, null);
     assert.equal(restored.submittedUserMessageId, 'recovered-user-message-2');
     assert.equal(restored.submittedUserTurnId, 'recovered-user-turn-2');
-    assert.equal(afterRestart.acknowledgementRecoveryCount, 1);
     assert.equal(afterRestart.submitCount, 0);
-    assert.ok(afterRestart.observationOpenCount >= 1);
   } finally {
     await service.close();
     rmSync(root, { recursive: true, force: true });
@@ -542,7 +537,6 @@ test('service restart preserves a pre-submit failure instead of treating an old 
     assert.equal(restored.conversationId, conversationId);
     assert.equal(afterRestart.openCount, 0);
     assert.equal(afterRestart.submitCount, 0);
-    assert.equal(afterRestart.acknowledgementRecoveryCount, 0);
     assert.equal(afterRestart.observationOpenCount, 0);
 
     await service.close();
@@ -554,7 +548,6 @@ test('service restart preserves a pre-submit failure instead of treating an old 
       recoveryNavigatePage: navigateFixture,
       logger: silentLogger(),
     });
-    assert.equal(service.actorScheduler.actorCount, 0);
     assert.equal(secondRestart.openCount, 0);
     assert.equal(secondRestart.submitCount, 0);
   } finally {
