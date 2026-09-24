@@ -403,6 +403,10 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     assert.equal(fake.submitCount, beforeAmbiguousStall + 1);
     fake.submitNeverResolves = false;
 
+    service.database.raw
+      .prepare("UPDATE sessions SET session_state = 'superseded' WHERE session_id = ?")
+      .run(disabled.sessionId);
+
     await service.close();
     const afterRestart = new FakeProviderAdapter();
     service = await startCore({
@@ -411,6 +415,13 @@ test('session.send submits once, persists exact acknowledgement, and never resen
       providerAdapters: [afterRestart],
       logger: silentLogger(),
     });
+
+    const superseded = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'client-send',
+      sessionId: disabled.sessionId,
+    });
+    assert.equal(superseded.sessionState, 'superseded');
+    assert.equal(superseded.errorCode, 'provider.model-unavailable');
 
     const recoveredPreSubmitOutbox = service.database.raw
       .prepare(`
