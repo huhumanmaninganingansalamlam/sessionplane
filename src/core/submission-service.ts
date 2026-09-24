@@ -133,7 +133,7 @@ export class SubmissionService {
       if (
         snapshot === null ||
         snapshot.generation !== outbox.generation ||
-        snapshot.terminal
+        (snapshot.terminal && outbox.submissionState !== 'failed_pre_submit')
       ) {
         continue;
       }

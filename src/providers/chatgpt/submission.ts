@@ -17,6 +17,7 @@ import {
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
 const COMPOSER_HYDRATION_TIMEOUT_MS = 3_000;
+const COMPOSER_READY_TIMEOUT_MS = 10_000;
 const COMPOSER_COMMIT_TIMEOUT_MS = 3_000;
 const COMPOSER_COMMIT_POLL_MS = 50;
 const COMPOSER_READ_TIMEOUT_MS = 500;
@@ -123,8 +124,8 @@ export class ChatGptSubmission implements ProviderSubmission {
       }
     }
 
-    const composer = await firstVisibleComposer(this.#page);
-    if (composer === null || !(await composer.isEditable().catch(() => false))) {
+    const composer = await firstEditableComposer(this.#page);
+    if (composer === null) {
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         'The exact ChatGPT composer is not editable',
@@ -1258,18 +1259,20 @@ async function attachmentsAcknowledged(
   return expected.every((name) => normalizedEvidence.includes(name));
 }
 
-async function firstVisibleComposer(page: Page): Promise<Locator | null> {
-  const exact = await firstVisible(
-    page,
-    CHATGPT_SELECTORS.composer.slice(0, 2),
-    VISIBLE_SELECTOR_TIMEOUT_MS,
-  );
-  if (exact !== null) return exact;
-  return await firstVisible(
-    page,
-    CHATGPT_SELECTORS.composer.slice(2),
-    VISIBLE_SELECTOR_TIMEOUT_MS,
-  );
+async function firstEditableComposer(page: Page): Promise<Locator | null> {
+  const candidates = page.locator(CHATGPT_SELECTORS.composer.join(', ')).filter({ visible: true });
+  const deadline = Date.now() + COMPOSER_READY_TIMEOUT_MS;
+  do {
+    const count = await candidates.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      const candidate = candidates.nth(index);
+      if (await candidate.isEditable().catch(() => false)) return candidate;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await page.waitForTimeout(Math.min(VISIBLE_SELECTOR_POLL_MS, remaining));
+  } while (Date.now() < deadline);
+  return null;
 }
 
 async function firstVisible(

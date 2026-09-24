@@ -69,10 +69,12 @@ test('ChatGPT submission captures exact model, conversation, and user-turn ackno
       await route.fulfill({
         status: 200,
         contentType: 'text/html',
-        body: chatGptFixture(false).replace(
-          '<button data-testid="send-button" type="button">Send</button>',
-          '<button data-testid="send-button" type="button" disabled>Send</button><script>document.querySelector("#prompt-textarea").addEventListener("input", () => setTimeout(() => document.querySelector("[data-testid=send-button]").disabled = false, 500))</script>',
-        ),
+        body: chatGptFixture(false)
+          .replace('contenteditable="true"', 'contenteditable="false"')
+          .replace(
+            '<button data-testid="send-button" type="button">Send</button>',
+            '<button data-testid="send-button" type="button" disabled>Send</button><script>setTimeout(() => document.querySelector("#prompt-textarea").setAttribute("contenteditable", "true"), 1000); document.querySelector("#prompt-textarea").addEventListener("input", () => setTimeout(() => document.querySelector("[data-testid=send-button]").disabled = false, 500))</script>',
+          ),
       });
     });
     await created.page.goto('https://chatgpt.com/');

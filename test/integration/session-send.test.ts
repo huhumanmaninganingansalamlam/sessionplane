@@ -19,6 +19,8 @@ interface SessionSnapshot {
   readonly generation: number;
   readonly submissionState: string | null;
   readonly sessionState: string;
+  readonly terminal: boolean;
+  readonly waitExpired: boolean;
   readonly providerState: string;
   readonly conversationId: string | null;
   readonly submittedUserMessageId: string | null;
@@ -155,6 +157,27 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     assert.equal(disabledSnapshot.submissionState, 'failed_pre_submit');
     assert.equal(disabledSnapshot.promptSubmitted, false);
     assert.equal(disabledSnapshot.errorCode, 'provider.model-unavailable');
+    assert.equal(disabledSnapshot.terminal, true);
+    const disabledWait = await rpc<SessionSnapshot>(config.socketPath, 'session.wait', {
+      clientId: 'client-send',
+      sessionId: disabled.sessionId,
+      generation: disabledSnapshot.generation,
+      waitMs: 0,
+    });
+    assert.equal(disabledWait.waitExpired, false);
+    assert.equal(disabledWait.terminal, true);
+    const disabledTeamWait = await rpc<{
+      readonly waitExpired: boolean;
+      readonly sessions: readonly SessionSnapshot[];
+    }>(config.socketPath, 'team.wait', {
+      clientId: 'client-send',
+      teamId: team.teamId,
+      roleKeys: ['expert.disabled'],
+      until: 'all_selected_terminal',
+      waitMs: 0,
+    });
+    assert.equal(disabledTeamWait.waitExpired, false);
+    assert.equal(disabledTeamWait.sessions[0]?.terminal, true);
 
     await createRole(config.socketPath, team.teamId, 'expert.human', 'human-role');
     const human = await createSession(
