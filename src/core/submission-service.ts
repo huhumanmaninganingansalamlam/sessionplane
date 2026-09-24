@@ -46,6 +46,8 @@ interface PreparedOutbox {
   readonly eventSequence: number;
 }
 
+const PROVIDER_STAGE_TIMEOUT_MS = 120_000;
+
 export class SubmissionService {
   readonly #database: SessionPlaneDatabase;
   readonly #directory: TeamDirectory;
@@ -445,8 +447,9 @@ export class SubmissionService {
 
     this.#persistPageKey(actor, prepared.outbox, submission.pageKey);
     return await this.#pageMutex.runExclusive(submission.pageKey, async () => {
+      const stageTimeoutMs = Math.min(PROVIDER_STAGE_TIMEOUT_MS, input.sessionDeadlineSec * 1_000);
       try {
-        await submission.prepare();
+        await withProviderStageTimeout(submission.prepare(), stageTimeoutMs, () => submission.abandon());
       } catch (error) {
         return await this.#failPreSubmit(actor, prepared.outbox, error);
       }
@@ -486,14 +489,17 @@ export class SubmissionService {
 
       let submitError: unknown = null;
       try {
-        await submission.submitOnce();
+        await withProviderStageTimeout(submission.submitOnce(), stageTimeoutMs);
       } catch (error) {
         submitError = error;
       }
 
       let acknowledgement: ProviderSubmissionAcknowledgement | null = null;
       try {
-        acknowledgement = await submission.captureAcknowledgement();
+        acknowledgement = await withProviderStageTimeout(
+          submission.captureAcknowledgement(),
+          stageTimeoutMs,
+        );
       } catch (error) {
         submitError ??= error;
       }
@@ -1081,6 +1087,33 @@ export class SubmissionService {
   }
 }
 
+async function withProviderStageTimeout<Result>(
+  operation: Promise<Result>,
+  timeoutMs: number,
+  onTimeout?: () => void,
+): Promise<Result> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          try {
+            onTimeout?.();
+          } catch (error) {
+            reject(error);
+            return;
+          }
+          reject(new ProviderSubmissionError('browser.unavailable', 'Provider browser operation timed out'));
+        }, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 function promptFromOutbox(outbox: OutboxRecord): string | null {
   try {
     const payload = JSON.parse(outbox.payloadJson) as unknown;
@@ -1265,4 +1298,3 @@ function mediaTypeForPath(filePath: string): string | null {
       return null;
   }
 }
-

@@ -29,6 +29,8 @@ export class FakeProviderAdapter implements ProviderAdapter {
   acknowledgementMode: FakeAcknowledgementMode = 'success';
   acknowledgementRecoveryMode: FakeAcknowledgementMode = 'missing';
   submitThrows = false;
+  submitNeverResolves = false;
+  prepareNeverResolves = false;
   prepareError: ProviderSubmissionError | null = null;
   readonly disabledModels = new Set<string>();
   readonly submissionRequests: ProviderSubmissionRequest[] = [];
@@ -74,6 +76,7 @@ export class FakeProviderAdapter implements ProviderAdapter {
       pageKey,
       async prepare(): Promise<void> {
         adapter.prepareCount += 1;
+        if (adapter.prepareNeverResolves) await new Promise<void>(() => undefined);
         if (adapter.prepareError !== null) {
           throw adapter.prepareError;
         }
@@ -84,8 +87,10 @@ export class FakeProviderAdapter implements ProviderAdapter {
           );
         }
       },
+      abandon(): void {},
       async submitOnce(): Promise<void> {
         adapter.submitCount += 1;
+        if (adapter.submitNeverResolves) await new Promise<void>(() => undefined);
         if (adapter.submitThrows) {
           throw new Error('Synthetic submit transport failure');
         }
@@ -353,4 +358,3 @@ class FakeObservationSource implements ProviderObservationSource {
     };
   }
 }
-

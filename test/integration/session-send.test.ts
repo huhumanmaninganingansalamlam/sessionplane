@@ -329,6 +329,59 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     assert.equal(outbox.submissionState, 'submission_unknown');
     assert.equal(Number(outbox.promptSubmitted), 1);
 
+    await createRole(config.socketPath, team.teamId, 'expert.stalled', 'stalled-role');
+    const stalled = await createSession(config.socketPath, team.teamId, 'expert.stalled', 'stalled-session');
+    fake.prepareNeverResolves = true;
+    const submissionsBeforeStall = fake.submitCount;
+    await assert.rejects(
+      rpc(config.socketPath, 'session.send', {
+        clientId: 'client-send',
+        requestId: 'send-stalled-preparation',
+        sessionId: stalled.sessionId,
+        prompt: 'Preparation must release the actor if the browser does not respond.',
+        sessionDeadlineSec: 1,
+      }),
+      hasRpcError('browser.unavailable', false),
+    );
+    const stalledSnapshot = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'client-send',
+      sessionId: stalled.sessionId,
+    });
+    assert.equal(stalledSnapshot.submissionState, 'failed_pre_submit');
+    assert.equal(stalledSnapshot.promptSubmitted, false);
+    assert.equal(fake.submitCount, submissionsBeforeStall);
+    assert.equal(service.actorScheduler.actorFor(stalled.sessionId).queueDepth, 0);
+    fake.prepareNeverResolves = false;
+
+    await createRole(config.socketPath, team.teamId, 'expert.ambiguous-stall', 'ambiguous-stall-role');
+    const ambiguousStall = await createSession(
+      config.socketPath,
+      team.teamId,
+      'expert.ambiguous-stall',
+      'ambiguous-stall-session',
+    );
+    fake.submitNeverResolves = true;
+    const beforeAmbiguousStall = fake.submitCount;
+    await assert.rejects(
+      rpc(config.socketPath, 'session.send', {
+        clientId: 'client-send',
+        requestId: 'send-ambiguous-stall',
+        sessionId: ambiguousStall.sessionId,
+        prompt: 'Do not resend an unacknowledged submission.',
+        sessionDeadlineSec: 1,
+      }),
+      hasRpcError('session.submission-unknown', true),
+    );
+    const ambiguousSnapshot = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'client-send',
+      sessionId: ambiguousStall.sessionId,
+    });
+    assert.equal(ambiguousSnapshot.submissionState, 'submission_unknown');
+    assert.equal(ambiguousSnapshot.promptSubmitted, true);
+    assert.equal(fake.submitCount, beforeAmbiguousStall + 1);
+    assert.equal(service.actorScheduler.actorFor(ambiguousStall.sessionId).queueDepth, 0);
+    fake.submitNeverResolves = false;
+
     await service.close();
     const afterRestart = new FakeProviderAdapter();
     service = await startCore({
@@ -471,4 +524,3 @@ function silentLogger() {
     error() {},
   };
 }
-

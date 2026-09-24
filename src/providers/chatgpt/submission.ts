@@ -157,6 +157,10 @@ export class ChatGptSubmission implements ProviderSubmission {
     this.#requireExactPage();
   }
 
+  abandon(): void {
+    void this.#page.close().catch(() => undefined);
+  }
+
   async submitOnce(): Promise<void> {
     if (this.#sendButton === null) {
       throw new ProviderSubmissionError(

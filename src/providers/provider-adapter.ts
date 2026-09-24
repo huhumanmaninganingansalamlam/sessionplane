@@ -37,6 +37,7 @@ export interface ProviderSubmission {
   readonly provider: string;
   readonly pageKey: string;
   prepare(): Promise<void>;
+  abandon(): void;
   submitOnce(): Promise<void>;
   captureAcknowledgement(): Promise<ProviderSubmissionAcknowledgement | null>;
   bindAcknowledgement(acknowledgement: ProviderSubmissionAcknowledgement): void;
@@ -236,4 +237,3 @@ export class ProviderAdapterRegistry {
     return [...this.#adapters.values()];
   }
 }
-
