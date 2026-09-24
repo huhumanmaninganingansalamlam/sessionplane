@@ -253,6 +253,45 @@ export class RecoveryService {
       }
     }
 
+    const redirectIds = snapshot.provider === 'chatgpt' && conversationId.startsWith('WEB:')
+      ? [...new Set(this.#pageBindings.listForSession(snapshot.sessionId)
+          .filter((binding) =>
+            binding.generation === snapshot.generation &&
+            (binding.bindingState === 'identity_lost' || binding.bindingState === 'closed') &&
+            binding.conversationId !== null &&
+            !binding.conversationId.startsWith('WEB:') &&
+            isProviderUrl(snapshot.provider, binding.url))
+          .map((binding) => binding.conversationId))]
+      : [];
+    const redirectId = redirectIds.length === 1 ? redirectIds[0] : null;
+    if (redirectId !== null && redirectId !== undefined) {
+      const candidates = this.#pageRegistry.findByConversation(redirectId)
+        .filter((page) => isProviderUrl(snapshot.provider, page.url));
+      if (candidates.length > 1) {
+        return await this.#recordUnavailable(snapshot, 'restart-page-redirect-conflict');
+      }
+      const candidate = candidates[0];
+      if (candidate !== undefined) {
+        try {
+          this.#pageRegistry.reserveRedirectCandidate(candidate.pageKey, {
+            sessionId: snapshot.sessionId,
+            generation: snapshot.generation,
+            previousConversationId: conversationId,
+            conversationId: redirectId,
+          });
+          const updated = await this.#recordPageState(snapshot, {
+            pageKey: candidate.pageKey,
+            observationTransport: 'stale',
+            reason: 'restart-page-redirect-unverified',
+            errorCode: 'session.page-identity-unverified',
+          }, 'generation.restart-page-rebound');
+          return result(updated, { rebound: true });
+        } catch (error) {
+          return await this.#recordUnavailable(snapshot, classifyPageFailure(error));
+        }
+      }
+    }
+
     if (this.#browserOwner === null) {
       return result(snapshot, { unavailable: true });
     }
@@ -265,9 +304,29 @@ export class RecoveryService {
         generation: snapshot.generation,
         conversationId: null,
       });
-      const target = providerConversationUrl(snapshot.provider, conversationId, this.#providerUrls);
+      const target = providerConversationUrl(
+        snapshot.provider,
+        redirectId ?? conversationId,
+        this.#providerUrls,
+      );
       await this.#navigatePage(created.page, target);
-      this.#pageRegistry.refreshPage(created.binding.pageKey);
+      const navigated = this.#pageRegistry.refreshPage(created.binding.pageKey);
+      if (
+        snapshot.provider === 'chatgpt' &&
+        conversationId.startsWith('WEB:') &&
+        navigated.state === 'identity_lost' &&
+        navigated.conversationId !== null &&
+        !navigated.conversationId.startsWith('WEB:')
+      ) {
+        const updated = await this.#recordPageState(snapshot, {
+          pageKey: created.binding.pageKey,
+          observationTransport: 'stale',
+          reason: 'restart-page-redirect-unverified',
+          errorCode: 'session.page-identity-unverified',
+        }, 'generation.restart-page-opened');
+        createdPage = null;
+        return result(updated, { opened: true });
+      }
       this.#pageRegistry.bindPage(created.binding.pageKey, {
         sessionId: snapshot.sessionId,
         generation: snapshot.generation,

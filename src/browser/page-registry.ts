@@ -221,6 +221,61 @@ export class PageRegistry {
     return this.#snapshot(record);
   }
 
+  bindVerifiedRedirect(
+    pageKey: string,
+    input: BindPageInput & { readonly previousConversationId: string },
+  ): PageBindingSnapshot {
+    const record = this.#requireRecord(pageKey);
+    this.refreshPage(pageKey);
+    if (
+      !input.previousConversationId.startsWith('WEB:') ||
+      input.conversationId.startsWith('WEB:') ||
+      record.state !== 'identity_lost' ||
+      record.sessionId !== input.sessionId ||
+      record.generation !== input.generation ||
+      (record.expectedConversationId !== input.previousConversationId &&
+        record.expectedConversationId !== null) ||
+      record.conversationId !== input.conversationId
+    ) {
+      throw new PageRegistryError(
+        'session.page-identity-unverified',
+        `Page ${pageKey} cannot accept a redirected conversation identity`,
+      );
+    }
+    record.expectedConversationId = input.conversationId;
+    record.lastSeenAt = this.#now().toISOString();
+    this.#reconcileConflicts();
+    this.#emit(record);
+    return this.#snapshot(record);
+  }
+
+  reserveRedirectCandidate(
+    pageKey: string,
+    input: BindPageInput & { readonly previousConversationId: string },
+  ): PageBindingSnapshot {
+    const record = this.#requireRecord(pageKey);
+    this.refreshPage(pageKey);
+    if (
+      record.state !== 'unbound' ||
+      record.sessionId !== null ||
+      record.conversationId !== input.conversationId ||
+      !input.previousConversationId.startsWith('WEB:') ||
+      input.conversationId.startsWith('WEB:')
+    ) {
+      throw new PageRegistryError(
+        'session.page-identity-unverified',
+        `Page ${pageKey} cannot be reserved for redirect verification`,
+      );
+    }
+    record.sessionId = input.sessionId;
+    record.generation = input.generation;
+    record.expectedConversationId = input.previousConversationId;
+    record.lastSeenAt = this.#now().toISOString();
+    this.#reconcileConflicts();
+    this.#emit(record);
+    return this.#snapshot(record);
+  }
+
   reservePage(pageKey: string, input: ReservePageInput): PageBindingSnapshot {
     const record = this.#requireRecord(pageKey);
     this.refreshPage(pageKey);
@@ -495,4 +550,3 @@ export class PageRegistry {
     }
   }
 }
-

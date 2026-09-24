@@ -239,12 +239,13 @@ export class SubmissionService {
     const actor = this.#scheduler.actorFor(snapshot.sessionId);
     return await actor.enqueue(async () => {
       const current = this.#requireSnapshot(snapshot.sessionId);
+      const currentConversationId = current.conversationId;
       if (
         current.generation !== snapshot.generation ||
         current.submissionState !== 'submission_unknown' ||
         !current.promptSubmitted ||
         current.pageKey === null ||
-        current.conversationId === null
+        currentConversationId === null
       ) {
         return current;
       }
@@ -264,7 +265,10 @@ export class SubmissionService {
         if (
           acknowledgement === undefined ||
           acknowledgement === null ||
-          acknowledgement.conversationId !== current.conversationId
+          (acknowledgement.conversationId !== currentConversationId &&
+            !(current.provider === 'chatgpt' &&
+              currentConversationId.startsWith('WEB:') &&
+              !acknowledgement.conversationId.startsWith('WEB:')))
         ) {
           return current;
         }
