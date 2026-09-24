@@ -380,6 +380,17 @@ export class SessionRepository {
       .get(sessionId) as SnapshotRow | undefined;
     return row === undefined ? null : toSnapshot(row);
   }
+
+  getSnapshotsByIds(sessionIds: readonly string[]): ReadonlyMap<string, SessionSnapshot> {
+    if (sessionIds.length === 0) return new Map();
+    const rows = this.#database
+      .prepare(`
+        ${SNAPSHOT_SELECT}
+        WHERE s.session_id IN (${sessionIds.map(() => '?').join(', ')})
+      `)
+      .all(...sessionIds) as unknown as SnapshotRow[];
+    return new Map(rows.map((row) => [row.sessionId, toSnapshot(row)]));
+  }
 }
 
 function toSnapshot(row: SnapshotRow): SessionSnapshot {

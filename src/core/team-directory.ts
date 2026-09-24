@@ -361,6 +361,38 @@ export class TeamDirectory {
     return this.getSession(role.currentSessionId);
   }
 
+  selectCurrentSessions(
+    team: TeamSnapshot,
+    requestedRoleKeys?: readonly string[],
+  ): readonly SessionSnapshot[] {
+    const rolesByKey = new Map(team.roles.map((role) => [role.roleKey, role]));
+    const roleKeys = new Set(requestedRoleKeys ?? team.roles.map((role) => role.roleKey));
+    const sessionIds = [...roleKeys].map((roleKey) => {
+      const role = rolesByKey.get(roleKey);
+      if (role === undefined) {
+        throw new SessionPlaneDomainError(
+          'input.role-not-found',
+          `Unknown role ${roleKey} in team ${team.teamId}`,
+        );
+      }
+      if (role.currentSessionId === null) {
+        throw new SessionPlaneDomainError(
+          'team.role-session-missing',
+          `Role ${roleKey} has no current session`,
+        );
+      }
+      return role.currentSessionId;
+    });
+    const snapshots = this.#sessions.getSnapshotsByIds(sessionIds);
+    return sessionIds.map((sessionId) => {
+      const snapshot = snapshots.get(sessionId);
+      if (snapshot === undefined) {
+        throw new SessionPlaneDomainError('input.session-not-found', `Unknown session: ${sessionId}`);
+      }
+      return snapshot;
+    });
+  }
+
   listSessions(ownerClientId: string): readonly SessionSnapshot[] {
     const clientId = requireNonEmpty(ownerClientId, 'clientId');
     return this.#sessions.listSnapshotsForOwner(clientId);

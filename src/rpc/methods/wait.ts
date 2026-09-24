@@ -78,7 +78,7 @@ export function registerWaitMethods(
         let cursor = params.afterEventSequence ?? team.latestEventSequence;
 
         for (;;) {
-          const selected = selectSessions(directory, team, params.roleKeys);
+          const selected = directory.selectCurrentSessions(team, params.roleKeys);
           const conditionMet = evaluateTeamCondition(
             params.until,
             team.primaryRoleKey,
@@ -113,7 +113,7 @@ export function registerWaitMethods(
               params.until,
               false,
               team.latestEventSequence,
-              selectSessions(directory, team, params.roleKeys),
+              directory.selectCurrentSessions(team, params.roleKeys),
             );
           }
           if (wake.waitExpired && team.latestEventSequence <= cursor) {
@@ -122,38 +122,13 @@ export function registerWaitMethods(
               params.until,
               true,
               team.latestEventSequence,
-              selectSessions(directory, team, params.roleKeys),
+              directory.selectCurrentSessions(team, params.roleKeys),
             );
           }
           cursor = Math.max(cursor, wake.latestEventSequence, team.latestEventSequence);
         }
       }),
   );
-}
-
-function selectSessions(
-  directory: TeamDirectory,
-  team: ReturnType<TeamDirectory['getTeam']>,
-  requestedRoleKeys: readonly string[] | undefined,
-): readonly SessionSnapshot[] {
-  const roleKeys = requestedRoleKeys ?? team.roles.map((role) => role.roleKey);
-  const uniqueRoleKeys = [...new Set(roleKeys)];
-  return uniqueRoleKeys.map((roleKey) => {
-    const role = team.roles.find((candidate) => candidate.roleKey === roleKey);
-    if (role === undefined) {
-      throw new SessionPlaneDomainError(
-        'input.role-not-found',
-        `Unknown role ${roleKey} in team ${team.teamId}`,
-      );
-    }
-    if (role.currentSessionId === null) {
-      throw new SessionPlaneDomainError(
-        'team.role-session-missing',
-        `Role ${roleKey} has no current session`,
-      );
-    }
-    return directory.getSession(role.currentSessionId);
-  });
 }
 
 function evaluateTeamCondition(

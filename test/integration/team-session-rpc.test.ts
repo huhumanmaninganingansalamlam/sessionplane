@@ -72,7 +72,7 @@ test('teams, role isolation, session replacement, events, and restart restoratio
       roleKey: 'expert.backend',
       provider: 'chatgpt',
     });
-    await rpc(config.socketPath, 'session.create', {
+    const mainSession = await rpc<SessionSnapshot>(config.socketPath, 'session.create', {
       clientId: 'client-a',
       requestId: 'main-session-1',
       teamId: teamA.teamId,
@@ -92,6 +92,23 @@ test('teams, role isolation, session replacement, events, and restart restoratio
       aggregate.roles.find((role) => role.roleKey === 'expert.backend')?.currentSessionId,
       firstBackend.sessionId,
     );
+
+    const selected = await rpc<{ readonly waitExpired: boolean; readonly sessions: readonly SessionSnapshot[] }>(
+      config.socketPath,
+      'team.wait',
+      {
+        clientId: 'client-a',
+        teamId: teamA.teamId,
+        roleKeys: ['expert.backend', 'main', 'expert.backend'],
+        until: 'all_selected_terminal',
+        waitMs: 0,
+      },
+    );
+    assert.equal(selected.waitExpired, true);
+    assert.deepEqual(selected.sessions.map((session) => session.sessionId), [
+      firstBackend.sessionId,
+      mainSession.sessionId,
+    ]);
 
     const teamB = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
       clientId: 'client-b',
