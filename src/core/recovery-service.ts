@@ -248,19 +248,23 @@ export class RecoveryService {
     const deadlineMs = session?.deadlineAt === null || session?.deadlineAt === undefined
       ? Number.NaN
       : Date.parse(session.deadlineAt);
+    const retryUntilMs = Math.max(
+      Number.isFinite(deadlineMs) ? deadlineMs : 0,
+      this.#now().getTime() + 60_000,
+    );
     let delayMs = initialDelayMs;
     let pageRecoveryAttempted = false;
     while (!signal.aborted) {
       if (delayMs > 0) {
-        const remainingMs = deadlineMs - this.#now().getTime();
-        if (!Number.isFinite(remainingMs) || remainingMs <= 0) return;
+        const remainingMs = retryUntilMs - this.#now().getTime();
+        if (remainingMs <= 0) return;
         delayMs = Math.min(delayMs, remainingMs);
         try {
           await delay(delayMs, undefined, { signal });
         } catch {
           return;
         }
-        if (this.#now().getTime() >= deadlineMs) return;
+        if (this.#now().getTime() >= retryUntilMs) return;
       }
 
       const snapshot = this.#sessions.getSnapshot(initial.sessionId);
@@ -286,8 +290,8 @@ export class RecoveryService {
         if (!needsAcknowledgementRecovery(recovered)) return;
       }
 
-      const remainingMs = deadlineMs - this.#now().getTime();
-      if (!Number.isFinite(remainingMs) || remainingMs <= 0) return;
+      const remainingMs = retryUntilMs - this.#now().getTime();
+      if (remainingMs <= 0) return;
       delayMs = Math.min(this.#acknowledgementRetryMs, remainingMs);
     }
   }

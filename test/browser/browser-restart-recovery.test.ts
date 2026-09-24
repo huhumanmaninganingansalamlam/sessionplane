@@ -240,6 +240,9 @@ test('service restart preserves submission-unknown diagnostics while reopening t
         "UPDATE outbox SET submission_state = 'submission_unknown', result_json = NULL, error_code = 'session.submission-unknown', prompt_submitted = 1 WHERE session_id = ? AND generation = ?",
       )
       .run(submitted.sessionId, generationBefore);
+    service.database.raw
+      .prepare('UPDATE sessions SET deadline_at = ? WHERE session_id = ?')
+      .run(new Date(Date.now() - 1_000).toISOString(), submitted.sessionId);
 
     await service.close();
 
@@ -285,11 +288,15 @@ test('service restart preserves submission-unknown diagnostics while reopening t
     assert.equal(generation.errorCode, 'session.submission-unknown');
     assert.equal(generation.promptSubmitted, 1);
     afterRestart.acknowledgementRecoveryMode = 'success';
-    await service.recoveryService.restore({ forceObservers: true });
-    const recovered = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
-      clientId: 'ambiguous-browser-restart-client',
-      sessionId: submitted.sessionId,
-    });
+    let recovered = restored;
+    const retryDeadline = Date.now() + 10_000;
+    while (recovered.submissionState !== 'submitted' && Date.now() < retryDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      recovered = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+        clientId: 'ambiguous-browser-restart-client',
+        sessionId: submitted.sessionId,
+      });
+    }
     assert.equal(recovered.submissionState, 'submitted');
     assert.ok(['submitted', 'observing'].includes(recovered.sessionState));
     assert.equal(recovered.errorCode, null);
