@@ -69,6 +69,12 @@ test('later user turns and network-only evidence never publish a final', () => {
   assert.equal(networkOnly.kind, 'progress');
   assert.equal(networkOnly.responseMessageId, null);
   assert.equal(networkOnly.answerText, null);
+  assert.equal(networkOnly.freshExactProgress, false);
+  assert.equal(
+    new ExactFinalTracker(10).evaluate(evidence({ candidate: null, activity: 'strong' }), 100)
+      .freshExactProgress,
+    false,
+  );
 });
 
 test('visible rate-limit dialogs are blocked but answer text is not a dialog', () => {
@@ -105,7 +111,7 @@ test('strong current-turn activity prevents quiet completion', () => {
     },
   });
   assert.equal(tracker.evaluate(active, 0).kind, 'progress');
-  assert.equal(tracker.evaluate(active, 10_000).kind, 'progress');
+  assert.equal(tracker.evaluate(active, 10_000).freshExactProgress, false);
 });
 
 test('request placeholder messages can never become final answers', () => {
@@ -126,6 +132,30 @@ test('request placeholder messages can never become final answers', () => {
   assert.equal(first.answerText, null);
   assert.equal(later.kind, 'progress');
   assert.equal(later.answerText, null);
+});
+
+test('connection-loss placeholder stays unverified until a real answer arrives', () => {
+  const tracker = new ExactFinalTracker(10);
+  const interrupted = evidence({
+    candidate: {
+      responseMessageId: 'assistant-interrupted',
+      answerText: '연결이 끊어졌습니다. 전체 답변을 기다리는 중입니다',
+      terminalMarker: true,
+      streamingMarker: false,
+    },
+  });
+  assert.equal(tracker.evaluate(interrupted, 0).reason, 'provider-connection-lost-placeholder');
+  assert.equal(tracker.evaluate(interrupted, 1_000).kind, 'unverified');
+
+  const recovered = evidence({
+    candidate: {
+      responseMessageId: 'assistant-recovered',
+      answerText: 'VERDICT: APPROVE',
+      terminalMarker: true,
+      streamingMarker: false,
+    },
+  });
+  assert.equal(tracker.evaluate(recovered, 1_001).kind, 'complete');
 });
 
 function evidence(

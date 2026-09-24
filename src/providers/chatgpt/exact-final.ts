@@ -57,7 +57,7 @@ export class ExactFinalTracker {
     if (candidate === null) {
       this.#reset();
       if (evidence.activity === 'strong') {
-        return decision('progress', 'provider-generation-activity', true);
+        return decision('progress', 'provider-generation-activity');
       }
       if (evidence.networkActivity) {
         return decision('progress', 'provider-network-activity');
@@ -67,23 +67,28 @@ export class ExactFinalTracker {
 
     if (candidate.responseMessageId.startsWith('request-placeholder-')) {
       this.#reset();
-      return decision('progress', 'assistant-placeholder-active', true);
+      return decision('progress', 'assistant-placeholder-active');
     }
 
     const text = candidate.answerText.trim();
     if (text.length === 0 || candidate.responseMessageId.length === 0) {
       this.#reset();
-      return decision('progress', 'assistant-candidate-empty', true);
+      return decision('progress', 'assistant-candidate-empty');
+    }
+    if (text === '연결이 끊어졌습니다. 전체 답변을 기다리는 중입니다') {
+      this.#reset();
+      return decision('unverified', 'provider-connection-lost-placeholder');
     }
 
-    if (this.#candidateId !== candidate.responseMessageId || this.#candidateText !== text) {
+    const textChanged = this.#candidateId !== candidate.responseMessageId || this.#candidateText !== text;
+    if (textChanged) {
       this.#candidateId = candidate.responseMessageId;
       this.#candidateText = text;
       this.#stableSinceMs = nowMs;
     }
 
     if (candidate.streamingMarker || evidence.activity === 'strong') {
-      return decision('progress', 'assistant-generation-active', true);
+      return decision('progress', 'assistant-generation-active', textChanged);
     }
     if (candidate.terminalMarker) {
       return complete(candidate.responseMessageId, text, 'dom-terminal-marker');
@@ -94,7 +99,7 @@ export class ExactFinalTracker {
     if (nowMs - this.#stableSinceMs >= this.#quietWindowMs) {
       return complete(candidate.responseMessageId, text, 'dom-quiet-stable-final');
     }
-    return decision('progress', 'assistant-candidate-stabilizing', true);
+    return decision('progress', 'assistant-candidate-stabilizing', textChanged);
   }
 
   #reset(): void {

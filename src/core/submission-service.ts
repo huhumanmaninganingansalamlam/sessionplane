@@ -46,6 +46,8 @@ interface PreparedOutbox {
   readonly eventSequence: number;
 }
 
+const PROVIDER_STAGE_TIMEOUT_MS = 120_000;
+
 export class SubmissionService {
   readonly #database: SessionPlaneDatabase;
   readonly #directory: TeamDirectory;
@@ -57,6 +59,7 @@ export class SubmissionService {
   readonly #outbox: OutboxRepository;
   readonly #now: () => Date;
   readonly #onSubmitted: ((snapshot: SessionSnapshot) => void) | null;
+  readonly #onSubmissionUnknown: ((snapshot: SessionSnapshot) => void) | null;
   readonly #maxUploadFileBytes: number;
   readonly #requestTails = new Map<string, Promise<void>>();
 
@@ -68,6 +71,7 @@ export class SubmissionService {
     readonly adapters: ProviderAdapterRegistry;
     readonly maxUploadFileBytes?: number;
     readonly onSubmitted?: (snapshot: SessionSnapshot) => void;
+    readonly onSubmissionUnknown?: (snapshot: SessionSnapshot) => void;
     readonly now?: () => Date;
   }) {
     this.#database = options.database;
@@ -79,6 +83,7 @@ export class SubmissionService {
     this.#events = new EventRepository(options.database.raw);
     this.#outbox = new OutboxRepository(options.database);
     this.#onSubmitted = options.onSubmitted ?? null;
+    this.#onSubmissionUnknown = options.onSubmissionUnknown ?? null;
     this.#maxUploadFileBytes = options.maxUploadFileBytes ?? 100 * 1024 * 1024;
     this.#now = options.now ?? (() => new Date());
   }
@@ -128,7 +133,7 @@ export class SubmissionService {
       if (
         snapshot === null ||
         snapshot.generation !== outbox.generation ||
-        snapshot.terminal
+        (snapshot.terminal && outbox.submissionState !== 'failed_pre_submit')
       ) {
         continue;
       }
@@ -237,12 +242,13 @@ export class SubmissionService {
     const actor = this.#scheduler.actorFor(snapshot.sessionId);
     return await actor.enqueue(async () => {
       const current = this.#requireSnapshot(snapshot.sessionId);
+      const currentConversationId = current.conversationId;
       if (
         current.generation !== snapshot.generation ||
         current.submissionState !== 'submission_unknown' ||
         !current.promptSubmitted ||
         current.pageKey === null ||
-        current.conversationId === null
+        currentConversationId === null
       ) {
         return current;
       }
@@ -262,7 +268,10 @@ export class SubmissionService {
         if (
           acknowledgement === undefined ||
           acknowledgement === null ||
-          acknowledgement.conversationId !== current.conversationId
+          (acknowledgement.conversationId !== currentConversationId &&
+            !(current.provider === 'chatgpt' &&
+              currentConversationId.startsWith('WEB:') &&
+              !acknowledgement.conversationId.startsWith('WEB:')))
         ) {
           return current;
         }
@@ -445,8 +454,9 @@ export class SubmissionService {
 
     this.#persistPageKey(actor, prepared.outbox, submission.pageKey);
     return await this.#pageMutex.runExclusive(submission.pageKey, async () => {
+      const stageTimeoutMs = Math.min(PROVIDER_STAGE_TIMEOUT_MS, input.sessionDeadlineSec * 1_000);
       try {
-        await submission.prepare();
+        await withProviderStageTimeout(submission.prepare(), stageTimeoutMs, () => submission.abandon());
       } catch (error) {
         return await this.#failPreSubmit(actor, prepared.outbox, error);
       }
@@ -486,14 +496,17 @@ export class SubmissionService {
 
       let submitError: unknown = null;
       try {
-        await submission.submitOnce();
+        await withProviderStageTimeout(submission.submitOnce(), stageTimeoutMs);
       } catch (error) {
         submitError = error;
       }
 
       let acknowledgement: ProviderSubmissionAcknowledgement | null = null;
       try {
-        acknowledgement = await submission.captureAcknowledgement();
+        acknowledgement = await withProviderStageTimeout(
+          submission.captureAcknowledgement(),
+          stageTimeoutMs,
+        );
       } catch (error) {
         submitError ??= error;
       }
@@ -996,6 +1009,7 @@ export class SubmissionService {
     reason: string,
   ): Promise<never> {
     const snapshot = this.#recordSubmissionUnknown(actor, originalOutbox, reason);
+    this.#onSubmissionUnknown?.(snapshot);
     throw new SessionPlaneDomainError(
       'session.submission-unknown',
       'Submission was attempted but exact provider acknowledgement was not proven',
@@ -1078,6 +1092,33 @@ export class SubmissionService {
       throw new SessionPlaneDomainError('input.session-not-found', `Unknown session: ${sessionId}`);
     }
     return snapshot;
+  }
+}
+
+async function withProviderStageTimeout<Result>(
+  operation: Promise<Result>,
+  timeoutMs: number,
+  onTimeout?: () => void,
+): Promise<Result> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          try {
+            onTimeout?.();
+          } catch (error) {
+            reject(error);
+            return;
+          }
+          reject(new ProviderSubmissionError('browser.unavailable', 'Provider browser operation timed out'));
+        }, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -1265,4 +1306,3 @@ function mediaTypeForPath(filePath: string): string | null {
       return null;
   }
 }
-

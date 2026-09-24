@@ -68,12 +68,12 @@ const ACCEPTANCE_EVIDENCE: readonly AcceptanceEvidence[] = [
   {
     id: 'A12',
     description: 'recent exact progress remains observing past the session deadline',
-    files: ['test/unit/wait-reducer.test.ts'],
+    files: ['test/integration/backend-recovery.test.ts'],
   },
   {
     id: 'A13',
     description: 'unknown deadline state remains nonterminal',
-    files: ['test/unit/wait-reducer.test.ts'],
+    files: ['test/integration/backend-recovery.test.ts'],
   },
   {
     id: 'A14',

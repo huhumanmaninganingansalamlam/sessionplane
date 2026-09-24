@@ -86,6 +86,7 @@ export const CHATGPT_SELECTORS = {
     '.whitespace-pre-wrap',
     '[data-testid*="user-message-content"]',
   ],
+  userMessageExpansionControls: 'button[aria-expanded="false"]',
   messages: '[data-message-author-role]',
   stopControls: [
     '[data-testid="stop-button"]',
@@ -105,4 +106,3 @@ export const CHATGPT_SELECTORS = {
     '[data-testid*="modal"]',
   ],
 } as const;
-

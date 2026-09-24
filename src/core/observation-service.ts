@@ -129,6 +129,8 @@ export class ObservationService {
     const tracker = new ExactFinalTracker(this.#quietWindowMs);
     const observationStartedAtMs = this.#now().getTime();
     let lastExactProgressAtMs = this.#now().getTime();
+    const deadlineAt = this.#sessions.getSession(initial.sessionId)?.deadlineAt;
+    const deadlineMs = deadlineAt === null || deadlineAt === undefined ? Infinity : Date.parse(deadlineAt);
     let source: ProviderObservationSource | null = null;
     try {
       while (!signal.aborted) {
@@ -170,12 +172,19 @@ export class ObservationService {
         }
 
         const nowMs = this.#now().getTime();
-        const decision = tracker.evaluate(evidence, nowMs);
+        const observed = tracker.evaluate(evidence, nowMs);
+        const deadlineExpired = nowMs >= deadlineMs && !observed.freshExactProgress;
+        const decision: ExactFinalDecision =
+          deadlineExpired && (observed.kind === 'progress' || observed.kind === 'pending')
+            ? { ...observed, kind: 'unverified', reason: 'session-deadline-unverified' }
+            : observed;
+        const verifiedRedirect = isVerifiedChatGptRedirect(current, evidence);
         const preserveBackendDeferral =
           current.observationTransport === 'deferred' &&
           current.nextCheckAt !== null &&
           Date.parse(current.nextCheckAt) > nowMs &&
           !decision.freshExactProgress &&
+          !verifiedRedirect &&
           decision.kind !== 'complete' &&
           decision.kind !== 'blocked' &&
           decision.kind !== 'interstitial';
@@ -205,7 +214,11 @@ export class ObservationService {
           !backendRecoveryPaced &&
           this.#now().getTime() - lastExactProgressAtMs >= this.#backendRecoveryAfterMs
         ) {
-          const recovery = await this.#recover(persisted);
+          const recoveredResult = await this.#recover(persisted);
+          const recovery: ProviderRecoveryResult =
+            this.#now().getTime() >= deadlineMs && recoveredResult.kind === 'pending'
+              ? { ...recoveredResult, kind: 'unverified', reason: 'session-deadline-unverified' }
+              : recoveredResult;
           if (signal.aborted) {
             return;
           }
@@ -236,7 +249,12 @@ export class ObservationService {
     evidence: ProviderObservationEvidence,
     decision: ExactFinalDecision,
   ): Promise<SessionSnapshot> {
-    const update = updateForDecision(decision, evidence, this.#now().toISOString());
+    const update: CurrentGenerationUpdate = {
+      ...updateForDecision(decision, evidence, this.#now().toISOString()),
+      ...(isVerifiedChatGptRedirect(previous, evidence)
+        ? { conversationId: evidence.conversationId }
+        : {}),
+    };
     if (!hasMeaningfulChange(previous, update)) {
       return previous;
     }
@@ -459,12 +477,27 @@ function hasMeaningfulChange(
     (update.providerState !== undefined && update.providerState !== snapshot.providerState) ||
     (update.observationTransport !== undefined &&
       update.observationTransport !== snapshot.observationTransport) ||
+    (update.conversationId !== undefined && update.conversationId !== snapshot.conversationId) ||
     (update.responseMessageId !== undefined &&
       update.responseMessageId !== snapshot.responseMessageId) ||
     (update.answerText !== undefined && update.answerText !== snapshot.answerText) ||
     (update.nextCheckAt !== undefined && update.nextCheckAt !== snapshot.nextCheckAt) ||
     (update.reason !== undefined && update.reason !== snapshot.reason) ||
     (update.errorCode !== undefined && update.errorCode !== snapshot.errorCode)
+  );
+}
+
+function isVerifiedChatGptRedirect(
+  snapshot: SessionSnapshot,
+  evidence: ProviderObservationEvidence,
+): evidence is ProviderObservationEvidence & { readonly conversationId: string } {
+  return (
+    snapshot.provider === 'chatgpt' &&
+    snapshot.conversationId?.startsWith('WEB:') === true &&
+    evidence.observationTransport === 'fresh' &&
+    evidence.submittedUserFound &&
+    evidence.conversationId !== null &&
+    !evidence.conversationId.startsWith('WEB:')
   );
 }
 

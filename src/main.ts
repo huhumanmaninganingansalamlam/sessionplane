@@ -184,6 +184,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     logger,
     metrics,
   });
+  let recoveryService: RecoveryService | null = null;
   const submissionService = new SubmissionService({
     database,
     directory: teamDirectory,
@@ -192,6 +193,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     adapters: providerAdapters,
     maxUploadFileBytes: config.maxUploadFileBytes,
     onSubmitted: (snapshot) => observationService.start(snapshot),
+    onSubmissionUnknown: (snapshot) =>
+      recoveryService?.watchAcknowledgementRecovery(snapshot),
   });
   const stopService = new StopService({
     database,
@@ -200,7 +203,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageMutex: pageMutationMutex,
     adapters: providerAdapters,
   });
-  const recoveryService = new RecoveryService({
+  const recovery = new RecoveryService({
     database,
     browserOwner,
     pageRegistry,
@@ -213,14 +216,16 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     grokUrl: config.grokUrl,
     metrics,
     logger,
+    acknowledgementRetryMs: config.observationActiveSweepMs,
     ...(options.recoveryNavigatePage === undefined
       ? {}
       : { navigatePage: options.recoveryNavigatePage }),
   });
+  recoveryService = recovery;
   const browserControl = new BrowserControlService({
     browserOwner,
     pageRegistry,
-    onStarted: async () => await recoveryService.restore({ forceObservers: true }),
+    onStarted: async () => await recovery.restore({ forceObservers: true }),
   });
   const searchService = SearchService.fromConfig(config);
   const researchService = new ResearchService({ search: searchService });
@@ -262,8 +267,9 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     if (recovered > 0) {
       logger.warn('submission.recovered-ambiguous', { count: recovered });
     }
-    await recoveryService.restore();
+    await recovery.restore();
   } catch (error) {
+    await recovery.close();
     await observationService.close();
     await browserOwner?.close();
     actorScheduler.close();
@@ -319,6 +325,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   try {
     await rpcServer.listen();
   } catch (error) {
+    await recovery.close();
     await observationService.close();
     await browserOwner?.close();
     actorScheduler.close();
@@ -329,6 +336,33 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   }
 
   let closed = false;
+  let browserRecovery: Promise<Readonly<Record<string, unknown>>> | null = null;
+  const restartBrowser = (): Promise<Readonly<Record<string, unknown>>> => {
+    if (browserRecovery !== null) return browserRecovery;
+    browserRecovery = (async () => {
+      if (browserOwner === null) throw new Error('Browser owner is disabled');
+      const browser = await browserOwner.restart();
+      const report = await recovery.restore({ forceObservers: true });
+      return { browser, recovery: report };
+    })().finally(() => {
+      browserRecovery = null;
+    });
+    return browserRecovery;
+  };
+  const browserRecoveryTimer = browserOwner === null ? null : setInterval(() => {
+    if (closed || browserRecovery !== null) return;
+    const state = browserOwner.status.state;
+    if (state !== 'disconnected' && state !== 'error') return;
+    logger.warn('browser.disconnected', { state });
+    void restartBrowser()
+      .then(({ recovery }) => logger.info('browser.recovered', { recovery }))
+      .catch((error: unknown) =>
+        logger.error('browser.recovery-failed', {
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      );
+  }, 5_000);
+  browserRecoveryTimer?.unref();
   return {
     config,
     database,
@@ -349,26 +383,24 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageBindings,
     providerAdapters,
     observationService,
-    recoveryService,
+    recoveryService: recovery,
     submissionService,
     stopService,
     searchService,
     researchService,
     startedAt,
     async restartBrowser(): Promise<Readonly<Record<string, unknown>>> {
-      if (browserOwner === null) {
-        throw new Error('Browser owner is disabled');
-      }
-      const browser = await browserOwner.restart();
-      const recovery = await recoveryService.restore({ forceObservers: true });
-      return { browser, recovery };
+      return await restartBrowser();
     },
     async close(): Promise<void> {
       if (closed) {
         return;
       }
       closed = true;
+      if (browserRecoveryTimer !== null) clearInterval(browserRecoveryTimer);
+      await browserRecovery?.catch(() => undefined);
       await rpcServer.close();
+      await recovery.close();
       await observationService.close();
       await browserOwner?.close();
       actorScheduler.close();
@@ -418,4 +450,3 @@ if (isDirectExecution()) {
     process.exitCode = 1;
   });
 }
-

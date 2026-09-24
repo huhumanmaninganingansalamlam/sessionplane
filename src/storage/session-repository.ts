@@ -7,7 +7,7 @@ import type {
   SessionSnapshot,
   SessionState,
 } from '../domain/session.ts';
-import { isTerminalSessionState } from '../domain/session.ts';
+import { isTerminalGeneration, isTerminalSessionState } from '../domain/session.ts';
 import type {
   CurrentGenerationUpdate,
   GenerationRecord,
@@ -47,7 +47,7 @@ interface SnapshotRow extends SessionRow {
 export type CurrentSessionSummary = Pick<
   SessionRecord,
   'sessionId' | 'provider' | 'currentGeneration' | 'sessionState' | 'providerState'
->;
+> & { readonly submissionState: SubmissionState | null };
 
 const SESSION_COLUMNS = `
   session_id AS sessionId,
@@ -90,7 +90,8 @@ const CURRENT_SESSION_COLUMNS = `
   s.provider,
   s.current_generation AS currentGeneration,
   s.session_state AS sessionState,
-  s.provider_state AS providerState
+  s.provider_state AS providerState,
+  g.submission_state AS submissionState
 `;
 
 const SNAPSHOT_SELECT = `
@@ -159,6 +160,8 @@ export class SessionRepository {
         SELECT ${CURRENT_SESSION_COLUMNS}
         FROM team_roles r
         JOIN sessions s ON s.session_id = r.current_session_id
+        LEFT JOIN generations g
+          ON g.session_id = s.session_id AND g.generation = s.current_generation
         WHERE r.team_id = ?
       `)
       .all(teamId) as unknown as CurrentSessionSummary[];
@@ -172,6 +175,8 @@ export class SessionRepository {
         FROM team_roles r
         JOIN teams t ON t.team_id = r.team_id
         JOIN sessions s ON s.session_id = r.current_session_id
+        LEFT JOIN generations g
+          ON g.session_id = s.session_id AND g.generation = s.current_generation
         WHERE t.owner_client_id = ?
       `)
       .all(ownerClientId) as unknown as CurrentSessionSummary[];
@@ -183,6 +188,7 @@ export class SessionRepository {
       .prepare(`
         ${SNAPSHOT_SELECT}
         WHERE s.session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
+          AND g.submission_state IS NOT 'failed_pre_submit'
         ORDER BY s.created_at, s.session_id
       `)
       .all() as unknown as SnapshotRow[];
@@ -207,6 +213,7 @@ export class SessionRepository {
         ${SNAPSHOT_SELECT}
         WHERE s.session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
           AND s.current_generation > 0
+          AND g.submission_state IS NOT 'failed_pre_submit'
         ORDER BY s.created_at, s.session_id
       `)
       .all() as unknown as SnapshotRow[];
@@ -419,7 +426,7 @@ function toSnapshot(row: SnapshotRow): SessionSnapshot {
     sessionState: row.sessionState,
     providerState: row.providerState,
     observationTransport: row.observationTransport,
-    terminal: isTerminalSessionState(row.sessionState),
+    terminal: isTerminalGeneration(row.sessionState, row.submissionState),
     waitExpired: false,
     nextCheckAt: row.nextCheckAt,
     conversationId: row.conversationId,

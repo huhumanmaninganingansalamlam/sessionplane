@@ -13,7 +13,7 @@ import {
   type RoleType,
   type TeamRoleSnapshot,
 } from '../domain/role.ts';
-import { isTerminalSessionState, type SessionSnapshot } from '../domain/session.ts';
+import { isTerminalGeneration, type SessionSnapshot } from '../domain/session.ts';
 import type { TeamListResult, TeamRecord, TeamSnapshot } from '../domain/team.ts';
 import { PROVIDERS, type ProviderName } from '../providers/provider-adapter.ts';
 
@@ -158,7 +158,9 @@ export class TeamDirectory {
         generation: session === null ? null : Number(session.currentGeneration),
         sessionState: session?.sessionState ?? null,
         providerState: session?.providerState ?? null,
-        terminal: session === null ? null : isTerminalSessionState(session.sessionState),
+        terminal: session === null
+          ? null
+          : isTerminalGeneration(session.sessionState, session.submissionState),
       };
     });
     return {

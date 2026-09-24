@@ -87,13 +87,26 @@ test('stale DOM recovers an exact server final and backend 429 remains deferred,
     assert.equal(deferred.errorCode, null);
     assert.notEqual(deferred.nextCheckAt, null);
     assert.equal(fake.recoveryCount, beforeLimited + 1);
+
+    fake.emitObservation(limitedSession.sessionId, {
+      activity: 'strong',
+      candidate: null,
+      networkActivity: false,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const afterSpinner = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'backend-client',
+      sessionId: limitedSession.sessionId,
+    });
+    assert.equal(afterSpinner.observationTransport, 'deferred');
+    assert.equal(afterSpinner.providerState, 'unknown');
   } finally {
     await service.close();
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });
 
-test('strong exact generation activity suppresses backend recovery until activity stops', async () => {
+test('spinner without an assistant candidate does not suppress exact backend recovery', async () => {
   const fixture = await createFixture('sessionplane-backend-activity-');
   const { config, fake, service } = fixture;
   try {
@@ -109,29 +122,11 @@ test('strong exact generation activity suppresses backend recovery until activit
     });
     await send(config.socketPath, session.sessionId, 'strong-activity');
 
-    const emitStrongActivity = () => {
-      fake.emitObservation(session.sessionId, {
-        activity: 'strong',
-        candidate: null,
-        networkActivity: false,
-      });
-    };
-    emitStrongActivity();
-    const interval = setInterval(() => {
-      emitStrongActivity();
-    }, 5);
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      assert.equal(fake.recoveryCount, 0);
-      const active = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
-        clientId: 'backend-client',
-        sessionId: session.sessionId,
-      });
-      assert.equal(active.providerState, 'generating');
-      assert.equal(active.terminal, false);
-    } finally {
-      clearInterval(interval);
-    }
+    fake.emitObservation(session.sessionId, {
+      activity: 'strong',
+      candidate: null,
+      networkActivity: false,
+    });
 
     const complete = await waitForSnapshot(
       config.socketPath,
@@ -140,6 +135,49 @@ test('strong exact generation activity suppresses backend recovery until activit
     );
     assert.equal(complete.answerText, 'Recovered after activity stopped');
     assert.equal(fake.recoveryCount, 1);
+  } finally {
+    await service.close();
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test('expired submitted generation reports uncertainty while observation continues', async () => {
+  const fixture = await createFixture('sessionplane-expired-observation-');
+  const { config, fake, service } = fixture;
+  try {
+    const { session } = await createSession(config.socketPath, 'main', 'expired');
+    await send(config.socketPath, session.sessionId, 'expired', 1);
+
+    await waitForSnapshot(
+      config.socketPath,
+      session.sessionId,
+      (snapshot) => snapshot.reason === 'session-deadline-unverified',
+    );
+    fake.emitObservation(session.sessionId, {
+      candidate: {
+        responseMessageId: 'assistant-after-deadline',
+        answerText: 'Part one',
+        terminalMarker: false,
+        streamingMarker: true,
+      },
+      activity: 'strong',
+    });
+    const resumed = await waitForSnapshot(
+      config.socketPath,
+      session.sessionId,
+      (snapshot) => snapshot.reason === 'assistant-generation-active',
+    );
+    assert.equal(resumed.providerState, 'generating');
+
+    const expired = await waitForSnapshot(
+      config.socketPath,
+      session.sessionId,
+      (snapshot) => snapshot.reason === 'session-deadline-unverified',
+    );
+    assert.equal(expired.providerState, 'unknown');
+    assert.equal(expired.terminal, false);
+    assert.equal(expired.promptSubmitted, true);
+    assert.equal(fake.submitCount, 1);
   } finally {
     await service.close();
     rmSync(fixture.root, { recursive: true, force: true });
@@ -369,13 +407,13 @@ async function createSession(socketPath: string, roleKey: string, suffix: string
   return { teamId: team.teamId, session };
 }
 
-async function send(socketPath: string, sessionId: string, suffix: string): Promise<void> {
+async function send(socketPath: string, sessionId: string, suffix: string, deadlineSec = 600): Promise<void> {
   await rpc(socketPath, 'session.send', {
     clientId: 'backend-client',
     requestId: `send-${suffix}`,
     sessionId,
     prompt: `Backend recovery ${suffix}`,
-    sessionDeadlineSec: 600,
+    sessionDeadlineSec: deadlineSec,
   });
 }
 
@@ -385,7 +423,8 @@ async function waitForSnapshot(
   predicate: (snapshot: WaitSnapshot) => boolean,
 ): Promise<WaitSnapshot> {
   let cursor = 0;
-  for (let attempt = 0; attempt < 200; attempt += 1) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
     const snapshot = await rpc<WaitSnapshot>(socketPath, 'session.wait', {
       clientId: 'backend-client',
       sessionId,

@@ -83,3 +83,9 @@ export function isTerminalSessionState(state: SessionState): boolean {
   return TERMINAL_SESSION_STATES.has(state);
 }
 
+export function isTerminalGeneration(
+  sessionState: SessionState,
+  submissionState: SubmissionState | null,
+): boolean {
+  return isTerminalSessionState(sessionState) || submissionState === 'failed_pre_submit';
+}

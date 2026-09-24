@@ -17,6 +17,7 @@ import {
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
 const COMPOSER_HYDRATION_TIMEOUT_MS = 3_000;
+const COMPOSER_READY_TIMEOUT_MS = 10_000;
 const COMPOSER_COMMIT_TIMEOUT_MS = 3_000;
 const COMPOSER_COMMIT_POLL_MS = 50;
 const COMPOSER_READ_TIMEOUT_MS = 500;
@@ -100,13 +101,14 @@ export class ChatGptSubmission implements ProviderSubmission {
 
     let modelSelection: ModelSelectionMode | null = null;
     if (this.#request.model !== null) {
-      modelSelection = await this.#selectModel(this.#request.model);
+      modelSelection = await this.#selectModel(this.#request.model, this.#request.effort ?? null);
     }
     if (
       this.#request.effort !== undefined &&
       this.#request.effort !== null &&
       normalizeLabel(this.#request.effort) !== '' &&
-      modelSelection !== 'intelligence-pro'
+      modelSelection !== 'intelligence-pro' &&
+      modelSelection !== 'intelligence-thinking'
     ) {
       const selectedByIntelligence = await selectIntelligenceEffort(
         this.#page,
@@ -122,8 +124,8 @@ export class ChatGptSubmission implements ProviderSubmission {
       }
     }
 
-    const composer = await firstVisibleComposer(this.#page);
-    if (composer === null || !(await composer.isEditable().catch(() => false))) {
+    const composer = await firstEditableComposer(this.#page);
+    if (composer === null) {
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         'The exact ChatGPT composer is not editable',
@@ -143,19 +145,21 @@ export class ChatGptSubmission implements ProviderSubmission {
       );
     }
 
-    const sendButton = await firstVisible(this.#page, CHATGPT_SELECTORS.sendButton);
-    if (
-      sendButton === null ||
-      (await sendButton.isDisabled().catch(() => true)) ||
-      !(await sendButton.isEnabled().catch(() => false))
-    ) {
+    const sendButton = await waitForEnabledSendButton(this.#page, 60_000);
+    if (sendButton === null) {
+      const visibleControl = await firstVisible(this.#page, CHATGPT_SELECTORS.sendButton);
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         'The exact ChatGPT send control is unavailable',
+        { details: { sendControl: visibleControl === null ? 'absent' : 'disabled' } },
       );
     }
     this.#sendButton = sendButton;
     this.#requireExactPage();
+  }
+
+  abandon(): void {
+    void this.#page.close().catch(() => undefined);
   }
 
   async submitOnce(): Promise<void> {
@@ -236,7 +240,23 @@ export class ChatGptSubmission implements ProviderSubmission {
     });
   }
 
-  async #selectModel(requestedModel: string): Promise<ModelSelectionMode> {
+  async #selectModel(requestedModel: string, requestedEffort: string | null): Promise<ModelSelectionMode> {
+    if (normalizeModelIdentity(requestedModel) === 'thinking') {
+      const intelligenceSwitcher = await firstVisible(
+        this.#page,
+        CHATGPT_SELECTORS.intelligenceSwitcher,
+      );
+      if (intelligenceSwitcher !== null) {
+        const effort = requestedEffort?.trim() || 'standard';
+        if (!(await selectIntelligenceEffort(this.#page, effort))) {
+          throw new ProviderSubmissionError(
+            'provider.mode-unavailable',
+            'Requested ChatGPT effort is unavailable: ' + effort,
+          );
+        }
+        return 'intelligence-thinking';
+      }
+    }
     if (isIntelligenceProRequest(requestedModel)) {
       const intelligenceSwitcher = await firstVisible(
         this.#page,
@@ -319,7 +339,7 @@ export async function recoverChatGptAcknowledgement(
   };
 }
 
-type ModelSelectionMode = 'legacy' | 'intelligence-pro';
+type ModelSelectionMode = 'legacy' | 'intelligence-pro' | 'intelligence-thinking';
 
 interface IntelligencePreset {
   readonly title: string;
@@ -657,19 +677,11 @@ async function selectLiveIntelligenceVersion(
     return { selected: false, reason: 'version-opener-not-visible' };
   }
   await opener.click({ timeout: 5_000 }).catch(() => undefined);
-  if (!(await waitForAttribute(advanced, 'data-active', 'true', 2_000))) {
-    return { selected: false, reason: 'advanced-view-not-active' };
-  }
-
   target = await findTarget();
-  if (target === null || !(await target.isVisible().catch(() => false))) {
+  if (target === null || !(await waitForVisible(target, 2_000))) {
     return { selected: false, reason: 'requested-version-not-visible' };
   }
   await target.click({ timeout: 5_000 });
-  const simple = page.locator(CHATGPT_SELECTORS.intelligenceSimpleView).first();
-  if (!(await waitForAttribute(simple, 'data-active', 'true', 2_000))) {
-    return { selected: false, reason: 'simple-view-not-restored' };
-  }
   if (!(await waitForAttribute(target, 'aria-checked', 'true', 2_000))) {
     return { selected: false, reason: 'version-not-acknowledged' };
   }
@@ -802,13 +814,9 @@ async function selectIntelligenceVersion(
   const opener = content.locator('[role="menuitem"]').first();
   if (!(await opener.isVisible().catch(() => false))) return false;
   await opener.click({ timeout: 5_000 });
-  if (!(await waitForAttribute(advanced, 'data-active', 'true', 2_000))) return false;
   target = await matchingVersionOption(options, version);
-  if (target === null || !(await target.isVisible().catch(() => false))) return false;
+  if (target === null || !(await waitForVisible(target, 2_000))) return false;
   await target.click({ timeout: 5_000 });
-
-  const simple = page.locator(CHATGPT_SELECTORS.intelligenceSimpleView).first();
-  if (!(await waitForAttribute(simple, 'data-active', 'true', 2_000))) return false;
   return await waitForAttribute(target, 'aria-checked', 'true', 2_000);
 }
 
@@ -852,6 +860,16 @@ async function waitForVisible(locator: Locator, timeoutMs: number): Promise<bool
     await locator.page().waitForTimeout(25);
   } while (Date.now() < deadline);
   return false;
+}
+
+async function waitForEnabledSendButton(page: Page, timeoutMs: number): Promise<Locator | null> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const button = await firstVisible(page, CHATGPT_SELECTORS.sendButton);
+    if (button !== null && (await button.isEnabled().catch(() => false))) return button;
+    await page.waitForTimeout(100);
+  } while (Date.now() < deadline);
+  return null;
 }
 
 function isIntelligenceProRequest(value: string): boolean {
@@ -1241,18 +1259,20 @@ async function attachmentsAcknowledged(
   return expected.every((name) => normalizedEvidence.includes(name));
 }
 
-async function firstVisibleComposer(page: Page): Promise<Locator | null> {
-  const exact = await firstVisible(
-    page,
-    CHATGPT_SELECTORS.composer.slice(0, 2),
-    VISIBLE_SELECTOR_TIMEOUT_MS,
-  );
-  if (exact !== null) return exact;
-  return await firstVisible(
-    page,
-    CHATGPT_SELECTORS.composer.slice(2),
-    VISIBLE_SELECTOR_TIMEOUT_MS,
-  );
+async function firstEditableComposer(page: Page): Promise<Locator | null> {
+  const candidates = page.locator(CHATGPT_SELECTORS.composer.join(', ')).filter({ visible: true });
+  const deadline = Date.now() + COMPOSER_READY_TIMEOUT_MS;
+  do {
+    const count = await candidates.count().catch(() => 0);
+    for (let index = 0; index < count; index += 1) {
+      const candidate = candidates.nth(index);
+      if (await candidate.isEditable().catch(() => false)) return candidate;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await page.waitForTimeout(Math.min(VISIBLE_SELECTOR_POLL_MS, remaining));
+  } while (Date.now() < deadline);
+  return null;
 }
 
 async function firstVisible(
@@ -1285,6 +1305,41 @@ async function readExactTextCandidates(locator: Locator): Promise<readonly strin
         }
         if (element instanceof HTMLElement) {
           values.push(element.innerText, element.textContent ?? '');
+          const inlineCode = Array.from(element.querySelectorAll('code'));
+          if (
+            inlineCode.length > 0 &&
+            inlineCode.every((code) => code.closest('pre') === null && code.parentElement?.closest('code') === null)
+          ) {
+            const renderedText = element.innerText;
+            const codeRanges: Array<{ start: number; end: number }> = [];
+            for (const code of inlineCode) {
+              const contentRange = document.createRange();
+              contentRange.selectNodeContents(code);
+              const codeText = contentRange.toString();
+              if (codeText.length === 0 || codeText.includes('`')) {
+                codeRanges.length = 0;
+                break;
+              }
+
+              const prefixRange = document.createRange();
+              prefixRange.selectNodeContents(element);
+              prefixRange.setEndBefore(code);
+              const start = prefixRange.toString().length;
+              const end = start + codeText.length;
+              if (renderedText.slice(start, end) !== codeText) {
+                codeRanges.length = 0;
+                break;
+              }
+              codeRanges.push({ start, end });
+            }
+            if (codeRanges.length === inlineCode.length) {
+              let markdownText = renderedText;
+              for (const { start, end } of codeRanges.sort((left, right) => right.start - left.start)) {
+                markdownText = `${markdownText.slice(0, start)}\`${markdownText.slice(start, end)}\`${markdownText.slice(end)}`;
+              }
+              values.push(markdownText);
+            }
+          }
           const blockChildren = Array.from(element.childNodes);
           if (
             blockChildren.length > 0 &&
@@ -1322,18 +1377,27 @@ async function composerHasExactValue(
 
 async function messageHasExactPrompt(message: Locator, expected: string): Promise<boolean> {
   const normalizedExpected = normalizeLineEndings(expected);
-  for (const selector of CHATGPT_SELECTORS.userMessageContent) {
-    const content = message.locator(selector).first();
-    if ((await content.count().catch(() => 0)) === 0) continue;
-    const values = await readExactTextCandidates(content);
-    if (values.some((value) => normalizeLineEndings(value) === normalizedExpected)) {
-      return true;
+  const matchesExactPrompt = async (): Promise<boolean> => {
+    for (const selector of CHATGPT_SELECTORS.userMessageContent) {
+      const content = message.locator(selector).first();
+      if ((await content.count().catch(() => 0)) === 0) continue;
+      const values = await readExactTextCandidates(content);
+      if (values.some((value) => normalizeLineEndings(value) === normalizedExpected)) {
+        return true;
+      }
     }
-  }
-  const fallbackValues = await readExactTextCandidates(message);
-  return fallbackValues.some(
-    (value) => normalizeLineEndings(value) === normalizedExpected,
-  );
+    const fallbackValues = await readExactTextCandidates(message);
+    return fallbackValues.some(
+      (value) => normalizeLineEndings(value) === normalizedExpected,
+    );
+  };
+
+  if (await matchesExactPrompt()) return true;
+
+  const collapsedControl = message.locator(CHATGPT_SELECTORS.userMessageExpansionControls);
+  if ((await collapsedControl.count().catch(() => 0)) !== 1) return false;
+  await collapsedControl.click({ timeout: 1_000 }).catch(() => undefined);
+  return await matchesExactPrompt();
 }
 
 async function writeExactComposerValue(
@@ -1522,4 +1586,3 @@ async function waitForModelLabel(
   } while (Date.now() < deadline);
   return false;
 }
-

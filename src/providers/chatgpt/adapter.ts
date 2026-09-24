@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import type { BrowserOwner } from '../../browser/browser-owner.ts';
 import { PageRegistryError, type PageRegistry } from '../../browser/page-registry.ts';
+import type { PageBindingSnapshot } from '../../browser/page-binding.ts';
 import {
   ProviderSubmissionError,
   type ProviderAdapter,
@@ -169,6 +170,26 @@ export class ChatGptAdapter implements ProviderAdapter {
     const conversationId = request.session.conversationId;
     if (pageKey === null || conversationId === null) return null;
     try {
+      const binding = this.#pageRegistry.refreshPage(pageKey);
+      if (isWebRedirect(binding, request.session.sessionId, request.generation, conversationId)) {
+        const page = this.#pageRegistry.pageForObservation(pageKey);
+        const acknowledgement = await recoverChatGptAcknowledgement(
+          page,
+          request.prompt,
+          binding.conversationId,
+        );
+        if (acknowledgement === null ||
+          this.#pageRegistry.refreshPage(pageKey).bindingEpoch !== binding.bindingEpoch) {
+          return null;
+        }
+        this.#pageRegistry.bindVerifiedRedirect(pageKey, {
+          sessionId: request.session.sessionId,
+          generation: request.generation,
+          previousConversationId: conversationId,
+          conversationId: binding.conversationId,
+        });
+        return acknowledgement;
+      }
       const page = this.#pageRegistry.requireOwnedPage(pageKey, {
         sessionId: request.session.sessionId,
         generation: request.generation,
@@ -197,11 +218,19 @@ export class ChatGptAdapter implements ProviderAdapter {
     }
 
     try {
-      const page = this.#pageRegistry.requireOwnedPage(pageKey, {
-        sessionId: request.session.sessionId,
-        generation: request.generation,
+      const binding = this.#pageRegistry.refreshPage(pageKey);
+      const page = isWebRedirect(
+        binding,
+        request.session.sessionId,
+        request.generation,
         conversationId,
-      });
+      )
+        ? this.#pageRegistry.pageForObservation(pageKey)
+        : this.#pageRegistry.requireOwnedPage(pageKey, {
+            sessionId: request.session.sessionId,
+            generation: request.generation,
+            conversationId,
+          });
       return new ChatGptObservationSource({
         pageKey,
         page,
@@ -417,6 +446,24 @@ function hasOpenPage(pageRegistry: PageRegistry, pageKey: string): boolean {
   }
 }
 
+function isWebRedirect(
+  binding: PageBindingSnapshot,
+  sessionId: string,
+  generation: number,
+  conversationId: string,
+): binding is PageBindingSnapshot & { readonly conversationId: string } {
+  return (
+    conversationId.startsWith('WEB:') &&
+    binding.state === 'identity_lost' &&
+    binding.sessionId === sessionId &&
+    binding.generation === generation &&
+    (binding.expectedConversationId === conversationId ||
+      binding.expectedConversationId === null) &&
+    binding.conversationId !== null &&
+    !binding.conversationId.startsWith('WEB:')
+  );
+}
+
 function sameProviderOrigin(currentUrl: string, loginUrl: string): boolean {
   try {
     return new URL(currentUrl).origin === new URL(loginUrl).origin;
@@ -553,6 +600,7 @@ class ChatGptObservationSource implements ProviderObservationSource {
   readonly #page: ReturnType<PageRegistry['requireOwnedPage']>;
   readonly #pageRegistry: PageRegistry;
   readonly #request: ProviderObservationRequest;
+  #conversationId: string;
   readonly #network: ChatGptNetworkObserver;
   #lastNetworkRevision = 0;
   #closed = false;
@@ -562,6 +610,7 @@ class ChatGptObservationSource implements ProviderObservationSource {
     this.#page = options.page;
     this.#pageRegistry = options.pageRegistry;
     this.#request = options.request;
+    this.#conversationId = options.request.session.conversationId ?? '';
     this.#network = new ChatGptNetworkObserver(options.page);
   }
 
@@ -574,10 +623,32 @@ class ChatGptObservationSource implements ProviderObservationSource {
     }
 
     try {
+      const redirect = this.#pageRegistry.refreshPage(this.pageKey);
+      if (isWebRedirect(
+        redirect,
+        this.#request.session.sessionId,
+        this.#request.generation,
+        this.#conversationId,
+      )) {
+        const dom = await observeChatGptDom(this.#page, {
+          submittedUserMessageId: this.#request.session.submittedUserMessageId,
+          submittedUserTurnId: this.#request.session.submittedUserTurnId,
+        });
+        const after = this.#pageRegistry.refreshPage(this.pageKey);
+        if (dom.submittedUserFound && after.bindingEpoch === redirect.bindingEpoch) {
+          this.#pageRegistry.bindVerifiedRedirect(this.pageKey, {
+            sessionId: this.#request.session.sessionId,
+            generation: this.#request.generation,
+            previousConversationId: this.#conversationId,
+            conversationId: redirect.conversationId,
+          });
+          this.#conversationId = redirect.conversationId;
+        }
+      }
       this.#pageRegistry.requireOwnedPage(this.pageKey, {
         sessionId: this.#request.session.sessionId,
         generation: this.#request.generation,
-        conversationId: this.#request.session.conversationId ?? '',
+        conversationId: this.#conversationId,
       });
       const before = this.#pageRegistry.getBinding(this.pageKey);
       const [dom, dialog] = await Promise.all([
@@ -594,7 +665,7 @@ class ChatGptObservationSource implements ProviderObservationSource {
         after.state !== 'owned' ||
         after.sessionId !== this.#request.session.sessionId ||
         after.generation !== this.#request.generation ||
-        after.conversationId !== this.#request.session.conversationId
+        after.conversationId !== this.#conversationId
       ) {
         return {
           provider: this.provider,
@@ -691,4 +762,3 @@ class ChatGptObservationSource implements ProviderObservationSource {
     };
   }
 }
-

@@ -13,6 +13,82 @@ import { ExactFinalTracker } from '../../src/providers/chatgpt/exact-final.ts';
 
 const CONVERSATION_ID = 'conversation-observer-123456';
 
+test('ChatGPT WEB redirect follows only the exact submitted user turn', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-redirect-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: registry,
+    headless: true,
+  });
+  const webId = 'WEB:11111111-1111-4111-8111-111111111111';
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: route.request().url().includes('other-conversation')
+          ? observerFixture()
+              .replaceAll('user-message-1', 'different-user')
+              .replaceAll('user-turn-1', 'different-turn')
+          : observerFixture(),
+      });
+    });
+    await created.page.goto(`https://chatgpt.com/c/${webId}`);
+    registry.bindPage(created.binding.pageKey, {
+      sessionId: 'session-observer',
+      generation: 1,
+      conversationId: webId,
+    });
+    const adapter = new ChatGptAdapter({
+      browserOwner: owner,
+      pageRegistry: registry,
+      loginUrl: 'https://chatgpt.com/',
+      acknowledgementTimeoutMs: 500,
+    });
+    const source = await adapter.openObservation({
+      session: { ...sessionSnapshot(created.binding.pageKey), conversationId: webId },
+      generation: 1,
+    });
+    try {
+      await created.page.goto('https://chatgpt.com/c/other-conversation');
+      const wrong = await source.observe();
+      assert.equal(wrong.observationTransport, 'stale');
+
+      await created.page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+      const exact = await source.observe();
+      assert.equal(exact.observationTransport, 'fresh');
+      assert.equal(exact.submittedUserFound, true);
+      assert.equal(exact.conversationId, CONVERSATION_ID);
+    } finally {
+      source.close();
+    }
+
+    await created.page.close();
+    const restored = await owner.createPage();
+    await restored.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'text/html', body: observerFixture() });
+    });
+    registry.reservePage(restored.binding.pageKey, {
+      sessionId: 'session-observer',
+      generation: 1,
+      conversationId: null,
+    });
+    await restored.page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    const recovered = await adapter.recoverAcknowledgement({
+      session: { ...sessionSnapshot(restored.binding.pageKey), conversationId: webId },
+      generation: 1,
+      prompt: 'Question',
+    });
+    assert.equal(recovered?.conversationId, CONVERSATION_ID);
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('background ChatGPT Page yields exact DOM, dialog, and network evidence without focus switching', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-observer-'));
   const registry = new PageRegistry();

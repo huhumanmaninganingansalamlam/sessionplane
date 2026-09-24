@@ -18,6 +18,15 @@ test('conversation ids are parsed only from exact ChatGPT conversation URLs', ()
     parseChatGptConversationId(`https://chatgpt.com/g/g-abc/c/${FIRST_CONVERSATION}?model=test`),
     FIRST_CONVERSATION,
   );
+  assert.equal(
+    parseChatGptConversationId(`https://chatgpt.com/c/WEB:${FIRST_CONVERSATION}`),
+    `WEB:${FIRST_CONVERSATION}`,
+  );
+  assert.equal(
+    parseChatGptConversationId(`https://chatgpt.com/c/WEB%3A${FIRST_CONVERSATION}`),
+    `WEB:${FIRST_CONVERSATION}`,
+  );
+  assert.equal(parseChatGptConversationId('https://chatgpt.com/c/WEB:not-a-uuid'), null);
   assert.equal(parseChatGptConversationId(`https://example.com/c/${FIRST_CONVERSATION}`), null);
   assert.equal(parseChatGptConversationId('https://chatgpt.com/'), null);
   assert.equal(parseChatGptConversationId('https://chatgpt.com/c/%E0%A4%A'), null);
@@ -152,4 +161,3 @@ test('PageRegistry quarantines duplicate conversations and detects navigation id
     rmSync(root, { recursive: true, force: true });
   }
 });
-

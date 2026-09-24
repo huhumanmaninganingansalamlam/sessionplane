@@ -19,6 +19,8 @@ interface SessionSnapshot {
   readonly generation: number;
   readonly submissionState: string | null;
   readonly sessionState: string;
+  readonly terminal: boolean;
+  readonly waitExpired: boolean;
   readonly providerState: string;
   readonly conversationId: string | null;
   readonly submittedUserMessageId: string | null;
@@ -155,6 +157,27 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     assert.equal(disabledSnapshot.submissionState, 'failed_pre_submit');
     assert.equal(disabledSnapshot.promptSubmitted, false);
     assert.equal(disabledSnapshot.errorCode, 'provider.model-unavailable');
+    assert.equal(disabledSnapshot.terminal, true);
+    const disabledWait = await rpc<SessionSnapshot>(config.socketPath, 'session.wait', {
+      clientId: 'client-send',
+      sessionId: disabled.sessionId,
+      generation: disabledSnapshot.generation,
+      waitMs: 0,
+    });
+    assert.equal(disabledWait.waitExpired, false);
+    assert.equal(disabledWait.terminal, true);
+    const disabledTeamWait = await rpc<{
+      readonly waitExpired: boolean;
+      readonly sessions: readonly SessionSnapshot[];
+    }>(config.socketPath, 'team.wait', {
+      clientId: 'client-send',
+      teamId: team.teamId,
+      roleKeys: ['expert.disabled'],
+      until: 'all_selected_terminal',
+      waitMs: 0,
+    });
+    assert.equal(disabledTeamWait.waitExpired, false);
+    assert.equal(disabledTeamWait.sessions[0]?.terminal, true);
 
     await createRole(config.socketPath, team.teamId, 'expert.human', 'human-role');
     const human = await createSession(
@@ -329,6 +352,57 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     assert.equal(outbox.submissionState, 'submission_unknown');
     assert.equal(Number(outbox.promptSubmitted), 1);
 
+    await createRole(config.socketPath, team.teamId, 'expert.stalled', 'stalled-role');
+    const stalled = await createSession(config.socketPath, team.teamId, 'expert.stalled', 'stalled-session');
+    fake.prepareNeverResolves = true;
+    const submissionsBeforeStall = fake.submitCount;
+    await assert.rejects(
+      rpc(config.socketPath, 'session.send', {
+        clientId: 'client-send',
+        requestId: 'send-stalled-preparation',
+        sessionId: stalled.sessionId,
+        prompt: 'Preparation must release the actor if the browser does not respond.',
+        sessionDeadlineSec: 1,
+      }),
+      hasRpcError('browser.unavailable', false),
+    );
+    const stalledSnapshot = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'client-send',
+      sessionId: stalled.sessionId,
+    });
+    assert.equal(stalledSnapshot.submissionState, 'failed_pre_submit');
+    assert.equal(stalledSnapshot.promptSubmitted, false);
+    assert.equal(fake.submitCount, submissionsBeforeStall);
+    fake.prepareNeverResolves = false;
+
+    await createRole(config.socketPath, team.teamId, 'expert.ambiguous-stall', 'ambiguous-stall-role');
+    const ambiguousStall = await createSession(
+      config.socketPath,
+      team.teamId,
+      'expert.ambiguous-stall',
+      'ambiguous-stall-session',
+    );
+    fake.submitNeverResolves = true;
+    const beforeAmbiguousStall = fake.submitCount;
+    await assert.rejects(
+      rpc(config.socketPath, 'session.send', {
+        clientId: 'client-send',
+        requestId: 'send-ambiguous-stall',
+        sessionId: ambiguousStall.sessionId,
+        prompt: 'Do not resend an unacknowledged submission.',
+        sessionDeadlineSec: 1,
+      }),
+      hasRpcError('session.submission-unknown', true),
+    );
+    const ambiguousSnapshot = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'client-send',
+      sessionId: ambiguousStall.sessionId,
+    });
+    assert.equal(ambiguousSnapshot.submissionState, 'submission_unknown');
+    assert.equal(ambiguousSnapshot.promptSubmitted, true);
+    assert.equal(fake.submitCount, beforeAmbiguousStall + 1);
+    fake.submitNeverResolves = false;
+
     await service.close();
     const afterRestart = new FakeProviderAdapter();
     service = await startCore({
@@ -471,4 +545,3 @@ function silentLogger() {
     error() {},
   };
 }
-

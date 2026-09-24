@@ -351,6 +351,10 @@ class DomProviderSubmission implements ProviderSubmission {
     this.#initialUrl = options.initialUrl ?? null;
   }
 
+  abandon(): void {
+    void this.#page.close().catch(() => undefined);
+  }
+
   async prepare(): Promise<void> {
     if (this.#initialUrl !== null) {
       await navigateProviderPage({
