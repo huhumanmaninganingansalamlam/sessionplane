@@ -182,4 +182,14 @@ Use `sessionplane_session_delete` to delete the provider conversation history it
 not just its browser tab. Pass the exact `sessionId`, `generation`, `conversationId`,
 a stable `requestId`, and `outputsRetrieved: true` only after retrieving required
 answers/artifacts. Local answers remain available. `provider.deletion-unknown`
-requires observation of that conversation; never retry with a fresh request ID.
+is reconciled by calling the same tool with the same request ID: it reads provider state
+without repeating deletion. Never create a fresh request ID to force another deletion.
+
+Role replacement does not cancel a submitted predecessor generation. Continue exact
+session/generation waits to retrieve its result, then delete its completed history.
+New submissions use the current role session; predecessor answers remain readable.
+An uncertain deletion can be reconciled through the same deletion request: the core
+checks exact provider absence read-only and never repeats the uncertain mutation.
+
+`provider.observation-unavailable` means the browser read timed out. Core still
+observes the exact server turn; use its result and retry timing, not a new send.

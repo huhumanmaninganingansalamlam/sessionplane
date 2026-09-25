@@ -334,7 +334,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
   ),
   tool(
     'sessionplane_session_delete', 'session.delete',
-    'Delete the exact completed ChatGPT conversation from provider history after all required answers and artifacts have been retrieved. Explicit cleanup, separate from replacement. Rejects active, ambiguous and shared conversations. Does not delete local durable answers. Reuse the same requestId; an unknown deletion is never retried automatically.',
+    'Delete the exact completed ChatGPT conversation from provider history after all required answers and artifacts have been retrieved. Explicit cleanup, separate from replacement. Rejects active, ambiguous and shared conversations. Does not delete local durable answers. Reuse the same requestId; an unknown deletion is reconciled through read-only provider verification without repeating deletion.',
     objectSchema({
       ...mutationIdentityProperties,
       sessionId: stringProperty('Exact completed session UUID.'),

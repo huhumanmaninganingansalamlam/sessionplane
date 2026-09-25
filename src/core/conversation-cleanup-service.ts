@@ -46,15 +46,21 @@ export class ConversationCleanupService {
           if (receipt.method !== 'session.delete' || receipt.requestHash !== requestHash) {
             throw new SessionPlaneDomainError('input.idempotency-conflict', 'Deletion request payload changed');
           }
-          return JSON.parse(receipt.resultJson) as DeletionResult;
+          if (receipt.status === 'complete') return JSON.parse(receipt.resultJson) as DeletionResult;
         }
         const session = sessions.getSnapshot(input.sessionId);
         if (session === null || session.generation !== input.generation ||
             session.conversationId !== input.conversationId) {
           throw new SessionPlaneDomainError('session.conversation-mismatch', 'Deletion requires the exact durable conversation and generation');
         }
-        const prior = receipts.findConversationDeletion(input.conversationId);
-        if (prior !== null) return JSON.parse(prior.resultJson) as DeletionResult;
+        const prior = receipt ?? receipts.findConversationDeletion(input.conversationId);
+        if (prior !== null) {
+          const previous = JSON.parse(prior.resultJson) as DeletionResult;
+          if (previous.sessionId !== input.sessionId || previous.generation !== input.generation) {
+            throw new SessionPlaneDomainError('session.conversation-mismatch', 'Deletion receipt belongs to another exact generation');
+          }
+          if (prior.status === 'complete') return previous;
+        }
         if (!input.outputsRetrieved || !session.terminal ||
             sessions.conversationCleanupBlocker(input.sessionId, input.conversationId)) {
           throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Conversation has active, unresolved or shared work; retrieve completed outputs before deletion');
@@ -69,13 +75,17 @@ export class ConversationCleanupService {
           conversationId: input.conversationId, deleted: false, errorCode: 'provider.deletion-unknown',
         };
         const record = (status: 'attempted' | 'complete') => receipts.record({
-          ...input, method: 'session.delete', requestHash, status, result,
+          clientId: prior?.clientId ?? input.clientId, requestId: prior?.requestId ?? input.requestId,
+          method: 'session.delete', requestHash: prior?.requestHash ?? requestHash, status, result,
         });
         try {
-          record('attempted');
-          let deleted: boolean;
-          try { deleted = await operation.deleteOnce(); }
-          catch { return result; }
+          let deleted = operation.alreadyDeleted;
+          if (!deleted && prior !== null) return result;
+          if (!deleted) {
+            record('attempted');
+            try { deleted = await operation.deleteOnce(); }
+            catch { return result; }
+          }
           if (!deleted) {
             result.errorCode = 'provider.deletion-rejected';
             record('complete');

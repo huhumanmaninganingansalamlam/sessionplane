@@ -381,8 +381,23 @@ export class SessionRepository {
     return true;
   }
 
+  restorePendingPredecessors(enabledProviders: readonly string[]): number {
+    if (enabledProviders.length === 0) return 0;
+    const result = this.#database.prepare(`
+      UPDATE sessions SET session_state = 'observing', updated_at = ?
+      WHERE session_state = 'superseded' AND provider IN (${enabledProviders.map(() => '?').join(',')})
+        AND EXISTS (SELECT 1 FROM sessions successor WHERE successor.predecessor_session_id = sessions.session_id)
+        AND EXISTS (SELECT 1 FROM generations g WHERE g.session_id = sessions.session_id
+          AND g.generation = sessions.current_generation AND g.prompt_submitted = 1
+          AND g.submission_state IN ('submitted', 'submission_unknown') AND g.completed_at IS NULL)
+    `).run(new Date().toISOString(), ...enabledProviders);
+    return Number(result.changes);
+  }
+
   transitionToSuperseded(sessionId: string, updatedAt: string): void {
-    const session = this.getSession(sessionId);
+    const session = this.getSnapshot(sessionId);
+    // Role replacement changes routing, not the lifetime of an already submitted request.
+    if (session?.promptSubmitted && !session.terminal) return;
     if (session === null || isTerminalSessionState(session.sessionState)) {
       return;
     }

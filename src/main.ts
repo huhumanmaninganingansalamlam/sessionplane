@@ -1,3 +1,4 @@
+import { SessionRepository } from './storage/session-repository.ts';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -128,6 +129,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
 
   try {
     await browserOwner?.start();
+    const restoredPredecessors = new SessionRepository(database.raw).restorePendingPredecessors(config.enabledProviders);
+    if (restoredPredecessors > 0) logger.info('recovery.pending-predecessors', { count: restoredPredecessors });
     actorScheduler.restore();
   } catch (error) {
     actorScheduler.close();
@@ -183,6 +186,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     quietSweepMs: config.observationQuietSweepMs,
     quietWindowMs: config.observationQuietWindowMs,
     backendRecoveryAfterMs: config.backendRecoveryAfterMs,
+    observationTimeoutMs: config.backendRequestTimeoutMs,
     probeCoordinator,
     logger,
     metrics,

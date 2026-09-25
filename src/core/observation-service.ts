@@ -28,6 +28,7 @@ export interface ObservationServiceOptions {
   readonly quietSweepMs: number;
   readonly quietWindowMs: number;
   readonly backendRecoveryAfterMs: number;
+  readonly observationTimeoutMs?: number;
   readonly probeCoordinator: ProbeCoordinator;
   readonly logger?: Logger;
   readonly now?: () => Date;
@@ -42,6 +43,7 @@ export class ObservationService {
   readonly #quietSweepMs: number;
   readonly #quietWindowMs: number;
   readonly #backendRecoveryAfterMs: number;
+  readonly #observationTimeoutMs: number;
   readonly #probeCoordinator: ProbeCoordinator;
   readonly #logger: Logger | null;
   readonly #now: () => Date;
@@ -57,6 +59,7 @@ export class ObservationService {
     this.#quietSweepMs = options.quietSweepMs;
     this.#quietWindowMs = options.quietWindowMs;
     this.#backendRecoveryAfterMs = options.backendRecoveryAfterMs;
+    this.#observationTimeoutMs = options.observationTimeoutMs ?? 15_000;
     this.#probeCoordinator = options.probeCoordinator;
     this.#logger = options.logger ?? null;
     this.#now = options.now ?? (() => new Date());
@@ -132,6 +135,7 @@ export class ObservationService {
     const deadlineAt = this.#sessions.getSession(initial.sessionId)?.deadlineAt;
     const deadlineMs = deadlineAt === null || deadlineAt === undefined ? Infinity : Date.parse(deadlineAt);
     let source: ProviderObservationSource | null = null;
+    let pendingObservation: Promise<ProviderObservationEvidence> | null = null;
     try {
       while (!signal.aborted) {
         const current = this.#sessions.getSnapshot(initial.sessionId);
@@ -159,7 +163,26 @@ export class ObservationService {
 
         let evidence: ProviderObservationEvidence;
         try {
-          evidence = await source.observe();
+          pendingObservation ??= source.observe().finally(() => { pendingObservation = null; });
+          const timeout = new AbortController();
+          const abort = () => timeout.abort();
+          signal.addEventListener('abort', abort, { once: true });
+          try {
+            evidence = await Promise.race([
+              pendingObservation,
+              waitForDelay(this.#observationTimeoutMs, timeout.signal).then(() => ({
+                provider: current.provider, pageKey: source!.pageKey, bindingEpoch: -1,
+                observedAt: this.#now().toISOString(), conversationId: current.conversationId,
+                submittedUserFound: false, laterUserFound: false, candidate: null,
+                activity: 'unknown' as const, dialogKind: null, networkActivity: false,
+                observationTransport: 'unavailable' as const,
+                reason: 'dom-observation-timeout', errorCode: 'provider.observation-unavailable',
+              })),
+            ]);
+          } finally {
+            timeout.abort();
+            signal.removeEventListener('abort', abort);
+          }
         } catch {
           source.close();
           source = null;
@@ -185,6 +208,7 @@ export class ObservationService {
           Date.parse(current.nextCheckAt) > nowMs &&
           evidence.errorCode === undefined &&
           current.errorCode !== 'provider.conversation-unavailable' &&
+          current.errorCode !== 'provider.observation-unavailable' &&
           !decision.freshExactProgress &&
           !verifiedRedirect &&
           decision.kind !== 'complete' &&
@@ -239,7 +263,8 @@ export class ObservationService {
         const sweepMs = decision.freshExactProgress
           ? this.#activeSweepMs
           : Math.min(this.#quietSweepMs, this.#quietWindowMs);
-        await waitForWakeOrAbort(source, sweepMs, signal);
+        if (pendingObservation !== null) await waitForDelay(sweepMs, signal);
+        else await waitForWakeOrAbort(source, sweepMs, signal);
       }
     } finally {
       source?.close();
@@ -302,7 +327,8 @@ export class ObservationService {
     // failure. Fresh DOM evidence or an exact recovered final clears it.
     const update = {
       ...updateForRecovery(recovery, this.#now().toISOString()),
-      ...(previous.errorCode === 'provider.conversation-unavailable' && recovery.kind !== 'complete'
+      ...((previous.errorCode === 'provider.conversation-unavailable' ||
+          previous.errorCode === 'provider.observation-unavailable') && recovery.kind !== 'complete'
         ? { errorCode: previous.errorCode, reason: previous.reason } : {}),
     };
     if (!hasMeaningfulChange(previous, update)) {

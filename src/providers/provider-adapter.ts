@@ -195,6 +195,7 @@ export interface ProviderAdapter {
   readonly provider: string;
   openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission>;
   openDeletion?(request: ProviderRecoveryRequest): Promise<{
+    readonly alreadyDeleted: boolean;
     deleteOnce(): Promise<boolean>;
     close(): Promise<void>;
   }>;

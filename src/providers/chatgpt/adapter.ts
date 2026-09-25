@@ -288,6 +288,7 @@ export class ChatGptAdapter implements ProviderAdapter {
         }
       } finally { await existing.dispose(); }
       return {
+        alreadyDeleted,
         deleteOnce: async (): Promise<boolean> => {
           if (alreadyDeleted) return true;
           const response = await page.context().request.patch(

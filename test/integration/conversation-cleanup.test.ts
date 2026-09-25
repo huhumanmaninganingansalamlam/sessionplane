@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 import { callRpc } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
@@ -14,8 +15,10 @@ test('conversation deletion protects unresolved work, retains answers and persis
   class DeletingProvider extends FakeProviderAdapter {
     deleted = new Set<string>();
     loseAcknowledgement = false;
+    confirmDeletion = false;
     async openDeletion({ session }: ProviderRecoveryRequest) {
       return {
+        alreadyDeleted: this.confirmDeletion && this.deleted.has(session.conversationId!),
         deleteOnce: async () => {
           assert.ok(!this.deleted.has(session.conversationId!));
           this.deleted.add(session.conversationId!);
@@ -58,6 +61,22 @@ test('conversation deletion protects unresolved work, retains answers and persis
     await assert.rejects(rpc('session.delete', deletion(active, 'active')),
       (error: unknown) => JSON.stringify(error).includes('session.cleanup-not-ready'));
     assert.equal(fake.deleted.size, 0);
+    const successor = await rpc<SessionSnapshot>('session.create', {
+      requestId: 'replace-active', teamId: active.teamId, roleKey: active.roleKey, provider: 'chatgpt',
+    });
+    assert.equal((await rpc<SessionSnapshot>('session.get', { sessionId: active.sessionId })).terminal, false);
+    fake.emitObservation(active.sessionId, { candidate: { responseMessageId: 'old-final',
+      answerText: 'Answer from predecessor', terminalMarker: true, streamingMarker: false }, activity: 'none' });
+    let recovered = active;
+    for (let attempt = 0; attempt < 100 && !recovered.terminal; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      recovered = await rpc<SessionSnapshot>('session.wait', { sessionId: active.sessionId, generation: 1, waitMs: 10 });
+    }
+    assert.equal(recovered.answerText, 'Answer from predecessor');
+    await assert.rejects(rpc('session.send', { requestId: 'send-to-predecessor', sessionId: active.sessionId, prompt: 'Wrong route' }),
+      (error: unknown) => JSON.stringify(error).includes('session.generation-superseded'));
+    assert.equal((await rpc<{ deleted: boolean }>('session.delete', deletion(recovered, 'delete-predecessor'))).deleted, true);
+    assert.equal((await rpc<SessionSnapshot>('session.get', { teamId: active.teamId, roleKey: active.roleKey })).sessionId, successor.sessionId);
     fake.autoFinalText = 'Retrieved answer';
     const complete = await create();
     assert.equal(complete.answerText, 'Retrieved answer');
@@ -80,6 +99,11 @@ test('conversation deletion protects unresolved work, retains answers and persis
     await assert.rejects(rpc('session.send', { requestId: 'send-after-delete',
       sessionId: uncertain.sessionId, prompt: 'Followup' }),
       (error: unknown) => JSON.stringify(error).includes('session.cleanup-pending'));
+    fake.confirmDeletion = true;
+    const reconciled = await rpc<{ deleted: boolean }>('session.delete', deletion(uncertain, 'uncertain'));
+    assert.equal(reconciled.deleted, true);
+    assert.equal((await rpc<SessionSnapshot>('session.get', { sessionId: uncertain.sessionId })).sessionState, 'superseded');
+    fake.loseAcknowledgement = false;
     const predecessor = await create();
     fake.autoFinalText = null;
     fake.acknowledgementMode = 'missing';
@@ -91,6 +115,15 @@ test('conversation deletion protects unresolved work, retains answers and persis
       roleKey: ambiguous.roleKey, provider: 'chatgpt' });
     await assert.rejects(rpc('session.delete', deletion(ambiguous, 'ambiguous')),
       (error: unknown) => JSON.stringify(error).includes('session.cleanup-not-ready'));
+    await core.close();
+    const oldDatabase = new DatabaseSync(config.databasePath);
+    oldDatabase.prepare("UPDATE sessions SET session_state = 'superseded' WHERE session_id = ?").run(ambiguous.sessionId);
+    oldDatabase.close();
+    core = await startCore(options);
+    const restored = await rpc<SessionSnapshot>('session.get', { sessionId: ambiguous.sessionId });
+    assert.equal(restored.terminal, false);
+    assert.equal(restored.generation, ambiguous.generation);
+    assert.equal(restored.submissionState, 'submission_unknown');
     await assert.rejects(rpc('session.delete', { ...deletion(uncertain, 'wrong-generation'), generation: 2 }),
       (error: unknown) => JSON.stringify(error).includes('session.conversation-mismatch'));
   } finally {

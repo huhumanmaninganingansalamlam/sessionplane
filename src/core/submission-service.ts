@@ -979,6 +979,9 @@ export class SubmissionService {
         throw new SessionPlaneDomainError('session.cleanup-pending', 'Conversation deletion was attempted; create a replacement session');
       }
       const team = this.#directory.getTeam(session.teamId);
+      if (!team.roles.some((role) => role.roleId === session.roleId && role.currentSessionId === sessionId)) {
+        throw new SessionPlaneDomainError('session.generation-superseded', 'New submissions must use the current role session');
+      }
       const generation = session.currentGeneration + 1;
       const timestamp = this.#now().toISOString();
       const deadlineAt = new Date(

@@ -9,6 +9,7 @@ import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
 import type {
+  ProviderObservationRequest,
   ProviderRecoveryRequest,
   ProviderRecoveryResult,
 } from '../../src/providers/provider-adapter.ts';
@@ -21,6 +22,35 @@ interface TeamSnapshot {
 interface WaitSnapshot extends SessionSnapshot {
   readonly latestEventSequence: number;
 }
+
+test('an unresponsive renderer cannot block exact backend completion or core shutdown', { timeout: 5_000 }, async () => {
+  class HungRenderer extends FakeProviderAdapter {
+    override async openObservation(request: ProviderObservationRequest) {
+      const source = await super.openObservation(request);
+      source.observe = () => new Promise(() => {});
+      return source;
+    }
+  }
+  const fixture = await createFixture('sessionplane-hung-renderer-', new HungRenderer());
+  try {
+    const { session } = await createSession(fixture.config.socketPath, 'main', 'hung-renderer');
+    fixture.fake.queueRecovery(session.sessionId, {
+      kind: 'complete', observationTransport: 'fresh', responseMessageId: 'exact-server-final',
+      answerText: 'Recovered with the renderer unresponsive', reason: 'backend-exact-final',
+      retryAfterMs: null, nextCheckAt: null,
+    });
+    await send(fixture.config.socketPath, session.sessionId, 'hung-renderer');
+    const final = await waitForSnapshot(fixture.config.socketPath, session.sessionId, state => state.terminal);
+    assert.equal(final.answerText, 'Recovered with the renderer unresponsive');
+    assert.equal(final.responseMessageId, 'exact-server-final');
+    assert.equal(final.errorCode, null);
+    const pending = await createSession(fixture.config.socketPath, 'main', 'hung-shutdown');
+    await send(fixture.config.socketPath, pending.session.sessionId, 'hung-shutdown');
+  } finally {
+    await fixture.service.close();
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
 
 test('stale DOM recovers an exact server final and backend 429 remains deferred, not blocked', async () => {
   const fixture = await createFixture('sessionplane-backend-recovery-');
@@ -371,6 +401,7 @@ async function createFixture(
     cwd: root,
     env: {},
     stateDir: '.state',
+    backendRequestTimeoutMs: 100,
     observationActiveSweepMs: timing.observationActiveSweepMs ?? 10,
     observationQuietSweepMs: timing.observationQuietSweepMs ?? 10,
     observationQuietWindowMs: 5,

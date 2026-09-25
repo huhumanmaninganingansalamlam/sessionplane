@@ -105,8 +105,8 @@ Do not endlessly repeat wait on a page that cannot display the conversation.
 
 When the caller decides the conversation must be replaced, or a completed long
 conversation needs a fresh context, use `sessionplane_session_create` for the
-same `teamId`, `roleKey`, and provider with a new stable request ID. The old
-session becomes superseded and the new one records `predecessorSessionId`.
+same `teamId`, `roleKey`, and provider with a new stable request ID. The new session records `predecessorSessionId` and becomes the current role route.
+Already submitted predecessor generations keep observing until their results are retrieved.
 Preserve completed answers and required artifacts, then carry only the relevant
 role brief, current objective, decisions, and unresolved work into the new send.
 Keep requested model/effort and verify attachment identity. Do not copy an entire
@@ -127,3 +127,14 @@ local durable answers. The core rejects unresolved generations and shared
 conversation identities. It records the attempt before contacting the provider;
 `provider.deletion-unknown` survives restart and cannot be retried under another
 request ID. Successful replay returns the original deletion receipt.
+
+Role replacement does not cancel a submitted predecessor generation. Continue exact
+session/generation waits to retrieve its result, then delete its completed history.
+New submissions use the current role session; predecessor answers remain readable.
+An uncertain deletion can be reconciled through the same deletion request: the core
+checks exact provider absence read-only and never repeats the uncertain mutation.
+
+If observation reports `provider.observation-unavailable`, the browser read did
+not finish within its I/O deadline. The generation is still unresolved: core
+continues paced server observation independently, with only one outstanding DOM
+read. Inspect exact state; do not infer that the prompt was not submitted.
