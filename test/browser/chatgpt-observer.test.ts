@@ -45,6 +45,31 @@ test('current ChatGPT message units recover the exact submitted turn and answer'
     assert.equal(observation.submittedUserFound, true);
     assert.equal(observation.candidate?.responseMessageId, 'answer-exact');
     assert.equal(observation.candidate?.answerText, 'Result');
+    await page.setContent(`<main>
+      <aside role="alert"><button>Earlier notice</button></aside>
+      <div data-message-author-role="user" data-message-id="user-exact">Question</div>
+    </main>`);
+    const identity = { submittedUserMessageId: 'user-exact', submittedUserTurnId: null };
+    assert.equal((await observeChatGptDom(page, identity)).actionableAlert, false);
+    await page.locator('main').evaluate((main) => {
+      const alert = document.createElement('aside');
+      alert.setAttribute('role', 'alert');
+      alert.innerHTML = '<span>Provider notice</span><button>Action</button>';
+      main.append(alert);
+    });
+    assert.equal((await observeChatGptDom(page, identity)).actionableAlert, true);
+    await page.locator('main').evaluate((main) => {
+      const response = document.createElement('div');
+      response.setAttribute('data-message-author-role', 'assistant');
+      response.setAttribute('data-message-id', 'partial-answer');
+      response.textContent = 'Partial response';
+      main.insertBefore(response, main.lastElementChild);
+    });
+    const interrupted = await observeChatGptDom(page, identity);
+    assert.equal(interrupted.actionableAlert, true);
+    assert.equal(interrupted.candidate?.responseMessageId, 'partial-answer');
+    assert.equal((await observeChatGptDom(page, { ...identity, submittedUserMessageId: 'other-turn' })).actionableAlert, false);
+
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });

@@ -4,6 +4,7 @@ import type { ProviderAssistantCandidate, ProviderWakeReason } from '../provider
 import { readChatGptMessages } from './message-dom.ts';
 
 export interface ChatGptDomObservation {
+  readonly actionableAlert: boolean;
   readonly loadFailureStatus: number | null;
   readonly submittedUserFound: boolean;
   readonly laterUserFound: boolean;
@@ -67,7 +68,23 @@ export async function observeChatGptDom(
     }
     return null;
   }) : null;
-  return { submittedUserFound, laterUserFound, candidate, loadFailureStatus };
+  const actionableAlert = submittedUserFound && !laterUserFound &&
+    await page.evaluate((identity) => {
+      const main = document.querySelector('main');
+      if (main === null) return false;
+      const ids = [identity.submittedUserMessageId, identity.submittedUserTurnId].filter(Boolean);
+      const anchor = [...main.querySelectorAll('[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')]
+        .find((node) => [node.getAttribute('data-message-id'), node.getAttribute('data-turn-id'),
+          ...(node.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/)]
+          .some((id) => id !== null && ids.includes(id)));
+      if (anchor === undefined) return false;
+      return [...main.querySelectorAll<HTMLElement>('[role="alert"]')].some((alert) =>
+        Boolean(anchor.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+        alert.getClientRects().length > 0 && Boolean(alert.innerText.trim()) &&
+        [...alert.querySelectorAll<HTMLElement>('button, [role="button"]')]
+          .some((button) => button.getClientRects().length > 0));
+    }, identity);
+  return { submittedUserFound, laterUserFound, candidate, loadFailureStatus, actionableAlert };
 }
 
 export async function waitForChatGptDomMutation(

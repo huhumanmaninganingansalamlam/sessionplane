@@ -141,3 +141,9 @@ If observation reports `provider.observation-unavailable`, the browser read did
 not finish within its I/O deadline. The generation is still unresolved: core
 continues paced server observation independently, with only one outstanding DOM
 read. Inspect exact state; do not infer that the prompt was not submitted.
+
+`provider.observation-unavailable` with reason `provider-actionable-alert` means
+a visible actionable alert follows the exact submitted turn. Partial answer text
+does not establish completion while that alert is present. Inspect that session and generation to interpret the current provider
+evidence. This is not proof of non-submission or authorization to click retry.
+Read-only recovery continues; backend cooldown cannot hide the alert.
