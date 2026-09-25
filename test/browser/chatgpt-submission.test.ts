@@ -626,6 +626,8 @@ test('ChatGPT submission selects the live intelligence Pro preset without miscla
       latestProLocked: false,
       selectedVersion: 'latest',
       selectedPreset: 3,
+      backendPresets: 'instant-only',
+      currentPicker: true,
     });
     await created.page.goto('https://chatgpt.com/');
     registry.refreshPage(created.binding.pageKey);
@@ -654,15 +656,13 @@ test('ChatGPT submission selects the live intelligence Pro preset without miscla
     await submission.prepare();
     assert.equal(
       await created.page
-        .locator('[data-model-reasoning-effort-slider] [role="slider"]')
+        .locator('[data-model-picker-power-slider] [role="slider"]')
         .getAttribute('aria-valuenow'),
       '4',
     );
     assert.equal(
       await created.page
-        .locator(
-          '[data-testid="composer-model-picker-slider-advanced-view"] [role="menuitemradio"][aria-checked="true"]',
-        )
+        .locator('[role="menuitemradio"][aria-checked="true"]')
         .getAttribute('data-version-id'),
       'latest',
     );
@@ -1276,6 +1276,7 @@ async function routeIntelligenceFixture(
     readonly backendPresets?: 'complete' | 'instant-only';
     readonly authenticated?: boolean;
     readonly viewStateWithoutDataActive?: boolean;
+    readonly currentPicker?: boolean;
   },
 ): Promise<void> {
   await page.route('https://chatgpt.com/**', async (route) => {
@@ -1424,6 +1425,7 @@ function chatGptIntelligenceFixture(options: {
   readonly selectedVersion: 'latest' | '5.6';
   readonly selectedPreset: number;
   readonly viewStateWithoutDataActive?: boolean;
+  readonly currentPicker?: boolean;
 }): string {
   const stateAttribute = options.viewStateWithoutDataActive ? 'data-view-state' : 'data-active';
   const dots = [0, 1, 2, 3, 4]
@@ -1431,8 +1433,7 @@ function chatGptIntelligenceFixture(options: {
       (index) =>
         '<span data-dot="' +
         String(index) +
-        '" data-locked="' +
-        String(options.latestProLocked && index === 4) +
+        (options.currentPicker ? '' : '" data-locked="' + String(options.latestProLocked && index === 4)) +
         '" data-selected="' +
         String(index <= options.selectedPreset) +
         '"></span>',
@@ -1451,18 +1452,27 @@ function chatGptIntelligenceFixture(options: {
     '<button data-testid="send-button" type="button">Send</button>',
     '</form>',
     '<div id="intelligence-menu" role="menu" data-state="closed" hidden>',
-    '<div data-testid="composer-intelligence-picker-content" role="group">',
-    '<div id="picker-root" data-expanded="false"><div role="menuitem" tabindex="0">Model selection</div></div>',
-    '<div data-testid="composer-model-picker-slider-simple-view" ' + stateAttribute + '="true">',
-    '<div id="slider-control" role="menuitem" tabindex="0" aria-label="Performance">',
-    '<div data-model-reasoning-effort-slider><span data-locked="false"></span>',
+    options.currentPicker ? '' : '<div data-testid="composer-intelligence-picker-content" role="group">',
+    '<div id="picker-root" data-expanded="false"><div role="menuitem" tabindex="0"' +
+      (options.currentPicker ? ' data-model-picker-view-toggle="true"' : '') +
+      '>Model selection<span id="selected-effort" data-maximum="false"></span></div></div>',
+    options.currentPicker
+      ? '<div id="current-simple">'
+      : '<div data-testid="composer-model-picker-slider-simple-view" ' + stateAttribute + '="true">',
+    '<div id="slider-control" role="menuitem" tabindex="0" aria-label="Performance"' +
+      (options.currentPicker ? ' data-reasoning-slider="true"' : '') + '>',
+    options.currentPicker
+      ? '<div data-model-picker-power-slider>'
+      : '<div data-model-reasoning-effort-slider><span data-locked="false"></span>',
     dots,
     '<span role="slider" tabindex="-1" style="display:inline-block;width:120px;height:20px" aria-valuemin="0" aria-valuemax="4" aria-valuenow="' +
       String(options.selectedPreset) +
       '"></span></div></div>',
     '<span id="slider-announcement"></span>',
     '</div>',
-    '<div data-testid="composer-model-picker-slider-advanced-view" ' + stateAttribute + '="false">',
+    options.currentPicker
+      ? '<div id="current-advanced">'
+      : '<div data-testid="composer-model-picker-slider-advanced-view" ' + stateAttribute + '="false">',
     '<div role="menuitemradio" data-version-id="latest" aria-checked="' +
       String(options.selectedVersion === 'latest') +
       '" data-state="' +
@@ -1473,7 +1483,7 @@ function chatGptIntelligenceFixture(options: {
       '" data-state="' +
       (options.selectedVersion === '5.6' ? 'checked' : 'unchecked') +
       '">GPT-5.6 Sol</div>',
-    '</div></div></div>',
+    options.currentPicker ? '</div></div>' : '</div></div></div>',
     '<script>',
     'window.sendCount=0;',
     'let selectedVersion=' + JSON.stringify(options.selectedVersion) + ';',
@@ -1485,13 +1495,13 @@ function chatGptIntelligenceFixture(options: {
     'const button=document.querySelector("#intelligence-button");',
     'const menu=document.querySelector("#intelligence-menu");',
     'const root=document.querySelector("#picker-root");',
-    'const simple=document.querySelector("[data-testid=\\"composer-model-picker-slider-simple-view\\"]");',
-    'const advanced=document.querySelector("[data-testid=\\"composer-model-picker-slider-advanced-view\\"]");',
+    'const simple=document.querySelector(' + JSON.stringify(options.currentPicker ? '#current-simple' : '[data-testid="composer-model-picker-slider-simple-view"]') + ');',
+    'const advanced=document.querySelector(' + JSON.stringify(options.currentPicker ? '#current-advanced' : '[data-testid="composer-model-picker-slider-advanced-view"]') + ');',
     'const slider=document.querySelector("[role=\\"slider\\"]");',
     'const sliderControl=document.querySelector("#slider-control");',
     'const announcement=document.querySelector("#slider-announcement");',
     'const dotNodes=Array.from(document.querySelectorAll("[data-dot]"));',
-    'const update=()=>{button.textContent=labels[selectedPreset];slider.setAttribute("aria-valuenow",String(selectedPreset));dotNodes.forEach((dot,index)=>{dot.setAttribute("data-locked",String(lockedByVersion[selectedVersion][index]));dot.setAttribute("data-selected",String(index<=selectedPreset));});for(const radio of advanced.querySelectorAll("[role=\\"menuitemradio\\"]")){const checked=radio.getAttribute("data-version-id")===selectedVersion;radio.setAttribute("aria-checked",String(checked));radio.setAttribute("data-state",checked?"checked":"unchecked");}};',
+    'const update=()=>{button.textContent=labels[selectedPreset];slider.setAttribute("aria-valuenow",String(selectedPreset));dotNodes.forEach((dot,index)=>{if(!' + String(options.currentPicker === true) + ')dot.setAttribute("data-locked",String(lockedByVersion[selectedVersion][index]));dot.setAttribute("data-selected",String(index<=selectedPreset));});const effort=document.querySelector("#selected-effort");effort.textContent=labels[selectedPreset];effort.setAttribute("data-maximum",String(selectedPreset===4));for(const radio of advanced.querySelectorAll("[role=\\"menuitemradio\\"]")){const checked=radio.getAttribute("data-version-id")===selectedVersion;radio.setAttribute("aria-checked",String(checked));radio.setAttribute("data-state",checked?"checked":"unchecked");}};',
     'button.addEventListener("click",()=>{menu.hidden=false;menu.setAttribute("data-state","open");button.setAttribute("data-state","open");});',
     'root.querySelector("[role=\\"menuitem\\"]").addEventListener("click",()=>{root.setAttribute("data-expanded","true");simple.setAttribute(' + JSON.stringify(stateAttribute) + ',"false");advanced.setAttribute(' + JSON.stringify(stateAttribute) + ',"true");});',
     'for(const radio of advanced.querySelectorAll("[role=\\"menuitemradio\\"]")){radio.addEventListener("click",()=>{selectedVersion=radio.getAttribute("data-version-id");selectedPreset=Math.min(selectedPreset,3);root.setAttribute("data-expanded","false");simple.setAttribute(' + JSON.stringify(stateAttribute) + ',"true");advanced.setAttribute(' + JSON.stringify(stateAttribute) + ',"false");update();});}',

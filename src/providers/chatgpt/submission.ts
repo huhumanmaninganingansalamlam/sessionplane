@@ -750,7 +750,7 @@ async function readLiveIntelligenceSlider(
     return null;
   }
 
-  const root = page.locator('[data-model-reasoning-effort-slider]').first();
+  const root = page.locator('[data-model-reasoning-effort-slider], [data-model-picker-power-slider]').first();
   const ancestorControl = root.locator('xpath=ancestor::*[@role="menuitem"][1]').first();
   const control = (await ancestorControl.isVisible().catch(() => false)) ? ancestorControl : slider;
   return { slider, control, dots, minimum, maximum, current, dotCount };

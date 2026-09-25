@@ -4,11 +4,11 @@ export const CHATGPT_SELECTORS = {
   intelligenceSwitcher: [
     'form button[aria-haspopup="menu"][data-state]:not([data-testid="composer-plus-btn"])',
   ],
-  intelligenceContent: '[data-testid="composer-intelligence-picker-content"]',
-  intelligenceSimpleView: '[data-testid="composer-model-picker-slider-simple-view"]',
-  intelligenceAdvancedView: '[data-testid="composer-model-picker-slider-advanced-view"]',
-  intelligenceSlider: '[data-model-reasoning-effort-slider] [role="slider"]',
-  intelligenceDots: '[data-model-reasoning-effort-slider] span[data-locked][data-selected]',
+  intelligenceContent: '[data-testid="composer-intelligence-picker-content"], [role="menu"]:has([data-model-picker-power-slider])',
+  intelligenceSimpleView: '[data-testid="composer-model-picker-slider-simple-view"], [data-model-picker-view-toggle] [data-maximum="true"]',
+  intelligenceAdvancedView: '[data-testid="composer-model-picker-slider-advanced-view"], [role="menu"]:has([data-model-picker-power-slider])',
+  intelligenceSlider: '[data-model-reasoning-effort-slider] [role="slider"], [data-model-picker-power-slider] [role="slider"]',
+  intelligenceDots: '[data-model-reasoning-effort-slider] span[data-locked][data-selected], [data-model-picker-power-slider] [data-selected]',
   composer: [
     '#prompt-textarea',
     '[data-testid="prompt-textarea"]',
