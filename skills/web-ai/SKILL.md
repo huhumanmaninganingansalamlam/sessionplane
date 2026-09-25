@@ -153,3 +153,10 @@ when requested, and choose composer/send controls from fresh observed refs. Use
 the original request and generation. No old automatic selector or opt-in flag
 exists. CLI send is also a preparation request, not an immediate browser submit.
 If intent cannot be satisfied, cancel preparation; do not silently change intent.
+
+If no send button exists before typing, choose model/effort and composer first,
+then resume. A preparation-required response can mean the prompt is filled but
+not submitted: inspect again, choose the newly visible send control, and resume
+the same request/generation. A collapsed model/effort chooser can confirm the
+current displayed selection without clicking. Interpret slider values using the
+full observed popup text; core verifies the chosen value, not model-name guesses.

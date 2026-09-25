@@ -135,8 +135,7 @@ export class ChatGptSubmission implements ProviderSubmission {
       interactive: false,
       maxNodes: 5_000,
     });
-    const intent = target.purpose === 'model' ? this.#request.model : this.#request.effort ?? null;
-    return !snapshot.nodesTruncated && hasPreparationSelectionEvidence(snapshot.nodes, target, intent);
+    return !snapshot.nodesTruncated && hasPreparationSelectionEvidence(snapshot.nodes, target);
   }
 
   async prepare(choices?: PreparationChoices): Promise<void> {
@@ -151,8 +150,8 @@ export class ChatGptSubmission implements ProviderSubmission {
     if (surface !== '' && surface !== 'chat' && surface !== 'normal') {
       throw new ProviderSubmissionError('capability.unsupported', 'Named-mode automatic selection is not supported');
     }
-    if (choices?.composer === undefined || choices.submit === undefined) {
-      throw new ProviderSubmissionError('provider.preparation-required', 'Choose the observed composer and submit control before continuation');
+    if (choices?.composer === undefined) {
+      throw new ProviderSubmissionError('provider.preparation-required', 'Choose the observed composer before continuation');
     }
     for (const purpose of ['model', 'effort'] as const) {
       const intent = this.#request[purpose];
@@ -162,18 +161,8 @@ export class ChatGptSubmission implements ProviderSubmission {
       }
     }
     const composer = await this.#resolvePreparationTarget(choices.composer, COMPOSER_READY_TIMEOUT_MS);
-    const submit = await this.#resolvePreparationTarget(choices.submit, 0);
-    if (composer === null || submit === null) {
-      await submit?.dispose();
-      throw new ProviderSubmissionError('provider.preparation-required', 'The chosen composer or submit control is no longer available');
-    }
-    await submit.dispose();
-
-    this.#baselineConversationId = parseChatGptConversationId(this.#page.url());
-    this.#baselineUserIds = await captureUserIdentitySet(this.#page);
-    const attachments = this.#request.attachments ?? [];
-    if (attachments.length > 0) {
-      await uploadAttachments(this.#page, attachments);
+    if (composer === null) {
+      throw new ProviderSubmissionError('provider.preparation-required', 'The chosen composer is no longer available');
     }
     if (!(await writeExactComposerValue(this.#page, composer, this.#request.prompt,
       () => this.#resolvePreparationTarget(choices.composer!, 0)))) {
@@ -182,6 +171,19 @@ export class ChatGptSubmission implements ProviderSubmission {
         'ChatGPT composer value did not match the requested prompt',
       );
     }
+
+    if (choices.submit === undefined) {
+      throw new ProviderSubmissionError('provider.preparation-required', 'Prompt is prepared; inspect and choose the current submit control');
+    }
+    const submit = await this.#resolvePreparationTarget(choices.submit, 0);
+    if (submit === null) {
+      throw new ProviderSubmissionError('provider.preparation-required', 'The chosen submit control is no longer available');
+    }
+    await submit.dispose();
+    this.#baselineConversationId = parseChatGptConversationId(this.#page.url());
+    this.#baselineUserIds = await captureUserIdentitySet(this.#page);
+    const attachments = this.#request.attachments ?? [];
+    if (attachments.length > 0) await uploadAttachments(this.#page, attachments);
 
     const sendButton = await this.#waitForEnabledPreparationTarget(choices.submit, 60_000);
     if (sendButton === null) {

@@ -28,10 +28,16 @@ all browser mutations, request receipts, submission attempts and answer identity
    `submit`. `reveal` opens a related model/effort chooser; `choose` records a
    choice and verifies its selected state. Sliders also need an explicit numeric
    `value`. Choose model/effort when requested, and always choose composer/send.
-   Choosing composer/send does not fill or submit anything.
+   A collapsed model/effort chooser can confirm its currently displayed selection
+   without clicking. Slider selection verifies the chosen numeric value; the agent
+   interprets its meaning from the surrounding observed labels. Choosing
+   composer/send does not fill or submit anything.
 4. Call `sessionplane_preparation_resume` with the original request identity.
-   Core revalidates the choices, transfers attachments, verifies the exact prompt,
-   records the attempt, and submits once. It never reruns an automatic selector.
+   Core revalidates model/effort and composer, and prepares the exact prompt. If
+   the send control appears only after typing, resume returns preparation-required
+   again with promptSubmitted:false. Inspect, choose that submit control, and
+   resume the same request. Attachments transfer only after a submit target is
+   available; core then records the attempt and submits once. It never reruns an automatic selector.
 5. Wait using the exact returned session and generation. If requested intent
    cannot be matched to evidence before submission, explicitly cancel preparation
    with `decision: "cancel"`; never select another model/provider as fallback.

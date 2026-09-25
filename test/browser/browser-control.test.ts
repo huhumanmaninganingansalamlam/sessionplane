@@ -51,6 +51,7 @@ test('generic browser control exposes snapshot-bound refs without focus identity
     );
 
     const snapshot = await browser.snapshot({ maxNodes: 50 });
+    assert.equal(snapshot.nodes.some((node) => ['Hidden', 'Transparent'].includes(node.name)), false);
     const input = snapshot.nodes.find((node) => node.name === 'Name');
     const button = snapshot.nodes.find((node) => node.name === 'Increment');
     const checkbox = snapshot.nodes.find((node) => node.name === 'Enabled');
@@ -258,6 +259,7 @@ function fixtureHtml(): string {
     <html>
       <head><title>Browser Control Fixture</title></head>
       <body>
+        <div style="display: contents"><div style="width: 0; height: 0">
         <label for="name">Name</label>
         <input id="name" type="text">
         <button id="increment" type="button">Increment</button>
@@ -266,6 +268,9 @@ function fixtureHtml(): string {
         <select id="mode"><option value="a">A</option><option value="b">B</option></select>
         <label for="attachment">Attachment</label>
         <input id="attachment" type="file">
+        </div></div>
+        <div style="display:none"><button>Hidden</button></div>
+        <div style="opacity:0"><button>Transparent</button></div>
         <script>
           window.count = 0;
           document.querySelector('#increment').addEventListener('click', () => {

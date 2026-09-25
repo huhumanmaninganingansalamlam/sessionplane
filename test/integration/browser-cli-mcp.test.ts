@@ -226,26 +226,32 @@ test('production core omits generic browser RPC methods', async () => {
 test('MCP preparation decisions inspect, reveal, select, and resume the original generation once', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-session-ui-'));
   const fixture = `<!doctype html><html><body>
-    <form id="composer"><button id="models-button" type="button" aria-label="Submit settings" aria-haspopup="menu" aria-controls="models">Submit settings</button>
-      <button id="effort-button" type="button" aria-haspopup="menu" aria-controls="effort-options">Effort</button>
-      <button data-testid="send-button" type="submit">전송</button><textarea aria-label="Prompt"></textarea></form>
+    <form id="composer"><button id="models-button" type="button" aria-label="Submit settings" aria-haspopup="menu">Submit settings</button>
+      <button id="effort-button" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="effort-options">Effort</button>
+      <button data-testid="send-button" type="submit" hidden>전송</button><textarea aria-label="Prompt"></textarea></form>
     <div role="menu" id="models" hidden><div role="menuitemradio" aria-checked="false">Pro</div></div>
     <div role="menu" id="effort-options" hidden>
-      <input id="effort" aria-label="Reasoning effort" type="range" min="1" max="4" value="1" aria-valuetext="Standard" aria-describedby="effort-help">
+      <input id="effort" aria-label="Reasoning effort" type="range" min="1" max="4" value="1">
       <span id="effort-help">High reasoning effort</span>
     </div>
     <div id="messages"></div>
     <script>
       window.submitCount = 0;
-      document.querySelector('#models-button').onclick = () => { document.querySelector('#models').hidden = false; };
-      document.querySelector('#effort-button').onclick = () => { document.querySelector('#effort-options').hidden = false; };
+      document.querySelector('textarea').addEventListener('input', () => { document.querySelector('[type=submit]').hidden = false; });
+      document.querySelector('#models-button').onclick = (event) => { event.currentTarget.setAttribute('aria-controls', 'models'); document.querySelector('#models').hidden = false; };
+      document.querySelector('#effort-button').onclick = (event) => { event.currentTarget.setAttribute('aria-expanded', 'true'); document.querySelector('#effort-options').hidden = false; };
       document.querySelector('[role=menuitemradio]').onclick = (event) => {
         event.currentTarget.setAttribute('aria-checked', 'true');
         document.querySelector('#models-button').textContent = 'Pro';
         document.querySelector('#models').hidden = true;
       };
-      document.querySelector('#effort').addEventListener('input', (event) => {
-        event.currentTarget.setAttribute('aria-valuetext', event.currentTarget.value === '4' ? 'High' : 'Standard');
+      document.querySelector('#effort').addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return;
+        document.querySelector('#effort-options').hidden = true;
+        const button = document.querySelector('#effort-button');
+        button.setAttribute('aria-expanded', 'false');
+        button.removeAttribute('aria-controls');
+        button.textContent = event.currentTarget.value === '4' ? 'High' : 'Standard';
       });
       document.querySelector('#composer').onsubmit = (event) => {
         event.preventDefault();
@@ -418,6 +424,12 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
     assert.equal((await decideFromFreshInspection('reveal-effort', 'effort', 'button', 'Effort', 'reveal')).isError, false);
     assert.equal((await decideFromFreshInspection('choose-effort', 'effort', 'slider', 'Reasoning effort', 'choose', 4)).isError, false);
     assert.equal((await decideFromFreshInspection('choose-composer', 'composer', 'textbox', 'Prompt')).isError, false);
+    const filled = await invoke('sessionplane_preparation_resume', {
+      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
+    });
+    assert.equal(filled.structuredContent.errorCode, 'provider.preparation-required');
+    assert.equal(service.teamDirectory.getSession(session.sessionId).promptSubmitted, false);
+    assert.notEqual(await inspectedPage.locator('textarea').inputValue(), '');
     assert.equal((await decideFromFreshInspection('choose-send', 'submit', 'button', '전송')).isError, false);
     const resumed = await invoke('sessionplane_preparation_resume', {
       requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,

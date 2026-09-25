@@ -41,8 +41,7 @@ generation pending; `details` carries its `requestId`, `sessionId`,
 use `sessionplane_preparation_decide` with a fresh `snapshotId` and observed
 `ref`. Inspect again before each decision. A slider choice needs an explicit
 numeric `value`. Composer and send choices only identify controls; core fills
-and submits on `sessionplane_preparation_resume`. Resume the original request
-once, then wait on the same session and generation. Cancel with a
+and submits on `sessionplane_preparation_resume`. Resume the original request until submission is acknowledged, then wait on the same session and generation. Cancel with a
 `sessionplane_preparation_decide` call using `decision: "cancel"` if the
 requested intent cannot be matched to evidence. Use MCP preparation tools to continue; CLI send begins the same preparation wait.
 
@@ -130,3 +129,10 @@ when requested, and choose composer/send controls from fresh observed refs. Use
 the original request and generation. No old automatic selector or opt-in flag
 exists. CLI send is also a preparation request, not an immediate browser submit.
 If intent cannot be satisfied, cancel preparation; do not silently change intent.
+
+If no send button exists before typing, choose model/effort and composer first,
+then resume. A preparation-required response can mean the prompt is filled but
+not submitted: inspect again, choose the newly visible send control, and resume
+the same request/generation. A collapsed model/effort chooser can confirm the
+current displayed selection without clicking. Interpret slider values using the
+full observed popup text; core verifies the chosen value, not model-name guesses.
