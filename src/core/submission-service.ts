@@ -1,5 +1,6 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, statSync } from 'node:fs';
+import { chmod, copyFile, mkdir, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { PageMutationMutex } from '../browser/page-mutex.ts';
@@ -57,6 +58,7 @@ interface StoredOutboxPayload {
   readonly surface: string | null;
   readonly sessionDeadlineSec: number;
   readonly attachments: readonly ProviderAttachment[];
+  readonly uploadAttachments?: readonly ProviderAttachment[];
 }
 
 interface PreparedOutbox {
@@ -470,14 +472,37 @@ export class SubmissionService {
       return await this.#replay(actor, existing);
     }
 
+    const uploadAttachments = await this.#snapshotAttachments(attachments);
     const prepared = this.#prepareOutbox(
       actor,
       sessionId,
       input,
-      payload,
+      { ...payload, uploadAttachments },
       requestHash,
     );
-    return await this.#runPreparedSubmission(actor, prepared, input, attachments);
+    return await this.#runPreparedSubmission(actor, prepared, input, uploadAttachments);
+  }
+
+  async #snapshotAttachments(attachments: readonly ProviderAttachment[]): Promise<readonly ProviderAttachment[]> {
+    const uploads: ProviderAttachment[] = [];
+    for (const attachment of attachments) {
+      const directory = path.join(path.dirname(this.#database.path), 'submission-inputs', hashCanonical(attachment));
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const destination = path.join(directory, attachment.name);
+      const temporary = path.join(directory, randomUUID());
+      try {
+        await copyFile(attachment.path, temporary);
+        await chmod(temporary, 0o600);
+        if (statSync(temporary).size !== attachment.sizeBytes || await hashFile(temporary) !== attachment.sha256) {
+          throw new SessionPlaneDomainError('input.idempotency-conflict', 'An attachment changed while the request was being accepted');
+        }
+        await rename(temporary, destination);
+        uploads.push({ ...attachment, path: destination });
+      } finally {
+        await rm(temporary, { force: true });
+      }
+    }
+    return uploads;
   }
 
   async #runPreparedSubmission(
@@ -612,11 +637,12 @@ export class SubmissionService {
         throw new SessionPlaneDomainError('provider.preparation-required', 'The exact request is not awaiting an assisted preparation choice');
       }
       const payload = parseOutboxPayload(initial);
+      const expectedAttachments = payload.uploadAttachments ?? payload.attachments;
       const attachments = await resolveProviderAttachments(
-        payload.attachments.map((attachment) => attachment.path),
+        expectedAttachments.map((attachment) => attachment.path),
         this.#maxUploadFileBytes,
       );
-      if (hashCanonical(attachments) !== hashCanonical(payload.attachments)) {
+      if (hashCanonical(attachments) !== hashCanonical(expectedAttachments)) {
         throw new SessionPlaneDomainError('input.idempotency-conflict', 'An attachment changed while preparation was pending');
       }
       const actor = this.#scheduler.actorFor(initial.sessionId);
@@ -1612,19 +1638,20 @@ function parseOutboxPayload(outbox: OutboxRecord): StoredOutboxPayload {
     throw new SessionPlaneDomainError('internal.invariant-violation', `Outbox ${outbox.outboxId} payload is not an object`);
   }
   const value = parsed as Record<string, unknown>;
-  const attachments = value.attachments;
+  const attachmentLists = [value.attachments];
+  if (value.uploadAttachments !== undefined) attachmentLists.push(value.uploadAttachments);
   if (
     typeof value.prompt !== 'string' ||
     !(value.model === null || typeof value.model === 'string') ||
     !(value.effort === null || typeof value.effort === 'string') ||
     !(value.surface === null || typeof value.surface === 'string') ||
     !Number.isSafeInteger(value.sessionDeadlineSec) ||
-    !Array.isArray(attachments) ||
-    !attachments.every((item) => item !== null && typeof item === 'object' &&
+    !attachmentLists.every((attachments) => Array.isArray(attachments) &&
+      attachments.every((item) => item !== null && typeof item === 'object' &&
       typeof (item as Record<string, unknown>).path === 'string' &&
       typeof (item as Record<string, unknown>).name === 'string' &&
       Number.isSafeInteger((item as Record<string, unknown>).sizeBytes) &&
-      typeof (item as Record<string, unknown>).sha256 === 'string')
+      typeof (item as Record<string, unknown>).sha256 === 'string'))
   ) {
     throw new SessionPlaneDomainError('internal.invariant-violation', `Outbox ${outbox.outboxId} payload is incomplete`);
   }

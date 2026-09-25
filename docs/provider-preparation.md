@@ -53,6 +53,15 @@ ChatGPT Work is forbidden. Named-mode automatic switching is removed.
 
 ## Identity and restart
 
+On acceptance, core snapshots attachment bytes into owner-private
+`submission-inputs` storage next to the durable database and records their upload
+identities in the outbox. Preparation and restart use those bytes even if the
+caller edits or removes its source files. Public inspection retains the original
+paths and hashes. Cached input bytes remain with durable request state; they are
+not temporary browser files. A changed or missing stored copy fails before
+submission. Older requests without snapshots still require their original bytes;
+core cannot reconstruct old contents from a hash or silently substitute new ones.
+
 The MCP client owns server registration and the stdio connection. Installing
 skills alone does not connect it. Preparation is core-owned, not tied to a
 transport process or an agent's context window. On client reconnection or

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
@@ -225,10 +225,14 @@ test('production core omits generic browser RPC methods', async () => {
 
 test('MCP preparation decisions inspect, reveal, select, and resume the original generation once', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-session-ui-'));
+  const attachmentPath = path.join(root, 'review.md');
+  const acceptedAttachment = 'Review the originally accepted content.';
+  writeFileSync(attachmentPath, acceptedAttachment);
   const fixture = `<!doctype html><html><body>
     <form id="composer"><button id="models-button" type="button" aria-label="Submit settings" aria-haspopup="menu">Submit settings</button>
       <button id="effort-button" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="effort-options">Effort</button>
-      <button data-testid="send-button" type="submit" hidden>전송</button><textarea aria-label="Prompt"></textarea></form>
+      <button data-testid="send-button" type="submit" hidden>전송</button><textarea aria-label="Prompt"></textarea>
+      <input type="file"><span id="uploaded-name"></span></form>
     <div role="menu" id="models" hidden><div role="menuitemradio" aria-checked="false">Pro</div></div>
     <div role="menu" id="effort-options" hidden>
       <input id="effort" aria-label="Reasoning effort" type="range" min="1" max="4" value="1">
@@ -237,6 +241,9 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
     <div id="messages"></div>
     <script>
       window.submitCount = 0;
+      document.querySelector('[type=file]').onchange = (event) => {
+        document.querySelector('#uploaded-name').textContent = event.target.files[0].name;
+      };
       document.querySelector('textarea').addEventListener('input', () => { document.querySelector('[type=submit]').hidden = false; });
       document.querySelector('#models-button').onclick = (event) => {
         event.currentTarget.setAttribute('aria-controls', 'models');
@@ -301,7 +308,7 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
       method: 'session.send',
       params: {
         clientId: 'mcp-ui-test', requestId: 'assisted-send', sessionId: session.sessionId,
-        prompt: 'test', model: 'Pro', effort: 'High', sessionDeadlineSec: 30,
+        prompt: 'test', model: 'Pro', effort: 'High', files: [attachmentPath], sessionDeadlineSec: 30,
       },
       timeoutMs: 30_000,
       maxLineBytes: config.rpcMaxLineBytes,
@@ -334,12 +341,13 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
       method: 'session.send',
       params: {
         clientId: 'mcp-ui-test', requestId: 'assisted-send', sessionId: session.sessionId,
-        prompt: 'test', model: 'Pro', effort: 'High', sessionDeadlineSec: 30,
+        prompt: 'test', model: 'Pro', effort: 'High', files: [attachmentPath], sessionDeadlineSec: 30,
       },
       timeoutMs: 30_000,
       maxLineBytes: config.rpcMaxLineBytes,
     }), (error: unknown) => error instanceof RpcClientError &&
       (error.data as { errorCode?: string }).errorCode === 'provider.preparation-required');
+    writeFileSync(attachmentPath, 'The caller continued editing after the request was accepted.');
     const competingClient = await invoke('sessionplane_preparation_inspect', {
       clientId: 'other-client', requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
     });
@@ -443,6 +451,8 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
     assert.equal(completedAttempt.promptSubmitted, true);
     assert.equal(completedAttempt.submissionState, 'submitted');
     const submittedPage = service.pageRegistry.pageForObservation(completedAttempt.pageKey!);
+    assert.equal(await submittedPage.locator('input[type=file]').evaluate(async (element) =>
+      await (element as HTMLInputElement).files![0]!.text()), acceptedAttachment);
     assert.equal(await submittedPage.evaluate(() => (window as Window & { submitCount: number }).submitCount), 1);
     const replayResume = await invoke('sessionplane_preparation_resume', {
       requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,

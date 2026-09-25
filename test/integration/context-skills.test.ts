@@ -153,7 +153,6 @@ test('RPC and CLI share deterministic context package semantics', async () => {
     const submission = fake.submissionRequests.at(-1);
     assert.equal(submission?.prompt, 'Use the repository context.');
     assert.equal(submission?.attachments?.length, 1);
-    assert.match(submission?.attachments?.[0]?.path ?? '', /context-packages/);
     assert.match(
       readFileSync(submission?.attachments?.[0]?.path ?? '', 'utf8'),
       /alpha\.ts/,
@@ -256,4 +255,3 @@ function silentLogger() {
     error() {},
   };
 }
-
