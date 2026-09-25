@@ -9,7 +9,7 @@ import test from 'node:test';
 import { callRpc, RpcClientError } from '../../src/cli/client.ts';
 import { runCli } from '../../src/cli/main.ts';
 import { resolveConfig } from '../../src/config.ts';
-import { startCore } from '../../src/main.ts';
+import { startCore, type CoreService } from '../../src/main.ts';
 import { invokeMcpTool, McpToolNotFoundError } from '../../src/mcp/tools.ts';
 
 interface BrowserSnapshot {
@@ -223,21 +223,55 @@ test('production core omits generic browser RPC methods', async () => {
   }
 });
 
-test('MCP model UI actions stay on the exact failed pre-submit generation', async () => {
+test('MCP preparation decisions inspect, reveal, select, and resume the original generation once', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-session-ui-'));
-  const fixture = await startFixtureServer(`<!doctype html><html><body>
-    <form><button type="button" aria-label="Models" aria-haspopup="menu" aria-controls="models">Models</button>
-      <button type="submit">Send</button><textarea aria-label="Prompt"></textarea></form>
-    <div role="menu" id="models"><div role="menuitemradio" aria-checked="false">Pro</div>
-      <span role="status">Current model</span></div>
-    <script>document.querySelector('[role=menuitemradio]').onclick = (event) => {
-      event.currentTarget.setAttribute('aria-checked', 'true');
-      document.querySelector('[role=status]').textContent = 'Selected Pro';
-    };</script>
-  </body></html>`);
+  const fixture = `<!doctype html><html><body>
+    <form id="composer"><button id="models-button" type="button" aria-label="Submit settings" aria-haspopup="menu" aria-controls="models">Submit settings</button>
+      <button id="effort-button" type="button" aria-haspopup="menu" aria-controls="effort-options">Effort</button>
+      <button data-testid="send-button" type="submit">전송</button><textarea aria-label="Prompt"></textarea></form>
+    <div role="menu" id="models" hidden><div role="menuitemradio" aria-checked="false">Pro</div></div>
+    <div role="menu" id="effort-options" hidden>
+      <input id="effort" aria-label="Reasoning effort" type="range" min="1" max="4" value="1" aria-valuetext="Standard" aria-describedby="effort-help">
+      <span id="effort-help">High reasoning effort</span>
+    </div>
+    <div id="messages"></div>
+    <script>
+      window.submitCount = 0;
+      document.querySelector('#models-button').onclick = () => { document.querySelector('#models').hidden = false; };
+      document.querySelector('#effort-button').onclick = () => { document.querySelector('#effort-options').hidden = false; };
+      document.querySelector('[role=menuitemradio]').onclick = (event) => {
+        event.currentTarget.setAttribute('aria-checked', 'true');
+        document.querySelector('#models-button').textContent = 'Pro';
+        document.querySelector('#models').hidden = true;
+      };
+      document.querySelector('#effort').addEventListener('input', (event) => {
+        event.currentTarget.setAttribute('aria-valuetext', event.currentTarget.value === '4' ? 'High' : 'Standard');
+      });
+      document.querySelector('#composer').onsubmit = (event) => {
+        event.preventDefault();
+        window.submitCount += 1;
+        history.pushState({}, '', '/c/conversation-123456');
+        const user = document.createElement('div');
+        user.setAttribute('data-message-author-role', 'user');
+        user.setAttribute('data-message-id', 'fixture-user-message');
+        user.setAttribute('data-turn-id', 'fixture-user-turn');
+        user.textContent = document.querySelector('textarea').value;
+        document.querySelector('#messages').appendChild(user);
+        const assistant = document.createElement('div');
+        assistant.setAttribute('data-message-author-role', 'assistant');
+        assistant.setAttribute('data-message-id', 'fixture-assistant-message');
+        assistant.setAttribute('data-turn-id', 'fixture-assistant-turn');
+        assistant.setAttribute('data-message-status', 'completed');
+        assistant.innerHTML = '<div data-testid="message-content">Fixture exact final answer</div>';
+        document.querySelector('#messages').appendChild(assistant);
+      };
+    </script>
+  </body></html>`;
   const base = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
-  const config = { ...base, chatgptUrl: fixture.url };
-  const service = await startCore({ config, browserHeadless: true, logger: silentLogger() });
+  const config = { ...base, chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 250 };
+  const start = async () => await startCore({ config, browserHeadless: true, logger: silentLogger() });
+  let service: CoreService = await start();
+  installPreparationFixtureRoute(service, fixture);
   const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({
     name,
     arguments: { clientId: 'mcp-ui-test', ...args },
@@ -252,51 +286,169 @@ test('MCP model UI actions stay on the exact failed pre-submit generation', asyn
       roleKey: team.primaryRoleKey,
       provider: 'chatgpt',
     });
+    let handoffDetails: Record<string, unknown> | undefined;
     await assert.rejects(callRpc({
       socketPath: config.socketPath,
       method: 'session.send',
       params: {
-        clientId: 'mcp-ui-test', requestId: 'missing-model', sessionId: session.sessionId,
-        prompt: 'test', model: 'Unavailable', sessionDeadlineSec: 30,
+        clientId: 'mcp-ui-test', requestId: 'assisted-send', sessionId: session.sessionId,
+        prompt: 'test', model: 'Pro', effort: 'High', assistedPreparation: true, sessionDeadlineSec: 30,
       },
-      timeoutMs: 10_000,
+      timeoutMs: 30_000,
+      maxLineBytes: config.rpcMaxLineBytes,
+    }), (error: unknown) => {
+      if (!(error instanceof RpcClientError)) return false;
+      const data = error.data as { errorCode?: string; details?: Record<string, unknown> };
+      handoffDetails = data.details;
+      return data.errorCode === 'provider.preparation-required';
+    });
+
+    const pending = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(handoffDetails?.requestId, 'assisted-send');
+    assert.equal(handoffDetails?.sessionId, session.sessionId);
+    assert.equal(handoffDetails?.generation, pending.generation);
+    assert.equal((handoffDetails?.snapshot as { promptSubmitted?: boolean } | undefined)?.promptSubmitted, false);
+    assert.equal(pending.promptSubmitted, false);
+    assert.equal(pending.submissionState, 'prepared');
+
+    // A restarted core must discard prior choices and make the caller inspect the reopened page.
+    await service.close();
+    service = await start();
+    installPreparationFixtureRoute(service, fixture);
+    const prematureResume = await invoke('sessionplane_preparation_resume', {
+      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
+    });
+    assert.equal(prematureResume.structuredContent.errorCode, 'provider.preparation-required');
+
+    await assert.rejects(callRpc({
+      socketPath: config.socketPath,
+      method: 'session.send',
+      params: {
+        clientId: 'mcp-ui-test', requestId: 'assisted-send', sessionId: session.sessionId,
+        prompt: 'test', model: 'Pro', effort: 'High', assistedPreparation: true, sessionDeadlineSec: 30,
+      },
+      timeoutMs: 30_000,
       maxLineBytes: config.rpcMaxLineBytes,
     }), (error: unknown) => error instanceof RpcClientError &&
-      (error.data as { errorCode?: string }).errorCode === 'provider.model-unavailable');
-
-    const failed = service.teamDirectory.getSession(session.sessionId);
-    assert.equal(failed.promptSubmitted, false);
-    assert.equal(failed.submissionState, 'failed_pre_submit');
-    const wrong = await invoke('sessionplane_session_ui_inspect', {
-      sessionId: session.sessionId, generation: failed.generation + 1,
+      (error.data as { errorCode?: string }).errorCode === 'provider.preparation-required');
+    const competingClient = await invoke('sessionplane_preparation_inspect', {
+      clientId: 'other-client', requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
+    });
+    assert.equal(competingClient.structuredContent.errorCode, 'session.generation-superseded');
+    const wrong = await invoke('sessionplane_preparation_inspect', {
+      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation + 1,
     });
     assert.equal(wrong.structuredContent.errorCode, 'session.generation-superseded');
 
-    const inspected = await invoke('sessionplane_session_ui_inspect', {
-      sessionId: session.sessionId, generation: failed.generation,
+    const initial = await invoke('sessionplane_preparation_inspect', {
+      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
     });
-    assert.equal(inspected.isError, false);
-    const nodes = inspected.structuredContent.nodes as Array<{ ref: string; role: string }>;
-    assert.equal(nodes.some((node) => node.role === 'textbox'), false);
-    assert.equal(nodes.filter((node) => node.role === 'button').length, 1);
-    const choice = nodes.find((node) => node.role === 'menuitemradio');
-    assert.notEqual(choice, undefined);
-    const actionArgs = {
-      requestId: 'select-model', sessionId: session.sessionId, generation: failed.generation,
-      snapshotId: inspected.structuredContent.snapshotId, ref: choice?.ref,
-      action: 'click',
+    assert.equal(initial.isError, false);
+    const initialNodes = initial.structuredContent.nodes as Array<{ ref: string; role: string; name: string }>;
+    const opener = initialNodes.find((node) => node.role === 'button' && node.name === 'Submit settings');
+    assert.notEqual(opener, undefined);
+    assert.equal(initialNodes.some((node) => node.role === 'menuitemradio'), false);
+    const page = service.pageRegistry.pageForObservation(initial.structuredContent.pageKey as string);
+    await page.evaluate(() => { document.querySelector('#models-button')!.textContent = 'Changed'; });
+    const changedControl = await invoke('sessionplane_preparation_decide', {
+      requestId: 'assisted-send', decisionId: 'changed-opener', decision: 'reveal', purpose: 'model',
+      sessionId: session.sessionId, generation: pending.generation,
+      snapshotId: initial.structuredContent.snapshotId, ref: opener?.ref,
+    });
+    assert.equal(changedControl.structuredContent.errorCode, 'browser.snapshot-stale');
+    assert.equal(await page.locator('#models').isVisible(), false);
+    await page.evaluate(() => { document.querySelector('#models-button')!.textContent = 'Submit settings'; });
+    const currentInitial = await invoke('sessionplane_preparation_inspect', {
+      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
+    });
+    const currentOpener = (currentInitial.structuredContent.nodes as Array<{ ref: string; role: string; name: string }>)
+      .find((node) => node.role === 'button' && node.name === 'Submit settings');
+    assert.notEqual(currentOpener, undefined);
+    const revealed = await invoke('sessionplane_preparation_decide', {
+      requestId: 'assisted-send', decisionId: 'reveal-model-menu', decision: 'reveal', purpose: 'model',
+      sessionId: session.sessionId, generation: pending.generation,
+      snapshotId: currentInitial.structuredContent.snapshotId, ref: currentOpener?.ref,
+    });
+    assert.equal(revealed.isError, false, JSON.stringify(revealed.structuredContent));
+    const stale = await invoke('sessionplane_preparation_decide', {
+      requestId: 'assisted-send', decisionId: 'stale-choice', decision: 'choose', purpose: 'model',
+      sessionId: session.sessionId, generation: pending.generation,
+      snapshotId: currentInitial.structuredContent.snapshotId, ref: currentOpener?.ref,
+    });
+    assert.equal(stale.structuredContent.errorCode, 'browser.snapshot-stale', JSON.stringify(stale.structuredContent));
+    const observed = await invoke('sessionplane_preparation_inspect', {
+      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
+    });
+    const inspectedPage = service.pageRegistry.pageForObservation(observed.structuredContent.pageKey as string);
+    const observedModel = (observed.structuredContent.nodes as Array<{ ref: string; role: string; name: string }>)
+      .find((node) => node.role === 'menuitemradio' && node.name === 'Pro');
+    assert.notEqual(observedModel, undefined);
+    await inspectedPage.evaluate(() => { document.querySelector('[role=menuitemradio]')!.textContent = 'Changed'; });
+    const changedChoice = await invoke('sessionplane_preparation_decide', {
+      requestId: 'assisted-send', decisionId: 'changed-model-label', decision: 'choose', purpose: 'model',
+      sessionId: session.sessionId, generation: pending.generation,
+      snapshotId: observed.structuredContent.snapshotId, ref: observedModel?.ref,
+    });
+    assert.equal(changedChoice.structuredContent.errorCode, 'browser.snapshot-stale');
+    assert.equal(await inspectedPage.locator('[role=menuitemradio]').getAttribute('aria-checked'), 'false');
+    await inspectedPage.evaluate(() => { document.querySelector('[role=menuitemradio]')!.textContent = 'Pro'; });
+
+    const decideFromFreshInspection = async (
+      decisionId: string,
+      purpose: string,
+      role: string,
+      name: string,
+      decision: 'choose' | 'reveal' = 'choose',
+      value?: number,
+    ) => {
+      const fresh = await invoke('sessionplane_preparation_inspect', {
+        requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
+      });
+      const target = (fresh.structuredContent.nodes as Array<{ ref: string; role: string; name: string }>)
+        .find((node) => node.role === role && node.name === name);
+      assert.notEqual(target, undefined, `${purpose} control missing from fresh inspection`);
+      return await invoke('sessionplane_preparation_decide', {
+        requestId: 'assisted-send', decisionId, decision, purpose,
+        sessionId: session.sessionId, generation: pending.generation,
+        snapshotId: fresh.structuredContent.snapshotId, ref: target?.ref,
+        ...(value === undefined ? {} : { value }),
+      });
     };
-    const staleGeneration = await invoke('sessionplane_session_ui_action', {
-      ...actionArgs, requestId: 'wrong-generation', generation: failed.generation + 1,
+    assert.equal((await decideFromFreshInspection('choose-model', 'model', 'menuitemradio', 'Pro')).isError, false);
+    assert.equal((await decideFromFreshInspection('reveal-effort', 'effort', 'button', 'Effort', 'reveal')).isError, false);
+    assert.equal((await decideFromFreshInspection('choose-effort', 'effort', 'slider', 'Reasoning effort', 'choose', 4)).isError, false);
+    assert.equal((await decideFromFreshInspection('choose-composer', 'composer', 'textbox', 'Prompt')).isError, false);
+    assert.equal((await decideFromFreshInspection('choose-send', 'submit', 'button', '전송')).isError, false);
+    const resumed = await invoke('sessionplane_preparation_resume', {
+      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
     });
-    assert.equal(staleGeneration.structuredContent.errorCode, 'session.generation-superseded');
-    const selected = await invoke('sessionplane_session_ui_action', actionArgs);
-    assert.equal(selected.isError, false);
-    const replay = await invoke('sessionplane_session_ui_action', actionArgs);
-    assert.deepEqual(replay.structuredContent, selected.structuredContent);
+    assert.equal(resumed.isError, false);
+    const completedAttempt = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(completedAttempt.generation, pending.generation);
+    assert.equal(completedAttempt.promptSubmitted, true);
+    assert.equal(completedAttempt.submissionState, 'submitted');
+    const submittedPage = service.pageRegistry.pageForObservation(completedAttempt.pageKey!);
+    assert.equal(await submittedPage.evaluate(() => (window as Window & { submitCount: number }).submitCount), 1);
+    const replayResume = await invoke('sessionplane_preparation_resume', {
+      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
+    });
+    assert.deepEqual(replayResume.structuredContent, resumed.structuredContent);
+    let final: { readonly terminal: boolean; readonly latestEventSequence: number; readonly answerText: string | null; readonly responseMessageId: string | null } | null = null;
+    let cursor = 0;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const waited = await invoke('sessionplane_wait', {
+        sessionId: session.sessionId, generation: pending.generation, afterEventSequence: cursor, waitMs: 500,
+      });
+      final = waited.structuredContent as typeof final;
+      cursor = Math.max(cursor, final.latestEventSequence);
+      if (final.terminal) break;
+    }
+    assert.equal(final?.terminal, true);
+    assert.equal(final?.answerText, 'Fixture exact final answer');
+    assert.equal(final?.responseMessageId, 'fixture-assistant-message');
+    assert.equal(await submittedPage.evaluate(() => (window as Window & { submitCount: number }).submitCount), 1);
   } finally {
     await service.close();
-    await closeServer(fixture.server);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -356,6 +508,20 @@ async function startFixtureServer(html?: string): Promise<{ readonly server: Ser
     throw new Error('Fixture server did not expose a TCP port');
   }
   return { server, url: `http://127.0.0.1:${address.port}/` };
+}
+
+function installPreparationFixtureRoute(service: CoreService, html: string): void {
+  const owner = service.browserOwner;
+  assert.notEqual(owner, null);
+  if (owner === null) assert.fail('Expected the core-owned browser');
+  const createPage = owner.createPage.bind(owner);
+  owner.createPage = async () => {
+    const created = await createPage();
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: html });
+    });
+    return created;
+  };
 }
 
 async function closeServer(server: Server): Promise<void> {

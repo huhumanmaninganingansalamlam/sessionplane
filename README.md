@@ -9,6 +9,17 @@ and recovery. The `sessplane` CLI and MCP adapter are thin Unix-socket clients.
 SessionPlane is maintained as an independent project with one canonical CLI
 and one runtime contract.
 
+## Agent-guided preparation
+
+For ChatGPT MCP requests, set `assistedPreparation: true` on
+`sessionplane_send` to keep unresolved preparation on the same request and
+generation. On `provider.preparation-required`, use
+`sessionplane_preparation_inspect`, `sessionplane_preparation_decide`, then
+`sessionplane_preparation_resume`. The caller interprets live evidence; the core
+owns execution, submission tracking and answer recovery. Ordinary sends retain
+their existing behavior. See [the preparation contract](docs/provider-preparation.md)
+for ownership and continuation requirements.
+
 ## Requirements
 
 - Node.js `>=24.15 <25`

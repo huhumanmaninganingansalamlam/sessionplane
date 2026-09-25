@@ -1,13 +1,16 @@
-import type { Locator, Page } from 'playwright-core';
+import type { ElementHandle, Locator, Page } from 'playwright-core';
 
 import type { PageRegistry } from '../../browser/page-registry.ts';
 import { parseChatGptConversationId } from '../../browser/page-binding.ts';
+import { BrowserRefSnapshotStore, hasPreparationSelectionEvidence, matchesPreparationTarget } from '../../browser/ref-snapshot.ts';
 import {
   ProviderSubmissionError,
   type ProviderAttachment,
   type ProviderSubmission,
   type ProviderSubmissionAcknowledgement,
   type ProviderSubmissionRequest,
+  type PreparationChoices,
+  type PreparationTarget,
 } from '../provider-adapter.ts';
 import {
   assertNoHumanVerification,
@@ -28,6 +31,7 @@ const VISIBLE_SELECTOR_TIMEOUT_MS = 5_000;
 const VISIBLE_SELECTOR_POLL_MS = 50;
 const MODEL_OPTION_DISCOVERY_TIMEOUT_MS = 2_000;
 const MODEL_OPTION_DISCOVERY_POLL_MS = 50;
+type PreparationElement = Locator | ElementHandle<Element>;
 
 export interface ChatGptSubmissionOptions {
   readonly page: Page;
@@ -46,7 +50,8 @@ export class ChatGptSubmission implements ProviderSubmission {
   readonly #request: ProviderSubmissionRequest;
   readonly #acknowledgementTimeoutMs: number;
   readonly #initialUrl: string | null;
-  #sendButton: Locator | null = null;
+  readonly #preparationRefs = new BrowserRefSnapshotStore();
+  #sendButton: PreparationElement | null = null;
   #baselineConversationId: string | null = null;
   #baselineUserIds = new Set<string>();
 
@@ -59,30 +64,85 @@ export class ChatGptSubmission implements ProviderSubmission {
     this.#initialUrl = options.initialUrl ?? null;
   }
 
-  async prepare(): Promise<void> {
+  async prepareForObservation(): Promise<void> {
     if (this.#initialUrl !== null) {
-      await navigateProviderPage({
-        page: this.#page,
-        provider: this.provider,
-        pageKey: this.pageKey,
-        url: this.#initialUrl,
-        timeoutMs: 30_000,
-      });
+      await navigateProviderPage({ page: this.#page, provider: this.provider, pageKey: this.pageKey, url: this.#initialUrl, timeoutMs: 30_000 });
       this.#registry.refreshPage(this.pageKey);
     } else {
-      await waitForProviderPageReady({
-        page: this.#page,
-        provider: this.provider,
-        pageKey: this.pageKey,
-      });
+      await waitForProviderPageReady({ page: this.#page, provider: this.provider, pageKey: this.pageKey });
     }
     this.#requireExactPage();
-    await assertNoHumanVerification({
-      page: this.#page,
-      provider: this.provider,
-      pageKey: this.pageKey,
-    });
+    await assertNoHumanVerification({ page: this.#page, provider: this.provider, pageKey: this.pageKey });
     await assertChatGptAuthenticated(this.#page);
+    await assertChatOnlySurface(this.#page);
+  }
+
+  async #resolvePreparationTarget(
+    target: PreparationTarget,
+    timeoutMs: number,
+  ): Promise<ElementHandle<Element> | null> {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      const binding = this.#registry.refreshPage(this.pageKey);
+      const snapshot = await this.#preparationRefs.capture({
+        pageKey: this.pageKey,
+        bindingEpoch: binding.bindingEpoch,
+        page: this.#page,
+        interactive: false,
+        maxNodes: 5_000,
+      });
+      const matches = snapshot.nodes.filter((node) => matchesPreparationTarget(node, target));
+      if (snapshot.nodesTruncated || matches.length > 1) return null;
+      const match = matches[0];
+      if (match !== undefined) {
+        const element = await this.#preparationRefs.resolve({
+          pageKey: this.pageKey,
+          bindingEpoch: binding.bindingEpoch,
+          page: this.#page,
+          ref: match.ref,
+          snapshotId: snapshot.snapshotId,
+        });
+        if (target.purpose !== 'composer' || await element.isEditable().catch(() => false)) return element;
+        await element.dispose();
+        return null;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await this.#page.waitForTimeout(Math.min(100, remaining));
+    } while (Date.now() < deadline);
+    return null;
+  }
+
+  async #waitForEnabledPreparationTarget(target: PreparationTarget, timeoutMs: number): Promise<ElementHandle<Element> | null> {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      const element = await this.#resolvePreparationTarget(target, 0);
+      if (element !== null) {
+        if (await element.isEnabled().catch(() => false)) return element;
+        await element.dispose();
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await this.#page.waitForTimeout(Math.min(100, remaining));
+    } while (Date.now() < deadline);
+    return null;
+  }
+
+  async #hasSelectedPreparationTarget(target: PreparationTarget): Promise<boolean> {
+    const binding = this.#registry.refreshPage(this.pageKey);
+    const snapshot = await this.#preparationRefs.capture({
+      pageKey: this.pageKey,
+      bindingEpoch: binding.bindingEpoch,
+      page: this.#page,
+      interactive: false,
+      maxNodes: 5_000,
+    });
+    const intent = target.purpose === 'model' ? this.#request.model : this.#request.effort ?? null;
+    return !snapshot.nodesTruncated && hasPreparationSelectionEvidence(snapshot.nodes, target, intent);
+  }
+
+  async prepare(choices?: PreparationChoices): Promise<void> {
+    await this.prepareForObservation();
     const surface = normalizeLabel(this.#request.surface ?? '');
     if (surface === 'work') {
       throw new ProviderSubmissionError(
@@ -90,7 +150,6 @@ export class ChatGptSubmission implements ProviderSubmission {
         'SessionPlane supports the Chat surface only; ChatGPT Work is not supported',
       );
     }
-    await assertChatOnlySurface(this.#page);
     if (surface !== '' && surface !== 'chat' && surface !== 'normal') {
       await selectNamedMode(
         this.#page,
@@ -101,10 +160,19 @@ export class ChatGptSubmission implements ProviderSubmission {
     }
 
     let modelSelection: ModelSelectionMode | null = null;
-    if (this.#request.model !== null) {
+    if (choices?.model !== undefined) {
+      if (!(await this.#hasSelectedPreparationTarget(choices.model))) {
+        throw new ProviderSubmissionError('provider.model-unavailable', 'The caller-selected model is no longer visibly selected');
+      }
+      modelSelection = selectionModeFor(this.#request.model);
+    } else if (this.#request.model !== null) {
       modelSelection = await this.#selectModel(this.#request.model, this.#request.effort ?? null);
     }
-    if (
+    if (choices?.effort !== undefined) {
+      if (!(await this.#hasSelectedPreparationTarget(choices.effort))) {
+        throw new ProviderSubmissionError('provider.mode-unavailable', 'The caller-selected effort is no longer visibly selected');
+      }
+    } else if (
       this.#request.effort !== undefined &&
       this.#request.effort !== null &&
       normalizeLabel(this.#request.effort) !== '' &&
@@ -125,11 +193,14 @@ export class ChatGptSubmission implements ProviderSubmission {
       }
     }
 
-    const composer = await firstEditableComposer(this.#page);
+    const composer = choices?.composer === undefined
+      ? await firstEditableComposer(this.#page)
+      : await this.#resolvePreparationTarget(choices.composer, COMPOSER_READY_TIMEOUT_MS);
     if (composer === null) {
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         'The exact ChatGPT composer is not editable',
+        { details: { preparationDecision: true } },
       );
     }
 
@@ -143,16 +214,19 @@ export class ChatGptSubmission implements ProviderSubmission {
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         'ChatGPT composer value did not match the requested prompt',
+        { details: { preparationDecision: false } },
       );
     }
 
-    const sendButton = await waitForEnabledSendButton(this.#page, composer, 60_000);
+    const sendButton = choices?.submit === undefined
+      ? await waitForEnabledSendButton(this.#page, composer, 60_000)
+      : await this.#waitForEnabledPreparationTarget(choices.submit, 60_000);
     if (sendButton === null) {
       const visibleControl = await firstVisible(this.#page, CHATGPT_SELECTORS.sendButton);
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         'The exact ChatGPT send control is unavailable',
-        { details: { sendControl: visibleControl === null ? 'absent' : 'disabled' } },
+        { details: { preparationDecision: false, sendControl: visibleControl === null ? 'absent' : 'disabled' } },
       );
     }
     this.#sendButton = sendButton;
@@ -937,12 +1011,12 @@ async function waitForVisible(locator: Locator, timeoutMs: number): Promise<bool
   return false;
 }
 
-async function waitForEnabledSendButton(page: Page, composer: Locator, timeoutMs: number): Promise<Locator | null> {
-  const form = composer.locator('xpath=ancestor::form[1]');
-  const buttons = ((await form.count().catch(() => 0)) === 1
-    ? form.locator(CHATGPT_SELECTORS.sendButton.join(', '))
-    : page.locator('[data-testid="send-button"]'))
-    .filter({ visible: true });
+async function waitForEnabledSendButton(page: Page, composer: PreparationElement, timeoutMs: number): Promise<Locator | null> {
+  const buttons = 'locator' in composer
+    ? await composer.locator('xpath=ancestor::form[1]').count().catch(() => 0) === 1
+      ? composer.locator('xpath=ancestor::form[1]').locator(CHATGPT_SELECTORS.sendButton.join(', ')).filter({ visible: true })
+      : page.locator('[data-testid="send-button"]').filter({ visible: true })
+    : page.locator('[data-testid="send-button"]').filter({ visible: true });
   const deadline = Date.now() + timeoutMs;
   do {
     if ((await buttons.count().catch(() => 0)) === 1) {
@@ -1357,6 +1431,12 @@ async function firstEditableComposer(page: Page): Promise<Locator | null> {
   return null;
 }
 
+function selectionModeFor(model: string | null): ModelSelectionMode {
+  if (model === null) return 'legacy';
+  if (normalizeModelIdentity(model) === 'thinking') return 'intelligence-thinking';
+  return isIntelligenceProRequest(model) ? 'intelligence-pro' : 'legacy';
+}
+
 async function firstVisible(
   page: Page,
   selectors: readonly string[],
@@ -1377,10 +1457,10 @@ async function firstVisible(
   return null;
 }
 
-async function readExactTextCandidates(locator: Locator): Promise<readonly string[]> {
-  return await locator
+async function readExactTextCandidates(locator: PreparationElement): Promise<readonly string[]> {
+  return await (locator as Locator)
     .evaluate(
-      (element) => {
+      (element: Element) => {
         const values: string[] = [];
         if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
           values.push(element.value);
@@ -1449,7 +1529,7 @@ async function readExactTextCandidates(locator: Locator): Promise<readonly strin
 }
 
 async function composerHasExactValue(
-  composer: Locator,
+  composer: PreparationElement,
   expected: string,
 ): Promise<boolean> {
   const normalizedExpected = normalizeLineEndings(expected);
@@ -1484,7 +1564,7 @@ async function messageHasExactPrompt(message: Locator, expected: string): Promis
 
 async function writeExactComposerValue(
   page: Page,
-  composer: Locator,
+  composer: PreparationElement,
   expected: string,
 ): Promise<boolean> {
   await waitForComposerStability(page, composer, COMPOSER_HYDRATION_TIMEOUT_MS);
@@ -1506,7 +1586,7 @@ async function writeExactComposerValue(
   return await waitForComposerValue(page, composer, expected);
 }
 
-async function clearComposerValue(page: Page, composer: Locator): Promise<boolean> {
+async function clearComposerValue(page: Page, composer: PreparationElement): Promise<boolean> {
   await composer.click({ timeout: 5_000 }).catch(() => undefined);
   await composer.focus().catch(() => undefined);
   const selectAll = process.platform === 'darwin' ? 'Meta+A' : 'Control+A';
@@ -1521,7 +1601,7 @@ async function clearComposerValue(page: Page, composer: Locator): Promise<boolea
 
 async function waitForComposerStability(
   page: Page,
-  composer: Locator,
+  composer: PreparationElement,
   timeoutMs: number,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -1550,7 +1630,7 @@ async function waitForComposerStability(
 
 async function waitForComposerValue(
   page: Page,
-  composer: Locator,
+  composer: PreparationElement,
   expected: string,
 ): Promise<boolean> {
   const normalizedExpected = normalizeLineEndings(expected);

@@ -28,6 +28,7 @@ export function registerSendMethods(router: RpcRouter, submissions: SubmissionSe
           model: Model,
           effort: Effort,
           surface: Surface,
+          assistedPreparation: z.boolean().optional(),
           files: Files,
           sessionDeadlineSec: SessionDeadlineSec,
         })
@@ -42,6 +43,7 @@ export function registerSendMethods(router: RpcRouter, submissions: SubmissionSe
           model: Model,
           effort: Effort,
           surface: Surface,
+          assistedPreparation: z.boolean().optional(),
           files: Files,
           sessionDeadlineSec: SessionDeadlineSec,
         })
@@ -56,6 +58,7 @@ export function registerSendMethods(router: RpcRouter, submissions: SubmissionSe
         ...(params.model === undefined ? {} : { model: params.model }),
         ...(params.effort === undefined ? {} : { effort: params.effort }),
         ...(params.surface === undefined ? {} : { surface: params.surface }),
+        ...(params.assistedPreparation === true ? { assistedPreparation: true } : {}),
         ...(params.files === undefined ? {} : { files: params.files }),
         ...('sessionId' in params
           ? { sessionId: params.sessionId }
@@ -63,4 +66,3 @@ export function registerSendMethods(router: RpcRouter, submissions: SubmissionSe
       }),
   );
 }
-

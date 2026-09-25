@@ -1,159 +1,135 @@
 import type { ElementHandle, Page } from 'playwright-core';
 
-import { PageMutationMutex } from '../browser/page-mutex.ts';
 import { PageRegistry, PageRegistryError } from '../browser/page-registry.ts';
-import { BrowserRefSnapshotStore, BrowserSnapshotError } from '../browser/ref-snapshot.ts';
+import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionEvidence, sameSnapshotSemantics, type BrowserSnapshotNode } from '../browser/ref-snapshot.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
-import { ActorScheduler } from '../scheduler/actor-scheduler.ts';
-import type { SessionPlaneDatabase } from '../storage/database.ts';
-import { hashCanonical, ReceiptRepository } from '../storage/receipt-repository.ts';
-import { SessionRepository } from '../storage/session-repository.ts';
-
-const MODEL_UI_ROOTS =
-  'form button[aria-haspopup="menu"], [role="menu"]:has([role="slider"], [role="menuitemradio"], [role="option"])';
+import type { PreparationPurpose, PreparationTarget } from '../providers/provider-adapter.ts';
+import type { SubmissionService } from './submission-service.ts';
 
 export class SessionUiService {
-  readonly #database: SessionPlaneDatabase;
-  readonly #sessions: SessionRepository;
+  readonly #submissions: SubmissionService;
   readonly #registry: PageRegistry;
-  readonly #scheduler: ActorScheduler;
-  readonly #mutex: PageMutationMutex;
-  readonly #receipts: ReceiptRepository;
   readonly #chatgptOrigin: string;
   readonly #refs = new BrowserRefSnapshotStore();
 
-  constructor(input: {
-    database: SessionPlaneDatabase;
-    registry: PageRegistry;
-    scheduler: ActorScheduler;
-    mutex: PageMutationMutex;
-    receipts: ReceiptRepository;
-    chatgptUrl: string;
-  }) {
-    this.#database = input.database;
-    this.#sessions = new SessionRepository(input.database.raw);
+  constructor(input: { submissions: SubmissionService; registry: PageRegistry; chatgptUrl: string }) {
+    this.#submissions = input.submissions;
     this.#registry = input.registry;
-    this.#scheduler = input.scheduler;
-    this.#mutex = input.mutex;
-    this.#receipts = input.receipts;
     this.#chatgptOrigin = new URL(input.chatgptUrl).origin;
   }
 
-  async inspect(sessionId: string, generation: number) {
-    return await this.#scheduler.actorFor(sessionId).enqueue(async () => {
-      const { pageKey } = this.#requirePreSubmit(sessionId, generation);
-      return await this.#mutex.runExclusive(pageKey, async () => {
-        const page = this.#requirePage(sessionId, generation, pageKey);
-        return await this.#snapshot(pageKey, page);
+  async inspect(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
+    return await this.#submissions.withPendingPreparation(input, async (session) => {
+      const page = this.#requirePage(session);
+      const binding = this.#registry.refreshPage(session.pageKey!);
+      return await this.#refs.capture({
+        pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch, page,
+        interactive: false, maxNodes: Math.max(1, Math.min(5_000, input.maxNodes ?? 1_000)),
       });
     });
   }
 
-  async action(input: {
-    clientId: string;
-    requestId: string;
-    sessionId: string;
-    generation: number;
-    snapshotId: string;
-    ref: string;
-    action: 'click' | 'press';
-    key?: 'ArrowLeft' | 'ArrowRight' | 'ArrowUp' | 'ArrowDown' | 'Home' | 'End' | 'Enter' | 'Space' | undefined;
+  async decide(input: PreparationOwner & {
+    readonly decisionId: string;
+    readonly decision: 'choose' | 'reveal' | 'cancel';
+    readonly purpose?: PreparationPurpose;
+    readonly snapshotId?: string;
+    readonly ref?: string;
+    readonly value?: number | undefined;
   }) {
-    return await this.#scheduler.actorFor(input.sessionId).enqueue(async () => {
-      const payload = {
-        sessionId: input.sessionId,
-        generation: input.generation,
-        snapshotId: input.snapshotId,
-        ref: input.ref,
-        action: input.action,
-        key: input.key ?? null,
-      };
-      const requestHash = hashCanonical({ method: 'session.ui.action', payload });
-      const previous = this.#receipts.get(input.clientId, input.requestId);
-      if (previous !== null) {
-        if (previous.method !== 'session.ui.action' || previous.requestHash !== requestHash) {
-          throw new SessionPlaneDomainError('input.idempotency-conflict', 'Request ID was already used with different input');
-        }
-        if (previous.status !== 'complete') {
-          throw new SessionPlaneDomainError('provider.action-unknown', 'Model UI action may have occurred; inspect before another action');
-        }
-        return JSON.parse(previous.resultJson) as unknown;
+      return await this.#submissions.decidePreparation(input, async (session, requested) => {
+      const purpose = input.purpose;
+      const snapshotId = input.snapshotId;
+      const ref = input.ref;
+      if (purpose === undefined || snapshotId === undefined || ref === undefined || session.pageKey === null) {
+        throw new SessionPlaneDomainError('input.invalid', 'A choice needs purpose, snapshotId, and ref');
       }
-      const { pageKey } = this.#requirePreSubmit(input.sessionId, input.generation);
-      return await this.#mutex.runExclusive(pageKey, async () => {
-        const page = this.#requirePage(input.sessionId, input.generation, pageKey);
-        const binding = this.#registry.refreshPage(pageKey);
-        let element: ElementHandle<Element>;
-        try {
-          element = await this.#refs.resolve({
-            pageKey,
-            bindingEpoch: binding.bindingEpoch,
-            page,
-            ref: input.ref,
-            snapshotId: input.snapshotId,
+      const page = this.#requirePage(session);
+      const binding = this.#registry.refreshPage(session.pageKey);
+      let element: ElementHandle<Element> | null = null;
+      try {
+        const node = this.#refs.node({ pageKey: session.pageKey, snapshotId, ref });
+        element = await this.#refs.resolve({ pageKey: session.pageKey, bindingEpoch: binding.bindingEpoch, page, ref, snapshotId });
+        const reveal = input.decision === 'reveal';
+        const currentObservation = await this.#refs.capture({
+          pageKey: session.pageKey, bindingEpoch: this.#registry.refreshPage(session.pageKey).bindingEpoch,
+          page, interactive: false, maxNodes: 5_000,
+        });
+        const currentNode = await this.#refs.nodeForElement({
+          pageKey: session.pageKey, snapshotId: currentObservation.snapshotId, element,
+        });
+        if (!sameSnapshotSemantics(node, currentNode)) {
+          throw new BrowserSnapshotError('browser.snapshot-stale', 'Selected control changed since it was inspected');
+        }
+        validatePurposeTarget(purpose, currentNode, reveal);
+        if (input.value !== undefined && currentNode.role !== 'slider') {
+          throw new SessionPlaneDomainError('input.invalid', 'A numeric value is only valid for a model or effort slider');
+        }
+        if (reveal) {
+          if (input.value !== undefined) throw new SessionPlaneDomainError('input.invalid', 'A reveal cannot include a selected value');
+          await element.evaluate((target) => {
+            if ((target instanceof HTMLButtonElement && target.type === 'submit') ||
+                (target instanceof HTMLInputElement && target.type === 'submit') ||
+                target.getAttribute('aria-disabled') === 'true' || ('disabled' in target && Boolean(target.disabled))) {
+              throw new Error('Only an enabled non-submit chooser can reveal choices');
+            }
           });
-        } catch (error) {
-          throw typedUiError(error);
+          await element.click({ timeout: 5_000 });
+          await page.waitForTimeout(100);
         }
-        try {
-          if (!(await isModelUiActionTarget(element, page))) {
-            throw new SessionPlaneDomainError('capability.unsupported', 'Only model-menu controls can be changed');
-          }
-          if (input.action === 'press' && input.key === undefined) {
-            throw new SessionPlaneDomainError('input.invalid', 'Press requires a key');
-          }
-          const now = new Date().toISOString();
-          this.#database.raw.prepare(`
-            INSERT INTO request_receipts(
-              client_id, request_id, method, result_json, created_at,
-              request_hash, status, updated_at
-            ) VALUES (?, ?, 'session.ui.action', '{}', ?, ?, 'attempted', ?)
-          `).run(input.clientId, input.requestId, now, requestHash, now);
-          if (input.action === 'click') {
-            await element.click();
-          } else {
-            await element.press(input.key ?? '');
-          }
-        } finally {
-          await element.dispose();
+        if (!reveal && (purpose === 'model' || purpose === 'effort') && currentNode.role !== 'slider' && currentNode.selected !== true && currentNode.checked !== true) {
+          if (input.value !== undefined) throw new SessionPlaneDomainError('input.invalid', 'A value is only valid when choosing a slider value');
+          await element.click({ timeout: 5_000 });
+          await page.waitForTimeout(100);
         }
-        this.#requirePreSubmit(input.sessionId, input.generation);
-        this.#requirePage(input.sessionId, input.generation, pageKey);
-        const result = await this.#snapshot(pageKey, page);
-        this.#database.raw.prepare(`
-          UPDATE request_receipts SET result_json = ?, status = 'complete', updated_at = ?
-          WHERE client_id = ? AND request_id = ? AND status = 'attempted'
-        `).run(JSON.stringify(result), new Date().toISOString(), input.clientId, input.requestId);
-        return result;
-      });
+        if (!reveal && currentNode.role === 'slider') {
+          const value = input.value;
+          if (!['model', 'effort'].includes(purpose) || value === undefined || !Number.isFinite(value) || currentNode.ariaValueMin === null || currentNode.ariaValueMax === null || value < Number(currentNode.ariaValueMin) || value > Number(currentNode.ariaValueMax)) {
+            throw new SessionPlaneDomainError('input.invalid', 'A model or effort slider choice needs an explicit value within its observed range');
+          }
+          const adjustment = await element.evaluate((target, requested) => {
+            const nativeRange = target instanceof HTMLInputElement && target.type === 'range';
+            const min = Number(target.getAttribute('aria-valuemin') ?? (nativeRange ? target.min || 0 : NaN));
+            const max = Number(target.getAttribute('aria-valuemax') ?? (nativeRange ? target.max || 100 : NaN));
+            const step = nativeRange ? (target.step === '' ? 1 : Number(target.step)) : 1;
+            const current = Number(target.getAttribute('aria-valuenow') ?? (nativeRange ? target.value : NaN));
+            const count = (requested - current) / step;
+            if (!Number.isFinite(step) || step <= 0 || requested < min || requested > max ||
+                !Number.isFinite(current) || Math.abs(count - Math.round(count)) > 1e-7 || Math.abs(count) > 1_000) return null;
+            return { key: count < 0 ? 'ArrowLeft' as const : 'ArrowRight' as const, count: Math.abs(count) };
+          }, value);
+          if (adjustment === null) throw new SessionPlaneDomainError('input.invalid', 'Slider value must match a supported native range step');
+          await element.focus();
+          for (let step = 0; step < adjustment.count; step += 1) await element.press(adjustment.key);
+        }
+        const after = await this.#refs.capture({
+          pageKey: session.pageKey, bindingEpoch: this.#registry.refreshPage(session.pageKey).bindingEpoch,
+          page, interactive: false, maxNodes: 1_000,
+        });
+        if (purpose === 'model' || purpose === 'effort') {
+          const intent = purpose === 'model' ? requested.model : requested.effort;
+          if (reveal ? !hasRevealedChoices(after.nodes, currentNode) : !hasPreparationSelectionEvidence(after.nodes, toPreparationTarget(purpose, currentNode, input.value), intent)) {
+            throw new SessionPlaneDomainError('provider.action-unknown', 'The chosen control did not show a verified selection or related choice list');
+          }
+        }
+        return { choice: reveal ? null : toPreparationTarget(purpose, currentNode, input.value), result: after };
+      } catch (error) {
+        throw typedUiError(error);
+      } finally {
+        await element?.dispose();
+      }
     });
   }
 
-  #requirePreSubmit(sessionId: string, generation: number): {
-    pageKey: string;
-    conversationId: string | null;
-  } {
-    const snapshot = this.#sessions.getSnapshot(sessionId);
-    if (snapshot === null || snapshot.generation !== generation) {
-      throw new SessionPlaneDomainError('session.generation-superseded', 'Exact session generation is unavailable');
-    }
-    if (snapshot.provider !== 'chatgpt' || snapshot.promptSubmitted ||
-        (snapshot.submissionState !== null && snapshot.submissionState !== 'failed_pre_submit')) {
-      throw new SessionPlaneDomainError('capability.unsupported', 'Model UI is available only before ChatGPT submission');
-    }
-    if (snapshot.pageKey === null) {
-      throw new SessionPlaneDomainError('browser.unavailable', 'Exact session page is unavailable');
-    }
-    return { pageKey: snapshot.pageKey, conversationId: snapshot.conversationId };
+  async resume(input: PreparationOwner) {
+    return await this.#submissions.resumePreparation(input);
   }
 
-  #requirePage(sessionId: string, generation: number, pageKey: string): Page {
+  #requirePage(session: { readonly sessionId: string; readonly generation: number; readonly pageKey: string | null; readonly conversationId: string | null }): Page {
+    if (session.pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'Exact preparation page is unavailable');
     try {
-      const { conversationId } = this.#requirePreSubmit(sessionId, generation);
-      const page = this.#registry.requireSessionPage(pageKey, {
-        sessionId,
-        generation,
-        conversationId,
+      const page = this.#registry.requireSessionPage(session.pageKey, {
+        sessionId: session.sessionId, generation: session.generation, conversationId: session.conversationId,
       });
       if (new URL(page.url()).origin !== this.#chatgptOrigin) {
         throw new SessionPlaneDomainError('session.page-identity-unverified', 'Page left the ChatGPT origin');
@@ -163,41 +139,54 @@ export class SessionUiService {
       throw typedUiError(error);
     }
   }
+}
 
-  async #snapshot(pageKey: string, page: Page) {
-    try {
-      const binding = this.#registry.refreshPage(pageKey);
-      return await this.#refs.capture({
-        pageKey,
-        bindingEpoch: binding.bindingEpoch,
-        page,
-        rootSelector: MODEL_UI_ROOTS,
-        maxNodes: 150,
-      });
-    } catch (error) {
-      throw typedUiError(error);
-    }
+export interface PreparationOwner {
+  readonly clientId: string;
+  readonly requestId: string;
+  readonly sessionId: string;
+  readonly generation: number;
+}
+
+function validatePurposeTarget(purpose: PreparationPurpose, node: BrowserSnapshotNode, reveal: boolean): void {
+  if (reveal && !['model', 'effort'].includes(purpose)) {
+    throw new SessionPlaneDomainError('input.invalid', 'Only model and effort controls can reveal choices');
+  }
+  if ((purpose === 'model' || purpose === 'effort') && node.disabled) {
+    throw new SessionPlaneDomainError('input.invalid', 'Disabled choices cannot be selected');
+  }
+  if (node.role === 'slider' && (!['model', 'effort'].includes(purpose) || reveal)) {
+    throw new SessionPlaneDomainError('input.invalid', 'Sliders can only set an explicit model or effort value');
+  }
+  const selectableRole = ['menuitemradio', 'option', 'radio'];
+  if (reveal && (node.role !== 'button' || node.controls.length === 0)) {
+    throw new SessionPlaneDomainError('input.invalid', 'A chooser reveal must target a button with related choices');
+  }
+  if ((purpose === 'model' || purpose === 'effort') && !reveal && node.role !== 'slider' && !selectableRole.includes(node.role)) {
+    throw new SessionPlaneDomainError('input.invalid', 'Model and effort choices must target an option, radio, or menuitemradio');
+  }
+  if (purpose === 'composer' && !(node.editable && node.role === 'textbox')) {
+    throw new SessionPlaneDomainError('input.invalid', 'Composer choice must target an editable textbox');
+  }
+  if (purpose === 'submit' && !(node.role === 'button' && ['button', 'input'].includes(node.tag))) {
+    throw new SessionPlaneDomainError('input.invalid', 'Submit choice must target an observed button control');
   }
 }
 
-async function isModelUiActionTarget(element: ElementHandle<Element>, page: Page): Promise<boolean> {
-  return await page.evaluate((target) => {
-    if (!(target instanceof Element)) return false;
-    const opener = target.closest('form button[aria-haspopup="menu"]');
-    if (opener instanceof HTMLButtonElement) {
-      return opener.type !== 'submit' && !opener.disabled;
-    }
-    const menu = target.closest('[role="menu"]');
-    if (menu === null || menu.id === '') return false;
-    const linked = [...document.querySelectorAll('form button[aria-controls]')]
-      .some((button) => button.getAttribute('aria-controls') === menu.id);
-    if (!linked) return false;
-    if (menu.querySelector('[role="slider"], [role="menuitemradio"], [role="option"]') === null) {
-      return false;
-    }
-    const role = target.getAttribute('role');
-    return role === 'menuitem' || role === 'menuitemradio' || role === 'slider' || role === 'option';
-  }, element).catch(() => false);
+function hasRevealedChoices(nodes: readonly BrowserSnapshotNode[], opener: BrowserSnapshotNode): boolean {
+  return nodes.some((node) => ['option', 'menuitem', 'menuitemradio', 'radio', 'slider'].includes(node.role) &&
+    (node.ancestorIds.some((id) => opener.controls.includes(id)) ||
+      opener.ancestorIds.includes(node.id) || opener.controls.includes(node.id)));
+}
+
+function toPreparationTarget(purpose: PreparationPurpose, node: BrowserSnapshotNode, selectedValue?: number): PreparationTarget {
+  return {
+    purpose, id: node.id, ancestorIds: node.ancestorIds, role: node.role, name: node.name, tag: node.tag, text: node.text, placeholder: node.placeholder,
+    selected: node.selected, checked: node.checked, disabled: node.disabled, editable: node.editable,
+    ariaValueText: node.ariaValueText, ariaValueNow: node.ariaValueNow, ariaValueMin: node.ariaValueMin,
+    ariaValueMax: node.ariaValueMax, selectedValue: selectedValue ?? null, description: node.description, controls: node.controls,
+    describedBy: node.describedBy, labelledBy: node.labelledBy,
+  };
 }
 
 function typedUiError(error: unknown): SessionPlaneDomainError {
@@ -205,5 +194,5 @@ function typedUiError(error: unknown): SessionPlaneDomainError {
   if (error instanceof PageRegistryError || error instanceof BrowserSnapshotError) {
     return new SessionPlaneDomainError(error.errorCode, error.message);
   }
-  return new SessionPlaneDomainError('browser.unavailable', 'Exact session page is unavailable');
+  return new SessionPlaneDomainError('browser.unavailable', error instanceof Error ? error.message : 'Exact preparation page is unavailable');
 }

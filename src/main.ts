@@ -309,11 +309,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   registerTeamMethods(router, teamDirectory, receipts);
   registerSessionMethods(router, teamDirectory, receipts);
   registerSessionUiMethods(router, new SessionUiService({
-    database,
+    submissions: submissionService,
     registry: pageRegistry,
-    scheduler: actorScheduler,
-    mutex: pageMutationMutex,
-    receipts,
     chatgptUrl: config.chatgptUrl,
   }));
   registerSendMethods(router, submissionService);

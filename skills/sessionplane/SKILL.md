@@ -33,6 +33,22 @@ unavailable, surface that condition instead of creating an isolated runtime.
 - `submission_unknown` means a submit may have occurred. Never issue a new requestId automatically to resend it.
 - The core may recover a unique exact-prompt acknowledgement read-only and resume observation on the same generation; keep waiting on its exact `sessionId + generation` and never resend it.
 
+For a ChatGPT MCP request that needs caller interpretation of an ambiguous model,
+effort, composer or send control, opt in on `sessionplane_send` with
+`assistedPreparation: true`. A `structuredContent.errorCode` of
+`provider.preparation-required` has `isError: true` but keeps the original
+generation pending; `details` carries its `requestId`, `sessionId`,
+`generation`, and nonterminal `snapshot`. Inspect with that exact identity, then
+use `sessionplane_preparation_decide` with a fresh `snapshotId` and observed
+`ref`. Inspect again before each decision. A slider choice needs an explicit
+numeric `value`. Composer and send choices only identify controls; core fills
+and submits on `sessionplane_preparation_resume`. Resume the original request
+once, then wait on the same session and generation. Cancel with a
+`sessionplane_preparation_decide` call using `decision: "cancel"` if the
+requested intent cannot be matched to evidence. Assisted preparation is
+available through MCP and the corresponding RPC methods; the existing CLI send
+flow does not expose this opt-in flag.
+
 ## Provider continuity and ChatGPT Pro
 
 - Provider availability is controlled by the running core. ChatGPT is the default enabled provider; Gemini or Grok require explicit operator enablement. Read `system.health.providers.enabled` when provider choice matters. Never create or switch to a provider that is not enabled; a typed `provider.disabled` result is authoritative until the operator changes the core allowlist.
@@ -42,7 +58,7 @@ unavailable, surface that condition instead of creating an isolated runtime.
 - Do not preflight or infer Pro availability from `/backend-api/models`, a partial model list, or one visible picker snapshot. ChatGPT can expose an Instant-only capability feed while the live composer picker still offers Pro. Submit the semantic `model=Pro` request through SessionPlane and let the provider adapter reconcile capability data with the live picker.
 - Do not hard-code labels such as `6 Pro`, `5.6 Pro`, or future version numbers into agent logic. Preserve the `Pro` intent across fresh sessions and generations.
 - Treat Pro as unavailable only when the current SessionPlane submission itself returns the typed pre-submit `provider.model-unavailable` result after its live-picker fallback. A catalog omission alone is not a blocker and must not be used to mark the task or product blocked. Do not silently create a Gemini or Grok session.
-- If a ChatGPT send ends with `provider.model-unavailable` and `promptSubmitted:false`, inspect the exact failed `sessionId + generation` with `sessionplane_session_ui_inspect`. Its model-control snapshot contains live semantic refs only. Use `sessionplane_session_ui_action` with the returned `snapshotId` and ref to adjust a model control, then inspect the returned state. Never guess a ref, use a stale snapshot, manipulate a composer/send control, or act on a different generation. A subsequent send is a separate deliberate caller request; do not automatically resend the failed prompt.
+- An ordinary send without assisted preparation that ends with `provider.model-unavailable` and `promptSubmitted:false` is a terminal pre-submit failure. Any retry is a separate deliberate caller request with a new `requestId`; do not automatically resend it.
 - Do not diagnose a rate limit from missing model entries. Call it rate limiting only when SessionPlane returns structured 429/deferred evidence or verified visible provider rate-limit evidence.
 - Once submit may have happened, provider/model fallback must not resend the prompt. Keep the exact `sessionId + generation` and observe or surface the ambiguity.
 

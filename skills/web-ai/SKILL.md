@@ -32,6 +32,21 @@ The core may recover a unique exact-prompt acknowledgement read-only and resume
 observation on the same generation; keep waiting on its exact `sessionId` and
 `generation`.
 
+For a ChatGPT MCP send that needs caller interpretation of an ambiguous model,
+effort, composer or send control, opt in with `assistedPreparation: true` on
+`sessionplane_send`. A `provider.preparation-required` MCP result has
+`isError: true` and `structuredContent.details` with the original `requestId`,
+`sessionId`, `generation`, and pending `snapshot`. Call
+`sessionplane_preparation_inspect` with that identity, then
+`sessionplane_preparation_decide` using a candidate ref from the latest
+`snapshotId`; inspect again before each decision. Slider choices require an
+explicit numeric `value`. Composer and send choices identify controls only.
+Call `sessionplane_preparation_resume` with the original identity to let core
+fill the composer and submit once, then continue waiting on the same
+generation. Use `decision: "cancel"` when evidence cannot support the
+requested intent. These preparation tools are available through MCP and their
+RPC methods; the existing CLI send flow remains unchanged.
+
 ## Provider continuity and model families
 
 Provider availability is an operator-owned core setting. ChatGPT is enabled by default; Gemini and Grok require explicit operator enablement. Check `system.health.providers.enabled` when choosing a provider. Do not create a session for a disabled provider and do not reinterpret `provider.disabled` as a reason to fall back to another provider.
