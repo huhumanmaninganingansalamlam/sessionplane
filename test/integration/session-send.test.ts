@@ -221,6 +221,38 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     assert.equal(fake.submitCount, beforeHuman);
     fake.prepareError = null;
 
+    await createRole(config.socketPath, team.teamId, 'expert.composer-failure', 'composer-failure-role');
+    const composerFailure = await createSession(
+      config.socketPath,
+      team.teamId,
+      'expert.composer-failure',
+      'composer-failure-session',
+    );
+    fake.prepareError = new ProviderSubmissionError(
+      'provider.composer-unavailable',
+      'The exact composer could not retain the requested prompt.',
+      { details: { preparationDecision: false } },
+    );
+    await assert.rejects(
+      rpc(config.socketPath, 'session.send', {
+        clientId: 'client-send',
+        requestId: 'send-composer-failure',
+        sessionId: composerFailure.sessionId,
+        prompt: 'This must not turn into another preparation decision.',
+        assistedPreparation: true,
+        sessionDeadlineSec: 600,
+      }),
+      hasRpcError('provider.composer-unavailable', false),
+    );
+    const composerFailureSnapshot = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
+      clientId: 'client-send',
+      sessionId: composerFailure.sessionId,
+    });
+    assert.equal(composerFailureSnapshot.submissionState, 'failed_pre_submit');
+    assert.equal(composerFailureSnapshot.terminal, true);
+    assert.equal(composerFailureSnapshot.promptSubmitted, false);
+    fake.prepareError = null;
+
     await createRole(config.socketPath, team.teamId, 'expert.interrupted', 'interrupted-role');
     const interrupted = await createSession(
       config.socketPath,

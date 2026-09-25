@@ -31,6 +31,13 @@ test('MCP tool catalogue exposes unique core mappings and exact selector schemas
   assert.equal(new Set(MCP_TOOLS.map((tool) => tool.name)).size, MCP_TOOLS.length);
   assert.equal(new Set(MCP_TOOLS.map((tool) => tool.rpcMethod)).size, MCP_TOOLS.length);
   assert.equal(getMcpTool('sessionplane_send')?.rpcMethod, 'session.send');
+  const preparationDecision = getMcpTool('sessionplane_preparation_decide')?.inputSchema;
+  assert.equal(preparationDecision?.type, 'object');
+  assert.equal(preparationDecision?.additionalProperties, false);
+  assert.deepEqual(Object.keys(preparationDecision?.properties as Record<string, unknown>).sort(), [
+    'clientId', 'decision', 'decisionId', 'generation', 'purpose', 'ref', 'requestId',
+    'sessionId', 'snapshotId', 'value',
+  ]);
   for (const name of [
     'browser_tabs',
     'browser_snapshot',

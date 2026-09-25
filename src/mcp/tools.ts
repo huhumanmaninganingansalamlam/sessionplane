@@ -103,6 +103,21 @@ const selectorOneOf = [
   { required: ['teamId', 'roleKey'] },
 ] as const;
 
+const preparationDecisionIdentityProperties = {
+  ...mutationIdentityProperties,
+  sessionId: stringProperty('Exact durable session UUID.'),
+  generation: { type: 'integer', minimum: 0 },
+  decisionId: stringProperty('Distinct mutation identity for this preparation decision.'),
+};
+
+const preparationChoiceProperties = {
+  ...preparationDecisionIdentityProperties,
+  purpose: { type: 'string', enum: ['model', 'effort', 'composer', 'submit'] },
+  snapshotId: stringProperty('Fresh broad preparation observation UUID.'),
+  ref: stringProperty('Observed candidate ref for the requested purpose.'),
+  value: { type: 'number' },
+};
+
 export const MCP_TOOLS: readonly McpToolDefinition[] = [
   tool(
     'sessionplane_fetch',
@@ -331,6 +346,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
         model: { type: ['string', 'null'], maxLength: 200 },
         effort: { type: ['string', 'null'], maxLength: 200 },
         surface: { type: ['string', 'null'], maxLength: 200 },
+        assistedPreparation: { type: 'boolean', default: false },
         files: {
           type: 'array',
           maxItems: 20,
@@ -346,6 +362,55 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
       ['clientId', 'requestId', 'prompt'],
       { oneOf: selectorOneOf },
     ),
+    false,
+  ),
+  tool(
+    'sessionplane_preparation_inspect',
+    'session.preparation.inspect',
+    'Inspect broad live evidence for the exact caller-owned assisted submission that is waiting for a decision.',
+    objectSchema({
+      ...baseIdentityProperties,
+      requestId: stringProperty('Original session.send request ID that owns the pending preparation.'),
+      sessionId: stringProperty('Exact durable session UUID.'),
+      generation: { type: 'integer', minimum: 0 },
+      maxNodes: { type: 'integer', minimum: 1, maximum: 5000 },
+    }, ['clientId', 'requestId', 'sessionId', 'generation']),
+    true,
+  ),
+  tool(
+    'sessionplane_preparation_decide',
+    'session.preparation.decide',
+    'Reveal a related choice list, record one purpose-scoped choice from fresh evidence, or cancel. Core owns all browser actions.',
+    {
+      type: 'object',
+      properties: {
+        ...preparationChoiceProperties,
+        decision: { type: 'string', enum: ['choose', 'reveal', 'cancel'] },
+      },
+      additionalProperties: false,
+      oneOf: [
+        objectSchema({
+          ...preparationChoiceProperties,
+          decision: { type: 'string', enum: ['choose', 'reveal'] },
+        }, ['clientId', 'requestId', 'sessionId', 'generation', 'decisionId', 'decision', 'purpose', 'snapshotId', 'ref']),
+        objectSchema({
+          ...preparationDecisionIdentityProperties,
+          decision: { type: 'string', enum: ['cancel'] },
+        }, ['clientId', 'requestId', 'sessionId', 'generation', 'decisionId', 'decision']),
+      ],
+    },
+    false,
+  ),
+  tool(
+    'sessionplane_preparation_resume',
+    'session.preparation.resume',
+    'Continue the same original session.send request and generation after verifying recorded purpose-scoped choices.',
+    objectSchema({
+      ...baseIdentityProperties,
+      requestId: stringProperty('Original session.send request ID that owns the pending preparation.'),
+      sessionId: stringProperty('Exact durable session UUID.'),
+      generation: { type: 'integer', minimum: 0 },
+    }, ['clientId', 'requestId', 'sessionId', 'generation']),
     false,
   ),
   tool(

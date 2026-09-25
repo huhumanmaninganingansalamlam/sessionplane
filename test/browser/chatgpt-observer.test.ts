@@ -10,8 +10,46 @@ import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { observeChatGptDom } from '../../src/providers/chatgpt/dom-observer.ts';
 import { ExactFinalTracker } from '../../src/providers/chatgpt/exact-final.ts';
+import { recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submission.ts';
 
 const CONVERSATION_ID = 'conversation-observer-123456';
+
+test('current ChatGPT message units recover the exact submitted turn and answer', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-message-units-'));
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'profile'),
+    pageRegistry: new PageRegistry(),
+    headless: true,
+  });
+  try {
+    await owner.start();
+    const { page } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'text/html', body: `
+        <div data-chatgpt-search-message-ids="user-exact">
+          <div data-user-message-bubble="true">Question</div>
+        </div>
+        <div data-chatgpt-search-message-ids="answer-exact answer-exact">
+          <h4 data-conversation-role="assistant">Answer</h4>
+          <div data-chatgpt-selection-message-id="answer-exact"><div class="markdown">Result</div></div>
+        </div>
+      ` });
+    });
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    const acknowledgement = await recoverChatGptAcknowledgement(page, 'Question', CONVERSATION_ID);
+    assert.equal(acknowledgement?.submittedUserMessageId, 'user-exact');
+    const observation = await observeChatGptDom(page, {
+      submittedUserMessageId: acknowledgement?.submittedUserMessageId ?? null,
+      submittedUserTurnId: acknowledgement?.submittedUserTurnId ?? null,
+    });
+    assert.equal(observation.submittedUserFound, true);
+    assert.equal(observation.candidate?.responseMessageId, 'answer-exact');
+    assert.equal(observation.candidate?.answerText, 'Result');
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('ChatGPT WEB redirect follows only the exact submitted user turn', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-redirect-'));

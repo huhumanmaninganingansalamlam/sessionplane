@@ -1,13 +1,16 @@
-import type { Locator, Page } from 'playwright-core';
+import type { ElementHandle, Locator, Page } from 'playwright-core';
 
 import type { PageRegistry } from '../../browser/page-registry.ts';
 import { parseChatGptConversationId } from '../../browser/page-binding.ts';
+import { BrowserRefSnapshotStore, hasPreparationSelectionEvidence, matchesPreparationTarget } from '../../browser/ref-snapshot.ts';
 import {
   ProviderSubmissionError,
   type ProviderAttachment,
   type ProviderSubmission,
   type ProviderSubmissionAcknowledgement,
   type ProviderSubmissionRequest,
+  type PreparationChoices,
+  type PreparationTarget,
 } from '../provider-adapter.ts';
 import {
   assertNoHumanVerification,
@@ -15,6 +18,7 @@ import {
   waitForProviderPageReady,
 } from '../human-verification.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
+import { readChatGptMessages, type ChatGptMessage } from './message-dom.ts';
 
 const COMPOSER_HYDRATION_TIMEOUT_MS = 3_000;
 const COMPOSER_READY_TIMEOUT_MS = 10_000;
@@ -27,6 +31,7 @@ const VISIBLE_SELECTOR_TIMEOUT_MS = 5_000;
 const VISIBLE_SELECTOR_POLL_MS = 50;
 const MODEL_OPTION_DISCOVERY_TIMEOUT_MS = 2_000;
 const MODEL_OPTION_DISCOVERY_POLL_MS = 50;
+type PreparationElement = Locator | ElementHandle<Element>;
 
 export interface ChatGptSubmissionOptions {
   readonly page: Page;
@@ -45,7 +50,8 @@ export class ChatGptSubmission implements ProviderSubmission {
   readonly #request: ProviderSubmissionRequest;
   readonly #acknowledgementTimeoutMs: number;
   readonly #initialUrl: string | null;
-  #sendButton: Locator | null = null;
+  readonly #preparationRefs = new BrowserRefSnapshotStore();
+  #sendButton: PreparationElement | null = null;
   #baselineConversationId: string | null = null;
   #baselineUserIds = new Set<string>();
 
@@ -58,30 +64,85 @@ export class ChatGptSubmission implements ProviderSubmission {
     this.#initialUrl = options.initialUrl ?? null;
   }
 
-  async prepare(): Promise<void> {
+  async prepareForObservation(): Promise<void> {
     if (this.#initialUrl !== null) {
-      await navigateProviderPage({
-        page: this.#page,
-        provider: this.provider,
-        pageKey: this.pageKey,
-        url: this.#initialUrl,
-        timeoutMs: 30_000,
-      });
+      await navigateProviderPage({ page: this.#page, provider: this.provider, pageKey: this.pageKey, url: this.#initialUrl, timeoutMs: 30_000 });
       this.#registry.refreshPage(this.pageKey);
     } else {
-      await waitForProviderPageReady({
-        page: this.#page,
-        provider: this.provider,
-        pageKey: this.pageKey,
-      });
+      await waitForProviderPageReady({ page: this.#page, provider: this.provider, pageKey: this.pageKey });
     }
     this.#requireExactPage();
-    await assertNoHumanVerification({
-      page: this.#page,
-      provider: this.provider,
-      pageKey: this.pageKey,
-    });
+    await assertNoHumanVerification({ page: this.#page, provider: this.provider, pageKey: this.pageKey });
     await assertChatGptAuthenticated(this.#page);
+    await assertChatOnlySurface(this.#page);
+  }
+
+  async #resolvePreparationTarget(
+    target: PreparationTarget,
+    timeoutMs: number,
+  ): Promise<ElementHandle<Element> | null> {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      const binding = this.#registry.refreshPage(this.pageKey);
+      const snapshot = await this.#preparationRefs.capture({
+        pageKey: this.pageKey,
+        bindingEpoch: binding.bindingEpoch,
+        page: this.#page,
+        interactive: false,
+        maxNodes: 5_000,
+      });
+      const matches = snapshot.nodes.filter((node) => matchesPreparationTarget(node, target));
+      if (snapshot.nodesTruncated || matches.length > 1) return null;
+      const match = matches[0];
+      if (match !== undefined) {
+        const element = await this.#preparationRefs.resolve({
+          pageKey: this.pageKey,
+          bindingEpoch: binding.bindingEpoch,
+          page: this.#page,
+          ref: match.ref,
+          snapshotId: snapshot.snapshotId,
+        });
+        if (target.purpose !== 'composer' || await element.isEditable().catch(() => false)) return element;
+        await element.dispose();
+        return null;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await this.#page.waitForTimeout(Math.min(100, remaining));
+    } while (Date.now() < deadline);
+    return null;
+  }
+
+  async #waitForEnabledPreparationTarget(target: PreparationTarget, timeoutMs: number): Promise<ElementHandle<Element> | null> {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      const element = await this.#resolvePreparationTarget(target, 0);
+      if (element !== null) {
+        if (await element.isEnabled().catch(() => false)) return element;
+        await element.dispose();
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      await this.#page.waitForTimeout(Math.min(100, remaining));
+    } while (Date.now() < deadline);
+    return null;
+  }
+
+  async #hasSelectedPreparationTarget(target: PreparationTarget): Promise<boolean> {
+    const binding = this.#registry.refreshPage(this.pageKey);
+    const snapshot = await this.#preparationRefs.capture({
+      pageKey: this.pageKey,
+      bindingEpoch: binding.bindingEpoch,
+      page: this.#page,
+      interactive: false,
+      maxNodes: 5_000,
+    });
+    const intent = target.purpose === 'model' ? this.#request.model : this.#request.effort ?? null;
+    return !snapshot.nodesTruncated && hasPreparationSelectionEvidence(snapshot.nodes, target, intent);
+  }
+
+  async prepare(choices?: PreparationChoices): Promise<void> {
+    await this.prepareForObservation();
     const surface = normalizeLabel(this.#request.surface ?? '');
     if (surface === 'work') {
       throw new ProviderSubmissionError(
@@ -89,7 +150,6 @@ export class ChatGptSubmission implements ProviderSubmission {
         'SessionPlane supports the Chat surface only; ChatGPT Work is not supported',
       );
     }
-    await assertChatOnlySurface(this.#page);
     if (surface !== '' && surface !== 'chat' && surface !== 'normal') {
       await selectNamedMode(
         this.#page,
@@ -100,10 +160,19 @@ export class ChatGptSubmission implements ProviderSubmission {
     }
 
     let modelSelection: ModelSelectionMode | null = null;
-    if (this.#request.model !== null) {
+    if (choices?.model !== undefined) {
+      if (!(await this.#hasSelectedPreparationTarget(choices.model))) {
+        throw new ProviderSubmissionError('provider.model-unavailable', 'The caller-selected model is no longer visibly selected');
+      }
+      modelSelection = selectionModeFor(this.#request.model);
+    } else if (this.#request.model !== null) {
       modelSelection = await this.#selectModel(this.#request.model, this.#request.effort ?? null);
     }
-    if (
+    if (choices?.effort !== undefined) {
+      if (!(await this.#hasSelectedPreparationTarget(choices.effort))) {
+        throw new ProviderSubmissionError('provider.mode-unavailable', 'The caller-selected effort is no longer visibly selected');
+      }
+    } else if (
       this.#request.effort !== undefined &&
       this.#request.effort !== null &&
       normalizeLabel(this.#request.effort) !== '' &&
@@ -124,11 +193,14 @@ export class ChatGptSubmission implements ProviderSubmission {
       }
     }
 
-    const composer = await firstEditableComposer(this.#page);
+    const composer = choices?.composer === undefined
+      ? await firstEditableComposer(this.#page)
+      : await this.#resolvePreparationTarget(choices.composer, COMPOSER_READY_TIMEOUT_MS);
     if (composer === null) {
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         'The exact ChatGPT composer is not editable',
+        { details: { preparationDecision: true } },
       );
     }
 
@@ -142,16 +214,19 @@ export class ChatGptSubmission implements ProviderSubmission {
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         'ChatGPT composer value did not match the requested prompt',
+        { details: { preparationDecision: false } },
       );
     }
 
-    const sendButton = await waitForEnabledSendButton(this.#page, 60_000);
+    const sendButton = choices?.submit === undefined
+      ? await waitForEnabledSendButton(this.#page, composer, 60_000)
+      : await this.#waitForEnabledPreparationTarget(choices.submit, 60_000);
     if (sendButton === null) {
       const visibleControl = await firstVisible(this.#page, CHATGPT_SELECTORS.sendButton);
       throw new ProviderSubmissionError(
         'provider.composer-unavailable',
         'The exact ChatGPT send control is unavailable',
-        { details: { sendControl: visibleControl === null ? 'absent' : 'disabled' } },
+        { details: { preparationDecision: false, sendControl: visibleControl === null ? 'absent' : 'disabled' } },
       );
     }
     this.#sendButton = sendButton;
@@ -188,14 +263,14 @@ export class ChatGptSubmission implements ProviderSubmission {
         deadline = Math.max(deadline, Date.now() + hydrationGraceMs);
         hydrationGraceApplied = true;
       }
-      const messages = this.#page.locator(CHATGPT_SELECTORS.userMessages);
-      const count = await messages.count().catch(() => 0);
-      for (let index = Math.max(0, count - 8); index < count; index += 1) {
-        const message = messages.nth(index);
-        if ((await messageHasExactPrompt(message, this.#request.prompt)) === false) {
+      const messages = (await readChatGptMessages(this.#page)).filter((message) => message.role === 'user');
+      for (let index = Math.max(0, messages.length - 8); index < messages.length; index += 1) {
+        const message = messages[index]!;
+        if (normalizeLineEndings(message.text) !== normalizeLineEndings(this.#request.prompt) &&
+          !(await messageHasExactPrompt(this.#page.locator(CHATGPT_SELECTORS.userMessages).nth(index), this.#request.prompt))) {
           continue;
         }
-        const identity = await readUserIdentity(message);
+        const identity = userIdentity(message);
         if (identity !== null && this.#baselineUserIds.has(identity.identityKey)) {
           continue;
         }
@@ -313,16 +388,16 @@ export async function recoverChatGptAcknowledgement(
   const conversationId = parseChatGptConversationId(page.url());
   if (conversationId !== expectedConversationId) return null;
 
-  const messages = page.locator(CHATGPT_SELECTORS.userMessages);
-  const count = await messages.count().catch(() => 0);
+  const messages = (await readChatGptMessages(page)).filter((message) => message.role === 'user');
   const matches = new Map<
     string,
     { readonly messageId: string; readonly turnId: string }
   >();
-  for (let index = 0; index < count; index += 1) {
-    const message = messages.nth(index);
-    if (!(await messageHasExactPrompt(message, prompt))) continue;
-    const identity = await readUserIdentity(message);
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]!;
+    if (normalizeLineEndings(message.text) !== normalizeLineEndings(prompt) &&
+      !(await messageHasExactPrompt(page.locator(CHATGPT_SELECTORS.userMessages).nth(index), prompt))) continue;
+    const identity = userIdentity(message);
     if (identity === null) continue;
     matches.set(identity.identityKey, {
       messageId: identity.messageId,
@@ -377,21 +452,18 @@ async function selectIntelligencePro(
   const capabilities = await readIntelligenceCapabilities(page);
   const targets =
     capabilities === null ? [] : intelligenceProTargets(capabilities, requestedModel);
-  const attempted: string[] = [];
-  for (const target of targets) {
-    const result = await selectIntelligenceTarget(page, switcher, target);
-    attempted.push(
-      target.version.id + ':' + String(target.presetIndex) + ':' + result.reason,
-    );
-    if (result.selected) return;
-  }
-  const liveResult = await selectLiveIntelligencePro(page, switcher, requestedModel);
-  attempted.push('live:' + liveResult.reason);
+  const preferredVersions = targets.map((target) => target.version.displayText);
+  const liveResult = await selectLiveIntelligencePro(
+    page,
+    switcher,
+    requestedModel,
+    preferredVersions,
+  );
   if (liveResult.selected) return;
   throw new ProviderSubmissionError(
     'provider.model-unavailable',
     'No available ChatGPT Pro preset could satisfy: ' + requestedModel,
-    { details: { attempted } },
+    { details: { attempted: ['live:' + liveResult.reason] } },
   );
 }
 
@@ -603,44 +675,131 @@ async function selectLiveIntelligencePro(
   page: Page,
   switcher: Locator,
   requestedModel: string,
+  preferredVersions: readonly string[] = [],
 ): Promise<{ readonly selected: boolean; readonly reason: string }> {
   if (!(await ensureIntelligencePickerOpen(page, switcher))) {
     return { selected: false, reason: 'picker-not-open' };
   }
 
-  if (normalizeModelIdentity(requestedModel) !== 'pro') {
-    const versionResult = await selectLiveIntelligenceVersion(page, requestedModel);
-    if (!versionResult.selected) {
-      return { selected: false, reason: 'version-' + versionResult.reason };
-    }
-    if (!(await ensureIntelligencePickerOpen(page, switcher))) {
-      return { selected: false, reason: 'picker-reopen-failed' };
-    }
-  }
-
-  const state = await readLiveIntelligenceSlider(page);
-  if (state === null) {
-    return { selected: false, reason: 'slider-not-visible' };
-  }
-  const initialIndex = state.current;
-  const result = await selectLiveIntelligenceSliderIndex(page, state.maximum);
-  if (!result.selected) return result;
-
-  const simpleText = normalizeLabel(
-    (await page
-      .locator(CHATGPT_SELECTORS.intelligenceSimpleView)
-      .first()
-      .textContent()
-      .catch(() => null)) ?? '',
+  const isFamilyRequest = normalizeModelIdentity(requestedModel) === 'pro';
+  const visibleVersions = isFamilyRequest
+    ? await readLiveIntelligenceVersionLabels(page)
+    : [requestedModel];
+  const versions: (string | null)[] = [
+    ...visibleVersions,
+    ...preferredVersions,
+  ].filter((version, index, all) =>
+    all.findIndex((candidate) => normalizeLabel(candidate) === normalizeLabel(version)) === index,
   );
-  if (isProModelLabel(simpleText)) {
+  if (versions.length === 0) versions.push(null);
+
+  let lastReason = 'no-semantic-model-acknowledgement';
+  for (const version of versions) {
+    if (version !== null) {
+      const versionResult = await selectLiveIntelligenceVersion(page, version);
+      if (!versionResult.selected) {
+        lastReason = 'version-' + versionResult.reason;
+        continue;
+      }
+      if (!(await ensureIntelligencePickerOpen(page, switcher))) {
+        lastReason = 'picker-reopen-failed';
+        continue;
+      }
+    }
+
+    const result = await selectLiveIntelligenceProAtCurrentVersion(page);
+    if (result.selected) return result;
+    lastReason = result.reason;
+  }
+  return { selected: false, reason: lastReason };
+}
+
+async function readLiveIntelligenceVersionLabels(page: Page): Promise<string[]> {
+  const options = page
+    .locator(CHATGPT_SELECTORS.intelligenceContent)
+    .filter({ visible: true })
+    .locator('[role="menuitemradio"]');
+  const count = await options.count().catch(() => 0);
+  const labels: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const option = options.nth(index);
+    if (
+      (await option.getAttribute('aria-disabled').catch(() => null)) === 'true' ||
+      (await option.isDisabled().catch(() => false))
+    ) {
+      continue;
+    }
+    const label = ((await option.textContent().catch(() => null)) ?? '').trim();
+    if (label !== '' && !labels.some((existing) => normalizeLabel(existing) === normalizeLabel(label))) {
+      labels.push(label);
+    }
+  }
+  return labels;
+}
+
+async function selectLiveIntelligenceProAtCurrentVersion(
+  page: Page,
+): Promise<{ readonly selected: boolean; readonly reason: string }> {
+  const state = await readLiveIntelligenceSlider(page);
+  if (state === null) return { selected: false, reason: 'slider-not-visible' };
+  if (state.maximum - state.minimum > 100) {
+    return { selected: false, reason: 'unsupported-slider-range' };
+  }
+
+  let current = state.current;
+  if (await waitForLiveModelLabel(page, 'Pro')) {
     return { selected: true, reason: 'selected-live-pro' };
   }
 
-  if (initialIndex !== state.maximum) {
-    await selectLiveIntelligenceSliderIndex(page, initialIndex);
+  while (current > state.minimum) {
+    await state.control.press('ArrowLeft');
+    await page.waitForTimeout(50);
+    const next = Number(await state.slider.getAttribute('aria-valuenow').catch(() => null));
+    if (!Number.isInteger(next) || next >= current) break;
+    current = next;
   }
-  return { selected: false, reason: 'slider-maximum-not-pro' };
+
+  for (;;) {
+    if (await waitForLiveModelLabel(page, 'Pro')) {
+      return { selected: true, reason: 'selected-live-pro' };
+    }
+    if (current >= state.maximum) break;
+    await state.control.press('ArrowRight');
+    await page.waitForTimeout(50);
+    const next = Number(await state.slider.getAttribute('aria-valuenow').catch(() => null));
+    if (!Number.isInteger(next) || next <= current) break;
+    current = next;
+  }
+  return { selected: false, reason: 'no-semantic-model-acknowledgement' };
+}
+
+async function waitForLiveModelLabel(page: Page, requestedModel: string): Promise<boolean> {
+  const deadline = Date.now() + 150;
+  do {
+    const menu = page.locator(CHATGPT_SELECTORS.intelligenceContent).filter({ visible: true }).first();
+    const slider = menu.locator('[role="slider"][aria-valuemin][aria-valuemax][aria-valuenow]').first();
+    const labels = await slider.evaluate((element) => {
+      const menu = element.closest('[role="menu"]');
+      const control = element.closest('[role="menuitem"][aria-describedby]');
+      const descriptions = (control?.getAttribute('aria-describedby') ?? '')
+        .split(/\s+/)
+        .map((id) => document.getElementById(id))
+        .filter((node): node is HTMLElement => node instanceof HTMLElement && menu?.contains(node) === true)
+        .map((node) => node.textContent ?? '');
+      const status = Array.from(menu?.querySelectorAll('[role="status"]') ?? []).filter((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+      return [
+        element.getAttribute('aria-valuetext') ?? '',
+        ...descriptions,
+        status.length === 1 ? status[0]?.textContent ?? '' : '',
+      ];
+    }).catch((): string[] => []);
+    if (labels.some((label) => modelLabelMatches(label, requestedModel))) return true;
+    await page.waitForTimeout(50);
+  } while (Date.now() < deadline);
+  return false;
 }
 
 async function selectLiveIntelligenceVersion(
@@ -648,18 +807,22 @@ async function selectLiveIntelligenceVersion(
   requestedModel: string,
 ): Promise<{ readonly selected: boolean; readonly reason: string }> {
   const requestedVersion = modelVersionParts(requestedModel);
-  if (requestedVersion.length === 0) {
-    return { selected: false, reason: 'requested-version-missing' };
-  }
+  const requestedLabel = normalizeLabel(requestedModel);
 
-  const advanced = page.locator(CHATGPT_SELECTORS.intelligenceAdvancedView).first();
+  const advanced = page.locator(CHATGPT_SELECTORS.intelligenceContent).filter({ visible: true }).first();
   const options = advanced.locator('[role="menuitemradio"]');
   const findTarget = async (): Promise<Locator | null> => {
     const count = await options.count().catch(() => 0);
     for (let index = 0; index < count; index += 1) {
       const option = options.nth(index);
-      const parts = modelVersionParts((await option.textContent().catch(() => null)) ?? '');
-      if (parts.length > 0 && compareVersionParts(parts, requestedVersion) === 0) {
+      const label = ((await option.textContent().catch(() => null)) ?? '').trim();
+      const parts = modelVersionParts(label);
+      if (
+        (requestedVersion.length > 0 &&
+          parts.length > 0 &&
+          compareVersionParts(parts, requestedVersion) === 0) ||
+        (requestedVersion.length === 0 && normalizeLabel(label) === requestedLabel)
+      ) {
         return option;
       }
     }
@@ -671,7 +834,7 @@ async function selectLiveIntelligenceVersion(
     return { selected: true, reason: 'already-selected' };
   }
 
-  const content = page.locator(CHATGPT_SELECTORS.intelligenceContent).first();
+  const content = page.locator(CHATGPT_SELECTORS.intelligenceContent).filter({ visible: true }).first();
   const opener = content.locator('[role="menuitem"]').first();
   if (!(await opener.isVisible().catch(() => false))) {
     return { selected: false, reason: 'version-opener-not-visible' };
@@ -697,12 +860,7 @@ async function selectLiveIntelligenceEffort(
     return { selected: false, reason: 'picker-not-open' };
   }
   const state = await readLiveIntelligenceSlider(page);
-  if (
-    state === null ||
-    state.minimum !== 0 ||
-    state.maximum !== 4 ||
-    state.dotCount !== 5
-  ) {
+  if (state === null || state.maximum - state.minimum > 100) {
     return { selected: false, reason: 'unsupported-slider-shape' };
   }
   const targetIndex =
@@ -719,21 +877,21 @@ async function selectLiveIntelligenceEffort(
 interface LiveIntelligenceSliderState {
   readonly slider: Locator;
   readonly control: Locator;
-  readonly dots: Locator;
   readonly minimum: number;
   readonly maximum: number;
   readonly current: number;
-  readonly dotCount: number;
 }
 
 async function readLiveIntelligenceSlider(
   page: Page,
 ): Promise<LiveIntelligenceSliderState | null> {
-  const slider = page.locator(CHATGPT_SELECTORS.intelligenceSlider).first();
-  if (!(await slider.isVisible().catch(() => false))) return null;
-
-  const dots = page.locator(CHATGPT_SELECTORS.intelligenceDots);
-  const dotCount = await dots.count().catch(() => 0);
+  const sliders = page
+    .locator(CHATGPT_SELECTORS.intelligenceContent)
+    .filter({ visible: true })
+    .locator('[role="slider"][aria-valuemin][aria-valuemax][aria-valuenow]')
+    .filter({ visible: true });
+  if ((await sliders.count().catch(() => 0)) !== 1) return null;
+  const slider = sliders.first();
   const minimum = Number(await slider.getAttribute('aria-valuemin').catch(() => null));
   const maximum = Number(await slider.getAttribute('aria-valuemax').catch(() => null));
   const current = Number(await slider.getAttribute('aria-valuenow').catch(() => null));
@@ -744,16 +902,14 @@ async function readLiveIntelligenceSlider(
     minimum < 0 ||
     current < minimum ||
     current > maximum ||
-    maximum < minimum ||
-    dotCount !== maximum - minimum + 1
+    maximum < minimum
   ) {
     return null;
   }
 
-  const root = page.locator('[data-model-reasoning-effort-slider]').first();
-  const ancestorControl = root.locator('xpath=ancestor::*[@role="menuitem"][1]').first();
+  const ancestorControl = slider.locator('xpath=ancestor::*[@role="menuitem"][1]').first();
   const control = (await ancestorControl.isVisible().catch(() => false)) ? ancestorControl : slider;
-  return { slider, control, dots, minimum, maximum, current, dotCount };
+  return { slider, control, minimum, maximum, current };
 }
 
 async function selectLiveIntelligenceSliderIndex(
@@ -767,15 +923,8 @@ async function selectLiveIntelligenceSliderIndex(
   if (targetIndex < state.minimum || targetIndex > state.maximum) {
     return {
       selected: false,
-      reason: 'preset-index-out-of-range-' + String(state.dotCount),
+      reason: 'preset-index-out-of-range-' + String(state.maximum - state.minimum + 1),
     };
-  }
-
-  const dotIndex = targetIndex - state.minimum;
-  if (
-    (await state.dots.nth(dotIndex).getAttribute('data-locked').catch(() => null)) === 'true'
-  ) {
-    return { selected: false, reason: 'preset-locked' };
   }
 
   let current = state.current;
@@ -793,7 +942,7 @@ async function selectLiveIntelligenceSliderIndex(
 }
 
 async function ensureIntelligencePickerOpen(page: Page, switcher: Locator): Promise<boolean> {
-  const content = page.locator(CHATGPT_SELECTORS.intelligenceContent).first();
+  const content = page.locator(CHATGPT_SELECTORS.intelligenceContent).filter({ visible: true }).first();
   if (await content.isVisible().catch(() => false)) return true;
   await switcher.click({ timeout: 5_000 }).catch(() => undefined);
   return await waitForVisible(content, 2_000);
@@ -803,14 +952,14 @@ async function selectIntelligenceVersion(
   page: Page,
   version: IntelligenceVersion,
 ): Promise<boolean> {
-  const advanced = page.locator(CHATGPT_SELECTORS.intelligenceAdvancedView).first();
+  const advanced = page.locator(CHATGPT_SELECTORS.intelligenceContent).filter({ visible: true }).first();
   const options = advanced.locator('[role="menuitemradio"]');
   let target = await matchingVersionOption(options, version);
   if (target !== null && (await target.getAttribute('aria-checked').catch(() => null)) === 'true') {
     return true;
   }
 
-  const content = page.locator(CHATGPT_SELECTORS.intelligenceContent).first();
+  const content = page.locator(CHATGPT_SELECTORS.intelligenceContent).filter({ visible: true }).first();
   const opener = content.locator('[role="menuitem"]').first();
   if (!(await opener.isVisible().catch(() => false))) return false;
   await opener.click({ timeout: 5_000 });
@@ -862,11 +1011,18 @@ async function waitForVisible(locator: Locator, timeoutMs: number): Promise<bool
   return false;
 }
 
-async function waitForEnabledSendButton(page: Page, timeoutMs: number): Promise<Locator | null> {
+async function waitForEnabledSendButton(page: Page, composer: PreparationElement, timeoutMs: number): Promise<Locator | null> {
+  const buttons = 'locator' in composer
+    ? await composer.locator('xpath=ancestor::form[1]').count().catch(() => 0) === 1
+      ? composer.locator('xpath=ancestor::form[1]').locator(CHATGPT_SELECTORS.sendButton.join(', ')).filter({ visible: true })
+      : page.locator('[data-testid="send-button"]').filter({ visible: true })
+    : page.locator('[data-testid="send-button"]').filter({ visible: true });
   const deadline = Date.now() + timeoutMs;
   do {
-    const button = await firstVisible(page, CHATGPT_SELECTORS.sendButton);
-    if (button !== null && (await button.isEnabled().catch(() => false))) return button;
+    if ((await buttons.count().catch(() => 0)) === 1) {
+      const button = buttons.first();
+      if (await button.isEnabled().catch(() => false)) return button;
+    }
     await page.waitForTimeout(100);
   } while (Date.now() < deadline);
   return null;
@@ -1275,6 +1431,12 @@ async function firstEditableComposer(page: Page): Promise<Locator | null> {
   return null;
 }
 
+function selectionModeFor(model: string | null): ModelSelectionMode {
+  if (model === null) return 'legacy';
+  if (normalizeModelIdentity(model) === 'thinking') return 'intelligence-thinking';
+  return isIntelligenceProRequest(model) ? 'intelligence-pro' : 'legacy';
+}
+
 async function firstVisible(
   page: Page,
   selectors: readonly string[],
@@ -1295,10 +1457,10 @@ async function firstVisible(
   return null;
 }
 
-async function readExactTextCandidates(locator: Locator): Promise<readonly string[]> {
-  return await locator
+async function readExactTextCandidates(locator: PreparationElement): Promise<readonly string[]> {
+  return await (locator as Locator)
     .evaluate(
-      (element) => {
+      (element: Element) => {
         const values: string[] = [];
         if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
           values.push(element.value);
@@ -1367,7 +1529,7 @@ async function readExactTextCandidates(locator: Locator): Promise<readonly strin
 }
 
 async function composerHasExactValue(
-  composer: Locator,
+  composer: PreparationElement,
   expected: string,
 ): Promise<boolean> {
   const normalizedExpected = normalizeLineEndings(expected);
@@ -1402,7 +1564,7 @@ async function messageHasExactPrompt(message: Locator, expected: string): Promis
 
 async function writeExactComposerValue(
   page: Page,
-  composer: Locator,
+  composer: PreparationElement,
   expected: string,
 ): Promise<boolean> {
   await waitForComposerStability(page, composer, COMPOSER_HYDRATION_TIMEOUT_MS);
@@ -1424,7 +1586,7 @@ async function writeExactComposerValue(
   return await waitForComposerValue(page, composer, expected);
 }
 
-async function clearComposerValue(page: Page, composer: Locator): Promise<boolean> {
+async function clearComposerValue(page: Page, composer: PreparationElement): Promise<boolean> {
   await composer.click({ timeout: 5_000 }).catch(() => undefined);
   await composer.focus().catch(() => undefined);
   const selectAll = process.platform === 'darwin' ? 'Meta+A' : 'Control+A';
@@ -1439,7 +1601,7 @@ async function clearComposerValue(page: Page, composer: Locator): Promise<boolea
 
 async function waitForComposerStability(
   page: Page,
-  composer: Locator,
+  composer: PreparationElement,
   timeoutMs: number,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -1468,7 +1630,7 @@ async function waitForComposerStability(
 
 async function waitForComposerValue(
   page: Page,
-  composer: Locator,
+  composer: PreparationElement,
   expected: string,
 ): Promise<boolean> {
   const normalizedExpected = normalizeLineEndings(expected);
@@ -1496,10 +1658,9 @@ async function waitForComposerValue(
 
 async function captureUserIdentitySet(page: Page): Promise<Set<string>> {
   const identities = new Set<string>();
-  const messages = page.locator(CHATGPT_SELECTORS.userMessages);
-  const count = await messages.count().catch(() => 0);
-  for (let index = 0; index < count; index += 1) {
-    const identity = await readUserIdentity(messages.nth(index));
+  for (const message of await readChatGptMessages(page)) {
+    if (message.role !== 'user') continue;
+    const identity = userIdentity(message);
     if (identity !== null) {
       identities.add(identity.identityKey);
     }
@@ -1507,26 +1668,13 @@ async function captureUserIdentitySet(page: Page): Promise<Set<string>> {
   return identities;
 }
 
-async function readUserIdentity(locator: Locator): Promise<{
+function userIdentity(message: ChatGptMessage): {
   readonly messageId: string;
   readonly turnId: string;
   readonly identityKey: string;
-} | null> {
-  const attributes = await locator
-    .evaluate((element) => {
-      const identityNode = element.closest('[data-message-id], [data-turn-id]') ?? element;
-      return {
-        messageId:
-          identityNode.getAttribute('data-message-id') ?? element.getAttribute('data-message-id'),
-        turnId: identityNode.getAttribute('data-turn-id') ?? element.getAttribute('data-turn-id'),
-      };
-    })
-    .catch(() => null);
-  if (attributes === null || (attributes.messageId === null && attributes.turnId === null)) {
-    return null;
-  }
-  const messageId = attributes.messageId ?? attributes.turnId;
-  const turnId = attributes.turnId ?? attributes.messageId;
+} | null {
+  const messageId = message.messageId ?? message.turnId;
+  const turnId = message.turnId ?? message.messageId;
   if (messageId === null || turnId === null) {
     return null;
   }
@@ -1568,7 +1716,7 @@ function modelLabelMatches(value: string, requestedModel: string): boolean {
 }
 
 function isLabelBoundary(value: string | undefined): boolean {
-  return value === undefined || /\s|[()[\]{}:]/.test(value);
+  return value === undefined || /\s|[()[\]{}:;,!.?·•]/.test(value);
 }
 
 async function waitForModelLabel(
@@ -1579,9 +1727,7 @@ async function waitForModelLabel(
   const deadline = Date.now() + 2_000;
   do {
     const label = (await switcher.textContent().catch(() => null)) ?? '';
-    if (modelLabelMatches(label, requestedModel)) {
-      return true;
-    }
+    if (modelLabelMatches(label, requestedModel)) return true;
     await page.waitForTimeout(50);
   } while (Date.now() < deadline);
   return false;
