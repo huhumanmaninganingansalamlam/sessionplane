@@ -12,7 +12,6 @@ import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
 import {
-  MCP_LEGACY_PROTOCOL_VERSION,
   MCP_MODERN_PROTOCOL_VERSION,
 } from '../../src/mcp/schemas.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
@@ -166,23 +165,35 @@ test('CLI and modern/legacy MCP expose the same core state across MCP process re
     );
     assert.deepEqual(restartedStatus.result?.structuredContent, afterMcpExit);
 
-    legacy = new McpSubprocess(config.stateDir);
-    const initialized = await legacy.request('initialize', {
-      protocolVersion: MCP_LEGACY_PROTOCOL_VERSION,
-      capabilities: {},
-      clientInfo: { name: 'legacy-test', version: '1.0.0' },
-    });
-    assert.equal(initialized.result?.protocolVersion, MCP_LEGACY_PROTOCOL_VERSION);
-    legacy.notify('notifications/initialized', {});
-    const legacyStatus = await legacy.request('tools/call', {
-      name: 'sessionplane_status',
-      arguments: {
-        clientId: 'cli-mcp-client',
-        sessionId: created.sessionId,
-      },
-    });
-    assert.equal(legacyStatus.result?.resultType, undefined);
-    assert.deepEqual(legacyStatus.result?.structuredContent, afterMcpExit);
+    for (const [requestedVersion, negotiatedVersion] of [
+      ['2025-11-25', '2025-11-25'],
+      ['2025-06-18', '2025-06-18'],
+      ['2099-01-01', '2025-11-25'],
+    ]) {
+      if (legacy !== null) await legacy.close();
+      legacy = new McpSubprocess(config.stateDir);
+      const initialized = await legacy.request('initialize', {
+        protocolVersion: requestedVersion,
+        capabilities: {},
+        clientInfo: { name: 'legacy-test', version: '1.0.0' },
+      });
+      assert.equal(initialized.result?.protocolVersion, negotiatedVersion);
+      legacy.notify('notifications/initialized', {});
+      const metadata = { 'io.modelcontextprotocol/protocolVersion': negotiatedVersion, progressToken: 'native-client' };
+      const legacyTools = await legacy.request('tools/list', { _meta: metadata });
+      assert.equal(legacyTools.error, undefined);
+      assert.ok((legacyTools.result?.tools as Array<{ name: string }>).some((tool) => tool.name === 'sessionplane_preparation_resume'));
+      const legacyStatus = await legacy.request('tools/call', {
+        _meta: metadata,
+        name: 'sessionplane_status',
+        arguments: {
+          clientId: 'cli-mcp-client',
+          sessionId: created.sessionId,
+        },
+      });
+      assert.equal(legacyStatus.result?.resultType, undefined);
+      assert.deepEqual(legacyStatus.result?.structuredContent, afterMcpExit);
+    }
 
     const stopArgs = [
       'stop',

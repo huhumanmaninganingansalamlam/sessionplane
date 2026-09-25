@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { resolveConfig, type SessionPlaneConfig } from '../config.ts';
 import {
   MCP_LEGACY_PROTOCOL_VERSION,
+  MCP_LEGACY_PROTOCOL_VERSIONS,
   MCP_MODERN_PROTOCOL_VERSION,
   MCP_SERVER_INFO,
   McpProtocolError,
@@ -174,15 +175,12 @@ class SessionPlaneMcpServer {
       throw new McpProtocolError(-32602, 'Invalid initialize params');
     }
     const requested = params.protocolVersion;
-    if (requested !== MCP_LEGACY_PROTOCOL_VERSION) {
-      throw new McpProtocolError(-32602, 'Unsupported legacy MCP protocol version', {
-        requested,
-        supported: [MCP_LEGACY_PROTOCOL_VERSION],
-      });
+    if (typeof requested !== 'string' || requested.length === 0) {
+      throw new McpProtocolError(-32602, 'Invalid initialize protocol version');
     }
     this.#legacyInitialized = true;
     return {
-      protocolVersion: MCP_LEGACY_PROTOCOL_VERSION,
+      protocolVersion: MCP_LEGACY_PROTOCOL_VERSIONS.includes(requested) ? requested : MCP_LEGACY_PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: false } },
       serverInfo: MCP_SERVER_INFO,
       instructions: serverInstructions(),
@@ -245,14 +243,9 @@ class SessionPlaneMcpServer {
   }
 
   #requestMode(params: unknown): ProtocolMode {
-    if (isRecord(params) && isRecord(params._meta)) {
-      requireModernMetadata(params);
-      return 'modern';
-    }
-    if (this.#legacyInitialized) {
-      return 'legacy';
-    }
-    throw new McpProtocolError(-32602, 'MCP request metadata is required before tool use');
+    if (this.#legacyInitialized) return 'legacy';
+    requireModernMetadata(params);
+    return 'modern';
   }
 
   async #handleNotification(request: McpRequest): Promise<void> {

@@ -67,6 +67,14 @@ After an input failure with `promptSubmitted:false`, the caller can correct its
 inputs and start a new request on the same session. Reusing the failed request ID
 replays its failure; waiting cannot repair its inputs.
 
+MCP initialization negotiates the client version: `2025-06-18` and
+`2025-11-25` use the same initialized stdio tool path. An unsupported version
+receives the supported `2025-11-25` version so the client can decide compatibility.
+Initialized connections retain their negotiated protocol when requests carry
+ordinary `_meta` fields; metadata presence does not select a different protocol.
+A successful manual connection at one version does not prove native client
+compatibility; verify tool discovery through the actual client.
+
 The MCP client owns server registration and the stdio connection. Installing
 skills alone does not connect it. Preparation is core-owned, not tied to a
 transport process or an agent's context window. On client reconnection or
