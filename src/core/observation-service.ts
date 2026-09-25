@@ -183,6 +183,8 @@ export class ObservationService {
           current.observationTransport === 'deferred' &&
           current.nextCheckAt !== null &&
           Date.parse(current.nextCheckAt) > nowMs &&
+          evidence.errorCode === undefined &&
+          current.errorCode !== 'provider.conversation-unavailable' &&
           !decision.freshExactProgress &&
           !verifiedRedirect &&
           decision.kind !== 'complete' &&
@@ -296,7 +298,13 @@ export class ObservationService {
     previous: SessionSnapshot,
     recovery: ProviderRecoveryResult,
   ): Promise<SessionSnapshot> {
-    const update = updateForRecovery(recovery, this.#now().toISOString());
+    // A backend retry/cooldown cannot erase an independently observed page
+    // failure. Fresh DOM evidence or an exact recovered final clears it.
+    const update = {
+      ...updateForRecovery(recovery, this.#now().toISOString()),
+      ...(previous.errorCode === 'provider.conversation-unavailable' && recovery.kind !== 'complete'
+        ? { errorCode: previous.errorCode, reason: previous.reason } : {}),
+    };
     if (!hasMeaningfulChange(previous, update)) {
       return previous;
     }
@@ -375,7 +383,7 @@ function updateForDecision(
         providerState: 'unknown',
         observationTransport: evidence.observationTransport,
         reason: decision.reason,
-        errorCode: null,
+        errorCode: evidence.errorCode ?? null,
       };
   }
 }

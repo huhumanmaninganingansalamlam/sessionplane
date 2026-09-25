@@ -100,6 +100,27 @@ test('stale DOM recovers an exact server final and backend 429 remains deferred,
     });
     assert.equal(afterSpinner.observationTransport, 'deferred');
     assert.equal(afterSpinner.providerState, 'unknown');
+
+    fake.emitObservation(limitedSession.sessionId, {
+      submittedUserFound: false, candidate: null, activity: 'unknown',
+      observationTransport: 'unavailable',
+      errorCode: 'provider.conversation-unavailable',
+      reason: 'conversation-load-http-429',
+    });
+    const unreadable = await waitForSnapshot(config.socketPath, limitedSession.sessionId,
+      (snapshot) => snapshot.errorCode === 'provider.conversation-unavailable');
+    assert.equal(unreadable.terminal, false);
+    assert.equal(unreadable.providerState, 'unknown');
+    assert.equal(unreadable.submittedUserMessageId, deferred.submittedUserMessageId);
+    fake.emitObservation(limitedSession.sessionId, {
+      submittedUserFound: true, activity: 'weak', observationTransport: 'fresh',
+      errorCode: undefined, reason: null,
+      candidate: { responseMessageId: 'restored-answer', answerText: 'Recovered', terminalMarker: true, streamingMarker: false },
+    });
+    const restored = await waitForSnapshot(config.socketPath, limitedSession.sessionId,
+      (snapshot) => snapshot.terminal);
+    assert.equal(restored.errorCode, null);
+    assert.equal(restored.answerText, 'Recovered');
   } finally {
     await service.close();
     rmSync(fixture.root, { recursive: true, force: true });

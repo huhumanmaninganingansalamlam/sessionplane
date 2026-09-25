@@ -84,6 +84,7 @@ export interface ProviderAssistantCandidate {
 }
 
 export interface ProviderObservationEvidence {
+  readonly errorCode?: string | undefined;
   readonly provider: string;
   readonly pageKey: string;
   readonly bindingEpoch: number;
@@ -193,6 +194,10 @@ export interface ProviderStopOperation {
 export interface ProviderAdapter {
   readonly provider: string;
   openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission>;
+  openDeletion?(request: ProviderRecoveryRequest): Promise<{
+    deleteOnce(): Promise<boolean>;
+    close(): Promise<void>;
+  }>;
   recoverAcknowledgement?(
     request: ProviderAcknowledgementRecoveryRequest,
   ): Promise<ProviderSubmissionAcknowledgement | null>;

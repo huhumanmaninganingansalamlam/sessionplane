@@ -235,6 +235,21 @@ test('background ChatGPT Page yields exact DOM, dialog, and network evidence wit
       const laterUser = await source.observe();
       assert.equal(laterUser.laterUserFound, true);
 
+      await target.page.setContent('<main><h1>Conversation cannot be displayed</h1></main>');
+      await target.page.route('**/backend-api/conversations/**', (route) =>
+        route.fulfill({ status: 429, contentType: 'application/json', body: '{}' }));
+      await target.page.evaluate(async () => { await fetch('/backend-api/conversations/unrelated'); });
+      assert.equal((await source.observe()).errorCode, undefined);
+      await target.page.evaluate(async (id) => { await (await fetch('/backend-api/conversations/' + id)).text(); }, CONVERSATION_ID);
+      const unreadable = await source.observe();
+      assert.equal(unreadable.errorCode, 'provider.conversation-unavailable');
+      assert.equal(unreadable.observationTransport, 'unavailable');
+      assert.equal(new ExactFinalTracker(1_000).evaluate(unreadable, Date.now()).kind, 'unverified');
+      await target.page.setContent(observerFixture());
+      const restored = await source.observe();
+      assert.equal(restored.errorCode, undefined);
+      assert.equal(restored.submittedUserFound, true);
+
       assert.equal(foreground.page.url(), 'https://chatgpt.com/');
       assert.equal(target.page.url(), `https://chatgpt.com/c/${CONVERSATION_ID}`);
     } finally {

@@ -70,6 +70,32 @@ export class ReceiptRepository {
     });
   }
 
+  record(input: { clientId: string; requestId: string; method: string; requestHash: string;
+    status: 'attempted' | 'complete'; result: unknown }): void {
+    const timestamp = this.#now().toISOString();
+    const written = this.#database.raw.prepare(`
+      INSERT INTO request_receipts(client_id, request_id, method, request_hash, status, result_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(client_id, request_id) DO UPDATE SET
+        status = excluded.status, result_json = excluded.result_json, updated_at = excluded.updated_at
+      WHERE request_receipts.method = excluded.method AND request_receipts.request_hash = excluded.request_hash
+    `).run(input.clientId, input.requestId, input.method, input.requestHash, input.status,
+      serializeResult(input.result), timestamp, timestamp);
+    if (Number(written.changes) !== 1) {
+      throw new SessionPlaneDomainError('input.idempotency-conflict', 'Request identity already belongs to another operation');
+    }
+  }
+
+  findConversationDeletion(conversationId: string): ReceiptRow | null {
+    const row = this.#database.raw.prepare(`
+      SELECT client_id AS clientId, request_id AS requestId FROM request_receipts
+      WHERE method = 'session.delete' AND json_extract(result_json, '$.conversationId') = ?
+        AND (status = 'attempted' OR json_extract(result_json, '$.deleted') = 1)
+      ORDER BY updated_at DESC LIMIT 1
+    `).get(conversationId) as { clientId: string; requestId: string } | undefined;
+    return row === undefined ? null : this.get(row.clientId, row.requestId);
+  }
+
   get(clientId: string, requestId: string): ReceiptRow | null {
     const row = this.#database.raw
       .prepare(`

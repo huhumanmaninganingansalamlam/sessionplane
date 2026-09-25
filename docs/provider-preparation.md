@@ -90,3 +90,40 @@ Keep one end-to-end MCP decision flow, exact identity/restart/no-resend checks,
 and literal prompt transport coverage. Delete tests for removed automatic model
 selection behavior; do not retain a second implementation to satisfy them.
 Live provider evidence must be reported separately from browser fixtures.
+
+## Unreadable or long conversations
+
+A successful health check only proves that the core and browser are available.
+For each operation, inspect the exact session and generation. If wait reports
+`provider.conversation-unavailable`, the conversation fetch failed and its
+message/composer surface is absent. This is not evidence of ongoing generation,
+permanent deletion, or non-submission. A 429 remains transport deferral: respect
+`nextCheckAt`, and do not replace a healthy conversation because of 429 alone.
+Use `sessionplane_submission_inspect` to inspect the live page and retrieve the
+original prompt, model, effort, surface, attachments (path/hash), and deadline.
+Do not endlessly repeat wait on a page that cannot display the conversation.
+
+When the caller decides the conversation must be replaced, or a completed long
+conversation needs a fresh context, use `sessionplane_session_create` for the
+same `teamId`, `roleKey`, and provider with a new stable request ID. The old
+session becomes superseded and the new one records `predecessorSessionId`.
+Preserve completed answers and required artifacts, then carry only the relevant
+role brief, current objective, decisions, and unresolved work into the new send.
+Keep requested model/effort and verify attachment identity. Do not copy an entire
+long transcript or rotate on an arbitrary message count. New sends still require
+fresh preparation decisions. A new session does not imply permission to repeat
+an unresolved submission; follow the caller/operator's explicit recovery intent.
+An existing instruction to replace and continue is authorization; do not ask again.
+
+Session replacement does not delete provider history. Cleanup is a separate
+operation after the role's work is complete and required answers/artifacts have
+been retrieved. Never delete active, unacknowledged, or unrecovered conversations
+merely because a successor exists or the page cannot be loaded.
+
+Call `sessionplane_session_delete` (`session.delete` RPC) with the exact session,
+generation and conversation ID, stable request ID and `outputsRetrieved: true`.
+This deletes ChatGPT history itself and closes its owned page while retaining
+local durable answers. The core rejects unresolved generations and shared
+conversation identities. It records the attempt before contacting the provider;
+`provider.deletion-unknown` survives restart and cannot be retried under another
+request ID. Successful replay returns the original deletion receipt.

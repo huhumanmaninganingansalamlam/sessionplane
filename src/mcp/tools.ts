@@ -316,7 +316,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
   tool(
     'sessionplane_session_create',
     'session.create',
-    'Create or replace the current provider session for an exact team role.',
+    'Create or replace the current provider session for an exact team role. Replacement supersedes the old session and records predecessorSessionId; it does not submit a prompt or delete provider history. Use after inspecting an unreadable conversation or when the caller chooses to rotate a long completed conversation. Carry forward only required context; never replay an unresolved submission automatically.',
     objectSchema(
       {
         ...mutationIdentityProperties,
@@ -330,6 +330,18 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
       },
       ['clientId', 'requestId', 'teamId', 'roleKey'],
     ),
+    false,
+  ),
+  tool(
+    'sessionplane_session_delete', 'session.delete',
+    'Delete the exact completed ChatGPT conversation from provider history after all required answers and artifacts have been retrieved. Explicit cleanup, separate from replacement. Rejects active, ambiguous and shared conversations. Does not delete local durable answers. Reuse the same requestId; an unknown deletion is never retried automatically.',
+    objectSchema({
+      ...mutationIdentityProperties,
+      sessionId: stringProperty('Exact completed session UUID.'),
+      generation: { type: 'integer', minimum: 1 },
+      conversationId: stringProperty('Exact durable provider conversation ID.'),
+      outputsRetrieved: { type: 'boolean', const: true, description: 'Caller confirms required answers and artifacts have been retrieved.' },
+    }, ['clientId', 'requestId', 'sessionId', 'generation', 'conversationId', 'outputsRetrieved']),
     false,
   ),
   tool(
@@ -366,7 +378,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
   tool(
     'sessionplane_submission_inspect',
     'session.submission.inspect',
-    'Inspect an exact caller-owned submission and live page evidence; attempt read-only acknowledgement recovery, even after its automatic window expired. Never resend or change preparation.',
+    'Inspect an exact caller-owned submission and live page evidence, including unreadable conversations; return original prompt, model, effort, attachment identities and deadline for caller-directed recovery. Attempt read-only acknowledgement recovery even after its automatic window expired. Never resend or change preparation.',
     objectSchema({
       ...baseIdentityProperties,
       requestId: stringProperty('Original session.send request ID.'),

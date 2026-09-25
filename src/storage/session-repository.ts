@@ -183,6 +183,25 @@ export class SessionRepository {
     return new Map(rows.map((row) => [row.sessionId, row]));
   }
 
+  conversationCleanupBlocker(sessionId: string, conversationId: string): boolean {
+    return this.#database.prepare(`
+      SELECT 1 FROM generations WHERE session_id = ? AND (
+        submission_state = 'failed_pre_submit' OR
+        (submission_state = 'submitted' AND completed_at IS NOT NULL AND response_message_id IS NOT NULL
+          AND answer_text IS NOT NULL AND error_code IS NULL)
+      ) IS NOT TRUE LIMIT 1
+    `).get(sessionId) !== undefined || this.#database.prepare(`
+      SELECT 1 FROM sessions WHERE conversation_id = ? AND session_id != ? LIMIT 1
+    `).get(conversationId, sessionId) !== undefined;
+  }
+
+  retireDeletedConversation(sessionId: string, timestamp: string): void {
+    this.#database.prepare("UPDATE sessions SET session_state = 'superseded', next_check_at = NULL, updated_at = ? WHERE session_id = ?")
+      .run(timestamp, sessionId);
+    this.#database.prepare('UPDATE team_roles SET current_session_id = NULL WHERE current_session_id = ?')
+      .run(sessionId);
+  }
+
   listNonterminalSnapshots(): readonly SessionSnapshot[] {
     const rows = this.#database
       .prepare(`

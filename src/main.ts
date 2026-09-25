@@ -18,6 +18,7 @@ import { RecoveryService } from './core/recovery-service.ts';
 import { StopService } from './core/stop-service.ts';
 import { TeamDirectory } from './core/team-directory.ts';
 import { SubmissionService } from './core/submission-service.ts';
+import { ConversationCleanupService } from './core/conversation-cleanup-service.ts';
 import { SessionUiService } from './core/session-ui-service.ts';
 import { createLogger, type Logger } from './logging.ts';
 import { RpcRouter } from './rpc/router.ts';
@@ -307,7 +308,10 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   registerCodeMethods(router, chatgptWorkflows);
   registerContextMethods(router, contextPackages);
   registerTeamMethods(router, teamDirectory, receipts);
-  registerSessionMethods(router, teamDirectory, receipts);
+  registerSessionMethods(router, teamDirectory, receipts, new ConversationCleanupService({
+    database, scheduler: actorScheduler, adapters: providerAdapters,
+    pageMutex: pageMutationMutex, registry: pageRegistry,
+  }));
   registerSessionUiMethods(router, new SessionUiService({
     submissions: submissionService,
     registry: pageRegistry,

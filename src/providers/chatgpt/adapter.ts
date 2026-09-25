@@ -248,6 +248,71 @@ export class ChatGptAdapter implements ProviderAdapter {
     }
   }
 
+  async openDeletion(request: ProviderRecoveryRequest) {
+    const conversationId = request.session.conversationId;
+    if (conversationId === null || conversationId.startsWith('WEB:')) {
+      throw new ProviderSubmissionError('session.conversation-mismatch', 'Deletion requires a durable ChatGPT conversation');
+    }
+    const { page } = await this.#browserOwner.createPage();
+    const origin = new URL(this.#loginUrl).origin;
+    try {
+      const auth = await page.context().request.get(origin + '/api/auth/session', { timeout: 15_000 });
+      let token: unknown;
+      try {
+        if (!auth.ok()) {
+          throw new ProviderSubmissionError(
+            auth.status() === 401 ? 'provider.authentication-required' : 'provider.unavailable',
+            'Deletion authentication request failed',
+          );
+        }
+        const body: unknown = await auth.json();
+        token = body !== null && typeof body === 'object' && 'accessToken' in body ? body.accessToken : null;
+      } finally { await auth.dispose(); }
+      if (typeof token !== 'string' || token.length < 8) {
+        throw new ProviderSubmissionError('provider.authentication-required', 'Deletion requires the dedicated authenticated profile');
+      }
+      const accessToken = token;
+      const endpoint = origin + '/backend-api/conversation/' + encodeURIComponent(conversationId);
+      const existing = await page.context().request.get(endpoint, {
+        headers: { authorization: 'Bearer ' + accessToken }, timeout: 15_000,
+      });
+      let alreadyDeleted = false;
+      try {
+        if (!existing.ok()) {
+          const body: unknown = await existing.json();
+          const detail = body !== null && typeof body === 'object' && 'detail' in body ? body.detail : null;
+          alreadyDeleted = existing.status() === 404 && detail !== null && typeof detail === 'object' &&
+            'code' in detail && detail.code === 'conversation_deleted' &&
+            'conversation_id' in detail && detail.conversation_id === conversationId;
+          if (!alreadyDeleted) throw new ProviderSubmissionError('provider.unavailable', 'Exact conversation could not be verified for deletion');
+        }
+      } finally { await existing.dispose(); }
+      return {
+        deleteOnce: async (): Promise<boolean> => {
+          if (alreadyDeleted) return true;
+          const response = await page.context().request.patch(
+            origin + '/backend-api/conversation/' + encodeURIComponent(conversationId), {
+              headers: { authorization: 'Bearer ' + accessToken },
+              data: { is_visible: false }, timeout: 15_000,
+            });
+          try {
+            if (response.status() >= 500 || response.status() === 408) {
+              throw new Error('Conversation deletion outcome is unknown');
+            }
+            if (!response.ok()) return false;
+            const body: unknown = await response.json();
+            if (body !== null && typeof body === 'object' && 'success' in body && body.success === true) return true;
+            throw new Error('Conversation deletion acknowledgement is unverified');
+          } finally { await response.dispose(); }
+        },
+        close: async () => { await page.close(); },
+      };
+    } catch (error) {
+      await page.close();
+      throw error;
+    }
+  }
+
   async recover(request: ProviderRecoveryRequest): Promise<ProviderRecoveryResult> {
     const pageKey = request.session.pageKey;
     const conversationId = request.session.conversationId;
@@ -696,8 +761,10 @@ class ChatGptObservationSource implements ProviderObservationSource {
         activity: activity.strength,
         dialogKind: dialog.kind,
         networkActivity: network.activity,
-        observationTransport: 'fresh',
-        reason: dialog.reason ?? activity.reason,
+        observationTransport: dom.loadFailureStatus === null ? 'fresh' : 'unavailable',
+        ...(dom.loadFailureStatus === null ? {} : { errorCode: 'provider.conversation-unavailable' }),
+        reason: dialog.reason ?? (dom.loadFailureStatus === null
+          ? activity.reason : 'conversation-load-http-' + dom.loadFailureStatus),
       };
     } catch (error) {
       const binding = this.#pageRegistry.getBinding(this.pageKey);

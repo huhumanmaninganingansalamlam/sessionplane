@@ -25,7 +25,7 @@ import {
   type OutboxRecord,
   type OutboxState,
 } from '../storage/outbox-repository.ts';
-import { hashCanonical } from '../storage/receipt-repository.ts';
+import { ReceiptRepository, hashCanonical } from '../storage/receipt-repository.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
 import type { TeamDirectory } from './team-directory.ts';
 
@@ -679,7 +679,11 @@ export class SubmissionService {
       const result = {
         requestId: outbox.requestId,
         snapshot,
-        requested: { prompt: requested.prompt, model: requested.model, effort: requested.effort },
+        requested: {
+          prompt: requested.prompt, model: requested.model, effort: requested.effort,
+          surface: requested.surface, attachments: requested.attachments,
+          sessionDeadlineSec: requested.sessionDeadlineSec,
+        },
       };
       if (snapshot.pageKey === null) return { ...result, evidence: null };
       return await this.#pageMutex.runExclusive(snapshot.pageKey, async () => ({
@@ -969,6 +973,10 @@ export class SubmissionService {
           'session.busy',
           `Session ${sessionId} already has active generation ${session.currentGeneration}`,
         );
+      }
+      if (session.conversationId !== null &&
+          new ReceiptRepository(this.#database).findConversationDeletion(session.conversationId) !== null) {
+        throw new SessionPlaneDomainError('session.cleanup-pending', 'Conversation deletion was attempted; create a replacement session');
       }
       const team = this.#directory.getTeam(session.teamId);
       const generation = session.currentGeneration + 1;

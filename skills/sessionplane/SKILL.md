@@ -136,3 +136,26 @@ not submitted: inspect again, choose the newly visible send control, and resume
 the same request/generation. A collapsed model/effort chooser can confirm the
 current displayed selection without clicking. Interpret slider values using the
 full observed popup text; core verifies the chosen value, not model-name guesses.
+
+## Conversation replacement and cleanup
+
+- `provider.conversation-unavailable` means a failed conversation fetch and absent
+  conversation surface, not ongoing generation or proof of non-submission. Inspect
+  the exact request with `sessionplane_submission_inspect`; it returns live evidence
+  and original prompt/model/effort/surface/attachment identities/deadline. Respect
+  `nextCheckAt`; a backend 429 alone does not justify replacement.
+- For an unreadable conversation or a completed long conversation the caller decides
+  to rotate, use `sessionplane_session_create` with the same team, role and provider.
+  It supersedes the old session and records `predecessorSessionId`. Carry a concise
+  role handoff, required artifacts and unchanged model intent into fresh preparation.
+  Do not rotate at an arbitrary message count or blindly replay unresolved work.
+  Apply an existing operator instruction to replace and continue; do not ask again.
+- Replacement does not delete provider history. Cleanup requires completed role work
+  and retrieval of required answers/artifacts. Never delete active, unacknowledged
+  or unrecovered conversations merely because a successor exists.
+
+Use `sessionplane_session_delete` to delete the provider conversation history itself,
+not just its browser tab. Pass the exact `sessionId`, `generation`, `conversationId`,
+a stable `requestId`, and `outputsRetrieved: true` only after retrieving required
+answers/artifacts. Local answers remain available. `provider.deletion-unknown`
+requires observation of that conversation; never retry with a fresh request ID.
