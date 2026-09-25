@@ -705,13 +705,14 @@ async function waitForLiveModelLabel(page: Page, requestedModel: string): Promis
     const menu = page.locator(CHATGPT_SELECTORS.intelligenceContent).filter({ visible: true }).first();
     const slider = menu.locator('[role="slider"][aria-valuemin][aria-valuemax][aria-valuenow]').first();
     const labels = await slider.evaluate((element) => {
+      const menu = element.closest('[role="menu"]');
       const control = element.closest('[role="menuitem"][aria-describedby]');
       const descriptions = (control?.getAttribute('aria-describedby') ?? '')
         .split(/\s+/)
         .map((id) => document.getElementById(id))
-        .filter((node): node is HTMLElement => node instanceof HTMLElement && control?.contains(node) === true)
+        .filter((node): node is HTMLElement => node instanceof HTMLElement && menu?.contains(node) === true)
         .map((node) => node.textContent ?? '');
-      const status = Array.from(element.closest('[role="menu"]')?.querySelectorAll('[role="status"]') ?? []).filter((node) => {
+      const status = Array.from(menu?.querySelectorAll('[role="status"]') ?? []).filter((node) => {
         const rect = node.getBoundingClientRect();
         return rect.width > 0 && rect.height > 0;
       });

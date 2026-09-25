@@ -806,7 +806,6 @@ test('ChatGPT submission uses live intelligence slider when capability feed expo
           const control = document.querySelector('#slider-control');
           const announcement = document.querySelector('#slider-announcement');
           if (control === null || announcement === null) throw new Error('slider fixture missing');
-          control.appendChild(announcement);
           control.setAttribute('aria-describedby', 'slider-announcement');
           document.querySelector('#slider-status')?.removeAttribute('role');
         });
