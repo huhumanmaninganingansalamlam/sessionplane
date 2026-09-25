@@ -21,7 +21,7 @@ Tagged releases attach a prebuilt npm package and SHA-256 checksum. Install the
 release package globally, then run the built-in doctor:
 
 ```bash
-VERSION=0.2.7
+VERSION=0.2.8
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz"
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz.sha256"
 sha256sum -c "sessionplane-$VERSION.tgz.sha256"
@@ -311,4 +311,3 @@ sessplane research browse-plan --plan plan.json --enrichment enrichment.json --j
 `SESSIONPLANE_FETCH_ALLOW_PRIVATE=true` exists only for isolated local fixtures
 or intentionally private deployments. It is false by default and should not be
 enabled for untrusted URLs.
-
