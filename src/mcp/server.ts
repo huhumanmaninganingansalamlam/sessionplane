@@ -300,11 +300,15 @@ function callToolResult(
 
 function serverInstructions(): string {
   return [
+    'ChatGPT send starts preparation, not submission.',
+    'On provider.preparation-required, preserve clientId + requestId + sessionId + generation and continue sessionplane_preparation_inspect, sessionplane_preparation_decide, sessionplane_preparation_resume until acknowledged.',
+    'Wait cannot advance preparation. After reconnect or compaction, inspect the same pending request with fresh evidence; never start a replacement send to resume it.',
     'Use teamId as the durable aggregate handle.',
     'Call sessionplane_team_get when starting or resuming work.',
     'Address mutations with teamId + roleKey or an exact sessionId.',
     'Preserve the returned sessionId and generation for waits.',
     'waitExpired and backend observation deferral are successful nonterminal states.',
+    'submission_unknown requires exact read-only sessionplane_submission_inspect; never automatically resend.',
   ].join(' ');
 }
 
@@ -358,4 +362,3 @@ if (isDirectExecution()) {
     process.exitCode = 1;
   });
 }
-

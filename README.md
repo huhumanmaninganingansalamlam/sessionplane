@@ -49,6 +49,22 @@ gh attestation verify "sessionplane-$VERSION.tgz" \
 
 The package exposes only the `sessplane` executable.
 
+### Connect the agent through MCP
+
+Installing the package or skills does not register an MCP server. For Codex:
+
+```bash
+codex mcp add sessionplane -- sessplane mcp
+codex mcp get sessionplane
+```
+
+Load the configuration in the Codex client and check `/mcp` for the connected
+SessionPlane server and its preparation tools before starting ChatGPT work.
+Other MCP clients should register `sessplane` with arguments `["mcp"]` as a
+stdio server. The client owns the transport process; an agent must not depend
+on a shell subprocess handle surviving context compaction. Reconnection uses
+the original `clientId + requestId + sessionId + generation` stored in the core.
+
 ## Development
 
 Use `dev` for ongoing development. Keep `main` as the release line and published

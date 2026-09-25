@@ -1,6 +1,6 @@
 ---
 name: sessionplane
-description: Route durable role-addressed AI chat sessions through the SessionPlane core using the sessplane CLI or MCP tools.
+description: Route durable role-addressed AI chat sessions through the SessionPlane MCP tools, including agent-directed preparation and exact-generation answers.
 ---
 
 # SessionPlane
@@ -17,6 +17,19 @@ unavailable, surface that condition instead of creating an isolated runtime.
 
 ## Required identity workflow
 
+Use the registered SessionPlane MCP tools for the complete ChatGPT workflow.
+Before sending, discover `sessionplane_preparation_inspect`,
+`sessionplane_preparation_decide`, and `sessionplane_preparation_resume` in the
+client's tool catalog. MCP resources are not the tool catalog: an empty resource
+list or an unknown CLI command does not establish that an MCP tool is absent.
+If the server is missing, configure the client's stdio MCP server as `sessplane
+mcp` (Codex: `codex mcp add sessionplane -- sessplane mcp`) and load that
+configuration. Skills installation alone does not register the server.
+Use the client's MCP connection rather than manually managing JSON-RPC through
+a shell subprocess. After reconnect or compaction, inspect the same pending
+request using its original four-part identity and fresh evidence; no new send
+is needed. `wait` does not advance a preparation request.
+
 1. Preserve the durable `teamId` in task state.
 2. At task start or resume, call `sessionplane_team_get` or `sessplane team show <teamId> --json` before selecting a role or session.
 3. Address role operations with exact `teamId + roleKey`. For generation-specific reads and waits, preserve the returned `sessionId + generation`.
@@ -25,7 +38,7 @@ unavailable, surface that condition instead of creating an isolated runtime.
 
 ## Send and wait
 
-- Submit with `sessionplane_send` or `sessplane send <teamId> <roleKey> --prompt ... --request-id ...`.
+- Start the request with `sessionplane_send`, then complete its preparation workflow below.
 - Keep the returned `sessionId` and `generation` and use them for `sessionplane_wait` or `sessplane wait --session <sessionId> --generation <generation>`.
 - `waitExpired: true` is a successful nonterminal response. It ends only the client wait; the core actor and provider generation continue.
 - `observationTransport: "deferred"` with a backend 429 reason is a successful nonterminal observation state, not provider blocking and not a reason to resend.

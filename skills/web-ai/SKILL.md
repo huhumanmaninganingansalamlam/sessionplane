@@ -14,16 +14,14 @@ browser automation belongs to Playwright/the general browser skill. Do not
 start another SessionPlane core, do not pass --state-dir, and do not use
 SessionPlane to log into or manipulate unrelated websites.
 
-```bash
-sessplane team create --name issue-123 --request-id issue-123-team --json
-sessplane role add "$TEAM_ID" expert.backend --type expert \
-  --request-id issue-123-backend-role --json
-sessplane session create "$TEAM_ID" expert.backend --provider chatgpt \
-  --request-id issue-123-backend-session --json
-sessplane send "$TEAM_ID" expert.backend --prompt "Review this" \
-  --file ./context.md --request-id issue-123-backend-1 --json
-sessplane wait --session "$SESSION_ID" --generation "$GENERATION" --json
-```
+Use the registered SessionPlane MCP tools throughout the ChatGPT workflow:
+team create/get, role create, session create, send, preparation inspect/decide/
+resume, then exact-generation wait. Discover the preparation tools before send.
+See the SessionPlane skill for MCP registration and connection recovery.
+Installing skills does not register the MCP server. Do not use a temporary shell
+process as the agent's MCP connection or infer tool availability from the MCP
+resource list. After compaction or reconnect, continue the original preparation
+identity with fresh inspection; waiting alone cannot submit a prepared request.
 
 `waitExpired` and backend observation deferral are nonterminal success states.
 `submission_unknown` must never be automatically resent. Use a stable

@@ -49,6 +49,14 @@ ChatGPT Work is forbidden. Named-mode automatic switching is removed.
 
 ## Identity and restart
 
+The MCP client owns server registration and the stdio connection. Installing
+skills alone does not connect it. Preparation is core-owned, not tied to a
+transport process or an agent's context window. On client reconnection or
+compaction, rediscover the preparation tools and inspect the original
+`clientId + requestId + sessionId + generation` before deciding/resuming.
+Do not create a new send, wait for an unsubmitted answer, or infer unavailable
+tools from an empty MCP resource list. See the README for Codex registration.
+
 The original caller and request own the entire preparation workflow. Each action
 checks owner, generation, page binding, observation revision and live semantics.
 Unrelated sessions remain independent. Replay of `session.send` reports the
