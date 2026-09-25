@@ -175,6 +175,7 @@ export class BrowserRefSnapshotStore {
           if (title !== null && title.trim() !== '') return normalize(title);
           const placeholder = element.getAttribute('placeholder');
           if (placeholder !== null && placeholder.trim() !== '') return normalize(placeholder);
+          if (inferredRole(element) === 'textbox') return '';
           const value =
             element instanceof HTMLInputElement ||
             element instanceof HTMLTextAreaElement ||
@@ -237,6 +238,8 @@ export class BrowserRefSnapshotStore {
             truncated = true;
             return;
           }
+          const style = getComputedStyle(element);
+          if (style.display === 'none' || Number(style.opacity) === 0) return;
           const visible = isVisible(element);
           const role = inferredRole(element);
           const include = visible && (!interactiveOnly || isInteractive(element, role));
@@ -324,9 +327,6 @@ export class BrowserRefSnapshotStore {
             });
           }
 
-          if (!visible && element !== document.body && element !== document.documentElement) {
-            return;
-          }
           for (const child of element.children) {
             visit(child, depth + 1, element.id === '' ? ancestorIds : [...ancestorIds, element.id]);
             if (truncated) return;
@@ -520,19 +520,14 @@ export function matchesPreparationTarget(
 export function hasPreparationSelectionEvidence(
   nodes: readonly BrowserSnapshotNode[],
   target: PreparationTarget,
-  expectedIntent?: string | null,
 ): boolean {
   const normalize = (value: string): string => value.replaceAll(/\s+/g, ' ').trim().toLowerCase();
   if (target.role === 'slider' && target.selectedValue !== null) {
-    return nodes.some((node) => {
-      if (!matchesPreparationTarget(node, target) || Number(node.ariaValueNow ?? node.value) !== target.selectedValue) return false;
-      if (expectedIntent == null || expectedIntent.trim() === '') return false;
-      const evidence = normalize(`${node.ariaValueText ?? ''} ${node.description} ${node.name} ${node.text}`);
-      const requested = normalize(expectedIntent);
-      if (/\bpro\b/.test(requested)) return /\bpro\b/.test(evidence);
-      return evidence.includes(requested);
-    });
+    return nodes.some((node) => matchesPreparationTarget(node, target) &&
+      Number(node.ariaValueNow ?? node.value) === target.selectedValue);
   }
+  if (target.role === 'button') return nodes.some((node) => matchesPreparationTarget(node, target) &&
+    node.expanded === false && node.hasPopup !== null);
   if (nodes.some((node) => matchesPreparationTarget(node, target) &&
       (node.selected === true || node.checked === true))) return true;
   const choice = normalize(target.name || target.text);

@@ -335,7 +335,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
   tool(
     'sessionplane_send',
     'session.send',
-    'Submit one exact generation to a session. Ambiguous acknowledgement is never retried.',
+    'Prepare one exact generation (ChatGPT requires inspect/decide/resume before submission) to a session. Ambiguous acknowledgement is never retried.',
     objectSchema(
       {
         ...mutationIdentityProperties,
@@ -346,7 +346,6 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
         model: { type: ['string', 'null'], maxLength: 200 },
         effort: { type: ['string', 'null'], maxLength: 200 },
         surface: { type: ['string', 'null'], maxLength: 200 },
-        assistedPreparation: { type: 'boolean', default: false },
         files: {
           type: 'array',
           maxItems: 20,
@@ -363,6 +362,19 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
       { oneOf: selectorOneOf },
     ),
     false,
+  ),
+  tool(
+    'sessionplane_submission_inspect',
+    'session.submission.inspect',
+    'Inspect an exact caller-owned submission and live page evidence; attempt read-only acknowledgement recovery, even after its automatic window expired. Never resend or change preparation.',
+    objectSchema({
+      ...baseIdentityProperties,
+      requestId: stringProperty('Original session.send request ID.'),
+      sessionId: stringProperty('Exact durable session UUID.'),
+      generation: { type: 'integer', minimum: 0 },
+      maxNodes: { type: 'integer', minimum: 1, maximum: 5000 },
+    }, ['clientId', 'requestId', 'sessionId', 'generation']),
+    true,
   ),
   tool(
     'sessionplane_preparation_inspect',

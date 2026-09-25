@@ -2,6 +2,7 @@ import type { ElementHandle, Page } from 'playwright-core';
 
 import { PageRegistry, PageRegistryError } from '../browser/page-registry.ts';
 import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionEvidence, sameSnapshotSemantics, type BrowserSnapshotNode } from '../browser/ref-snapshot.ts';
+import type { SessionSnapshot } from '../domain/session.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { PreparationPurpose, PreparationTarget } from '../providers/provider-adapter.ts';
 import type { SubmissionService } from './submission-service.ts';
@@ -19,13 +20,21 @@ export class SessionUiService {
   }
 
   async inspect(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
-    return await this.#submissions.withPendingPreparation(input, async (session) => {
-      const page = this.#requirePage(session);
-      const binding = this.#registry.refreshPage(session.pageKey!);
-      return await this.#refs.capture({
-        pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch, page,
-        interactive: false, maxNodes: Math.max(1, Math.min(5_000, input.maxNodes ?? 1_000)),
-      });
+    return await this.#submissions.withPendingPreparation(input,
+      async (session) => await this.#capture(session, input.maxNodes));
+  }
+
+  async inspectSubmission(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
+    return await this.#submissions.inspectSubmission(input,
+      async (session) => await this.#capture(session, input.maxNodes));
+  }
+
+  async #capture(session: SessionSnapshot, maxNodes?: number) {
+    const page = this.#requirePage(session);
+    const binding = this.#registry.refreshPage(session.pageKey!);
+    return await this.#refs.capture({
+      pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch, page,
+      interactive: false, maxNodes: Math.max(1, Math.min(5_000, maxNodes ?? 1_000)),
     });
   }
 
@@ -37,7 +46,7 @@ export class SessionUiService {
     readonly ref?: string;
     readonly value?: number | undefined;
   }) {
-      return await this.#submissions.decidePreparation(input, async (session, requested) => {
+      return await this.#submissions.decidePreparation(input, async (session) => {
       const purpose = input.purpose;
       const snapshotId = input.snapshotId;
       const ref = input.ref;
@@ -77,7 +86,7 @@ export class SessionUiService {
           await element.click({ timeout: 5_000 });
           await page.waitForTimeout(100);
         }
-        if (!reveal && (purpose === 'model' || purpose === 'effort') && currentNode.role !== 'slider' && currentNode.selected !== true && currentNode.checked !== true) {
+        if (!reveal && (purpose === 'model' || purpose === 'effort') && !['slider', 'button'].includes(currentNode.role) && currentNode.selected !== true && currentNode.checked !== true) {
           if (input.value !== undefined) throw new SessionPlaneDomainError('input.invalid', 'A value is only valid when choosing a slider value');
           await element.click({ timeout: 5_000 });
           await page.waitForTimeout(100);
@@ -102,17 +111,27 @@ export class SessionUiService {
           await element.focus();
           for (let step = 0; step < adjustment.count; step += 1) await element.press(adjustment.key);
         }
-        const after = await this.#refs.capture({
+        let after = await this.#refs.capture({
           pageKey: session.pageKey, bindingEpoch: this.#registry.refreshPage(session.pageKey).bindingEpoch,
-          page, interactive: false, maxNodes: 1_000,
+          page, interactive: false, maxNodes: 5_000,
         });
         if (purpose === 'model' || purpose === 'effort') {
-          const intent = purpose === 'model' ? requested.model : requested.effort;
-          if (reveal ? !hasRevealedChoices(after.nodes, currentNode) : !hasPreparationSelectionEvidence(after.nodes, toPreparationTarget(purpose, currentNode, input.value), intent)) {
+          if (reveal ? !hasRevealedChoices(after.nodes, await this.#refs.nodeForElement({ pageKey: session.pageKey, snapshotId: after.snapshotId, element })) : !hasPreparationSelectionEvidence(after.nodes, toPreparationTarget(purpose, currentNode, input.value))) {
             throw new SessionPlaneDomainError('provider.action-unknown', 'The chosen control did not show a verified selection or related choice list');
           }
         }
-        return { choice: reveal ? null : toPreparationTarget(purpose, currentNode, input.value), result: after };
+        let choice = reveal ? null : toPreparationTarget(purpose, currentNode, input.value);
+        if (!reveal && currentNode.role === 'slider') {
+          const openers = after.nodes.filter((node) => node.role === 'button' && node.expanded === true &&
+            node.controls.some((id) => currentNode.ancestorIds.includes(id)));
+          if (openers.length === 1 && after.nodes.some((node) => node.role === 'menu' && currentNode.ancestorIds.includes(node.id))) {
+            await element.press('Escape');
+            after = await this.#refs.capture({ pageKey: session.pageKey, bindingEpoch: binding.bindingEpoch, page, interactive: false, maxNodes: 5_000 });
+            const summary = after.nodes.find((node) => node.id === openers[0]!.id && node.role === 'button' && node.expanded === false);
+            if (summary !== undefined && summary.id !== '') choice = toPreparationTarget(purpose, summary);
+          }
+        }
+        return { choice, result: after };
       } catch (error) {
         throw typedUiError(error);
       } finally {
@@ -159,10 +178,10 @@ function validatePurposeTarget(purpose: PreparationPurpose, node: BrowserSnapsho
     throw new SessionPlaneDomainError('input.invalid', 'Sliders can only set an explicit model or effort value');
   }
   const selectableRole = ['menuitemradio', 'option', 'radio'];
-  if (reveal && (node.role !== 'button' || node.controls.length === 0)) {
+  if (reveal && (node.role !== 'button' || (node.controls.length === 0 && !['menu', 'listbox', 'dialog', 'true'].includes(node.hasPopup ?? '')))) {
     throw new SessionPlaneDomainError('input.invalid', 'A chooser reveal must target a button with related choices');
   }
-  if ((purpose === 'model' || purpose === 'effort') && !reveal && node.role !== 'slider' && !selectableRole.includes(node.role)) {
+  if ((purpose === 'model' || purpose === 'effort') && !reveal && node.role !== 'slider' && !(node.role === 'button' && node.expanded === false && node.hasPopup !== null) && !selectableRole.includes(node.role)) {
     throw new SessionPlaneDomainError('input.invalid', 'Model and effort choices must target an option, radio, or menuitemradio');
   }
   if (purpose === 'composer' && !(node.editable && node.role === 'textbox')) {

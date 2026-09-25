@@ -11,6 +11,11 @@ const identity = {
 } as const;
 
 export function registerSessionUiMethods(router: RpcRouter, ui: SessionUiService): void {
+  router.register('session.submission.inspect', z.object({
+    ...identity,
+    maxNodes: z.number().int().min(1).max(5_000).optional(),
+  }).strict(), (input) => ui.inspectSubmission(input));
+
   router.register('session.preparation.inspect', z.object({
     ...identity,
     maxNodes: z.number().int().min(1).max(5_000).optional(),

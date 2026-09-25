@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
@@ -282,11 +282,41 @@ class CaptureWritable extends Writable {
   }
 }
 
-async function runCliJson(argv: readonly string[]) {
+test('CLI file and stdin prompts preserve literal text and reject competing sources before send', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-prompt-input-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const service = await startCore({ config, startBrowser: false, providerAdapters: [fake], logger: silentLogger() });
+  try {
+    const prompt = "Director's report: \"quoted\" `literal` $(literal)\n한국어 🧭\n";
+    const filename = path.join(root, 'prompt.txt');
+    writeFileSync(filename, prompt);
+    const bytes = Buffer.from(prompt);
+    for (const source of [['--prompt-file', filename], ['--prompt-stdin']]) {
+      const team = service.teamDirectory.createTeam({ clientId: 'literal-client' });
+      const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+      const args = ['send', '--session', session.sessionId, '--client-id', 'literal-client', '--request-id', source[0]!.slice(2), '--state-dir', config.stateDir, '--json'];
+      const rejected = await runCliJson([...args, '--prompt', 'conflict', ...source]);
+      assert.notEqual(rejected.code, 0);
+      assert.equal(service.teamDirectory.getSession(session.sessionId).generation, 0);
+      const sent = await runCliJson([...args, ...source], Array.from(bytes, (byte) => Buffer.from([byte])));
+      assert.equal(sent.code, 0, sent.stderr);
+      assert.equal(fake.submissionRequests.at(-1)?.prompt, prompt);
+      const replay = await runCliJson([...args, '--prompt', prompt]);
+      assert.equal(replay.code, 0, replay.stderr);
+      assert.equal(JSON.parse(replay.stdout).generation, JSON.parse(sent.stdout).generation);
+    }
+  } finally {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+async function runCliJson(argv: readonly string[], input: readonly (string | Buffer)[] = []) {
   const stdout = new CaptureWritable();
   const stderr = new CaptureWritable();
   const code = await runCli(argv, {
-    stdin: Readable.from([]),
+    stdin: Readable.from(input),
     stdout,
     stderr,
   });

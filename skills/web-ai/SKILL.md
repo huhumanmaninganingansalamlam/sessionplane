@@ -32,9 +32,8 @@ The core may recover a unique exact-prompt acknowledgement read-only and resume
 observation on the same generation; keep waiting on its exact `sessionId` and
 `generation`.
 
-For a ChatGPT MCP send that needs caller interpretation of an ambiguous model,
-effort, composer or send control, opt in with `assistedPreparation: true` on
-`sessionplane_send`. A `provider.preparation-required` MCP result has
+Every ChatGPT send begins caller-directed preparation. The automatic selection
+path and `assistedPreparation` flag have been removed. A `provider.preparation-required` MCP result has
 `isError: true` and `structuredContent.details` with the original `requestId`,
 `sessionId`, `generation`, and pending `snapshot`. Call
 `sessionplane_preparation_inspect` with that identity, then
@@ -45,7 +44,7 @@ Call `sessionplane_preparation_resume` with the original identity to let core
 fill the composer and submit once, then continue waiting on the same
 generation. Use `decision: "cancel"` when evidence cannot support the
 requested intent. These preparation tools are available through MCP and their
-RPC methods; the existing CLI send flow remains unchanged.
+RPC methods; CLI send also begins preparation without submitting.
 
 ## Provider continuity and model families
 
@@ -57,25 +56,10 @@ of `submission_unknown`, model unavailability, a consent/interstitial page,
 rate limiting, wait expiry, or observation trouble. Change provider only when
 the user or caller explicitly requested a different provider.
 
-For ChatGPT, pass `--model Pro` when the intent is the best currently available
-Pro-family model. SessionPlane discovers the live model menu, selects the
-highest enabled Pro-family option, and falls back to the next enabled Pro option
-before submit. Do not encode version labels such as `6 Pro` or `5.6 Pro` in the
-agent workflow.
-
-Do not inspect `/backend-api/models`, a partial model list, or one picker snapshot
-and declare Pro unavailable before calling SessionPlane. ChatGPT can return an
-Instant-only capability feed while the live composer picker still exposes Pro.
-Let `sessplane send --model Pro` perform both capability and live-picker
-reconciliation. Only a typed pre-submit `provider.model-unavailable` returned by
-that current submission establishes Pro unavailability. A missing catalog entry
-is not a task blocker. Do not call it a rate limit unless SessionPlane reports
-structured 429/deferred evidence or verified visible provider rate-limit evidence.
-
-`provider.human-action-required` means a visible browser verification is open.
-Do not retry in a loop and do not attempt to click or bypass it. Ask the user to
-complete it in the headed SessionPlane Chrome window, then rerun the submission
-with a new request ID because the previous attempt ended before prompt mutation.
+For ChatGPT preserve semantic `model=Pro`. Inspect the current choices and choose
+an available Pro-family model using the live evidence. Do not encode version
+labels, infer availability from a partial catalog, or switch to another family.
+Core no longer chooses a model or effort on the agent's behalf.
 
 Provider-created files are durable:
 
@@ -93,7 +77,7 @@ generated package or select inline transport.
 SessionPlane never submits through ChatGPT Work and never silently changes a
 Work composer back to Chat. An explicit `surface=work` request or a visibly
 active Work composer fails before the irreversible submit. Use ordinary Chat
-model/reasoning selection and named Chat modes instead.
+model/reasoning selection through the preparation workflow. Named-mode automatic switching is not supported.
 
 ## ChatGPT Project Sources
 
@@ -117,6 +101,10 @@ sessplane chatgpt project-sources add \
 recovery. It never scans the active tab. New code ZIPs must contain a nonempty
 root `PLAN.md` or `00_plan.md`; unsafe or malformed archives are rejected.
 
+ChatGPT code generation first returns the same preparation handoff. Complete
+inspect/decide/resume with its original request identity, then repeat the exact
+`code generate` request to wait and export artifacts without another submit.
+
 ```bash
 sessplane code generate --session "$SESSION_ID" \
   --prompt "Build a minimal TypeScript CLI" \
@@ -137,3 +125,38 @@ only when recovering legacy archives created before the plan contract.
 sessplane code extract --session "$SESSION_ID" \
   --output-zip ./recovered.zip --require-plan --json
 ```
+
+## Literal prompt transport and ambiguous submissions
+
+Prefer `sessionplane_send` with structured JSON arguments. For CLI bodies from
+files use `--prompt-file PATH`; for piped text use `--prompt-stdin`. Choose exactly
+one of these or `--prompt`. Never interpolate arbitrary prompt text into shell
+command strings. Keep the original request ID and exact payload for idempotent
+replay; missing output or shell failure is not evidence of non-submission.
+
+When a generation remains `submission_unknown`, call
+`sessionplane_submission_inspect` with its original `clientId`, `requestId`,
+`sessionId`, and `generation`. This explicitly attempts read-only acknowledgement
+recovery and returns the current snapshot, requested prompt/model/effort, and
+live page evidence, including after automatic recovery has expired. It also handles existing ambiguous records. If it recovers the exact user identity, wait on
+the same generation for the answer. Otherwise report what the evidence shows;
+do not keep claiming an answer is generating merely because wait is nonterminal.
+A draft or absent message does not authorize retry. Obtain an explicit operator
+decision before replacement/resubmission; do not use preparation resume to resend.
+
+## Mandatory ChatGPT preparation
+
+Every `sessionplane_send` starts preparation before filling or submitting. Preserve
+`model=Pro` when requested. Inspect current UI, choose matching model and effort
+when requested, and choose composer/send controls from fresh observed refs. Use
+`sessionplane_preparation_decide` and then `sessionplane_preparation_resume` on
+the original request and generation. No old automatic selector or opt-in flag
+exists. CLI send is also a preparation request, not an immediate browser submit.
+If intent cannot be satisfied, cancel preparation; do not silently change intent.
+
+If no send button exists before typing, choose model/effort and composer first,
+then resume. A preparation-required response can mean the prompt is filled but
+not submitted: inspect again, choose the newly visible send control, and resume
+the same request/generation. A collapsed model/effort chooser can confirm the
+current displayed selection without clicking. Interpret slider values using the
+full observed popup text; core verifies the chosen value, not model-name guesses.
