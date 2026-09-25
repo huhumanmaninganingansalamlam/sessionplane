@@ -801,6 +801,16 @@ test('ChatGPT submission uses live intelligence slider when capability feed expo
         viewStateWithoutDataActive: 'viewStateWithoutDataActive' in testCase,
       });
       await created.page.goto('https://chatgpt.com/');
+      if (testCase.name === 'semantic Pro') {
+        await created.page.evaluate(() => {
+          const control = document.querySelector('#slider-control');
+          const announcement = document.querySelector('#slider-announcement');
+          if (control === null || announcement === null) throw new Error('slider fixture missing');
+          control.appendChild(announcement);
+          control.setAttribute('aria-describedby', 'slider-announcement');
+          document.querySelector('#slider-status')?.removeAttribute('role');
+        });
+      }
       registry.refreshPage(created.binding.pageKey);
       const sessionId = 'session-live-slider-fallback-' + String(index);
       registry.reservePage(created.binding.pageKey, {
