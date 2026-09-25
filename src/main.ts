@@ -109,11 +109,12 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageBindings.upsert(binding);
   });
   const pageMutationMutex = new PageMutationMutex();
+  const actorScheduler = new ActorScheduler(database);
   const teamDirectory = new TeamDirectory(database, {
     enabledProviders: config.enabledProviders,
+    onSessionChanged: (sessionId) => actorScheduler.refreshSession(sessionId),
   });
   const receipts = new ReceiptRepository(database);
-  const actorScheduler = new ActorScheduler(database);
   const browserOwner =
     options.startBrowser === false
       ? null
@@ -129,8 +130,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
 
   try {
     await browserOwner?.start();
-    const restoredPredecessors = new SessionRepository(database.raw).restorePendingPredecessors(config.enabledProviders);
-    if (restoredPredecessors > 0) logger.info('recovery.pending-predecessors', { count: restoredPredecessors });
+    const restoredRetiredSessions = new SessionRepository(database.raw).restorePendingRetiredSessions(config.enabledProviders);
+    if (restoredRetiredSessions > 0) logger.info('recovery.pending-retired-sessions', { count: restoredRetiredSessions });
     actorScheduler.restore();
   } catch (error) {
     actorScheduler.close();

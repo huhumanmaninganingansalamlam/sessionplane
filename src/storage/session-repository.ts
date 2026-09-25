@@ -381,12 +381,13 @@ export class SessionRepository {
     return true;
   }
 
-  restorePendingPredecessors(enabledProviders: readonly string[]): number {
+  restorePendingRetiredSessions(enabledProviders: readonly string[]): number {
     if (enabledProviders.length === 0) return 0;
     const result = this.#database.prepare(`
       UPDATE sessions SET session_state = 'observing', updated_at = ?
-      WHERE session_state = 'superseded' AND provider IN (${enabledProviders.map(() => '?').join(',')})
-        AND EXISTS (SELECT 1 FROM sessions successor WHERE successor.predecessor_session_id = sessions.session_id)
+      WHERE session_state IN ('superseded', 'cancelled') AND provider IN (${enabledProviders.map(() => '?').join(',')})
+        AND (EXISTS (SELECT 1 FROM sessions successor WHERE successor.predecessor_session_id = sessions.session_id)
+          OR EXISTS (SELECT 1 FROM team_roles role WHERE role.role_id = sessions.role_id AND role.role_state = 'retired'))
         AND EXISTS (SELECT 1 FROM generations g WHERE g.session_id = sessions.session_id
           AND g.generation = sessions.current_generation AND g.prompt_submitted = 1
           AND g.submission_state IN ('submitted', 'submission_unknown') AND g.completed_at IS NULL)
@@ -394,34 +395,13 @@ export class SessionRepository {
     return Number(result.changes);
   }
 
-  transitionToSuperseded(sessionId: string, updatedAt: string): void {
+  retireUnsubmittedSession(sessionId: string, state: 'superseded' | 'cancelled', updatedAt: string): void {
     const session = this.getSnapshot(sessionId);
-    // Role replacement changes routing, not the lifetime of an already submitted request.
-    if (session?.promptSubmitted && !session.terminal) return;
-    if (session === null || isTerminalSessionState(session.sessionState)) {
-      return;
-    }
-    this.#database
-      .prepare(`
-        UPDATE sessions
-        SET session_state = 'superseded', updated_at = ?
-        WHERE session_id = ?
-      `)
-      .run(updatedAt, sessionId);
-  }
-
-  transitionToCancelled(sessionId: string, updatedAt: string): void {
-    const session = this.getSession(sessionId);
-    if (session === null || isTerminalSessionState(session.sessionState)) {
-      return;
-    }
-    this.#database
-      .prepare(`
-        UPDATE sessions
-        SET session_state = 'cancelled', provider_state = 'stopped', updated_at = ?
-        WHERE session_id = ?
-      `)
-      .run(updatedAt, sessionId);
+    // Routing retirement cannot cancel an already submitted provider request.
+    if (session === null || isTerminalSessionState(session.sessionState) || session.promptSubmitted) return;
+    this.#database.prepare(`
+      UPDATE sessions SET session_state = ?, provider_state = ?, updated_at = ? WHERE session_id = ?
+    `).run(state, state === 'cancelled' ? 'stopped' : session.providerState, updatedAt, sessionId);
   }
 
   getSnapshot(sessionId: string): SessionSnapshot | null {

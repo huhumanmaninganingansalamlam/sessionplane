@@ -128,9 +128,12 @@ conversation identities. It records the attempt before contacting the provider;
 `provider.deletion-unknown` survives restart and cannot be retried under another
 request ID. Successful replay returns the original deletion receipt.
 
-Role replacement does not cancel a submitted predecessor generation. Continue exact
+Role replacement and role retirement do not cancel submitted generations. Continue exact
 session/generation waits to retrieve its result, then delete its completed history.
-New submissions use the current role session; predecessor answers remain readable.
+New submissions require the current session of an active role, checked again after
+provider preparation. Unsubmitted retired sessions wake existing waiters with a
+terminal snapshot. Submitted work continues observation across restart, and answers
+remain readable after routing retirement.
 An uncertain deletion can be reconciled through the same deletion request: the core
 checks exact provider absence read-only and never repeats the uncertain mutation.
 

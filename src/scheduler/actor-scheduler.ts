@@ -71,6 +71,13 @@ export class ActorScheduler {
       ));
   }
 
+  refreshSession(sessionId: string): void {
+    const actor = this.#actors.get(sessionId);
+    if (actor !== null) {
+      actor.publish(this.#requireSnapshot(sessionId), this.#events.latestSequenceForSession(sessionId));
+    }
+  }
+
   waitSession(sessionId: string, options: SessionWaitOptions): Promise<SessionWaitSnapshot> {
     return this.actorFor(sessionId).wait(options);
   }

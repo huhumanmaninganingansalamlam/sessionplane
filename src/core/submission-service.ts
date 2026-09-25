@@ -512,7 +512,10 @@ export class SubmissionService {
           stageTimeoutMs,
           () => submission.abandon(),
         );
+        this.#requireActiveRoleSession(this.#requireSnapshot(prepared.outbox.sessionId));
       } catch (error) {
+        try { this.#requireActiveRoleSession(this.#requireSnapshot(prepared.outbox.sessionId)); }
+        catch (retired) { submission.abandon(); error = retired; }
         if (error instanceof ProviderSubmissionError && error.errorCode === 'provider.preparation-required') {
           return await this.#recordPreparationRequired(actor, prepared.outbox, error);
         }
@@ -953,6 +956,15 @@ export class SubmissionService {
     return snapshot;
   }
 
+  #requireActiveRoleSession(session: Pick<SessionSnapshot, 'sessionId' | 'teamId' | 'roleId'>) {
+    const team = this.#directory.getTeam(session.teamId);
+    if (!team.roles.some(role => role.roleId === session.roleId && role.roleState === 'active' &&
+        role.currentSessionId === session.sessionId)) {
+      throw new SessionPlaneDomainError('session.generation-superseded', 'New submissions require the current session of an active role');
+    }
+    return team;
+  }
+
   #prepareOutbox(
     actor: SessionActor,
     sessionId: string,
@@ -978,10 +990,7 @@ export class SubmissionService {
           new ReceiptRepository(this.#database).findConversationDeletion(session.conversationId) !== null) {
         throw new SessionPlaneDomainError('session.cleanup-pending', 'Conversation deletion was attempted; create a replacement session');
       }
-      const team = this.#directory.getTeam(session.teamId);
-      if (!team.roles.some((role) => role.roleId === session.roleId && role.currentSessionId === sessionId)) {
-        throw new SessionPlaneDomainError('session.generation-superseded', 'New submissions must use the current role session');
-      }
+      const team = this.#requireActiveRoleSession(session);
       const generation = session.currentGeneration + 1;
       const timestamp = this.#now().toISOString();
       const deadlineAt = new Date(

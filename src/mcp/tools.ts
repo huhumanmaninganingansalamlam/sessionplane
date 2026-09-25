@@ -287,7 +287,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
   tool(
     'sessionplane_role_retire',
     'team.role.retire',
-    'Retire an explicitly addressed non-primary role.',
+    'Retire an explicitly addressed non-primary role and reject new submissions. Already submitted generations continue observation; retrieve their exact session/generation outputs before deleting completed provider history.',
     objectSchema(
       {
         ...mutationIdentityProperties,
@@ -316,7 +316,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
   tool(
     'sessionplane_session_create',
     'session.create',
-    'Create or replace the current provider session for an exact team role. Replacement supersedes the old session and records predecessorSessionId; it does not submit a prompt or delete provider history. Use after inspecting an unreadable conversation or when the caller chooses to rotate a long completed conversation. Carry forward only required context; never replay an unresolved submission automatically.',
+    'Create or replace the current provider session for an exact team role. Replacement changes role routing and records predecessorSessionId while already submitted generations continue observation; it does not submit a prompt or delete provider history. Use after inspecting an unreadable conversation or when the caller chooses to rotate a long completed conversation. Carry forward only required context; never replay an unresolved submission automatically.',
     objectSchema(
       {
         ...mutationIdentityProperties,
