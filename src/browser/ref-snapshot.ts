@@ -17,6 +17,9 @@ export interface BrowserSnapshotNode {
   readonly href: string | null;
   readonly placeholder: string | null;
   readonly value: string | null;
+  readonly ariaValueText: string | null;
+  readonly ariaValueNow: string | null;
+  readonly ariaValueMax: string | null;
   readonly box: {
     readonly x: number;
     readonly y: number;
@@ -66,12 +69,13 @@ export class BrowserRefSnapshotStore {
     readonly page: Page;
     readonly interactive?: boolean;
     readonly maxNodes?: number;
+    readonly rootSelector?: string;
   }): Promise<BrowserSnapshot> {
     const snapshotId = randomUUID();
     const interactive = options.interactive ?? true;
     const maxNodes = Math.max(1, Math.min(5_000, options.maxNodes ?? 250));
     const result = await options.page.evaluate(
-      ({ snapshotId: browserSnapshotId, interactive: interactiveOnly, maxNodes: limit, refProperty }) => {
+      ({ snapshotId: browserSnapshotId, interactive: interactiveOnly, maxNodes: limit, refProperty, rootSelector }) => {
         type MutableSnapshotNode = {
           ref: string;
           token: string;
@@ -86,6 +90,9 @@ export class BrowserRefSnapshotStore {
           href: string | null;
           placeholder: string | null;
           value: string | null;
+          ariaValueText: string | null;
+          ariaValueNow: string | null;
+          ariaValueMax: string | null;
           box: { x: number; y: number; width: number; height: number } | null;
         };
 
@@ -179,7 +186,9 @@ export class BrowserRefSnapshotStore {
               'combobox',
               'option',
               'slider',
+              'status',
               'menuitem',
+              'menuitemradio',
               'switch',
               'tab',
               'treeitem',
@@ -256,6 +265,9 @@ export class BrowserRefSnapshotStore {
               href: element instanceof HTMLAnchorElement ? element.href : null,
               placeholder: element.getAttribute('placeholder'),
               value,
+              ariaValueText: element.getAttribute('aria-valuetext'),
+              ariaValueNow: element.getAttribute('aria-valuenow'),
+              ariaValueMax: element.getAttribute('aria-valuemax'),
               box: {
                 x: rect.x,
                 y: rect.y,
@@ -281,8 +293,13 @@ export class BrowserRefSnapshotStore {
           }
         };
 
-        const root = document.body ?? document.documentElement;
-        if (root !== null) visit(root, 0);
+        const roots = rootSelector === null
+          ? [document.body ?? document.documentElement]
+          : [...document.querySelectorAll(rootSelector)];
+        for (const root of roots) {
+          if (root !== null) visit(root, 0);
+          if (truncated) break;
+        }
         return {
           url: location.href,
           title: document.title,
@@ -295,6 +312,7 @@ export class BrowserRefSnapshotStore {
         interactive,
         maxNodes,
         refProperty: REF_PROPERTY,
+        rootSelector: options.rootSelector ?? null,
       },
     );
 

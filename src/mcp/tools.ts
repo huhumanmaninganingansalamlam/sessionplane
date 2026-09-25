@@ -349,6 +349,32 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
     false,
   ),
   tool(
+    'sessionplane_session_ui_inspect',
+    'session.ui.inspect',
+    'Inspect only the model controls on the exact pre-submit ChatGPT session page.',
+    objectSchema({
+      ...baseIdentityProperties,
+      sessionId: stringProperty('Exact durable session UUID.'),
+      generation: { type: 'integer', minimum: 0 },
+    }, ['clientId', 'sessionId', 'generation']),
+    true,
+  ),
+  tool(
+    'sessionplane_session_ui_action',
+    'session.ui.action',
+    'Act on one fresh model-control ref for an exact pre-submit ChatGPT generation; cannot type or submit a prompt.',
+    objectSchema({
+      ...mutationIdentityProperties,
+      sessionId: stringProperty('Exact durable session UUID.'),
+      generation: { type: 'integer', minimum: 0 },
+      snapshotId: stringProperty('Fresh model-control snapshot UUID.'),
+      ref: stringProperty('One ref returned by model-control inspect.'),
+      action: { type: 'string', enum: ['click', 'press'] },
+      key: { type: 'string', enum: ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Enter', 'Space'] },
+    }, ['clientId', 'requestId', 'sessionId', 'generation', 'snapshotId', 'ref', 'action']),
+    false,
+  ),
+  tool(
     'sessionplane_code_generate',
     'code.generate',
     'Generate ChatGPT code under the strict ZIP contract and retrieve verified artifacts.',

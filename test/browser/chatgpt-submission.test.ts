@@ -656,9 +656,17 @@ test('ChatGPT submission selects the live intelligence Pro preset without miscla
     await submission.prepare();
     assert.equal(
       await created.page
-        .locator('[data-model-picker-power-slider] [role="slider"]')
+        .locator('[role="menu"] [role="slider"]')
         .getAttribute('aria-valuenow'),
       '4',
+    );
+    assert.equal(
+      await created.page.locator('[role="menu"] [role="status"]').textContent(),
+      'Pro',
+    );
+    assert.equal(
+      await created.page.locator('#intelligence-button').textContent(),
+      'Reasoning level',
     );
     assert.equal(
       await created.page
@@ -1158,7 +1166,6 @@ function chatGptFixture(
         <div id="model-menu" role="menu" hidden>
           ${modelOptionsMarkup}
         </div>
-        ${delayedComposerVisibility ? '<form><textarea placeholder="Proxy composer"></textarea></form>' : ''}
         <div id="prompt-textarea" data-testid="prompt-textarea" contenteditable="true">${initialComposerMarkup}</div>
         <button data-testid="send-button" type="button">Send</button>
         <section id="messages"></section>
@@ -1433,7 +1440,7 @@ function chatGptIntelligenceFixture(options: {
       (index) =>
         '<span data-dot="' +
         String(index) +
-        (options.currentPicker ? '' : '" data-locked="' + String(options.latestProLocked && index === 4)) +
+        '" data-locked="' + String(options.latestProLocked && index === 4) +
         '" data-selected="' +
         String(index <= options.selectedPreset) +
         '"></span>',
@@ -1449,26 +1456,26 @@ function chatGptIntelligenceFixture(options: {
     '<textarea id="prompt-textarea" placeholder="Ask ChatGPT"></textarea>',
     '<button data-testid="composer-plus-btn" type="button" aria-haspopup="menu">+</button>',
     '<button id="intelligence-button" type="button" aria-haspopup="menu" data-state="closed">Very High</button>',
-    '<button data-testid="send-button" type="button">Send</button>',
+    options.currentPicker
+      ? '<button type="submit">Send</button>'
+      : '<button data-testid="send-button" type="button">Send</button>',
     '</form>',
     '<div id="intelligence-menu" role="menu" data-state="closed" hidden>',
     options.currentPicker ? '' : '<div data-testid="composer-intelligence-picker-content" role="group">',
-    '<div id="picker-root" data-expanded="false"><div role="menuitem" tabindex="0"' +
-      (options.currentPicker ? ' data-model-picker-view-toggle="true"' : '') +
-      '>Model selection<span id="selected-effort" data-maximum="false"></span></div></div>',
+    '<div id="picker-root" data-expanded="false"><div role="menuitem" tabindex="0">Model selection</div></div>',
     options.currentPicker
       ? '<div id="current-simple">'
       : '<div data-testid="composer-model-picker-slider-simple-view" ' + stateAttribute + '="true">',
-    '<div id="slider-control" role="menuitem" tabindex="0" aria-label="Performance"' +
-      (options.currentPicker ? ' data-reasoning-slider="true"' : '') + '>',
+    '<div id="slider-control" role="menuitem" tabindex="0" aria-label="Performance">',
     options.currentPicker
-      ? '<div data-model-picker-power-slider>'
+      ? '<div>'
       : '<div data-model-reasoning-effort-slider><span data-locked="false"></span>',
     dots,
     '<span role="slider" tabindex="-1" style="display:inline-block;width:120px;height:20px" aria-valuemin="0" aria-valuemax="4" aria-valuenow="' +
       String(options.selectedPreset) +
       '"></span></div></div>',
     '<span id="slider-announcement"></span>',
+    '<span id="slider-status" role="status"></span>',
     '</div>',
     options.currentPicker
       ? '<div id="current-advanced">'
@@ -1500,13 +1507,14 @@ function chatGptIntelligenceFixture(options: {
     'const slider=document.querySelector("[role=\\"slider\\"]");',
     'const sliderControl=document.querySelector("#slider-control");',
     'const announcement=document.querySelector("#slider-announcement");',
+    'const status=document.querySelector("#slider-status");',
     'const dotNodes=Array.from(document.querySelectorAll("[data-dot]"));',
-    'const update=()=>{button.textContent=labels[selectedPreset];slider.setAttribute("aria-valuenow",String(selectedPreset));dotNodes.forEach((dot,index)=>{if(!' + String(options.currentPicker === true) + ')dot.setAttribute("data-locked",String(lockedByVersion[selectedVersion][index]));dot.setAttribute("data-selected",String(index<=selectedPreset));});const effort=document.querySelector("#selected-effort");effort.textContent=labels[selectedPreset];effort.setAttribute("data-maximum",String(selectedPreset===4));for(const radio of advanced.querySelectorAll("[role=\\"menuitemradio\\"]")){const checked=radio.getAttribute("data-version-id")===selectedVersion;radio.setAttribute("aria-checked",String(checked));radio.setAttribute("data-state",checked?"checked":"unchecked");}};',
+    'const update=()=>{button.textContent="Reasoning level";status.textContent=labels[selectedPreset];slider.setAttribute("aria-valuenow",String(selectedPreset));dotNodes.forEach((dot,index)=>{dot.setAttribute("data-locked",String(lockedByVersion[selectedVersion][index]));dot.setAttribute("data-selected",String(index<=selectedPreset));});for(const radio of advanced.querySelectorAll("[role=\\"menuitemradio\\"]")){const checked=radio.getAttribute("data-version-id");radio.setAttribute("aria-checked",String(checked===selectedVersion));radio.setAttribute("data-state",checked===selectedVersion?"checked":"unchecked");}};',
     'button.addEventListener("click",()=>{menu.hidden=false;menu.setAttribute("data-state","open");button.setAttribute("data-state","open");});',
     'root.querySelector("[role=\\"menuitem\\"]").addEventListener("click",()=>{root.setAttribute("data-expanded","true");simple.setAttribute(' + JSON.stringify(stateAttribute) + ',"false");advanced.setAttribute(' + JSON.stringify(stateAttribute) + ',"true");});',
     'for(const radio of advanced.querySelectorAll("[role=\\"menuitemradio\\"]")){radio.addEventListener("click",()=>{selectedVersion=radio.getAttribute("data-version-id");selectedPreset=Math.min(selectedPreset,3);root.setAttribute("data-expanded","false");simple.setAttribute(' + JSON.stringify(stateAttribute) + ',"true");advanced.setAttribute(' + JSON.stringify(stateAttribute) + ',"false");update();});}',
     'slider.addEventListener("keydown",(event)=>{if(event.key!=="ArrowLeft"&&event.key!=="ArrowRight")return;const direction=event.key==="ArrowRight"?1:-1;const next=Math.max(0,Math.min(4,selectedPreset+direction));if(lockedByVersion[selectedVersion][next])return;selectedPreset=next;update();});',
-    'document.querySelector("[data-testid=\\"send-button\\"]").addEventListener("click",()=>{window.sendCount+=1;});',
+    'document.querySelector("form button[type=submit], [data-testid=\\"send-button\\"]").addEventListener("click",()=>{window.sendCount+=1;});',
     'sliderControl.addEventListener("keydown",(event)=>{if(event.key!=="ArrowLeft"&&event.key!=="ArrowRight")return;const direction=event.key==="ArrowRight"?1:-1;const next=Math.max(0,Math.min(4,selectedPreset+direction));if(lockedByVersion[selectedVersion][next])return;selectedPreset=next;update();announcement.textContent=labels[selectedPreset]+", 5 of 5.";});',
     'update();announcement.textContent=labels[selectedPreset]+", 5 of 5.";',
     '</script></body></html>',

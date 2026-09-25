@@ -223,6 +223,84 @@ test('production core omits generic browser RPC methods', async () => {
   }
 });
 
+test('MCP model UI actions stay on the exact failed pre-submit generation', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-session-ui-'));
+  const fixture = await startFixtureServer(`<!doctype html><html><body>
+    <form><button type="button" aria-label="Models" aria-haspopup="menu" aria-controls="models">Models</button>
+      <button type="submit">Send</button><textarea aria-label="Prompt"></textarea></form>
+    <div role="menu" id="models"><div role="menuitemradio" aria-checked="false">Pro</div>
+      <span role="status">Current model</span></div>
+    <script>document.querySelector('[role=menuitemradio]').onclick = (event) => {
+      event.currentTarget.setAttribute('aria-checked', 'true');
+      document.querySelector('[role=status]').textContent = 'Selected Pro';
+    };</script>
+  </body></html>`);
+  const base = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const config = { ...base, chatgptUrl: fixture.url };
+  const service = await startCore({ config, browserHeadless: true, logger: silentLogger() });
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({
+    name,
+    arguments: { clientId: 'mcp-ui-test', ...args },
+    socketPath: config.socketPath,
+    timeoutMs: 10_000,
+    maxLineBytes: config.rpcMaxLineBytes,
+  });
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'mcp-ui-test' });
+    const session = service.teamDirectory.createSession({
+      teamId: team.teamId,
+      roleKey: team.primaryRoleKey,
+      provider: 'chatgpt',
+    });
+    await assert.rejects(callRpc({
+      socketPath: config.socketPath,
+      method: 'session.send',
+      params: {
+        clientId: 'mcp-ui-test', requestId: 'missing-model', sessionId: session.sessionId,
+        prompt: 'test', model: 'Unavailable', sessionDeadlineSec: 30,
+      },
+      timeoutMs: 10_000,
+      maxLineBytes: config.rpcMaxLineBytes,
+    }), (error: unknown) => error instanceof RpcClientError &&
+      (error.data as { errorCode?: string }).errorCode === 'provider.model-unavailable');
+
+    const failed = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(failed.promptSubmitted, false);
+    assert.equal(failed.submissionState, 'failed_pre_submit');
+    const wrong = await invoke('sessionplane_session_ui_inspect', {
+      sessionId: session.sessionId, generation: failed.generation + 1,
+    });
+    assert.equal(wrong.structuredContent.errorCode, 'session.generation-superseded');
+
+    const inspected = await invoke('sessionplane_session_ui_inspect', {
+      sessionId: session.sessionId, generation: failed.generation,
+    });
+    assert.equal(inspected.isError, false);
+    const nodes = inspected.structuredContent.nodes as Array<{ ref: string; role: string }>;
+    assert.equal(nodes.some((node) => node.role === 'textbox'), false);
+    assert.equal(nodes.filter((node) => node.role === 'button').length, 1);
+    const choice = nodes.find((node) => node.role === 'menuitemradio');
+    assert.notEqual(choice, undefined);
+    const actionArgs = {
+      requestId: 'select-model', sessionId: session.sessionId, generation: failed.generation,
+      snapshotId: inspected.structuredContent.snapshotId, ref: choice?.ref,
+      action: 'click',
+    };
+    const staleGeneration = await invoke('sessionplane_session_ui_action', {
+      ...actionArgs, requestId: 'wrong-generation', generation: failed.generation + 1,
+    });
+    assert.equal(staleGeneration.structuredContent.errorCode, 'session.generation-superseded');
+    const selected = await invoke('sessionplane_session_ui_action', actionArgs);
+    assert.equal(selected.isError, false);
+    const replay = await invoke('sessionplane_session_ui_action', actionArgs);
+    assert.deepEqual(replay.structuredContent, selected.structuredContent);
+  } finally {
+    await service.close();
+    await closeServer(fixture.server);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 class CaptureWritable extends Writable {
   value = '';
 
@@ -247,10 +325,10 @@ async function runCliJson(argv: readonly string[]) {
   return { code, stdout: stdout.value.trim(), stderr: stderr.value.trim() };
 }
 
-async function startFixtureServer(): Promise<{ readonly server: Server; readonly url: string }> {
+async function startFixtureServer(html?: string): Promise<{ readonly server: Server; readonly url: string }> {
   const server = createServer((_request, response) => {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end(`<!doctype html>
+    response.end(html ?? `<!doctype html>
       <html>
         <head><title>CLI MCP Browser Fixture</title></head>
         <body>

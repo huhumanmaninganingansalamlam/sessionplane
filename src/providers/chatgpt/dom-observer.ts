@@ -1,7 +1,7 @@
 import type { Page } from 'playwright-core';
 
 import type { ProviderAssistantCandidate, ProviderWakeReason } from '../provider-adapter.ts';
-import { CHATGPT_SELECTORS } from './selectors.ts';
+import { readChatGptMessages } from './message-dom.ts';
 
 export interface ChatGptDomObservation {
   readonly submittedUserFound: boolean;
@@ -18,113 +18,33 @@ export async function observeChatGptDom(
   page: Page,
   identity: SubmittedUserIdentity,
 ): Promise<ChatGptDomObservation> {
-  return await page.evaluate(
-    ({ messageSelector, submittedUserMessageId, submittedUserTurnId }) => {
-      interface ExtractedMessage {
-        readonly role: string;
-        readonly messageId: string | null;
-        readonly turnId: string | null;
-        readonly text: string;
-        readonly terminalMarker: boolean;
-        readonly streamingMarker: boolean;
+  const messages = await readChatGptMessages(page);
+  let submittedUserFound = false;
+  let laterUserFound = false;
+  let candidate: ProviderAssistantCandidate | null = null;
+  for (const message of messages) {
+    if (!submittedUserFound) {
+      if (message.role === 'user' &&
+        ((identity.submittedUserMessageId !== null && message.messageId === identity.submittedUserMessageId) ||
+          (identity.submittedUserTurnId !== null && message.turnId === identity.submittedUserTurnId))) {
+        submittedUserFound = true;
       }
-
-      const extracted: ExtractedMessage[] = [];
-      const seen = new Set<Element>();
-      const nodes = Array.from(document.querySelectorAll<HTMLElement>(messageSelector));
-      for (const node of nodes) {
-        const identityNode =
-          node.closest<HTMLElement>('[data-message-id], [data-turn-id]') ??
-          node.closest<HTMLElement>('article[data-testid^="conversation-turn-"]') ??
-          node;
-        if (seen.has(identityNode)) {
-          continue;
-        }
-        seen.add(identityNode);
-
-        const attribute = (name: string): string | null =>
-          identityNode.getAttribute(name) ?? node.getAttribute(name);
-        const role = (attribute('data-message-author-role') ?? '').trim().toLowerCase();
-        if (role.length === 0) {
-          continue;
-        }
-        const messageId = attribute('data-message-id');
-        const turnId = attribute('data-turn-id');
-        const status = (
-          attribute('data-message-status') ??
-          attribute('data-status') ??
-          ''
-        ).toLowerCase();
-        const endTurn = (attribute('data-end-turn') ?? '').toLowerCase();
-        const isStreaming = (attribute('data-is-streaming') ?? '').toLowerCase();
-        const ariaBusy = (attribute('aria-busy') ?? '').toLowerCase();
-        const content =
-          identityNode.querySelector<HTMLElement>(
-            '[data-message-content], [data-testid="message-content"], .markdown',
-          ) ?? node;
-        const text = (content.innerText ?? content.textContent ?? '').replaceAll('\r\n', '\n');
-
-        extracted.push({
-          role,
-          messageId,
-          turnId,
-          text,
-          terminalMarker:
-            /^(complete|completed|finished|finished_successfully|success)$/.test(status) ||
-            endTurn === 'true' ||
-            isStreaming === 'false',
-          streamingMarker:
-            /^(in_progress|streaming|generating|pending)$/.test(status) ||
-            isStreaming === 'true' ||
-            ariaBusy === 'true',
-        });
-      }
-
-      const matchesSubmittedUser = (message: ExtractedMessage): boolean =>
-        message.role === 'user' &&
-        ((submittedUserMessageId !== null && message.messageId === submittedUserMessageId) ||
-          (submittedUserTurnId !== null && message.turnId === submittedUserTurnId));
-
-      let submittedUserFound = false;
-      let laterUserFound = false;
-      let candidate: ProviderAssistantCandidate | null = null;
-      for (const message of extracted) {
-        if (!submittedUserFound) {
-          if (matchesSubmittedUser(message)) {
-            submittedUserFound = true;
-          }
-          continue;
-        }
-        if (message.role === 'user') {
-          laterUserFound = true;
-          break;
-        }
-        if (message.role !== 'assistant') {
-          continue;
-        }
-        const responseMessageId = message.messageId ?? message.turnId;
-        if (
-          responseMessageId === null ||
-          responseMessageId.startsWith('request-placeholder-')
-        ) {
-          continue;
-        }
-        candidate = {
-          responseMessageId,
-          answerText: message.text,
-          terminalMarker: message.terminalMarker,
-          streamingMarker: message.streamingMarker,
-        };
-      }
-
-      return { submittedUserFound, laterUserFound, candidate };
-    },
-    {
-      messageSelector: CHATGPT_SELECTORS.messages,
-      submittedUserMessageId: identity.submittedUserMessageId,
-      submittedUserTurnId: identity.submittedUserTurnId,
-    },
-  );
+      continue;
+    }
+    if (message.role === 'user') {
+      laterUserFound = true;
+      break;
+    }
+    const responseMessageId = message.messageId ?? message.turnId;
+    if (responseMessageId === null || responseMessageId.startsWith('request-placeholder-')) continue;
+    candidate = {
+      responseMessageId,
+      answerText: message.text,
+      terminalMarker: message.terminalMarker,
+      streamingMarker: message.streamingMarker,
+    };
+  }
+  return { submittedUserFound, laterUserFound, candidate };
 }
 
 export async function waitForChatGptDomMutation(

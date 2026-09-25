@@ -18,6 +18,7 @@ import { RecoveryService } from './core/recovery-service.ts';
 import { StopService } from './core/stop-service.ts';
 import { TeamDirectory } from './core/team-directory.ts';
 import { SubmissionService } from './core/submission-service.ts';
+import { SessionUiService } from './core/session-ui-service.ts';
 import { createLogger, type Logger } from './logging.ts';
 import { RpcRouter } from './rpc/router.ts';
 import { RpcServer } from './rpc/server.ts';
@@ -28,6 +29,7 @@ import { registerChatGptMethods } from './rpc/methods/chatgpt.ts';
 import { registerCodeMethods } from './rpc/methods/code.ts';
 import { registerContextMethods } from './rpc/methods/context.ts';
 import { registerSessionMethods } from './rpc/methods/session.ts';
+import { registerSessionUiMethods } from './rpc/methods/session-ui.ts';
 import { registerSendMethods } from './rpc/methods/send.ts';
 import { registerStopMethods } from './rpc/methods/stop.ts';
 import { registerTeamMethods } from './rpc/methods/team.ts';
@@ -306,6 +308,14 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   registerContextMethods(router, contextPackages);
   registerTeamMethods(router, teamDirectory, receipts);
   registerSessionMethods(router, teamDirectory, receipts);
+  registerSessionUiMethods(router, new SessionUiService({
+    database,
+    registry: pageRegistry,
+    scheduler: actorScheduler,
+    mutex: pageMutationMutex,
+    receipts,
+    chatgptUrl: config.chatgptUrl,
+  }));
   registerSendMethods(router, submissionService);
   registerStopMethods(router, stopService);
   registerWaitMethods(router, teamDirectory, actorScheduler);

@@ -4,11 +4,7 @@ export const CHATGPT_SELECTORS = {
   intelligenceSwitcher: [
     'form button[aria-haspopup="menu"][data-state]:not([data-testid="composer-plus-btn"])',
   ],
-  intelligenceContent: '[data-testid="composer-intelligence-picker-content"], [role="menu"]:has([data-model-picker-power-slider])',
-  intelligenceSimpleView: '[data-testid="composer-model-picker-slider-simple-view"], [data-model-picker-view-toggle] [data-maximum="true"]',
-  intelligenceAdvancedView: '[data-testid="composer-model-picker-slider-advanced-view"], [role="menu"]:has([data-model-picker-power-slider])',
-  intelligenceSlider: '[data-model-reasoning-effort-slider] [role="slider"], [data-model-picker-power-slider] [role="slider"]',
-  intelligenceDots: '[data-model-reasoning-effort-slider] span[data-locked][data-selected], [data-model-picker-power-slider] [data-selected]',
+  intelligenceContent: '[role="menu"]:has([role="slider"])',
   composer: [
     '#prompt-textarea',
     '[data-testid="prompt-textarea"]',
@@ -18,10 +14,8 @@ export const CHATGPT_SELECTORS = {
     'form div[contenteditable="true"]',
   ],
   sendButton: [
+    'button[type="submit"]',
     '[data-testid="send-button"]',
-    'button[aria-label="Send prompt"]',
-    'button[aria-label="Send message"]',
-    'button[aria-label="전송"]',
   ],
   modelSwitcher: [
     '[data-testid="model-switcher-dropdown-button"]',
@@ -80,14 +74,14 @@ export const CHATGPT_SELECTORS = {
     'button[aria-label*="add files" i]',
     'button[aria-label*="project files" i]',
   ],
-  userMessages: '[data-message-author-role="user"]',
+  userMessages: '[data-message-author-role="user"], [data-chatgpt-search-message-ids]:has([data-user-message-bubble])',
   userMessageContent: [
     '[data-testid="collapsible-user-message-content"]',
     '.whitespace-pre-wrap',
     '[data-testid*="user-message-content"]',
   ],
   userMessageExpansionControls: 'button[aria-expanded="false"]',
-  messages: '[data-message-author-role]',
+  messages: '[data-message-author-role], [data-chatgpt-search-message-ids]',
   stopControls: [
     '[data-testid="stop-button"]',
     'button[aria-label="Stop generating"]',
