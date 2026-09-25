@@ -32,6 +32,10 @@ all browser mutations, request receipts, submission attempts and answer identity
    without clicking. Slider selection verifies the chosen numeric value; the agent
    interprets its meaning from the surrounding observed labels. Choosing
    composer/send does not fill or submit anything.
+   Core performs the selected action once, then observes related choices or
+   selected-state evidence for up to five seconds. Rendering and menu animations
+   need not finish within a fixed sleep. Unverified outcomes remain
+   `provider.action-unknown`; core never repeats the action to obtain evidence.
 4. Call `sessionplane_preparation_resume` with the original request identity.
    Core revalidates model/effort and composer, and prepares the exact prompt. If
    the send control appears only after typing, resume returns preparation-required

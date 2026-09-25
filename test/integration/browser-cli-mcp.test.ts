@@ -238,7 +238,10 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
     <script>
       window.submitCount = 0;
       document.querySelector('textarea').addEventListener('input', () => { document.querySelector('[type=submit]').hidden = false; });
-      document.querySelector('#models-button').onclick = (event) => { event.currentTarget.setAttribute('aria-controls', 'models'); document.querySelector('#models').hidden = false; };
+      document.querySelector('#models-button').onclick = (event) => {
+        event.currentTarget.setAttribute('aria-controls', 'models');
+        setTimeout(() => { document.querySelector('#models').hidden = false; }, 350);
+      };
       document.querySelector('#effort-button').onclick = (event) => { event.currentTarget.setAttribute('aria-expanded', 'true'); document.querySelector('#effort-options').hidden = false; };
       document.querySelector('[role=menuitemradio]').onclick = (event) => {
         event.currentTarget.setAttribute('aria-checked', 'true');
