@@ -59,8 +59,13 @@ identities in the outbox. Preparation and restart use those bytes even if the
 caller edits or removes its source files. Public inspection retains the original
 paths and hashes. Cached input bytes remain with durable request state; they are
 not temporary browser files. A changed or missing stored copy fails before
-submission. Older requests without snapshots still require their original bytes;
+submission and records a terminal pre-submit failure, waking exact-generation
+waiters with the same input error. Older requests without snapshots still require
+their original bytes;
 core cannot reconstruct old contents from a hash or silently substitute new ones.
+After an input failure with `promptSubmitted:false`, the caller can correct its
+inputs and start a new request on the same session. Reusing the failed request ID
+replays its failure; waiting cannot repair its inputs.
 
 The MCP client owns server registration and the stdio connection. Installing
 skills alone does not connect it. Preparation is core-owned, not tied to a

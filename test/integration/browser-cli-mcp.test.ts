@@ -472,6 +472,26 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
     assert.equal(final?.answerText, 'Fixture exact final answer');
     assert.equal(final?.responseMessageId, 'fixture-assistant-message');
     assert.equal(await submittedPage.evaluate(() => (window as Window & { submitCount: number }).submitCount), 1);
+
+    const next = await invoke('sessionplane_send', {
+      sessionId: session.sessionId, requestId: 'missing-upload', prompt: 'Next review',
+      files: [attachmentPath],
+    });
+    assert.equal(next.structuredContent.errorCode, 'provider.preparation-required');
+    const nextGeneration = service.teamDirectory.getSession(session.sessionId).generation;
+    rmSync(path.join(config.stateDir, 'submission-inputs'), { recursive: true, force: true });
+    const rejected = await invoke('sessionplane_preparation_resume', {
+      sessionId: session.sessionId, generation: nextGeneration, requestId: 'missing-upload',
+    });
+    assert.equal(rejected.structuredContent.errorCode, 'input.invalid');
+    const failed = await invoke('sessionplane_wait', {
+      sessionId: session.sessionId, generation: nextGeneration, waitMs: 1,
+    });
+    assert.equal(failed.structuredContent.terminal, true);
+    assert.equal(failed.structuredContent.submissionState, 'failed_pre_submit');
+    assert.equal(failed.structuredContent.errorCode, 'input.invalid');
+    assert.equal(failed.structuredContent.promptSubmitted, false);
+
   } finally {
     await service.close();
     rmSync(root, { recursive: true, force: true });

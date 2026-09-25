@@ -636,18 +636,9 @@ export class SubmissionService {
         }
         throw new SessionPlaneDomainError('provider.preparation-required', 'The exact request is not awaiting an assisted preparation choice');
       }
-      const payload = parseOutboxPayload(initial);
-      const expectedAttachments = payload.uploadAttachments ?? payload.attachments;
-      const attachments = await resolveProviderAttachments(
-        expectedAttachments.map((attachment) => attachment.path),
-        this.#maxUploadFileBytes,
-      );
-      if (hashCanonical(attachments) !== hashCanonical(expectedAttachments)) {
-        throw new SessionPlaneDomainError('input.idempotency-conflict', 'An attachment changed while preparation was pending');
-      }
       const actor = this.#scheduler.actorFor(initial.sessionId);
       return await actor.enqueue(async () =>
-        await this.#resumePreparationLocked(actor, input, attachments),
+        await this.#resumePreparationLocked(actor, input),
       );
     });
   }
@@ -655,7 +646,6 @@ export class SubmissionService {
   async #resumePreparationLocked(
     actor: SessionActor,
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number },
-    attachments: readonly ProviderAttachment[],
   ): Promise<SessionSnapshot> {
     const outbox = this.#outbox.getByRequest(input.clientId, input.requestId);
     const snapshot = this.#requireSnapshot(input.sessionId);
@@ -671,6 +661,19 @@ export class SubmissionService {
     const state = parsePreparationState(outbox);
     if (state.requiresInspection === true) {
       throw new SessionPlaneDomainError('provider.preparation-required', 'Inspect current provider state before resuming after restart');
+    }
+    let attachments: readonly ProviderAttachment[];
+    try {
+      const expected = payload.uploadAttachments ?? payload.attachments;
+      attachments = await resolveProviderAttachments(
+        expected.map((attachment) => attachment.path),
+        this.#maxUploadFileBytes,
+      );
+      if (hashCanonical(attachments) !== hashCanonical(expected)) {
+        throw new SessionPlaneDomainError('input.idempotency-conflict', 'An attachment changed while preparation was pending');
+      }
+    } catch (error) {
+      return await this.#failPreSubmit(actor, outbox, error);
     }
     const sendInput = sessionSendInputFromOutbox(outbox, payload);
     return await this.#runPreparedSubmission(
