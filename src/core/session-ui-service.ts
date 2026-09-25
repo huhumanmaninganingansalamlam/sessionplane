@@ -2,6 +2,7 @@ import type { ElementHandle, Page } from 'playwright-core';
 
 import { PageRegistry, PageRegistryError } from '../browser/page-registry.ts';
 import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionEvidence, sameSnapshotSemantics, type BrowserSnapshotNode } from '../browser/ref-snapshot.ts';
+import type { SessionSnapshot } from '../domain/session.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { PreparationPurpose, PreparationTarget } from '../providers/provider-adapter.ts';
 import type { SubmissionService } from './submission-service.ts';
@@ -19,13 +20,21 @@ export class SessionUiService {
   }
 
   async inspect(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
-    return await this.#submissions.withPendingPreparation(input, async (session) => {
-      const page = this.#requirePage(session);
-      const binding = this.#registry.refreshPage(session.pageKey!);
-      return await this.#refs.capture({
-        pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch, page,
-        interactive: false, maxNodes: Math.max(1, Math.min(5_000, input.maxNodes ?? 1_000)),
-      });
+    return await this.#submissions.withPendingPreparation(input,
+      async (session) => await this.#capture(session, input.maxNodes));
+  }
+
+  async inspectSubmission(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
+    return await this.#submissions.inspectSubmission(input,
+      async (session) => await this.#capture(session, input.maxNodes));
+  }
+
+  async #capture(session: SessionSnapshot, maxNodes?: number) {
+    const page = this.#requirePage(session);
+    const binding = this.#registry.refreshPage(session.pageKey!);
+    return await this.#refs.capture({
+      pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch, page,
+      interactive: false, maxNodes: Math.max(1, Math.min(5_000, maxNodes ?? 1_000)),
     });
   }
 

@@ -292,7 +292,7 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
       method: 'session.send',
       params: {
         clientId: 'mcp-ui-test', requestId: 'assisted-send', sessionId: session.sessionId,
-        prompt: 'test', model: 'Pro', effort: 'High', assistedPreparation: true, sessionDeadlineSec: 30,
+        prompt: 'test', model: 'Pro', effort: 'High', sessionDeadlineSec: 30,
       },
       timeoutMs: 30_000,
       maxLineBytes: config.rpcMaxLineBytes,
@@ -325,7 +325,7 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
       method: 'session.send',
       params: {
         clientId: 'mcp-ui-test', requestId: 'assisted-send', sessionId: session.sessionId,
-        prompt: 'test', model: 'Pro', effort: 'High', assistedPreparation: true, sessionDeadlineSec: 30,
+        prompt: 'test', model: 'Pro', effort: 'High', sessionDeadlineSec: 30,
       },
       timeoutMs: 30_000,
       maxLineBytes: config.rpcMaxLineBytes,
@@ -447,6 +447,85 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
     assert.equal(final?.answerText, 'Fixture exact final answer');
     assert.equal(final?.responseMessageId, 'fixture-assistant-message');
     assert.equal(await submittedPage.evaluate(() => (window as Window & { submitCount: number }).submitCount), 1);
+  } finally {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('MCP inspects an ambiguous caller-directed submission without resend and recovers a later exact acknowledgement', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-ambiguous-inspection-'));
+  const config = { ...resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 100 };
+  const service = await startCore({ config, browserHeadless: true, logger: silentLogger() });
+  installPreparationFixtureRoute(service, `<!doctype html><form>
+    <textarea id="prompt-textarea"></textarea><button type="submit">Send</button></form>
+    <div id="messages"></div><script>
+      document.querySelector('form').onsubmit = (event) => {
+        event.preventDefault(); history.pushState({}, '', '/c/conversation-123456');
+      };
+    </script>`);
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'inspection-owner' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    await assert.rejects(callRpc({
+      socketPath: config.socketPath, method: 'session.send',
+      params: { clientId: 'inspection-owner', requestId: 'original', sessionId: session.sessionId, prompt: 'Exact pending draft', sessionDeadlineSec: 30 },
+    }), (error: unknown) => error instanceof RpcClientError &&
+      (error.data as { errorCode?: string }).errorCode === 'provider.preparation-required');
+    const prepared = service.teamDirectory.getSession(session.sessionId);
+    const caller = { clientId: 'inspection-owner', requestId: 'original', sessionId: session.sessionId, generation: prepared.generation };
+    for (const purpose of ['composer', 'submit']) {
+      const observed = await callRpc<{ snapshotId: string; nodes: Array<{ ref: string; role: string; editable: boolean; name: string }> }>({
+        socketPath: config.socketPath, method: 'session.preparation.inspect', params: caller,
+      });
+      const target = observed.nodes.find((node) => purpose === 'composer' ? node.editable && node.role === 'textbox' : node.role === 'button' && node.name === 'Send');
+      assert.ok(target);
+      await callRpc({ socketPath: config.socketPath, method: 'session.preparation.decide', params: {
+        ...caller, decisionId: purpose, decision: 'choose', purpose, snapshotId: observed.snapshotId, ref: target.ref,
+      } });
+    }
+    await assert.rejects(callRpc({ socketPath: config.socketPath, method: 'session.preparation.resume', params: caller }),
+      (error: unknown) => error instanceof RpcClientError && (error.data as { errorCode?: string }).errorCode === 'session.submission-unknown');
+    const sent = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(sent.submissionState, 'submission_unknown');
+    // Exercise explicit inspection with the background recovery service stopped.
+    await service.recoveryService.close();
+    const page = service.pageRegistry.pageForObservation(sent.pageKey!);
+    const identity = { clientId: 'inspection-owner', requestId: 'original', sessionId: session.sessionId, generation: sent.generation };
+    const inspect = (override: Record<string, unknown> = {}) => invokeMcpTool({
+      name: 'sessionplane_submission_inspect', arguments: { ...identity, ...override },
+      socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes,
+    });
+    for (const override of [{ clientId: 'other-owner' }, { generation: sent.generation + 1 }]) {
+      const rejected = await inspect(override);
+      assert.equal(rejected.structuredContent.errorCode, 'session.generation-superseded');
+    }
+    const pending = await inspect();
+    assert.equal(pending.isError, false);
+    const snapshot = pending.structuredContent.snapshot as { submissionState: string; generation: number };
+    assert.equal(snapshot.submissionState, 'submission_unknown');
+    assert.equal(snapshot.generation, sent.generation);
+    const evidence = pending.structuredContent.evidence as { nodes: Array<{ editable: boolean; value: string }> };
+    assert.ok(evidence.nodes.some((node) => node.editable && node.value === 'Exact pending draft'));
+    assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft');
+    assert.equal(await page.locator('[data-message-author-role]').count(), 0);
+
+    // A delayed provider acknowledgement arrives; inspection must bind it, never submit again.
+    await page.locator('#messages').evaluate((messages) => {
+      messages.innerHTML = '<div data-message-author-role="user" data-message-id="delayed-user">Exact pending draft</div>' +
+        '<div data-message-author-role="assistant" data-message-id="delayed-answer" data-message-status="completed">Recovered final</div>';
+    });
+    const recovered = await inspect();
+    assert.equal(recovered.isError, false);
+    assert.equal((recovered.structuredContent.snapshot as { submittedUserMessageId: string }).submittedUserMessageId, 'delayed-user');
+    let final = service.teamDirectory.getSession(session.sessionId);
+    for (let attempt = 0; attempt < 20 && !final.terminal; attempt += 1) {
+      final = await callRpc<typeof final>({ socketPath: config.socketPath, method: 'session.wait', params: { clientId: identity.clientId, sessionId: session.sessionId, generation: sent.generation, waitMs: 500 } });
+    }
+    assert.equal(final.generation, sent.generation);
+    assert.equal(final.answerText, 'Recovered final');
+    assert.equal(await page.locator('[data-message-author-role="user"]').count(), 1);
+    assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft');
   } finally {
     await service.close();
     rmSync(root, { recursive: true, force: true });

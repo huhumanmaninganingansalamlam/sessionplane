@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { prepareFixture } from '../helpers/preparation-fixture.ts';
 
 import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry, PageRegistryError } from '../../src/browser/page-registry.ts';
@@ -50,7 +51,7 @@ test('ChatGPT read-only acknowledgement recovery requires one unique exact promp
   }
 });
 
-test('ChatGPT submission captures exact model, conversation, and user-turn acknowledgement', async () => {
+test('ChatGPT submission captures exact conversation and user-turn acknowledgement', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-submit-'));
   const registry = new PageRegistry();
   const owner = new BrowserOwner({
@@ -67,10 +68,10 @@ test('ChatGPT submission captures exact model, conversation, and user-turn ackno
         status: 200,
         contentType: 'text/html',
         body: chatGptFixture(false)
-          .replace('contenteditable="true"', 'contenteditable="false"')
+
           .replace(
             '<button data-testid="send-button" type="button">Send</button>',
-            '<button data-testid="send-button" type="button" disabled>Send</button><script>setTimeout(() => document.querySelector("#prompt-textarea").setAttribute("contenteditable", "true"), 1000); document.querySelector("#prompt-textarea").addEventListener("input", () => setTimeout(() => document.querySelector("[data-testid=send-button]").disabled = false, 500))</script>',
+            '<button data-testid="send-button" type="button" disabled>Send</button><script>document.querySelector("#prompt-textarea").addEventListener("input", () => setTimeout(() => document.querySelector("[data-testid=send-button]").disabled = false, 500))</script>',
           ),
       });
     });
@@ -89,7 +90,7 @@ test('ChatGPT submission captures exact model, conversation, and user-turn ackno
       }),
       generation: 1,
       prompt: 'Exact prompt body',
-      model: 'Model B',
+      model: null,
     } as const;
     const submission = new ChatGptSubmission({
       page: created.page,
@@ -99,11 +100,7 @@ test('ChatGPT submission captures exact model, conversation, and user-turn ackno
       acknowledgementTimeoutMs: 2_000,
     });
 
-    await submission.prepare();
-    assert.equal(
-      await created.page.locator('[data-testid="model-switcher-dropdown-button"]').textContent(),
-      'Model B',
-    );
+    await prepareFixture(submission, created.page);
     assert.equal(await created.page.locator('#prompt-textarea').textContent(), request.prompt);
 
     await submission.submitOnce();
@@ -235,7 +232,7 @@ test('ChatGPT submission waits for a controlled composer to commit the filled pr
       acknowledgementTimeoutMs: 500,
     });
 
-    await submission.prepare();
+    await prepareFixture(submission, created.page);
     assert.equal(await created.page.locator('#prompt-textarea').textContent(), prompt);
     assert.equal(
       await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
@@ -298,7 +295,7 @@ test('ChatGPT submission preserves exact multiline text through ProseMirror bloc
       acknowledgementTimeoutMs: 2_000,
     });
 
-    await submission.prepare();
+    await prepareFixture(submission, created.page);
     assert.equal(
       await created.page.locator('#prompt-textarea').evaluate((element) =>
         Array.from(element.children)
@@ -364,7 +361,7 @@ test('ChatGPT submission accepts an already exact controlled composer value', as
       acknowledgementTimeoutMs: 500,
     });
 
-    await submission.prepare();
+    await prepareFixture(submission, created.page);
     assert.equal(await created.page.locator('#prompt-textarea').textContent(), prompt);
     assert.equal(
       await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
@@ -420,7 +417,7 @@ test('ChatGPT submission follows the visible composer across a DOM replacement',
       acknowledgementTimeoutMs: 500,
     });
 
-    await submission.prepare();
+    await prepareFixture(submission, created.page);
     const visibleComposer = created.page
       .locator('#prompt-textarea')
       .filter({ visible: true })
@@ -430,434 +427,6 @@ test('ChatGPT submission follows the visible composer across a DOM replacement',
       await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
       0,
     );
-  } finally {
-    await owner.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('ChatGPT submission refuses a disabled requested model before send', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-disabled-'));
-  const registry = new PageRegistry();
-  const owner = new BrowserOwner({
-    profileDir: path.join(root, 'profile'),
-    pageRegistry: registry,
-    headless: true,
-  });
-
-  try {
-    await owner.start();
-    const created = await owner.createPage();
-    await created.page.route('https://chatgpt.com/**', async (route) => {
-      await route.fulfill({ status: 200, contentType: 'text/html', body: chatGptFixture(true) });
-    });
-    await created.page.goto('https://chatgpt.com/');
-    registry.refreshPage(created.binding.pageKey);
-    registry.reservePage(created.binding.pageKey, {
-      sessionId: 'session-disabled',
-      generation: 1,
-      conversationId: null,
-    });
-    const submission = new ChatGptSubmission({
-      page: created.page,
-      pageKey: created.binding.pageKey,
-      pageRegistry: registry,
-      request: {
-        session: sessionSnapshot({
-          sessionId: 'session-disabled',
-          pageKey: created.binding.pageKey,
-        }),
-        generation: 1,
-        prompt: 'Do not submit this',
-        model: 'Model B',
-      },
-      acknowledgementTimeoutMs: 500,
-    });
-
-    await assert.rejects(
-      submission.prepare(),
-      (error: unknown) =>
-        error instanceof ProviderSubmissionError &&
-        error.errorCode === 'provider.model-unavailable' &&
-        error.promptSubmitted === false,
-    );
-    assert.equal(await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount), 0);
-  } finally {
-    await owner.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('ChatGPT submission resolves Pro family to the highest enabled discovered model', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-pro-family-'));
-  const registry = new PageRegistry();
-  const owner = new BrowserOwner({
-    profileDir: path.join(root, 'profile'),
-    pageRegistry: registry,
-    headless: true,
-  });
-
-  try {
-    await owner.start();
-    const created = await owner.createPage();
-    await created.page.route('https://chatgpt.com/**', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body: chatGptModelFixture('5.6 Pro', [
-          { label: '5.6 Pro' },
-          { label: '6 Pro' },
-          { label: 'Instant' },
-        ]),
-      });
-    });
-    await created.page.goto('https://chatgpt.com/');
-    registry.refreshPage(created.binding.pageKey);
-    registry.reservePage(created.binding.pageKey, {
-      sessionId: 'session-pro-family-highest',
-      generation: 1,
-      conversationId: null,
-    });
-    const submission = new ChatGptSubmission({
-      page: created.page,
-      pageKey: created.binding.pageKey,
-      pageRegistry: registry,
-      request: {
-        session: sessionSnapshot({
-          sessionId: 'session-pro-family-highest',
-          pageKey: created.binding.pageKey,
-        }),
-        generation: 1,
-        prompt: 'Use the best available Pro model',
-        model: 'Pro',
-      },
-      acknowledgementTimeoutMs: 500,
-    });
-
-    await submission.prepare();
-    assert.equal(
-      await created.page.locator('[data-testid="model-switcher-dropdown-button"]').textContent(),
-      '6 Pro',
-    );
-    assert.equal(
-      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
-      0,
-    );
-  } finally {
-    await owner.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('ChatGPT submission falls back to the next enabled Pro model', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-pro-fallback-'));
-  const registry = new PageRegistry();
-  const owner = new BrowserOwner({
-    profileDir: path.join(root, 'profile'),
-    pageRegistry: registry,
-    headless: true,
-  });
-
-  try {
-    await owner.start();
-    const created = await owner.createPage();
-    await created.page.route('https://chatgpt.com/**', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body: chatGptModelFixture('6 Pro', [
-          { label: '6 Pro', disabled: true },
-          { label: '5.6 Pro' },
-          { label: 'Instant' },
-        ]),
-      });
-    });
-    await created.page.goto('https://chatgpt.com/');
-    registry.refreshPage(created.binding.pageKey);
-    registry.reservePage(created.binding.pageKey, {
-      sessionId: 'session-pro-family-fallback',
-      generation: 1,
-      conversationId: null,
-    });
-    const submission = new ChatGptSubmission({
-      page: created.page,
-      pageKey: created.binding.pageKey,
-      pageRegistry: registry,
-      request: {
-        session: sessionSnapshot({
-          sessionId: 'session-pro-family-fallback',
-          pageKey: created.binding.pageKey,
-        }),
-        generation: 1,
-        prompt: 'Fall back within the Pro family',
-        model: 'Pro',
-      },
-      acknowledgementTimeoutMs: 500,
-    });
-
-    await submission.prepare();
-    assert.equal(
-      await created.page.locator('[data-testid="model-switcher-dropdown-button"]').textContent(),
-      '5.6 Pro',
-    );
-    assert.equal(
-      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
-      0,
-    );
-  } finally {
-    await owner.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('ChatGPT submission selects the live intelligence Pro preset without misclassifying Chat as Work', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-live-pro-'));
-  const registry = new PageRegistry();
-  const owner = new BrowserOwner({
-    profileDir: path.join(root, 'profile'),
-    pageRegistry: registry,
-    headless: true,
-  });
-
-  try {
-    await owner.start();
-    const created = await owner.createPage();
-    await routeIntelligenceFixture(created.page, {
-      latestProLocked: false,
-      selectedVersion: 'latest',
-      selectedPreset: 3,
-      backendPresets: 'instant-only',
-      currentPicker: true,
-    });
-    await created.page.goto('https://chatgpt.com/');
-    registry.refreshPage(created.binding.pageKey);
-    registry.reservePage(created.binding.pageKey, {
-      sessionId: 'session-live-pro',
-      generation: 1,
-      conversationId: null,
-    });
-    const submission = new ChatGptSubmission({
-      page: created.page,
-      pageKey: created.binding.pageKey,
-      pageRegistry: registry,
-      request: {
-        session: sessionSnapshot({
-          sessionId: 'session-live-pro',
-          pageKey: created.binding.pageKey,
-        }),
-        generation: 1,
-        prompt: 'Use the best available Pro model',
-        model: 'Pro',
-        effort: 'Extra High',
-      },
-      acknowledgementTimeoutMs: 500,
-    });
-
-    await submission.prepare();
-    assert.equal(
-      await created.page
-        .locator('[role="menu"] [role="slider"]')
-        .getAttribute('aria-valuenow'),
-      '4',
-    );
-    assert.equal(
-      await created.page.locator('[role="menu"] [role="status"]').textContent(),
-      'Pro',
-    );
-    assert.equal(
-      await created.page.locator('#intelligence-button').textContent(),
-      'Reasoning level',
-    );
-    assert.equal(
-      await created.page
-        .locator('[role="menuitemradio"][aria-checked="true"]')
-        .getAttribute('data-version-id'),
-      'latest',
-    );
-    assert.equal(
-      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
-      0,
-    );
-  } finally {
-    await owner.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('ChatGPT submission falls back from a locked latest Pro preset to the next available Pro version', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-live-pro-fallback-'));
-  const registry = new PageRegistry();
-  const owner = new BrowserOwner({
-    profileDir: path.join(root, 'profile'),
-    pageRegistry: registry,
-    headless: true,
-  });
-
-  try {
-    await owner.start();
-    const created = await owner.createPage();
-    await routeIntelligenceFixture(created.page, {
-      latestProLocked: true,
-      selectedVersion: 'latest',
-      selectedPreset: 3,
-    });
-    await created.page.goto('https://chatgpt.com/');
-    registry.refreshPage(created.binding.pageKey);
-    registry.reservePage(created.binding.pageKey, {
-      sessionId: 'session-live-pro-fallback',
-      generation: 1,
-      conversationId: null,
-    });
-    const submission = new ChatGptSubmission({
-      page: created.page,
-      pageKey: created.binding.pageKey,
-      pageRegistry: registry,
-      request: {
-        session: sessionSnapshot({
-          sessionId: 'session-live-pro-fallback',
-          pageKey: created.binding.pageKey,
-        }),
-        generation: 1,
-        prompt: 'Fall back to the next unlocked Pro version',
-        model: 'Pro',
-      },
-      acknowledgementTimeoutMs: 500,
-    });
-
-    await submission.prepare();
-    assert.equal(
-      await created.page
-        .locator(
-          '[data-testid="composer-model-picker-slider-advanced-view"] [role="menuitemradio"][aria-checked="true"]',
-        )
-        .getAttribute('data-version-id'),
-      '5.6',
-    );
-    assert.equal(
-      await created.page
-        .locator('[data-model-reasoning-effort-slider] [role="slider"]')
-        .getAttribute('aria-valuenow'),
-      '4',
-    );
-    assert.equal(
-      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
-      0,
-    );
-  } finally {
-    await owner.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-test('ChatGPT submission uses live intelligence slider when capability feed exposes only Instant', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-live-slider-fallback-'));
-  const registry = new PageRegistry();
-  const owner = new BrowserOwner({
-    profileDir: path.join(root, 'profile'),
-    pageRegistry: registry,
-    headless: true,
-  });
-
-  const cases = [
-    {
-      name: 'semantic Pro',
-      model: 'Pro',
-      effort: null,
-      expectedVersion: 'latest',
-      expectedPreset: '4',
-    },
-    {
-      name: 'exact GPT-5.6 Pro',
-      model: 'GPT-5.6 Pro',
-      effort: null,
-      expectedVersion: '5.6',
-      expectedPreset: '4',
-      viewStateWithoutDataActive: true,
-    },
-    {
-      name: 'Extra High effort',
-      model: null,
-      effort: 'Extra High',
-      expectedVersion: 'latest',
-      expectedPreset: '3',
-    },
-    {
-      name: 'Thinking with Extra High effort',
-      model: 'Thinking',
-      effort: 'extra_high',
-      expectedVersion: 'latest',
-      expectedPreset: '3',
-    },
-  ] as const;
-
-  try {
-    await owner.start();
-    for (const [index, testCase] of cases.entries()) {
-      const created = await owner.createPage();
-      await routeIntelligenceFixture(created.page, {
-        latestProLocked: false,
-        selectedVersion: 'latest',
-        selectedPreset: 0,
-        backendPresets: 'instant-only',
-        viewStateWithoutDataActive: 'viewStateWithoutDataActive' in testCase,
-      });
-      await created.page.goto('https://chatgpt.com/');
-      if (testCase.name === 'semantic Pro') {
-        await created.page.evaluate(() => {
-          const control = document.querySelector('#slider-control');
-          const announcement = document.querySelector('#slider-announcement');
-          if (control === null || announcement === null) throw new Error('slider fixture missing');
-          control.setAttribute('aria-describedby', 'slider-announcement');
-          document.querySelector('#slider-status')?.removeAttribute('role');
-        });
-      }
-      registry.refreshPage(created.binding.pageKey);
-      const sessionId = 'session-live-slider-fallback-' + String(index);
-      registry.reservePage(created.binding.pageKey, {
-        sessionId,
-        generation: 1,
-        conversationId: null,
-      });
-      const submission = new ChatGptSubmission({
-        page: created.page,
-        pageKey: created.binding.pageKey,
-        pageRegistry: registry,
-        request: {
-          session: sessionSnapshot({
-            sessionId,
-            pageKey: created.binding.pageKey,
-          }),
-          generation: 1,
-          prompt: 'Prepare only with incomplete capabilities: ' + testCase.name,
-          model: testCase.model,
-          effort: testCase.effort,
-        },
-        acknowledgementTimeoutMs: 500,
-      });
-
-      await submission.prepare();
-      assert.equal(
-        await created.page
-          .locator('[data-model-reasoning-effort-slider] [role="slider"]')
-          .getAttribute('aria-valuenow'),
-        testCase.expectedPreset,
-        testCase.name,
-      );
-      assert.equal(
-        await created.page
-          .locator(
-            '[data-testid="composer-model-picker-slider-advanced-view"] [role="menuitemradio"][aria-checked="true"]',
-          )
-          .getAttribute('data-version-id'),
-        testCase.expectedVersion,
-        testCase.name,
-      );
-      assert.equal(
-        await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
-        0,
-        testCase.name,
-      );
-      await created.page.close();
-    }
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });
@@ -876,11 +445,13 @@ test('ChatGPT submission classifies a proven logged-out auth session before mode
   try {
     await owner.start();
     const created = await owner.createPage();
-    await routeIntelligenceFixture(created.page, {
-      latestProLocked: false,
-      selectedVersion: 'latest',
-      selectedPreset: 0,
-      authenticated: false,
+    await created.page.route('https://chatgpt.com/**', async (route) => {
+      const auth = new URL(route.request().url()).pathname === '/api/auth/session';
+      await route.fulfill({
+        status: 200,
+        contentType: auth ? 'application/json' : 'text/html',
+        body: auth ? '{}' : chatGptFixture(false),
+      });
     });
     await created.page.goto('https://chatgpt.com/');
     registry.refreshPage(created.binding.pageKey);
@@ -912,68 +483,6 @@ test('ChatGPT submission classifies a proven logged-out auth session before mode
         error.errorCode === 'provider.authentication-required' &&
         error.promptSubmitted === false,
     );
-    assert.equal(
-      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
-      0,
-    );
-  } finally {
-    await owner.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test('ChatGPT submission does not classify the ordinary intelligence picker as Work', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-intelligence-chat-'));
-  const registry = new PageRegistry();
-  const owner = new BrowserOwner({
-    profileDir: path.join(root, 'profile'),
-    pageRegistry: registry,
-    headless: true,
-  });
-
-  try {
-    await owner.start();
-    const created = await owner.createPage();
-    await created.page.route('https://chatgpt.com/**', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body: [
-          '<!doctype html><html><body>',
-          '<div data-testid="composer-model-picker-slider-simple-view" data-active="true"></div>',
-          '<form>',
-          '<textarea id="prompt-textarea" placeholder="Ask ChatGPT"></textarea>',
-          '<button data-testid="send-button" type="button">Send</button>',
-          '</form>',
-          '<script>window.sendCount=0;document.querySelector("[data-testid=\\"send-button\\"]").addEventListener("click",()=>{window.sendCount+=1;});</script>',
-          '</body></html>',
-        ].join(''),
-      });
-    });
-    await created.page.goto('https://chatgpt.com/');
-    registry.refreshPage(created.binding.pageKey);
-    registry.reservePage(created.binding.pageKey, {
-      sessionId: 'session-intelligence-chat',
-      generation: 1,
-      conversationId: null,
-    });
-    const submission = new ChatGptSubmission({
-      page: created.page,
-      pageKey: created.binding.pageKey,
-      pageRegistry: registry,
-      request: {
-        session: sessionSnapshot({
-          sessionId: 'session-intelligence-chat',
-          pageKey: created.binding.pageKey,
-        }),
-        generation: 1,
-        prompt: 'Ordinary Chat must remain supported',
-        model: null,
-      },
-      acknowledgementTimeoutMs: 500,
-    });
-
-    await submission.prepare();
     assert.equal(
       await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
       0,
@@ -1026,7 +535,7 @@ test('ChatGPT submission extends acknowledgement while exact user identity hydra
       acknowledgementTimeoutMs: 100,
     });
 
-    await submission.prepare();
+    await prepareFixture(submission, created.page);
     await submission.submitOnce();
     assert.deepEqual(await submission.captureAcknowledgement(), {
       conversationId: 'conversation-123456',
@@ -1043,64 +552,6 @@ test('ChatGPT submission extends acknowledgement while exact user identity hydra
   }
 });
 
-test('ChatGPT submission verifies that model selection actually took effect', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-model-ack-'));
-  const registry = new PageRegistry();
-  const owner = new BrowserOwner({
-    profileDir: path.join(root, 'profile'),
-    pageRegistry: registry,
-    headless: true,
-  });
-
-  try {
-    await owner.start();
-    const created = await owner.createPage();
-    await created.page.route('https://chatgpt.com/**', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body: chatGptFixture(false, false),
-      });
-    });
-    await created.page.goto('https://chatgpt.com/');
-    registry.refreshPage(created.binding.pageKey);
-    registry.reservePage(created.binding.pageKey, {
-      sessionId: 'session-model-noop',
-      generation: 1,
-      conversationId: null,
-    });
-    const submission = new ChatGptSubmission({
-      page: created.page,
-      pageKey: created.binding.pageKey,
-      pageRegistry: registry,
-      request: {
-        session: sessionSnapshot({
-          sessionId: 'session-model-noop',
-          pageKey: created.binding.pageKey,
-        }),
-        generation: 1,
-        prompt: 'Do not submit under the wrong model',
-        model: 'Model B',
-      },
-      acknowledgementTimeoutMs: 500,
-    });
-
-    await assert.rejects(
-      submission.prepare(),
-      (error: unknown) =>
-        error instanceof ProviderSubmissionError &&
-        error.errorCode === 'provider.model-unavailable' &&
-        error.promptSubmitted === false,
-    );
-    assert.equal(
-      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
-      0,
-    );
-  } finally {
-    await owner.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
 function sessionSnapshot(overrides: {
   readonly sessionId: string;
@@ -1273,262 +724,6 @@ function chatGptFixture(
     </html>`;
 }
 
-function chatGptModelFixture(
-  current: string,
-  options: readonly { readonly label: string; readonly disabled?: boolean }[],
-): string {
-  return chatGptFixture(false, true, false, '', false, false, false, false, {
-    current,
-    options,
-  });
-}
-
-async function routeIntelligenceFixture(
-  page: import('playwright-core').Page,
-  options: {
-    readonly latestProLocked: boolean;
-    readonly selectedVersion: 'latest' | '5.6';
-    readonly selectedPreset: number;
-    readonly backendPresets?: 'complete' | 'instant-only';
-    readonly authenticated?: boolean;
-    readonly viewStateWithoutDataActive?: boolean;
-    readonly currentPicker?: boolean;
-  },
-): Promise<void> {
-  await page.route('https://chatgpt.com/**', async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === '/api/auth/session') {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(
-          options.authenticated === false
-            ? { WARNING_BANNER: 'fixture logged out' }
-            : {
-                user: { id: 'fixture-user' },
-                WARNING_BANNER: 'no access token required for same-origin models',
-              },
-        ),
-      });
-      return;
-    }
-    if (url.pathname === '/backend-api/models') {
-      await route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify(intelligenceModelsFixture(options.backendPresets ?? 'complete')),
-      });
-      return;
-    }
-    await route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: chatGptIntelligenceFixture(options),
-    });
-  });
-}
-
-function intelligenceModelsFixture(mode: 'complete' | 'instant-only' = 'complete') {
-  if (mode === 'instant-only') {
-    return {
-      default_model_slug: 'auto',
-      model_picker_version: 2,
-      versions: [
-        {
-          id: '5.6',
-          display_text: 'Latest • 5.6',
-          display_text_for_intelligence: 'GPT-5.6 Sol',
-          enabled: true,
-          intelligence_presets: [
-            {
-              title: 'Instant',
-              model_slug: 'gpt-5-6',
-              lane: 'instant',
-              preset_type: 'available',
-            },
-          ],
-        },
-        { id: 'auto', display_text: 'Auto', enabled: true, intelligence_presets: [] },
-      ],
-    };
-  }
-  return {
-    default_model_slug: 'gpt-5-6',
-    model_picker_version: 2,
-    versions: [
-      {
-        id: 'latest',
-        display_text: 'Latest',
-        display_text_for_intelligence: 'Latest',
-        enabled: true,
-        intelligence_presets: [
-          { title: 'Instant', model_slug: 'gpt-5-6-instant', lane: 'instant', preset_type: 'available' },
-          {
-            title: 'Medium',
-            model_slug: 'gpt-5-6-thinking',
-            lane: 'thinking',
-            thinking_effort: 'standard',
-            preset_type: 'available',
-          },
-          {
-            title: 'High',
-            model_slug: 'gpt-5-6-thinking',
-            lane: 'thinking',
-            thinking_effort: 'extended',
-            preset_type: 'available',
-          },
-          {
-            title: 'Very High',
-            model_slug: 'gpt-5-6-thinking',
-            lane: 'thinking',
-            thinking_effort: 'max',
-            preset_type: 'available',
-          },
-          {
-            title: 'Pro',
-            selected_display_title: 'Pro',
-            selected_display_version: '6',
-            model_slug: 'gpt-6-pro',
-            lane: 'pro',
-            preset_type: 'available',
-          },
-        ],
-      },
-      {
-        id: '5.6',
-        display_text: '5.6',
-        display_text_for_intelligence: 'GPT-5.6 Sol',
-        enabled: true,
-        intelligence_presets: [
-          { title: 'Instant', model_slug: 'gpt-5-6-instant', lane: 'instant', preset_type: 'available' },
-          {
-            title: 'Medium',
-            model_slug: 'gpt-5-6-thinking',
-            lane: 'thinking',
-            thinking_effort: 'standard',
-            preset_type: 'available',
-          },
-          {
-            title: 'High',
-            model_slug: 'gpt-5-6-thinking',
-            lane: 'thinking',
-            thinking_effort: 'extended',
-            preset_type: 'available',
-          },
-          {
-            title: 'Very High',
-            model_slug: 'gpt-5-6-thinking',
-            lane: 'thinking',
-            thinking_effort: 'max',
-            preset_type: 'available',
-          },
-          {
-            title: 'Pro',
-            selected_display_title: 'Pro',
-            selected_display_version: '5.6',
-            model_slug: 'gpt-5-6-pro',
-            lane: 'pro',
-            preset_type: 'available',
-          },
-        ],
-      },
-    ],
-  };
-}
-
-function chatGptIntelligenceFixture(options: {
-  readonly latestProLocked: boolean;
-  readonly selectedVersion: 'latest' | '5.6';
-  readonly selectedPreset: number;
-  readonly viewStateWithoutDataActive?: boolean;
-  readonly currentPicker?: boolean;
-}): string {
-  const stateAttribute = options.viewStateWithoutDataActive ? 'data-view-state' : 'data-active';
-  const dots = [0, 1, 2, 3, 4]
-    .map(
-      (index) =>
-        '<span data-dot="' +
-        String(index) +
-        '" data-locked="' + String(options.latestProLocked && index === 4) +
-        '" data-selected="' +
-        String(index <= options.selectedPreset) +
-        '"></span>',
-    )
-    .join('');
-  return [
-    '<!doctype html><html><body>',
-    '<div role="radiogroup" aria-label="Chat surface">',
-    '<button role="radio" type="button" aria-checked="true" data-state="on">Chat</button>',
-    '<button role="radio" type="button" aria-checked="false" data-state="off">Work</button>',
-    '</div>',
-    '<form>',
-    '<textarea id="prompt-textarea" placeholder="Ask ChatGPT"></textarea>',
-    '<button data-testid="composer-plus-btn" type="button" aria-haspopup="menu">+</button>',
-    '<button id="intelligence-button" type="button" aria-haspopup="menu" data-state="closed">Very High</button>',
-    options.currentPicker
-      ? '<button type="submit">Send</button>'
-      : '<button data-testid="send-button" type="button">Send</button>',
-    '</form>',
-    '<div id="intelligence-menu" role="menu" data-state="closed" hidden>',
-    options.currentPicker ? '' : '<div data-testid="composer-intelligence-picker-content" role="group">',
-    '<div id="picker-root" data-expanded="false"><div role="menuitem" tabindex="0">Model selection</div></div>',
-    options.currentPicker
-      ? '<div id="current-simple">'
-      : '<div data-testid="composer-model-picker-slider-simple-view" ' + stateAttribute + '="true">',
-    '<div id="slider-control" role="menuitem" tabindex="0" aria-label="Performance">',
-    options.currentPicker
-      ? '<div>'
-      : '<div data-model-reasoning-effort-slider><span data-locked="false"></span>',
-    dots,
-    '<span role="slider" tabindex="-1" style="display:inline-block;width:120px;height:20px" aria-valuemin="0" aria-valuemax="4" aria-valuenow="' +
-      String(options.selectedPreset) +
-      '"></span></div></div>',
-    '<span id="slider-announcement"></span>',
-    '<span id="slider-status" role="status"></span>',
-    '</div>',
-    options.currentPicker
-      ? '<div id="current-advanced">'
-      : '<div data-testid="composer-model-picker-slider-advanced-view" ' + stateAttribute + '="false">',
-    '<div role="menuitemradio" data-version-id="latest" aria-checked="' +
-      String(options.selectedVersion === 'latest') +
-      '" data-state="' +
-      (options.selectedVersion === 'latest' ? 'checked' : 'unchecked') +
-      '">Latest</div>',
-    '<div role="menuitemradio" data-version-id="5.6" aria-checked="' +
-      String(options.selectedVersion === '5.6') +
-      '" data-state="' +
-      (options.selectedVersion === '5.6' ? 'checked' : 'unchecked') +
-      '">GPT-5.6 Sol</div>',
-    options.currentPicker ? '</div></div>' : '</div></div></div>',
-    '<script>',
-    'window.sendCount=0;',
-    'let selectedVersion=' + JSON.stringify(options.selectedVersion) + ';',
-    'let selectedPreset=' + String(options.selectedPreset) + ';',
-    'const lockedByVersion={latest:[false,false,false,false,' +
-      String(options.latestProLocked) +
-      '],"5.6":[false,false,false,false,false]};',
-    'const labels=["Instant","Medium","High","Very High","Pro"];',
-    'const button=document.querySelector("#intelligence-button");',
-    'const menu=document.querySelector("#intelligence-menu");',
-    'const root=document.querySelector("#picker-root");',
-    'const simple=document.querySelector(' + JSON.stringify(options.currentPicker ? '#current-simple' : '[data-testid="composer-model-picker-slider-simple-view"]') + ');',
-    'const advanced=document.querySelector(' + JSON.stringify(options.currentPicker ? '#current-advanced' : '[data-testid="composer-model-picker-slider-advanced-view"]') + ');',
-    'const slider=document.querySelector("[role=\\"slider\\"]");',
-    'const sliderControl=document.querySelector("#slider-control");',
-    'const announcement=document.querySelector("#slider-announcement");',
-    'const status=document.querySelector("#slider-status");',
-    'const dotNodes=Array.from(document.querySelectorAll("[data-dot]"));',
-    'const update=()=>{button.textContent="Reasoning level";status.textContent=labels[selectedPreset];slider.setAttribute("aria-valuenow",String(selectedPreset));dotNodes.forEach((dot,index)=>{dot.setAttribute("data-locked",String(lockedByVersion[selectedVersion][index]));dot.setAttribute("data-selected",String(index<=selectedPreset));});for(const radio of advanced.querySelectorAll("[role=\\"menuitemradio\\"]")){const checked=radio.getAttribute("data-version-id");radio.setAttribute("aria-checked",String(checked===selectedVersion));radio.setAttribute("data-state",checked===selectedVersion?"checked":"unchecked");}};',
-    'button.addEventListener("click",()=>{menu.hidden=false;menu.setAttribute("data-state","open");button.setAttribute("data-state","open");});',
-    'root.querySelector("[role=\\"menuitem\\"]").addEventListener("click",()=>{root.setAttribute("data-expanded","true");simple.setAttribute(' + JSON.stringify(stateAttribute) + ',"false");advanced.setAttribute(' + JSON.stringify(stateAttribute) + ',"true");});',
-    'for(const radio of advanced.querySelectorAll("[role=\\"menuitemradio\\"]")){radio.addEventListener("click",()=>{selectedVersion=radio.getAttribute("data-version-id");selectedPreset=Math.min(selectedPreset,3);root.setAttribute("data-expanded","false");simple.setAttribute(' + JSON.stringify(stateAttribute) + ',"true");advanced.setAttribute(' + JSON.stringify(stateAttribute) + ',"false");update();});}',
-    'slider.addEventListener("keydown",(event)=>{if(event.key!=="ArrowLeft"&&event.key!=="ArrowRight")return;const direction=event.key==="ArrowRight"?1:-1;const next=Math.max(0,Math.min(4,selectedPreset+direction));if(lockedByVersion[selectedVersion][next])return;selectedPreset=next;update();});',
-    'document.querySelector("form button[type=submit], [data-testid=\\"send-button\\"]").addEventListener("click",()=>{window.sendCount+=1;});',
-    'sliderControl.addEventListener("keydown",(event)=>{if(event.key!=="ArrowLeft"&&event.key!=="ArrowRight")return;const direction=event.key==="ArrowRight"?1:-1;const next=Math.max(0,Math.min(4,selectedPreset+direction));if(lockedByVersion[selectedVersion][next])return;selectedPreset=next;update();announcement.textContent=labels[selectedPreset]+", 5 of 5.";});',
-    'update();announcement.textContent=labels[selectedPreset]+", 5 of 5.";',
-    '</script></body></html>',
-  ].join('');
-}
 function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')

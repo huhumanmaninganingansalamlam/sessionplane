@@ -1,0 +1,19 @@
+{
+  "annotations": {
+    "test/helpers/preparation-fixture.ts": {
+      "declared_effects": [
+        "ui"
+      ],
+      "purpose": "Provide explicit composer and submit choices for deterministic browser fixtures",
+      "reviewed_at": "20260925T091458Z",
+      "reviewed_by": "agent",
+      "role": "test",
+      "source_content_digest": "sha256:856e7149fb100a3e364ec26585f4480f73f5ac2ebcd088c95b857711d3b62854",
+      "topics": [
+        "provider-preparation"
+      ]
+    }
+  },
+  "exclusions": {},
+  "schema_version": 1
+}

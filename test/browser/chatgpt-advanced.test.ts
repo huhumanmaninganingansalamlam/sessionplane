@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { prepareFixture } from '../helpers/preparation-fixture.ts';
 
 import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
@@ -58,7 +59,7 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
       acknowledgementTimeoutMs: 2_000,
     });
 
-    await submission.prepare();
+    await prepareFixture(submission, registry.pageForObservation(submission.pageKey));
     assert.equal(await created.page.locator('#chat').getAttribute('aria-checked'), 'true');
     assert.deepEqual(
       await created.page.locator('[data-testid="attachment-pill"]').allTextContents(),
@@ -233,7 +234,7 @@ test('ChatGPT pre-submit retry re-navigates an open blank reserved Page', async 
       model: null,
     });
     assert.equal(retry.pageKey, created.binding.pageKey);
-    await retry.prepare();
+    await prepareFixture(retry, created.page);
     assert.equal(new URL(created.page.url()).origin, 'https://chatgpt.com');
     assert.equal(
       await created.page.locator('#prompt-textarea').textContent(),
@@ -308,7 +309,7 @@ test('ChatGPT follow-up reopens the exact conversation when the durable pageKey 
       `https://chatgpt.com/c/${conversationId}`,
     );
 
-    await submission.prepare();
+    await prepareFixture(submission, registry.pageForObservation(submission.pageKey));
     assert.equal(
       await registry
         .pageForObservation(submission.pageKey)
@@ -504,60 +505,6 @@ test('visible browser verification is handed to a human before composer mutation
   }
 });
 
-test('ChatGPT named Deep Research mode must acknowledge selection before submit', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-deep-research-'));
-  const registry = new PageRegistry();
-  const owner = new BrowserOwner({
-    profileDir: path.join(root, 'profile'),
-    pageRegistry: registry,
-    headless: true,
-  });
-
-  try {
-    await owner.start();
-    const created = await owner.createPage();
-    await created.page.route('https://chatgpt.com/**', async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body: namedModeFixture(),
-      });
-    });
-    await created.page.goto('https://chatgpt.com/');
-    registry.refreshPage(created.binding.pageKey);
-    registry.reservePage(created.binding.pageKey, {
-      sessionId: 'deep-research-session',
-      generation: 1,
-      conversationId: null,
-    });
-    const submission = new ChatGptSubmission({
-      page: created.page,
-      pageKey: created.binding.pageKey,
-      pageRegistry: registry,
-      request: {
-        session: { ...sessionSnapshot(created.binding.pageKey), sessionId: 'deep-research-session' },
-        generation: 1,
-        prompt: 'Research exact primary sources.',
-        model: null,
-        surface: 'deep-research',
-      },
-      acknowledgementTimeoutMs: 1_000,
-    });
-
-    await submission.prepare();
-    assert.equal(
-      await created.page.locator('[data-testid="composer-tools"]').textContent(),
-      'Deep Research',
-    );
-    assert.equal(
-      await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount),
-      0,
-    );
-  } finally {
-    await owner.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
 function attachment(root: string, name: string, content: string): ProviderAttachment {
   const filePath = path.join(root, name);

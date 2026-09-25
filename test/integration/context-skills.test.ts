@@ -204,18 +204,12 @@ test('bundled skills are served and installed by the SessionPlane CLI', async ()
     assert.equal(existsSync(path.join(target, 'sessionplane', 'SKILL.md')), true);
     const webAiSkill = readFileSync(path.join(target, 'web-ai', 'SKILL.md'), 'utf8');
     const coreSkill = readFileSync(path.join(target, 'sessionplane', 'SKILL.md'), 'utf8');
-    assert.match(webAiSkill, /Never use Gemini or Grok as an implicit fallback for ChatGPT/);
-    assert.match(webAiSkill, /pass `--model Pro`/);
-    assert.match(coreSkill, /Never switch providers as recovery/);
-    assert.match(coreSkill, /general browser skill/);
-    assert.match(webAiSkill, /browser automation belongs to Playwright/);
-    assert.match(coreSkill, /`model=Pro` is a model-family intent/);
-    assert.match(coreSkill, /Do not preflight or infer Pro availability from `\/backend-api\/models`/);
-    assert.match(coreSkill, /catalog omission alone is not a blocker/);
-    assert.match(webAiSkill, /Do not inspect `\/backend-api\/models`/);
-    assert.match(webAiSkill, /Instant-only capability feed while the live composer picker still exposes Pro/);
-    assert.match(webAiSkill, /Only a typed pre-submit `provider\.model-unavailable`/);
-    assert.match(webAiSkill, /Do not call it a rate limit unless SessionPlane reports/);
+    const sessionplane = await runSessplane(['skills', 'get', 'sessionplane', '--full', '--json']);
+    assert.equal(sessionplane.code, 0, sessionplane.stderr);
+    assert.equal(coreSkill, (JSON.parse(sessionplane.stdout) as { content: string }).content);
+    const webAi = await runSessplane(['skills', 'get', 'web-ai', '--full', '--json']);
+    assert.equal(webAi.code, 0, webAi.stderr);
+    assert.equal(webAiSkill, (JSON.parse(webAi.stdout) as { content: string }).content);
 
     const protectedRun = await runSessplane([
       'skills',

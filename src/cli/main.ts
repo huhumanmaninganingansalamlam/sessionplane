@@ -45,6 +45,7 @@ const FLAG_OPTIONS = new Set([
   'include-html',
   'include-binary',
   'stdin-results',
+  'prompt-stdin',
   'overwrite',
   'full',
   'link',
@@ -78,6 +79,7 @@ const VALUE_OPTIONS = new Set([
   'provider',
   'brief',
   'prompt',
+  'prompt-file',
   'text',
   'model',
   'effort',
@@ -878,7 +880,13 @@ async function runSendCommand(
   parsed: ParsedArgs,
   config: SessionPlaneConfig,
 ): Promise<number> {
-  let prompt = requireOption(parsed, 'prompt');
+  const sources = ['prompt', 'prompt-file', 'prompt-stdin'].filter((key) => parsed.options[key] !== undefined);
+  if (sources.length !== 1) throw new Error('Choose exactly one of --prompt, --prompt-file, or --prompt-stdin');
+  let prompt = parsed.options['prompt-file'] !== undefined
+    ? readFileSync(parsed.options['prompt-file'], 'utf8')
+    : parsed.options['prompt-stdin'] === 'true'
+      ? await readInput(io.stdin)
+      : requireOption(parsed, 'prompt');
   const files = [...parsed.files];
   if (hasContextInput(parsed)) {
     const contextPackages = new ContextPackageService({ stateDir: config.stateDir });
@@ -1564,6 +1572,7 @@ function parseJsonText(value: string, label: string): unknown {
 }
 
 async function readInput(stream: NodeJS.ReadableStream): Promise<string> {
+  stream.setEncoding('utf8');
   let value = '';
   for await (const chunk of stream) {
     value += typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString('utf8');
@@ -1624,8 +1633,8 @@ Team and role sessions:
   sessplane session create TEAM_ID ROLE_KEY [--provider chatgpt|gemini|grok]
   sessplane session show SESSION_ID
   sessplane session events TEAM_ID [--after-sequence N]
-  sessplane send TEAM_ID ROLE_KEY --prompt TEXT [--model MODEL] [--effort LEVEL] [--surface NAME] [--file PATH ...]
-  sessplane send --session SESSION_ID --prompt TEXT
+  sessplane send TEAM_ID ROLE_KEY (--prompt TEXT | --prompt-file PATH | --prompt-stdin) [--model MODEL] [--effort LEVEL] [--surface NAME] [--file PATH ...]
+  sessplane send --session SESSION_ID (--prompt TEXT | --prompt-file PATH | --prompt-stdin)
   sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID
   sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]
   sessplane stop TEAM_ID ROLE_KEY [--request-id ID]

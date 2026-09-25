@@ -175,6 +175,7 @@ export class BrowserRefSnapshotStore {
           if (title !== null && title.trim() !== '') return normalize(title);
           const placeholder = element.getAttribute('placeholder');
           if (placeholder !== null && placeholder.trim() !== '') return normalize(placeholder);
+          if (inferredRole(element) === 'textbox') return '';
           const value =
             element instanceof HTMLInputElement ||
             element instanceof HTMLTextAreaElement ||

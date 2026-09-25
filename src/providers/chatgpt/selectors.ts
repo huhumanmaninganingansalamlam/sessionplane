@@ -1,41 +1,6 @@
 export const CHATGPT_SELECTORS = {
   chatSurfaceRadios:
     '[role="radiogroup"] [role="radio"][aria-checked="true"], [role="radiogroup"] [role="radio"][data-state="on"]',
-  intelligenceSwitcher: [
-    'form button[aria-haspopup="menu"][data-state]:not([data-testid="composer-plus-btn"])',
-  ],
-  intelligenceContent: '[role="menu"]:has([role="slider"])',
-  composer: [
-    '#prompt-textarea',
-    '[data-testid="prompt-textarea"]',
-    'form textarea[placeholder]',
-    'form div[contenteditable="true"][data-lexical-editor="true"]',
-    'form div[contenteditable="true"][role="textbox"]',
-    'form div[contenteditable="true"]',
-  ],
-  sendButton: [
-    'button[type="submit"]',
-    '[data-testid="send-button"]',
-  ],
-  modelSwitcher: [
-    '[data-testid="model-switcher-dropdown-button"]',
-    'button[aria-haspopup="menu"][data-testid*="model"]',
-    'button[aria-label*="model" i]',
-  ],
-  modelOptions: '[role="menuitem"], [role="option"], [data-testid*="model-option"], [role="menu"] button',
-  effortSwitcher: [
-    '[data-testid*="reasoning-effort"]',
-    'button[aria-label*="reasoning" i]',
-    'button[aria-label*="thinking" i]',
-  ],
-  surfaceSwitcher: [
-    '[data-testid*="composer-tools"]',
-    '[data-testid*="tools-button"]',
-    'button[aria-label*="tools" i]',
-    'button[aria-label*="mode" i]',
-  ],
-  namedModeOptions:
-    '[role="menuitem"], [role="option"], [data-testid*="tool"], [data-testid*="mode"], [role="menu"] button',
   fileInputs: ['input[type="file"]'],
   uploadTriggers: [
     '[data-testid*="attach"]',

@@ -239,7 +239,6 @@ test('session.send submits once, persists exact acknowledgement, and never resen
         requestId: 'send-composer-failure',
         sessionId: composerFailure.sessionId,
         prompt: 'This must not turn into another preparation decision.',
-        assistedPreparation: true,
         sessionDeadlineSec: 600,
       }),
       hasRpcError('provider.composer-unavailable', false),

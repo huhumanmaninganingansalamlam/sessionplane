@@ -40,7 +40,6 @@ export interface SessionSendInput {
   readonly effort?: string | null;
   readonly surface?: string | null;
   readonly files?: readonly string[];
-  readonly assistedPreparation?: boolean;
   readonly sessionDeadlineSec: number;
 }
 
@@ -50,24 +49,6 @@ interface PendingPreparation {
   readonly requiresInspection?: boolean;
 }
 
-function canStartAssistedPreparation(error: unknown): boolean {
-  if (error instanceof ProviderSubmissionError) {
-    if (error.details !== null && typeof error.details === 'object') {
-      const marker = (error.details as { preparationDecision?: unknown }).preparationDecision;
-      if (marker === false) return false;
-      if (marker === true) return error.errorCode === 'provider.composer-unavailable';
-    }
-    return ['provider.model-unavailable', 'provider.mode-unavailable'].includes(error.errorCode);
-  }
-  if (!(error instanceof SessionPlaneDomainError)) return false;
-  const details = error.details;
-  if (details !== null && typeof details === 'object') {
-    const marker = (details as { preparationDecision?: unknown }).preparationDecision;
-    if (marker === false) return false;
-    if (marker === true) return error.errorCode === 'provider.composer-unavailable';
-  }
-  return ['provider.model-unavailable', 'provider.mode-unavailable'].includes(error.errorCode);
-}
 
 interface StoredOutboxPayload {
   readonly prompt: string;
@@ -76,7 +57,6 @@ interface StoredOutboxPayload {
   readonly surface: string | null;
   readonly sessionDeadlineSec: number;
   readonly attachments: readonly ProviderAttachment[];
-  readonly assistedPreparation?: boolean;
 }
 
 interface PreparedOutbox {
@@ -151,7 +131,7 @@ export class SubmissionService {
         if (
           current.submissionState === 'prepared' &&
           current.errorCode === 'provider.preparation-required' &&
-          !current.promptSubmitted && isAssistedOutbox(current) &&
+          !current.promptSubmitted &&
           currentSnapshot.generation === current.generation &&
           currentSnapshot.sessionState === 'submitting' &&
           currentSnapshot.submissionState === 'prepared' &&
@@ -281,6 +261,7 @@ export class SubmissionService {
 
   async recoverAcknowledgement(snapshot: SessionSnapshot): Promise<SessionSnapshot> {
     if (
+      snapshot.terminal ||
       snapshot.submissionState !== 'submission_unknown' ||
       !snapshot.promptSubmitted ||
       snapshot.pageKey === null ||
@@ -303,7 +284,7 @@ export class SubmissionService {
       const current = this.#requireSnapshot(snapshot.sessionId);
       const currentConversationId = current.conversationId;
       if (
-        current.generation !== snapshot.generation ||
+        current.generation !== snapshot.generation || current.terminal ||
         current.submissionState !== 'submission_unknown' ||
         !current.promptSubmitted ||
         current.pageKey === null ||
@@ -430,7 +411,6 @@ export class SubmissionService {
       surface,
       attachments,
       sessionDeadlineSec: input.sessionDeadlineSec,
-      ...(input.assistedPreparation === true ? { assistedPreparation: true } : {}),
     };
     const requestHash = hashCanonical({ method: 'session.send', payload });
     const requestKey = JSON.stringify([input.clientId, input.requestId]);
@@ -456,9 +436,6 @@ export class SubmissionService {
           'provider.disabled',
           'Provider is disabled by runtime configuration: ' + selected.provider,
         );
-      }
-      if (input.assistedPreparation === true && selected.provider !== 'chatgpt') {
-        throw new SessionPlaneDomainError('capability.unsupported', 'Assisted provider preparation currently supports ChatGPT only');
       }
       const actor = this.#scheduler.actorFor(selected.sessionId);
       return await actor.enqueue(async () =>
@@ -536,8 +513,7 @@ export class SubmissionService {
           () => submission.abandon(),
         );
       } catch (error) {
-        if (input.assistedPreparation === true && prepared.snapshot.provider === 'chatgpt' &&
-          canStartAssistedPreparation(error)) {
+        if (error instanceof ProviderSubmissionError && error.errorCode === 'provider.preparation-required') {
           return await this.#recordPreparationRequired(actor, prepared.outbox, error);
         }
         return await this.#failPreSubmit(actor, prepared.outbox, error);
@@ -657,7 +633,7 @@ export class SubmissionService {
     if (
       outbox === null || outbox.sessionId !== input.sessionId || outbox.generation !== input.generation ||
       outbox.submissionState !== 'prepared' || outbox.errorCode !== 'provider.preparation-required' ||
-      !isAssistedOutbox(outbox) || snapshot.generation !== input.generation || snapshot.promptSubmitted ||
+      snapshot.generation !== input.generation || snapshot.promptSubmitted ||
       snapshot.sessionState !== 'submitting'
     ) {
       throw new SessionPlaneDomainError('session.generation-superseded', 'Exact pending preparation is no longer current');
@@ -675,6 +651,41 @@ export class SubmissionService {
       attachments,
       state.choices,
     );
+  }
+
+  async inspectSubmission<Result>(
+    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number },
+    observe: (snapshot: SessionSnapshot) => Promise<Result>,
+  ) {
+    const actor = this.#scheduler.actorFor(input.sessionId);
+    const requireOwner = () => {
+      const outbox = this.#outbox.getByRequest(input.clientId, input.requestId);
+      const snapshot = this.#requireSnapshot(input.sessionId);
+      if (outbox === null || outbox.sessionId !== input.sessionId ||
+          outbox.generation !== input.generation || snapshot.generation !== input.generation) {
+        throw new SessionPlaneDomainError('session.generation-superseded', 'Exact caller-owned submission is no longer current');
+      }
+      this.#adapters.require(snapshot.provider);
+      if (snapshot.provider !== 'chatgpt') {
+        throw new SessionPlaneDomainError('capability.unsupported', 'Submission page inspection currently supports ChatGPT only');
+      }
+      return { outbox, snapshot };
+    };
+    const initial = await actor.enqueue(requireOwner);
+    if (!initial.snapshot.terminal) await this.recoverAcknowledgement(initial.snapshot);
+    return await actor.enqueue(async () => {
+      const { outbox, snapshot } = requireOwner();
+      const requested = parseOutboxPayload(outbox);
+      const result = {
+        requestId: outbox.requestId,
+        snapshot,
+        requested: { prompt: requested.prompt, model: requested.model, effort: requested.effort },
+      };
+      if (snapshot.pageKey === null) return { ...result, evidence: null };
+      return await this.#pageMutex.runExclusive(snapshot.pageKey, async () => ({
+        ...result, evidence: await observe(snapshot),
+      }));
+    });
   }
 
   async withPendingPreparation<Result>(
@@ -845,7 +856,7 @@ export class SubmissionService {
     if (
       outbox === null || outbox.sessionId !== input.sessionId || outbox.generation !== input.generation ||
       outbox.submissionState !== 'prepared' || outbox.errorCode !== 'provider.preparation-required' ||
-      !isAssistedOutbox(outbox) || snapshot.generation !== input.generation ||
+      snapshot.generation !== input.generation ||
       snapshot.sessionState !== 'submitting' || snapshot.submissionState !== 'prepared' || snapshot.promptSubmitted
     ) {
       throw new SessionPlaneDomainError('session.generation-superseded', 'Exact caller-owned preparation is no longer current');
@@ -855,9 +866,6 @@ export class SubmissionService {
 
   async #recordPreparationRequired(actor: SessionActor, outbox: OutboxRecord, cause: unknown): Promise<SessionSnapshot> {
     const classified = classifyPreSubmitError(cause);
-    if (!canStartAssistedPreparation(cause)) {
-      return await this.#failPreSubmit(actor, outbox, cause);
-    }
     let snapshot!: SessionSnapshot;
     let eventSequence = 0;
     const state = {
@@ -1451,8 +1459,7 @@ export class SubmissionService {
       );
     }
     const pendingSnapshot = outbox.submissionState === 'prepared' &&
-      outbox.errorCode === 'provider.preparation-required' && !outbox.promptSubmitted &&
-      isAssistedOutbox(outbox) ? this.#sessions.getSnapshot(outbox.sessionId) : null;
+      outbox.errorCode === 'provider.preparation-required' && !outbox.promptSubmitted ? this.#sessions.getSnapshot(outbox.sessionId) : null;
     if (
       pendingSnapshot?.generation === outbox.generation &&
       pendingSnapshot.sessionState === 'submitting' &&
@@ -1574,16 +1581,6 @@ function promptFromOutbox(outbox: OutboxRecord): string | null {
   return null;
 }
 
-function isAssistedOutbox(outbox: OutboxRecord): boolean {
-  try {
-    const payload = JSON.parse(outbox.payloadJson) as unknown;
-    return payload !== null && typeof payload === 'object' &&
-      (payload as Record<string, unknown>).assistedPreparation === true;
-  } catch {
-    return false;
-  }
-}
-
 function parseOutboxPayload(outbox: OutboxRecord): StoredOutboxPayload {
   let parsed: unknown;
   try {
@@ -1640,7 +1637,6 @@ function sessionSendInputFromOutbox(outbox: OutboxRecord, payload: StoredOutboxP
     effort: payload.effort,
     surface: payload.surface,
     files: payload.attachments.map((attachment) => attachment.path),
-    assistedPreparation: payload.assistedPreparation === true,
     sessionDeadlineSec: payload.sessionDeadlineSec,
   };
 }

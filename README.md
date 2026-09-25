@@ -11,14 +11,13 @@ and one runtime contract.
 
 ## Agent-guided preparation
 
-For ChatGPT MCP requests, set `assistedPreparation: true` on
-`sessionplane_send` to keep unresolved preparation on the same request and
-generation. On `provider.preparation-required`, use
-`sessionplane_preparation_inspect`, `sessionplane_preparation_decide`, then
-`sessionplane_preparation_resume`. The caller interprets live evidence; the core
-owns execution, submission tracking and answer recovery. Ordinary sends retain
-their existing behavior. See [the preparation contract](docs/provider-preparation.md)
-for ownership and continuation requirements.
+Every ChatGPT send starts a caller-owned preparation request. Inspect the live
+UI with `sessionplane_preparation_inspect`, choose observed controls with
+`sessionplane_preparation_decide`, and continue the same request/generation with
+`sessionplane_preparation_resume`. Core executes verified choices and owns exact
+submission/answer correlation. Automatic UI selection, immediate-submit
+compatibility and the `assistedPreparation` flag have been removed. See
+[the preparation contract](docs/provider-preparation.md).
 
 ## Requirements
 
@@ -186,7 +185,7 @@ uploads and durable artifact capture.
 
 SessionPlane deliberately uses the Chat surface only. It never switches a
 composer into ChatGPT Work, and an explicit Work request fails before provider
-mutation. Chat model/reasoning selection, named Chat modes, uploads, durable
+mutation. Agent-directed Chat model/reasoning selection, uploads, durable
 follow-up generations, Project Sources, and artifact recovery remain supported.
 
 When a provider Page visibly presents Cloudflare or CAPTCHA-style browser
@@ -217,6 +216,10 @@ stores it content-addressed, and exports it to the requested path. Newly
 generated code archives must contain a nonempty root `PLAN.md` or
 `00_plan.md`. Unsafe paths, symbolic links, malformed local headers, oversized
 archives, and output replacement are rejected.
+
+ChatGPT code generation first returns the same preparation handoff. Complete
+inspect/decide/resume with its original request identity, then repeat the exact
+`code generate` request to wait and export artifacts without another submit.
 
 ```bash
 sessplane code generate --session "$SESSION_ID" \
@@ -322,3 +325,13 @@ sessplane research browse-plan --plan plan.json --enrichment enrichment.json --j
 `SESSIONPLANE_FETCH_ALLOW_PRIVATE=true` exists only for isolated local fixtures
 or intentionally private deployments. It is false by default and should not be
 enabled for untrusted URLs.
+
+Long CLI prompt bodies can be sent with `sessplane send TEAM_ID ROLE_KEY
+--prompt-file ./prompt.txt --request-id REQUEST_ID --json`, or `--prompt-stdin`
+for piped input. Select exactly one prompt source. With MCP, use structured
+`sessionplane_send` arguments instead of interpolating text into a shell.
+
+For a stuck ambiguous submission, `sessionplane_submission_inspect` exposes
+caller-owned page evidence and attempts read-only acknowledgement recovery using
+the original request/session/generation. It never resends a prompt; see
+[ambiguous submission inspection](docs/provider-preparation.md#ambiguous-submission-inspection).
