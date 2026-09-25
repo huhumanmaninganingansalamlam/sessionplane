@@ -98,10 +98,10 @@ export function registerWaitMethods(
             afterRevision: cursor,
             expectedGeneration: snapshot.generation,
             signal: controller.signal,
+            wakeOnTerminal: false,
           }),
         );
-        const wake = await Promise.race(waits);
-        controller.abort();
+        const wake = await Promise.race(waits).finally(() => controller.abort());
         team = directory.getTeam(params.teamId);
         const observedChange = !wake.waitExpired || team.latestEventSequence > cursor;
         if (params.until === 'any_change' && observedChange) {

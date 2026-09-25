@@ -10,11 +10,13 @@ export interface SessionWaitOptions {
   readonly afterRevision?: number;
   readonly expectedGeneration?: number;
   readonly signal?: AbortSignal;
+  readonly wakeOnTerminal?: boolean;
 }
 
 interface Waiter {
+  readonly wakeOnTerminal: boolean;
   readonly afterRevision: number;
-  readonly resolve: (snapshot: SessionWaitSnapshot) => void;
+  readonly finish: (waitExpired: boolean) => void;
   readonly timer: NodeJS.Timeout;
   readonly cleanup: () => void;
 }
@@ -97,12 +99,9 @@ export class SessionActor {
 
     this.#snapshot = snapshot;
     this.#revision = Math.max(this.#revision, revision);
-    for (const [waiterId, waiter] of this.#waiters) {
-      if (snapshot.terminal || this.#revision > waiter.afterRevision) {
-        clearTimeout(waiter.timer);
-        waiter.cleanup();
-        this.#waiters.delete(waiterId);
-        waiter.resolve(this.#decorate(snapshot, false));
+    for (const waiter of this.#waiters.values()) {
+      if ((snapshot.terminal && waiter.wakeOnTerminal) || this.#revision > waiter.afterRevision) {
+        waiter.finish(false);
       }
     }
     this.#retireIfIdleTerminal();
@@ -111,7 +110,7 @@ export class SessionActor {
   async wait(options: SessionWaitOptions): Promise<SessionWaitSnapshot> {
     this.#assertGeneration(options.expectedGeneration);
     const afterRevision = options.afterRevision ?? this.#revision;
-    if (this.#snapshot.terminal || this.#revision > afterRevision) {
+    if ((this.#snapshot.terminal && options.wakeOnTerminal !== false) || this.#revision > afterRevision) {
       const snapshot = this.#decorate(this.#snapshot, false);
       this.#retireIfIdleTerminal();
       return snapshot;
@@ -146,8 +145,9 @@ export class SessionActor {
       options.signal?.addEventListener('abort', onAbort, { once: true });
       const cleanup = (): void => options.signal?.removeEventListener('abort', onAbort);
       this.#waiters.set(waiterId, {
+        wakeOnTerminal: options.wakeOnTerminal !== false,
         afterRevision,
-        resolve: () => finish(false),
+        finish,
         timer,
         cleanup,
       });
@@ -162,11 +162,8 @@ export class SessionActor {
       return;
     }
     this.#closed = true;
-    for (const [waiterId, waiter] of this.#waiters) {
-      clearTimeout(waiter.timer);
-      waiter.cleanup();
-      this.#waiters.delete(waiterId);
-      waiter.resolve(this.#decorate(this.#snapshot, true));
+    for (const waiter of this.#waiters.values()) {
+      waiter.finish(true);
     }
   }
 
@@ -193,7 +190,7 @@ export class SessionActor {
   #decorate(snapshot: SessionSnapshot, waitExpired: boolean): SessionWaitSnapshot {
     return {
       ...snapshot,
-      waitExpired: snapshot.terminal ? false : waitExpired,
+      waitExpired,
       latestEventSequence: this.#revision,
     };
   }

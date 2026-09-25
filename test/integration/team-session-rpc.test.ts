@@ -7,6 +7,7 @@ import test from 'node:test';
 import { callRpc, RpcClientError } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
+import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 interface TeamSnapshot {
   readonly teamId: string;
@@ -29,7 +30,9 @@ interface SessionSnapshot {
 test('teams, role isolation, session replacement, events, and restart restoration are durable', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-team-session-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
-  let service = await startCore({ config, startBrowser: false });
+  const fake = new FakeProviderAdapter();
+  fake.autoFinalText = 'Review complete';
+  let service = await startCore({ config, startBrowser: false, providerAdapters: [fake] });
 
   try {
     const teamA = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
@@ -191,6 +194,30 @@ test('teams, role isolation, session replacement, events, and restart restoratio
         error instanceof RpcClientError &&
         (error.data as Record<string, unknown>).errorCode === 'team.role-key-conflict',
     );
+
+    const reviewer = await rpc<SessionSnapshot>(config.socketPath, 'session.create', {
+      clientId: 'client-a', requestId: 'reviewer-session', teamId: teamA.teamId,
+      roleKey: 'reviewer.security', provider: 'chatgpt',
+    });
+    await rpc(config.socketPath, 'session.send', {
+      clientId: 'client-a', requestId: 'reviewer-send', sessionId: reviewer.sessionId, prompt: 'Review',
+    });
+    let review: { terminal: boolean };
+    do {
+      review = await rpc(config.socketPath, 'session.wait', {
+        clientId: 'client-a', sessionId: reviewer.sessionId, generation: 1, waitMs: 1000,
+      });
+    } while (!review.terminal);
+    const waiting = rpc<{ waitExpired: boolean }>(config.socketPath, 'team.wait', {
+      clientId: 'client-a', teamId: teamA.teamId,
+      roleKeys: ['reviewer.security', 'main'], until: 'primary_terminal', waitMs: 500,
+    });
+    const concurrentRead = new Promise((resolve) => setTimeout(resolve, 20)).then(() =>
+      rpc(config.socketPath, 'team.get', { clientId: 'client-a', teamId: teamA.teamId }));
+    assert.equal(await Promise.race([
+      waiting.then(() => 'wait-finished'), concurrentRead.then(() => 'core-responsive'),
+    ]), 'core-responsive');
+    assert.equal((await waiting).waitExpired, true);
 
     await service.close();
     service = await startCore({ config, startBrowser: false });

@@ -170,7 +170,7 @@ full observed popup text; core verifies the chosen value, not model-name guesses
   `nextCheckAt`; a backend 429 alone does not justify replacement.
 - For an unreadable conversation or a completed long conversation the caller decides
   to rotate, use `sessionplane_session_create` with the same team, role and provider.
-  It supersedes the old session and records `predecessorSessionId`. Carry a concise
+  It changes current role routing and records `predecessorSessionId`. Carry a concise
   role handoff, required artifacts and unchanged model intent into fresh preparation.
   Do not rotate at an arbitrary message count or blindly replay unresolved work.
   Apply an existing operator instruction to replace and continue; do not ask again.
@@ -185,11 +185,15 @@ answers/artifacts. Local answers remain available. `provider.deletion-unknown`
 is reconciled by calling the same tool with the same request ID: it reads provider state
 without repeating deletion. Never create a fresh request ID to force another deletion.
 
-Role replacement does not cancel a submitted predecessor generation. Continue exact
-session/generation waits to retrieve its result, then delete its completed history.
-New submissions use the current role session; predecessor answers remain readable.
-An uncertain deletion can be reconciled through the same deletion request: the core
-checks exact provider absence read-only and never repeats the uncertain mutation.
+Role replacement and role retirement prevent new submissions to the old route;
+already submitted generations keep observing, including after restart. Retrieve
+their exact session/generation outputs before deleting completed history.
 
-`provider.observation-unavailable` means the browser read timed out. Core still
-observes the exact server turn; use its result and retry timing, not a new send.
+For `provider.observation-unavailable`, inspect `reason`:
+- `dom-observation-timeout`: the browser read did not finish; paced server recovery continues.
+- `provider-actionable-alert`: an actionable alert follows the exact submitted turn.
+  Call `sessionplane_submission_inspect` and interpret the live evidence. Partial
+  text is not a verified final. Do not repeat waits as if generation were progressing.
+
+Neither condition proves non-submission. Apply the caller's explicit recovery
+intent when choosing replacement; inspection never authorizes an automatic resend.

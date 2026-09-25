@@ -74,7 +74,8 @@ export class ActorScheduler {
   refreshSession(sessionId: string): void {
     const actor = this.#actors.get(sessionId);
     if (actor !== null) {
-      actor.publish(this.#requireSnapshot(sessionId), this.#events.latestSequenceForSession(sessionId));
+      const snapshot = this.#requireSnapshot(sessionId);
+      actor.publish(snapshot, this.#events.latestSequence(snapshot.teamId));
     }
   }
 

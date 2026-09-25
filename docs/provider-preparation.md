@@ -137,8 +137,8 @@ remain readable after routing retirement.
 An uncertain deletion can be reconciled through the same deletion request: the core
 checks exact provider absence read-only and never repeats the uncertain mutation.
 
-If observation reports `provider.observation-unavailable`, the browser read did
-not finish within its I/O deadline. The generation is still unresolved: core
+If observation reports `provider.observation-unavailable` with reason
+`dom-observation-timeout`, the browser read did not finish within its I/O deadline. The generation is still unresolved: core
 continues paced server observation independently, with only one outstanding DOM
 read. Inspect exact state; do not infer that the prompt was not submitted.
 
