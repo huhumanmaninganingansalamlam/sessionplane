@@ -27,6 +27,9 @@ Ordinary flow: team_get → send → decide when needed → wait.
   validates freshness and performs the action. `decide` then advances that same
   request. A reveal returns fresh choices without submitting. There is no separate
   resume tool and no model/version/menu-label inference inside the workflow layer.
+  Reveal also accepts an observed menu item for nested model/effort lists. It
+  verifies newly exposed choices in the related menu even when the opener is
+  replaced. Opening a list never records a model selection or submits the prompt.
 - `team_get` with `requestRef` inspects that exact request, including read-only
   acknowledgement recovery. Ordinary team reads return compact current-request summaries. With `history:true`,
   team_get lists all generations newest first in pages of 50 requests; pass the
@@ -45,6 +48,9 @@ Ordinary flow: team_get → send → decide when needed → wait.
 - `stop` cancels preparation or stops the exact generating request. It cannot stop
   a newer generation. `session_replace` explicitly changes routing without replaying
   work or deleting history. `role_retire` prevents new work on a finished expert.
+  If a role has no current session, session_replace accepts its observed roleKey
+  instead of roleRef and creates its first session (ChatGPT by default). A roleKey
+  cannot replace an occupied role; that still requires its fresh roleRef.
   `session_delete` separately requires an exact request and `outputsRetrieved:true`;
   existing cleanup checks reject unresolved/shared conversations.
 

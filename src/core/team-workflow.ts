@@ -78,9 +78,19 @@ export class TeamWorkflow {
     return this.getTeam(input);
   }
 
-  replaceSession(input: RoleInput) {
+  replaceSession(input: Mutation & { roleRef?: string | undefined; roleKey?: string | undefined; provider?: ProviderName | undefined }) {
+    if ((input.roleRef === undefined) === (input.roleKey === undefined) || (input.roleRef !== undefined && input.provider !== undefined)) {
+      throw new SessionPlaneDomainError('input.invalid', 'Use either a fresh roleRef, or an empty roleKey with an optional provider');
+    }
     this.#mutate(input, 'session_replace', () => {
-      const session = this.#role(input);
+      if (input.roleRef === undefined) {
+        const role = this.services.directory.getTeam(input.teamId).roles.find((role) => role.roleKey === input.roleKey);
+        if (role === undefined || role.currentSessionId !== null) {
+          throw new SessionPlaneDomainError('input.invalid', 'Role must exist without a current session; refresh the team');
+        }
+        return this.services.directory.createSession({ teamId: input.teamId, roleKey: role.roleKey, provider: input.provider ?? 'chatgpt' });
+      }
+      const session = this.#role({ ...input, roleRef: input.roleRef });
       return this.services.directory.createSession({ teamId: input.teamId, roleKey: session.roleKey, provider: session.provider });
     });
     return this.getTeam(input);

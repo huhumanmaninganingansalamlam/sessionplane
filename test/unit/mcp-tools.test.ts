@@ -79,5 +79,15 @@ test('team MCP deduplicates sends, rejects stale/cross-team refs and keeps concu
     const wrongCursor = await invoke('team_get', { teamId, beforeRequestRef: otherSend.structuredContent.requestRef });
     assert.equal(wrongCursor.structuredContent.errorCode, 'input.invalid');
     assert.equal(((history.structuredContent.results as Array<{ answerText: string }>)[0]!).answerText, 'Result 0');
+    const empty = service.teamDirectory.createTeam({ clientId: 'empty-team' });
+    const initialize = { teamId: empty.teamId, requestId: 'initialize', roleKey: empty.primaryRoleKey };
+    assert.equal((await invoke('session_replace', { ...initialize, provider: 'gemini' })).structuredContent.errorCode, 'provider.disabled');
+    const initialized = await invoke('session_replace', initialize);
+    assert.equal(initialized.isError, false);
+    const initialRoles = initialized.structuredContent.roles as Array<{ roleRef: string; currentSessionId: string }>;
+    assert.ok(initialRoles[0]!.roleRef);
+    assert.deepEqual((await invoke('session_replace', initialize)).structuredContent.roles, initialRoles);
+    assert.equal((await invoke('session_replace', { ...initialize, requestId: 'occupied' })).structuredContent.errorCode, 'input.invalid');
+    assert.equal(service.teamDirectory.getCurrentSession(empty.teamId, empty.primaryRoleKey).sessionId, initialRoles[0]!.currentSessionId);
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });

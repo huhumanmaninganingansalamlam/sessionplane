@@ -233,7 +233,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       <button id="effort-button" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="effort-options">Effort</button>
       <button data-testid="send-button" type="submit" hidden>전송</button><textarea aria-label="Prompt"></textarea>
       <input type="file"><span id="uploaded-name"></span></form>
-    <div role="menu" id="models" hidden><div role="menuitemradio" aria-checked="false">Pro</div></div>
+    <div role="menu" id="models" hidden><div role="menuitem">Model family</div></div>
     <div role="menu" id="effort-options" hidden>
       <input id="effort" aria-label="Reasoning effort" type="range" min="1" max="4" value="1">
       <span id="effort-help">High reasoning effort</span>
@@ -250,8 +250,12 @@ test('MCP team decisions continue the same generation across restart, UI drift a
         setTimeout(() => { document.querySelector('#models').hidden = false; }, 350);
       };
       document.querySelector('#effort-button').onclick = (event) => { event.currentTarget.setAttribute('aria-expanded', 'true'); document.querySelector('#effort-options').hidden = false; };
-      document.querySelector('[role=menuitemradio]').onclick = (event) => {
-        event.currentTarget.setAttribute('aria-checked', 'true');
+      document.querySelector('[role=menuitem]').onclick = () => {
+        document.querySelector('#models').innerHTML = '<div role="menuitemradio" aria-checked="false">Pro</div>';
+      };
+      document.querySelector('#models').onclick = (event) => {
+        if (event.target.getAttribute('role') !== 'menuitemradio') return;
+        event.target.setAttribute('aria-checked', 'true');
         document.querySelector('#models-button').textContent = 'Pro';
         document.querySelector('#models').hidden = true;
       };
@@ -340,6 +344,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
     let last: Record<string, unknown> = {};
     for (const [purpose, role, name, decision, value] of [
       ['model', 'button', 'Submit settings', 'reveal'],
+      ['model', 'menuitem', 'Model family', 'reveal'],
       ['model', 'menuitemradio', 'Pro', 'choose'],
       ['effort', 'button', 'Effort', 'reveal'],
       ['effort', 'slider', 'Reasoning effort', 'choose', 4],
@@ -349,7 +354,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       const evidence = await inspect();
       const target = evidence.nodes.find((n) => n.role === role && n.name === name);
       assert.ok(target, 'Expected semantic control in fresh evidence');
-      const args = { ...identity, requestId: purpose + decision, decision, purpose,
+      const args = { ...identity, requestId: purpose + decision + role, decision, purpose,
         snapshotId: evidence.snapshotId, ref: target.ref, ...(value === undefined ? {} : { value }) };
       const result = await invoke('sessionplane_decide', args);
       assert.equal(result.isError, false, JSON.stringify(result));

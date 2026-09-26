@@ -29,7 +29,9 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
 4. `status: needs_decision` is a normal handoff, not a failed send. Interpret the
    fresh evidence and recorded choices. `sessionplane_decide` takes the requestRef,
    fresh snapshotId/ref, purpose and `choose` or `reveal`. Model/effort reveal opens
-   observed related options. Slider choices also take a numeric value. Core
+   observed related options, including nested menu items. Reveal a submenu before
+   choosing its options; opening it is not a model selection. Slider choices also
+   take a numeric value, interpreted from the observed labels and range. Core
    executes the choice and continues the same request; there is no resume tool.
    Choose composer and submit controls, and model/effort when requested. New UI
    evidence can require another choice. Never reuse stale UI refs.
@@ -54,6 +56,8 @@ out prompts, infer consensus, or inject answers into other roles.
 - `sessionplane_stop` cancels preparation or stops exactly that request.
 - `sessionplane_session_replace` explicitly rotates a broken/long conversation;
   carry forward necessary context yourself. It never replays unresolved work.
+  If team_get shows an existing role with no session/roleRef, initialize it with
+  session_replace using its roleKey instead. Do not recreate that role.
 - `sessionplane_role_retire` ends a non-primary role without deleting provider history.
 - `sessionplane_session_delete` permanently removes a completed provider conversation
   after retrieving required outputs. Pass its exact requestRef and outputsRetrieved:true.

@@ -70,7 +70,7 @@ export class SessionUiService {
         if (!sameSnapshotSemantics(node, currentNode)) {
           throw new BrowserSnapshotError('browser.snapshot-stale', 'Selected control changed since it was inspected');
         }
-        validatePurposeTarget(purpose, currentNode, reveal);
+        validatePurposeTarget(purpose, currentNode, reveal, currentObservation.nodes);
         if (input.value !== undefined && currentNode.role !== 'slider') {
           throw new SessionPlaneDomainError('input.invalid', 'A numeric value is only valid for a model or effort slider');
         }
@@ -119,7 +119,7 @@ export class SessionUiService {
           });
           if (purpose !== 'model' && purpose !== 'effort') break;
           const verified = reveal
-            ? hasRevealedChoices(after.nodes, await this.#refs.nodeForElement({ pageKey: session.pageKey, snapshotId: after.snapshotId, element }))
+            ? hasRevealedChoices(after.nodes, currentNode, currentObservation.nodes)
             : hasPreparationSelectionEvidence(after.nodes, toPreparationTarget(purpose, currentNode, input.value));
           if (verified) break;
           if (performance.now() >= evidenceDeadline) {
@@ -174,7 +174,7 @@ export interface PreparationOwner {
   readonly generation: number;
 }
 
-function validatePurposeTarget(purpose: PreparationPurpose, node: BrowserSnapshotNode, reveal: boolean): void {
+function validatePurposeTarget(purpose: PreparationPurpose, node: BrowserSnapshotNode, reveal: boolean, nodes: readonly BrowserSnapshotNode[]): void {
   if (reveal && !['model', 'effort'].includes(purpose)) {
     throw new SessionPlaneDomainError('input.invalid', 'Only model and effort controls can reveal choices');
   }
@@ -185,8 +185,9 @@ function validatePurposeTarget(purpose: PreparationPurpose, node: BrowserSnapsho
     throw new SessionPlaneDomainError('input.invalid', 'Sliders can only set an explicit model or effort value');
   }
   const selectableRole = ['menuitemradio', 'option', 'radio'];
-  if (reveal && (node.role !== 'button' || (node.controls.length === 0 && !['menu', 'listbox', 'dialog', 'true'].includes(node.hasPopup ?? '')))) {
-    throw new SessionPlaneDomainError('input.invalid', 'A chooser reveal must target a button with related choices');
+  const nestedMenuItem = node.role === 'menuitem' && nodes.some((parent) => parent.role === 'menu' && parent.id !== '' && node.ancestorIds.includes(parent.id));
+  if (reveal && !nestedMenuItem && (node.role !== 'button' || (node.controls.length === 0 && !['menu', 'listbox', 'dialog', 'true'].includes(node.hasPopup ?? '')))) {
+    throw new SessionPlaneDomainError('input.invalid', 'A chooser reveal must target a popup control or an item in an observed menu');
   }
   if ((purpose === 'model' || purpose === 'effort') && !reveal && node.role !== 'slider' && !(node.role === 'button' && node.expanded === false && node.hasPopup !== null) && !selectableRole.includes(node.role)) {
     throw new SessionPlaneDomainError('input.invalid', 'Model and effort choices must target an option, radio, or menuitemradio');
@@ -199,10 +200,17 @@ function validatePurposeTarget(purpose: PreparationPurpose, node: BrowserSnapsho
   }
 }
 
-function hasRevealedChoices(nodes: readonly BrowserSnapshotNode[], opener: BrowserSnapshotNode): boolean {
+function hasRevealedChoices(nodes: readonly BrowserSnapshotNode[], opener: BrowserSnapshotNode, before: readonly BrowserSnapshotNode[]): boolean {
+  // A nested menu may replace its opener. Verify fresh choices in that menu,
+  // rather than requiring the clicked element to survive the transition.
+  const scopes = new Set([
+    ...opener.controls,
+    ...before.filter((node) => node.id !== '' && node.role === 'menu' && opener.ancestorIds.includes(node.id)).map((node) => node.id),
+    ...nodes.filter((node) => node.id !== '' && node.id === opener.id).flatMap((node) => node.controls),
+  ]);
   return nodes.some((node) => ['option', 'menuitem', 'menuitemradio', 'radio', 'slider'].includes(node.role) &&
-    (node.ancestorIds.some((id) => opener.controls.includes(id)) ||
-      opener.ancestorIds.includes(node.id) || opener.controls.includes(node.id)));
+    node.ancestorIds.some((id) => scopes.has(id)) &&
+    !before.some((previous) => sameSnapshotSemantics(previous, node)));
 }
 
 function toPreparationTarget(purpose: PreparationPurpose, node: BrowserSnapshotNode, selectedValue?: number): PreparationTarget {

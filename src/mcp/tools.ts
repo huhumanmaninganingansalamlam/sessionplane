@@ -39,7 +39,7 @@ const descriptions: Record<keyof typeof workflowSchemas, string> = {
   team_get: 'Read roles and request references in a team. history:true lists all generations; continue with nextRequestRef as beforeRequestRef. Include requestRef to recover or inspect that exact request and fresh UI evidence.',
   role_create: 'Create an expert/reviewer role and its provider conversation in the team.',
   role_retire: 'Retire a finished non-primary role. Submitted work remains observable; provider history is not deleted.',
-  session_replace: 'Explicitly replace a broken or long role conversation using a fresh roleRef. Keeps provider and old results; never replays prompts or deletes history.',
+  session_replace: 'Replace a broken or long conversation using a fresh roleRef, keeping its provider and old results. If team_get shows a role with no session, use its roleKey instead to initialize it. Never replays prompts or deletes history.',
   session_delete: 'Permanently delete the exact completed provider conversation after retrieving needed answers/files. Rejects ambiguous, active or shared history.',
   send: 'Send to an observed roleRef. Returns requestRef and either needs_decision with fresh evidence or submission state. Preserve model intent. Never resend an ambiguous request.',
   decide: 'Choose a fresh observed control for the pending request and continue it automatically, or reveal model/effort choices. No separate resume call. Use stop to cancel.',
