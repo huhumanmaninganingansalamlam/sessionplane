@@ -238,6 +238,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       <input id="effort" aria-label="Reasoning effort" type="range" min="1" max="4" value="1">
       <span id="effort-help">High reasoning effort</span>
     </div>
+    <div role="menu" id="selection-summary" hidden><div role="menuitem" aria-label="Model selection">5.6 Pro</div></div>
     <a download="old.txt" href="data:text/plain,OLD">Old unrelated file</a><div id="messages"></div>
     <script>
       window.submitCount = 0;
@@ -251,12 +252,12 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       };
       document.querySelector('#effort-button').onclick = (event) => { event.currentTarget.setAttribute('aria-expanded', 'true'); document.querySelector('#effort-options').hidden = false; };
       document.querySelector('[role=menuitem]').onclick = () => {
-        document.querySelector('#models').innerHTML = '<div role="menuitemradio" aria-checked="false">Pro</div>';
+        document.querySelector('#models').innerHTML = '<div role="menuitemradio" aria-checked="false">GPT-5.6 Sol</div>';
       };
       document.querySelector('#models').onclick = (event) => {
         if (event.target.getAttribute('role') !== 'menuitemradio') return;
         event.target.setAttribute('aria-checked', 'true');
-        document.querySelector('#models-button').textContent = 'Pro';
+        document.querySelector('#models-button').textContent = 'GPT-5.6 Sol';
         document.querySelector('#models').hidden = true;
       };
       document.querySelector('#effort').addEventListener('keydown', (event) => {
@@ -266,7 +267,12 @@ test('MCP team decisions continue the same generation across restart, UI drift a
         button.setAttribute('aria-expanded', 'false');
         button.removeAttribute('aria-controls');
         button.textContent = event.currentTarget.value === '4' ? 'High' : 'Standard';
+        document.querySelector('#models-button').textContent = '5.6 Pro';
+        document.querySelector('#selection-summary').hidden = false;
       });
+      document.querySelector('#selection-summary').onclick = () => {
+        document.querySelector('#selection-summary [role=menuitem]').textContent = 'Unintended selection';
+      };
       document.querySelector('#composer').onsubmit = (event) => {
         event.preventDefault();
         window.submitCount += 1;
@@ -346,11 +352,12 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       ['composer', 'textbox', 'Prompt', 'choose'],
       ['model', 'button', 'Submit settings', 'reveal'],
       ['model', 'menuitem', 'Model family', 'reveal'],
-      ['model', 'menuitemradio', 'Pro', 'choose'],
+      ['model', 'menuitemradio', 'GPT-5.6 Sol', 'choose'],
       ['effort', 'button', 'Effort', 'reveal'],
       ['effort', 'slider', 'Reasoning effort', 'choose', 4],
       ['effort', 'button', 'High', 'choose'],
       ['submit', 'button', '전송', 'choose'],
+      ['model', 'menuitem', 'Model selection', 'choose'],
     ] as const) {
       if (purpose === 'effort' && role === 'button' && decision === 'choose') {
         await page.locator('#effort-button').evaluate((node) => node.setAttribute('aria-expanded', 'true'));
@@ -362,6 +369,10 @@ test('MCP team decisions continue the same generation across restart, UI drift a
         snapshotId: evidence.snapshotId, ref: target.ref, ...(value === undefined ? {} : { value }) };
       const result = await invoke('sessionplane_decide', args);
       assert.equal(result.isError, false, JSON.stringify(result));
+      if (purpose === 'submit') {
+        assert.equal(result.structuredContent.status, 'needs_decision');
+        assert.equal(result.structuredContent.promptSubmitted, false);
+      }
       if (purpose === 'composer') assert.equal(await page.locator('textarea').inputValue(), send.prompt);
       last = args;
     }

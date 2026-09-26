@@ -523,6 +523,12 @@ export function matchesPreparationTarget(
     (target.placeholder === null || node.placeholder === target.placeholder);
 }
 
+export function isPreparationSummary(node: BrowserSnapshotNode, nodes: readonly BrowserSnapshotNode[]): boolean {
+  return node.role === 'menuitem' && node.name.trim() !== '' && node.text.trim() !== '' &&
+    node.text.trim() !== node.name.trim() && nodes.some((parent) =>
+      parent.role === 'menu' && parent.id !== '' && node.ancestorIds.includes(parent.id));
+}
+
 export function hasPreparationSelectionEvidence(
   nodes: readonly BrowserSnapshotNode[],
   target: PreparationTarget,
@@ -532,6 +538,8 @@ export function hasPreparationSelectionEvidence(
     return nodes.some((node) => matchesPreparationTarget(node, target) &&
       Number(node.ariaValueNow ?? node.value) === target.selectedValue);
   }
+  if (target.role === 'menuitem') return nodes.some((node) => matchesPreparationTarget(node, target) &&
+    isPreparationSummary(node, nodes));
   if (target.role === 'button') return nodes.some((node) => matchesPreparationTarget(node, target) &&
     node.hasPopup !== null);
   if (nodes.some((node) => matchesPreparationTarget(node, target) &&

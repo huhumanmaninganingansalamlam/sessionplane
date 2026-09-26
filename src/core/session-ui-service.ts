@@ -1,7 +1,7 @@
 import type { ElementHandle, Page } from 'playwright-core';
 
 import { PageRegistry, PageRegistryError } from '../browser/page-registry.ts';
-import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionEvidence, sameSnapshotSemantics, type BrowserSnapshot, type BrowserSnapshotNode } from '../browser/ref-snapshot.ts';
+import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionEvidence, isPreparationSummary, sameSnapshotSemantics, type BrowserSnapshot, type BrowserSnapshotNode } from '../browser/ref-snapshot.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { PreparationPurpose, PreparationTarget } from '../providers/provider-adapter.ts';
@@ -85,7 +85,7 @@ export class SessionUiService {
           });
           await element.click({ timeout: 5_000 });
         }
-        if (!reveal && (purpose === 'model' || purpose === 'effort') && !['slider', 'button'].includes(currentNode.role) && currentNode.selected !== true && currentNode.checked !== true) {
+        if (!reveal && (purpose === 'model' || purpose === 'effort') && !['slider', 'button', 'menuitem'].includes(currentNode.role) && currentNode.selected !== true && currentNode.checked !== true) {
           if (input.value !== undefined) throw new SessionPlaneDomainError('input.invalid', 'A value is only valid when choosing a slider value');
           await element.click({ timeout: 5_000 });
         }
@@ -189,8 +189,8 @@ function validatePurposeTarget(purpose: PreparationPurpose, node: BrowserSnapsho
   if (reveal && !nestedMenuItem && (node.role !== 'button' || (node.controls.length === 0 && !['menu', 'listbox', 'dialog', 'true'].includes(node.hasPopup ?? '')))) {
     throw new SessionPlaneDomainError('input.invalid', 'A chooser reveal must target a popup control or an item in an observed menu');
   }
-  if ((purpose === 'model' || purpose === 'effort') && !reveal && node.role !== 'slider' && !(node.role === 'button' && node.hasPopup !== null) && !selectableRole.includes(node.role)) {
-    throw new SessionPlaneDomainError('input.invalid', 'Model and effort choices must target an option, radio, or menuitemradio');
+  if ((purpose === 'model' || purpose === 'effort') && !reveal && node.role !== 'slider' && !(node.role === 'button' && node.hasPopup !== null) && !selectableRole.includes(node.role) && !isPreparationSummary(node, nodes)) {
+    throw new SessionPlaneDomainError('input.invalid', 'Model and effort choices must target a selectable option or an observed selection summary');
   }
   if (purpose === 'composer' && !(node.editable && node.role === 'textbox')) {
     throw new SessionPlaneDomainError('input.invalid', 'Composer choice must target an editable textbox');

@@ -295,6 +295,7 @@ function serverInstructions(): string {
     'Copy roleRef for sends and requestRef for decisions, waits, stop and cleanup.',
     'Use stable unique requestId values for mutations; reuse only identical requests.',
     'needs_decision is a normal handoff: reason from fresh observed evidence and call decide. It continues the same request automatically.',
+    'When effort changes the displayed model, confirm the final selection summary for each requested purpose with fresh decide choices. A popup button or a menu item with a separate displayed value can confirm without clicking; do not reselect an intermediate model to match an old choice.',
     'Never change provider/model intent or resend submission_unknown. Use team_get with requestRef for read-only recovery.',
     'wait returns exact answers and files. waitExpired, backend-http-429 and probe pacing alone do not establish generation failure: keep observing active work on the same requestRef, respecting nextCheckAt.',
     'For provider-actionable-alert, inspect the returned evidence or team_get with requestRef. Report the actual visible error, not a guessed CAPTCHA or account issue. A visible provider recovery failure may require user refresh/recovery; do not poll it indefinitely or retry the submitted prompt. After recovery, inspect the same requestRef.',

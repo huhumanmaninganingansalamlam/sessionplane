@@ -36,8 +36,8 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    Choose composer and submit controls, and model/effort when requested. New UI
    evidence can require another choice. Never reuse stale UI refs.
    A recorded choice is not proof that it remains selected: another choice may
-   change the same control. Reopen the related chooser and choose fresh evidence
-   satisfying the original intent. Model and effort may share one control;
+   change the same control. Confirm fresh final evidence satisfying the original
+   intent instead of reselecting an intermediate option. Model and effort may share one control;
    do not assume they are independent or that a version option establishes Pro.
    Keep the same requestRef through preparation; cancelling and sending again
    does not resolve a selection mismatch.
@@ -45,6 +45,9 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    on this request's owned page with its accepted prompt, without submitting it.
    A popup button can confirm its displayed selection even while its menu is open;
    use its current label as evidence, not the mere presence of an open menu.
+   A menu item with a separate label and displayed value can also confirm the
+   final selection without clicking. If model and effort share this summary,
+   confirm it separately for each requested purpose using fresh evidence.
 5. `sessionplane_wait` takes one or several requestRefs from this team. It returns
    exact answers and captures generated files; outputDir exports stored bytes.
    Inspect each result and file failure. Old requests can capture files from their
