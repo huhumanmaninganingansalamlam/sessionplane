@@ -35,10 +35,21 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    executes the choice and continues the same request; there is no resume tool.
    Choose composer and submit controls, and model/effort when requested. New UI
    evidence can require another choice. Never reuse stale UI refs.
+   A recorded choice is not proof that it remains selected: another choice may
+   change the same control. Reopen the related chooser and choose fresh evidence
+   satisfying the original intent. Model and effort may share one control;
+   do not assume they are independent or that a version option establishes Pro.
+   Keep the same requestRef through preparation; cancelling and sending again
+   does not resolve a selection mismatch.
 5. `sessionplane_wait` takes one or several requestRefs from this team. It returns
    exact answers and captures generated files; outputDir exports stored bytes.
    Inspect each result and file failure. Old requests can capture files from their
    exact answer even after a newer send; unavailable provider content is a file error. A timeout does not stop provider work.
+   When terminal:false, backend-http-429, probe pacing and waitExpired are
+   observation delays, not failed generation. Respect nextCheckAt and continue
+   waiting on the same requestRef. Do not ask the user to copy the answer merely
+   because observation is deferred. After an interrupted caller resumes, fetch
+   that request again: the core keeps observing and may already have its answer.
 
 The caller chooses experts and context; SessionPlane does not automatically fan
 out prompts, infer consensus, or inject answers into other roles.

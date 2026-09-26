@@ -158,8 +158,14 @@ export class ChatGptSubmission implements ProviderSubmission {
     for (const purpose of ['model', 'effort'] as const) {
       const intent = this.#request[purpose];
       const choice = choices[purpose];
-      if (intent != null && (choice === undefined || !(await this.#hasSelectedPreparationTarget(choice)))) {
-        throw new ProviderSubmissionError('provider.preparation-required', 'The requested ' + purpose + ' needs a verified caller selection');
+      if (intent == null) continue;
+      if (choice === undefined) {
+        throw new ProviderSubmissionError('provider.preparation-required',
+          `No ${purpose} choice is recorded for ${JSON.stringify(intent)}. Choose a matching observed selection; reveal only opens options. Continue this requestRef.`);
+      }
+      if (!(await this.#hasSelectedPreparationTarget(choice))) {
+        throw new ProviderSubmissionError('provider.preparation-required',
+          `Recorded ${purpose} choice ${JSON.stringify(choice.name || choice.text)} is no longer verified on the current page. Reopen its chooser and choose current evidence matching ${JSON.stringify(intent)}. Another model/effort choice may have changed the same control. Continue this requestRef; cancelling and resending does not repair the selection.`);
       }
     }
     const composer = await this.#resolvePreparationTarget(choices.composer, COMPOSER_READY_TIMEOUT_MS);

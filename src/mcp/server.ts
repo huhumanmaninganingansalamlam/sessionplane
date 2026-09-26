@@ -296,7 +296,7 @@ function serverInstructions(): string {
     'Use stable unique requestId values for mutations; reuse only identical requests.',
     'needs_decision is a normal handoff: reason from fresh observed evidence and call decide. It continues the same request automatically.',
     'Never change provider/model intent or resend submission_unknown. Use team_get with requestRef for read-only recovery.',
-    'wait returns exact answers and files; waitExpired and observation deferral do not end generation.',
+    'wait returns exact answers and files. While terminal=false, waitExpired, backend-http-429 and observation deferral mean keep observing the same requestRef, respecting nextCheckAt; they are not failed generation or evidence that user intervention is required.',
   ].join(' ');
 }
 
