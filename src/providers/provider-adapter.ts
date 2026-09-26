@@ -143,6 +143,8 @@ export interface ProviderArtifactCandidate {
 }
 
 export interface ProviderArtifactRequest {
+  /** Current page owner revision; the requested answer may belong to an older generation. */
+  readonly bindingGeneration?: number;
   readonly session: SessionSnapshot;
   readonly generation: number;
 }

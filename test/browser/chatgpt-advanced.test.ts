@@ -116,15 +116,25 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
       responseMessageId: 'artifact-response',
       terminal: true,
     };
-    const candidates = await adapter.discoverArtifacts?.({
-      session: observedSession,
-      generation: 1,
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: observedSession.sessionId, generation: 2, conversationId: observedSession.conversationId,
     });
+    await created.page.evaluate(() => {
+      const other = document.createElement('div');
+      other.setAttribute('data-message-author-role', 'assistant');
+      other.setAttribute('data-message-id', 'newer-response');
+      other.innerHTML = '<a download="wrong.txt" href="data:text/plain,WRONG">Different answer</a>';
+      document.body.appendChild(other);
+    });
+    const candidates = await adapter.discoverArtifacts?.({
+      session: observedSession, generation: 1, bindingGeneration: 2,
+    });
+    assert.deepEqual(candidates?.map((candidate) => candidate.name), ['diagram.png']);
     const image = candidates?.find((candidate) => candidate.name === 'diagram.png');
     assert.notEqual(image, undefined);
     if (image === undefined) throw new Error('missing image candidate');
     const downloaded = await adapter.downloadArtifact?.(
-      { session: observedSession, generation: 1 },
+      { session: observedSession, generation: 1, bindingGeneration: 2 },
       image,
     );
     assert.equal(Buffer.from(downloaded?.bytes ?? []).toString('utf8'), 'PNGDATA');

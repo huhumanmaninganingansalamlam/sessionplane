@@ -87,6 +87,7 @@ export class ChatGptSubmission implements ProviderSubmission {
         bindingEpoch: binding.bindingEpoch,
         page: this.#page,
         interactive: false,
+        compact: true,
         maxNodes: 5_000,
       });
       const matches = snapshot.nodes.filter((node) => matchesPreparationTarget(node, target));
@@ -133,6 +134,7 @@ export class ChatGptSubmission implements ProviderSubmission {
       bindingEpoch: binding.bindingEpoch,
       page: this.#page,
       interactive: false,
+      compact: true,
       maxNodes: 5_000,
     });
     return !snapshot.nodesTruncated && hasPreparationSelectionEvidence(snapshot.nodes, target);

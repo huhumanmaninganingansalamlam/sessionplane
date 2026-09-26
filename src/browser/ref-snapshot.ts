@@ -84,12 +84,13 @@ export class BrowserRefSnapshotStore {
     readonly interactive?: boolean;
     readonly maxNodes?: number;
     readonly rootSelector?: string;
+    readonly compact?: boolean;
   }): Promise<BrowserSnapshot> {
     const snapshotId = randomUUID();
     const interactive = options.interactive ?? true;
     const maxNodes = Math.max(1, Math.min(5_000, options.maxNodes ?? 250));
     const result = await options.page.evaluate(
-      ({ snapshotId: browserSnapshotId, interactive: interactiveOnly, maxNodes: limit, refProperty, rootSelector }) => {
+      ({ snapshotId: browserSnapshotId, interactive: interactiveOnly, maxNodes: limit, refProperty, rootSelector, compact }) => {
         type MutableSnapshotNode = {
           ref: string;
           token: string;
@@ -183,7 +184,7 @@ export class BrowserRefSnapshotStore {
               ? element.value
               : null;
           if (value !== null && value.trim() !== '') return normalize(value);
-          return normalize(element.textContent);
+          return normalize(element instanceof HTMLElement ? element.innerText : element.textContent);
         };
 
         const isVisible = (element: Element): boolean => {
@@ -238,11 +239,15 @@ export class BrowserRefSnapshotStore {
             truncated = true;
             return;
           }
+          if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(element.tagName) || (compact && element instanceof SVGElement)) return;
           const style = getComputedStyle(element);
           if (style.display === 'none' || Number(style.opacity) === 0) return;
           const visible = isVisible(element);
           const role = inferredRole(element);
-          const include = visible && (!interactiveOnly || isInteractive(element, role));
+          const actionable = isInteractive(element, role);
+          const ownText = [...element.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
+          const meaningful = actionable || ownText || ['dialog', 'alert', 'status', 'heading', 'menu', 'group', 'radiogroup'].includes(role);
+          const include = visible && (!interactiveOnly || actionable) && (!compact || meaningful);
           if (include) {
             sequence += 1;
             const ref = `@e${sequence}`;
@@ -280,7 +285,7 @@ export class BrowserRefSnapshotStore {
               role,
               name: accessibleName(element),
               tag: element.tagName.toLowerCase(),
-              text: normalize(element.textContent, 500),
+              text: normalize(element instanceof HTMLElement ? element.innerText : element.textContent, 500),
               depth,
               ancestorIds: [...ancestorIds],
               disabled:
@@ -360,6 +365,7 @@ export class BrowserRefSnapshotStore {
         maxNodes,
         refProperty: REF_PROPERTY,
         rootSelector: options.rootSelector ?? null,
+        compact: options.compact ?? false,
       },
     );
 

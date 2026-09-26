@@ -404,12 +404,12 @@ export class SessionRepository {
     `).run(state, state === 'cancelled' ? 'stopped' : session.providerState, updatedAt, sessionId);
   }
 
-  getGenerationResult(sessionId: string, generation: number) {
+  getGenerationResult(sessionId: string, generation: number): Omit<GenerationRecord, 'sessionId' | 'teamBriefVersion' | 'promptHash'> | null {
     const row = this.#database.prepare(`SELECT generation, submission_state AS submissionState,
       submitted_user_message_id AS submittedUserMessageId, submitted_user_turn_id AS submittedUserTurnId,
       response_message_id AS responseMessageId, answer_text AS answerText, completed_at AS completedAt,
       reason, error_code AS errorCode, prompt_submitted AS promptSubmitted
-      FROM generations WHERE session_id = ? AND generation = ?`).get(sessionId, generation);
+      FROM generations WHERE session_id = ? AND generation = ?`).get(sessionId, generation) as (Omit<NonNullable<ReturnType<SessionRepository['getGenerationResult']>>, 'promptSubmitted'> & { promptSubmitted: number }) | undefined;
     return row === undefined ? null : { ...row, promptSubmitted: Number(row.promptSubmitted) === 1 };
   }
 

@@ -22,17 +22,26 @@ Ordinary flow: team_get → send → decide when needed → wait.
   before creating work. An exact duplicate replays the original request even if
   the role has advanced. Concurrent new sends from an old role reference fail.
 - `needs_decision` is a successful intermediate result. It contains fresh evidence,
-  recorded choices and requested intent. The agent selects observed refs; core
+  recorded choices and requested intent. Evidence omits scripts, decorative SVG and empty DOM wrappers while retaining
+  controls, selection states and visible explanatory text. The agent selects observed refs; core
   validates freshness and performs the action. `decide` then advances that same
   request. A reveal returns fresh choices without submitting. There is no separate
   resume tool and no model/version/menu-label inference inside the workflow layer.
 - `team_get` with `requestRef` inspects that exact request, including read-only
-  acknowledgement recovery. Ordinary team reads return compact request summaries.
+  acknowledgement recovery. Ordinary team reads return compact current-request summaries. With `history:true`,
+  team_get lists all generations newest first in pages of 50 requests; pass the
+  returned `nextRequestRef` as `beforeRequestRef` to continue until it is null.
+  Historical references can therefore be rediscovered using only teamId.
 - `wait` accepts exact request references in one team. It observes existing actors,
   returns answers, and captures generated files in the durable artifact store.
   An optional output directory materializes those files. No prompts are fanned out.
   Preparation waits return decisions immediately; ambiguous requests are observed,
-  never resent. Each request's result/failure is reported independently.
+  never resent. Each request's result/failure is reported independently, including invalid or
+  cross-team references in a mixed batch. Historical file retrieval uses the stored
+  response message identity and the current page ownership generation separately;
+  newer answers cannot substitute for the requested answer. Downloaded files remain
+  available offline. Missing exact provider answers return a file error, not an
+  empty successful file list.
 - `stop` cancels preparation or stops the exact generating request. It cannot stop
   a newer generation. `session_replace` explicitly changes routing without replaying
   work or deleting history. `role_retire` prevents new work on a finished expert.

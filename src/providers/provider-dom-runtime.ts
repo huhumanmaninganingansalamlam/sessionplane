@@ -198,7 +198,7 @@ export class DomProviderAdapter implements ProviderAdapter {
   async discoverArtifacts(
     request: ProviderArtifactRequest,
   ): Promise<readonly ProviderArtifactCandidate[]> {
-    const page = this.#requireOwnedPage(request.session, request.generation);
+    const page = this.#requireOwnedPage(request.session, request.bindingGeneration ?? request.generation);
     const selector = this.#selectors.artifactLinks.join(', ');
     if (selector.length === 0) return [];
     const turn = (await readTurns(page, this.#selectors, 'assistant', true)).find((turn) => turn.messageId === request.session.responseMessageId);
@@ -224,7 +224,7 @@ export class DomProviderAdapter implements ProviderAdapter {
     request: ProviderArtifactRequest,
     candidate: ProviderArtifactCandidate,
   ): Promise<ProviderArtifactDownload> {
-    const page = this.#requireOwnedPage(request.session, request.generation);
+    const page = this.#requireOwnedPage(request.session, request.bindingGeneration ?? request.generation);
     const expectedId = createHash('sha256')
       .update(`${this.provider}\u0000${candidate.sourceUrl}\u0000${candidate.name}`)
       .digest('hex');

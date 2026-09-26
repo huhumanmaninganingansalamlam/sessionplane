@@ -445,11 +445,16 @@ export class ChatGptAdapter implements ProviderAdapter {
         { promptSubmitted: request.session.promptSubmitted },
       );
     }
-    return this.#pageRegistry.requireOwnedPage(pageKey, {
-      sessionId: request.session.sessionId,
-      generation: request.generation,
-      conversationId,
-    });
+    try {
+      return this.#pageRegistry.requireOwnedPage(pageKey, {
+        sessionId: request.session.sessionId,
+        generation: request.bindingGeneration ?? request.generation,
+        conversationId,
+      });
+    } catch (error) {
+      if (error instanceof PageRegistryError) throw new ProviderSubmissionError(error.errorCode, error.message, { cause: error });
+      throw error;
+    }
   }
 }
 

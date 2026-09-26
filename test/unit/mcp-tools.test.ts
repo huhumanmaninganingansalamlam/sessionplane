@@ -45,8 +45,6 @@ test('team MCP deduplicates sends, rejects stale/cross-team refs and keeps concu
     assert.equal(wrong.structuredContent.errorCode, 'input.invalid');
     const waiting = await invoke('wait', { teamId, requestRefs: [first.requestRef], waitMs: 1 });
     assert.equal((waiting.structuredContent.results as Array<{ waitExpired: boolean }>)[0]!.waitExpired, true);
-    fake.addArtifact(first.sessionId as string, { providerArtifactId: 'native-file', name: 'review.txt',
-      sourceUrl: 'https://fixture.invalid/review.txt', mediaType: 'text/plain' }, 'review bytes');
     for (const [i, result] of sent.entries()) {
       fake.emitObservation(result.structuredContent.sessionId as string, {
         candidate: { responseMessageId: 'answer-' + i, answerText: 'Result ' + i, terminalMarker: true, streamingMarker: false }, activity: 'none',
@@ -59,15 +57,27 @@ test('team MCP deduplicates sends, rejects stale/cross-team refs and keeps concu
       if (results.every((r) => r.terminal)) break;
     }
     assert.deepEqual(results.map((r) => r.answerText), ['Result 0', 'Result 1']);
-    const fileResult = results[0] as unknown as { files: { exports: Array<{ outputPath: string }> } };
-    assert.equal(readFileSync(fileResult.files.exports[0]!.outputPath, 'utf8'), 'review bytes');
     const refreshed = await invoke('team_get', { teamId });
     const nextRole = (refreshed.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef;
     const next = await invoke('send', { teamId, roleRef: nextRole, requestId: 'next', prompt: 'Next review' });
     assert.equal(next.isError, false);
     const oldStop = await invoke('stop', { teamId, requestRef: first.requestRef, requestId: 'old-stop' });
     assert.equal(oldStop.structuredContent.errorCode, 'session.generation-superseded');
-    const history = await invoke('wait', { teamId, requestRefs: [first.requestRef], waitMs: 0 });
+    fake.addArtifact(first.sessionId as string, { providerArtifactId: 'native-file', name: 'review.txt',
+      sourceUrl: 'https://fixture.invalid/review.txt', mediaType: 'text/plain' }, 'review bytes');
+    const history = await invoke('wait', { teamId, requestRefs: [first.requestRef, otherSend.structuredContent.requestRef], waitMs: 0, outputDir: path.join(root, 'historical-files') });
+    assert.equal(history.isError, false);
+    const historicalResults = history.structuredContent.results as Array<{ answerText: string; errorCode?: string; files: { exports: Array<{ outputPath: string }> } }>;
+    assert.equal(historicalResults[1]!.errorCode, 'input.invalid');
+    assert.equal(readFileSync(historicalResults[0]!.files.exports[0]!.outputPath, 'utf8'), 'review bytes');
+    const all = await invoke('team_get', { teamId, history: true });
+    const entries = all.structuredContent.requests as Array<{ requestRef: string }>;
+    assert.ok(entries.some((r) => r.requestRef === first.requestRef));
+    assert.ok(entries.some((r) => r.requestRef === next.structuredContent.requestRef));
+    const older = await invoke('team_get', { teamId, beforeRequestRef: entries[0]!.requestRef });
+    assert.deepEqual((older.structuredContent.requests as typeof entries).map((r) => r.requestRef), entries.slice(1).map((r) => r.requestRef));
+    const wrongCursor = await invoke('team_get', { teamId, beforeRequestRef: otherSend.structuredContent.requestRef });
+    assert.equal(wrongCursor.structuredContent.errorCode, 'input.invalid');
     assert.equal(((history.structuredContent.results as Array<{ answerText: string }>)[0]!).answerText, 'Result 0');
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });

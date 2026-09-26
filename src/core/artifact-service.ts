@@ -19,6 +19,7 @@ import type {
   ProviderArtifactCandidate,
 } from '../providers/provider-adapter.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
+import { SessionRepository } from '../storage/session-repository.ts';
 import { EventRepository } from '../storage/event-repository.ts';
 import {
   ArtifactRepository,
@@ -63,7 +64,7 @@ export class ArtifactService {
   }
 
   async discover(selector: ArtifactSelector): Promise<Readonly<Record<string, unknown>>> {
-    const snapshot = this.#resolveCurrent(selector);
+    const { snapshot, bindingGeneration } = this.#resolveAnswer(selector);
     const adapter = this.#adapters.require(snapshot.provider);
     if (adapter.discoverArtifacts === undefined) {
       throw new SessionPlaneDomainError(
@@ -73,7 +74,7 @@ export class ArtifactService {
     }
     const candidates = await adapter.discoverArtifacts({
       session: snapshot,
-      generation: snapshot.generation,
+      generation: snapshot.generation, bindingGeneration,
     });
     const artifacts = this.#persistCandidates(snapshot, candidates);
     return artifactListResult(snapshot, artifacts);
@@ -82,9 +83,14 @@ export class ArtifactService {
   async capture(
     selector: ArtifactSelector & { readonly artifactIds?: readonly string[] },
   ): Promise<Readonly<Record<string, unknown>>> {
-    const snapshot = this.#resolveCurrent(selector);
+    const { snapshot, bindingGeneration } = this.#resolveAnswer(selector);
     const captureKey = `${snapshot.sessionId}:${snapshot.generation}`;
     return await this.#runExclusive(captureKey, async () => {
+      const stored = this.#artifacts.list(snapshot.sessionId, snapshot.generation);
+      if (bindingGeneration !== snapshot.generation && stored.length > 0 && stored.every((artifact) => this.#reuseDownloaded(artifact) !== null)) {
+        const artifacts = selectArtifacts(stored, selector.artifactIds);
+        return { ...artifactListResult(snapshot, artifacts), discoveredCount: stored.length, capturedCount: artifacts.length, failures: [] };
+      }
       const adapter = this.#adapters.require(snapshot.provider);
       if (adapter.discoverArtifacts === undefined || adapter.downloadArtifact === undefined) {
         throw new SessionPlaneDomainError(
@@ -94,8 +100,7 @@ export class ArtifactService {
       }
 
       const candidates = await adapter.discoverArtifacts({
-        session: snapshot,
-        generation: snapshot.generation,
+        session: snapshot, generation: snapshot.generation, bindingGeneration,
       });
       const discovered = this.#persistCandidates(snapshot, candidates);
       const selected = selectArtifacts(discovered, selector.artifactIds);
@@ -111,7 +116,7 @@ export class ArtifactService {
           }
           const candidate = candidateFromRecord(artifact);
           const downloaded = await adapter.downloadArtifact(
-            { session: snapshot, generation: snapshot.generation },
+            { session: snapshot, generation: snapshot.generation, bindingGeneration },
             candidate,
           );
           if (downloaded.candidate.providerArtifactId !== artifact.providerArtifactId) {
@@ -347,7 +352,7 @@ export class ArtifactService {
     return resolved;
   }
 
-  #resolveCurrent(selector: ArtifactSelector): SessionSnapshot {
+  #resolveAnswer(selector: ArtifactSelector): { snapshot: SessionSnapshot; bindingGeneration: number } {
     const snapshot = this.#resolveSession(selector);
     if (snapshot.generation <= 0) {
       throw new SessionPlaneDomainError(
@@ -355,13 +360,19 @@ export class ArtifactService {
         `Session ${snapshot.sessionId} has no submitted generation`,
       );
     }
-    if (selector.generation !== undefined && selector.generation !== snapshot.generation) {
-      throw new SessionPlaneDomainError(
-        'session.generation-superseded',
-        `Artifact discovery requires current generation ${snapshot.generation}`,
-      );
+    if (selector.generation !== undefined && selector.generation > snapshot.generation) {
+      throw new SessionPlaneDomainError('session.generation-superseded', 'Requested generation has not been created');
     }
-    return snapshot;
+    if (selector.generation !== undefined && selector.generation !== snapshot.generation) {
+      const previous = new SessionRepository(this.#database.raw).getGenerationResult(snapshot.sessionId, selector.generation);
+      if (previous === null || previous.completedAt === null || previous.responseMessageId === null || previous.errorCode !== null) {
+        throw new SessionPlaneDomainError('provider.artifacts-unavailable', 'No completed exact answer exists for this generation');
+      }
+      return { bindingGeneration: snapshot.generation, snapshot: {
+        ...snapshot, ...previous, sessionState: 'complete', providerState: 'complete', terminal: true, nextCheckAt: null,
+      } };
+    }
+    return { snapshot, bindingGeneration: snapshot.generation };
   }
 
   #resolveSession(selector: ArtifactSelector): SessionSnapshot {

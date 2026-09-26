@@ -12,7 +12,7 @@ const request = { teamId, requestRef };
 
 export const workflowSchemas = {
   team_create: z.object({ requestId, name: z.string().max(500).optional(), objective: z.string().max(20_000).optional(), provider }).strict(),
-  team_get: z.object({ teamId, requestRef: requestRef.optional(), maxNodes: z.number().int().min(1).max(5000).optional() }).strict(),
+  team_get: z.object({ teamId, requestRef: requestRef.optional(), maxNodes: z.number().int().min(1).max(5000).optional(), history: z.boolean().optional().describe('List all request generations in pages, newest first.'), beforeRequestRef: requestRef.optional().describe('Continue history using nextRequestRef returned by team_get.') }).strict(),
   role_create: z.object({ ...mutation, roleKey: z.string().trim().min(1).max(80), roleType: z.enum(['expert', 'reviewer', 'custom']).default('expert'), displayName: z.string().max(500).optional(), provider }).strict(),
   role_retire: z.object({ ...mutation, roleRef }).strict(),
   session_replace: z.object({ ...mutation, roleRef }).strict(),

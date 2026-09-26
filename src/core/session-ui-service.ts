@@ -34,7 +34,7 @@ export class SessionUiService {
     const binding = this.#registry.refreshPage(session.pageKey!);
     return await this.#refs.capture({
       pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch, page,
-      interactive: false, maxNodes: Math.max(1, Math.min(5_000, maxNodes ?? 1_000)),
+      interactive: false, compact: true, maxNodes: Math.max(1, Math.min(5_000, maxNodes ?? 1_000)),
     });
   }
 
@@ -62,7 +62,7 @@ export class SessionUiService {
         const reveal = input.decision === 'reveal';
         const currentObservation = await this.#refs.capture({
           pageKey: session.pageKey, bindingEpoch: this.#registry.refreshPage(session.pageKey).bindingEpoch,
-          page, interactive: false, maxNodes: 5_000,
+          page, interactive: false, compact: true, maxNodes: 5_000,
         });
         const currentNode = await this.#refs.nodeForElement({
           pageKey: session.pageKey, snapshotId: currentObservation.snapshotId, element,
@@ -115,7 +115,7 @@ export class SessionUiService {
         while (true) {
           after = await this.#refs.capture({
             pageKey: session.pageKey, bindingEpoch: this.#registry.refreshPage(session.pageKey).bindingEpoch,
-            page, interactive: false, maxNodes: 5_000,
+            page, interactive: false, compact: true, maxNodes: 5_000,
           });
           if (purpose !== 'model' && purpose !== 'effort') break;
           const verified = reveal
@@ -133,7 +133,7 @@ export class SessionUiService {
             node.controls.some((id) => currentNode.ancestorIds.includes(id)));
           if (openers.length === 1 && after.nodes.some((node) => node.role === 'menu' && currentNode.ancestorIds.includes(node.id))) {
             await element.press('Escape');
-            after = await this.#refs.capture({ pageKey: session.pageKey, bindingEpoch: binding.bindingEpoch, page, interactive: false, maxNodes: 5_000 });
+            after = await this.#refs.capture({ pageKey: session.pageKey, bindingEpoch: binding.bindingEpoch, page, interactive: false, compact: true, maxNodes: 5_000 });
             const summary = after.nodes.find((node) => node.id === openers[0]!.id && node.role === 'button' && node.expanded === false);
             if (summary !== undefined && summary.id !== '') choice = toPreparationTarget(purpose, summary);
           }

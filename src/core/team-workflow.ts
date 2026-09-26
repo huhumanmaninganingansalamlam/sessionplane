@@ -46,13 +46,16 @@ export class TeamWorkflow {
     return this.getTeam({ teamId: team.teamId });
   }
 
-  async getTeam(input: { teamId: string; requestRef?: string | undefined; maxNodes?: number | undefined }) {
+  async getTeam(input: { teamId: string; requestRef?: string | undefined; maxNodes?: number | undefined; history?: boolean | undefined; beforeRequestRef?: string | undefined }) {
     const team = this.services.directory.getTeam(input.teamId);
-    const requests = this.#outbox.listForTeam(team.teamId);
+    const before = input.beforeRequestRef === undefined ? undefined : this.#request({ teamId: input.teamId, requestRef: input.beforeRequestRef });
+    const history = input.history === true || before !== undefined
+      ? this.#outbox.historyForTeam(team.teamId, before)
+      : { requests: this.#outbox.listForTeam(team.teamId), nextRequestRef: null };
     return {
       ...team,
       roles: team.roles.map((r) => ({ ...r, roleRef: r.currentSessionId === null ? null : `${r.currentSessionId}:${r.generation}` })),
-      requests,
+      ...history,
       ...(input.requestRef === undefined ? {} : { request: await this.#observe(this.#request({ teamId: input.teamId, requestRef: input.requestRef }), input.maxNodes, true) }),
     };
   }
@@ -131,10 +134,11 @@ export class TeamWorkflow {
   }
 
   async wait(input: { teamId: string; requestRefs: string[]; waitMs: number; outputDir?: string | undefined }) {
-    const requests = [...new Set(input.requestRefs)].map((requestRef) => this.#request({ teamId: input.teamId, requestRef }));
+    const requestRefs = [...new Set(input.requestRefs)];
     // Actor waits share one deadline. File capture remains sequential to bound network and memory use.
-    const observed = await Promise.all(requests.map(async (request) => {
+    const observed = await Promise.all(requestRefs.map(async (requestRef) => {
       try {
+        const request = this.#request({ teamId: input.teamId, requestRef });
         const current = this.services.directory.getSession(request.sessionId);
         let waitExpired = false;
         if (current.generation === request.generation && !needsDecision(current)) {
@@ -142,18 +146,18 @@ export class TeamWorkflow {
           waitExpired = waited.waitExpired;
         }
         return { request, result: { ...await this.#observe(request), waitExpired } };
-      } catch (error) { return { request, result: failure(error, request.outboxId) }; }
+      } catch (error) { return { request: null, result: failure(error, requestRef) }; }
     }));
     const results = [];
     for (const { request, result } of observed) {
+      if (request === null) { results.push(result); continue; }
       let files: Record<string, unknown> | undefined;
       const current = this.services.directory.getSession(request.sessionId);
-      if (current.generation === request.generation && current.sessionState === 'complete') {
+      if ((current.generation === request.generation && current.sessionState === 'complete') ||
+          (current.generation !== request.generation && this.#sessions.getGenerationResult(request.sessionId, request.generation)?.responseMessageId != null)) {
         try {
           files = await this.services.artifacts.capture({ sessionId: request.sessionId, generation: request.generation });
         } catch (error) { files = failure(error, request.outboxId); }
-      } else if (current.generation !== request.generation) {
-        files = this.services.artifacts.list({ sessionId: request.sessionId, generation: request.generation });
       }
       if (input.outputDir !== undefined && files !== undefined) {
         try {

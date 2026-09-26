@@ -21,6 +21,8 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
 2. `sessionplane_team_get` returns roleRefs and requestRefs. Copy references from
    results; do not reconstruct them. Include a requestRef for its exact result or
    fresh UI evidence. Retired/replaced conversations remain individually addressable.
+   To rediscover older requestRefs, use history:true and continue with nextRequestRef
+   as beforeRequestRef until null.
 3. `sessionplane_send` takes teamId, a fresh roleRef, prompt and intended model/
    effort. Every mutation needs a distinct stable requestId; retry that ID only
    with identical arguments. A stale roleRef requires refreshing team_get.
@@ -33,7 +35,8 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    evidence can require another choice. Never reuse stale UI refs.
 5. `sessionplane_wait` takes one or several requestRefs from this team. It returns
    exact answers and captures generated files; outputDir exports stored bytes.
-   Inspect each result and file failure. A timeout does not stop provider work.
+   Inspect each result and file failure. Old requests can capture files from their
+   exact answer even after a newer send; unavailable provider content is a file error. A timeout does not stop provider work.
 
 The caller chooses experts and context; SessionPlane does not automatically fan
 out prompts, infer consensus, or inject answers into other roles.

@@ -320,7 +320,16 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       assert.equal(result.isError, false, JSON.stringify(result));
       return (result.structuredContent.request as { evidence: { snapshotId: string; pageKey: string; nodes: Array<{ ref: string; role: string; name: string }> } }).evidence;
     };
+    const ready = await inspect();
+    const evidencePage = service.pageRegistry.pageForObservation(ready.pageKey);
+    await evidencePage.evaluate(() => {
+      const clutter = document.createElement('div');
+      clutter.innerHTML = '<div style="width:1px;height:1px"><svg width="1" height="1"><path d="M0 0L1 1" /></svg></div>'.repeat(1200);
+      document.body.prepend(clutter);
+    });
     const initial = await inspect();
+    assert.ok(Buffer.byteLength(JSON.stringify(initial)) < 64 * 1024, 'Semantic evidence must retain controls without decorative DOM expansion');
+    assert.ok(initial.nodes.some((node) => node.role === 'textbox'));
     const opener = initial.nodes.find((n) => n.role === 'button' && n.name === 'Submit settings')!;
     const page = service.pageRegistry.pageForObservation(initial.pageKey);
     await page.locator('#models-button').evaluate((node) => { node.textContent = 'Changed'; });

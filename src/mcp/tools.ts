@@ -36,7 +36,7 @@ export function resolveMcpToolTimeoutMs(options: {
 
 const descriptions: Record<keyof typeof workflowSchemas, string> = {
   team_create: 'Create a durable team with its main conversation. Keep teamId and use team_get to resume.',
-  team_get: 'Read roles and request references in a team. Include requestRef to recover or inspect that exact request and fresh UI evidence.',
+  team_get: 'Read roles and request references in a team. history:true lists all generations; continue with nextRequestRef as beforeRequestRef. Include requestRef to recover or inspect that exact request and fresh UI evidence.',
   role_create: 'Create an expert/reviewer role and its provider conversation in the team.',
   role_retire: 'Retire a finished non-primary role. Submitted work remains observable; provider history is not deleted.',
   session_replace: 'Explicitly replace a broken or long role conversation using a fresh roleRef. Keeps provider and old results; never replays prompts or deletes history.',
