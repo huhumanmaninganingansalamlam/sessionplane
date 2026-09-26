@@ -43,7 +43,7 @@ const descriptions: Record<keyof typeof workflowSchemas, string> = {
   session_delete: 'Permanently delete the exact completed provider conversation after retrieving needed answers/files. Rejects ambiguous, active or shared history.',
   send: 'Send to an observed roleRef. Returns requestRef and either needs_decision with fresh evidence or submission state. Preserve model intent. Never resend an ambiguous request.',
   decide: 'Choose a fresh observed control for the pending request and continue it automatically, or reveal model/effort choices. No separate resume call. Use stop to cancel.',
-  wait: 'Wait on exact requestRefs, retrieve answers and capture generated files. outputDir exports files locally. needs_decision requires decide. While terminal=false, timeout, backend-http-429 and probe pacing are observation delays: continue waiting on the same requestRef, respecting nextCheckAt. They do not cancel generation or require the user to copy a browser answer.',
+  wait: 'Wait on exact requestRefs, retrieve answers and capture generated files. outputDir exports files locally. needs_decision requires decide. waitExpired, backend-http-429 and probe pacing alone are observation delays; keep waiting for active work, respecting nextCheckAt. For provider-actionable-alert, read the UI evidence: report an actual provider failure and await user recovery when needed, rather than polling indefinitely or guessing human verification. Resume observation with the same requestRef after recovery.',
   stop: 'Cancel preparation or stop generation for this exact requestRef without affecting a newer request.',
 };
 

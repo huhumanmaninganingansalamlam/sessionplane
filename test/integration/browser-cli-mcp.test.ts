@@ -422,7 +422,7 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
   const service = await startCore({ config, browserHeadless: true, logger: silentLogger() });
   installPreparationFixtureRoute(service, `<!doctype html><form>
     <textarea id="prompt-textarea"></textarea><button type="submit">Send</button></form>
-    <div id="messages"></div><script>
+    <main><div id="messages"></div></main><script>
       document.querySelector('form').onsubmit = (event) => {
         event.preventDefault(); history.pushState({}, '', '/c/conversation-123456');
       };
@@ -470,11 +470,26 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
     // A delayed provider acknowledgement arrives; inspection must bind it, never submit again.
     await page.locator('#messages').evaluate((messages) => {
       messages.innerHTML = '<div data-message-author-role="user" data-message-id="delayed-user">Exact pending draft</div>' +
-        '<div data-message-author-role="assistant" data-message-id="delayed-answer" data-message-status="completed">Recovered final</div>';
+        '<div data-message-author-role="assistant" data-message-id="delayed-answer" data-message-status="completed">Recovered final</div>' +
+        '<aside role="alert">Stream interrupted<button>Retry</button></aside>';
     });
     const recovered = await inspect();
     assert.equal(recovered.isError, false);
     assert.equal((recovered.structuredContent.request as { submittedUserMessageId: string }).submittedUserMessageId, 'delayed-user');
+    let alerted: { reason: string; terminal: boolean; evidence?: { nodes: Array<{ role: string }> } } | undefined;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const waited = await invokeMcpTool({ name: 'sessionplane_wait', arguments: { teamId: identity.teamId, requestRefs: [identity.requestRef], waitMs: 100 },
+        socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+      assert.equal(waited.isError, false);
+      alerted = (waited.structuredContent.results as Array<NonNullable<typeof alerted>>)[0];
+      if (alerted?.reason === 'provider-actionable-alert') break;
+    }
+    assert.equal(alerted?.reason, 'provider-actionable-alert');
+    assert.equal(alerted?.terminal, false);
+    assert.ok(alerted?.evidence?.nodes.some((node) => node.role === 'alert'));
+    const current = await inspect();
+    assert.ok((current.structuredContent.request as NonNullable<typeof alerted>).evidence?.nodes.some((node) => node.role === 'alert'));
+    await page.locator('[role="alert"]').evaluate((node) => node.remove());
     let final = service.teamDirectory.getSession(session.sessionId);
     for (let attempt = 0; attempt < 20 && !final.terminal; attempt += 1) {
       final = await callRpc<typeof final>({ socketPath: config.socketPath, method: 'session.wait', params: { clientId: 'inspection-owner', sessionId: session.sessionId, generation: sent.generation, waitMs: 500 } });

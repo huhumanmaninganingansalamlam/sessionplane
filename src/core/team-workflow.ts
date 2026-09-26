@@ -229,7 +229,7 @@ export class TeamWorkflow {
     if (!this.services.enabledProviders.includes(provider)) throw new SessionPlaneDomainError('provider.disabled', 'Provider is disabled: ' + provider);
   }
 
-  async #observe(request: OutboxRecord, maxNodes?: number, inspectUnknown = false): Promise<Record<string, unknown>> {
+  async #observe(request: OutboxRecord, maxNodes?: number, inspectCurrent = false): Promise<Record<string, unknown>> {
     let snapshot = this.services.directory.getSession(request.sessionId);
     if (snapshot.generation !== request.generation) {
       return { requestOk: true, requestRef: request.outboxId, sessionId: request.sessionId, generation: request.generation,
@@ -244,11 +244,21 @@ export class TeamWorkflow {
         requested: { model: payload.model, effort: payload.effort, surface: payload.surface }, choices: preparation.choices,
         message: preparation.message };
     }
-    if (snapshot.submissionState === 'submission_unknown') {
-      if (inspectUnknown) {
+    if ((snapshot.submissionState === 'submission_unknown' && inspectCurrent) ||
+        (snapshot.provider === 'chatgpt' && !snapshot.terminal && snapshot.submissionState === 'submitted' &&
+          (inspectCurrent || snapshot.reason === 'provider-actionable-alert'))) {
+      try {
         const inspected = await this.services.ui.inspectSubmission({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });
-        return { ...inspected.snapshot, requestRef: request.outboxId, evidence: inspected.evidence, requested: inspected.requested };
+        return { ...inspected.snapshot, requestRef: request.outboxId, roleRef: roleRef(inspected.snapshot),
+          evidence: inspected.evidence, requested: inspected.requested };
+      } catch (error) {
+        if (!(error instanceof SessionPlaneDomainError) ||
+            (!error.errorCode.startsWith('browser.') && error.errorCode !== 'session.page-identity-unverified')) throw error;
+        return { ...snapshot, requestRef: request.outboxId, roleRef: roleRef(snapshot), evidence: null,
+          inspectionError: { errorCode: error.errorCode, message: error.message } };
       }
+    }
+    if (snapshot.submissionState === 'submission_unknown') {
       snapshot = await this.services.submissions.recoverAcknowledgement(snapshot);
     }
     return { ...snapshot, requestRef: request.outboxId, roleRef: roleRef(snapshot) };

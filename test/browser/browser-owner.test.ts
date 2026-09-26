@@ -362,7 +362,6 @@ test('BrowserOwner closes a newly created login Page when navigation fails', asy
     pageRegistry: registry,
     headless: true,
     browserExecutable: HOST_BROWSER?.executable ?? null,
-    launchTimeoutMs: 2_000,
   });
   const unavailableUrl = await closedFixtureUrl();
 
@@ -470,4 +469,3 @@ function browserCommandLines(profileDir: string): string {
     });
   }
 }
-

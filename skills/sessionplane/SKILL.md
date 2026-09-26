@@ -54,6 +54,20 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    waiting on the same requestRef. Do not ask the user to copy the answer merely
    because observation is deferred. After an interrupted caller resumes, fetch
    that request again: the core keeps observing and may already have its answer.
+   A provider-actionable-alert is not a human-verification diagnosis. Inspect the
+   returned evidence (or team_get with the same requestRef) and report the actual
+   alert. A stream timeout or Retry control does not establish a CAPTCHA or account
+   problem. Distinguish active thinking/streaming from a visible provider failure:
+   keep waiting for active work. A stream recovery failure can be a disconnected
+   page rather than failed generation: refreshing the exact conversation may
+   restore it. After user refresh or recovery, inspect the same requestRef and
+   resume waiting if activity returns; escalate a persisting visible failure
+   instead of polling indefinitely. Do not click Retry or resend an
+   acknowledged request as a read-only recovery.
+   Provider completion is not task completion. If a completed answer stops at a
+   checkpoint or leaves authorized work unfinished, read it and send a contextual
+   continuation to the same role with a fresh roleRef/requestId. Preserve the prior
+   result. Elapsed time alone does not justify a continuation while work is active.
 
 The caller chooses experts and context; SessionPlane does not automatically fan
 out prompts, infer consensus, or inject answers into other roles.
