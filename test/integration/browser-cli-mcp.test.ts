@@ -223,7 +223,7 @@ test('production core omits generic browser RPC methods', async () => {
   }
 });
 
-test('MCP preparation decisions inspect, reveal, select, and resume the original generation once', async () => {
+test('MCP team decisions continue the same generation across restart, UI drift and attachment changes', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-session-ui-'));
   const attachmentPath = path.join(root, 'review.md');
   const acceptedAttachment = 'Review the originally accepted content.';
@@ -238,7 +238,7 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
       <input id="effort" aria-label="Reasoning effort" type="range" min="1" max="4" value="1">
       <span id="effort-help">High reasoning effort</span>
     </div>
-    <div id="messages"></div>
+    <a download="old.txt" href="data:text/plain,OLD">Old unrelated file</a><div id="messages"></div>
     <script>
       window.submitCount = 0;
       document.querySelector('[type=file]').onchange = (event) => {
@@ -278,7 +278,7 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
         assistant.setAttribute('data-message-id', 'fixture-assistant-message');
         assistant.setAttribute('data-turn-id', 'fixture-assistant-turn');
         assistant.setAttribute('data-message-status', 'completed');
-        assistant.innerHTML = '<div data-testid="message-content">Fixture exact final answer</div>';
+        assistant.innerHTML = '<div data-testid="message-content">Fixture exact final answer</div><a download="result.txt" href="data:text/plain,EXACT_FILE">File</a>';
         document.querySelector('#messages').appendChild(assistant);
       };
     </script>
@@ -290,7 +290,7 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
   installPreparationFixtureRoute(service, fixture);
   const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({
     name,
-    arguments: { clientId: 'mcp-ui-test', ...args },
+    arguments: args,
     socketPath: config.socketPath,
     timeoutMs: 10_000,
     maxLineBytes: config.rpcMaxLineBytes,
@@ -302,195 +302,94 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
       roleKey: team.primaryRoleKey,
       provider: 'chatgpt',
     });
-    let handoffDetails: Record<string, unknown> | undefined;
-    await assert.rejects(callRpc({
-      socketPath: config.socketPath,
-      method: 'session.send',
-      params: {
-        clientId: 'mcp-ui-test', requestId: 'assisted-send', sessionId: session.sessionId,
-        prompt: 'test', model: 'Pro', effort: 'High', files: [attachmentPath], sessionDeadlineSec: 30,
-      },
-      timeoutMs: 30_000,
-      maxLineBytes: config.rpcMaxLineBytes,
-    }), (error: unknown) => {
-      if (!(error instanceof RpcClientError)) return false;
-      const data = error.data as { errorCode?: string; details?: Record<string, unknown> };
-      handoffDetails = data.details;
-      return data.errorCode === 'provider.preparation-required';
-    });
-
-    const pending = service.teamDirectory.getSession(session.sessionId);
-    assert.equal(handoffDetails?.requestId, 'assisted-send');
-    assert.equal(handoffDetails?.sessionId, session.sessionId);
-    assert.equal(handoffDetails?.generation, pending.generation);
-    assert.equal((handoffDetails?.snapshot as { promptSubmitted?: boolean } | undefined)?.promptSubmitted, false);
-    assert.equal(pending.promptSubmitted, false);
-    assert.equal(pending.submissionState, 'prepared');
-
-    // A restarted core must discard prior choices and make the caller inspect the reopened page.
+    const initialView = await invoke('sessionplane_team_get', { teamId: team.teamId });
+    const send = { teamId: team.teamId, roleRef: (initialView.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef,
+      requestId: 'assisted-send', prompt: 'test', model: 'Pro', effort: 'High', files: [attachmentPath], sessionDeadlineSec: 60 };
+    const pending = await invoke('sessionplane_send', send);
+    assert.equal(pending.isError, false, JSON.stringify(pending));
+    assert.equal(pending.structuredContent.status, 'needs_decision');
+    assert.equal(pending.structuredContent.promptSubmitted, false);
+    const identity = { teamId: team.teamId, requestRef: pending.structuredContent.requestRef };
     await service.close();
     service = await start();
     installPreparationFixtureRoute(service, fixture);
-    const prematureResume = await invoke('sessionplane_preparation_resume', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    assert.equal(prematureResume.structuredContent.errorCode, 'provider.preparation-required');
+    writeFileSync(attachmentPath, 'Caller edited the original after acceptance.');
 
-    await assert.rejects(callRpc({
-      socketPath: config.socketPath,
-      method: 'session.send',
-      params: {
-        clientId: 'mcp-ui-test', requestId: 'assisted-send', sessionId: session.sessionId,
-        prompt: 'test', model: 'Pro', effort: 'High', files: [attachmentPath], sessionDeadlineSec: 30,
-      },
-      timeoutMs: 30_000,
-      maxLineBytes: config.rpcMaxLineBytes,
-    }), (error: unknown) => error instanceof RpcClientError &&
-      (error.data as { errorCode?: string }).errorCode === 'provider.preparation-required');
-    writeFileSync(attachmentPath, 'The caller continued editing after the request was accepted.');
-    const competingClient = await invoke('sessionplane_preparation_inspect', {
-      clientId: 'other-client', requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    assert.equal(competingClient.structuredContent.errorCode, 'session.generation-superseded');
-    const wrong = await invoke('sessionplane_preparation_inspect', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation + 1,
-    });
-    assert.equal(wrong.structuredContent.errorCode, 'session.generation-superseded');
-
-    const initial = await invoke('sessionplane_preparation_inspect', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    assert.equal(initial.isError, false);
-    const initialNodes = initial.structuredContent.nodes as Array<{ ref: string; role: string; name: string }>;
-    const opener = initialNodes.find((node) => node.role === 'button' && node.name === 'Submit settings');
-    assert.notEqual(opener, undefined);
-    assert.equal(initialNodes.some((node) => node.role === 'menuitemradio'), false);
-    const page = service.pageRegistry.pageForObservation(initial.structuredContent.pageKey as string);
-    await page.evaluate(() => { document.querySelector('#models-button')!.textContent = 'Changed'; });
-    const changedControl = await invoke('sessionplane_preparation_decide', {
-      requestId: 'assisted-send', decisionId: 'changed-opener', decision: 'reveal', purpose: 'model',
-      sessionId: session.sessionId, generation: pending.generation,
-      snapshotId: initial.structuredContent.snapshotId, ref: opener?.ref,
-    });
-    assert.equal(changedControl.structuredContent.errorCode, 'browser.snapshot-stale');
-    assert.equal(await page.locator('#models').isVisible(), false);
-    await page.evaluate(() => { document.querySelector('#models-button')!.textContent = 'Submit settings'; });
-    const currentInitial = await invoke('sessionplane_preparation_inspect', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    const currentOpener = (currentInitial.structuredContent.nodes as Array<{ ref: string; role: string; name: string }>)
-      .find((node) => node.role === 'button' && node.name === 'Submit settings');
-    assert.notEqual(currentOpener, undefined);
-    const revealed = await invoke('sessionplane_preparation_decide', {
-      requestId: 'assisted-send', decisionId: 'reveal-model-menu', decision: 'reveal', purpose: 'model',
-      sessionId: session.sessionId, generation: pending.generation,
-      snapshotId: currentInitial.structuredContent.snapshotId, ref: currentOpener?.ref,
-    });
-    assert.equal(revealed.isError, false, JSON.stringify(revealed.structuredContent));
-    const stale = await invoke('sessionplane_preparation_decide', {
-      requestId: 'assisted-send', decisionId: 'stale-choice', decision: 'choose', purpose: 'model',
-      sessionId: session.sessionId, generation: pending.generation,
-      snapshotId: currentInitial.structuredContent.snapshotId, ref: currentOpener?.ref,
-    });
-    assert.equal(stale.structuredContent.errorCode, 'browser.snapshot-stale', JSON.stringify(stale.structuredContent));
-    const observed = await invoke('sessionplane_preparation_inspect', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    const inspectedPage = service.pageRegistry.pageForObservation(observed.structuredContent.pageKey as string);
-    const observedModel = (observed.structuredContent.nodes as Array<{ ref: string; role: string; name: string }>)
-      .find((node) => node.role === 'menuitemradio' && node.name === 'Pro');
-    assert.notEqual(observedModel, undefined);
-    await inspectedPage.evaluate(() => { document.querySelector('[role=menuitemradio]')!.textContent = 'Changed'; });
-    const changedChoice = await invoke('sessionplane_preparation_decide', {
-      requestId: 'assisted-send', decisionId: 'changed-model-label', decision: 'choose', purpose: 'model',
-      sessionId: session.sessionId, generation: pending.generation,
-      snapshotId: observed.structuredContent.snapshotId, ref: observedModel?.ref,
-    });
-    assert.equal(changedChoice.structuredContent.errorCode, 'browser.snapshot-stale');
-    assert.equal(await inspectedPage.locator('[role=menuitemradio]').getAttribute('aria-checked'), 'false');
-    await inspectedPage.evaluate(() => { document.querySelector('[role=menuitemradio]')!.textContent = 'Pro'; });
-
-    const decideFromFreshInspection = async (
-      decisionId: string,
-      purpose: string,
-      role: string,
-      name: string,
-      decision: 'choose' | 'reveal' = 'choose',
-      value?: number,
-    ) => {
-      const fresh = await invoke('sessionplane_preparation_inspect', {
-        requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-      });
-      const target = (fresh.structuredContent.nodes as Array<{ ref: string; role: string; name: string }>)
-        .find((node) => node.role === role && node.name === name);
-      assert.notEqual(target, undefined, `${purpose} control missing from fresh inspection`);
-      return await invoke('sessionplane_preparation_decide', {
-        requestId: 'assisted-send', decisionId, decision, purpose,
-        sessionId: session.sessionId, generation: pending.generation,
-        snapshotId: fresh.structuredContent.snapshotId, ref: target?.ref,
-        ...(value === undefined ? {} : { value }),
-      });
+    const inspect = async () => {
+      const result = await invoke('sessionplane_team_get', identity);
+      assert.equal(result.isError, false, JSON.stringify(result));
+      return (result.structuredContent.request as { evidence: { snapshotId: string; pageKey: string; nodes: Array<{ ref: string; role: string; name: string }> } }).evidence;
     };
-    assert.equal((await decideFromFreshInspection('choose-model', 'model', 'menuitemradio', 'Pro')).isError, false);
-    assert.equal((await decideFromFreshInspection('reveal-effort', 'effort', 'button', 'Effort', 'reveal')).isError, false);
-    assert.equal((await decideFromFreshInspection('choose-effort', 'effort', 'slider', 'Reasoning effort', 'choose', 4)).isError, false);
-    assert.equal((await decideFromFreshInspection('choose-composer', 'composer', 'textbox', 'Prompt')).isError, false);
-    const filled = await invoke('sessionplane_preparation_resume', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    assert.equal(filled.structuredContent.errorCode, 'provider.preparation-required');
-    assert.equal(service.teamDirectory.getSession(session.sessionId).promptSubmitted, false);
-    assert.notEqual(await inspectedPage.locator('textarea').inputValue(), '');
-    assert.equal((await decideFromFreshInspection('choose-send', 'submit', 'button', '전송')).isError, false);
-    const resumed = await invoke('sessionplane_preparation_resume', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    assert.equal(resumed.isError, false);
-    const completedAttempt = service.teamDirectory.getSession(session.sessionId);
-    assert.equal(completedAttempt.generation, pending.generation);
-    assert.equal(completedAttempt.promptSubmitted, true);
-    assert.equal(completedAttempt.submissionState, 'submitted');
-    const submittedPage = service.pageRegistry.pageForObservation(completedAttempt.pageKey!);
-    assert.equal(await submittedPage.locator('input[type=file]').evaluate(async (element) =>
-      await (element as HTMLInputElement).files![0]!.text()), acceptedAttachment);
-    assert.equal(await submittedPage.evaluate(() => (window as Window & { submitCount: number }).submitCount), 1);
-    const replayResume = await invoke('sessionplane_preparation_resume', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    assert.deepEqual(replayResume.structuredContent, resumed.structuredContent);
-    let final: { readonly terminal: boolean; readonly latestEventSequence: number; readonly answerText: string | null; readonly responseMessageId: string | null } | null = null;
-    let cursor = 0;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const waited = await invoke('sessionplane_wait', {
-        sessionId: session.sessionId, generation: pending.generation, afterEventSequence: cursor, waitMs: 500,
-      });
-      final = waited.structuredContent as typeof final;
-      cursor = Math.max(cursor, final.latestEventSequence);
-      if (final.terminal) break;
+    const initial = await inspect();
+    const opener = initial.nodes.find((n) => n.role === 'button' && n.name === 'Submit settings')!;
+    const page = service.pageRegistry.pageForObservation(initial.pageKey);
+    await page.locator('#models-button').evaluate((node) => { node.textContent = 'Changed'; });
+    const stale = await invoke('sessionplane_decide', { ...identity, requestId: 'stale', decision: 'reveal', purpose: 'model', snapshotId: initial.snapshotId, ref: opener.ref });
+    assert.equal(stale.structuredContent.errorCode, 'browser.snapshot-stale');
+    assert.equal(await page.locator('#models').isVisible(), false);
+    await page.locator('#models-button').evaluate((node) => { node.textContent = 'Submit settings'; });
+    let last: Record<string, unknown> = {};
+    for (const [purpose, role, name, decision, value] of [
+      ['model', 'button', 'Submit settings', 'reveal'],
+      ['model', 'menuitemradio', 'Pro', 'choose'],
+      ['effort', 'button', 'Effort', 'reveal'],
+      ['effort', 'slider', 'Reasoning effort', 'choose', 4],
+      ['composer', 'textbox', 'Prompt', 'choose'],
+      ['submit', 'button', '전송', 'choose'],
+    ] as const) {
+      const evidence = await inspect();
+      const target = evidence.nodes.find((n) => n.role === role && n.name === name);
+      assert.ok(target, 'Expected semantic control in fresh evidence');
+      const args = { ...identity, requestId: purpose + decision, decision, purpose,
+        snapshotId: evidence.snapshotId, ref: target.ref, ...(value === undefined ? {} : { value }) };
+      const result = await invoke('sessionplane_decide', args);
+      assert.equal(result.isError, false, JSON.stringify(result));
+      last = args;
     }
-    assert.equal(final?.terminal, true);
+    const submitted = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(submitted.generation, pending.structuredContent.generation);
+    assert.equal(submitted.promptSubmitted, true);
+    assert.equal(await page.locator('input[type=file]').evaluate(async (el) => await (el as HTMLInputElement).files![0]!.text()), acceptedAttachment);
+    assert.equal((await invoke('sessionplane_decide', last)).isError, false);
+    let final: { terminal: boolean; answerText: string } | undefined;
+    for (let i = 0; i < 20; i++) {
+      const waited = await invoke('sessionplane_wait', { teamId: team.teamId, requestRefs: [identity.requestRef], waitMs: 500 });
+      final = (waited.structuredContent.results as Array<typeof final>)[0];
+      if (final?.terminal) break;
+    }
     assert.equal(final?.answerText, 'Fixture exact final answer');
-    assert.equal(final?.responseMessageId, 'fixture-assistant-message');
-    assert.equal(await submittedPage.evaluate(() => (window as Window & { submitCount: number }).submitCount), 1);
+    const fileWait = await invoke('sessionplane_wait', { teamId: team.teamId, requestRefs: [identity.requestRef], waitMs: 0 });
+    const files = ((fileWait.structuredContent.results as Array<{ files: { artifacts: Array<{ name: string }> } }>)[0]!).files;
+    assert.deepEqual(files.artifacts.map((file) => file.name), ['result.txt']);
+    assert.equal(await page.evaluate(() => (window as Window & { submitCount: number }).submitCount), 1);
 
-    const next = await invoke('sessionplane_send', {
-      sessionId: session.sessionId, requestId: 'missing-upload', prompt: 'Next review',
-      files: [attachmentPath],
-    });
-    assert.equal(next.structuredContent.errorCode, 'provider.preparation-required');
-    const nextGeneration = service.teamDirectory.getSession(session.sessionId).generation;
+    const view = await invoke('sessionplane_team_get', { teamId: team.teamId });
+    const next = await invoke('sessionplane_send', { teamId: team.teamId,
+      roleRef: (view.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef,
+      requestId: 'missing-upload', prompt: 'Next review', files: [attachmentPath] });
     rmSync(path.join(config.stateDir, 'submission-inputs'), { recursive: true, force: true });
-    const rejected = await invoke('sessionplane_preparation_resume', {
-      sessionId: session.sessionId, generation: nextGeneration, requestId: 'missing-upload',
-    });
+    const nextEvidence = next.structuredContent.evidence as typeof initial;
+    const composer = nextEvidence.nodes.find((n) => n.role === 'textbox')!;
+    const rejected = await invoke('sessionplane_decide', { teamId: team.teamId, requestRef: next.structuredContent.requestRef,
+      requestId: 'missing-upload-choice', decision: 'choose', purpose: 'composer', snapshotId: nextEvidence.snapshotId, ref: composer.ref });
     assert.equal(rejected.structuredContent.errorCode, 'input.invalid');
-    const failed = await invoke('sessionplane_wait', {
-      sessionId: session.sessionId, generation: nextGeneration, waitMs: 1,
-    });
-    assert.equal(failed.structuredContent.terminal, true);
-    assert.equal(failed.structuredContent.submissionState, 'failed_pre_submit');
-    assert.equal(failed.structuredContent.errorCode, 'input.invalid');
-    assert.equal(failed.structuredContent.promptSubmitted, false);
+    const failed = await invoke('sessionplane_wait', { teamId: team.teamId, requestRefs: [next.structuredContent.requestRef], waitMs: 0 });
+    const result = (failed.structuredContent.results as Array<Record<string, unknown>>)[0]!;
+    assert.equal(result.terminal, true);
+    assert.equal(result.submissionState, 'failed_pre_submit');
+    assert.equal(result.promptSubmitted, false);
+    const freshTeam = await invoke('sessionplane_team_get', { teamId: team.teamId });
+    const replacement = await invoke('sessionplane_session_replace', { teamId: team.teamId, requestId: 'replace',
+      roleRef: (freshTeam.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef });
+    const cancellable = await invoke('sessionplane_send', { teamId: team.teamId, requestId: 'cancel-send', prompt: 'Cancel this preparation',
+      roleRef: (replacement.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef });
+    const cancelArgs = { teamId: team.teamId, requestId: 'cancel-request', requestRef: cancellable.structuredContent.requestRef };
+    const cancelled = await invoke('sessionplane_stop', cancelArgs);
+    assert.equal(cancelled.isError, false);
+    assert.equal(cancelled.structuredContent.promptSubmitted, false);
+    assert.equal(cancelled.structuredContent.terminal, true);
+    assert.equal((await invoke('sessionplane_stop', cancelArgs)).isError, false);
+
 
   } finally {
     await service.close();
@@ -536,22 +435,16 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
     // Exercise explicit inspection with the background recovery service stopped.
     await service.recoveryService.close();
     const page = service.pageRegistry.pageForObservation(sent.pageKey!);
-    const identity = { clientId: 'inspection-owner', requestId: 'original', sessionId: session.sessionId, generation: sent.generation };
-    const inspect = (override: Record<string, unknown> = {}) => invokeMcpTool({
-      name: 'sessionplane_submission_inspect', arguments: { ...identity, ...override },
-      socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes,
-    });
-    for (const override of [{ clientId: 'other-owner' }, { generation: sent.generation + 1 }]) {
-      const rejected = await inspect(override);
-      assert.equal(rejected.structuredContent.errorCode, 'session.generation-superseded');
-    }
+    const view = await callRpc<{ requests: Array<{ requestRef: string }> }>({ socketPath: config.socketPath, method: 'workflow.team_get', params: { teamId: team.teamId } });
+    const identity = { teamId: team.teamId, requestRef: view.requests[0]!.requestRef };
+    const inspect = () => invokeMcpTool({ name: 'sessionplane_team_get', arguments: identity,
+      socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
     const pending = await inspect();
     assert.equal(pending.isError, false);
-    const snapshot = pending.structuredContent.snapshot as { submissionState: string; generation: number };
+    const snapshot = pending.structuredContent.request as { submissionState: string; generation: number; evidence: { nodes: Array<{ editable: boolean; value: string }> } };
     assert.equal(snapshot.submissionState, 'submission_unknown');
     assert.equal(snapshot.generation, sent.generation);
-    const evidence = pending.structuredContent.evidence as { nodes: Array<{ editable: boolean; value: string }> };
-    assert.ok(evidence.nodes.some((node) => node.editable && node.value === 'Exact pending draft'));
+    assert.ok(snapshot.evidence.nodes.some((node) => node.editable && node.value === 'Exact pending draft'));
     assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft');
     assert.equal(await page.locator('[data-message-author-role]').count(), 0);
 
@@ -562,10 +455,10 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
     });
     const recovered = await inspect();
     assert.equal(recovered.isError, false);
-    assert.equal((recovered.structuredContent.snapshot as { submittedUserMessageId: string }).submittedUserMessageId, 'delayed-user');
+    assert.equal((recovered.structuredContent.request as { submittedUserMessageId: string }).submittedUserMessageId, 'delayed-user');
     let final = service.teamDirectory.getSession(session.sessionId);
     for (let attempt = 0; attempt < 20 && !final.terminal; attempt += 1) {
-      final = await callRpc<typeof final>({ socketPath: config.socketPath, method: 'session.wait', params: { clientId: identity.clientId, sessionId: session.sessionId, generation: sent.generation, waitMs: 500 } });
+      final = await callRpc<typeof final>({ socketPath: config.socketPath, method: 'session.wait', params: { clientId: 'inspection-owner', sessionId: session.sessionId, generation: sent.generation, waitMs: 500 } });
     }
     assert.equal(final.generation, sent.generation);
     assert.equal(final.answerText, 'Recovered final');

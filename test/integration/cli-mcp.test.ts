@@ -112,6 +112,9 @@ test('CLI and modern/legacy MCP expose the same core state across MCP process re
     });
     assert.deepEqual(cliSnapshot, directSnapshot);
 
+    const view = await callRpc<{ requests: Array<{ requestRef: string }> }>({ socketPath: config.socketPath,
+      method: 'workflow.team_get', params: { teamId: team.teamId } });
+    const requestRef = view.requests[0]!.requestRef;
     modern = new McpSubprocess(config.stateDir);
     const discover = await modern.request('server/discover', modernParams());
     assert.equal(discover.error, undefined);
@@ -125,22 +128,21 @@ test('CLI and modern/legacy MCP expose the same core state across MCP process re
     assert.equal(list.result?.resultType, 'complete');
     assert.ok(
       (list.result?.tools as Array<{ name: string }>).some(
-        (tool) => tool.name === 'sessionplane_status',
+        (tool) => tool.name === 'sessionplane_team_get',
       ),
     );
 
     const modernStatus = await modern.request(
       'tools/call',
       modernParams({
-        name: 'sessionplane_status',
+        name: 'sessionplane_team_get',
         arguments: {
-          clientId: 'cli-mcp-client',
-          sessionId: created.sessionId,
+          teamId: team.teamId, requestRef,
         },
       }),
     );
     assert.equal(modernStatus.error, undefined);
-    assert.deepEqual(modernStatus.result?.structuredContent, directSnapshot);
+    assert.equal((modernStatus.result?.structuredContent as { request: SessionSnapshot }).request.sessionId, directSnapshot.sessionId);
     assert.equal(modernStatus.result?.isError, false);
 
     await modern.close();
@@ -156,14 +158,13 @@ test('CLI and modern/legacy MCP expose the same core state across MCP process re
     const restartedStatus = await restarted.request(
       'tools/call',
       modernParams({
-        name: 'sessionplane_status',
+        name: 'sessionplane_team_get',
         arguments: {
-          clientId: 'cli-mcp-client',
-          sessionId: created.sessionId,
+          teamId: team.teamId, requestRef,
         },
       }),
     );
-    assert.deepEqual(restartedStatus.result?.structuredContent, afterMcpExit);
+    assert.equal((restartedStatus.result?.structuredContent as { request: SessionSnapshot }).request.sessionId, afterMcpExit.sessionId);
 
     for (const [requestedVersion, negotiatedVersion] of [
       ['2025-11-25', '2025-11-25'],
@@ -182,17 +183,16 @@ test('CLI and modern/legacy MCP expose the same core state across MCP process re
       const metadata = { 'io.modelcontextprotocol/protocolVersion': negotiatedVersion, progressToken: 'native-client' };
       const legacyTools = await legacy.request('tools/list', { _meta: metadata });
       assert.equal(legacyTools.error, undefined);
-      assert.ok((legacyTools.result?.tools as Array<{ name: string }>).some((tool) => tool.name === 'sessionplane_preparation_resume'));
+      assert.ok((legacyTools.result?.tools as Array<{ name: string }>).some((tool) => tool.name === 'sessionplane_decide'));
       const legacyStatus = await legacy.request('tools/call', {
         _meta: metadata,
-        name: 'sessionplane_status',
+        name: 'sessionplane_team_get',
         arguments: {
-          clientId: 'cli-mcp-client',
-          sessionId: created.sessionId,
+          teamId: team.teamId, requestRef,
         },
       });
       assert.equal(legacyStatus.result?.resultType, undefined);
-      assert.deepEqual(legacyStatus.result?.structuredContent, afterMcpExit);
+      assert.equal((legacyStatus.result?.structuredContent as { request: SessionSnapshot }).request.sessionId, afterMcpExit.sessionId);
     }
 
     const stopArgs = [

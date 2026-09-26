@@ -46,11 +46,6 @@ export interface SessionPlaneConfig {
   readonly tokenCacheTtlMs: number;
   readonly maxUploadFileBytes: number;
   readonly maxArtifactFileBytes: number;
-  readonly fetchTimeoutMs: number;
-  readonly fetchMaxBytes: number;
-  readonly fetchMaxRedirects: number;
-  readonly fetchAllowPrivateNetworks: boolean;
-  readonly searchMaxCandidates: number;
   readonly chatgptUrl: string;
   readonly geminiUrl: string;
   readonly grokUrl: string;
@@ -84,11 +79,6 @@ export interface ConfigOverrides {
   readonly tokenCacheTtlMs?: number;
   readonly maxUploadFileBytes?: number;
   readonly maxArtifactFileBytes?: number;
-  readonly fetchTimeoutMs?: number;
-  readonly fetchMaxBytes?: number;
-  readonly fetchMaxRedirects?: number;
-  readonly fetchAllowPrivateNetworks?: boolean;
-  readonly searchMaxCandidates?: number;
   readonly chatgptUrl?: string;
   readonly geminiUrl?: string;
   readonly grokUrl?: string;
@@ -332,25 +322,6 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
         512 * 1024 * 1024,
         'Maximum artifact file bytes',
       ),
-    fetchTimeoutMs:
-      overrides.fetchTimeoutMs ??
-      parsePositiveInteger(env.SESSIONPLANE_FETCH_TIMEOUT_MS, 15_000, 'Fetch timeout'),
-    fetchMaxBytes:
-      overrides.fetchMaxBytes ??
-      parsePositiveInteger(env.SESSIONPLANE_FETCH_MAX_BYTES, 5 * 1024 * 1024, 'Fetch max bytes'),
-    fetchMaxRedirects:
-      overrides.fetchMaxRedirects ??
-      parsePositiveInteger(env.SESSIONPLANE_FETCH_MAX_REDIRECTS, 5, 'Fetch max redirects'),
-    fetchAllowPrivateNetworks:
-      overrides.fetchAllowPrivateNetworks ??
-      parseBoolean(
-        env.SESSIONPLANE_FETCH_ALLOW_PRIVATE,
-        false,
-        'SESSIONPLANE_FETCH_ALLOW_PRIVATE',
-      ),
-    searchMaxCandidates:
-      overrides.searchMaxCandidates ??
-      parsePositiveInteger(env.SESSIONPLANE_SEARCH_MAX_CANDIDATES, 10, 'Search max candidates'),
     chatgptUrl,
     geminiUrl,
     grokUrl,

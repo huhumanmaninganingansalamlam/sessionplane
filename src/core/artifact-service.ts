@@ -187,7 +187,7 @@ export class ArtifactService {
     });
   }
 
-  list(selector: ArtifactSelector): Readonly<Record<string, unknown>> {
+  list(selector: ArtifactSelector) {
     const snapshot = this.#resolveSession(selector);
     const generation = selector.generation ?? snapshot.generation;
     return artifactListResult(
@@ -201,63 +201,6 @@ export class ArtifactService {
     const artifact = this.#requireArtifact(artifactId);
     this.#directory.getSession(artifact.sessionId);
     return { requestOk: true, artifact };
-  }
-
-  storeBytes(
-    selector: ArtifactSelector,
-    candidate: ProviderArtifactCandidate,
-    value: Uint8Array,
-  ): ArtifactRecord {
-    const snapshot = this.#resolveCurrent(selector);
-    const bytes = Buffer.from(value);
-    if (bytes.length === 0) {
-      throw new SessionPlaneDomainError(
-        'provider.artifact-empty',
-        `Provider artifact is empty: ${candidate.name}`,
-      );
-    }
-    if (bytes.length > this.#maxArtifactFileBytes) {
-      throw new SessionPlaneDomainError(
-        'provider.artifact-too-large',
-        `Provider artifact exceeds ${this.#maxArtifactFileBytes} bytes: ${candidate.name}`,
-        { sizeBytes: bytes.length, limitBytes: this.#maxArtifactFileBytes },
-      );
-    }
-    const sha256 = createHash('sha256').update(bytes).digest('hex');
-    const relativePath = this.#storeContent(sha256, bytes);
-    const timestamp = this.#now().toISOString();
-    return this.#database.transaction(() => {
-      const discovered = this.#artifacts.upsertCandidate({
-        sessionId: snapshot.sessionId,
-        generation: snapshot.generation,
-        provider: snapshot.provider,
-        candidate,
-        timestamp,
-      });
-      const artifact = this.#artifacts.markDownloaded({
-        artifactId: discovered.artifactId,
-        sizeBytes: bytes.length,
-        sha256,
-        relativePath,
-        timestamp,
-      });
-      this.#events.append({
-        teamId: snapshot.teamId,
-        roleId: snapshot.roleId,
-        sessionId: snapshot.sessionId,
-        generation: snapshot.generation,
-        eventType: 'artifact.downloaded',
-        payload: {
-          artifactId: artifact.artifactId,
-          artifactKind: artifact.artifactKind,
-          sizeBytes: artifact.sizeBytes,
-          sha256: artifact.sha256,
-          source: 'code-artifact',
-        },
-        createdAt: timestamp,
-      });
-      return artifact;
-    });
   }
 
   export(input: {
@@ -504,7 +447,7 @@ function artifactListResult(
   snapshot: SessionSnapshot,
   artifacts: readonly ArtifactRecord[],
   generation = snapshot.generation,
-): Readonly<Record<string, unknown>> {
+) {
   return {
     requestOk: true,
     teamId: snapshot.teamId,

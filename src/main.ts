@@ -1,3 +1,5 @@
+import { TeamWorkflow } from './core/team-workflow.ts';
+import { registerWorkflowMethods } from './rpc/methods/workflow.ts';
 import { SessionRepository } from './storage/session-repository.ts';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -11,10 +13,7 @@ import { prepareRuntimeDirectories, resolveConfig, type SessionPlaneConfig } fro
 import { getSystemHealth } from './core/health.ts';
 import { BrowserControlService } from './core/browser-control-service.ts';
 import { ArtifactService } from './core/artifact-service.ts';
-import { ChatGptWorkflowService } from './core/chatgpt-workflow-service.ts';
-import { ContextPackageService } from './context/context-package.ts';
 import { ObservationService } from './core/observation-service.ts';
-import { ProjectSourceService } from './core/project-source-service.ts';
 import { RecoveryService } from './core/recovery-service.ts';
 import { StopService } from './core/stop-service.ts';
 import { TeamDirectory } from './core/team-directory.ts';
@@ -27,24 +26,18 @@ import { RpcServer } from './rpc/server.ts';
 import { registerBrowserMethods } from './rpc/methods/browser.ts';
 import { registerBrowserControlMethods } from './rpc/methods/browser-control.ts';
 import { registerArtifactMethods } from './rpc/methods/artifact.ts';
-import { registerChatGptMethods } from './rpc/methods/chatgpt.ts';
-import { registerCodeMethods } from './rpc/methods/code.ts';
-import { registerContextMethods } from './rpc/methods/context.ts';
 import { registerSessionMethods } from './rpc/methods/session.ts';
 import { registerSessionUiMethods } from './rpc/methods/session-ui.ts';
 import { registerSendMethods } from './rpc/methods/send.ts';
 import { registerStopMethods } from './rpc/methods/stop.ts';
 import { registerTeamMethods } from './rpc/methods/team.ts';
 import { registerWaitMethods } from './rpc/methods/wait.ts';
-import { registerResearchMethods } from './rpc/methods/research.ts';
 import { ActorScheduler } from './scheduler/actor-scheduler.ts';
 import { ProbeCoordinator } from './scheduler/probe-coordinator.ts';
 import { SessionPlaneDatabase } from './storage/database.ts';
 import { PageBindingRepository } from './storage/page-binding-repository.ts';
 import { ReceiptRepository } from './storage/receipt-repository.ts';
 import { RuntimeMetrics } from './telemetry/metrics.ts';
-import { ResearchService } from './research/research-service.ts';
-import { SearchService } from './search/search-service.ts';
 import { ChatGptAdapter } from './providers/chatgpt/adapter.ts';
 import { GeminiAdapter } from './providers/gemini/adapter.ts';
 import { GrokAdapter } from './providers/grok/adapter.ts';
@@ -63,9 +56,6 @@ export interface CoreService {
   readonly pageRegistry: PageRegistry;
   readonly browserControl: BrowserControlService;
   readonly artifactService: ArtifactService;
-  readonly chatgptWorkflows: ChatGptWorkflowService;
-  readonly contextPackages: ContextPackageService;
-  readonly projectSources: ProjectSourceService;
   readonly pageMutationMutex: PageMutationMutex;
   readonly teamDirectory: TeamDirectory;
   readonly receipts: ReceiptRepository;
@@ -78,8 +68,6 @@ export interface CoreService {
   readonly recoveryService: RecoveryService;
   readonly submissionService: SubmissionService;
   readonly stopService: StopService;
-  readonly searchService: SearchService;
-  readonly researchService: ResearchService;
   readonly startedAt: Date;
   restartBrowser(): Promise<Readonly<Record<string, unknown>>>;
   close(): Promise<void>;
@@ -235,30 +223,11 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageRegistry,
     onStarted: async () => await recovery.restore({ forceObservers: true }),
   });
-  const searchService = SearchService.fromConfig(config);
-  const researchService = new ResearchService({ search: searchService });
   const artifactService = new ArtifactService({
     database,
     directory: teamDirectory,
     adapters: providerAdapters,
     artifactDir: config.artifactDir,
-    maxArtifactFileBytes: config.maxArtifactFileBytes,
-  });
-  const contextPackages = new ContextPackageService({ stateDir: config.stateDir });
-  const projectSources = new ProjectSourceService({
-    browserOwner,
-    pageRegistry,
-    maxUploadFileBytes: config.maxUploadFileBytes,
-  });
-  const chatgptWorkflows = new ChatGptWorkflowService({
-    browserOwner,
-    pageRegistry,
-    directory: teamDirectory,
-    submissions: submissionService,
-    scheduler: actorScheduler,
-    adapters: providerAdapters,
-    artifacts: artifactService,
-    chatgptUrl: config.chatgptUrl,
     maxArtifactFileBytes: config.maxArtifactFileBytes,
   });
 
@@ -309,27 +278,26 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     registerBrowserControlMethods(router, browserControl);
   }
   registerArtifactMethods(router, artifactService);
-  registerChatGptMethods(router, projectSources);
-  registerCodeMethods(router, chatgptWorkflows);
-  registerContextMethods(router, contextPackages);
   registerTeamMethods(router, teamDirectory, receipts);
-  registerSessionMethods(router, teamDirectory, receipts, new ConversationCleanupService({
+  const cleanup = new ConversationCleanupService({
     database, scheduler: actorScheduler, adapters: providerAdapters,
     pageMutex: pageMutationMutex, registry: pageRegistry,
-  }));
-  registerSessionUiMethods(router, new SessionUiService({
+  });
+  registerSessionMethods(router, teamDirectory, receipts, cleanup);
+  const ui = new SessionUiService({
     submissions: submissionService,
     registry: pageRegistry,
     chatgptUrl: config.chatgptUrl,
+  });
+  registerSessionUiMethods(router, ui);
+  registerWorkflowMethods(router, new TeamWorkflow({
+    database, directory: teamDirectory, receipts, submissions: submissionService, ui,
+    scheduler: actorScheduler, artifacts: artifactService, stops: stopService, cleanup,
+    enabledProviders: config.enabledProviders,
   }));
   registerSendMethods(router, submissionService);
   registerStopMethods(router, stopService);
   registerWaitMethods(router, teamDirectory, actorScheduler);
-  registerResearchMethods(router, {
-    config,
-    search: searchService,
-    research: researchService,
-  });
 
   const rpcServer = new RpcServer({
     socketPath: config.socketPath,
@@ -387,9 +355,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageRegistry,
     browserControl,
     artifactService,
-    chatgptWorkflows,
-    contextPackages,
-    projectSources,
     pageMutationMutex,
     teamDirectory,
     receipts,
@@ -402,8 +367,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     recoveryService: recovery,
     submissionService,
     stopService,
-    searchService,
-    researchService,
     startedAt,
     async restartBrowser(): Promise<Readonly<Record<string, unknown>>> {
       return await restartBrowser();

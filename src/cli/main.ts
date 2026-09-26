@@ -10,10 +10,6 @@ import {
   type BrowserPreference,
 } from '../browser/browser-health.ts';
 import { resolveConfig, SESSIONPLANE_VERSION, type SessionPlaneConfig } from '../config.ts';
-import {
-  ContextPackageService,
-  type ContextPackageInput,
-} from '../context/context-package.ts';
 import { serveForever } from '../main.ts';
 import { runMcpServer } from '../mcp/server.ts';
 import { SkillDistributionService } from '../skills/skill-distribution.ts';
@@ -42,24 +38,15 @@ const FLAG_OPTIONS = new Set([
   'all-nodes',
   'force',
   'deep',
-  'include-html',
-  'include-binary',
-  'stdin-results',
   'prompt-stdin',
   'overwrite',
   'full',
   'link',
-  'files-report',
-  'inline-only',
-  'allow-grok-context-pack',
-  'multi-zip',
-  'require-plan',
-  'dry-run',
   'manual',
   'resume',
   'no-activate',
 ]);
-const MULTI_VALUE_OPTIONS = new Set(['file', 'context-from-files', 'context-exclude', 'skill']);
+const MULTI_VALUE_OPTIONS = new Set(['file', 'skill']);
 const VALUE_OPTIONS = new Set([
   'state-dir',
   'browser',
@@ -114,40 +101,13 @@ const VALUE_OPTIONS = new Set([
   'button',
   'click-count',
   'max-bytes',
-  'max-redirects',
-  'max-results',
-  'max-queries',
-  'max-actions',
-  'schema',
-  'from-file',
   'source',
-  'backend',
-  'verify',
-  'results',
-  'plan',
-  'enrichment',
-  'query',
   'timeout',
   'artifact-id',
-  'root',
-  'context-from-files',
-  'context-exclude',
-  'context-file',
-  'context-transport',
-  'context-transform',
-  'max-input',
-  'max-file-size',
-  'max-total-size',
   'target',
   'skill',
-  'vendor',
-  'max-context-file-size',
-  'max-upload-file-size',
   'conversation',
-  'output-zip',
-  'output-dir',
   'chatgpt-url',
-  'project-url',
 ]);
 
 const INTERNAL_BROWSER_COMMANDS = new Set([
@@ -321,22 +281,8 @@ export async function runCli(
           : await runStatusCommand(io, parsed, config);
       case 'events':
         return await runEventsCommand(io, parsed, config, parsed.words.slice(1));
-      case 'fetch':
-        return await runFetchCommand(io, parsed, config);
-      case 'extract':
-        return await runExtractCommand(io, parsed, config);
-      case 'search':
-        return await runSearchCommand(io, parsed, config);
-      case 'research':
-        return await runResearchCommand(io, parsed, config);
       case 'artifact':
         return await runArtifactCommand(io, parsed, config);
-      case 'code':
-        return await runCodeCommand(io, parsed, config);
-      case 'chatgpt':
-        return await runChatGptCommand(io, parsed, config);
-      case 'context':
-        return await runContextCommand(io, parsed, config);
       case 'skills':
         return await runSkillsCommand(io, parsed);
       case 'mcp':
@@ -882,21 +828,12 @@ async function runSendCommand(
 ): Promise<number> {
   const sources = ['prompt', 'prompt-file', 'prompt-stdin'].filter((key) => parsed.options[key] !== undefined);
   if (sources.length !== 1) throw new Error('Choose exactly one of --prompt, --prompt-file, or --prompt-stdin');
-  let prompt = parsed.options['prompt-file'] !== undefined
+  const prompt = parsed.options['prompt-file'] !== undefined
     ? readFileSync(parsed.options['prompt-file'], 'utf8')
     : parsed.options['prompt-stdin'] === 'true'
       ? await readInput(io.stdin)
       : requireOption(parsed, 'prompt');
   const files = [...parsed.files];
-  if (hasContextInput(parsed)) {
-    const contextPackages = new ContextPackageService({ stateDir: config.stateDir });
-    const context = contextPackages.render(contextInput(parsed, prompt));
-    if (context.transport === 'inline') {
-      prompt = context.composerText;
-    } else if (context.artifactPath !== null) {
-      files.push(context.artifactPath);
-    }
-  }
   return await printRpc(io, parsed, config, 'session.send', {
     ...mutationIdentity(parsed),
     ...sessionSelector(parsed, parsed.words.slice(1)),
@@ -967,128 +904,6 @@ async function runEventsCommand(
   });
 }
 
-async function runFetchCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const url = parsed.options.url ?? requirePositional(parsed.words.slice(1), 0, 'url');
-  const timeoutMs = integerOption(parsed, 'timeout-ms', config.fetchTimeoutMs, 1, 120_000);
-  return await printRpc(io, parsed, config, 'fetch.read', {
-    url,
-    timeoutMs,
-    maxBytes: integerOption(parsed, 'max-bytes', config.fetchMaxBytes, 1, 25 * 1024 * 1024),
-    maxRedirects: integerOption(parsed, 'max-redirects', config.fetchMaxRedirects, 0, 20),
-    maxExtractChars: integerOption(parsed, 'max-chars', 500_000, 1, 2_000_000),
-    includeHtml: parsed.options['include-html'] === 'true',
-    includeBinary: parsed.options['include-binary'] === 'true',
-  }, timeoutMs + 2_000);
-}
-
-async function runExtractCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const schema = readJsonFile(requireOption(parsed, 'schema'), 'schema');
-  const sourceMode = parsed.options.source;
-  const fromFile = parsed.options['from-file'];
-  const url = parsed.words[1] ?? parsed.options.url;
-  if (fromFile === undefined && url === undefined) {
-    throw new Error('extract requires a URL or --from-file PATH');
-  }
-  const params: Record<string, unknown> = {
-    schema,
-    ...(sourceMode === undefined ? {} : { sourceMode }),
-  };
-  if (fromFile !== undefined) params.html = readFileSync(fromFile, 'utf8');
-  else params.url = url;
-  return await printRpc(io, parsed, config, 'extract.schema', params, config.fetchTimeoutMs + 2_000);
-}
-
-async function runSearchCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const verifyUrl = parsed.options.verify;
-  const query = (parsed.options.query ?? parsed.words.slice(1).join(' ') ?? '').trim() || verifyUrl;
-  if (query === undefined || query.trim() === '') throw new Error('search query is required');
-  let results: unknown = undefined;
-  if (parsed.options.results !== undefined) results = readJsonFile(parsed.options.results, 'results');
-  else if (parsed.options['stdin-results'] === 'true') results = parseJsonText(await readInput(io.stdin), 'stdin results');
-  return await printRpc(io, parsed, config, 'search.query', {
-    query,
-    ...(results === undefined ? {} : { results }),
-    ...optionalParam('backend', parsed.options.backend),
-    ...optionalParam('verifyUrl', verifyUrl),
-    maxResults: integerOption(
-      parsed,
-      'max-results',
-      config.searchMaxCandidates,
-      1,
-      50,
-    ),
-    deep: parsed.options.deep === 'true',
-  }, Math.max(config.rpcRequestTimeoutMs, config.fetchTimeoutMs * config.searchMaxCandidates));
-}
-
-async function runResearchCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const action = parsed.words[1] ?? 'plan';
-  switch (action) {
-    case 'plan': {
-      const query = parsed.options.query ?? parsed.words.slice(2).join(' ');
-      if (query.trim() === '') throw new Error('research plan requires a query');
-      return await printRpc(io, parsed, config, 'research.plan', {
-        query,
-        maxQueries: integerOption(parsed, 'max-queries', 6, 1, 20),
-      });
-    }
-    case 'normalize-results': {
-      const results = parsed.options.results !== undefined
-        ? readJsonFile(parsed.options.results, 'results')
-        : parsed.files[0] !== undefined
-          ? readJsonFile(parsed.files[0], 'results')
-          : parsed.options['stdin-results'] === 'true'
-            ? parseJsonText(await readInput(io.stdin), 'stdin results')
-            : undefined;
-      if (results === undefined) throw new Error('research normalize-results requires --results FILE or --stdin-results');
-      const query = parsed.options.query ?? parsed.words.slice(2).join(' ');
-      if (query.trim() === '') throw new Error('research normalize-results requires --query');
-      return await printRpc(io, parsed, config, 'research.normalize', {
-        query,
-        results,
-        ...optionalParam('backend', parsed.options.backend),
-        maxResults: integerOption(parsed, 'max-results', 100, 1, 500),
-      });
-    }
-    case 'enrich-fetch': {
-      const planPath = requireOption(parsed, 'plan');
-      const resultsPath = requireOption(parsed, 'results');
-      return await printRpc(io, parsed, config, 'research.enrich', {
-        plan: readJsonFile(planPath, 'plan'),
-        results: readJsonFile(resultsPath, 'results'),
-        maxResults: integerOption(parsed, 'max-results', config.searchMaxCandidates, 1, 100),
-      }, Math.max(config.rpcRequestTimeoutMs, config.fetchTimeoutMs * config.searchMaxCandidates));
-    }
-    case 'browse-plan': {
-      const planPath = requireOption(parsed, 'plan');
-      const enrichmentPath = requireOption(parsed, 'enrichment');
-      return await printRpc(io, parsed, config, 'research.browsePlan', {
-        plan: readJsonFile(planPath, 'plan'),
-        enrichment: readJsonFile(enrichmentPath, 'enrichment'),
-        maxActions: integerOption(parsed, 'max-actions', 10, 1, 50),
-      });
-    }
-    default:
-      throw new Error(`Unknown research command: ${action}`);
-  }
-}
-
 async function runArtifactCommand(
   io: CliIo,
   parsed: ParsedArgs,
@@ -1133,118 +948,6 @@ async function runArtifactCommand(
     default:
       throw new Error(`Unknown artifact command: ${action}`);
   }
-}
-
-async function runCodeCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const action = parsed.words[1] ?? 'generate';
-  const rest = parsed.words.slice(2);
-  if (action === 'generate' || action === 'run') {
-    let prompt = requireOption(parsed, 'prompt');
-    const files = [...parsed.files];
-    if (hasContextInput(parsed)) {
-      const contextPackages = new ContextPackageService({ stateDir: config.stateDir });
-      const context = contextPackages.render(contextInput(parsed, prompt));
-      if (context.transport === 'inline') prompt = context.composerText;
-      else if (context.artifactPath !== null) files.push(context.artifactPath);
-    }
-    const deadline = integerOption(parsed, 'deadline', 5_400, 1, 86_400);
-    return await printRpc(
-      io,
-      parsed,
-      config,
-      'code.generate',
-      {
-        ...mutationIdentity(parsed),
-        ...sessionSelector(parsed, rest),
-        prompt,
-        ...optionalParam('model', parsed.options.model),
-        ...optionalParam('effort', parsed.options.effort),
-        ...(files.length === 0 ? {} : { files }),
-        sessionDeadlineSec: deadline,
-        ...optionalParam('outputPath', parsed.options['output-zip'] ?? parsed.options.out),
-        ...optionalParam('outputDir', parsed.options['output-dir']),
-        multiZip: parsed.options['multi-zip'] === 'true',
-        overwrite: parsed.options.overwrite === 'true',
-      },
-      deadline * 1_000 + config.submissionAckTimeoutMs + 10_000,
-    );
-  }
-  if (action === 'extract') {
-    const selector = optionalSessionSelector(parsed, rest);
-    const conversationId = parsed.options.conversation ?? parsed.options.url;
-    const timeoutMs = Math.max(config.rpcRequestTimeoutMs, 120_000);
-    return await printRpc(
-      io,
-      parsed,
-      config,
-      'code.extract',
-      {
-        clientId: clientId(parsed),
-        ...selector,
-        ...optionalParam('conversationId', conversationId),
-        ...optionalIntegerParam(parsed, 'generation', 'generation', 1),
-        ...optionalParam('outputPath', parsed.options['output-zip'] ?? parsed.options.out),
-        ...optionalParam('outputDir', parsed.options['output-dir']),
-        multiZip: parsed.options['multi-zip'] === 'true',
-        requirePlan: parsed.options['require-plan'] === 'true',
-        overwrite: parsed.options.overwrite === 'true',
-      },
-      timeoutMs,
-    );
-  }
-  throw new Error(`Unknown code command: ${action}`);
-}
-
-async function runChatGptCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const family = parsed.words[1];
-  const action = parsed.words[2];
-  if (family === 'project-sources' && (action === 'list' || action === 'add')) {
-    const projectUrl =
-      parsed.options['project-url'] ?? parsed.options['chatgpt-url'] ?? parsed.options.url;
-    if (projectUrl === undefined) throw new Error('--project-url or --chatgpt-url is required');
-    if (action === 'list') {
-      return await printRpc(io, parsed, config, 'chatgpt.projectSources.list', {
-        clientId: clientId(parsed),
-        projectUrl,
-      }, 60_000);
-    }
-    return await printRpc(io, parsed, config, 'chatgpt.projectSources.add', {
-      ...mutationIdentity(parsed),
-      projectUrl,
-      files: parsed.files,
-      dryRun: parsed.options['dry-run'] !== undefined,
-    }, 120_000);
-  }
-  throw new Error(`Unknown chatgpt command: ${[family, action].filter(Boolean).join(' ')}`);
-}
-
-async function runContextCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const action = parsed.words[1] ?? 'dry-run';
-  const service = new ContextPackageService({ stateDir: config.stateDir });
-  const input = contextInput(parsed, parsed.options.prompt ?? '');
-  if (action === 'dry-run') {
-    const result = service.dryRun(input);
-    writeCliResult(io, parsed.json, contextOutput(result, parsed.options.full === 'true'));
-    return 0;
-  }
-  if (action === 'render') {
-    const result = service.render(input);
-    writeCliResult(io, parsed.json, result);
-    return 0;
-  }
-  throw new Error(`Unknown context command: ${action}`);
 }
 
 async function runSkillsCommand(io: CliIo, parsed: ParsedArgs): Promise<number> {
@@ -1488,89 +1191,6 @@ function optionValues(parsed: ParsedArgs, name: string): readonly string[] {
   return parsed.multiOptions[name] ?? (parsed.options[name] === undefined ? [] : [parsed.options[name]]);
 }
 
-function hasContextInput(parsed: ParsedArgs): boolean {
-  return (
-    optionValues(parsed, 'context-from-files').length > 0 ||
-    optionValues(parsed, 'context-exclude').length > 0 ||
-    parsed.options['context-file'] !== undefined
-  );
-}
-
-function contextInput(parsed: ParsedArgs, prompt: string): ContextPackageInput {
-  return {
-    ...(parsed.options.root === undefined ? {} : { root: parsed.options.root }),
-    ...(optionValues(parsed, 'context-from-files').length === 0
-      ? {}
-      : { includes: optionValues(parsed, 'context-from-files') }),
-    ...(optionValues(parsed, 'context-exclude').length === 0
-      ? {}
-      : { excludes: optionValues(parsed, 'context-exclude') }),
-    ...(parsed.options['context-file'] === undefined
-      ? {}
-      : { contextFile: parsed.options['context-file'] }),
-    ...(prompt.length === 0 ? {} : { prompt }),
-    transport: parseContextTransport(parsed.options['context-transport']),
-    transform: parseContextTransform(parsed.options['context-transform']),
-    maxInputTokens: integerOption(parsed, 'max-input', 120_000, 1, 10_000_000),
-    maxFileBytes: integerOption(
-      parsed,
-      parsed.options['max-context-file-size'] === undefined
-        ? 'max-file-size'
-        : 'max-context-file-size',
-      2 * 1024 * 1024,
-      1,
-      1024 * 1024 * 1024,
-    ),
-    maxTotalBytes: integerOption(
-      parsed,
-      'max-total-size',
-      20 * 1024 * 1024,
-      1,
-      2 * 1024 * 1024 * 1024,
-    ),
-  };
-}
-
-function parseContextTransport(value: string | undefined): 'inline' | 'upload' {
-  const resolved = value ?? 'upload';
-  if (resolved !== 'inline' && resolved !== 'upload') {
-    throw new Error('--context-transport must be inline or upload');
-  }
-  return resolved;
-}
-
-function parseContextTransform(value: string | undefined): 'raw' | 'repomix' {
-  const resolved = value ?? 'raw';
-  if (resolved !== 'raw' && resolved !== 'repomix') {
-    throw new Error('--context-transform must be raw or repomix');
-  }
-  return resolved;
-}
-
-function contextOutput(
-  result: ReturnType<ContextPackageService['dryRun']>,
-  full: boolean,
-): unknown {
-  if (full) return result;
-  return {
-    ...result,
-    files: result.files.map(({ content: _content, ...file }) => file),
-    composerText: '',
-  };
-}
-
-function readJsonFile(path: string, label: string): unknown {
-  return parseJsonText(readFileSync(path, 'utf8'), label);
-}
-
-function parseJsonText(value: string, label: string): unknown {
-  try {
-    return JSON.parse(value) as unknown;
-  } catch (error) {
-    throw new Error(`${label} is not valid JSON`, { cause: error });
-  }
-}
-
 async function readInput(stream: NodeJS.ReadableStream): Promise<string> {
   stream.setEncoding('utf8');
   let value = '';
@@ -1605,23 +1225,6 @@ Provider browser runtime:
   ChatGPT is enabled by default; other providers require explicit operator enablement.
   --providers or SESSIONPLANE_ENABLED_PROVIDERS defines the hard provider allowlist.
 
-Fetch, search, and research:
-  sessplane fetch URL [--max-bytes N] [--max-redirects N] [--include-html]
-  sessplane extract URL --schema FILE [--source auto|json|jsonld|table]
-  sessplane extract --from-file HTML --schema FILE
-  sessplane search QUERY [--max-results N] [--deep]
-  sessplane search --verify URL
-  sessplane search QUERY --results FILE [--backend NAME]
-  sessplane research plan QUERY [--max-queries N]
-  sessplane research normalize-results --query QUERY --results FILE --backend NAME
-  sessplane research enrich-fetch --plan PLAN --results RESULTS
-  sessplane research browse-plan --plan PLAN --enrichment ENRICHMENT
-
-Context packages:
-  sessplane context dry-run --context-from-files GLOB [--context-exclude GLOB]
-  sessplane context render --context-file FILE --context-transport inline|upload
-  sessplane send ... --context-from-files GLOB --context-transform raw|repomix
-
 Team and role sessions:
   sessplane team create --name NAME [--objective TEXT] [--request-id ID]
   sessplane team show TEAM_ID [--json]
@@ -1638,14 +1241,6 @@ Team and role sessions:
   sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID
   sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]
   sessplane stop TEAM_ID ROLE_KEY [--request-id ID]
-
-Advanced ChatGPT Chat and code artifacts:
-  sessplane chatgpt project-sources list --project-url URL
-  sessplane chatgpt project-sources add --project-url URL --file PATH [--dry-run]
-  sessplane code generate --session SESSION_ID --prompt TEXT [--output-zip PATH]
-  sessplane code generate --session SESSION_ID --prompt TEXT --multi-zip --output-dir DIR
-  sessplane code extract --session SESSION_ID [--output-zip PATH] [--require-plan]
-  sessplane code extract --conversation ID_OR_URL [--multi-zip --output-dir DIR]
 
 Provider artifacts:
   sessplane artifact discover --session SESSION_ID

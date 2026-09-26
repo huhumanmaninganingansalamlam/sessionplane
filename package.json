@@ -1,6 +1,6 @@
 {
   "name": "sessionplane",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Durable local runtime for role-addressed browser-backed AI chat sessions",
   "private": true,
   "type": "module",
@@ -26,7 +26,6 @@
     "test:ci": "node --test --test-concurrency=1 --experimental-strip-types $(find test -name '*.test.ts' ! -path 'test/browser/*' ! -path 'test/integration/browser-cli-mcp.test.ts' | sort)",
     "test:acceptance": "node --test --test-concurrency=1 --experimental-strip-types test/reliability/acceptance.test.ts",
     "test:reliability": "node --test --test-concurrency=1 --experimental-strip-types test/reliability/*.test.ts test/integration/restart-recovery.test.ts test/browser/browser-restart-recovery.test.ts",
-    "test:research": "node --test --test-concurrency=1 --experimental-strip-types test/unit/url-safety.test.ts test/unit/html-extractor.test.ts test/unit/schema-extractor.test.ts test/integration/fetch-search-research.test.ts",
     "test:package": "node scripts/package-smoke.mjs",
     "release:preflight": "node scripts/release-preflight.mjs",
     "dev": "node --watch --experimental-strip-types src/main.ts",

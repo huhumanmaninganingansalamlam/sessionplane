@@ -9,15 +9,17 @@ and recovery. The `sessplane` CLI and MCP adapter are thin Unix-socket clients.
 SessionPlane is maintained as an independent project with one canonical CLI
 and one runtime contract.
 
-## Agent-guided preparation
+## Agent workflow
 
-Every ChatGPT send starts a caller-owned preparation request. Inspect the live
-UI with `sessionplane_preparation_inspect`, choose observed controls with
-`sessionplane_preparation_decide`, and continue the same request/generation with
-`sessionplane_preparation_resume`. Core executes verified choices and owns exact
-submission/answer correlation. Automatic UI selection, immediate-submit
-compatibility and the `assistedPreparation` flag have been removed. See
-[the preparation contract](docs/provider-preparation.md).
+Use native MCP with `sessplane mcp`. Keep a teamId and follow
+`sessionplane_team_get` → `sessionplane_send` → `sessionplane_decide` when needed
+→ `sessionplane_wait`. Roles and exact requests are referenced by handles returned
+by the core. UI choices are interpreted by the caller from fresh evidence; core
+executes and validates them and continues the same request automatically.
+
+The [ten-tool contract](docs/team-workflow.md) includes expert creation/retirement,
+explicit stop, conversation replacement and completed-history deletion. The
+[preparation design](docs/provider-preparation.md) explains UI evidence and recovery.
 
 ## Requirements
 
@@ -197,157 +199,18 @@ the visible dedicated provider window, then run sessplane login --resume --json.
 Provider sessions support ChatGPT, Gemini, and Grok, including exact local file
 uploads and durable artifact capture.
 
-## Advanced ChatGPT Chat and code artifacts
+## Attachments, results and skills
 
-SessionPlane deliberately uses the Chat surface only. It never switches a
-composer into ChatGPT Work, and an explicit Work request fails before provider
-mutation. Agent-directed Chat model/reasoning selection, uploads, durable
-follow-up generations, Project Sources, and artifact recovery remain supported.
+Attach ordinary files through `sessionplane_send.files`. Accepted bytes are retained
+for preparation and restart even if source files change. `sessionplane_wait`
+returns exact answers and captured generated-file descriptors; outputDir exports
+files with their original integrity metadata. Check per-file capture failures.
 
-When a provider Page visibly presents Cloudflare or CAPTCHA-style browser
-verification, submission fails before model selection, upload, prompt fill, or
-send with `provider.human-action-required`. SessionPlane leaves the headed Page
-open so a person can complete the check and rerun the command with a new
-request ID. It never clicks, solves, disguises, or bypasses the challenge.
+Install the bundled agent instructions with `sessplane skills install --target
+/path/to/skills --skill sessionplane`. Register the native MCP server separately.
+Search, context packaging, project-source management and code ZIP orchestration
+are outside SessionPlane's chat-session scope; use existing agent tools.
 
-ChatGPT Project Sources are addressed by an explicit project URL. `add` hashes
-and validates every local file before opening the provider page, skips names
-already visible in the project, and serializes concurrent mutations for the
-same project. Use `--dry-run` to inspect the upload set without starting a
-browser mutation.
-
-```bash
-sessplane chatgpt project-sources list \
-  --project-url "https://chatgpt.com/g/<project-id>" --json
-
-sessplane chatgpt project-sources add \
-  --project-url "https://chatgpt.com/g/<project-id>" \
-  --file ./requirements.md --file ./architecture.pdf --dry-run --json
-```
-
-Code mode submits a strict packaging contract, waits on the exact durable
-generation, scans the corresponding ChatGPT conversation for `/mnt/data/*.zip`
-artifacts, downloads the newest matching sandbox snapshot, validates the ZIP,
-stores it content-addressed, and exports it to the requested path. Newly
-generated code archives must contain a nonempty root `PLAN.md` or
-`00_plan.md`. Unsafe paths, symbolic links, malformed local headers, oversized
-archives, and output replacement are rejected.
-
-ChatGPT code generation first returns the same preparation handoff. Complete
-inspect/decide/resume with its original request identity, then repeat the exact
-`code generate` request to wait and export artifacts without another submit.
-
-```bash
-sessplane code generate --session "$SESSION_ID" \
-  --prompt "Build a small TypeScript CLI" \
-  --output-zip ./result.zip \
-  --request-id code-generation-1 --json
-
-sessplane code generate --session "$SESSION_ID" \
-  --prompt "Build separate frontend and backend deliverables" \
-  --multi-zip --output-dir ./artifacts \
-  --request-id code-generation-2 --json
-
-# Read-only recovery from a durable session or an explicit conversation.
-sessplane code extract --session "$SESSION_ID" \
-  --output-zip ./recovered.zip --require-plan --json
-sessplane code extract --conversation "https://chatgpt.com/c/<conversation-id>" \
-  --multi-zip --output-dir ./recovered --json
-```
-
-The same Project Sources, code generation, and code extraction methods are
-available through the thin MCP adapter.
-
-`browser-list --json` shows the supported host browsers and the exact selected
-executable. `doctor --json` verifies that selection and, when the core is
-running, reports the current Page bindings without changing browser focus.
-
-Installed or linked sessplane commands use exactly one production runtime
-directory: $HOME/.local/state/sessionplane. Production callers cannot create
-competing SessionPlane cores or profiles with --state-dir,
-SESSIONPLANE_STATE_DIR, or XDG_STATE_HOME; isolated runtime state is reserved
-for automated tests. The artifact store defaults under the canonical state
-directory and keeps the same configured per-artifact limits.
-
-## Context packages and bundled skills
-
-Large local context can be inspected before any browser mutation. Selection is
-root-bounded, deterministic, symlink-rejecting, binary-aware, size-bounded, and
-SHA-256 addressed. `raw` renders one fenced section per file; `repomix` renders
-a deterministic XML-compatible package without executing repository config or
-processors.
-
-```bash
-sessplane context dry-run \
-  --root . \
-  --context-from-files 'src/**/*.ts' \
-  --context-exclude 'src/**/*.generated.ts' \
-  --max-input 120000 --json
-
-sessplane context render \
-  --root . \
-  --context-file context-files.txt \
-  --context-transform repomix \
-  --context-transport upload --json
-
-sessplane send --session <sessionId> --prompt "Review this repository" \
-  --context-from-files 'src/**/*.ts' \
-  --context-transport upload --json
-```
-
-Bundled SessionPlane skills can be inspected or installed directly from the
-SessionPlane package:
-
-```bash
-sessplane skills list --json
-sessplane skills get core --full
-sessplane skills path web-ai
-sessplane skills install --target ~/.codex/skills --skill browser --skill web-ai
-```
-
-Installation never replaces an existing skill unless `--force` is explicit.
-`--link` creates directory symlinks; the default copies the bundled skills.
-
-## Adaptive fetch, extraction, search, and research
-
-SessionPlane owns its fetch pipeline. Each HTTP redirect is revalidated, DNS
-answers are pinned to the requested connection, private/link-local/
-documentation/multicast ranges are blocked by default, and response and
-extraction sizes are bounded.
-
-```bash
-sessplane fetch https://example.com --json
-sessplane extract https://example.com/catalog --schema schema.json --json
-sessplane search "Node.js 24 node:sqlite" --json
-sessplane search --verify https://nodejs.org/api/sqlite.html --json
-```
-
-Search results are candidates, not evidence. `search` fetches original pages
-and returns a scored evidence ledger with explicit verified, weak, blocked, or
-failed verdicts. Provider-specific search rows can be supplied through
-`--results FILE` or `--stdin-results`.
-
-Research planning is split into inspectable, non-mutating stages:
-
-```bash
-sessplane research plan --query "Node.js 24 SQLite changes" --json > plan.json
-sessplane research normalize-results --query "Node.js 24 SQLite changes" \
-  --results provider-results.json --backend external --json > candidates.json
-sessplane research enrich-fetch --plan plan.json --results candidates.json \
-  --json > enrichment.json
-sessplane research browse-plan --plan plan.json --enrichment enrichment.json --json
-```
-
-`SESSIONPLANE_FETCH_ALLOW_PRIVATE=true` exists only for isolated local fixtures
-or intentionally private deployments. It is false by default and should not be
-enabled for untrusted URLs.
-
-Long CLI prompt bodies can be sent with `sessplane send TEAM_ID ROLE_KEY
---prompt-file ./prompt.txt --request-id REQUEST_ID --json`, or `--prompt-stdin`
-for piped input. Select exactly one prompt source. With MCP, use structured
-`sessionplane_send` arguments instead of interpolating text into a shell.
-
-For a stuck ambiguous submission, `sessionplane_submission_inspect` exposes
-caller-owned page evidence and attempts read-only acknowledgement recovery using
-the original request/session/generation. It never resends a prompt; see
-[ambiguous submission inspection](docs/provider-preparation.md#ambiguous-submission-inspection).
+Long operator CLI prompts support --prompt-file or --prompt-stdin. Agents use
+structured MCP arguments. An ambiguous request is inspected with team_get and its
+requestRef; inspection never resends a prompt.

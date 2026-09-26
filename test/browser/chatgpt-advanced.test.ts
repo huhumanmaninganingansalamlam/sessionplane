@@ -93,7 +93,11 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
       artifact.download = 'diagram.png';
       artifact.href = 'data:image/png;base64,UE5HREFUQQ==';
       artifact.textContent = 'Download diagram';
-      document.body.appendChild(artifact);
+      const answer = document.createElement('div');
+      answer.setAttribute('data-message-author-role', 'assistant');
+      answer.setAttribute('data-message-id', 'artifact-response');
+      answer.appendChild(artifact);
+      document.body.appendChild(answer);
     });
     const adapter = new ChatGptAdapter({
       browserOwner: owner,
@@ -108,7 +112,8 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
       submittedUserTurnId: acknowledgement.submittedUserTurnId,
       promptSubmitted: true,
       sessionState: 'complete',
-      providerState: 'completed',
+      providerState: 'complete',
+      responseMessageId: 'artifact-response',
       terminal: true,
     };
     const candidates = await adapter.discoverArtifacts?.({

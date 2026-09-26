@@ -211,8 +211,6 @@ class SessionPlaneMcpServer {
         arguments: toolArguments,
         socketPath: this.#config.socketPath,
         timeoutMs: resolveMcpToolTimeoutMs({
-          name,
-          arguments: toolArguments,
           rpcRequestTimeoutMs: this.#config.rpcRequestTimeoutMs,
           submissionAckTimeoutMs: this.#config.submissionAckTimeoutMs,
         }),
@@ -293,15 +291,12 @@ function callToolResult(
 
 function serverInstructions(): string {
   return [
-    'ChatGPT send starts preparation, not submission.',
-    'On provider.preparation-required, preserve clientId + requestId + sessionId + generation and continue sessionplane_preparation_inspect, sessionplane_preparation_decide, sessionplane_preparation_resume until acknowledged.',
-    'Wait cannot advance preparation. After reconnect or compaction, inspect the same pending request with fresh evidence; never start a replacement send to resume it.',
-    'Use teamId as the durable aggregate handle.',
-    'Call sessionplane_team_get when starting or resuming work.',
-    'Address mutations with teamId + roleKey or an exact sessionId.',
-    'Preserve the returned sessionId and generation for waits.',
-    'waitExpired and backend observation deferral are successful nonterminal states.',
-    'submission_unknown requires exact read-only sessionplane_submission_inspect; never automatically resend.',
+    'Keep teamId and start or resume with sessionplane_team_get.',
+    'Copy roleRef for sends and requestRef for decisions, waits, stop and cleanup.',
+    'Use stable unique requestId values for mutations; reuse only identical requests.',
+    'needs_decision is a normal handoff: reason from fresh observed evidence and call decide. It continues the same request automatically.',
+    'Never change provider/model intent or resend submission_unknown. Use team_get with requestRef for read-only recovery.',
+    'wait returns exact answers and files; waitExpired and observation deferral do not end generation.',
   ].join(' ');
 }
 

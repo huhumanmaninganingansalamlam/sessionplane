@@ -201,18 +201,9 @@ export class DomProviderAdapter implements ProviderAdapter {
     const page = this.#requireOwnedPage(request.session, request.generation);
     const selector = this.#selectors.artifactLinks.join(', ');
     if (selector.length === 0) return [];
-    const rows = await page.locator(selector).evaluateAll((elements) =>
-      elements.map((element, index) => {
-        const anchor = element as HTMLAnchorElement;
-        const href = anchor.href || anchor.getAttribute('href') || '';
-        const name =
-          anchor.getAttribute('download') ||
-          anchor.getAttribute('aria-label') ||
-          anchor.textContent?.trim() ||
-          `artifact-${index + 1}`;
-        return { href, name, mediaType: anchor.getAttribute('type') };
-      }),
-    );
+    const turn = (await readTurns(page, this.#selectors, 'assistant', true)).find((turn) => turn.messageId === request.session.responseMessageId);
+    if (turn === undefined) throw new ProviderSubmissionError('provider.artifacts-unavailable', 'Exact answer is not present for file discovery');
+    const rows = turn.artifacts ?? [];
     const candidates = new Map<string, ProviderArtifactCandidate>();
     for (const row of rows) {
       if (row.href.length === 0) continue;
@@ -699,6 +690,7 @@ interface DomTurn {
   readonly messageId: string;
   readonly turnId: string;
   readonly identityKey: string;
+  readonly artifacts?: readonly { href: string; name: string; mediaType: string | null }[];
   readonly terminalAttribute: boolean;
   readonly streamingAttribute: boolean;
 }
@@ -707,9 +699,10 @@ async function readTurns(
   page: Page,
   selectors: ProviderDomSelectors,
   role?: 'user' | 'assistant',
+  includeArtifacts = false,
 ): Promise<readonly DomTurn[]> {
   const raw = await page.evaluate(
-    ({ userSelectors, userTextLineSelectors, assistantSelectors, textSelectors }) => {
+    ({ userSelectors, userTextLineSelectors, assistantSelectors, textSelectors, artifactSelector, includeArtifacts }) => {
       const normalize = (value: string | null | undefined): string =>
         (value ?? '').replaceAll(/\s+/g, ' ').trim();
       const userSelector = userSelectors.join(', ');
@@ -725,7 +718,7 @@ async function readTurns(
       let assistantIndex = 0;
       return elements.map((element) => {
         const isUser = roleOf(element) === 'user';
-        const roleValue = isUser ? 'user' : 'assistant';
+        const roleValue: 'user' | 'assistant' = isUser ? 'user' : 'assistant';
         const index = isUser ? userIndex++ : assistantIndex++;
         const messageId =
           element.getAttribute('data-message-id') ??
@@ -760,6 +753,11 @@ async function readTurns(
         const status = (element.getAttribute('data-status') ?? '').toLowerCase();
         const state = (element.getAttribute('data-state') ?? '').toLowerCase();
         return {
+          ...(includeArtifacts && artifactSelector.length > 0 ? { artifacts: [...element.querySelectorAll<HTMLAnchorElement>(artifactSelector)].map((anchor, index) => ({
+            href: anchor.href || anchor.getAttribute('href') || '',
+            name: anchor.getAttribute('download') || anchor.getAttribute('aria-label') || anchor.textContent?.trim() || `artifact-${index + 1}`,
+            mediaType: anchor.getAttribute('type'),
+          })) } : {}),
           role: roleValue,
           index,
           text,
@@ -781,18 +779,11 @@ async function readTurns(
     {
       userSelectors: [...selectors.userMessages],
       userTextLineSelectors: [...(selectors.userTextLines ?? [])],
+      artifactSelector: selectors.artifactLinks.join(', '), includeArtifacts,
       assistantSelectors: [...selectors.assistantMessages],
       textSelectors: [...selectors.assistantText],
     },
-  ) as Array<{
-    role: 'user' | 'assistant';
-    index: number;
-    text: string;
-    messageId: string | null;
-    turnId: string | null;
-    terminalAttribute: boolean;
-    streamingAttribute: boolean;
-  }>;
+  );
   const counters: Record<'user' | 'assistant', number> = { user: 0, assistant: 0 };
   const turns: DomTurn[] = raw.map((turn) => {
     const ordinal = counters[turn.role]++;
@@ -806,6 +797,7 @@ async function readTurns(
       text: turn.text,
       messageId,
       turnId,
+      ...(turn.artifacts === undefined ? {} : { artifacts: turn.artifacts }),
       identityKey: `${messageId}\u0000${turnId}`,
       terminalAttribute: turn.terminalAttribute,
       streamingAttribute: turn.streamingAttribute,

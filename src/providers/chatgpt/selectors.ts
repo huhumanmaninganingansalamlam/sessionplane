@@ -27,18 +27,6 @@ export const CHATGPT_SELECTORS = {
     'img[src^="blob:"]',
     'img[src^="data:image/"]',
   ],
-  projectSourceRows: [
-    '[data-project-file-id]',
-    '[data-testid*="project-source"]',
-    '[data-testid*="source-file"]',
-    '[data-testid*="file-item"]',
-  ],
-  projectSourceInputs: ['input[type="file"][multiple]', 'input[type="file"]'],
-  projectSourceTriggers: [
-    '[data-testid*="add-source"]',
-    'button[aria-label*="add files" i]',
-    'button[aria-label*="project files" i]',
-  ],
   userMessages: '[data-message-author-role="user"], [data-chatgpt-search-message-ids]:has([data-user-message-bubble])',
   userMessageContent: [
     '[data-testid="collapsible-user-message-content"]',

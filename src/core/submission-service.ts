@@ -36,6 +36,7 @@ export interface SessionSendInput {
   readonly sessionId?: string;
   readonly teamId?: string;
   readonly roleKey?: string;
+  readonly expectedGeneration?: number;
   readonly prompt: string;
   readonly model?: string | null;
   readonly effort?: string | null;
@@ -472,6 +473,10 @@ export class SubmissionService {
       return await this.#replay(actor, existing);
     }
 
+    if (input.expectedGeneration !== undefined &&
+        this.#requireSnapshot(sessionId).generation !== input.expectedGeneration) {
+      throw new SessionPlaneDomainError('session.generation-superseded', 'Role reference is stale; refresh the team before sending');
+    }
     const uploadAttachments = await this.#snapshotAttachments(attachments);
     const prepared = this.#prepareOutbox(
       actor,

@@ -152,33 +152,6 @@ export interface ProviderArtifactDownload {
   readonly bytes: Uint8Array;
 }
 
-export interface ProviderCodeArtifactCandidate {
-  readonly providerArtifactId: string;
-  readonly name: string;
-  readonly sandboxPath: string;
-  readonly candidateMessageIds: readonly string[];
-  readonly mediaType: 'application/zip';
-}
-
-export interface ProviderCodeArtifactRequest {
-  readonly session: SessionSnapshot;
-  readonly generation: number;
-  readonly conversationId: string;
-  readonly maxBytes: number;
-}
-
-export interface ProviderCodeArtifactDownload {
-  readonly candidate: ProviderCodeArtifactCandidate;
-  readonly bytes: Uint8Array;
-  readonly mintedMessageId: string;
-}
-
-export interface ProviderProjectSource {
-  readonly providerSourceId: string;
-  readonly name: string;
-  readonly mediaType: string | null;
-}
-
 export interface ProviderStopRequest {
   readonly session: SessionSnapshot;
   readonly generation: number;
@@ -210,13 +183,7 @@ export interface ProviderAdapter {
     request: ProviderArtifactRequest,
     candidate: ProviderArtifactCandidate,
   ): Promise<ProviderArtifactDownload>;
-  discoverCodeArtifacts?(
-    request: ProviderCodeArtifactRequest,
-  ): Promise<readonly ProviderCodeArtifactCandidate[]>;
-  downloadCodeArtifact?(
-    request: ProviderCodeArtifactRequest,
-    candidate: ProviderCodeArtifactCandidate,
-  ): Promise<ProviderCodeArtifactDownload>;
+
 }
 
 export class ProviderSubmissionError extends Error {

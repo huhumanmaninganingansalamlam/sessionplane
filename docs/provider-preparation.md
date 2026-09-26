@@ -15,36 +15,22 @@ all browser mutations, request receipts, submission attempts and answer identity
 
 ## MCP flow
 
-1. Call `sessionplane_send` with the intended provider session, prompt, model,
-   effort, stable client ID and request ID. Its preparation handoff has
-   `isError: true`, `errorCode: "provider.preparation-required"`, and `details`
-   containing the same `requestId`, `sessionId`, `generation` and pending snapshot.
-2. Call `sessionplane_preparation_inspect` with that exact four-part identity.
-   Inspect again before each decision. `maxNodes` can broaden the observation;
-   truncation is explicit. Interpret the current UI instead of assuming labels,
-   model version numbers or fixed menu roots.
-3. Use `sessionplane_preparation_decide` with a distinct `decisionId`, latest
-   `snapshotId`, observed `ref`, and purpose `model`, `effort`, `composer` or
-   `submit`. `reveal` opens a related model/effort chooser; `choose` records a
-   choice and verifies its selected state. Sliders also need an explicit numeric
-   `value`. Choose model/effort when requested, and always choose composer/send.
-   A collapsed model/effort chooser can confirm its currently displayed selection
-   without clicking. Slider selection verifies the chosen numeric value; the agent
-   interprets its meaning from the surrounding observed labels. Choosing
-   composer/send does not fill or submit anything.
-   Core performs the selected action once, then observes related choices or
-   selected-state evidence for up to five seconds. Rendering and menu animations
-   need not finish within a fixed sleep. Unverified outcomes remain
-   `provider.action-unknown`; core never repeats the action to obtain evidence.
-4. Call `sessionplane_preparation_resume` with the original request identity.
-   Core revalidates model/effort and composer, and prepares the exact prompt. If
-   the send control appears only after typing, resume returns preparation-required
-   again with promptSubmitted:false. Inspect, choose that submit control, and
-   resume the same request. Attachments transfer only after a submit target is
-   available; core then records the attempt and submits once. It never reruns an automatic selector.
-5. Wait using the exact returned session and generation. If requested intent
-   cannot be matched to evidence before submission, explicitly cancel preparation
-   with `decision: "cancel"`; never select another model/provider as fallback.
+The public contract is [team-centered MCP](team-workflow.md). Start with
+`sessionplane_team_get`, then `sessionplane_send` using the returned roleRef.
+A pending preparation is a successful `status: needs_decision` result with a durable
+requestRef, requested model/effort, recorded choices and fresh evidence.
+
+Use `sessionplane_decide` with that requestRef, a unique requestId, fresh snapshotId,
+observed ref and purpose. A reveal opens related model/effort options. A choose
+verifies and records the selected control, then continues the same request.
+Composer selection can fill the prompt and reveal a previously hidden submit
+control. Submit selection can submit once all required choices are verified.
+There is no separate public resume operation. Subsequent decisions use newly
+returned evidence, or `team_get` with requestRef for a fresh inspection.
+
+Core performs each mutation once and observes its result; unverified UI action
+outcomes remain typed `provider.action-unknown`. Use `sessionplane_stop` to cancel
+preparation and `sessionplane_wait` for exact answers and generated files.
 
 Requested intent and observed selection are distinct. The agent is responsible
 for choosing evidence that satisfies the intent; a selected control alone does
@@ -78,8 +64,8 @@ compatibility; verify tool discovery through the actual client.
 The MCP client owns server registration and the stdio connection. Installing
 skills alone does not connect it. Preparation is core-owned, not tied to a
 transport process or an agent's context window. On client reconnection or
-compaction, rediscover the preparation tools and inspect the original
-`clientId + requestId + sessionId + generation` before deciding/resuming.
+compaction, call team_get with the teamId and select the original requestRef
+before deciding. The core resolves the original owner/session/generation.
 Do not create a new send, wait for an unsubmitted answer, or infer unavailable
 tools from an empty MCP resource list. See the README for Codex registration.
 
@@ -96,8 +82,8 @@ and require explicit operator enablement.
 
 ## Submission uncertainty
 
-`sessionplane_submission_inspect` (`session.submission.inspect`) takes the
-original `clientId + requestId + sessionId + generation`. It attempts existing
+`sessionplane_team_get` with `teamId + requestRef` resolves the original durable
+caller/session/generation identity internally. It attempts existing
 read-only exact acknowledgement recovery, then returns the current snapshot,
 original prompt/model/effort and current owned-page evidence. This also works
 after the automatic recovery window expires. Recovered identity starts the
@@ -133,12 +119,12 @@ For each operation, inspect the exact session and generation. If wait reports
 message/composer surface is absent. This is not evidence of ongoing generation,
 permanent deletion, or non-submission. A 429 remains transport deferral: respect
 `nextCheckAt`, and do not replace a healthy conversation because of 429 alone.
-Use `sessionplane_submission_inspect` to inspect the live page and retrieve the
+Use `sessionplane_team_get` with `requestRef` to inspect the live page and retrieve the
 original prompt, model, effort, surface, attachments (path/hash), and deadline.
 Do not endlessly repeat wait on a page that cannot display the conversation.
 
 When the caller decides the conversation must be replaced, or a completed long
-conversation needs a fresh context, use `sessionplane_session_create` for the
+conversation needs a fresh context, use `sessionplane_session_replace` for the
 same `teamId`, `roleKey`, and provider with a new stable request ID. The new session records `predecessorSessionId` and becomes the current role route.
 Already submitted predecessor generations keep observing until their results are retrieved.
 Preserve completed answers and required artifacts, then carry only the relevant
@@ -154,8 +140,9 @@ operation after the role's work is complete and required answers/artifacts have
 been retrieved. Never delete active, unacknowledged, or unrecovered conversations
 merely because a successor exists or the page cannot be loaded.
 
-Call `sessionplane_session_delete` (`session.delete` RPC) with the exact session,
-generation and conversation ID, stable request ID and `outputsRetrieved: true`.
+Call `sessionplane_session_delete` with teamId, the exact requestRef, a stable
+requestId and `outputsRetrieved: true`. Core resolves the bound session, generation
+and conversation ID.
 This deletes ChatGPT history itself and closes its owned page while retaining
 local durable answers. The core rejects unresolved generations and shared
 conversation identities. It records the attempt before contacting the provider;
@@ -163,7 +150,7 @@ conversation identities. It records the attempt before contacting the provider;
 request ID. Successful replay returns the original deletion receipt.
 
 Role replacement and role retirement do not cancel submitted generations. Continue exact
-session/generation waits to retrieve its result, then delete its completed history.
+requestRef waits to retrieve its result, then delete its completed history.
 New submissions require the current session of an active role, checked again after
 provider preparation. Unsubmitted retired sessions wake existing waiters with a
 terminal snapshot. Submitted work continues observation across restart, and answers

@@ -9,10 +9,11 @@ export interface ChatGptMessage {
   readonly text: string;
   readonly terminalMarker: boolean;
   readonly streamingMarker: boolean;
+  readonly artifacts?: readonly { source: string; name: string; mediaType: string | null }[];
 }
 
-export async function readChatGptMessages(page: Page): Promise<ChatGptMessage[]> {
-  return await page.evaluate((selector) => {
+export async function readChatGptMessages(page: Page, includeArtifacts = false): Promise<ChatGptMessage[]> {
+  return await page.evaluate(({ selector, artifactSelector, includeArtifacts }) => {
     const messages: ChatGptMessage[] = [];
     const seen = new Set<Element>();
     const nodes = document.querySelectorAll<HTMLElement>(selector);
@@ -51,6 +52,11 @@ export async function readChatGptMessages(page: Page): Promise<ChatGptMessage[]>
           '[data-message-content], [data-testid="message-content"], .markdown',
         ) ?? node;
       messages.push({
+        ...(includeArtifacts ? { artifacts: [...identityNode.querySelectorAll(artifactSelector)].map((element) => ({
+          source: element instanceof HTMLAnchorElement ? element.href : element instanceof HTMLImageElement ? element.src : '',
+          name: (element instanceof HTMLAnchorElement ? element.download : element instanceof HTMLImageElement ? element.alt : '') || element.textContent?.trim() || '',
+          mediaType: element instanceof HTMLImageElement ? 'image/*' : null,
+        })) } : {}),
         role,
         messageId,
         turnId,
@@ -62,5 +68,5 @@ export async function readChatGptMessages(page: Page): Promise<ChatGptMessage[]>
       });
     }
     return messages;
-  }, CHATGPT_SELECTORS.messages);
+  }, { selector: CHATGPT_SELECTORS.messages, artifactSelector: CHATGPT_SELECTORS.artifactLinks.join(', '), includeArtifacts });
 }

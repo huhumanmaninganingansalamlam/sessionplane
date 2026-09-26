@@ -94,6 +94,21 @@ export class OutboxRepository {
     return row === undefined ? null : mapRow(row);
   }
 
+  getById(outboxId: string): OutboxRecord | null {
+    const row = this.#database.raw.prepare(`SELECT ${OUTBOX_COLUMNS} FROM outbox WHERE outbox_id = ?`)
+      .get(outboxId) as OutboxRow | undefined;
+    return row === undefined ? null : mapRow(row);
+  }
+
+  listForTeam(teamId: string) {
+    // One compact row per conversation, including replaced conversations needing cleanup.
+    return this.#database.raw.prepare(`SELECT o.outbox_id AS requestRef, o.request_id AS requestId,
+      o.session_id AS sessionId, o.generation, o.role_id AS roleId, o.submission_state AS submissionState,
+      s.session_state AS sessionState, s.provider_state AS providerState, o.error_code AS errorCode
+      FROM outbox o JOIN sessions s ON s.session_id = o.session_id AND s.current_generation = o.generation
+      WHERE o.team_id = ? ORDER BY o.created_at, o.outbox_id`).all(teamId);
+  }
+
   requireById(outboxId: string): OutboxRecord {
     const row = this.#database.raw
       .prepare(`SELECT ${OUTBOX_COLUMNS} FROM outbox WHERE outbox_id = ?`)

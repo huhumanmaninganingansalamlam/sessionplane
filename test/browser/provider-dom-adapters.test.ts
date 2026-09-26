@@ -118,7 +118,7 @@ for (const provider of ['gemini', 'grok'] as const) {
       assert.equal(evidence.candidate?.terminalMarker, true);
       source.close();
 
-      const request = { session: observedSession, generation: 1 };
+      const request = { session: { ...observedSession, responseMessageId: evidence.candidate!.responseMessageId }, generation: 1 };
       const candidates = await adapter.discoverArtifacts?.(request);
       assert.equal(candidates?.length, 1);
       const candidate = candidates?.[0];

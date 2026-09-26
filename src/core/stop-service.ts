@@ -13,6 +13,7 @@ import type { TeamDirectory } from './team-directory.ts';
 export interface SessionStopInput {
   readonly clientId: string;
   readonly requestId: string;
+  readonly expectedGeneration?: number;
   readonly sessionId?: string;
   readonly teamId?: string;
   readonly roleKey?: string;
@@ -68,6 +69,7 @@ export class StopService {
 
   async stop(input: SessionStopInput): Promise<SessionSnapshot> {
     const payload = {
+      ...(input.expectedGeneration === undefined ? {} : { expectedGeneration: input.expectedGeneration }),
       selector:
         input.sessionId === undefined
           ? { teamId: input.teamId, roleKey: input.roleKey }
@@ -99,6 +101,9 @@ export class StopService {
     requestHash: string,
   ): Promise<SessionSnapshot> {
     const current = this.#requireSnapshot(sessionId);
+    if (input.expectedGeneration !== undefined && current.generation !== input.expectedGeneration) {
+      throw new SessionPlaneDomainError('session.generation-superseded', 'Stop request belongs to an older generation');
+    }
     if (current.terminal) {
       this.#storeCompleteReceipt(input, requestHash, current);
       return current;

@@ -12,9 +12,6 @@ import {
   type ProviderArtifactCandidate,
   type ProviderArtifactDownload,
   type ProviderArtifactRequest,
-  type ProviderCodeArtifactCandidate,
-  type ProviderCodeArtifactDownload,
-  type ProviderCodeArtifactRequest,
   type ProviderObservationEvidence,
   type ProviderObservationRequest,
   type ProviderObservationSource,
@@ -29,16 +26,13 @@ import {
 } from '../provider-adapter.ts';
 import { observeChatGptActivity } from './activity-observer.ts';
 import {
-  discoverChatGptCodeArtifacts,
-  downloadChatGptCodeArtifact,
-} from './code-artifacts.ts';
-import {
   ChatGptBackendRecovery,
   type BackendJsonClient,
 } from './backend-recovery.ts';
 import { observeChatGptDialog } from './dialog-observer.ts';
 import { observeChatGptDom, waitForChatGptDomMutation } from './dom-observer.ts';
 import { ChatGptNetworkObserver } from './network-observer.ts';
+import { readChatGptMessages } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 import { ChatGptSubmission, recoverChatGptAcknowledgement } from './submission.ts';
 
@@ -361,27 +355,10 @@ export class ChatGptAdapter implements ProviderAdapter {
     request: ProviderArtifactRequest,
   ): Promise<readonly ProviderArtifactCandidate[]> {
     const page = this.#requireExactArtifactPage(request);
-    const rows = await page.locator(CHATGPT_SELECTORS.artifactLinks.join(', ')).evaluateAll((elements) =>
-      elements.map((element) => {
-        const source =
-          element instanceof HTMLAnchorElement
-            ? element.href
-            : element instanceof HTMLImageElement
-              ? element.src
-              : '';
-        const explicitName =
-          element instanceof HTMLAnchorElement
-            ? element.download
-            : element instanceof HTMLImageElement
-              ? element.alt
-              : '';
-        return {
-          source,
-          name: explicitName || element.textContent?.trim() || '',
-          mediaType: element instanceof HTMLImageElement ? 'image/*' : null,
-        };
-      }),
-    );
+    const message = (await readChatGptMessages(page, true)).find((message) =>
+      message.role === 'assistant' && message.messageId !== null && message.messageId === request.session.responseMessageId);
+    if (message === undefined) throw new ProviderSubmissionError('provider.artifacts-unavailable', 'Exact answer is not present for file discovery');
+    const rows = message.artifacts ?? [];
     const seen = new Set<string>();
     const candidates: ProviderArtifactCandidate[] = [];
     for (const row of rows) {
@@ -433,26 +410,6 @@ export class ChatGptAdapter implements ProviderAdapter {
     };
   }
 
-  async discoverCodeArtifacts(
-    request: ProviderCodeArtifactRequest,
-  ): Promise<readonly ProviderCodeArtifactCandidate[]> {
-    const page = this.#requireExactArtifactPage(request);
-    return await discoverChatGptCodeArtifacts(page, request.conversationId);
-  }
-
-  async downloadCodeArtifact(
-    request: ProviderCodeArtifactRequest,
-    candidate: ProviderCodeArtifactCandidate,
-  ): Promise<ProviderCodeArtifactDownload> {
-    const page = this.#requireExactArtifactPage(request);
-    return await downloadChatGptCodeArtifact(
-      page,
-      request.conversationId,
-      candidate,
-      request.maxBytes,
-    );
-  }
-
   async openStop(request: ProviderStopRequest): Promise<ProviderStopOperation> {
     const pageKey = request.session.pageKey;
     const conversationId = request.session.conversationId;
@@ -477,7 +434,7 @@ export class ChatGptAdapter implements ProviderAdapter {
   }
 
   #requireExactArtifactPage(
-    request: ProviderArtifactRequest | ProviderCodeArtifactRequest,
+    request: ProviderArtifactRequest,
   ): ReturnType<PageRegistry['requireOwnedPage']> {
     const pageKey = request.session.pageKey;
     const conversationId = request.session.conversationId;
@@ -485,13 +442,6 @@ export class ChatGptAdapter implements ProviderAdapter {
       throw new ProviderSubmissionError(
         'session.page-identity-unverified',
         'Exact ChatGPT artifact identity is incomplete',
-        { promptSubmitted: request.session.promptSubmitted },
-      );
-    }
-    if ('conversationId' in request && request.conversationId !== conversationId) {
-      throw new ProviderSubmissionError(
-        'session.conversation-mismatch',
-        `Requested conversation ${request.conversationId} does not match session ${conversationId}`,
         { promptSubmitted: request.session.promptSubmitted },
       );
     }

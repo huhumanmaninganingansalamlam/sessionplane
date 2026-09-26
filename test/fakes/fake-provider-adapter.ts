@@ -5,9 +5,6 @@ import {
   type ProviderArtifactCandidate,
   type ProviderArtifactDownload,
   type ProviderArtifactRequest,
-  type ProviderCodeArtifactCandidate,
-  type ProviderCodeArtifactDownload,
-  type ProviderCodeArtifactRequest,
   type ProviderName,
   type ProviderObservationEvidence,
   type ProviderObservationRequest,
@@ -46,8 +43,6 @@ export class FakeProviderAdapter implements ProviderAdapter {
   stopCount = 0;
   artifactDiscoverCount = 0;
   artifactDownloadCount = 0;
-  codeArtifactDiscoverCount = 0;
-  codeArtifactDownloadCount = 0;
   stopControlAvailable = true;
   stopThrows = false;
   autoFinalText: string | null = null;
@@ -59,8 +54,6 @@ export class FakeProviderAdapter implements ProviderAdapter {
   readonly #recoveryResults = new Map<string, ProviderRecoveryResult[]>();
   readonly #artifactCandidates = new Map<string, ProviderArtifactCandidate[]>();
   readonly #artifactBytes = new Map<string, Uint8Array>();
-  readonly #codeArtifactCandidates = new Map<string, ProviderCodeArtifactCandidate[]>();
-  readonly #codeArtifactBytes = new Map<string, Uint8Array>();
 
   constructor(provider: ProviderName = 'chatgpt') {
     this.provider = provider;
@@ -243,42 +236,7 @@ export class FakeProviderAdapter implements ProviderAdapter {
     return { candidate, bytes: Uint8Array.from(bytes) };
   }
 
-  addCodeArtifact(
-    sessionId: string,
-    candidate: ProviderCodeArtifactCandidate,
-    bytes: Uint8Array,
-  ): void {
-    const candidates = this.#codeArtifactCandidates.get(sessionId) ?? [];
-    candidates.push(candidate);
-    this.#codeArtifactCandidates.set(sessionId, candidates);
-    this.#codeArtifactBytes.set(candidate.providerArtifactId, Uint8Array.from(bytes));
-  }
 
-  async discoverCodeArtifacts(
-    request: ProviderCodeArtifactRequest,
-  ): Promise<readonly ProviderCodeArtifactCandidate[]> {
-    this.codeArtifactDiscoverCount += 1;
-    return [
-      ...(this.#codeArtifactCandidates.get(request.session.sessionId) ?? []),
-      ...(this.#codeArtifactCandidates.get('*') ?? []),
-    ];
-  }
-
-  async downloadCodeArtifact(
-    _request: ProviderCodeArtifactRequest,
-    candidate: ProviderCodeArtifactCandidate,
-  ): Promise<ProviderCodeArtifactDownload> {
-    this.codeArtifactDownloadCount += 1;
-    const bytes = this.#codeArtifactBytes.get(candidate.providerArtifactId);
-    if (bytes === undefined) {
-      throw new Error(`Missing fake code artifact bytes: ${candidate.providerArtifactId}`);
-    }
-    return {
-      candidate,
-      bytes: Uint8Array.from(bytes),
-      mintedMessageId: candidate.candidateMessageIds.at(-1) ?? 'fake-code-message',
-    };
-  }
 }
 
 class FakeObservationSource implements ProviderObservationSource {
