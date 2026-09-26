@@ -5,6 +5,7 @@ import type { BrowserOwner } from '../browser/browser-owner.ts';
 import { isProviderUrl } from '../browser/page-binding.ts';
 import { PageRegistryError, type PageRegistry } from '../browser/page-registry.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
+import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { Logger } from '../logging.ts';
 import type { ProviderAdapterRegistry } from '../providers/provider-adapter.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
@@ -99,6 +100,32 @@ export class RecoveryService {
     const operation = this.#tail.then(async () => await this.#restore(options));
     this.#tail = operation.catch(() => emptyReport());
     return operation;
+  }
+
+  async ensurePage(sessionId: string, generation: number): Promise<void> {
+    const operation = this.#tail.then(async () => {
+      const snapshot = this.#sessions.getSnapshot(sessionId);
+      if (snapshot === null || snapshot.generation !== generation) {
+        throw new SessionPlaneDomainError('session.generation-superseded', 'Artifact page ownership changed');
+      }
+      this.#adapters.require(snapshot.provider);
+      if (snapshot.pageKey !== null) {
+        try {
+          this.#pageRegistry.requireSessionPage(snapshot.pageKey, {
+            sessionId, generation, conversationId: snapshot.conversationId,
+          });
+          return;
+        } catch (error) {
+          if (!(error instanceof PageRegistryError) || error.errorCode !== 'browser.unavailable') throw error;
+        }
+      }
+      const recovered = await this.#reconcilePage(snapshot);
+      if (recovered.unavailable || recovered.conflict || recovered.snapshot.pageKey === null) {
+        throw new SessionPlaneDomainError('browser.unavailable', 'Exact artifact conversation page could not be recovered');
+      }
+    });
+    this.#tail = operation.then(() => emptyReport(), () => emptyReport());
+    await operation;
   }
 
   watchAcknowledgementRecovery(
@@ -500,11 +527,11 @@ export class RecoveryService {
     const preserveGenerationDiagnostic =
       snapshot.submissionState === 'submission_unknown' ||
       (!snapshot.promptSubmitted && snapshot.errorCode !== null);
-    const effectiveUpdate: typeof update =
-      preserveGenerationDiagnostic && update.errorCode === null
+    const effectiveUpdate =
+      snapshot.terminal || (preserveGenerationDiagnostic && update.errorCode === null)
         ? {
             ...update,
-            reason: snapshot.reason ?? update.reason,
+            reason: snapshot.reason,
             errorCode: snapshot.errorCode,
           }
         : update;

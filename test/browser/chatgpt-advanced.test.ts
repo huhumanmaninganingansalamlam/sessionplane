@@ -120,6 +120,9 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
       sessionId: observedSession.sessionId, generation: 2, conversationId: observedSession.conversationId,
     });
     await created.page.evaluate(() => {
+      const exact = document.querySelector('[data-message-id="artifact-response"]')!;
+      exact.remove();
+      setTimeout(() => document.body.appendChild(exact), 250);
       const other = document.createElement('div');
       other.setAttribute('data-message-author-role', 'assistant');
       other.setAttribute('data-message-id', 'newer-response');

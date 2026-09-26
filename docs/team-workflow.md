@@ -30,6 +30,8 @@ Ordinary flow: team_get → send → decide when needed → wait.
   Reveal also accepts an observed menu item for nested model/effort lists. It
   verifies newly exposed choices in the related menu even when the opener is
   replaced. Opening a list never records a model selection or submits the prompt.
+  The preparation message identifies the remaining failed verification; use it
+  with the current evidence instead of repeating an already recorded choice.
 - `team_get` with `requestRef` inspects that exact request, including read-only
   acknowledgement recovery. Ordinary team reads return compact current-request summaries. With `history:true`,
   team_get lists all generations newest first in pages of 50 requests; pass the
@@ -45,6 +47,8 @@ Ordinary flow: team_get → send → decide when needed → wait.
   newer answers cannot substitute for the requested answer. Downloaded files remain
   available offline. Missing exact provider answers return a file error, not an
   empty successful file list.
+  After restart, uncached files reopen the exact conversation on demand without
+  resending. Page recovery preserves the completed answer and terminal reason.
 - `stop` cancels preparation or stops the exact generating request. It cannot stop
   a newer generation. `session_replace` explicitly changes routing without replaying
   work or deleting history. `role_retire` prevents new work on a finished expert.

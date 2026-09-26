@@ -229,6 +229,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     adapters: providerAdapters,
     artifactDir: config.artifactDir,
     maxArtifactFileBytes: config.maxArtifactFileBytes,
+    ...(browserOwner === null ? {} : { ensurePage: (sessionId: string, generation: number) => recovery.ensurePage(sessionId, generation) }),
   });
 
   try {

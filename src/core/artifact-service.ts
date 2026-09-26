@@ -43,6 +43,7 @@ export class ArtifactService {
   readonly #artifactDir: string;
   readonly #maxArtifactFileBytes: number;
   readonly #now: () => Date;
+  readonly #ensurePage: ((sessionId: string, generation: number) => Promise<void>) | undefined;
   readonly #captureTails = new Map<string, Promise<void>>();
 
   constructor(options: {
@@ -52,6 +53,7 @@ export class ArtifactService {
     readonly artifactDir: string;
     readonly maxArtifactFileBytes: number;
     readonly now?: () => Date;
+    readonly ensurePage?: (sessionId: string, generation: number) => Promise<void>;
   }) {
     this.#database = options.database;
     this.#directory = options.directory;
@@ -61,36 +63,42 @@ export class ArtifactService {
     this.#artifactDir = path.resolve(options.artifactDir);
     this.#maxArtifactFileBytes = options.maxArtifactFileBytes;
     this.#now = options.now ?? (() => new Date());
+    this.#ensurePage = options.ensurePage;
   }
 
   async discover(selector: ArtifactSelector): Promise<Readonly<Record<string, unknown>>> {
-    const { snapshot, bindingGeneration } = this.#resolveAnswer(selector);
-    const adapter = this.#adapters.require(snapshot.provider);
-    if (adapter.discoverArtifacts === undefined) {
-      throw new SessionPlaneDomainError(
-        'provider.artifacts-unavailable',
-        `Provider ${snapshot.provider} does not expose artifact discovery`,
-      );
-    }
-    const candidates = await adapter.discoverArtifacts({
-      session: snapshot,
-      generation: snapshot.generation, bindingGeneration,
+    const initial = this.#resolveAnswer(selector).snapshot;
+    return await this.#runExclusive(initial.sessionId, async () => {
+      const { snapshot, bindingGeneration } = await this.#resolveSource({ sessionId: initial.sessionId, generation: initial.generation });
+      const adapter = this.#adapters.require(snapshot.provider);
+      if (adapter.discoverArtifacts === undefined) {
+        throw new SessionPlaneDomainError(
+          'provider.artifacts-unavailable',
+          `Provider ${snapshot.provider} does not expose artifact discovery`,
+        );
+      }
+      const candidates = await adapter.discoverArtifacts({
+        session: snapshot,
+        generation: snapshot.generation, bindingGeneration,
+      });
+      const artifacts = this.#persistCandidates(snapshot, candidates);
+      return artifactListResult(snapshot, artifacts);
     });
-    const artifacts = this.#persistCandidates(snapshot, candidates);
-    return artifactListResult(snapshot, artifacts);
   }
 
   async capture(
     selector: ArtifactSelector & { readonly artifactIds?: readonly string[] },
   ): Promise<Readonly<Record<string, unknown>>> {
-    const { snapshot, bindingGeneration } = this.#resolveAnswer(selector);
-    const captureKey = `${snapshot.sessionId}:${snapshot.generation}`;
-    return await this.#runExclusive(captureKey, async () => {
+    const initial = this.#resolveAnswer(selector).snapshot;
+    return await this.#runExclusive(initial.sessionId, async () => {
+      let { snapshot, bindingGeneration } = this.#resolveAnswer({ sessionId: initial.sessionId, generation: initial.generation });
       const stored = this.#artifacts.list(snapshot.sessionId, snapshot.generation);
-      if (bindingGeneration !== snapshot.generation && stored.length > 0 && stored.every((artifact) => this.#reuseDownloaded(artifact) !== null)) {
+      if (snapshot.terminal && stored.length > 0 && stored.every((artifact) => this.#reuseDownloaded(artifact) !== null)) {
         const artifacts = selectArtifacts(stored, selector.artifactIds);
         return { ...artifactListResult(snapshot, artifacts), discoveredCount: stored.length, capturedCount: artifacts.length, failures: [] };
       }
+
+      ({ snapshot, bindingGeneration } = await this.#resolveSource({ sessionId: initial.sessionId, generation: initial.generation }));
       const adapter = this.#adapters.require(snapshot.provider);
       if (adapter.discoverArtifacts === undefined || adapter.downloadArtifact === undefined) {
         throw new SessionPlaneDomainError(
@@ -352,6 +360,12 @@ export class ArtifactService {
     return resolved;
   }
 
+  async #resolveSource(selector: ArtifactSelector) {
+    const { snapshot, bindingGeneration } = this.#resolveAnswer(selector);
+    await this.#ensurePage?.(snapshot.sessionId, bindingGeneration);
+    return this.#resolveAnswer(selector);
+  }
+
   #resolveAnswer(selector: ArtifactSelector): { snapshot: SessionSnapshot; bindingGeneration: number } {
     const snapshot = this.#resolveSession(selector);
     if (snapshot.generation <= 0) {
@@ -485,4 +499,3 @@ function exportResult(
     reused,
   };
 }
-

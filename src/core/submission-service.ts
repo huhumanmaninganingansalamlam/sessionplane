@@ -49,6 +49,7 @@ interface PendingPreparation {
   readonly kind: 'pending-preparation';
   readonly choices: PreparationChoices;
   readonly requiresInspection?: boolean;
+  readonly message?: string;
 }
 
 
@@ -912,6 +913,7 @@ export class SubmissionService {
     const state = {
       kind: 'pending-preparation',
       choices: parsePreparationState(outbox).choices,
+      message: classified.message,
     } satisfies PendingPreparation;
     this.#database.transaction(() => {
       const timestamp = this.#now().toISOString();

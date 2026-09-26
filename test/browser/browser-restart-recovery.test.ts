@@ -374,6 +374,17 @@ test('restart recovers a unique ambiguous follow-up acknowledgement without rese
       'generation.followup-recovery-first-complete',
     );
 
+    const recoveredFiles = await service.artifactService.capture({ sessionId: first.sessionId, generation: first.generation });
+    assert.equal(recoveredFiles.requestOk, true);
+    const completed = service.teamDirectory.getSession(first.sessionId);
+    assert.equal(completed.reason, 'test-complete');
+    assert.equal(completed.answerText, 'done');
+    assert.equal(completed.responseMessageId, 'followup-first-response');
+    assert.equal(completed.sessionState, 'complete');
+    assert.equal(completed.generation, first.generation);
+    assert.equal(completed.errorCode, null);
+    assert.equal(service.pageRegistry.getBinding(completed.pageKey!).conversationId, first.conversationId);
+
     beforeRestart.acknowledgementMode = 'missing';
     await assert.rejects(
       rpc(config.socketPath, 'session.send', {

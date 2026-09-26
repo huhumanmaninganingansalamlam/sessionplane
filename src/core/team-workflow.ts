@@ -241,7 +241,8 @@ export class TeamWorkflow {
       const payload = JSON.parse(stored.payloadJson) as Record<string, unknown>;
       const preparation = JSON.parse(stored.resultJson ?? '{}') as Record<string, unknown>;
       return { ...snapshot, status: 'needs_decision', requestRef: request.outboxId, evidence,
-        requested: { model: payload.model, effort: payload.effort, surface: payload.surface }, choices: preparation.choices };
+        requested: { model: payload.model, effort: payload.effort, surface: payload.surface }, choices: preparation.choices,
+        message: preparation.message };
     }
     if (snapshot.submissionState === 'submission_unknown') {
       if (inspectUnknown) {
