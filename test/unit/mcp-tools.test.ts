@@ -2,11 +2,39 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
 import test from 'node:test';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+
+test('MCP distinguishes an unreachable core from lost responses without claiming submit failure', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-mcp-transport-'));
+  try {
+    for (const mode of ['missing', 'closed', 'timeout'] as const) {
+      const socketPath = path.join(root, mode + '.sock');
+      const sockets = new Set<net.Socket>();
+      const server = net.createServer((socket) => {
+        sockets.add(socket);
+        socket.on('data', () => { if (mode === 'closed') socket.end(); });
+      });
+      try {
+        if (mode !== 'missing') await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+        const result = await invokeMcpTool({ name: 'sessionplane_team_create', arguments: { requestId: mode },
+          socketPath, timeoutMs: mode === 'timeout' ? 200 : 5000, maxLineBytes: 4096 });
+        assert.equal(result.isError, true);
+        assert.equal(result.structuredContent.errorCode,
+          { missing: 'core.unavailable', closed: 'core.connection-lost', timeout: 'core.timeout' }[mode]);
+        assert.equal((result.structuredContent.details as { requestDispatched: boolean }).requestDispatched, mode !== 'missing');
+        assert.equal(result.structuredContent.promptSubmitted, undefined);
+      } finally {
+        for (const socket of sockets) socket.destroy();
+        if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test('team MCP deduplicates sends, rejects stale/cross-team refs and keeps concurrent role results exact', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-team-mcp-'));
