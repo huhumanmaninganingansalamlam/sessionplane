@@ -153,8 +153,20 @@ export class ChatGptSubmission implements ProviderSubmission {
       throw new ProviderSubmissionError('capability.unsupported', 'Named-mode automatic selection is not supported');
     }
     if (choices?.composer === undefined) {
-      throw new ProviderSubmissionError('provider.preparation-required', 'Choose the observed composer before continuation');
+      throw new ProviderSubmissionError('provider.preparation-required', 'Choose the composer on this exact owned page to replace any provider-restored draft with this request prompt before model/effort selection');
     }
+    const composer = await this.#resolvePreparationTarget(choices.composer, COMPOSER_READY_TIMEOUT_MS);
+    if (composer === null) {
+      throw new ProviderSubmissionError('provider.preparation-required', 'The chosen composer is no longer available');
+    }
+    if (!(await writeExactComposerValue(this.#page, composer, this.#request.prompt,
+      () => this.#resolvePreparationTarget(choices.composer!, 0)))) {
+      throw new ProviderSubmissionError(
+        'provider.composer-unavailable',
+        'ChatGPT composer value did not match the requested prompt',
+      );
+    }
+
     for (const purpose of ['model', 'effort'] as const) {
       const intent = this.#request[purpose];
       const choice = choices[purpose];
@@ -167,17 +179,6 @@ export class ChatGptSubmission implements ProviderSubmission {
         throw new ProviderSubmissionError('provider.preparation-required',
           `Recorded ${purpose} choice ${JSON.stringify(choice.name || choice.text)} is no longer verified on the current page. Reopen its chooser and choose current evidence matching ${JSON.stringify(intent)}. Another model/effort choice may have changed the same control. Continue this requestRef; cancelling and resending does not repair the selection.`);
       }
-    }
-    const composer = await this.#resolvePreparationTarget(choices.composer, COMPOSER_READY_TIMEOUT_MS);
-    if (composer === null) {
-      throw new ProviderSubmissionError('provider.preparation-required', 'The chosen composer is no longer available');
-    }
-    if (!(await writeExactComposerValue(this.#page, composer, this.#request.prompt,
-      () => this.#resolvePreparationTarget(choices.composer!, 0)))) {
-      throw new ProviderSubmissionError(
-        'provider.composer-unavailable',
-        'ChatGPT composer value did not match the requested prompt',
-      );
     }
 
     if (choices.submit === undefined) {
@@ -505,10 +506,10 @@ async function firstVisible(
   return null;
 }
 
-async function readExactTextCandidates(locator: PreparationElement): Promise<readonly string[]> {
+async function readExactTextCandidates(locator: PreparationElement, messageContent = false): Promise<readonly string[]> {
   return await (locator as Locator)
     .evaluate(
-      (element: Element) => {
+      (element: Element, messageContent: boolean) => {
         const values: string[] = [];
         if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
           values.push(element.value);
@@ -550,7 +551,21 @@ async function readExactTextCandidates(locator: PreparationElement): Promise<rea
               values.push(markdownText);
             }
           }
-          const blockChildren = Array.from(element.childNodes);
+          // Provider controls are not authored message content. Detached DOM text
+          // also avoids layout-only line breaks inside inline links.
+          let blockRoot = element;
+          if (messageContent) {
+            blockRoot = element.cloneNode(true) as HTMLElement;
+            blockRoot.querySelectorAll('button, [role="button"], svg, [data-thread-find-skip]').forEach((control) => control.remove());
+            blockRoot.querySelectorAll('br').forEach((br) => br.replaceWith('\n'));
+            values.push(blockRoot.textContent ?? '');
+            while (blockRoot.children.length === 1 &&
+                Array.from(blockRoot.childNodes).every((node) => node.nodeType !== Node.TEXT_NODE || (node.textContent ?? '').trim() === '') &&
+                blockRoot.firstElementChild instanceof HTMLElement && blockRoot.firstElementChild.tagName === 'DIV') {
+              blockRoot = blockRoot.firstElementChild;
+            }
+          }
+          const blockChildren = Array.from(blockRoot.childNodes);
           if (
             blockChildren.length > 0 &&
             blockChildren.every(
@@ -560,17 +575,16 @@ async function readExactTextCandidates(locator: PreparationElement): Promise<rea
                   (node.tagName === 'P' || node.tagName === 'DIV')),
             )
           ) {
-            values.push(
-              blockChildren
-                .filter((node): node is HTMLElement => node instanceof HTMLElement)
-                .map((node) => node.textContent ?? '')
-                .join('\n'),
-            );
+            const blocks = blockChildren.filter((node): node is HTMLElement => node instanceof HTMLElement)
+              .map((node) => node.textContent ?? '');
+            values.push(blocks.join('\n'));
+            if (messageContent) values.push(blocks.join('\n\n'));
+
           }
         }
         return values;
       },
-      undefined,
+      messageContent,
       { timeout: COMPOSER_READ_TIMEOUT_MS },
     )
     .catch(() => [] as string[]);
@@ -591,12 +605,12 @@ async function messageHasExactPrompt(message: Locator, expected: string): Promis
     for (const selector of CHATGPT_SELECTORS.userMessageContent) {
       const content = message.locator(selector).first();
       if ((await content.count().catch(() => 0)) === 0) continue;
-      const values = await readExactTextCandidates(content);
+      const values = await readExactTextCandidates(content, true);
       if (values.some((value) => normalizeLineEndings(value) === normalizedExpected)) {
         return true;
       }
     }
-    const fallbackValues = await readExactTextCandidates(message);
+    const fallbackValues = await readExactTextCandidates(message, true);
     return fallbackValues.some(
       (value) => normalizeLineEndings(value) === normalizedExpected,
     );

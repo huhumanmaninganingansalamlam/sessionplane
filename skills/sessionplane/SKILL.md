@@ -41,6 +41,10 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    do not assume they are independent or that a version option establishes Pro.
    Keep the same requestRef through preparation; cancelling and sending again
    does not resolve a selection mismatch.
+   Choose the composer first. This authorizes replacing a provider-restored draft
+   on this request's owned page with its accepted prompt, without submitting it.
+   A popup button can confirm its displayed selection even while its menu is open;
+   use its current label as evidence, not the mere presence of an open menu.
 5. `sessionplane_wait` takes one or several requestRefs from this team. It returns
    exact answers and captures generated files; outputDir exports stored bytes.
    Inspect each result and file failure. Old requests can capture files from their

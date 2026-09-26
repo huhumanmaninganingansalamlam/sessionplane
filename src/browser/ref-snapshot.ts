@@ -533,7 +533,7 @@ export function hasPreparationSelectionEvidence(
       Number(node.ariaValueNow ?? node.value) === target.selectedValue);
   }
   if (target.role === 'button') return nodes.some((node) => matchesPreparationTarget(node, target) &&
-    node.expanded === false && node.hasPopup !== null);
+    node.hasPopup !== null);
   if (nodes.some((node) => matchesPreparationTarget(node, target) &&
       (node.selected === true || node.checked === true))) return true;
   const choice = normalize(target.name || target.text);

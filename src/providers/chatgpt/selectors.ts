@@ -29,6 +29,7 @@ export const CHATGPT_SELECTORS = {
   ],
   userMessages: '[data-message-author-role="user"], [data-chatgpt-search-message-ids]:has([data-user-message-bubble])',
   userMessageContent: [
+    '[data-user-message-bubble]',
     '[data-testid="collapsible-user-message-content"]',
     '.whitespace-pre-wrap',
     '[data-testid*="user-message-content"]',

@@ -231,7 +231,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
   const fixture = `<!doctype html><html><body>
     <form id="composer"><button id="models-button" type="button" aria-label="Submit settings" aria-haspopup="menu">Submit settings</button>
       <button id="effort-button" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="effort-options">Effort</button>
-      <button data-testid="send-button" type="submit" hidden>전송</button><textarea aria-label="Prompt"></textarea>
+      <button data-testid="send-button" type="submit" hidden>전송</button><textarea aria-label="Prompt">Provider-restored unrelated draft</textarea>
       <input type="file"><span id="uploaded-name"></span></form>
     <div role="menu" id="models" hidden><div role="menuitem">Model family</div></div>
     <div role="menu" id="effort-options" hidden>
@@ -343,14 +343,18 @@ test('MCP team decisions continue the same generation across restart, UI drift a
     await page.locator('#models-button').evaluate((node) => { node.textContent = 'Submit settings'; });
     let last: Record<string, unknown> = {};
     for (const [purpose, role, name, decision, value] of [
+      ['composer', 'textbox', 'Prompt', 'choose'],
       ['model', 'button', 'Submit settings', 'reveal'],
       ['model', 'menuitem', 'Model family', 'reveal'],
       ['model', 'menuitemradio', 'Pro', 'choose'],
       ['effort', 'button', 'Effort', 'reveal'],
       ['effort', 'slider', 'Reasoning effort', 'choose', 4],
-      ['composer', 'textbox', 'Prompt', 'choose'],
+      ['effort', 'button', 'High', 'choose'],
       ['submit', 'button', '전송', 'choose'],
     ] as const) {
+      if (purpose === 'effort' && role === 'button' && decision === 'choose') {
+        await page.locator('#effort-button').evaluate((node) => node.setAttribute('aria-expanded', 'true'));
+      }
       const evidence = await inspect();
       const target = evidence.nodes.find((n) => n.role === role && n.name === name);
       assert.ok(target, 'Expected semantic control in fresh evidence');
@@ -358,6 +362,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
         snapshotId: evidence.snapshotId, ref: target.ref, ...(value === undefined ? {} : { value }) };
       const result = await invoke('sessionplane_decide', args);
       assert.equal(result.isError, false, JSON.stringify(result));
+      if (purpose === 'composer') assert.equal(await page.locator('textarea').inputValue(), send.prompt);
       last = args;
     }
     const submitted = service.teamDirectory.getSession(session.sessionId);

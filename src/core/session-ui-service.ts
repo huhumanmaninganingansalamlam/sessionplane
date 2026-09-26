@@ -189,7 +189,7 @@ function validatePurposeTarget(purpose: PreparationPurpose, node: BrowserSnapsho
   if (reveal && !nestedMenuItem && (node.role !== 'button' || (node.controls.length === 0 && !['menu', 'listbox', 'dialog', 'true'].includes(node.hasPopup ?? '')))) {
     throw new SessionPlaneDomainError('input.invalid', 'A chooser reveal must target a popup control or an item in an observed menu');
   }
-  if ((purpose === 'model' || purpose === 'effort') && !reveal && node.role !== 'slider' && !(node.role === 'button' && node.expanded === false && node.hasPopup !== null) && !selectableRole.includes(node.role)) {
+  if ((purpose === 'model' || purpose === 'effort') && !reveal && node.role !== 'slider' && !(node.role === 'button' && node.hasPopup !== null) && !selectableRole.includes(node.role)) {
     throw new SessionPlaneDomainError('input.invalid', 'Model and effort choices must target an option, radio, or menuitemradio');
   }
   if (purpose === 'composer' && !(node.editable && node.role === 'textbox')) {
