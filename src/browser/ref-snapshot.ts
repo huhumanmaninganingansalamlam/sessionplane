@@ -233,6 +233,7 @@ export class BrowserRefSnapshotStore {
         const nodes: MutableSnapshotNode[] = [];
         let truncated = false;
         let sequence = 0;
+        let controlsFirst: boolean | null = null;
 
         const visit = (element: Element, depth: number, ancestorIds: readonly string[]): void => {
           if (nodes.length >= limit) {
@@ -247,7 +248,9 @@ export class BrowserRefSnapshotStore {
           const actionable = isInteractive(element, role);
           const ownText = [...element.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
           const meaningful = actionable || ownText || ['dialog', 'alert', 'status', 'heading', 'menu', 'group', 'radiogroup'].includes(role);
-          const include = visible && (!interactiveOnly || actionable) && (!compact || meaningful);
+          const control = actionable || ['dialog', 'alert', 'menu', 'group', 'radiogroup'].includes(role);
+          const include = visible && (!interactiveOnly || actionable || (compact && control)) && (!compact || meaningful) &&
+            (controlsFirst === null || control === controlsFirst);
           if (include) {
             sequence += 1;
             const ref = `@e${sequence}`;
@@ -348,8 +351,13 @@ export class BrowserRefSnapshotStore {
         const roots = rootSelector === null
           ? [document.body ?? document.documentElement]
           : [...document.querySelectorAll(rootSelector)];
-        for (const root of roots) {
-          if (root !== null) visit(root, 0, []);
+        // Keep live controls reachable when conversation text exceeds the evidence budget.
+        for (const pass of compact && !interactiveOnly ? [true, false] : [null]) {
+          controlsFirst = pass;
+          for (const root of roots) {
+            if (root !== null) visit(root, 0, []);
+            if (truncated) break;
+          }
           if (truncated) break;
         }
         return {

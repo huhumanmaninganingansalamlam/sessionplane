@@ -70,6 +70,10 @@ out prompts, infer consensus, or inject answers into other roles.
 
 ## Recovery and cleanup
 
+- A requested model can combine a family/version with a reasoning tier. Select
+  those dimensions through the observed controls and confirm the final summary;
+  do not require the entire requested name to appear as one menu item. Truncated
+  evidence cannot establish that an option is unavailable.
 - Preserve requested model/mode through cancellation and replacement. Confirm active
   model/effort controls: an account badge, High or Extra High does not establish Pro.
   Inspect nested options, ranges and actual enabled state; nearby access hints alone

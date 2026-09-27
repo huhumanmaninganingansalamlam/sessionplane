@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { BrowserOwner } from '../../src/browser/browser-owner.ts';
+import { BrowserRefSnapshotStore } from '../../src/browser/ref-snapshot.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 import {
   BrowserControlError,
@@ -281,3 +282,31 @@ function fixtureHtml(): string {
       </body>
     </html>`;
 }
+
+
+test('bounded preparation evidence retains controls after a long transcript', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-evidence-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.setContent('<main>' + '<p>Earlier conversation text</p>'.repeat(1200) +
+      '<button aria-haspopup="menu">Selected tier</button><div role="menu"><label>Reasoning <input type="range" min="1" max="4" value="4"></label></div><textarea aria-label="Prompt"></textarea></main>');
+    const refs = new BrowserRefSnapshotStore();
+    const capture = { page, pageKey: binding.pageKey, bindingEpoch: binding.bindingEpoch, compact: true, maxNodes: 20 };
+    const snapshot = await refs.capture({ ...capture, interactive: false });
+    assert.equal(snapshot.nodesTruncated, true);
+    for (const role of ['button', 'slider', 'textbox']) assert.ok(snapshot.nodes.some(node => node.role === role));
+    const slider = snapshot.nodes.find(node => node.role === 'slider')!;
+    assert.equal(Number(slider.ariaValueNow ?? slider.value), 4);
+    const element = await refs.resolve({ ...capture, ref: slider.ref, snapshotId: snapshot.snapshotId });
+    assert.equal(await element.getAttribute('type'), 'range');
+    await element.dispose();
+    const controls = await refs.capture({ ...capture, interactive: true });
+    assert.equal(controls.nodesTruncated, false);
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

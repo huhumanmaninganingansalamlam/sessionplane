@@ -86,7 +86,7 @@ export class ChatGptSubmission implements ProviderSubmission {
         pageKey: this.pageKey,
         bindingEpoch: binding.bindingEpoch,
         page: this.#page,
-        interactive: false,
+        interactive: true,
         compact: true,
         maxNodes: 5_000,
       });
@@ -133,7 +133,7 @@ export class ChatGptSubmission implements ProviderSubmission {
       pageKey: this.pageKey,
       bindingEpoch: binding.bindingEpoch,
       page: this.#page,
-      interactive: false,
+      interactive: true,
       compact: true,
       maxNodes: 5_000,
     });

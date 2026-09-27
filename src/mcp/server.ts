@@ -295,6 +295,7 @@ function serverInstructions(): string {
     'Copy roleRef for sends and requestRef for decisions, waits, stop and cleanup.',
     'Use stable unique requestId values for mutations; reuse only identical requests.',
     'needs_decision is a normal handoff: reason from fresh observed evidence and call decide. It continues the same request automatically.',
+    'Model intent may combine a model family/version and reasoning tier exposed by separate or nested controls. Select those dimensions and confirm the resulting summary; the whole intent need not be a menu item. If evidence is truncated, missing text is not proof of unavailability.',
     'Confirm requested model/effort from fresh final controls, separately for each purpose even when they share a summary. Confirming a displayed value need not click or reselect an intermediate option.',
     'Preserve model/mode intent across requests and replacements. Account badges do not prove selection; High/Extra High is not Pro. Inspect nested options, ranges and actual enabled state. Honor explicit versions; otherwise choose the latest matching option. If unavailable, return evidence for a user decision; do not substitute.',
     'Never resend submission_unknown. Use team_get with requestRef for read-only recovery.',
