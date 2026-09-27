@@ -15,11 +15,6 @@ export interface StoredPageBinding {
   readonly lastSeenAt: string;
 }
 
-interface SessionOwnerRow {
-  readonly teamId: string;
-  readonly roleId: string;
-}
-
 export class PageBindingRepository {
   readonly #database: DatabaseSync;
 
@@ -28,22 +23,16 @@ export class PageBindingRepository {
   }
 
   upsert(binding: PageBindingSnapshot): void {
-    const owner =
-      binding.sessionId === null
-        ? null
-        : (this.#database
-            .prepare(`
-              SELECT team_id AS teamId, role_id AS roleId
-              FROM sessions
-              WHERE session_id = ?
-            `)
-            .get(binding.sessionId) as SessionOwnerRow | undefined) ?? null;
     this.#database
       .prepare(`
         INSERT INTO page_bindings(
           page_key, binding_epoch, team_id, role_id, session_id, generation,
           conversation_id, binding_state, url, last_seen_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        )
+        SELECT ?, ?, s.team_id, s.role_id, ?, ?, ?, ?, ?, ?
+        FROM (SELECT ? AS session_id) binding
+        LEFT JOIN sessions s ON s.session_id = binding.session_id
+        WHERE true
         ON CONFLICT(page_key) DO UPDATE SET
           binding_epoch = excluded.binding_epoch,
           team_id = excluded.team_id,
@@ -58,14 +47,13 @@ export class PageBindingRepository {
       .run(
         binding.pageKey,
         binding.bindingEpoch,
-        owner?.teamId ?? null,
-        owner?.roleId ?? null,
         binding.sessionId,
         binding.generation,
         binding.conversationId,
         binding.state,
         binding.url,
         binding.lastSeenAt,
+        binding.sessionId,
       );
   }
 

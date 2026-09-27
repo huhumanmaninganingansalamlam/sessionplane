@@ -341,14 +341,13 @@ export class PageRegistry {
     const includeClosed = options.includeClosed ?? true;
     return [...this.#records.values()]
       .filter((record) => includeClosed || record.state !== 'closed')
-      .sort((left, right) => left.registrationOrder - right.registrationOrder)
       .map((record) => this.#snapshot(record));
   }
 
   findByConversation(conversationId: string): readonly PageBindingSnapshot[] {
-    return this.listBindings({ includeClosed: false }).filter(
-      (binding) => binding.conversationId === conversationId,
-    );
+    return [...this.#records.values()]
+      .filter((record) => record.state !== 'closed' && record.conversationId === conversationId)
+      .map((record) => this.#snapshot(record));
   }
 
   pageForObservation(pageKey: string, expectedEpoch?: number): Page {

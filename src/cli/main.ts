@@ -1085,16 +1085,6 @@ function sessionSelector(
   };
 }
 
-function optionalSessionSelector(
-  parsed: ParsedArgs,
-  positionals: readonly string[],
-): Readonly<Record<string, string>> {
-  if (parsed.options.session !== undefined || positionals.length > 0) {
-    return sessionSelector(parsed, positionals);
-  }
-  return {};
-}
-
 function mutationIdentity(parsed: ParsedArgs): Readonly<Record<string, string>> {
   return {
     clientId: clientId(parsed),

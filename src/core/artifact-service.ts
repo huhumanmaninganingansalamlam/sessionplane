@@ -18,6 +18,7 @@ import type {
   ProviderAdapterRegistry,
   ProviderArtifactCandidate,
 } from '../providers/provider-adapter.ts';
+import { KeyedMutex } from '../scheduler/keyed-mutex.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
 import { EventRepository } from '../storage/event-repository.ts';
@@ -44,7 +45,7 @@ export class ArtifactService {
   readonly #maxArtifactFileBytes: number;
   readonly #now: () => Date;
   readonly #ensurePage: ((sessionId: string, generation: number) => Promise<void>) | undefined;
-  readonly #captureTails = new Map<string, Promise<void>>();
+  readonly #captureMutex = new KeyedMutex();
 
   constructor(options: {
     readonly database: SessionPlaneDatabase;
@@ -68,7 +69,7 @@ export class ArtifactService {
 
   async discover(selector: ArtifactSelector): Promise<Readonly<Record<string, unknown>>> {
     const initial = this.#resolveAnswer(selector).snapshot;
-    return await this.#runExclusive(initial.sessionId, async () => {
+    return await this.#captureMutex.runExclusive(initial.sessionId, async () => {
       const { snapshot, bindingGeneration } = await this.#resolveSource({ sessionId: initial.sessionId, generation: initial.generation });
       const adapter = this.#adapters.require(snapshot.provider);
       if (adapter.discoverArtifacts === undefined) {
@@ -90,7 +91,7 @@ export class ArtifactService {
     selector: ArtifactSelector & { readonly artifactIds?: readonly string[] },
   ): Promise<Readonly<Record<string, unknown>>> {
     const initial = this.#resolveAnswer(selector).snapshot;
-    return await this.#runExclusive(initial.sessionId, async () => {
+    return await this.#captureMutex.runExclusive(initial.sessionId, async () => {
       let { snapshot, bindingGeneration } = this.#resolveAnswer({ sessionId: initial.sessionId, generation: initial.generation });
       const stored = this.#artifacts.list(snapshot.sessionId, snapshot.generation);
       if (snapshot.terminal && stored.length > 0 && stored.every((artifact) => this.#reuseDownloaded(artifact) !== null)) {
@@ -411,25 +412,6 @@ export class ArtifactService {
       );
     }
     return artifact;
-  }
-
-  async #runExclusive<Result>(key: string, operation: () => Promise<Result>): Promise<Result> {
-    const previous = this.#captureTails.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.then(() => gate);
-    this.#captureTails.set(key, tail);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.#captureTails.get(key) === tail) {
-        this.#captureTails.delete(key);
-      }
-    }
   }
 }
 

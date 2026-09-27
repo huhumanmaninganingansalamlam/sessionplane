@@ -1,7 +1,6 @@
 import type { CurrentGenerationUpdate } from '../domain/generation.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
-import { ActorRegistry } from '../core/actor-registry.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { EventRepository } from '../storage/event-repository.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
@@ -23,7 +22,7 @@ export class ActorScheduler {
   readonly #database: SessionPlaneDatabase;
   readonly #sessions: SessionRepository;
   readonly #events: EventRepository;
-  readonly #actors = new ActorRegistry<SessionActor>();
+  readonly #actors = new Map<string, SessionActor>();
   readonly #now: () => Date;
 
   constructor(database: SessionPlaneDatabase, options: { readonly now?: () => Date } = {}) {
@@ -39,7 +38,7 @@ export class ActorScheduler {
 
   get totalQueueDepth(): number {
     let total = 0;
-    for (const [, actor] of this.#actors.entries()) {
+    for (const actor of this.#actors.values()) {
       total += actor.queueDepth;
     }
     return total;
@@ -47,7 +46,7 @@ export class ActorScheduler {
 
   get totalSubscriberCount(): number {
     let total = 0;
-    for (const [, actor] of this.#actors.entries()) {
+    for (const actor of this.#actors.values()) {
       total += actor.subscriberCount;
     }
     return total;
@@ -57,23 +56,25 @@ export class ActorScheduler {
     const snapshots = this.#sessions.listNonterminalSnapshots();
     const revisions = this.#events.latestSequencesForSessions(snapshots.map((snapshot) => snapshot.sessionId));
     for (const snapshot of snapshots) {
-      this.#actors.getOrCreate(snapshot.sessionId, () =>
-        this.#createActor(snapshot, revisions.get(snapshot.sessionId) ?? 0));
+      if (!this.#actors.has(snapshot.sessionId)) {
+        this.#actors.set(snapshot.sessionId, this.#createActor(snapshot, revisions.get(snapshot.sessionId) ?? 0));
+      }
     }
     return this.#actors.size;
   }
 
   actorFor(sessionId: string): SessionActor {
-    return this.#actors.getOrCreate(sessionId, () =>
-      this.#createActor(
-        this.#requireSnapshot(sessionId),
-        this.#events.latestSequenceForSession(sessionId),
-      ));
+    let actor = this.#actors.get(sessionId);
+    if (actor === undefined) {
+      actor = this.#createActor(this.#requireSnapshot(sessionId), this.#events.latestSequenceForSession(sessionId));
+      this.#actors.set(sessionId, actor);
+    }
+    return actor;
   }
 
   refreshSession(sessionId: string): void {
     const actor = this.#actors.get(sessionId);
-    if (actor !== null) {
+    if (actor !== undefined) {
       const snapshot = this.#requireSnapshot(sessionId);
       actor.publish(snapshot, this.#events.latestSequence(snapshot.teamId));
     }
@@ -221,7 +222,7 @@ export class ActorScheduler {
   }
 
   close(): void {
-    for (const [, actor] of this.#actors.entries()) {
+    for (const actor of this.#actors.values()) {
       actor.close();
     }
   }

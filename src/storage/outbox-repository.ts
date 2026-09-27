@@ -1,17 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { SQLInputValue } from 'node:sqlite';
 
+import type { SubmissionState } from '../domain/generation.ts';
 import type { SessionPlaneDatabase } from './database.ts';
 
-export const OUTBOX_STATES = [
-  'prepared',
-  'composer_filled',
-  'submit_attempted',
-  'submitted',
-  'submission_unknown',
-  'failed_pre_submit',
-] as const;
-export type OutboxState = (typeof OUTBOX_STATES)[number];
+export { SUBMISSION_STATES as OUTBOX_STATES } from '../domain/generation.ts';
+export type OutboxState = SubmissionState;
 
 export interface OutboxRecord {
   readonly outboxId: string;

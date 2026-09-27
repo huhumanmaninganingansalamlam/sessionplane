@@ -1,3 +1,4 @@
+import { KeyedMutex } from './keyed-mutex.ts';
 import type { ProviderRecoveryResult } from '../providers/provider-adapter.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { ProbeBudgetRepository } from '../storage/probe-budget-repository.ts';
@@ -24,7 +25,7 @@ export class ProbeCoordinator {
   readonly #now: () => Date;
   readonly #random: () => number;
   readonly #metrics: RuntimeMetrics | null;
-  readonly #tails = new Map<string, Promise<void>>();
+  readonly #mutex = new KeyedMutex();
 
   constructor(options: ProbeCoordinatorOptions) {
     if (options.min429BackoffMs > options.max429BackoffMs) {
@@ -49,23 +50,7 @@ export class ProbeCoordinator {
     if (normalizedScope.length === 0) {
       return Promise.reject(new Error('Probe scope must not be empty'));
     }
-    const previous = this.#tails.get(normalizedScope) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.catch(() => undefined).then(() => gate);
-    this.#tails.set(normalizedScope, tail);
-
-    return previous
-      .catch(() => undefined)
-      .then(() => this.#run(normalizedScope, operation))
-      .finally(() => {
-        release();
-        if (this.#tails.get(normalizedScope) === tail) {
-          this.#tails.delete(normalizedScope);
-        }
-      });
+    return this.#mutex.runExclusive(normalizedScope, () => this.#run(normalizedScope, operation));
   }
 
   #run(

@@ -35,19 +35,11 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    executes the choice and continues the same request; there is no resume tool.
    Choose composer and submit controls, and model/effort when requested. New UI
    evidence can require another choice. Never reuse stale UI refs.
-   A recorded choice is not proof that it remains selected: another choice may
-   change the same control. Confirm fresh final evidence satisfying the original
-   intent instead of reselecting an intermediate option. Model and effort may share one control;
-   do not assume they are independent or that a version option establishes Pro.
-   Keep the same requestRef through preparation; cancelling and sending again
-   does not resolve a selection mismatch.
-   Choose the composer first. This authorizes replacing a provider-restored draft
-   on this request's owned page with its accepted prompt, without submitting it.
-   A popup button can confirm its displayed selection even while its menu is open;
-   use its current label as evidence, not the mere presence of an open menu.
-   A menu item with a separate label and displayed value can also confirm the
-   final selection without clicking. If model and effort share this summary,
-   confirm it separately for each requested purpose using fresh evidence.
+   Choose the composer first to authorize replacing its restored draft with this
+   request's prompt. Confirm final model/effort evidence after all choices; changing
+   one can change the other. A popup or menu item displaying a separate selected
+   value can confirm without clicking. Confirm each requested purpose with fresh
+   evidence, even when both share a summary. Keep the same requestRef.
    When the user requests a page refresh, or visible stream/history recovery
    failure warrants one, call `sessionplane_decide` with decision `refresh`,
    teamId, requestRef and a stable requestId. No snapshotId/ref/purpose is needed.
@@ -63,16 +55,11 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    waiting on the same requestRef. Do not ask the user to copy the answer merely
    because observation is deferred. After an interrupted caller resumes, fetch
    that request again: the core keeps observing and may already have its answer.
-   A provider-actionable-alert is not a human-verification diagnosis. Inspect the
-   returned evidence (or team_get with the same requestRef) and report the actual
-   alert. A stream timeout or Retry control does not establish a CAPTCHA or account
-   problem. Distinguish active thinking/streaming from a visible provider failure:
-   keep waiting for active work. A stream recovery failure can be a disconnected
-   page rather than failed generation: refreshing the exact conversation may
-   restore it. Use the scoped refresh decision above, then inspect the same requestRef and
-   resume waiting if activity returns; escalate a persisting visible failure
-   instead of polling indefinitely. Do not click Retry or resend an
-   acknowledged request as a read-only recovery.
+   For provider-actionable-alert, inspect evidence or team_get on the same requestRef
+   and report the visible error. Active thinking/streaming needs waiting; a visible
+   stream/history recovery failure may need scoped refresh, then reinspection.
+   Escalate persisting failures instead of polling indefinitely. A Retry control
+   alone does not imply human verification; Retry/resend is not read-only recovery.
    Provider completion is not task completion. If a completed answer stops at a
    checkpoint or leaves authorized work unfinished, read it and send a contextual
    continuation to the same role with a fresh roleRef/requestId. Preserve the prior
@@ -83,18 +70,12 @@ out prompts, infer consensus, or inject answers into other roles.
 
 ## Recovery and cleanup
 
-- Preserve semantic model intent such as Pro, regardless of visible version labels.
-  An account/subscription Pro badge does not establish a selected Pro model/mode.
-  Confirm the final active model/effort control; High and Extra High are not Pro.
-  Inspect nested controls and their displayed range before declaring Pro absent.
-  Nearby access hints alone do not prove a control is disabled; use its actual
-  enabled state and the observed result of normal selection. Never bypass access controls.
-  Keep an explicit version when the user requests it; otherwise use the current/latest
-  option satisfying the requested mode, without pinning a remembered version.
-  Cancelling preparation, replacing a session or reading model documentation does
-  not authorize changing that intent. If the matching choice is locked or unavailable,
-  return the observed limitation for a user decision instead of sending a substitute.
-  Use Chat only, never Work. Do not change model/provider as an error fallback.
+- Preserve requested model/mode through cancellation and replacement. Confirm active
+  model/effort controls: an account badge, High or Extra High does not establish Pro.
+  Inspect nested options, ranges and actual enabled state; nearby access hints alone
+  do not prove unavailability. Honor explicit versions; otherwise choose the latest
+  matching option. If unavailable, return evidence for a user decision.
+  Use Chat only, never Work. Do not substitute models/providers or bypass access controls.
 - `submission_unknown` means acknowledgement is ambiguous. Use team_get with the
   same requestRef for read-only recovery; never automatically resend it.
   If the result has status `recovery_required` and recovery.state `unavailable`,

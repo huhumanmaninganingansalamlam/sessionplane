@@ -19,6 +19,7 @@ import {
 } from '../providers/provider-adapter.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import type { SessionActor } from '../scheduler/session-actor.ts';
+import { KeyedMutex } from '../scheduler/keyed-mutex.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { EventRepository } from '../storage/event-repository.ts';
 import {
@@ -52,7 +53,6 @@ interface PendingPreparation {
   readonly message?: string;
 }
 
-
 interface StoredOutboxPayload {
   readonly prompt: string;
   readonly model: string | null;
@@ -84,7 +84,7 @@ export class SubmissionService {
   readonly #onSubmitted: ((snapshot: SessionSnapshot) => void) | null;
   readonly #onSubmissionUnknown: ((snapshot: SessionSnapshot) => void) | null;
   readonly #maxUploadFileBytes: number;
-  readonly #requestTails = new Map<string, Promise<void>>();
+  readonly #requestMutex = new KeyedMutex();
 
   constructor(options: {
     readonly database: SessionPlaneDatabase;
@@ -418,7 +418,7 @@ export class SubmissionService {
     };
     const requestHash = hashCanonical({ method: 'session.send', payload });
     const requestKey = JSON.stringify([input.clientId, input.requestId]);
-    return await this.#runRequestExclusive(requestKey, async () => {
+    return await this.#requestMutex.runExclusive(requestKey, async () => {
       const existing = this.#outbox.getByRequest(input.clientId, input.requestId);
       if (existing !== null) {
         if (existing.requestHash !== requestHash) {
@@ -627,7 +627,7 @@ export class SubmissionService {
     readonly generation: number;
   }): Promise<SessionSnapshot> {
     const requestKey = JSON.stringify([input.clientId, input.requestId]);
-    return await this.#runRequestExclusive(requestKey, async () => {
+    return await this.#requestMutex.runExclusive(requestKey, async () => {
       const initial = this.#outbox.getByRequest(input.clientId, input.requestId);
       if (initial === null || initial.sessionId !== input.sessionId || initial.generation !== input.generation) {
         throw new SessionPlaneDomainError(
@@ -862,7 +862,7 @@ export class SubmissionService {
         }
         return JSON.parse(previous.resultJson) as Result | SessionSnapshot;
       }
-      const initial = this.#requirePreparationOwner(input);
+      this.#requirePreparationOwner(input);
       const initialSnapshot = this.#requireSnapshot(input.sessionId);
       const pageKey = initialSnapshot.pageKey;
       if (pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'Exact preparation page is unavailable');
@@ -1589,29 +1589,6 @@ export class SubmissionService {
         'The original request stopped before submit and will not replay browser mutations',
       ),
     );
-  }
-
-  async #runRequestExclusive<Result>(
-    requestKey: string,
-    operation: () => Promise<Result>,
-  ): Promise<Result> {
-    const previous = this.#requestTails.get(requestKey) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.then(() => gate);
-    this.#requestTails.set(requestKey, tail);
-
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.#requestTails.get(requestKey) === tail) {
-        this.#requestTails.delete(requestKey);
-      }
-    }
   }
 
   #resolveSession(input: SessionSendInput): SessionSnapshot {

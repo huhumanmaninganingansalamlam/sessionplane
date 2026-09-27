@@ -4,6 +4,7 @@ import type { SessionSnapshot } from '../domain/session.ts';
 import type { ProviderAdapterRegistry } from '../providers/provider-adapter.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import type { SessionActor } from '../scheduler/session-actor.ts';
+import { KeyedMutex } from '../scheduler/keyed-mutex.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { EventRepository } from '../storage/event-repository.ts';
 import { hashCanonical } from '../storage/receipt-repository.ts';
@@ -47,7 +48,7 @@ export class StopService {
   readonly #sessions: SessionRepository;
   readonly #events: EventRepository;
   readonly #now: () => Date;
-  readonly #requestTails = new Map<string, Promise<void>>();
+  readonly #requestMutex = new KeyedMutex();
 
   constructor(options: {
     readonly database: SessionPlaneDatabase;
@@ -77,7 +78,7 @@ export class StopService {
     };
     const requestHash = hashCanonical({ method: 'session.stop', payload });
     const requestKey = JSON.stringify([input.clientId, input.requestId]);
-    return await this.#runRequestExclusive(requestKey, async () => {
+    return await this.#requestMutex.runExclusive(requestKey, async () => {
       const existing = this.#getReceipt(input.clientId, input.requestId);
       if (existing !== null) {
         this.#assertReceipt(existing, input.clientId, input.requestId, requestHash);
@@ -319,27 +320,5 @@ export class StopService {
       throw new SessionPlaneDomainError('input.session-not-found', `Unknown session: ${sessionId}`);
     }
     return snapshot;
-  }
-
-  async #runRequestExclusive<Result>(
-    requestKey: string,
-    operation: () => Promise<Result>,
-  ): Promise<Result> {
-    const previous = this.#requestTails.get(requestKey) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.then(() => gate);
-    this.#requestTails.set(requestKey, tail);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.#requestTails.get(requestKey) === tail) {
-        this.#requestTails.delete(requestKey);
-      }
-    }
   }
 }
