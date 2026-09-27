@@ -14,6 +14,15 @@ to ChatGPT; explicitly disabled providers fail before creating team/role state.
 
 Ordinary flow: team_get → send → decide when needed → wait.
 
+The caller preserves the user's model/mode requirement across requests and session
+replacement. Account entitlement is not active selection evidence: a Pro account
+with High or Extra High selected does not prove Pro mode. Inspect nested controls
+and the visible range, then confirm the final selection. Honor explicit versions;
+otherwise choose the current/latest option satisfying the requested mode. A locked
+or unavailable choice requires a user decision, not cancellation followed by a
+substitute model request. The core verifies the caller's recorded controls remain
+selected; it does not infer user requirements from role names or account badges.
+
 - Mutations require a caller-generated stable `requestId` for delivery deduplication.
   Reuse it only with identical arguments. IDs are scoped to the team; team creation
   needs a globally unique ID. The core derives the team request namespace;

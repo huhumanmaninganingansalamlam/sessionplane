@@ -84,6 +84,16 @@ out prompts, infer consensus, or inject answers into other roles.
 ## Recovery and cleanup
 
 - Preserve semantic model intent such as Pro, regardless of visible version labels.
+  An account/subscription Pro badge does not establish a selected Pro model/mode.
+  Confirm the final active model/effort control; High and Extra High are not Pro.
+  Inspect nested controls and their displayed range before declaring Pro absent.
+  Nearby access hints alone do not prove a control is disabled; use its actual
+  enabled state and the observed result of normal selection. Never bypass access controls.
+  Keep an explicit version when the user requests it; otherwise use the current/latest
+  option satisfying the requested mode, without pinning a remembered version.
+  Cancelling preparation, replacing a session or reading model documentation does
+  not authorize changing that intent. If the matching choice is locked or unavailable,
+  return the observed limitation for a user decision instead of sending a substitute.
   Use Chat only, never Work. Do not change model/provider as an error fallback.
 - `submission_unknown` means acknowledgement is ambiguous. Use team_get with the
   same requestRef for read-only recovery; never automatically resend it.
