@@ -26,6 +26,7 @@ export class TeamWorkflow {
     submissions: SubmissionService; ui: SessionUiService; scheduler: ActorScheduler;
     artifacts: ArtifactService; stops: StopService; cleanup: ConversationCleanupService;
     enabledProviders: readonly ProviderName[];
+    ensurePage: (sessionId: string, generation: number) => Promise<void>;
   };
   constructor(services: TeamWorkflow['services']) {
     this.services = services;
@@ -131,6 +132,10 @@ export class TeamWorkflow {
     const request = this.#request(input);
     const owner = ownerOf(request);
     if (input.decision === 'refresh') {
+      const current = this.services.directory.getSession(request.sessionId);
+      if (current.conversationId !== null && this.services.receipts.get(request.clientId, input.requestId) === null) {
+        await this.services.ensurePage(request.sessionId, request.generation);
+      }
       await this.services.ui.refresh({ ...owner, decisionId: input.requestId });
       return await this.#observe(this.#request(input), undefined, true);
     }
@@ -252,6 +257,7 @@ export class TeamWorkflow {
         (snapshot.provider === 'chatgpt' && !snapshot.terminal && snapshot.submissionState === 'submitted' &&
           (inspectCurrent || snapshot.reason === 'provider-actionable-alert'))) {
       try {
+        if (snapshot.conversationId !== null) await this.services.ensurePage(snapshot.sessionId, snapshot.generation);
         const inspected = await this.services.ui.inspectSubmission({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });
         return { ...inspected.snapshot, requestRef: request.outboxId, roleRef: roleRef(inspected.snapshot),
           evidence: inspected.evidence, requested: inspected.requested };

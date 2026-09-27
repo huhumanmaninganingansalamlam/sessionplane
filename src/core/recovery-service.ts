@@ -106,7 +106,7 @@ export class RecoveryService {
     const operation = this.#tail.then(async () => {
       const snapshot = this.#sessions.getSnapshot(sessionId);
       if (snapshot === null || snapshot.generation !== generation) {
-        throw new SessionPlaneDomainError('session.generation-superseded', 'Artifact page ownership changed');
+        throw new SessionPlaneDomainError('session.generation-superseded', 'Exact request page ownership changed');
       }
       this.#adapters.require(snapshot.provider);
       if (snapshot.pageKey !== null) {
@@ -114,6 +114,7 @@ export class RecoveryService {
           this.#pageRegistry.requireSessionPage(snapshot.pageKey, {
             sessionId, generation, conversationId: snapshot.conversationId,
           });
+          if (isObservationReady(snapshot)) this.#observations.start(snapshot);
           return;
         } catch (error) {
           if (!(error instanceof PageRegistryError) || error.errorCode !== 'browser.unavailable') throw error;
@@ -121,8 +122,10 @@ export class RecoveryService {
       }
       const recovered = await this.#reconcilePage(snapshot);
       if (recovered.unavailable || recovered.conflict || recovered.snapshot.pageKey === null) {
-        throw new SessionPlaneDomainError('browser.unavailable', 'Exact artifact conversation page could not be recovered');
+        throw new SessionPlaneDomainError('browser.unavailable', 'Exact request conversation page could not be recovered');
       }
+      if (isObservationReady(recovered.snapshot)) this.#observations.start(recovered.snapshot, { force: true });
+      if (needsAcknowledgementRecovery(recovered.snapshot)) this.watchAcknowledgementRecovery(recovered.snapshot);
     });
     this.#tail = operation.then(() => emptyReport(), () => emptyReport());
     await operation;
