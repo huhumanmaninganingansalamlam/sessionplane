@@ -89,7 +89,7 @@ export class BrowserRefSnapshotStore {
     const snapshotId = randomUUID();
     const interactive = options.interactive ?? true;
     const maxNodes = Math.max(1, Math.min(5_000, options.maxNodes ?? 250));
-    const result = await options.page.evaluate(
+    const evaluation = options.page.evaluate(
       ({ snapshotId: browserSnapshotId, interactive: interactiveOnly, maxNodes: limit, refProperty, rootSelector, compact }) => {
         type MutableSnapshotNode = {
           ref: string;
@@ -368,6 +368,15 @@ export class BrowserRefSnapshotStore {
         compact: options.compact ?? false,
       },
     );
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      evaluation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new BrowserSnapshotError('browser.snapshot-timeout',
+          'The provider page did not respond to inspection. The request was not resent; inspect provider health or explicitly refresh this exact request.')), 5_000);
+      }),
+    ]).finally(() => clearTimeout(timer));
 
     const tokens = new Map<string, string>();
     const refsByToken = new Map<string, string>();

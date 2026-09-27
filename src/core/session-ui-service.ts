@@ -44,10 +44,14 @@ export class SessionUiService {
   async #capture(session: SessionSnapshot, maxNodes?: number) {
     const page = this.#requirePage(session);
     const binding = this.#registry.refreshPage(session.pageKey!);
-    return await this.#refs.capture({
-      pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch, page,
-      interactive: false, compact: true, maxNodes: Math.max(1, Math.min(5_000, maxNodes ?? 1_000)),
-    });
+    try {
+      return await this.#refs.capture({
+        pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch, page,
+        interactive: false, compact: true, maxNodes: Math.max(1, Math.min(5_000, maxNodes ?? 1_000)),
+      });
+    } catch (error) {
+      throw typedUiError(error);
+    }
   }
 
   async decide(input: PreparationOwner & {

@@ -500,6 +500,17 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
     assert.ok(alerted?.evidence?.nodes.some((node) => node.role === 'alert'));
     const current = await inspect();
     assert.ok((current.structuredContent.request as NonNullable<typeof alerted>).evidence?.nodes.some((node) => node.role === 'alert'));
+    // A stalled renderer must not hold the session actor and block later recovery.
+    const debuggerSession = await page.context().newCDPSession(page);
+    await debuggerSession.send('Debugger.enable');
+    await debuggerSession.send('Debugger.pause');
+    try {
+      const stalled = await inspect();
+      assert.equal((stalled.structuredContent.request as { inspectionError: { errorCode: string } }).inspectionError.errorCode, 'browser.snapshot-timeout');
+    } finally {
+      await debuggerSession.send('Debugger.resume');
+      await debuggerSession.detach();
+    }
     // Provider history becomes readable after a reload; no prompt is submitted again.
     installPreparationFixtureRoute(service, `<!doctype html>
         <textarea>Exact pending draft</textarea>
