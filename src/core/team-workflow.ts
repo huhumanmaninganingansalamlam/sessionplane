@@ -133,7 +133,14 @@ export class TeamWorkflow {
     const owner = ownerOf(request);
     if (input.decision === 'refresh') {
       const current = this.services.directory.getSession(request.sessionId);
-      if (current.conversationId !== null && this.services.receipts.get(request.clientId, input.requestId) === null) {
+      const prior = this.services.receipts.get(request.clientId, input.requestId);
+      const recovery = this.#lostSubmission(current);
+      if (prior === null && current.generation === request.generation && recovery !== null) {
+        throw new SessionPlaneDomainError('session.recovery-unavailable', recovery.message, {
+          requestRef: request.outboxId, roleRef: roleRef(current), ...recovery,
+        });
+      }
+      if (current.conversationId !== null && prior === null) {
         await this.services.ensurePage(request.sessionId, request.generation);
       }
       await this.services.ui.refresh({ ...owner, decisionId: input.requestId });
@@ -160,7 +167,7 @@ export class TeamWorkflow {
         const request = this.#request({ teamId: input.teamId, requestRef });
         const current = this.services.directory.getSession(request.sessionId);
         let waitExpired = false;
-        if (current.generation === request.generation && !needsDecision(current)) {
+        if (current.generation === request.generation && !needsDecision(current) && this.#lostSubmission(current) === null) {
           const waited = await this.services.scheduler.waitSession(request.sessionId, { expectedGeneration: request.generation, waitMs: input.waitMs });
           waitExpired = waited.waitExpired;
         }
@@ -238,12 +245,23 @@ export class TeamWorkflow {
     if (!this.services.enabledProviders.includes(provider)) throw new SessionPlaneDomainError('provider.disabled', 'Provider is disabled: ' + provider);
   }
 
+  #lostSubmission(snapshot: SessionSnapshot) {
+    if (!this.services.ui.isSubmissionPageLost(snapshot)) return null;
+    return {
+      status: 'recovery_required',
+      recovery: { state: 'unavailable', reason: 'page-lost-without-conversation', nextAction: 'sessionplane_session_replace' },
+      message: 'Submission acknowledgement is unknown and neither an owned page nor a durable conversation ID remains. Waiting or refreshing cannot recover this request. promptSubmitted records an attempt, not confirmed provider acceptance. Explicitly decide whether to replace the role session and continue with new work, accounting for possible duplicate processing. Replacement does not resend or delete this request.',
+    };
+  }
+
   async #observe(request: OutboxRecord, maxNodes?: number, inspectCurrent = false): Promise<Record<string, unknown>> {
     let snapshot = this.services.directory.getSession(request.sessionId);
     if (snapshot.generation !== request.generation) {
       return { requestOk: true, requestRef: request.outboxId, sessionId: request.sessionId, generation: request.generation,
         ...this.#sessions.getGenerationResult(request.sessionId, request.generation), historical: true, terminal: true, waitExpired: false };
     }
+    const recovery = this.#lostSubmission(snapshot);
+    if (recovery !== null) return { ...snapshot, requestRef: request.outboxId, roleRef: roleRef(snapshot), ...recovery };
     if (needsDecision(snapshot)) {
       const evidence = await this.services.ui.inspect({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });
       const stored = this.#outbox.requireById(request.outboxId);

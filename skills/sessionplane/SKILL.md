@@ -87,6 +87,13 @@ out prompts, infer consensus, or inject answers into other roles.
   Use Chat only, never Work. Do not change model/provider as an error fallback.
 - `submission_unknown` means acknowledgement is ambiguous. Use team_get with the
   same requestRef for read-only recovery; never automatically resend it.
+  If the result has status `recovery_required` and recovery.state `unavailable`,
+  stop polling/refreshing: the owned page and durable conversation ID are both absent.
+  `promptSubmitted:true` here is an attempt, not confirmed acceptance. Explicitly
+  decide whether to use session_replace and continue with new work, considering
+  possible duplicate processing and the user's authorization. Ask the user when
+  that decision exceeds your authority; do not silently replay the old prompt.
+  Keep the original requestRef and uncertainty; replacement does not delete it.
 - A definite pre-submit failure with promptSubmitted:false permits corrected new
   work with a new requestId. Refresh the roleRef first. Waiting cannot fix bad input.
 - After restart, team_get returns pending requests. Observe fresh evidence before

@@ -19,6 +19,18 @@ export class SessionUiService {
     this.#chatgptOrigin = new URL(input.chatgptUrl).origin;
   }
 
+  isSubmissionPageLost(session: SessionSnapshot): boolean {
+    if (session.terminal || session.submissionState !== 'submission_unknown' || session.conversationId !== null) return false;
+    if (session.pageKey === null) return true;
+    try {
+      this.#registry.requireSessionPage(session.pageKey, session);
+      return false;
+    } catch (error) {
+      if (error instanceof PageRegistryError) return error.errorCode === 'browser.unavailable';
+      throw error;
+    }
+  }
+
   async inspect(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
     return await this.#submissions.withPendingPreparation(input,
       async (session) => await this.#capture(session, input.maxNodes));

@@ -538,6 +538,52 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
   }
 });
 
+test('MCP returns a decision for a lost ambiguous page and permits explicit replacement without replay', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-lost-page-'));
+  const config = { ...resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 100 };
+  const service = await startCore({ config, browserHeadless: true, logger: silentLogger() });
+  installPreparationFixtureRoute(service, `<form onsubmit="event.preventDefault()"><textarea id="prompt-textarea"></textarea><button type="submit">Send</button></form>`);
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_' + name, arguments: args,
+    socketPath: config.socketPath, timeoutMs: 5_000, maxLineBytes: config.rpcMaxLineBytes });
+  try {
+    const created = (await invoke('team_create', { requestId: 'lost-team' })).structuredContent;
+    const teamId = created.teamId;
+    const role = (created.roles as Array<{ roleRef: string }>)[0]!;
+    const sent = await invoke('send', { teamId, roleRef: role.roleRef, requestId: 'lost-send', prompt: 'Uncertain request' });
+    const identity = { teamId, requestRef: sent.structuredContent.requestRef };
+    const inspect = async () => (await invoke('team_get', identity)).structuredContent.request as Record<string, unknown>;
+    for (const purpose of ['composer', 'submit']) {
+      const evidence = (await inspect()).evidence as { snapshotId: string; nodes: Array<{ ref: string; role: string; editable: boolean }> };
+      const target = evidence.nodes.find((n) => purpose === 'composer' ? n.editable && n.role === 'textbox' : n.role === 'button')!;
+      await invoke('decide', { ...identity, requestId: purpose, decision: 'choose', purpose, snapshotId: evidence.snapshotId, ref: target.ref });
+    }
+    const before = await inspect();
+    assert.equal(before.submissionState, 'submission_unknown');
+    assert.equal(before.conversationId, null);
+    assert.notEqual(before.status, 'recovery_required');
+    await service.pageRegistry.pageForObservation(before.pageKey as string).close();
+    const lost = await inspect();
+    assert.equal(lost.status, 'recovery_required');
+    assert.equal(lost.submissionState, 'submission_unknown');
+    assert.equal(lost.generation, before.generation);
+    const waited = await invoke('wait', { teamId, requestRefs: [identity.requestRef], waitMs: 30_000 });
+    assert.equal(waited.isError, false);
+    assert.equal((waited.structuredContent.results as Array<Record<string, unknown>>)[0]!.status, 'recovery_required');
+    assert.equal((await invoke('decide', { ...identity, requestId: 'refresh-lost', decision: 'refresh' })).structuredContent.errorCode, 'session.recovery-unavailable');
+    const replaced = await invoke('session_replace', { teamId, roleRef: lost.roleRef, requestId: 'replace-lost' });
+    assert.equal(replaced.isError, false);
+    const newRole = (replaced.structuredContent.roles as Array<{ currentSessionId: string }>)[0]!;
+    assert.notEqual(newRole.currentSessionId, before.sessionId);
+    assert.equal(service.teamDirectory.getSession(newRole.currentSessionId).promptSubmitted, false);
+    const retained = await inspect();
+    assert.equal(retained.submissionState, 'submission_unknown');
+    assert.equal(retained.sessionId, before.sessionId);
+  } finally {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 class CaptureWritable extends Writable {
   value = '';
 

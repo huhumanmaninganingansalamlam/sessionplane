@@ -58,6 +58,16 @@ Ordinary flow: team_get → send → decide when needed → wait.
   empty successful file list.
   After restart, uncached files reopen the exact conversation on demand without
   resending. Page recovery preserves the completed answer and terminal reason.
+- An ambiguous request with neither its owned page nor a durable conversation ID
+  returns `status:"recovery_required"`, `recovery.state:"unavailable"` and
+  `recovery.nextAction:"sessionplane_session_replace"`. Wait returns immediately;
+  refresh fails with `session.recovery-unavailable` and the same guidance.
+  Its submission outcome remains unknown, not completed or definitely unsent.
+  `promptSubmitted:true` in this state records an attempt, not provider acceptance.
+  The caller must explicitly decide whether to replace the session and continue
+  with new work, accounting for possible duplicate processing. Replacement itself
+  never replays the prompt; the old request remains inspectable. A provider outage
+  or slow answer alone does not meet this lost-page condition.
 - `stop` cancels preparation or stops the exact generating request. It cannot stop
   a newer generation. `session_replace` explicitly changes routing without replaying
   work or deleting history. `role_retire` prevents new work on a finished expert.
