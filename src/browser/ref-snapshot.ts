@@ -84,13 +84,15 @@ export class BrowserRefSnapshotStore {
     readonly interactive?: boolean;
     readonly maxNodes?: number;
     readonly rootSelector?: string;
+    readonly excludeSelector?: string;
+    readonly controlScope?: boolean;
     readonly compact?: boolean;
   }): Promise<BrowserSnapshot> {
     const snapshotId = randomUUID();
     const interactive = options.interactive ?? true;
     const maxNodes = Math.max(1, Math.min(5_000, options.maxNodes ?? 250));
     const evaluation = options.page.evaluate(
-      ({ snapshotId: browserSnapshotId, interactive: interactiveOnly, maxNodes: limit, refProperty, rootSelector, compact }) => {
+      ({ snapshotId: browserSnapshotId, interactive: interactiveOnly, maxNodes: limit, refProperty, rootSelector, excludeSelector, controlScope, compact }) => {
         type MutableSnapshotNode = {
           ref: string;
           token: string;
@@ -233,13 +235,14 @@ export class BrowserRefSnapshotStore {
         const nodes: MutableSnapshotNode[] = [];
         let truncated = false;
         let sequence = 0;
-        let controlsFirst: boolean | null = null;
 
         const visit = (element: Element, depth: number, ancestorIds: readonly string[]): void => {
           if (nodes.length >= limit) {
             truncated = true;
             return;
           }
+          if (excludeSelector !== null && element.matches(excludeSelector) &&
+              !element.matches('[role="alert"], [role="alertdialog"]')) return;
           if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(element.tagName) || (compact && element instanceof SVGElement)) return;
           const style = getComputedStyle(element);
           if (style.display === 'none' || Number(style.opacity) === 0) return;
@@ -250,7 +253,7 @@ export class BrowserRefSnapshotStore {
           const meaningful = actionable || ownText || ['dialog', 'alert', 'status', 'heading', 'menu', 'group', 'radiogroup'].includes(role);
           const control = actionable || ['dialog', 'alert', 'menu', 'group', 'radiogroup'].includes(role);
           const include = visible && (!interactiveOnly || actionable || (compact && control)) && (!compact || meaningful) &&
-            (controlsFirst === null || control === controlsFirst);
+            (excludeSelector === null || element.querySelector(excludeSelector) === null);
           if (include) {
             sequence += 1;
             const ref = `@e${sequence}`;
@@ -288,7 +291,7 @@ export class BrowserRefSnapshotStore {
               role,
               name: accessibleName(element),
               tag: element.tagName.toLowerCase(),
-              text: normalize(element instanceof HTMLElement ? element.innerText : element.textContent, 500),
+              text: compact && role === 'textbox' ? '' : normalize(element instanceof HTMLElement ? element.innerText : element.textContent, 500),
               depth,
               ancestorIds: [...ancestorIds],
               disabled:
@@ -309,7 +312,7 @@ export class BrowserRefSnapshotStore {
                     : element.getAttribute('aria-selected') === 'true' || element.getAttribute('aria-pressed') === 'true',
               href: element instanceof HTMLAnchorElement ? element.href : null,
               placeholder: element.getAttribute('placeholder'),
-              value,
+              value: compact && role === 'textbox' ? null : value,
               ariaValueText: element.getAttribute('aria-valuetext'),
               ariaValueNow: element.getAttribute('aria-valuenow'),
               ariaValueMin: element.getAttribute('aria-valuemin') ?? (input instanceof HTMLInputElement && input.type === 'range' ? input.min || '0' : null),
@@ -335,6 +338,7 @@ export class BrowserRefSnapshotStore {
             });
           }
 
+          if (compact && role === 'textbox') return;
           for (const child of element.children) {
             visit(child, depth + 1, element.id === '' ? ancestorIds : [...ancestorIds, element.id]);
             if (truncated) return;
@@ -348,16 +352,33 @@ export class BrowserRefSnapshotStore {
           }
         };
 
-        const roots = rootSelector === null
+        let roots = rootSelector === null
           ? [document.body ?? document.documentElement]
           : [...document.querySelectorAll(rootSelector)];
-        // Keep live controls reachable when conversation text exceeds the evidence budget.
-        for (const pass of compact && !interactiveOnly ? [true, false] : [null]) {
-          controlsFirst = pass;
-          for (const root of roots) {
-            if (root !== null) visit(root, 0, []);
-            if (truncated) break;
+        if (controlScope) {
+          const excluded = (element: Element): boolean => !element.matches('[role="alert"], [role="alertdialog"]') &&
+            excludeSelector !== null && element.closest(excludeSelector) !== null;
+          roots = [...document.querySelectorAll('[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], [role="alert"], [role="status"], [role="radiogroup"]')]
+            .filter(element => !excluded(element));
+          const editors = [...document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')].filter(element => !excluded(element));
+          if (editors.length === 0) roots.push(...document.querySelectorAll('main, [role="main"]'));
+          for (const editor of editors) {
+            let region = editor.closest('form') ?? editor.parentElement ?? editor;
+            while (region.parentElement && !region.querySelector('button, [role="button"], input[type="submit"]')) {
+              if (excluded(region.parentElement)) break;
+              region = region.parentElement;
+            }
+            if (region === document.body || region.matches('main, [role="main"]')) {
+              roots.push(...region.querySelectorAll('button, input, textarea, [role="textbox"], [contenteditable="true"], [role="combobox"]'));
+            } else {
+              roots.push(region);
+            }
           }
+          roots = [...new Set(roots)].filter(element => !excluded(element));
+          roots = roots.filter(element => !roots.some(parent => parent !== element && parent.contains(element)));
+        }
+        for (const root of roots) {
+          if (root !== null) visit(root, 0, []);
           if (truncated) break;
         }
         return {
@@ -373,6 +394,8 @@ export class BrowserRefSnapshotStore {
         maxNodes,
         refProperty: REF_PROPERTY,
         rootSelector: options.rootSelector ?? null,
+        excludeSelector: options.excludeSelector ?? null,
+        controlScope: options.controlScope ?? false,
         compact: options.compact ?? false,
       },
     );

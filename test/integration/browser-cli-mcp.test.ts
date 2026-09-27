@@ -471,10 +471,10 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
       socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
     const pending = await inspect();
     assert.equal(pending.isError, false);
-    const snapshot = pending.structuredContent.request as { submissionState: string; generation: number; evidence: { nodes: Array<{ editable: boolean; value: string }> } };
+    const snapshot = pending.structuredContent.request as { submissionState: string; generation: number; evidence: { nodes: Array<{ editable: boolean; value: string | null }> } };
     assert.equal(snapshot.submissionState, 'submission_unknown');
     assert.equal(snapshot.generation, sent.generation);
-    assert.ok(snapshot.evidence.nodes.some((node) => node.editable && node.value === 'Exact pending draft'));
+    assert.ok(snapshot.evidence.nodes.some((node) => node.editable && node.value === null));
     assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft');
     assert.equal(await page.locator('[data-message-author-role]').count(), 0);
 

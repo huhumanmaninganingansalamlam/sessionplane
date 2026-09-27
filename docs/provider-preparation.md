@@ -13,6 +13,12 @@ selected state. It selects observed controls; it never sends executable
 JavaScript, selectors or coordinates. Core validates fresh evidence and owns
 all browser mutations, request receipts, submission attempts and answer identity.
 
+Preparation evidence excludes provider message subtrees and history navigation.
+Composer content stays in the accepted request, not the UI evidence. Controls,
+current values, menus, related explanations and provider alerts remain observable.
+The same scope is used for inspection, decisions and pre-submit verification;
+answer text is read only by the provider observation path.
+
 ## MCP flow
 
 The public contract is [team-centered MCP](team-workflow.md). Start with

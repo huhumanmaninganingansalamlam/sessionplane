@@ -5,6 +5,7 @@ import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionE
 import type { SessionSnapshot } from '../domain/session.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { PreparationPurpose, PreparationTarget } from '../providers/provider-adapter.ts';
+import { CHATGPT_PREPARATION_SNAPSHOT } from '../providers/chatgpt/selectors.ts';
 import type { SubmissionService } from './submission-service.ts';
 
 export class SessionUiService {
@@ -47,7 +48,7 @@ export class SessionUiService {
     try {
       return await this.#refs.capture({
         pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch, page,
-        interactive: false, compact: true, maxNodes: Math.max(1, Math.min(5_000, maxNodes ?? 1_000)),
+        ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: Math.max(1, Math.min(5_000, maxNodes ?? 1_000)),
       });
     } catch (error) {
       throw typedUiError(error);
@@ -78,7 +79,7 @@ export class SessionUiService {
         const reveal = input.decision === 'reveal';
         const currentObservation = await this.#refs.capture({
           pageKey: session.pageKey, bindingEpoch: this.#registry.refreshPage(session.pageKey).bindingEpoch,
-          page, interactive: false, compact: true, maxNodes: 5_000,
+          page, ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: 5_000,
         });
         const currentNode = await this.#refs.nodeForElement({
           pageKey: session.pageKey, snapshotId: currentObservation.snapshotId, element,
@@ -131,7 +132,7 @@ export class SessionUiService {
         while (true) {
           after = await this.#refs.capture({
             pageKey: session.pageKey, bindingEpoch: this.#registry.refreshPage(session.pageKey).bindingEpoch,
-            page, interactive: false, compact: true, maxNodes: 5_000,
+            page, ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: 5_000,
           });
           if (purpose !== 'model' && purpose !== 'effort') break;
           const verified = reveal
@@ -149,7 +150,7 @@ export class SessionUiService {
             node.controls.some((id) => currentNode.ancestorIds.includes(id)));
           if (openers.length === 1 && after.nodes.some((node) => node.role === 'menu' && currentNode.ancestorIds.includes(node.id))) {
             await element.press('Escape');
-            after = await this.#refs.capture({ pageKey: session.pageKey, bindingEpoch: binding.bindingEpoch, page, interactive: false, compact: true, maxNodes: 5_000 });
+            after = await this.#refs.capture({ pageKey: session.pageKey, bindingEpoch: binding.bindingEpoch, page, ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: 5_000 });
             const summary = after.nodes.find((node) => node.id === openers[0]!.id && node.role === 'button' && node.expanded === false);
             if (summary !== undefined && summary.id !== '') choice = toPreparationTarget(purpose, summary);
           }

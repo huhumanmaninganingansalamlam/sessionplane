@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { BrowserOwner } from '../../src/browser/browser-owner.ts';
+import { CHATGPT_PREPARATION_SNAPSHOT } from '../../src/providers/chatgpt/selectors.ts';
 import { BrowserRefSnapshotStore } from '../../src/browser/ref-snapshot.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 import {
@@ -283,20 +284,21 @@ function fixtureHtml(): string {
     </html>`;
 }
 
-
-test('bounded preparation evidence retains controls after a long transcript', async () => {
+test('preparation evidence omits transcript and draft text while retaining controls and alerts', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-evidence-'));
   const registry = new PageRegistry();
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
   try {
     await owner.start();
     const { page, binding } = await owner.createPage();
-    await page.setContent('<main>' + '<p>Earlier conversation text</p>'.repeat(1200) +
-      '<button aria-haspopup="menu">Selected tier</button><div role="menu"><label>Reasoning <input type="range" min="1" max="4" value="4"></label></div><textarea aria-label="Prompt"></textarea></main>');
+    await page.setContent('<nav>History navigation</nav><main><section role=group><article>' + '<p>Earlier conversation text</p><button>Message action</button>'.repeat(1200) + '</article></section>' +
+      '<form><button aria-haspopup="menu">Selected tier</button><div role="menu"><label>Reasoning <input type="range" min="1" max="4" value="4"></label></div><div role="alert">Provider recovery needed</div><textarea aria-label="Prompt">Private draft</textarea></form></main>');
     const refs = new BrowserRefSnapshotStore();
-    const capture = { page, pageKey: binding.pageKey, bindingEpoch: binding.bindingEpoch, compact: true, maxNodes: 20 };
+    const capture = { page, pageKey: binding.pageKey, bindingEpoch: binding.bindingEpoch, ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: 20 };
     const snapshot = await refs.capture({ ...capture, interactive: false });
-    assert.equal(snapshot.nodesTruncated, true);
+    assert.equal(snapshot.nodesTruncated, false);
+    assert.ok(snapshot.nodes.some(node => node.role === 'alert'));
+    assert.equal(snapshot.nodes.some(node => /Earlier conversation|Message action|History navigation|Private draft/.test(node.name + node.text + node.value)), false);
     for (const role of ['button', 'slider', 'textbox']) assert.ok(snapshot.nodes.some(node => node.role === role));
     const slider = snapshot.nodes.find(node => node.role === 'slider')!;
     assert.equal(Number(slider.ariaValueNow ?? slider.value), 4);

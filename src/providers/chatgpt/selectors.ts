@@ -54,3 +54,11 @@ export const CHATGPT_SELECTORS = {
     '[data-testid*="modal"]',
   ],
 } as const;
+
+
+export const CHATGPT_PREPARATION_SNAPSHOT = {
+  interactive: false,
+  compact: true,
+  controlScope: true,
+  excludeSelector: `${CHATGPT_SELECTORS.messages}, article, nav, aside, [role="navigation"], #app-shell-sidebar`,
+} as const;

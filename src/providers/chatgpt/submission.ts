@@ -17,7 +17,7 @@ import {
   navigateProviderPage,
   waitForProviderPageReady,
 } from '../human-verification.ts';
-import { CHATGPT_SELECTORS } from './selectors.ts';
+import { CHATGPT_SELECTORS, CHATGPT_PREPARATION_SNAPSHOT } from './selectors.ts';
 import { readChatGptMessages, type ChatGptMessage } from './message-dom.ts';
 
 const COMPOSER_HYDRATION_TIMEOUT_MS = 3_000;
@@ -86,8 +86,7 @@ export class ChatGptSubmission implements ProviderSubmission {
         pageKey: this.pageKey,
         bindingEpoch: binding.bindingEpoch,
         page: this.#page,
-        interactive: true,
-        compact: true,
+        ...CHATGPT_PREPARATION_SNAPSHOT,
         maxNodes: 5_000,
       });
       const matches = snapshot.nodes.filter((node) => matchesPreparationTarget(node, target));
@@ -133,8 +132,7 @@ export class ChatGptSubmission implements ProviderSubmission {
       pageKey: this.pageKey,
       bindingEpoch: binding.bindingEpoch,
       page: this.#page,
-      interactive: true,
-      compact: true,
+      ...CHATGPT_PREPARATION_SNAPSHOT,
       maxNodes: 5_000,
     });
     return !snapshot.nodesTruncated && hasPreparationSelectionEvidence(snapshot.nodes, target);
