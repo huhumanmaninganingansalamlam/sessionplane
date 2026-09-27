@@ -127,9 +127,13 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined }) {
+  async decide(input: Identity & ({ requestId: string; decision: 'refresh' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
+    if (input.decision === 'refresh') {
+      await this.services.ui.refresh({ ...owner, decisionId: input.requestId });
+      return await this.#observe(this.#request(input), undefined, true);
+    }
     await this.services.ui.decide({ ...owner, decisionId: input.requestId, decision: input.decision,
       purpose: input.purpose, snapshotId: input.snapshotId, ref: input.ref,
       ...(input.value === undefined ? {} : { value: input.value }),

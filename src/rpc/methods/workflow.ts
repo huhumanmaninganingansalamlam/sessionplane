@@ -18,7 +18,10 @@ export const workflowSchemas = {
   session_replace: z.object({ ...mutation, roleRef: roleRef.optional(), roleKey: z.string().trim().min(1).max(80).optional().describe('Instead of roleRef, use the observed roleKey only when the role has no session.'), provider: provider.removeDefault().optional().describe('Only for an empty role; defaults to chatgpt. Existing conversations retain their provider.') }).strict(),
   session_delete: z.object({ ...request, requestId, outputsRetrieved: z.literal(true) }).strict(),
   send: z.object({ ...mutation, roleRef, prompt: z.string().min(1).max(200_000), model: z.string().trim().min(1).max(200).optional(), effort: z.string().trim().min(1).max(200).optional(), files: z.array(z.string().min(1).max(20_000)).max(20).optional(), sessionDeadlineSec: z.number().int().min(1).max(86_400).default(5400) }).strict(),
-  decide: z.object({ ...request, requestId, decision: z.enum(['choose', 'reveal']), purpose: z.enum(['model', 'effort', 'composer', 'submit']), snapshotId: z.string().uuid(), ref: z.string().regex(/^@e\d+$/), value: z.number().optional() }).strict(),
+  decide: z.union([
+    z.object({ ...request, requestId, decision: z.enum(['choose', 'reveal']), purpose: z.enum(['model', 'effort', 'composer', 'submit']), snapshotId: z.string().uuid(), ref: z.string().regex(/^@e\d+$/), value: z.number().optional() }).strict(),
+    z.object({ ...request, requestId, decision: z.literal('refresh') }).strict(),
+  ]),
   wait: z.object({ teamId, requestRefs: z.array(requestRef).min(1), waitMs: z.number().int().min(0).max(120_000).default(30_000), outputDir: z.string().min(1).optional() }).strict(),
   stop: z.object({ ...request, requestId }).strict(),
 };

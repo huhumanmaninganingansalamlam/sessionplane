@@ -147,6 +147,19 @@ export class SessionUiService {
     });
   }
 
+  async refresh(input: PreparationOwner & { readonly decisionId: string }): Promise<void> {
+    try {
+      await this.#submissions.refreshPage(input, async (session) => {
+        const page = this.#requirePage(session);
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+        this.#requirePage(session);
+        this.#refs.clear(session.pageKey!);
+      });
+    } catch (error) {
+      throw typedUiError(error);
+    }
+  }
+
   async resume(input: PreparationOwner) {
     return await this.#submissions.resumePreparation(input);
   }

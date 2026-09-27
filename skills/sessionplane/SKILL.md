@@ -48,6 +48,12 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    A menu item with a separate label and displayed value can also confirm the
    final selection without clicking. If model and effort share this summary,
    confirm it separately for each requested purpose using fresh evidence.
+   When the user requests a page refresh, or visible stream/history recovery
+   failure warrants one, call `sessionplane_decide` with decision `refresh`,
+   teamId, requestRef and a stable requestId. No snapshotId/ref/purpose is needed.
+   It reloads only the exact owned page, never resends the prompt or presses Retry.
+   Reinspect afterward; preparation requires fresh model/effort confirmation.
+   Do not refresh healthy long-running thinking on a timer or bypass verification.
 5. `sessionplane_wait` takes one or several requestRefs from this team. It returns
    exact answers and captures generated files; outputDir exports stored bytes.
    Inspect each result and file failure. Old requests can capture files from their
@@ -63,7 +69,7 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    problem. Distinguish active thinking/streaming from a visible provider failure:
    keep waiting for active work. A stream recovery failure can be a disconnected
    page rather than failed generation: refreshing the exact conversation may
-   restore it. After user refresh or recovery, inspect the same requestRef and
+   restore it. Use the scoped refresh decision above, then inspect the same requestRef and
    resume waiting if activity returns; escalate a persisting visible failure
    instead of polling indefinitely. Do not click Retry or resend an
    acknowledged request as a read-only recovery.

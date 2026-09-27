@@ -500,7 +500,23 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
     assert.ok(alerted?.evidence?.nodes.some((node) => node.role === 'alert'));
     const current = await inspect();
     assert.ok((current.structuredContent.request as NonNullable<typeof alerted>).evidence?.nodes.some((node) => node.role === 'alert'));
-    await page.locator('[role="alert"]').evaluate((node) => node.remove());
+    // Provider history becomes readable after a reload; no prompt is submitted again.
+    await page.route('https://chatgpt.com/**', async (route) => {
+      if (!route.request().isNavigationRequest()) return await route.fallback();
+      await route.fulfill({ contentType: 'text/html', body: `<!doctype html>
+        <textarea>Exact pending draft</textarea>
+        <div data-message-author-role="user" data-message-id="delayed-user">Exact pending draft</div>
+        <div data-message-author-role="assistant" data-message-id="delayed-answer" data-message-status="completed">Recovered final</div>
+        <script>sessionStorage.setItem('refreshes', String(Number(sessionStorage.getItem('refreshes') || 0) + 1));</script>` });
+    });
+    const refreshArgs = { ...identity, requestId: 'refresh-provider-history', decision: 'refresh' };
+    const refresh = (args = refreshArgs) => invokeMcpTool({ name: 'sessionplane_decide', arguments: args,
+      socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    const otherTeam = service.teamDirectory.createTeam({ clientId: 'another-owner' });
+    assert.equal((await refresh({ ...refreshArgs, teamId: otherTeam.teamId })).structuredContent.errorCode, 'input.invalid');
+    assert.equal((await refresh()).isError, false);
+    assert.equal((await refresh()).isError, false);
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('refreshes')), '1');
     let final = service.teamDirectory.getSession(session.sessionId);
     for (let attempt = 0; attempt < 20 && !final.terminal; attempt += 1) {
       final = await callRpc<typeof final>({ socketPath: config.socketPath, method: 'session.wait', params: { clientId: 'inspection-owner', sessionId: session.sessionId, generation: sent.generation, waitMs: 500 } });
@@ -509,6 +525,13 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
     assert.equal(final.answerText, 'Recovered final');
     assert.equal(await page.locator('[data-message-author-role="user"]').count(), 1);
     assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft');
+    await assert.rejects(callRpc({ socketPath: config.socketPath, method: 'session.send', params: {
+      clientId: 'inspection-owner', requestId: 'newer', sessionId: session.sessionId,
+      prompt: 'Next request', sessionDeadlineSec: 30,
+    } }), (error: unknown) => error instanceof RpcClientError &&
+      (error.data as { errorCode?: string }).errorCode === 'provider.preparation-required');
+    assert.equal((await refresh({ ...refreshArgs, requestId: 'stale-refresh' })).structuredContent.errorCode, 'session.generation-superseded');
+    assert.equal(await page.evaluate(() => sessionStorage.getItem('refreshes')), '1');
   } finally {
     await service.close();
     rmSync(root, { recursive: true, force: true });

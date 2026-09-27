@@ -730,6 +730,50 @@ export class SubmissionService {
     });
   }
 
+  async refreshPage(
+    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string },
+    reload: (snapshot: SessionSnapshot) => Promise<void>,
+  ): Promise<void> {
+    const method = 'session.page.refresh';
+    const requestHash = hashCanonical({ method, requestId: input.requestId, sessionId: input.sessionId, generation: input.generation });
+    const receipts = new ReceiptRepository(this.#database);
+    await this.#scheduler.actorFor(input.sessionId).enqueue(async () => {
+      const prior = receipts.get(input.clientId, input.decisionId);
+      if (prior !== null) {
+        if (prior.method !== method || prior.requestHash !== requestHash) {
+          throw new SessionPlaneDomainError('input.idempotency-conflict', 'Refresh request identity was reused with different arguments');
+        }
+        if (prior.status === 'complete') return;
+        throw new SessionPlaneDomainError('provider.action-unknown', 'Refresh was attempted; inspect the same request before deciding whether another refresh is needed');
+      }
+      const outbox = this.#outbox.getByRequest(input.clientId, input.requestId);
+      const snapshot = this.#requireSnapshot(input.sessionId);
+      if (outbox === null || outbox.sessionId !== input.sessionId || outbox.generation !== input.generation || snapshot.generation !== input.generation) {
+        throw new SessionPlaneDomainError('session.generation-superseded', 'Refresh requires the current exact request');
+      }
+      this.#adapters.require(snapshot.provider);
+      if (snapshot.provider !== 'chatgpt') throw new SessionPlaneDomainError('capability.unsupported', 'Page refresh currently supports ChatGPT only');
+      if (snapshot.pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'Inspect the exact request to recover its page before refreshing');
+      await this.#pageMutex.runExclusive(snapshot.pageKey, async () => {
+        const record = (status: 'attempted' | 'complete') => receipts.record({
+          clientId: input.clientId, requestId: input.decisionId, method, requestHash, status,
+          result: { sessionId: input.sessionId, generation: input.generation },
+        });
+        this.#database.transaction(() => {
+          record('attempted');
+          if (outbox.submissionState === 'prepared' && outbox.errorCode === 'provider.preparation-required') {
+            this.#outbox.transition(outbox.outboxId, ['prepared'], 'prepared', {
+              updatedAt: this.#now().toISOString(),
+              resultJson: JSON.stringify({ kind: 'pending-preparation', choices: {}, requiresInspection: true }),
+            });
+          }
+        });
+        await reload(snapshot);
+        record('complete');
+      });
+    });
+  }
+
   async withPendingPreparation<Result>(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number },
     operation: (snapshot: SessionSnapshot) => Promise<Result>,

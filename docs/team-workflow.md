@@ -32,6 +32,15 @@ Ordinary flow: team_get → send → decide when needed → wait.
   replaced. Opening a list never records a model selection or submits the prompt.
   The preparation message identifies the remaining failed verification; use it
   with the current evidence instead of repeating an already recorded choice.
+- `decide` with `decision:"refresh"`, teamId, requestRef and a stable requestId
+  reloads only that request's currently owned ChatGPT page. No UI ref is needed.
+  Use when the user requests refresh or visible provider recovery failure warrants
+  it, not as an automatic timer during normal thinking. It never submits a prompt,
+  presses Retry/Continue, or changes generation. Repeating the same requestId never
+  reloads twice. A failed/uncertain refresh requires inspection before a new decision.
+  Preparation selections are cleared because reload can reset provider defaults;
+  inspect and reconfirm the original model/effort intent. Historical generations
+  cannot refresh a page now owned by a newer request.
 - `team_get` with `requestRef` inspects that exact request, including read-only
   acknowledgement recovery. Ordinary team reads return compact current-request summaries. With `history:true`,
   team_get lists all generations newest first in pages of 50 requests; pass the

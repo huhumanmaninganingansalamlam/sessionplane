@@ -298,7 +298,7 @@ function serverInstructions(): string {
     'When effort changes the displayed model, confirm the final selection summary for each requested purpose with fresh decide choices. A popup button or a menu item with a separate displayed value can confirm without clicking; do not reselect an intermediate model to match an old choice.',
     'Never change provider/model intent or resend submission_unknown. Use team_get with requestRef for read-only recovery.',
     'wait returns exact answers and files. waitExpired, backend-http-429 and probe pacing alone do not establish generation failure: keep observing active work on the same requestRef, respecting nextCheckAt.',
-    'For provider-actionable-alert, inspect the returned evidence or team_get with requestRef. Report the actual visible error, not a guessed CAPTCHA or account issue. A visible provider recovery failure may require user refresh/recovery; do not poll it indefinitely or retry the submitted prompt. After recovery, inspect the same requestRef.',
+    'For provider-actionable-alert, inspect the returned evidence or team_get with requestRef. Report the actual visible error, not a guessed CAPTCHA or account issue. Use decide with decision:refresh and a stable requestId when the user requests page refresh or a visible recovery failure warrants it. It reloads only this request page without resending. Human verification still requires the user; do not poll it indefinitely or retry the submitted prompt. After recovery, inspect the same requestRef.',
   ].join(' ');
 }
 
