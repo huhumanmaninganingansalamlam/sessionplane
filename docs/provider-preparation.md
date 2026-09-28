@@ -34,6 +34,13 @@ The public contract is [team-centered MCP](team-workflow.md). Start with
 A pending preparation is a successful `status: needs_decision` result with a durable
 requestRef, requested model/effort, recorded choices and fresh evidence.
 
+Model and effort are intent hints, not a checklist of independent UI controls.
+The agent configures the observed controls and confirms the final configuration
+once using either purpose. A new model/effort choice replaces the previous
+configuration confirmation. Core verifies that selection before submission;
+the agent judges the full intent and follows explicit user corrections when
+request hints conflict. Choose submit after configuring all required controls.
+
 Use `sessionplane_decide` with that requestRef, a unique requestId, fresh snapshotId,
 observed ref and purpose. A reveal opens related model/effort options. A choose
 verifies and records the selected control, then continues the same request.

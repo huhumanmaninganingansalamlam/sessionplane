@@ -393,6 +393,9 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       assert.ok(target, 'Expected semantic control in fresh evidence');
       const args = { ...identity, requestId: purpose + decision + role, decision, purpose,
         snapshotId: evidence.snapshotId, ref: target.ref, ...(value === undefined ? {} : { value }) };
+      if (purpose === 'submit') {
+        await page.locator('#effort-button').evaluate(node => { node.textContent = 'High (updated)'; });
+      }
       const result = await invoke('sessionplane_decide', args);
       assert.equal(result.isError, false, JSON.stringify(result));
       if (purpose === 'submit') {

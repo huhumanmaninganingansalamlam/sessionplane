@@ -33,13 +33,14 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    choosing its options; opening it is not a model selection. Slider choices also
    take a numeric value, interpreted from the observed labels and range. Core
    executes the choice and continues the same request; there is no resume tool.
-   Choose composer and submit controls, and model/effort when requested. New UI
+   Choose the composer, requested configuration and submit controls. New UI
    evidence can require another choice. Never reuse stale UI refs.
    Choose the composer first to authorize replacing its restored draft with this
-   request's prompt. Confirm final model/effort evidence after all choices; changing
-   one can change the other. A popup or menu item displaying a separate selected
-   value can confirm without clicking. Confirm each requested purpose with fresh
-   evidence, even when both share a summary. Keep the same requestRef.
+   request's prompt. Model and effort describe intent, not required UI dimensions.
+   Configure any independent controls needed, then confirm the final configuration
+   once using model or effort and choose submit last. A newer configuration choice
+   replaces the prior confirmation. A displayed summary can confirm without clicking.
+   Follow explicit user corrections when request hints conflict. Keep the same requestRef.
    When the user requests a page refresh, or visible stream/history recovery
    failure warrants one, call `sessionplane_decide` with decision `refresh`,
    teamId, requestRef and a stable requestId. No snapshotId/ref/purpose is needed.

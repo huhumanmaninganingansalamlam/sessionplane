@@ -172,8 +172,8 @@ export class ChatGptSubmission implements ProviderSubmission {
       );
     }
 
-    const purposes = (['model', 'effort'] as const).filter((purpose) => this.#request[purpose] != null);
-    if (purposes.length > 0) {
+    const configuration = choices.model ?? choices.effort;
+    if (configuration !== undefined || this.#request.model != null || this.#request.effort != null) {
       const snapshot = await this.#preparationRefs.capture({
         pageKey: this.pageKey,
         bindingEpoch: this.#registry.refreshPage(this.pageKey).bindingEpoch,
@@ -181,14 +181,9 @@ export class ChatGptSubmission implements ProviderSubmission {
         ...CHATGPT_PREPARATION_SNAPSHOT,
         maxNodes: 5_000,
       });
-      const unconfirmed = purposes.filter((purpose) => {
-        const choice = choices[purpose];
-        return choice === undefined || snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, choice);
-      });
-      if (unconfirmed.length > 0) {
-        const requested = Object.fromEntries(unconfirmed.map((purpose) => [purpose, this.#request[purpose]]));
+      if (configuration === undefined || snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, configuration)) {
         throw new ProviderSubmissionError('provider.preparation-required',
-          `Confirm the final configuration for ${JSON.stringify(requested)}. One observed summary may confirm both purposes. If the requested settings cannot coexist, report the observed alternatives instead of alternating selections. Continue this requestRef.`);
+          'Inspect the requested model intent and current controls, then choose the final configuration using model or effort. One verified choice is sufficient; the request fields do not require separate UI controls. Continue this requestRef.');
       }
     }
 

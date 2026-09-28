@@ -923,7 +923,9 @@ export class SubmissionService {
           this.#requirePreparationOwner(input);
           if (selected.choice !== null) {
             const state = parsePreparationState(current);
-            choices = { ...state.choices, [selected.choice.purpose]: selected.choice };
+            const { model: _model, effort: _effort, ...otherChoices } = state.choices;
+            const configuration = selected.choice.purpose === 'model' || selected.choice.purpose === 'effort';
+            choices = { ...(configuration ? otherChoices : state.choices), [selected.choice.purpose]: selected.choice };
           }
           result = selected.result;
         }
