@@ -235,6 +235,8 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       <input type="file"><span id="uploaded-name"></span></form>
     <div role="menu" id="models" hidden><div role="menuitem">Model family</div></div>
     <div role="menu" id="effort-options" hidden>
+      <div aria-hidden="true" inert><div role="menuitem">Inactive submenu marker</div></div>
+      <span style="opacity:0">Invisible access hint</span>
       <div id="effort" role="menuitem" aria-label="Reasoning effort" aria-keyshortcuts="ArrowLeft ArrowRight" tabindex="0">Power<span role="slider" aria-hidden="true" aria-valuemin="1" aria-valuemax="4" aria-valuenow="1"></span></div>
       <span id="effort-help">High reasoning effort</span>
     </div>
@@ -388,6 +390,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
         await page.locator('#effort-button').evaluate((node) => node.setAttribute('aria-expanded', 'true'));
       }
       const evidence = await inspect();
+      assert.ok(evidence.nodes.every(node => !/Inactive submenu marker|Invisible access hint/.test(node.text)));
       const target = evidence.nodes.find((n) => n.role === role && n.name === name);
       assert.ok(target, 'Expected semantic control in fresh evidence');
       assert.ok(target.actions[decision].includes(purpose));

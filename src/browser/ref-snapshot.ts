@@ -151,12 +151,31 @@ export class BrowserRefSnapshotStore {
           return 'generic';
         };
 
+        const visibleTextCache = new WeakMap<Element, string>();
+        const visibleText = (element: Element): string => {
+          const cached = visibleTextCache.get(element);
+          if (cached !== undefined) return cached;
+          const style = getComputedStyle(element);
+          if (element.matches('[aria-hidden="true"], [inert], script, style, noscript, template') ||
+              style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return '';
+          const text = [...element.childNodes].map(child => {
+            if (child.nodeType === Node.TEXT_NODE) return child.textContent ?? '';
+            if (!(child instanceof Element)) return '';
+            const content = visibleText(child);
+            return child.tagName === 'BR' || !getComputedStyle(child).display.startsWith('inline')
+              ? `\n${content}\n` : content;
+          }).join('');
+          visibleTextCache.set(element, text);
+          return text;
+        };
+
         const evidenceText = (element: Element | null, rendered = false): string => {
           if (element === null) return '';
           if (controlScope && (element.matches('textarea, [contenteditable="true"], [role="textbox"]') ||
               element.querySelector('textarea, [contenteditable="true"], [role="textbox"]') !== null ||
               (excludeSelector !== null && (element.querySelector(excludeSelector) !== null ||
                 (element.closest(excludeSelector) !== null && element.closest('[role="alert"], [role="alertdialog"]') === null))))) return '';
+          if (rendered && controlScope) return visibleText(element);
           return rendered && element instanceof HTMLElement ? element.innerText : element.textContent ?? '';
         };
 
