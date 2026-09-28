@@ -70,6 +70,7 @@ test('generic browser control exposes snapshot-bound refs without focus identity
       bindingEpoch: registry.refreshPage(created.binding.pageKey).bindingEpoch,
       page: created.page,
     });
+    await Promise.all([browser.snapshot({ maxNodes: 50 }), browser.snapshot({ maxNodes: 50 })]);
 
     await browser.type({
       ref: input?.ref ?? '',
@@ -123,6 +124,17 @@ test('generic browser control exposes snapshot-bound refs without focus identity
     const bundle = await browser.observationBundle({ maxTextChars: 100 });
     assert.equal(bundle.schemaVersion, 'observation-bundle-v1');
     assert.equal(bundle.pageKey, created.binding.pageKey);
+
+    const beforeReplacement = await browser.snapshot({ maxNodes: 50 });
+    const replacedButton = beforeReplacement.nodes.find(node => node.name === 'Increment')!;
+    await created.page.getByRole('button', { name: 'Increment', exact: true }).evaluate(element => {
+      element.replaceWith(element.cloneNode(true));
+    });
+    await browser.snapshot({ maxNodes: 50 });
+    await assert.rejects(
+      browser.click({ ref: replacedButton.ref, snapshotId: beforeReplacement.snapshotId }),
+      (error: unknown) => error instanceof BrowserControlError && error.errorCode === 'browser.snapshot-stale',
+    );
 
     await browser.navigate({ url: 'https://browser.test/next' });
     await assert.rejects(

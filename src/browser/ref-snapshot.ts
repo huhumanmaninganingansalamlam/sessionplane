@@ -58,6 +58,7 @@ export interface BrowserSnapshot {
 
 interface SnapshotRecord {
   readonly snapshotId: string;
+  readonly scope: string;
   readonly bindingEpoch: number;
   readonly tokens: ReadonlyMap<string, string>;
   readonly refsByToken: ReadonlyMap<string, string>;
@@ -88,7 +89,7 @@ export class BrowserRefSnapshotStore {
     readonly controlScope?: boolean;
     readonly compact?: boolean;
   }): Promise<BrowserSnapshot> {
-    const snapshotId = randomUUID();
+    let snapshotId: string = randomUUID();
     const interactive = options.interactive ?? true;
     const maxNodes = Math.max(1, Math.min(5_000, options.maxNodes ?? 250));
     const evaluation = options.page.evaluate(
@@ -435,8 +436,21 @@ export class BrowserRefSnapshotStore {
       snapshotNodes.set(node.ref, value);
       return value;
     });
+    const scope = JSON.stringify([result.url, result.title, interactive, maxNodes,
+      options.rootSelector ?? null, options.excludeSelector ?? null,
+      options.controlScope ?? false, options.compact ?? false, result.truncated]);
+    const previous = this.#latestByPage.get(options.pageKey);
+    if (previous?.bindingEpoch === options.bindingEpoch && previous.scope === scope &&
+        previous.nodes.size === snapshotNodes.size && nodes.every(node => {
+          const prior = previous.nodes.get(node.ref);
+          return prior !== undefined && previous.tokens.get(node.ref) === tokens.get(node.ref) &&
+            sameSnapshotSemantics(prior, node);
+        })) {
+      snapshotId = previous.snapshotId;
+    }
     this.#latestByPage.set(options.pageKey, {
       snapshotId,
+      scope,
       bindingEpoch: options.bindingEpoch,
       tokens,
       refsByToken,
