@@ -1,7 +1,7 @@
 import { errors, type ElementHandle, type Page } from 'playwright-core';
 
 import { PageRegistry, PageRegistryError } from '../browser/page-registry.ts';
-import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionEvidence, isPreparationSummary, sameSnapshotSemantics, type BrowserSnapshot, type BrowserSnapshotNode } from '../browser/ref-snapshot.ts';
+import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionEvidence, isPreparationSummary, matchesPreparationTarget, sameSnapshotSemantics, type BrowserSnapshot, type BrowserSnapshotNode } from '../browser/ref-snapshot.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { PreparationPurpose, PreparationTarget } from '../providers/provider-adapter.ts';
@@ -146,6 +146,7 @@ export class SessionUiService {
           actionTimeout = error;
         }
         let after: BrowserSnapshot;
+        const target = toPreparationTarget(purpose, currentNode, input.value);
         const evidenceDeadline = performance.now() + 5_000;
         // Mutate once; wait for observable UI evidence rather than an animation delay.
         while (true) {
@@ -154,16 +155,19 @@ export class SessionUiService {
             page, ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: 5_000,
           });
           if (purpose !== 'model' && purpose !== 'effort') break;
+          const transitioned = ['menuitemradio', 'option', 'radio'].includes(currentNode.role) &&
+            !after.nodes.some((node) => matchesPreparationTarget(node, target)) &&
+            hasRevealedChoices(after.nodes, currentNode, currentObservation.nodes);
           const verified = reveal
             ? hasRevealedChoices(after.nodes, currentNode, currentObservation.nodes)
-            : hasPreparationSelectionEvidence(after.nodes, toPreparationTarget(purpose, currentNode, input.value));
+            : hasPreparationSelectionEvidence(after.nodes, target) || transitioned;
           if (verified) break;
           if (performance.now() >= evidenceDeadline) {
             throw actionTimeout ?? new SessionPlaneDomainError('provider.action-unknown', 'The chosen control did not show a verified selection or related choice list');
           }
           await page.waitForTimeout(100);
         }
-        let choice = reveal ? null : toPreparationTarget(purpose, currentNode, input.value);
+        let choice = reveal ? null : target;
         if (!reveal && currentNode.role === 'slider') {
           const openers = after.nodes.filter((node) => node.role === 'button' && node.expanded === true &&
             node.controls.some((id) => currentNode.ancestorIds.includes(id)));

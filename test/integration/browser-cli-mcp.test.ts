@@ -258,9 +258,8 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       };
       document.querySelector('#models').onclick = (event) => {
         if (event.target.getAttribute('role') !== 'menuitemradio') return;
-        event.target.setAttribute('aria-checked', 'true');
-        document.querySelector('#models-button').textContent = 'GPT-5.6 Sol';
-        document.querySelector('#models').hidden = true;
+        document.querySelector('#models-button').textContent = 'Configuration';
+        document.querySelector('#models').innerHTML = '<div role="menuitem" aria-label="Intermediate configuration">Family configured</div>';
       };
       document.querySelector('#effort').addEventListener('keydown', (event) => {
         const thumb = event.currentTarget.querySelector('[role=slider]');

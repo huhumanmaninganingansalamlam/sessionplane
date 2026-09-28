@@ -61,6 +61,9 @@ the current page and choose the affected control again; nothing was submitted.
 Core performs each mutation once and observes its result; unverified UI action
 outcomes remain typed `provider.action-unknown`. Use `sessionplane_stop` to cancel
 preparation and `sessionplane_wait` for exact answers and generated files.
+An option may replace itself with related configuration controls. That observed
+transition acknowledges the interaction, not the final configuration; submission
+still requires a selection verified against the current screen.
 
 Requested intent and observed selection are distinct. The agent is responsible
 for choosing evidence that satisfies the intent; a selected control alone does
