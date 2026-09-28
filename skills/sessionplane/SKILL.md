@@ -27,7 +27,11 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    effort. Every mutation needs a distinct stable requestId; retry that ID only
    with identical arguments. A stale roleRef requires refreshing team_get.
 4. `status: needs_decision` is a normal handoff, not a failed send. Interpret the
-   fresh evidence and recorded choices. `sessionplane_decide` takes the requestRef,
+   fresh evidence and recorded choices.
+   `evidence.interactive` describes the snapshot filter, not page capability or
+   permission: false includes noninteractive content. Use each control's role,
+   `disabled` and `editable` fields to assess the action.
+   `sessionplane_decide` takes the requestRef,
    fresh snapshotId/ref, purpose and `choose` or `reveal`. Model/effort reveal opens
    observed related options, including nested menu items. Reveal a submenu before
    choosing its options; opening it is not a model selection. Slider choices also
