@@ -65,6 +65,12 @@ test('generic browser control exposes snapshot-bound refs without focus identity
     assert.notEqual(select, undefined);
     assert.notEqual(upload, undefined);
 
+    await new BrowserRefSnapshotStore().capture({
+      pageKey: created.binding.pageKey,
+      bindingEpoch: registry.refreshPage(created.binding.pageKey).bindingEpoch,
+      page: created.page,
+    });
+
     await browser.type({
       ref: input?.ref ?? '',
       snapshotId: snapshot.snapshotId,

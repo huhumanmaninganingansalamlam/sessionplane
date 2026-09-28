@@ -276,15 +276,12 @@ export class BrowserRefSnapshotStore {
           if (include) {
             sequence += 1;
             const ref = `@e${sequence}`;
-            const token = `${browserSnapshotId}:${sequence}`;
-            try {
-              Object.defineProperty(element, refProperty, {
-                value: token,
-                configurable: true,
-                writable: true,
-              });
-            } catch {
-              (element as Element & Record<string, unknown>)[refProperty] = token;
+            const existingToken = (element as Element & Record<string, unknown>)[refProperty];
+            // Element identity survives independent inspections; snapshot freshness
+            // and current control semantics are checked separately before actions.
+            const token = typeof existingToken === 'string' ? existingToken : `${browserSnapshotId}:${sequence}`;
+            if (token !== existingToken) {
+              Object.defineProperty(element, refProperty, { value: token, configurable: true });
             }
             const rect = element.getBoundingClientRect();
             const input = element as HTMLInputElement;

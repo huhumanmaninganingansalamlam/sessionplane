@@ -1,4 +1,4 @@
-import type { ElementHandle, Page } from 'playwright-core';
+import { errors, type ElementHandle, type Page } from 'playwright-core';
 
 import { PageRegistry, PageRegistryError } from '../browser/page-registry.ts';
 import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionEvidence, isPreparationSummary, sameSnapshotSemantics, type BrowserSnapshot, type BrowserSnapshotNode } from '../browser/ref-snapshot.ts';
@@ -98,38 +98,44 @@ export class SessionUiService {
         if (input.value !== undefined && currentNode.role !== 'slider') {
           throw new SessionPlaneDomainError('input.invalid', 'A numeric value is only valid for a model or effort slider');
         }
-        if (reveal) {
-          if (input.value !== undefined) throw new SessionPlaneDomainError('input.invalid', 'A reveal cannot include a selected value');
-          await element.evaluate((target) => {
-            if ((target instanceof HTMLButtonElement && target.type === 'submit') ||
-                (target instanceof HTMLInputElement && target.type === 'submit') ||
-                target.getAttribute('aria-disabled') === 'true' || ('disabled' in target && Boolean(target.disabled))) {
-              throw new Error('Only an enabled non-submit chooser can reveal choices');
-            }
-          });
-          await element.click({ timeout: 5_000 });
-        }
-        if (!reveal && (purpose === 'model' || purpose === 'effort') && !['slider', 'button', 'menuitem'].includes(currentNode.role) && currentNode.selected !== true && currentNode.checked !== true) {
-          if (input.value !== undefined) throw new SessionPlaneDomainError('input.invalid', 'A value is only valid when choosing a slider value');
-          await element.click({ timeout: 5_000 });
-        }
-        if (!reveal && currentNode.role === 'slider') {
-          const value = input.value;
-          if (!['model', 'effort'].includes(purpose) || value === undefined || !Number.isFinite(value) || currentNode.ariaValueMin === null || currentNode.ariaValueMax === null || value < Number(currentNode.ariaValueMin) || value > Number(currentNode.ariaValueMax)) {
-            throw new SessionPlaneDomainError('input.invalid', 'A model or effort slider choice needs an explicit value within its observed range');
+        let actionTimeout: Error | undefined;
+        try {
+          if (reveal) {
+            if (input.value !== undefined) throw new SessionPlaneDomainError('input.invalid', 'A reveal cannot include a selected value');
+            await element.evaluate((target) => {
+              if ((target instanceof HTMLButtonElement && target.type === 'submit') ||
+                  (target instanceof HTMLInputElement && target.type === 'submit') ||
+                  target.getAttribute('aria-disabled') === 'true' || ('disabled' in target && Boolean(target.disabled))) {
+                throw new Error('Only an enabled non-submit chooser can reveal choices');
+              }
+            });
+            await element.click({ timeout: 5_000 });
           }
-          const adjustment = await element.evaluate((target, { requested, min, max, current }) => {
-            const nativeRange = target instanceof HTMLInputElement && target.type === 'range';
-            const step = nativeRange ? (target.step === '' ? 1 : Number(target.step)) : 1;
-            const count = (requested - current) / step;
-            if (!Number.isFinite(step) || step <= 0 || requested < min || requested > max ||
-                !Number.isFinite(current) || Math.abs(count - Math.round(count)) > 1e-7 || Math.abs(count) > 1_000) return null;
-            return { key: count < 0 ? 'ArrowLeft' as const : 'ArrowRight' as const, count: Math.abs(count) };
-          }, { requested: value, min: Number(currentNode.ariaValueMin), max: Number(currentNode.ariaValueMax),
-            current: Number(currentNode.ariaValueNow ?? currentNode.value ?? NaN) });
-          if (adjustment === null) throw new SessionPlaneDomainError('input.invalid', 'Slider value must match a supported native range step');
-          await element.focus();
-          for (let step = 0; step < adjustment.count; step += 1) await element.press(adjustment.key);
+          if (!reveal && (purpose === 'model' || purpose === 'effort') && !['slider', 'button', 'menuitem'].includes(currentNode.role) && currentNode.selected !== true && currentNode.checked !== true) {
+            if (input.value !== undefined) throw new SessionPlaneDomainError('input.invalid', 'A value is only valid when choosing a slider value');
+            await element.click({ timeout: 5_000 });
+          }
+          if (!reveal && currentNode.role === 'slider') {
+            const value = input.value;
+            if (!['model', 'effort'].includes(purpose) || value === undefined || !Number.isFinite(value) || currentNode.ariaValueMin === null || currentNode.ariaValueMax === null || value < Number(currentNode.ariaValueMin) || value > Number(currentNode.ariaValueMax)) {
+              throw new SessionPlaneDomainError('input.invalid', 'A model or effort slider choice needs an explicit value within its observed range');
+            }
+            const adjustment = await element.evaluate((target, { requested, min, max, current }) => {
+              const nativeRange = target instanceof HTMLInputElement && target.type === 'range';
+              const step = nativeRange ? (target.step === '' ? 1 : Number(target.step)) : 1;
+              const count = (requested - current) / step;
+              if (!Number.isFinite(step) || step <= 0 || requested < min || requested > max ||
+                  !Number.isFinite(current) || Math.abs(count - Math.round(count)) > 1e-7 || Math.abs(count) > 1_000) return null;
+              return { key: count < 0 ? 'ArrowLeft' as const : 'ArrowRight' as const, count: Math.abs(count) };
+            }, { requested: value, min: Number(currentNode.ariaValueMin), max: Number(currentNode.ariaValueMax),
+              current: Number(currentNode.ariaValueNow ?? currentNode.value ?? NaN) });
+            if (adjustment === null) throw new SessionPlaneDomainError('input.invalid', 'Slider value must match a supported native range step');
+            await element.focus();
+            for (let step = 0; step < adjustment.count; step += 1) await element.press(adjustment.key);
+          }
+        } catch (error) {
+          if (!(error instanceof errors.TimeoutError)) throw error;
+          actionTimeout = error;
         }
         let after: BrowserSnapshot;
         const evidenceDeadline = performance.now() + 5_000;
@@ -145,7 +151,7 @@ export class SessionUiService {
             : hasPreparationSelectionEvidence(after.nodes, toPreparationTarget(purpose, currentNode, input.value));
           if (verified) break;
           if (performance.now() >= evidenceDeadline) {
-            throw new SessionPlaneDomainError('provider.action-unknown', 'The chosen control did not show a verified selection or related choice list');
+            throw actionTimeout ?? new SessionPlaneDomainError('provider.action-unknown', 'The chosen control did not show a verified selection or related choice list');
           }
           await page.waitForTimeout(100);
         }

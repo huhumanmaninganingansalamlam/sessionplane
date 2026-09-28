@@ -249,6 +249,8 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       document.querySelector('#models-button').onclick = (event) => {
         event.currentTarget.setAttribute('aria-controls', 'models');
         setTimeout(() => { document.querySelector('#models').hidden = false; }, 350);
+        const busyUntil = performance.now() + 5_500;
+        while (performance.now() < busyUntil) { /* Model menu responds after click acknowledgement times out. */ }
       };
       document.querySelector('#effort-button').onclick = (event) => { event.currentTarget.setAttribute('aria-expanded', 'true'); document.querySelector('#effort-options').hidden = false; };
       document.querySelector('[role=menuitem]').onclick = () => {
