@@ -41,6 +41,9 @@ Composer selection can fill the prompt and reveal a previously hidden submit
 control. Submit selection can submit once all required choices are verified.
 There is no separate public resume operation. Subsequent decisions use newly
 returned evidence, or `team_get` with requestRef for a fresh inspection.
+If the editor does not retain the exact prompt or the selected send control
+becomes unavailable, preparation stays pending on the same requestRef. Inspect
+the current page and choose the affected control again; nothing was submitted.
 
 Core performs each mutation once and observes its result; unverified UI action
 outcomes remain typed `provider.action-unknown`. Use `sessionplane_stop` to cancel

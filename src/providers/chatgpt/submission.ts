@@ -167,8 +167,8 @@ export class ChatGptSubmission implements ProviderSubmission {
     if (!(await writeExactComposerValue(this.#page, composer, this.#request.prompt,
       () => this.#resolvePreparationTarget(choices.composer!, 0)))) {
       throw new ProviderSubmissionError(
-        'provider.composer-unavailable',
-        'ChatGPT composer value did not match the requested prompt',
+        'provider.preparation-required',
+        'The composer did not retain the exact prompt. Inspect the current editor and choose the composer again on this request.',
       );
     }
 
@@ -212,7 +212,7 @@ export class ChatGptSubmission implements ProviderSubmission {
 
     const sendButton = await this.#waitForEnabledPreparationTarget(choices.submit, 60_000);
     if (sendButton === null) {
-      throw new ProviderSubmissionError('provider.composer-unavailable', 'The chosen send control is unavailable after composer preparation');
+      throw new ProviderSubmissionError('provider.preparation-required', 'The chosen send control is unavailable. Inspect the current page and choose the submit control again on this request.');
     }
     this.#sendButton = sendButton;
     this.#requireExactPage();

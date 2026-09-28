@@ -356,6 +356,23 @@ test('MCP team decisions continue the same generation across restart, UI drift a
     assert.equal(stale.structuredContent.errorCode, 'browser.snapshot-stale');
     assert.equal(await page.locator('#models').isVisible(), false);
     await page.locator('#models-button').evaluate((node) => { node.textContent = 'Submit settings'; });
+    await page.locator('textarea').evaluate(element => {
+      element.setAttribute('data-reject-input', 'true');
+      element.addEventListener('input', () => {
+        if (element.hasAttribute('data-reject-input')) element.value = '';
+      });
+    });
+    const rejectedInput = await inspect();
+    const rejectedComposer = rejectedInput.nodes.find(node => node.role === 'textbox')!;
+    const stillPreparing = await invokeMcpTool({ name: 'sessionplane_decide',
+      arguments: { ...identity, requestId: 'composer-not-retained', decision: 'choose', purpose: 'composer',
+        snapshotId: rejectedInput.snapshotId, ref: rejectedComposer.ref },
+      socketPath: config.socketPath, timeoutMs: 20_000, maxLineBytes: config.rpcMaxLineBytes });
+    assert.equal(stillPreparing.isError, false, JSON.stringify(stillPreparing));
+    assert.equal(stillPreparing.structuredContent.status, 'needs_decision');
+    assert.equal(stillPreparing.structuredContent.requestRef, identity.requestRef);
+    assert.equal(stillPreparing.structuredContent.promptSubmitted, false);
+    await page.locator('textarea').evaluate(element => element.removeAttribute('data-reject-input'));
     let last: Record<string, unknown> = {};
     for (const [purpose, role, name, decision, value] of [
       ['composer', 'textbox', 'Prompt', 'choose'],
