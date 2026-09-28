@@ -413,7 +413,7 @@ class DomProviderSubmission implements ProviderSubmission {
     );
     const attachments = this.#request.attachments ?? [];
     if (attachments.length > 0) {
-      await uploadAttachments(this.#page, this.#selectors, attachments);
+      await uploadAttachments(this.#page, this.#selectors, attachments, composer);
     }
     await composer.fill(this.#request.prompt);
     if (!(await waitForComposerValue(composer, this.#request.prompt, 2_000))) {
@@ -881,6 +881,7 @@ async function uploadAttachments(
   page: Page,
   selectors: ProviderDomSelectors,
   attachments: readonly ProviderAttachment[],
+  composer: Locator,
 ): Promise<void> {
   const paths = attachments.map((attachment) => attachment.path);
   const input = await firstExisting(page, selectors.fileInputs);
@@ -921,7 +922,7 @@ async function uploadAttachments(
 
   const deadline = Date.now() + 20_000;
   do {
-    if (await attachmentsAcknowledged(page, attachments, selectors.attachmentEvidence,
+    if (await attachmentsAcknowledged(composer, attachments, selectors.attachmentEvidence,
       [...selectors.userMessages, ...selectors.assistantMessages])) return;
     await page.waitForTimeout(100);
   } while (Date.now() < deadline);

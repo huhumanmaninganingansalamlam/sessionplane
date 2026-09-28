@@ -191,7 +191,12 @@ export class ChatGptSubmission implements ProviderSubmission {
     this.#baselineConversationId = parseChatGptConversationId(this.#page.url());
     this.#baselineUserIds = await captureUserIdentitySet(this.#page);
     const attachments = this.#request.attachments ?? [];
-    if (attachments.length > 0) await uploadAttachments(this.#page, attachments);
+    if (attachments.length > 0) {
+      const currentComposer = await this.#resolvePreparationTarget(choices.composer, 0);
+      if (currentComposer === null) throw new ProviderSubmissionError('provider.preparation-required', 'The chosen composer is no longer available');
+      try { await uploadAttachments(this.#page, attachments, currentComposer); }
+      finally { await currentComposer.dispose(); }
+    }
 
     const sendButton = await this.#waitForEnabledPreparationTarget(choices.submit, 60_000);
     if (sendButton === null) {
@@ -400,6 +405,7 @@ async function assertChatOnlySurface(page: Page): Promise<void> {
 async function uploadAttachments(
   page: Page,
   attachments: readonly ProviderAttachment[],
+  composer: PreparationElement,
 ): Promise<void> {
   const paths = attachments.map((attachment) => attachment.path);
   const directInput = await firstExisting(page, CHATGPT_SELECTORS.fileInputs);
@@ -440,7 +446,7 @@ async function uploadAttachments(
 
   const deadline = Date.now() + 20_000;
   do {
-    if (await attachmentsAcknowledged(page, attachments, CHATGPT_SELECTORS.attachmentEvidence, [CHATGPT_SELECTORS.messages])) return;
+    if (await attachmentsAcknowledged(composer, attachments, CHATGPT_SELECTORS.attachmentEvidence, [CHATGPT_SELECTORS.messages])) return;
     await page.waitForTimeout(100);
   } while (Date.now() < deadline);
   throw new ProviderSubmissionError(

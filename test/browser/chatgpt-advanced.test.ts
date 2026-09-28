@@ -32,7 +32,8 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
         contentType: 'text/html',
         body: advancedFixture().replace('<section id="messages"></section>',
           '<section id="messages"><article data-message-author-role="user"><span data-testid="attachment-pill">context-one.txt context-two.md</span></article></section>')
-          .replace("host.appendChild(pill);", "setTimeout(() => host.appendChild(pill), 400);"),
+          .replace('<div id="attachments"></div>', '<form><span data-testid="attachment-pill">context-one.txt</span><span data-testid="attachment-pill">context-two.md</span></form><div id="attachments"></div>')
+          .replace("host.appendChild(pill);", "pill.textContent = 'old-' + file.name; host.appendChild(pill); setTimeout(() => { pill.textContent = file.name; }, 400);"),
       });
     });
     await created.page.goto('https://chatgpt.com/');

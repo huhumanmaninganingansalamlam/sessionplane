@@ -20,9 +20,10 @@ The same scope is used for inspection, decisions and pre-submit verification;
 answer text is read only by the provider observation path. Parent labels and
 accessibility descriptions cannot reintroduce excluded content. Hidden editors do
 not suppress load-failure evidence.
-Attachment acknowledgement reads visible attachment elements and the current
-input form, excluding editable content and the transcript. Providers share this
-check; file names in earlier messages cannot acknowledge a new upload. Exact prompt recovery binds
+Attachment acknowledgement is scoped to the chosen composer: its form, or its
+nearest attachment container when no form exists. It compares complete file names,
+excluding other forms, editable content and the transcript. Providers share this
+check; unrelated or partially matching names cannot acknowledge a new upload. Exact prompt recovery binds
 its content lookup to the observed message identity rather than a second DOM list's
 position.
 
