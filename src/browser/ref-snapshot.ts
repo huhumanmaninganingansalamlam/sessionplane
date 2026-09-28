@@ -593,10 +593,9 @@ export function matchesPreparationTarget(
     (target.placeholder === null || node.placeholder === target.placeholder);
 }
 
-export function isPreparationSummary(node: BrowserSnapshotNode, nodes: readonly BrowserSnapshotNode[]): boolean {
+export function isPreparationSummary(node: BrowserSnapshotNode, insideMenu: boolean): boolean {
   return node.role === 'menuitem' && node.name.trim() !== '' && node.text.trim() !== '' &&
-    node.text.trim() !== node.name.trim() && nodes.some((parent) =>
-      parent.role === 'menu' && parent.id !== '' && node.ancestorIds.includes(parent.id));
+    node.text.trim() !== node.name.trim() && insideMenu;
 }
 
 export function hasPreparationSelectionEvidence(
@@ -609,7 +608,8 @@ export function hasPreparationSelectionEvidence(
       Number(node.ariaValueNow ?? node.value) === target.selectedValue);
   }
   if (target.role === 'menuitem') return nodes.some((node) => matchesPreparationTarget(node, target) &&
-    isPreparationSummary(node, nodes));
+    isPreparationSummary(node, nodes.some((parent) =>
+      parent.role === 'menu' && parent.id !== '' && node.ancestorIds.includes(parent.id))));
   if (target.role === 'button') return nodes.some((node) => matchesPreparationTarget(node, target) &&
     node.hasPopup !== null);
   if (nodes.some((node) => matchesPreparationTarget(node, target) &&

@@ -35,7 +35,11 @@ export class SessionUiService {
 
   async inspect(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
     return await this.#submissions.withPendingPreparation(input,
-      async (session) => await this.#capture(session, input.maxNodes));
+      async (session) => {
+        const snapshot = await this.#capture(session, input.maxNodes);
+        const menuIds = new Set(snapshot.nodes.filter((node) => node.role === 'menu' && node.id !== '').map((node) => node.id));
+        return { ...snapshot, nodes: snapshot.nodes.map((node) => ({ ...node, actions: preparationActions(node, menuIds) })) };
+      });
   }
 
   async inspectSubmission(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
@@ -94,7 +98,11 @@ export class SessionUiService {
         if (!sameSnapshotSemantics(node, currentNode)) {
           throw new BrowserSnapshotError('browser.snapshot-stale', 'Selected control changed since it was inspected');
         }
-        validatePurposeTarget(purpose, currentNode, reveal, currentObservation.nodes);
+        const menuIds = new Set(currentObservation.nodes.filter((node) => node.role === 'menu' && node.id !== '').map((node) => node.id));
+        const actions = preparationActions(currentNode, menuIds);
+        if (!actions[reveal ? 'reveal' : 'choose'].includes(purpose)) {
+          throw new SessionPlaneDomainError('input.invalid', `The observed control does not support ${input.decision} for ${purpose}`);
+        }
         if (input.value !== undefined && currentNode.role !== 'slider') {
           throw new SessionPlaneDomainError('input.invalid', 'A numeric value is only valid for a model or effort slider');
         }
@@ -215,30 +223,23 @@ export interface PreparationOwner {
   readonly generation: number;
 }
 
-function validatePurposeTarget(purpose: PreparationPurpose, node: BrowserSnapshotNode, reveal: boolean, nodes: readonly BrowserSnapshotNode[]): void {
-  if (reveal && !['model', 'effort'].includes(purpose)) {
-    throw new SessionPlaneDomainError('input.invalid', 'Only model and effort controls can reveal choices');
+function preparationActions(node: BrowserSnapshotNode, menuIds: ReadonlySet<string>) {
+  const choose: PreparationPurpose[] = [];
+  const reveal: PreparationPurpose[] = [];
+  if (node.editable && node.role === 'textbox') choose.push('composer');
+  if (node.role === 'button' && ['button', 'input'].includes(node.tag)) choose.push('submit');
+  const insideMenu = node.ancestorIds.some((id) => menuIds.has(id));
+  if (!node.disabled) {
+    if (node.role === 'slider' || (node.role === 'button' && node.hasPopup !== null) ||
+        ['menuitemradio', 'option', 'radio'].includes(node.role) || isPreparationSummary(node, insideMenu)) {
+      choose.push('model', 'effort');
+    }
+    if ((node.role === 'menuitem' && insideMenu) || (node.role === 'button' &&
+        (node.controls.length > 0 || ['menu', 'listbox', 'dialog', 'true'].includes(node.hasPopup ?? '')))) {
+      reveal.push('model', 'effort');
+    }
   }
-  if ((purpose === 'model' || purpose === 'effort') && node.disabled) {
-    throw new SessionPlaneDomainError('input.invalid', 'Disabled choices cannot be selected');
-  }
-  if (node.role === 'slider' && (!['model', 'effort'].includes(purpose) || reveal)) {
-    throw new SessionPlaneDomainError('input.invalid', 'Sliders can only set an explicit model or effort value');
-  }
-  const selectableRole = ['menuitemradio', 'option', 'radio'];
-  const nestedMenuItem = node.role === 'menuitem' && nodes.some((parent) => parent.role === 'menu' && parent.id !== '' && node.ancestorIds.includes(parent.id));
-  if (reveal && !nestedMenuItem && (node.role !== 'button' || (node.controls.length === 0 && !['menu', 'listbox', 'dialog', 'true'].includes(node.hasPopup ?? '')))) {
-    throw new SessionPlaneDomainError('input.invalid', 'A chooser reveal must target a popup control or an item in an observed menu');
-  }
-  if ((purpose === 'model' || purpose === 'effort') && !reveal && node.role !== 'slider' && !(node.role === 'button' && node.hasPopup !== null) && !selectableRole.includes(node.role) && !isPreparationSummary(node, nodes)) {
-    throw new SessionPlaneDomainError('input.invalid', 'Model and effort choices must target a selectable option or an observed selection summary');
-  }
-  if (purpose === 'composer' && !(node.editable && node.role === 'textbox')) {
-    throw new SessionPlaneDomainError('input.invalid', 'Composer choice must target an editable textbox');
-  }
-  if (purpose === 'submit' && !(node.role === 'button' && ['button', 'input'].includes(node.tag))) {
-    throw new SessionPlaneDomainError('input.invalid', 'Submit choice must target an observed button control');
-  }
+  return { choose, reveal };
 }
 
 function hasRevealedChoices(nodes: readonly BrowserSnapshotNode[], opener: BrowserSnapshotNode, before: readonly BrowserSnapshotNode[]): boolean {

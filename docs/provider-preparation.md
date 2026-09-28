@@ -33,6 +33,12 @@ The public contract is [team-centered MCP](team-workflow.md). Start with
 `sessionplane_team_get`, then `sessionplane_send` using the returned roleRef.
 A pending preparation is a successful `status: needs_decision` result with a durable
 requestRef, requested model/effort, recorded choices and fresh evidence.
+Preparation nodes include `actions.choose` and `actions.reveal`: supported
+purposes derived from the same semantic rules used to validate decisions.
+These capabilities do not classify a button's meaning or authorize submission;
+the agent selects by observed labels, values and requested intent. Freshness,
+ownership and operation-specific checks still run at execution. Submitted
+request observations do not advertise preparation actions.
 
 Model and effort are intent hints, not a checklist of independent UI controls.
 The agent configures the observed controls and confirms the final configuration
@@ -211,8 +217,3 @@ keyboard receiver. Bounds and current value come from its unique descendant
 range, even when that visual thumb is accessibility-hidden. Actions use the
 receiver and freshly observed values; model names and tier ordering remain agent
 decisions. Hidden or inert menu views do not become actionable.
-
-Model and effort confirmations are validated against one observed configuration.
-All unresolved purposes are returned together. A shared control does not imply
-that conflicting requested values can coexist; the caller decides from the
-observed alternatives instead of alternating intermediate selections.

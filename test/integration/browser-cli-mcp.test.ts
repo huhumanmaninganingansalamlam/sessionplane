@@ -335,7 +335,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
     const inspect = async () => {
       const result = await invoke('sessionplane_team_get', identity);
       assert.equal(result.isError, false, JSON.stringify(result));
-      const request = result.structuredContent.request as { pageKey: string; evidence: { snapshotId: string; pageKey: string; nodes: Array<{ ref: string; role: string; name: string }> } };
+      const request = result.structuredContent.request as { pageKey: string; evidence: { snapshotId: string; pageKey: string; nodes: Array<{ ref: string; role: string; name: string; actions: { choose: string[]; reveal: string[] } }> } };
       assert.equal(request.pageKey, request.evidence.pageKey);
       return request.evidence;
     };
@@ -348,7 +348,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
     });
     const initial = await inspect();
     assert.ok(Buffer.byteLength(JSON.stringify(initial)) < 64 * 1024, 'Semantic evidence must retain controls without decorative DOM expansion');
-    assert.ok(initial.nodes.some((node) => node.role === 'textbox'));
+    assert.ok(initial.nodes.some((node) => node.actions.choose.includes('composer')));
     const opener = initial.nodes.find((n) => n.role === 'button' && n.name === 'Submit settings')!;
     const page = service.pageRegistry.pageForObservation(initial.pageKey);
     await page.locator('#models-button').evaluate((node) => { node.textContent = 'Changed'; });
@@ -391,6 +391,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       const evidence = await inspect();
       const target = evidence.nodes.find((n) => n.role === role && n.name === name);
       assert.ok(target, 'Expected semantic control in fresh evidence');
+      assert.ok(target.actions[decision].includes(purpose));
       const args = { ...identity, requestId: purpose + decision + role, decision, purpose,
         snapshotId: evidence.snapshotId, ref: target.ref, ...(value === undefined ? {} : { value }) };
       if (purpose === 'submit') {
