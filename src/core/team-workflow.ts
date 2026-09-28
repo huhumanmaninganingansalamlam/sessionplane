@@ -128,9 +128,13 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'refresh' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
+    if (input.decision === 'acknowledge') {
+      await this.services.submissions.acknowledgeSubmission({ ...owner, decisionId: input.requestId, messageId: input.messageId, evidenceHash: input.evidenceHash });
+      return await this.#observe(this.#request(input));
+    }
     if (input.decision === 'refresh') {
       const current = this.services.directory.getSession(request.sessionId);
       const prior = this.services.receipts.get(request.clientId, input.requestId);
@@ -272,13 +276,14 @@ export class TeamWorkflow {
         requested: { model: payload.model, effort: payload.effort, surface: payload.surface }, choices: preparation.choices,
         message: preparation.message };
     }
-    if ((snapshot.submissionState === 'submission_unknown' && inspectCurrent) ||
+    if ((snapshot.submissionState === 'submission_unknown' && snapshot.provider === 'chatgpt') ||
         (snapshot.provider === 'chatgpt' && !snapshot.terminal && snapshot.submissionState === 'submitted' &&
           (inspectCurrent || snapshot.reason === 'provider-actionable-alert'))) {
       try {
         if (snapshot.conversationId !== null) await this.services.ensurePage(snapshot.sessionId, snapshot.generation);
         const inspected = await this.services.ui.inspectSubmission({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });
         return { ...inspected.snapshot, requestRef: request.outboxId, roleRef: roleRef(inspected.snapshot),
+          ...((inspected.evidence?.submissionCandidates?.length ?? 0) > 0 ? { status: 'needs_decision' } : {}),
           evidence: inspected.evidence, requested: inspected.requested };
       } catch (error) {
         if (!(error instanceof SessionPlaneDomainError) ||

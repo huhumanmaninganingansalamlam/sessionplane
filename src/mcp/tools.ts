@@ -42,7 +42,7 @@ const descriptions: Record<keyof typeof workflowSchemas, string> = {
   session_replace: 'Replace a broken or long conversation using a fresh roleRef, keeping its provider and old results. If team_get shows a role with no session, use its roleKey instead to initialize it. Never replays prompts or deletes history.',
   session_delete: 'Permanently delete the exact completed provider conversation after retrieving needed answers/files. Rejects ambiguous, active or shared history.',
   send: 'Send to a fresh roleRef with the intended model/effort. Returns requestRef and needs_decision evidence or submission state.',
-  decide: 'Choose or reveal fresh observed controls and continue the pending request. decision:refresh reloads its owned page without submitting and needs only teamId, requestRef and requestId. Use stop to cancel.',
+  decide: 'Choose or reveal fresh observed controls. refresh reloads the owned page. For submission_unknown, inspect team_get submissionCandidates; acknowledge with the matching messageId and evidenceHash binds that existing message and reads its answer without sending. Choose only after checking the candidate against the requested prompt; leave unresolved candidates for user judgment. Use stop to cancel.',
   wait: 'Observe exact requestRefs, retrieve answers and capture generated files; outputDir exports them locally. Handle each result independently: needs_decision requires decide, active work requires waiting until nextCheckAt, and provider-actionable-alert requires inspecting evidence.',
   stop: 'Cancel preparation or stop generation for this exact requestRef without affecting a newer request.',
 };

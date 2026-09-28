@@ -517,6 +517,26 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     );
     assert.equal(afterRestart.openCount, 0);
     assert.equal(afterRestart.submitCount, 0);
+
+    // Restart recovery retains the provider conversation while acknowledgement is missing.
+    service.database.raw.prepare('UPDATE sessions SET conversation_id = ? WHERE session_id = ?')
+      .run('conversation-' + unknown.sessionId, unknown.sessionId);
+    const pending = service.database.raw.prepare('SELECT outbox_id AS id FROM outbox WHERE session_id = ? AND generation = 1')
+      .get(unknown.sessionId) as { id: string };
+    afterRestart.acknowledgementRecoveryMode = 'success';
+    const decision = { teamId: team.teamId, requestRef: pending.id, requestId: 'confirm-existing-message',
+      decision: 'acknowledge', messageId: 'recovered-user-message-1', evidenceHash: 'a'.repeat(64) };
+    await assert.rejects(rpc(config.socketPath, 'workflow.decide', { ...decision, messageId: 'wrong-message' }),
+      hasRpcError('browser.snapshot-stale'));
+    const confirmed = await rpc<SessionSnapshot>(config.socketPath, 'workflow.decide', decision);
+    assert.equal(confirmed.submittedUserMessageId, decision.messageId);
+    assert.equal(confirmed.generation, 1);
+    assert.equal(confirmed.submissionState, 'submitted');
+    const repeated = await rpc<SessionSnapshot>(config.socketPath, 'workflow.decide', decision);
+    assert.equal(repeated.submittedUserMessageId, decision.messageId);
+    await assert.rejects(rpc(config.socketPath, 'workflow.decide', { ...decision, evidenceHash: 'b'.repeat(64) }),
+      hasRpcError('input.idempotency-conflict'));
+    assert.equal(afterRestart.submitCount, 0);
   } finally {
     await service.close();
     rmSync(root, { recursive: true, force: true });

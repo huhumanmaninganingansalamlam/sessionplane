@@ -171,6 +171,7 @@ export class ChatGptAdapter implements ProviderAdapter {
           page,
           request.prompt,
           binding.conversationId,
+          request.selection,
         );
         if (acknowledgement === null ||
           this.#pageRegistry.refreshPage(pageKey).bindingEpoch !== binding.bindingEpoch) {
@@ -189,7 +190,8 @@ export class ChatGptAdapter implements ProviderAdapter {
         generation: request.generation,
         conversationId,
       });
-      return await recoverChatGptAcknowledgement(page, request.prompt, conversationId);
+      const acknowledgement = await recoverChatGptAcknowledgement(page, request.prompt, conversationId, request.selection);
+      return this.#pageRegistry.refreshPage(pageKey).bindingEpoch === binding.bindingEpoch ? acknowledgement : null;
     } catch {
       return null;
     }

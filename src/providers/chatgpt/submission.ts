@@ -1,4 +1,5 @@
-import type { ElementHandle, Locator, Page } from 'playwright-core';
+import { createHash } from 'node:crypto';
+import type { ElementHandle, Locator, Page, Request } from 'playwright-core';
 
 import type { PageRegistry } from '../../browser/page-registry.ts';
 import { parseChatGptConversationId } from '../../browser/page-binding.ts';
@@ -53,6 +54,23 @@ export class ChatGptSubmission implements ProviderSubmission {
   #sendButton: PreparationElement | null = null;
   #baselineConversationId: string | null = null;
   #baselineUserIds = new Set<string>();
+  readonly #sentMessageIds = new Set<string>();
+  readonly #captureSentIdentity = (request: Request): void => {
+    if (request.method() !== 'POST' || new URL(request.url()).origin !== new URL(this.#page.url()).origin) return;
+    try {
+      const body: unknown = request.postDataJSON();
+      if (body === null || typeof body !== 'object' || !('messages' in body) || !Array.isArray(body.messages)) return;
+      if (this.#baselineConversationId !== null && 'conversation_id' in body && body.conversation_id != null && body.conversation_id !== this.#baselineConversationId) return;
+      for (const message of body.messages as unknown[]) {
+        if (message === null || typeof message !== 'object' || !('id' in message) ||
+            typeof message.id !== 'string' || message.id === '' || !('author' in message)) continue;
+        const author = message.author;
+        if (author !== null && typeof author === 'object' && 'role' in author && author.role === 'user') {
+          this.#sentMessageIds.add(message.id);
+        }
+      }
+    } catch { /* Unrelated non-JSON browser requests do not carry message identities. */ }
+  };
 
   constructor(options: ChatGptSubmissionOptions) {
     this.#page = options.page;
@@ -207,6 +225,7 @@ export class ChatGptSubmission implements ProviderSubmission {
   }
 
   abandon(): void {
+    this.#page.off('request', this.#captureSentIdentity);
     void this.#page.close().catch(() => undefined);
   }
 
@@ -219,50 +238,56 @@ export class ChatGptSubmission implements ProviderSubmission {
       );
     }
     this.#requireExactPage();
+    this.#page.on('request', this.#captureSentIdentity);
     await this.#sendButton.click({ timeout: 5_000 });
   }
 
   async captureAcknowledgement(): Promise<ProviderSubmissionAcknowledgement | null> {
-    let deadline = Date.now() + this.#acknowledgementTimeoutMs;
-    let hydrationGraceApplied = false;
-    const hydrationGraceMs = acknowledgementHydrationGraceMs(this.#acknowledgementTimeoutMs);
-    while (Date.now() < deadline) {
-      const conversationId = parseChatGptConversationId(this.#page.url());
-      if (
-        hydrationGraceApplied === false &&
-        conversationId !== null &&
-        conversationId !== this.#baselineConversationId
-      ) {
-        deadline = Math.max(deadline, Date.now() + hydrationGraceMs);
-        hydrationGraceApplied = true;
-      }
-      const messages = (await readChatGptMessages(this.#page)).filter((message) => message.role === 'user');
-      for (let index = Math.max(0, messages.length - 8); index < messages.length; index += 1) {
-        const message = messages[index]!;
-        if (normalizeLineEndings(message.text) !== normalizeLineEndings(this.#request.prompt) &&
-          !(await messageHasExactPrompt(this.#page, message, this.#request.prompt))) {
-          continue;
+    try {
+      let deadline = Date.now() + this.#acknowledgementTimeoutMs;
+      let hydrationGraceApplied = false;
+      const hydrationGraceMs = acknowledgementHydrationGraceMs(this.#acknowledgementTimeoutMs);
+      while (Date.now() < deadline) {
+        const conversationId = parseChatGptConversationId(this.#page.url());
+        if (
+          hydrationGraceApplied === false &&
+          conversationId !== null &&
+          conversationId !== this.#baselineConversationId
+        ) {
+          deadline = Math.max(deadline, Date.now() + hydrationGraceMs);
+          hydrationGraceApplied = true;
         }
-        const identity = userIdentity(message);
-        if (identity !== null && this.#baselineUserIds.has(identity.identityKey)) {
-          continue;
-        }
-        if (identity === null || conversationId === null) {
-          if (hydrationGraceApplied === false) {
-            deadline = Math.max(deadline, Date.now() + hydrationGraceMs);
-            hydrationGraceApplied = true;
+        const messages = (await readChatGptMessages(this.#page)).filter((message) => message.role === 'user');
+        for (let index = Math.max(0, messages.length - 8); index < messages.length; index += 1) {
+          const message = messages[index]!;
+          if (!(message.messageId !== null && this.#sentMessageIds.has(message.messageId)) &&
+            normalizeLineEndings(message.text) !== normalizeLineEndings(this.#request.prompt) &&
+            !(await messageHasExactPrompt(this.#page, message, this.#request.prompt))) {
+            continue;
           }
-          continue;
+          const identity = userIdentity(message);
+          if (identity !== null && this.#baselineUserIds.has(identity.identityKey)) {
+            continue;
+          }
+          if (identity === null || conversationId === null) {
+            if (hydrationGraceApplied === false) {
+              deadline = Math.max(deadline, Date.now() + hydrationGraceMs);
+              hydrationGraceApplied = true;
+            }
+            continue;
+          }
+          return {
+            conversationId,
+            submittedUserMessageId: identity.messageId,
+            submittedUserTurnId: identity.turnId,
+          };
         }
-        return {
-          conversationId,
-          submittedUserMessageId: identity.messageId,
-          submittedUserTurnId: identity.turnId,
-        };
+        await this.#page.waitForTimeout(100);
       }
-      await this.#page.waitForTimeout(100);
+      return null;
+    } finally {
+      this.#page.off('request', this.#captureSentIdentity);
     }
-    return null;
   }
 
   bindAcknowledgement(acknowledgement: ProviderSubmissionAcknowledgement): void {
@@ -294,11 +319,19 @@ export async function recoverChatGptAcknowledgement(
   page: Page,
   prompt: string,
   expectedConversationId: string,
+  selection?: { readonly messageId: string; readonly evidenceHash: string },
 ): Promise<ProviderSubmissionAcknowledgement | null> {
   const conversationId = parseChatGptConversationId(page.url());
   if (conversationId !== expectedConversationId) return null;
 
   const messages = (await readChatGptMessages(page)).filter((message) => message.role === 'user');
+  if (selection !== undefined) {
+    const candidates = messages.filter((message) => userIdentity(message)?.messageId === selection.messageId &&
+      submissionEvidenceHash(conversationId, message) === selection.evidenceHash);
+    if (candidates.length !== 1) return null;
+    const identity = userIdentity(candidates[0]!);
+    return identity === null ? null : { conversationId, submittedUserMessageId: identity.messageId, submittedUserTurnId: identity.turnId };
+  }
   const matches = new Map<
     string,
     { readonly messageId: string; readonly turnId: string }
@@ -322,6 +355,20 @@ export async function recoverChatGptAcknowledgement(
     submittedUserMessageId: identity.messageId,
     submittedUserTurnId: identity.turnId,
   };
+}
+
+export async function inspectChatGptSubmissionCandidates(page: Page, conversationId: string) {
+  if (parseChatGptConversationId(page.url()) !== conversationId) return [];
+  return (await readChatGptMessages(page)).filter((message) => message.role === 'user').flatMap((message) => {
+    const identity = userIdentity(message);
+    return identity === null ? [] : [{ messageId: identity.messageId,
+      evidenceHash: submissionEvidenceHash(conversationId, message),
+      text: message.text.slice(0, 4000), textTruncated: message.text.length > 4000 }];
+  });
+}
+
+function submissionEvidenceHash(conversationId: string, message: ChatGptMessage): string {
+  return createHash('sha256').update(JSON.stringify([conversationId, message.messageId, message.turnId, message.text])).digest('hex');
 }
 
 async function assertChatGptAuthenticated(page: Page): Promise<void> {

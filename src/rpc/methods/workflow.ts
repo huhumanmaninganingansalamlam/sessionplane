@@ -19,6 +19,7 @@ export const workflowSchemas = {
   session_delete: z.object({ ...request, requestId, outputsRetrieved: z.literal(true) }).strict(),
   send: z.object({ ...mutation, roleRef, prompt: z.string().min(1).max(200_000), model: z.string().trim().min(1).max(200).optional(), effort: z.string().trim().min(1).max(200).optional(), files: z.array(z.string().min(1).max(20_000)).max(20).optional(), sessionDeadlineSec: z.number().int().min(1).max(86_400).default(5400) }).strict(),
   decide: z.union([
+    z.object({ ...request, requestId, decision: z.literal('acknowledge'), messageId: z.string().min(1).max(300), evidenceHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
     z.object({ ...request, requestId, decision: z.enum(['choose', 'reveal']), purpose: z.enum(['model', 'effort', 'composer', 'submit']), snapshotId: z.string().uuid(), ref: z.string().regex(/^@e\d+$/), value: z.number().optional() }).strict(),
     z.object({ ...request, requestId, decision: z.literal('refresh') }).strict(),
   ]),

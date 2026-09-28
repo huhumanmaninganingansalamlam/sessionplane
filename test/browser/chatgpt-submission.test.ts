@@ -9,9 +9,9 @@ import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry, PageRegistryError } from '../../src/browser/page-registry.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
-import { ChatGptSubmission, recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submission.ts';
+import { ChatGptSubmission, recoverChatGptAcknowledgement, inspectChatGptSubmissionCandidates } from '../../src/providers/chatgpt/submission.ts';
 
-test('ChatGPT read-only acknowledgement recovery requires one unique exact prompt identity', async () => {
+test('ChatGPT acknowledgement recovery uses exact text or an unchanged explicit message selection', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-ack-recovery-'));
   const prompt = 'Recover `C17=B` exactly';
   const registry = new PageRegistry();
@@ -53,6 +53,13 @@ test('ChatGPT read-only acknowledgement recovery requires one unique exact promp
       await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123'),
       null,
     );
+    const [candidate] = await inspectChatGptSubmissionCandidates(created.page, 'auditconv123');
+    assert.ok(candidate);
+    const selection = { messageId: candidate.messageId, evidenceHash: candidate.evidenceHash };
+    assert.equal((await recoverChatGptAcknowledgement(created.page, 'Original text with different formatting', 'auditconv123', selection))?.submittedUserMessageId, candidate.messageId);
+    assert.equal(await recoverChatGptAcknowledgement(created.page, prompt, 'other-conversation', selection), null);
+    await created.page.locator('[data-message-id="user-1"] .whitespace-pre-wrap').evaluate((element) => { element.textContent = 'edited'; });
+    assert.equal(await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123', selection), null);
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });
@@ -76,7 +83,9 @@ test('ChatGPT submission captures exact conversation and user-turn acknowledgeme
         status: 200,
         contentType: 'text/html',
         body: chatGptFixture(false)
-
+          .replace('window.sendCount += 1;', `window.sendCount += 1;
+            void fetch('/backend-api/conversation', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({messages:[{id:'user-message-1',author:{role:'user'}}]})});`)
+          .replace('message.textContent = prompt;', 'message.textContent = "Rendered wrapper: " + prompt;')
           .replace(
             '<button data-testid="send-button" type="button">Send</button>',
             '<button data-testid="send-button" type="button" disabled>Send</button><script>document.querySelector("#prompt-textarea").addEventListener("input", () => setTimeout(() => document.querySelector("[data-testid=send-button]").disabled = false, 500))</script>',
@@ -112,6 +121,7 @@ test('ChatGPT submission captures exact conversation and user-turn acknowledgeme
     assert.equal(await created.page.locator('#prompt-textarea').textContent(), request.prompt);
 
     await submission.submitOnce();
+    assert.notEqual(await created.page.locator('[data-message-id="user-message-1"]').innerText(), request.prompt);
     const acknowledgement = await submission.captureAcknowledgement();
     assert.deepEqual(acknowledgement, {
       conversationId: 'conversation-123456',

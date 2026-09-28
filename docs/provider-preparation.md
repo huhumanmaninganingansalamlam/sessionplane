@@ -103,6 +103,19 @@ original prompt/model/effort and current owned-page evidence. This also works
 after the automatic recovery window expires. Recovered identity starts the
 existing answer observer on the same generation. Inspection never submits.
 
+During submission, outgoing user-message IDs are correlated with observed provider
+messages. Prompt text matching is a fallback, not a requirement for an ID-confirmed
+submission. Provider formatting differences do not discard that identity.
+
+If automatic recovery cannot establish identity, inspection returns
+`submissionCandidates`, excluding messages already bound to a generation. Compare
+the candidate with the requested prompt and use `decide` with
+`decision: "acknowledge"`, its `messageId` and `evidenceHash`. This read-only provider
+action binds the existing message and starts answer observation; it never sends.
+The owned conversation, current generation and unchanged message evidence are
+rechecked. Unclear or truncated candidates require further inspection or user
+judgment, not guessing.
+
 If identity remains unproven, do not repeat waits as though generation were
 confirmed. A draft, absent message, missing CLI output or expired timeout does
 not prove non-submission. Inspect evidence and obtain an explicit operator

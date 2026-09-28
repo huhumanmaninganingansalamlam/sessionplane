@@ -6,6 +6,7 @@ import type { SessionSnapshot } from '../domain/session.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { PreparationPurpose, PreparationTarget } from '../providers/provider-adapter.ts';
 import { CHATGPT_PREPARATION_SNAPSHOT } from '../providers/chatgpt/selectors.ts';
+import { inspectChatGptSubmissionCandidates } from '../providers/chatgpt/submission.ts';
 import type { SubmissionService } from './submission-service.ts';
 
 export class SessionUiService {
@@ -39,7 +40,13 @@ export class SessionUiService {
 
   async inspectSubmission(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
     return await this.#submissions.inspectSubmission(input,
-      async (session) => await this.#capture(session, input.maxNodes));
+      async (session, submittedMessageIds) => ({
+        ...await this.#capture(session, input.maxNodes),
+        ...(session.submissionState !== 'submission_unknown' || session.conversationId === null ? {} : {
+          submissionCandidates: (await inspectChatGptSubmissionCandidates(this.#requirePage(session), session.conversationId))
+            .filter((candidate) => !submittedMessageIds.has(candidate.messageId)),
+        }),
+      }));
   }
 
   async #capture(session: SessionSnapshot, maxNodes?: number) {

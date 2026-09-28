@@ -192,33 +192,12 @@ test('spinner without an assistant candidate does not suppress exact backend rec
   }
 });
 
-test('expired submitted generation reports uncertainty while observation continues', async () => {
+test('an expired submitted generation still delivers its later final answer', async () => {
   const fixture = await createFixture('sessionplane-expired-observation-');
   const { config, fake, service } = fixture;
   try {
     const { session } = await createSession(config.socketPath, 'main', 'expired');
     await send(config.socketPath, session.sessionId, 'expired', 1);
-
-    await waitForSnapshot(
-      config.socketPath,
-      session.sessionId,
-      (snapshot) => snapshot.reason === 'session-deadline-unverified',
-    );
-    fake.emitObservation(session.sessionId, {
-      candidate: {
-        responseMessageId: 'assistant-after-deadline',
-        answerText: 'Part one',
-        terminalMarker: false,
-        streamingMarker: true,
-      },
-      activity: 'strong',
-    });
-    const resumed = await waitForSnapshot(
-      config.socketPath,
-      session.sessionId,
-      (snapshot) => snapshot.reason === 'assistant-generation-active',
-    );
-    assert.equal(resumed.providerState, 'generating');
 
     const expired = await waitForSnapshot(
       config.socketPath,
@@ -228,6 +207,18 @@ test('expired submitted generation reports uncertainty while observation continu
     assert.equal(expired.providerState, 'unknown');
     assert.equal(expired.terminal, false);
     assert.equal(expired.promptSubmitted, true);
+    fake.emitObservation(session.sessionId, {
+      candidate: {
+        responseMessageId: 'assistant-after-deadline',
+        answerText: 'Completed after the deadline',
+        terminalMarker: true,
+        streamingMarker: false,
+      },
+      activity: 'none',
+    });
+    const completed = await waitForSnapshot(config.socketPath, session.sessionId, (snapshot) => snapshot.terminal);
+    assert.equal(completed.answerText, 'Completed after the deadline');
+    assert.equal(completed.responseMessageId, 'assistant-after-deadline');
     assert.equal(fake.submitCount, 1);
   } finally {
     await service.close();

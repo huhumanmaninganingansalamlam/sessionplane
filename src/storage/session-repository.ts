@@ -404,6 +404,11 @@ export class SessionRepository {
     `).run(state, state === 'cancelled' ? 'stopped' : session.providerState, updatedAt, sessionId);
   }
 
+  submittedMessageIds(sessionId: string): Set<string> {
+    const rows = this.#database.prepare('SELECT submitted_user_message_id AS id FROM generations WHERE session_id = ? AND submitted_user_message_id IS NOT NULL').all(sessionId) as { id: string }[];
+    return new Set(rows.map((row) => row.id));
+  }
+
   getGenerationResult(sessionId: string, generation: number): Omit<GenerationRecord, 'sessionId' | 'teamBriefVersion' | 'promptHash'> | null {
     const row = this.#database.prepare(`SELECT generation, submission_state AS submissionState,
       submitted_user_message_id AS submittedUserMessageId, submitted_user_turn_id AS submittedUserTurnId,

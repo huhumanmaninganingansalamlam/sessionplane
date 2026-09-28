@@ -59,6 +59,7 @@ export interface ProviderAcknowledgementRecoveryRequest {
   readonly session: SessionSnapshot;
   readonly generation: number;
   readonly prompt: string;
+  readonly selection?: { readonly messageId: string; readonly evidenceHash: string };
 }
 
 export interface ProviderSubmission {

@@ -263,7 +263,31 @@ export class SubmissionService {
     return recovered;
   }
 
-  async recoverAcknowledgement(snapshot: SessionSnapshot): Promise<SessionSnapshot> {
+  async acknowledgeSubmission(input: { clientId: string; requestId: string; sessionId: string; generation: number; decisionId: string; messageId: string; evidenceHash: string }): Promise<SessionSnapshot> {
+    return await this.#requestMutex.runExclusive(JSON.stringify([input.clientId, input.decisionId]), async () => {
+      const receipts = new ReceiptRepository(this.#database);
+      const method = 'session.submission.acknowledge';
+      const requestHash = hashCanonical({ method, input });
+      const prior = receipts.get(input.clientId, input.decisionId);
+      if (prior !== null && (prior.method !== method || prior.requestHash !== requestHash)) {
+        throw new SessionPlaneDomainError('input.idempotency-conflict', 'Decision identity was reused with different arguments');
+      }
+      const outbox = this.#outbox.getByRequest(input.clientId, input.requestId);
+      const snapshot = this.#requireSnapshot(input.sessionId);
+      if (outbox === null || outbox.sessionId !== input.sessionId || outbox.generation !== input.generation || snapshot.generation !== input.generation) {
+        throw new SessionPlaneDomainError('session.generation-superseded', 'Acknowledgement requires the current caller-owned request');
+      }
+      if (snapshot.provider !== 'chatgpt') throw new SessionPlaneDomainError('capability.unsupported', 'Observed message selection currently supports ChatGPT only');
+      const recovered = await this.recoverAcknowledgement(snapshot, { messageId: input.messageId, evidenceHash: input.evidenceHash });
+      if (recovered.generation !== input.generation || recovered.submittedUserMessageId !== input.messageId) {
+        throw new SessionPlaneDomainError('browser.snapshot-stale', 'Selected submission evidence is unavailable or no longer current; inspect the same request');
+      }
+      receipts.record({ clientId: input.clientId, requestId: input.decisionId, method, requestHash, status: 'complete', result: recovered });
+      return recovered;
+    });
+  }
+
+  async recoverAcknowledgement(snapshot: SessionSnapshot, selection?: { readonly messageId: string; readonly evidenceHash: string }): Promise<SessionSnapshot> {
     if (
       snapshot.terminal ||
       snapshot.submissionState !== 'submission_unknown' ||
@@ -304,14 +328,19 @@ export class SubmissionService {
       if (currentPrompt === null) return current;
 
       return await this.#pageMutex.runExclusive(current.pageKey, async () => {
+        if (selection !== undefined && this.#sessions.submittedMessageIds(current.sessionId).has(selection.messageId)) {
+          throw new SessionPlaneDomainError('input.invalid', 'Selected message already belongs to another generation');
+        }
         const acknowledgement = await adapter.recoverAcknowledgement?.({
           session: current,
           generation: current.generation,
           prompt: currentPrompt,
+          ...(selection === undefined ? {} : { selection }),
         });
         if (
           acknowledgement === undefined ||
           acknowledgement === null ||
+          (selection !== undefined && acknowledgement.submittedUserMessageId !== selection.messageId) ||
           (acknowledgement.conversationId !== currentConversationId &&
             !(current.provider === 'chatgpt' &&
               currentConversationId.startsWith('WEB:') &&
@@ -693,7 +722,7 @@ export class SubmissionService {
 
   async inspectSubmission<Result>(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number },
-    observe: (snapshot: SessionSnapshot) => Promise<Result>,
+    observe: (snapshot: SessionSnapshot, submittedMessageIds: ReadonlySet<string>) => Promise<Result>,
   ) {
     const actor = this.#scheduler.actorFor(input.sessionId);
     const requireOwner = () => {
@@ -725,7 +754,7 @@ export class SubmissionService {
       };
       if (snapshot.pageKey === null) return { ...result, evidence: null };
       return await this.#pageMutex.runExclusive(snapshot.pageKey, async () => ({
-        ...result, evidence: await observe(snapshot),
+        ...result, evidence: await observe(snapshot, this.#sessions.submittedMessageIds(snapshot.sessionId)),
       }));
     });
   }
