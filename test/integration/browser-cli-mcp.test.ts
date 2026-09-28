@@ -246,6 +246,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       window.submitCount = 0;
       document.querySelector('[type=file]').onchange = (event) => {
         document.querySelector('#uploaded-name').textContent = event.target.files[0].name;
+        document.querySelector('#selection-summary [role=menuitem]').textContent = 'Updated configuration';
       };
       document.querySelector('textarea').addEventListener('input', () => { document.querySelector('[type=submit]').hidden = false; });
       document.querySelector('#models-button').onclick = (event) => {
@@ -408,6 +409,12 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       if (purpose === 'composer') assert.equal(await page.locator('textarea').inputValue(), send.prompt);
       last = args;
     }
+    assert.equal(service.teamDirectory.getSession(session.sessionId).promptSubmitted, false);
+    const finalEvidence = await inspect();
+    const finalConfiguration = finalEvidence.nodes.find(node => node.role === 'menuitem' && node.name === 'Model selection')!;
+    last = { ...identity, requestId: 'confirm-after-upload', decision: 'choose', purpose: 'model',
+      snapshotId: finalEvidence.snapshotId, ref: finalConfiguration.ref };
+    assert.equal((await invoke('sessionplane_decide', last)).isError, false);
     const submitted = service.teamDirectory.getSession(session.sessionId);
     assert.equal(submitted.generation, pending.structuredContent.generation);
     assert.equal(submitted.promptSubmitted, true);

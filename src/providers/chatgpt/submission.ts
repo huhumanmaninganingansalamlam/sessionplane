@@ -145,6 +145,23 @@ export class ChatGptSubmission implements ProviderSubmission {
     return null;
   }
 
+  async #verifyConfiguration(choices?: PreparationChoices): Promise<void> {
+    const configuration = choices?.model ?? choices?.effort;
+    if (configuration !== undefined || this.#request.model != null || this.#request.effort != null) {
+      const snapshot = await this.#preparationRefs.capture({
+        pageKey: this.pageKey,
+        bindingEpoch: this.#registry.refreshPage(this.pageKey).bindingEpoch,
+        page: this.#page,
+        ...CHATGPT_PREPARATION_SNAPSHOT,
+        maxNodes: 5_000,
+      });
+      if (configuration === undefined || snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, configuration)) {
+        throw new ProviderSubmissionError('provider.preparation-required',
+          'Inspect the requested model intent and current controls, then choose the final configuration using model or effort. One verified choice is sufficient; the request fields do not require separate UI controls. Continue this requestRef.');
+      }
+    }
+  }
+
   async prepare(choices?: PreparationChoices): Promise<void> {
     await this.prepareForObservation();
     const surface = normalizeLabel(this.#request.surface ?? '');
@@ -172,20 +189,7 @@ export class ChatGptSubmission implements ProviderSubmission {
       );
     }
 
-    const configuration = choices.model ?? choices.effort;
-    if (configuration !== undefined || this.#request.model != null || this.#request.effort != null) {
-      const snapshot = await this.#preparationRefs.capture({
-        pageKey: this.pageKey,
-        bindingEpoch: this.#registry.refreshPage(this.pageKey).bindingEpoch,
-        page: this.#page,
-        ...CHATGPT_PREPARATION_SNAPSHOT,
-        maxNodes: 5_000,
-      });
-      if (configuration === undefined || snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, configuration)) {
-        throw new ProviderSubmissionError('provider.preparation-required',
-          'Inspect the requested model intent and current controls, then choose the final configuration using model or effort. One verified choice is sufficient; the request fields do not require separate UI controls. Continue this requestRef.');
-      }
-    }
+    await this.#verifyConfiguration(choices);
 
     if (choices.submit === undefined) {
       throw new ProviderSubmissionError('provider.preparation-required', 'Prompt is prepared; inspect and choose the current submit control');
@@ -209,8 +213,14 @@ export class ChatGptSubmission implements ProviderSubmission {
     if (sendButton === null) {
       throw new ProviderSubmissionError('provider.preparation-required', 'The chosen send control is unavailable. Inspect the current page and choose the submit control again on this request.');
     }
-    this.#sendButton = sendButton;
-    this.#requireExactPage();
+    try {
+      await this.#verifyConfiguration(choices);
+      this.#requireExactPage();
+      this.#sendButton = sendButton;
+    } catch (error) {
+      await sendButton.dispose();
+      throw error;
+    }
   }
 
   abandon(): void {
