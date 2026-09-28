@@ -145,18 +145,6 @@ export class ChatGptSubmission implements ProviderSubmission {
     return null;
   }
 
-  async #hasSelectedPreparationTarget(target: PreparationTarget): Promise<boolean> {
-    const binding = this.#registry.refreshPage(this.pageKey);
-    const snapshot = await this.#preparationRefs.capture({
-      pageKey: this.pageKey,
-      bindingEpoch: binding.bindingEpoch,
-      page: this.#page,
-      ...CHATGPT_PREPARATION_SNAPSHOT,
-      maxNodes: 5_000,
-    });
-    return !snapshot.nodesTruncated && hasPreparationSelectionEvidence(snapshot.nodes, target);
-  }
-
   async prepare(choices?: PreparationChoices): Promise<void> {
     await this.prepareForObservation();
     const surface = normalizeLabel(this.#request.surface ?? '');
@@ -184,17 +172,23 @@ export class ChatGptSubmission implements ProviderSubmission {
       );
     }
 
-    for (const purpose of ['model', 'effort'] as const) {
-      const intent = this.#request[purpose];
-      const choice = choices[purpose];
-      if (intent == null) continue;
-      if (choice === undefined) {
+    const purposes = (['model', 'effort'] as const).filter((purpose) => this.#request[purpose] != null);
+    if (purposes.length > 0) {
+      const snapshot = await this.#preparationRefs.capture({
+        pageKey: this.pageKey,
+        bindingEpoch: this.#registry.refreshPage(this.pageKey).bindingEpoch,
+        page: this.#page,
+        ...CHATGPT_PREPARATION_SNAPSHOT,
+        maxNodes: 5_000,
+      });
+      const unconfirmed = purposes.filter((purpose) => {
+        const choice = choices[purpose];
+        return choice === undefined || snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, choice);
+      });
+      if (unconfirmed.length > 0) {
+        const requested = Object.fromEntries(unconfirmed.map((purpose) => [purpose, this.#request[purpose]]));
         throw new ProviderSubmissionError('provider.preparation-required',
-          `No ${purpose} choice is recorded for ${JSON.stringify(intent)}. Choose a matching observed selection; reveal only opens options. Continue this requestRef.`);
-      }
-      if (!(await this.#hasSelectedPreparationTarget(choice))) {
-        throw new ProviderSubmissionError('provider.preparation-required',
-          `Recorded ${purpose} choice ${JSON.stringify(choice.name || choice.text)} is no longer verified on the current page. Choose the current displayed summary matching ${JSON.stringify(intent)}. A shared model/effort control may change its label. Confirm its final summary separately for each requested purpose; do not reselect an intermediate option just to match the old label. Continue this requestRef; cancelling and resending does not repair the selection.`);
+          `Confirm the final configuration for ${JSON.stringify(requested)}. One observed summary may confirm both purposes. If the requested settings cannot coexist, report the observed alternatives instead of alternating selections. Continue this requestRef.`);
       }
     }
 

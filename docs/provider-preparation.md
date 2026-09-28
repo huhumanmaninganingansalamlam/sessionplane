@@ -201,3 +201,8 @@ keyboard receiver. Bounds and current value come from its unique descendant
 range, even when that visual thumb is accessibility-hidden. Actions use the
 receiver and freshly observed values; model names and tier ordering remain agent
 decisions. Hidden or inert menu views do not become actionable.
+
+Model and effort confirmations are validated against one observed configuration.
+All unresolved purposes are returned together. A shared control does not imply
+that conflicting requested values can coexist; the caller decides from the
+observed alternatives instead of alternating intermediate selections.
