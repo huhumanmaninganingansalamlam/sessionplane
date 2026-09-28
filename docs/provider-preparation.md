@@ -195,3 +195,9 @@ a visible actionable alert follows the exact submitted turn. Partial answer text
 does not establish completion while that alert is present. Inspect that session and generation to interpret the current provider
 evidence. This is not proof of non-submission or authorization to click retry.
 Read-only recovery continues; backend cooldown cannot hide the alert.
+
+Composite keyboard range controls expose one semantic slider ref on the visible
+keyboard receiver. Bounds and current value come from its unique descendant
+range, even when that visual thumb is accessibility-hidden. Actions use the
+receiver and freshly observed values; model names and tier ordering remain agent
+decisions. Hidden or inert menu views do not become actionable.

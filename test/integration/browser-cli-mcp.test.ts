@@ -235,7 +235,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       <input type="file"><span id="uploaded-name"></span></form>
     <div role="menu" id="models" hidden><div role="menuitem">Model family</div></div>
     <div role="menu" id="effort-options" hidden>
-      <input id="effort" aria-label="Reasoning effort" type="range" min="1" max="4" value="1">
+      <div id="effort" role="menuitem" aria-label="Reasoning effort" aria-keyshortcuts="ArrowLeft ArrowRight" tabindex="0">Power<span role="slider" aria-hidden="true" aria-valuemin="1" aria-valuemax="4" aria-valuenow="1"></span></div>
       <span id="effort-help">High reasoning effort</span>
     </div>
     <div role="menu" id="selection-summary" hidden><div role="menuitem" aria-label="Model selection">5.6 Pro</div></div>
@@ -261,12 +261,17 @@ test('MCP team decisions continue the same generation across restart, UI drift a
         document.querySelector('#models').hidden = true;
       };
       document.querySelector('#effort').addEventListener('keydown', (event) => {
+        const thumb = event.currentTarget.querySelector('[role=slider]');
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          thumb.setAttribute('aria-valuenow', String(Math.max(1, Math.min(4, Number(thumb.getAttribute('aria-valuenow')) + (event.key === 'ArrowRight' ? 1 : -1)))));
+          return;
+        }
         if (event.key !== 'Escape') return;
         document.querySelector('#effort-options').hidden = true;
         const button = document.querySelector('#effort-button');
         button.setAttribute('aria-expanded', 'false');
         button.removeAttribute('aria-controls');
-        button.textContent = event.currentTarget.value === '4' ? 'High' : 'Standard';
+        button.textContent = thumb.getAttribute('aria-valuenow') === '4' ? 'High' : 'Standard';
         document.querySelector('#models-button').textContent = '5.6 Pro';
         document.querySelector('#selection-summary').hidden = false;
       });

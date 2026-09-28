@@ -200,6 +200,7 @@ export class BrowserRefSnapshotStore {
 
         const isVisible = (element: Element): boolean => {
           if (!(element instanceof HTMLElement || element instanceof SVGElement)) return false;
+          if (element.closest('[aria-hidden="true"], [inert]') !== null) return false;
           const style = getComputedStyle(element);
           if (
             style.display === 'none' ||
@@ -246,6 +247,7 @@ export class BrowserRefSnapshotStore {
         let sequence = 0;
 
         const visit = (element: Element, depth: number, ancestorIds: readonly string[]): void => {
+          if (element.closest('[aria-hidden="true"], [inert]') !== null) return;
           if (nodes.length >= limit) {
             truncated = true;
             return;
@@ -256,7 +258,15 @@ export class BrowserRefSnapshotStore {
           const style = getComputedStyle(element);
           if (style.display === 'none' || Number(style.opacity) === 0) return;
           const visible = isVisible(element);
-          const role = inferredRole(element);
+          const keys = new Set((element.getAttribute('aria-keyshortcuts') ?? '').split(/\s+/));
+          const ranges = keys.has('ArrowLeft') && keys.has('ArrowRight')
+            ? [...element.querySelectorAll('[role="slider"][aria-valuemin][aria-valuemax][aria-valuenow]')]
+              .filter(range => range.closest('[aria-keyshortcuts]') === element)
+            : [];
+          // Composite controls expose their range on a hidden thumb, but keyboard
+          // input belongs to the visible receiver. Keep the ref on that receiver.
+          const range = ranges.length === 1 ? ranges[0]! : element;
+          const role = range === element ? inferredRole(element) : 'slider';
           const actionable = isInteractive(element, role);
           const ownText = [...element.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
           const meaningful = actionable || ownText || ['dialog', 'alert', 'status', 'heading', 'menu', 'group', 'radiogroup'].includes(role);
@@ -322,10 +332,10 @@ export class BrowserRefSnapshotStore {
               href: element instanceof HTMLAnchorElement ? element.href : null,
               placeholder: element.getAttribute('placeholder'),
               value: compact && role === 'textbox' ? null : value,
-              ariaValueText: element.getAttribute('aria-valuetext'),
-              ariaValueNow: element.getAttribute('aria-valuenow'),
-              ariaValueMin: element.getAttribute('aria-valuemin') ?? (input instanceof HTMLInputElement && input.type === 'range' ? input.min || '0' : null),
-              ariaValueMax: element.getAttribute('aria-valuemax') ?? (input instanceof HTMLInputElement && input.type === 'range' ? input.max || '100' : null),
+              ariaValueText: range.getAttribute('aria-valuetext'),
+              ariaValueNow: range.getAttribute('aria-valuenow'),
+              ariaValueMin: range.getAttribute('aria-valuemin') ?? (input instanceof HTMLInputElement && input.type === 'range' ? input.min || '0' : null),
+              ariaValueMax: range.getAttribute('aria-valuemax') ?? (input instanceof HTMLInputElement && input.type === 'range' ? input.max || '100' : null),
               description: describedBy.text,
               controls: relationship('aria-controls').ids,
               describedBy: describedBy.ids,

@@ -118,17 +118,15 @@ export class SessionUiService {
           if (!['model', 'effort'].includes(purpose) || value === undefined || !Number.isFinite(value) || currentNode.ariaValueMin === null || currentNode.ariaValueMax === null || value < Number(currentNode.ariaValueMin) || value > Number(currentNode.ariaValueMax)) {
             throw new SessionPlaneDomainError('input.invalid', 'A model or effort slider choice needs an explicit value within its observed range');
           }
-          const adjustment = await element.evaluate((target, requested) => {
+          const adjustment = await element.evaluate((target, { requested, min, max, current }) => {
             const nativeRange = target instanceof HTMLInputElement && target.type === 'range';
-            const min = Number(target.getAttribute('aria-valuemin') ?? (nativeRange ? target.min || 0 : NaN));
-            const max = Number(target.getAttribute('aria-valuemax') ?? (nativeRange ? target.max || 100 : NaN));
             const step = nativeRange ? (target.step === '' ? 1 : Number(target.step)) : 1;
-            const current = Number(target.getAttribute('aria-valuenow') ?? (nativeRange ? target.value : NaN));
             const count = (requested - current) / step;
             if (!Number.isFinite(step) || step <= 0 || requested < min || requested > max ||
                 !Number.isFinite(current) || Math.abs(count - Math.round(count)) > 1e-7 || Math.abs(count) > 1_000) return null;
             return { key: count < 0 ? 'ArrowLeft' as const : 'ArrowRight' as const, count: Math.abs(count) };
-          }, value);
+          }, { requested: value, min: Number(currentNode.ariaValueMin), max: Number(currentNode.ariaValueMax),
+            current: Number(currentNode.ariaValueNow ?? currentNode.value ?? NaN) });
           if (adjustment === null) throw new SessionPlaneDomainError('input.invalid', 'Slider value must match a supported native range step');
           await element.focus();
           for (let step = 0; step < adjustment.count; step += 1) await element.press(adjustment.key);
