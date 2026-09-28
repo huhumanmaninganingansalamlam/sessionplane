@@ -1,3 +1,4 @@
+import { attachmentsAcknowledged } from './attachment-evidence.ts';
 import { createHash } from 'node:crypto';
 
 import type { Locator, Page, Request, Response, WebSocket } from 'playwright-core';
@@ -920,28 +921,8 @@ async function uploadAttachments(
 
   const deadline = Date.now() + 20_000;
   do {
-    const expected = attachments.map((attachment) => normalizeLabel(attachment.name));
-    const body = normalizeLabel((await page.locator('body').innerText().catch(() => '')) ?? '');
-    if (expected.every((name) => body.includes(name))) return;
-
-    const evidence: string[] = [];
-    for (const selector of selectors.attachmentEvidence) {
-      const values = await page
-        .locator(selector)
-        .evaluateAll((elements) =>
-          elements.map((element) =>
-            [
-              element.textContent ?? '',
-              element.getAttribute('aria-label') ?? '',
-              element.getAttribute('title') ?? '',
-            ].join(' '),
-          ),
-        )
-        .catch(() => [] as string[]);
-      evidence.push(...values);
-    }
-    const normalizedEvidence = normalizeLabel(evidence.join(' '));
-    if (expected.every((name) => normalizedEvidence.includes(name))) return;
+    if (await attachmentsAcknowledged(page, attachments, selectors.attachmentEvidence,
+      [...selectors.userMessages, ...selectors.assistantMessages])) return;
     await page.waitForTimeout(100);
   } while (Date.now() < deadline);
   throw new ProviderSubmissionError(

@@ -292,13 +292,13 @@ test('preparation evidence omits transcript and draft text while retaining contr
     await owner.start();
     const { page, binding } = await owner.createPage();
     await page.setContent('<nav>History navigation</nav><main><section role=group><article>' + '<p>Earlier conversation text</p><button>Message action</button>'.repeat(1200) + '</article></section>' +
-      '<form><button aria-haspopup="menu">Selected tier</button><div role="menu"><label>Reasoning <input type="range" min="1" max="4" value="4"></label></div><div role="alert">Provider recovery needed</div><textarea aria-label="Prompt">Private draft</textarea></form></main>');
+      '<form><div role="group"><button aria-haspopup="menu" aria-describedby="old-message">Selected tier</button><div role="menu"><label>Reasoning <input type="range" min="1" max="4" value="4"></label></div><div role="alert">Provider recovery needed</div><div role="textbox" contenteditable="true" aria-label="Prompt">Private draft</div></div></form><article id="old-message">Earlier conversation</article></main>');
     const refs = new BrowserRefSnapshotStore();
     const capture = { page, pageKey: binding.pageKey, bindingEpoch: binding.bindingEpoch, ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: 20 };
     const snapshot = await refs.capture({ ...capture, interactive: false });
     assert.equal(snapshot.nodesTruncated, false);
     assert.ok(snapshot.nodes.some(node => node.role === 'alert'));
-    assert.equal(snapshot.nodes.some(node => /Earlier conversation|Message action|History navigation|Private draft/.test(node.name + node.text + node.value)), false);
+    assert.equal(snapshot.nodes.some(node => /Earlier conversation|Message action|History navigation|Private draft/.test(node.name + node.text + node.value + node.description)), false);
     for (const role of ['button', 'slider', 'textbox']) assert.ok(snapshot.nodes.some(node => node.role === role));
     const slider = snapshot.nodes.find(node => node.role === 'slider')!;
     assert.equal(Number(slider.ariaValueNow ?? slider.value), 4);
@@ -307,6 +307,10 @@ test('preparation evidence omits transcript and draft text while retaining contr
     await element.dispose();
     const controls = await refs.capture({ ...capture, interactive: true });
     assert.equal(controls.nodesTruncated, false);
+    await page.setContent('<form hidden><textarea></textarea></form><main><h1>Conversation unavailable</h1><button>Retry</button></main>');
+    const unavailable = await refs.capture(capture);
+    assert.ok(unavailable.nodes.some(node => node.text === 'Conversation unavailable'));
+    assert.ok(unavailable.nodes.some(node => node.role === 'button'));
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });

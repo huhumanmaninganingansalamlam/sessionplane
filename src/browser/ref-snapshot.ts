@@ -150,6 +150,15 @@ export class BrowserRefSnapshotStore {
           return 'generic';
         };
 
+        const evidenceText = (element: Element | null, rendered = false): string => {
+          if (element === null) return '';
+          if (controlScope && (element.matches('textarea, [contenteditable="true"], [role="textbox"]') ||
+              element.querySelector('textarea, [contenteditable="true"], [role="textbox"]') !== null ||
+              (excludeSelector !== null && (element.querySelector(excludeSelector) !== null ||
+                (element.closest(excludeSelector) !== null && element.closest('[role="alert"], [role="alertdialog"]') === null))))) return '';
+          return rendered && element instanceof HTMLElement ? element.innerText : element.textContent ?? '';
+        };
+
         const accessibleName = (element: Element): string => {
           const ariaLabel = element.getAttribute('aria-label');
           if (ariaLabel !== null && ariaLabel.trim() !== '') return normalize(ariaLabel);
@@ -157,7 +166,7 @@ export class BrowserRefSnapshotStore {
           if (labelledBy !== null) {
             const label = labelledBy
               .split(/\s+/)
-              .map((id) => document.getElementById(id)?.textContent ?? '')
+              .map((id) => evidenceText(document.getElementById(id)))
               .join(' ');
             if (label.trim() !== '') return normalize(label);
           }
@@ -165,13 +174,13 @@ export class BrowserRefSnapshotStore {
           if (htmlElement.id !== '') {
             try {
               const label = document.querySelector(`label[for="${CSS.escape(htmlElement.id)}"]`);
-              if (label?.textContent?.trim()) return normalize(label.textContent);
+              if (evidenceText(label).trim()) return normalize(evidenceText(label));
             } catch {
               // Ignore malformed ids and continue through the name fallback chain.
             }
           }
           const wrappingLabel = element.closest('label');
-          if (wrappingLabel?.textContent?.trim()) return normalize(wrappingLabel.textContent);
+          if (evidenceText(wrappingLabel).trim()) return normalize(evidenceText(wrappingLabel));
           const alt = element.getAttribute('alt');
           if (alt !== null && alt.trim() !== '') return normalize(alt);
           const title = element.getAttribute('title');
@@ -186,7 +195,7 @@ export class BrowserRefSnapshotStore {
               ? element.value
               : null;
           if (value !== null && value.trim() !== '') return normalize(value);
-          return normalize(element instanceof HTMLElement ? element.innerText : element.textContent);
+          return normalize(evidenceText(element, true));
         };
 
         const isVisible = (element: Element): boolean => {
@@ -280,7 +289,7 @@ export class BrowserRefSnapshotStore {
               const ids = (element.getAttribute(name) ?? '').trim().split(/\s+/).filter(Boolean);
               return {
                 ids,
-                text: ids.map((id) => document.getElementById(id)?.textContent?.trim() || '').join(' ').slice(0, 500),
+                text: ids.map((id) => evidenceText(document.getElementById(id)).trim()).join(' ').slice(0, 500),
               };
             };
             const describedBy = relationship('aria-describedby');
@@ -291,7 +300,7 @@ export class BrowserRefSnapshotStore {
               role,
               name: accessibleName(element),
               tag: element.tagName.toLowerCase(),
-              text: compact && role === 'textbox' ? '' : normalize(element instanceof HTMLElement ? element.innerText : element.textContent, 500),
+              text: compact && role === 'textbox' ? '' : normalize(evidenceText(element, true), 500),
               depth,
               ancestorIds: [...ancestorIds],
               disabled:
@@ -360,7 +369,7 @@ export class BrowserRefSnapshotStore {
             excludeSelector !== null && element.closest(excludeSelector) !== null;
           roots = [...document.querySelectorAll('[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], [role="alert"], [role="status"], [role="radiogroup"]')]
             .filter(element => !excluded(element));
-          const editors = [...document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')].filter(element => !excluded(element));
+          const editors = [...document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')].filter(element => !excluded(element) && isVisible(element));
           if (editors.length === 0) roots.push(...document.querySelectorAll('main, [role="main"]'));
           for (const editor of editors) {
             let region = editor.closest('form') ?? editor.parentElement ?? editor;

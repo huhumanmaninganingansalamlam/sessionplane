@@ -264,6 +264,7 @@ export class TeamWorkflow {
     if (recovery !== null) return { ...snapshot, requestRef: request.outboxId, roleRef: roleRef(snapshot), ...recovery };
     if (needsDecision(snapshot)) {
       const evidence = await this.services.ui.inspect({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });
+      snapshot = this.services.directory.getSession(request.sessionId);
       const stored = this.#outbox.requireById(request.outboxId);
       const payload = JSON.parse(stored.payloadJson) as Record<string, unknown>;
       const preparation = JSON.parse(stored.resultJson ?? '{}') as Record<string, unknown>;

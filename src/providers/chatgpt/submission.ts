@@ -17,6 +17,7 @@ import {
   navigateProviderPage,
   waitForProviderPageReady,
 } from '../human-verification.ts';
+import { attachmentsAcknowledged } from '../attachment-evidence.ts';
 import { CHATGPT_SELECTORS, CHATGPT_PREPARATION_SNAPSHOT } from './selectors.ts';
 import { readChatGptMessages, type ChatGptMessage } from './message-dom.ts';
 
@@ -234,7 +235,7 @@ export class ChatGptSubmission implements ProviderSubmission {
       for (let index = Math.max(0, messages.length - 8); index < messages.length; index += 1) {
         const message = messages[index]!;
         if (normalizeLineEndings(message.text) !== normalizeLineEndings(this.#request.prompt) &&
-          !(await messageHasExactPrompt(this.#page.locator(CHATGPT_SELECTORS.userMessages).nth(index), this.#request.prompt))) {
+          !(await messageHasExactPrompt(this.#page, message, this.#request.prompt))) {
           continue;
         }
         const identity = userIdentity(message);
@@ -300,7 +301,7 @@ export async function recoverChatGptAcknowledgement(
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index]!;
     if (normalizeLineEndings(message.text) !== normalizeLineEndings(prompt) &&
-      !(await messageHasExactPrompt(page.locator(CHATGPT_SELECTORS.userMessages).nth(index), prompt))) continue;
+      !(await messageHasExactPrompt(page, message, prompt))) continue;
     const identity = userIdentity(message);
     if (identity === null) continue;
     matches.set(identity.identityKey, {
@@ -439,7 +440,7 @@ async function uploadAttachments(
 
   const deadline = Date.now() + 20_000;
   do {
-    if (await attachmentsAcknowledged(page, attachments)) return;
+    if (await attachmentsAcknowledged(page, attachments, CHATGPT_SELECTORS.attachmentEvidence, [CHATGPT_SELECTORS.messages])) return;
     await page.waitForTimeout(100);
   } while (Date.now() < deadline);
   throw new ProviderSubmissionError(
@@ -454,34 +455,6 @@ async function firstExisting(page: Page, selectors: readonly string[]): Promise<
     if ((await candidate.count().catch(() => 0)) > 0) return candidate;
   }
   return null;
-}
-
-async function attachmentsAcknowledged(
-  page: Page,
-  attachments: readonly ProviderAttachment[],
-): Promise<boolean> {
-  const expected = attachments.map((attachment) => normalizeLabel(attachment.name));
-  const body = normalizeLabel((await page.locator('body').innerText().catch(() => '')) ?? '');
-  if (expected.every((name) => body.includes(name))) return true;
-
-  const evidence: string[] = [];
-  for (const selector of CHATGPT_SELECTORS.attachmentEvidence) {
-    const values = await page
-      .locator(selector)
-      .evaluateAll((elements) =>
-        elements.map((element) =>
-          [
-            element.textContent ?? '',
-            element.getAttribute('aria-label') ?? '',
-            element.getAttribute('title') ?? '',
-          ].join(' '),
-        ),
-      )
-      .catch(() => [] as string[]);
-    evidence.push(...values);
-  }
-  const normalizedEvidence = normalizeLabel(evidence.join(' '));
-  return expected.every((name) => normalizedEvidence.includes(name));
 }
 
 async function firstVisible(
@@ -597,7 +570,15 @@ async function composerHasExactValue(
   return values.some((value) => normalizeLineEndings(value) === normalizedExpected);
 }
 
-async function messageHasExactPrompt(message: Locator, expected: string): Promise<boolean> {
+async function messageHasExactPrompt(page: Page, identity: ChatGptMessage, expected: string): Promise<boolean> {
+  const id = identity.messageId ?? identity.turnId;
+  if (id === null) return false;
+  const escaped = await page.evaluate((value) => CSS.escape(value), id);
+  const identitySelector = identity.messageId !== null
+    ? `[data-message-id="${escaped}"], [data-chatgpt-search-message-ids~="${escaped}"]`
+    : `[data-turn-id="${escaped}"]`;
+  const message = page.locator(`:is(${identitySelector}):is(${CHATGPT_SELECTORS.userMessages}), :is(${identitySelector}) :is(${CHATGPT_SELECTORS.userMessages})`).first();
+  if (await message.count() === 0) return false;
   const normalizedExpected = normalizeLineEndings(expected);
   const matchesExactPrompt = async (): Promise<boolean> => {
     for (const selector of CHATGPT_SELECTORS.userMessageContent) {

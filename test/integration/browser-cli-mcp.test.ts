@@ -328,7 +328,9 @@ test('MCP team decisions continue the same generation across restart, UI drift a
     const inspect = async () => {
       const result = await invoke('sessionplane_team_get', identity);
       assert.equal(result.isError, false, JSON.stringify(result));
-      return (result.structuredContent.request as { evidence: { snapshotId: string; pageKey: string; nodes: Array<{ ref: string; role: string; name: string }> } }).evidence;
+      const request = result.structuredContent.request as { pageKey: string; evidence: { snapshotId: string; pageKey: string; nodes: Array<{ ref: string; role: string; name: string }> } };
+      assert.equal(request.pageKey, request.evidence.pageKey);
+      return request.evidence;
     };
     const ready = await inspect();
     const evidencePage = service.pageRegistry.pageForObservation(ready.pageKey);

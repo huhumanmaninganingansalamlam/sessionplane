@@ -43,6 +43,9 @@ test('ChatGPT read-only acknowledgement recovery requires one unique exact promp
     assert.equal((await recoverChatGptAcknowledgement(created.page, structuredPrompt, 'auditconv123'))?.submittedUserMessageId, 'user-1');
     assert.equal(await recoverChatGptAcknowledgement(created.page, structuredPrompt + ' changed', 'auditconv123'), null);
 
+    await created.page.setContent('<div data-message-id="old-user"><div data-message-author-role="user"><div data-message-author-role="user">Older prompt</div></div></div><div data-message-author-role="user" data-message-id="exact-user"><div class="whitespace-pre-wrap">Recover <code>C17=B</code> exactly</div></div>');
+    assert.equal((await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123'))?.submittedUserMessageId, 'exact-user');
+
     await created.page.setContent(
       '<div data-message-author-role="user" data-message-id="user-1" data-turn-id="turn-1"><div class="whitespace-pre-wrap">Recover <code>C17=B</code> exactly</div></div><div data-message-author-role="user" data-message-id="user-2" data-turn-id="turn-2"><div class="whitespace-pre-wrap">Recover <code>C17=B</code> exactly</div></div>',
     );

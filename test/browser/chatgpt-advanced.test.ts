@@ -30,7 +30,9 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
       await route.fulfill({
         status: 200,
         contentType: 'text/html',
-        body: advancedFixture(),
+        body: advancedFixture().replace('<section id="messages"></section>',
+          '<section id="messages"><article data-message-author-role="user"><span data-testid="attachment-pill">context-one.txt context-two.md</span></article></section>')
+          .replace("host.appendChild(pill);", "setTimeout(() => host.appendChild(pill), 400);"),
       });
     });
     await created.page.goto('https://chatgpt.com/');
@@ -62,7 +64,7 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
     await prepareFixture(submission, registry.pageForObservation(submission.pageKey));
     assert.equal(await created.page.locator('#chat').getAttribute('aria-checked'), 'true');
     assert.deepEqual(
-      await created.page.locator('[data-testid="attachment-pill"]').allTextContents(),
+      await created.page.locator('#attachments [data-testid="attachment-pill"]').allTextContents(),
       ['context-one.txt', 'context-two.md'],
     );
     assert.equal(
