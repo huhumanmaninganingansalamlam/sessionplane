@@ -105,8 +105,9 @@ and confirm the final active controls; unavailable intent requires a user decisi
 
 General search/research, context packaging, project-source management and code ZIP
 orchestration are outside the agent chat workflow. They are not optional MCP profiles
-or hidden commands behind a generic execute tool. Ordinary file upload and generated
-file retrieval remain chat capabilities.
+or hidden commands behind a generic execute tool. Generated file retrieval remains
+available. Attachment uploads default to disabled; operators can opt in with
+SESSIONPLANE_UPLOADS_ENABLED=true. Team snapshots report capabilities.uploadsEnabled.
 
 Unchanged invariants: semantic model intent, Chat-only surface, no provider fallback,
 no automatic ambiguous resend, exact answer ancestry, one mutation owner per page,

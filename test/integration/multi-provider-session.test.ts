@@ -18,6 +18,7 @@ test('ChatGPT, Gemini, and Grok sessions share team identity without cross-provi
     env: {},
     stateDir: '.state',
     enabledProviders: ['chatgpt', 'gemini', 'grok'],
+    uploadsEnabled: true,
     observationActiveSweepMs: 5,
     observationQuietSweepMs: 10,
     observationQuietWindowMs: 5,

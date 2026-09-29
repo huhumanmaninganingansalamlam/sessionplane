@@ -94,6 +94,10 @@ test('resolveConfig anchors runtime paths under an explicit state directory', ()
     assert.equal(config.probeMax429BackoffMs, 15 * 60_000);
     assert.equal(config.tokenCacheTtlMs, 60_000);
     assert.equal(config.maxUploadFileBytes, 100 * 1024 * 1024);
+    assert.equal(config.uploadsEnabled, false);
+    assert.equal(resolveConfig({ env: { SESSIONPLANE_UPLOADS_ENABLED: 'true' } }).uploadsEnabled, true);
+    assert.equal(resolveConfig({ env: { SESSIONPLANE_UPLOADS_ENABLED: 'false' } }).uploadsEnabled, false);
+    assert.throws(() => resolveConfig({ env: { SESSIONPLANE_UPLOADS_ENABLED: 'sometimes' } }), /must be a boolean/);
     assert.equal(config.chatgptUrl, 'https://chatgpt.com/');
     assert.equal(config.geminiUrl, 'https://gemini.google.com/app');
     assert.equal(config.grokUrl, 'https://grok.com/');

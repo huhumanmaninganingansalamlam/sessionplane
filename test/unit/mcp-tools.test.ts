@@ -52,6 +52,13 @@ test('team MCP deduplicates sends, rejects stale/cross-team refs and keeps concu
     assert.equal(service.teamDirectory.listTeams('sessionplane-mcp').teams.length, 0);
     const created = await invoke('team_create', { requestId: 'team' });
     assert.equal(created.isError, false);
+    assert.deepEqual(created.structuredContent.capabilities, { uploadsEnabled: false, downloadsEnabled: true });
+    const rejectedUpload = await invoke('send', { teamId: created.structuredContent.teamId,
+      roleRef: (created.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef,
+      requestId: 'disabled-upload', prompt: 'Review', files: ['/does-not-exist'] });
+    assert.equal(rejectedUpload.structuredContent.errorCode, 'capability.unsupported');
+    assert.equal(fake.submitCount, 0);
+    assert.deepEqual((await invoke('team_get', { teamId: created.structuredContent.teamId, history: true })).structuredContent.requests, []);
     const teamId = created.structuredContent.teamId;
     assert.equal((await invoke('team_create', { requestId: 'team' })).structuredContent.teamId, teamId);
     const withExpert = await invoke('role_create', { teamId, requestId: 'expert', roleKey: 'expert.database' });

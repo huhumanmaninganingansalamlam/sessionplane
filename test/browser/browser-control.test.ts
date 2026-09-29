@@ -25,6 +25,7 @@ test('generic browser control exposes snapshot-bound refs without focus identity
     browserOwner: owner,
     pageRegistry: registry,
     genericMutationsEnabled: true,
+    uploadsEnabled: true,
   });
 
   try {
@@ -88,6 +89,9 @@ test('generic browser control exposes snapshot-bound refs without focus identity
       snapshotId: snapshot.snapshotId,
       values: ['b'],
     });
+    const disabledUploads = new BrowserControlService({ browserOwner: owner, pageRegistry: registry, genericMutationsEnabled: true });
+    await assert.rejects(disabledUploads.upload({ ref: upload!.ref, files: ['/does-not-exist'] }),
+      (error: BrowserControlError) => error.errorCode === 'capability.unsupported');
     const uploadPath = path.join(root, 'attachment.txt');
     writeFileSync(uploadPath, 'attachment', 'utf8');
     await browser.upload({

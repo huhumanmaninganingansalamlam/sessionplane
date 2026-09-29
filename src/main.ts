@@ -188,6 +188,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageMutex: pageMutationMutex,
     adapters: providerAdapters,
     maxUploadFileBytes: config.maxUploadFileBytes,
+    uploadsEnabled: config.uploadsEnabled,
     onSubmitted: (snapshot) => observationService.start(snapshot),
     onSubmissionUnknown: (snapshot) =>
       recoveryService?.watchAcknowledgementRecovery(snapshot),
@@ -221,6 +222,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   const browserControl = new BrowserControlService({
     browserOwner,
     pageRegistry,
+    uploadsEnabled: config.uploadsEnabled,
     onStarted: async () => await recovery.restore({ forceObservers: true }),
   });
   const artifactService = new ArtifactService({

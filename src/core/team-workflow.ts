@@ -55,6 +55,7 @@ export class TeamWorkflow {
       : { requests: this.#outbox.listForTeam(team.teamId), nextRequestRef: null };
     return {
       ...team,
+      capabilities: { uploadsEnabled: this.services.submissions.uploadsEnabled, downloadsEnabled: true },
       roles: team.roles.map((r) => ({ ...r, roleRef: r.currentSessionId === null ? null : `${r.currentSessionId}:${r.generation}`,
         conversationUsage: this.#conversationUsage(r.currentSessionId) })),
       ...history,

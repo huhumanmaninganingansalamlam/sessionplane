@@ -72,6 +72,7 @@ interface PreparedOutbox {
 const PROVIDER_STAGE_TIMEOUT_MS = 120_000;
 
 export class SubmissionService {
+  readonly uploadsEnabled: boolean;
   readonly #database: SessionPlaneDatabase;
   readonly #directory: TeamDirectory;
   readonly #scheduler: ActorScheduler;
@@ -93,6 +94,7 @@ export class SubmissionService {
     readonly pageMutex: PageMutationMutex;
     readonly adapters: ProviderAdapterRegistry;
     readonly maxUploadFileBytes?: number;
+    readonly uploadsEnabled?: boolean;
     readonly onSubmitted?: (snapshot: SessionSnapshot) => void;
     readonly onSubmissionUnknown?: (snapshot: SessionSnapshot) => void;
     readonly now?: () => Date;
@@ -108,6 +110,7 @@ export class SubmissionService {
     this.#onSubmitted = options.onSubmitted ?? null;
     this.#onSubmissionUnknown = options.onSubmissionUnknown ?? null;
     this.#maxUploadFileBytes = options.maxUploadFileBytes ?? 100 * 1024 * 1024;
+    this.uploadsEnabled = options.uploadsEnabled ?? false;
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -419,6 +422,7 @@ export class SubmissionService {
   }
 
   async send(input: SessionSendInput): Promise<SessionSnapshot> {
+    if (input.files?.length) this.#requireUploadsEnabled();
     const prompt = validatePrompt(input.prompt);
     const model = normalizeOptional(input.model);
     const effort = normalizeOptional(input.effort);
@@ -540,6 +544,13 @@ export class SubmissionService {
     return uploads;
   }
 
+  #requireUploadsEnabled(): void {
+    if (!this.uploadsEnabled) {
+      throw new SessionPlaneDomainError('capability.unsupported',
+        'Attachment uploads are disabled. Downloads remain available. The operator can enable uploads with SESSIONPLANE_UPLOADS_ENABLED=true.');
+    }
+  }
+
   async #runPreparedSubmission(
     actor: SessionActor,
     prepared: PreparedOutbox,
@@ -549,6 +560,7 @@ export class SubmissionService {
   ): Promise<SessionSnapshot> {
     let submission: ProviderSubmission;
     try {
+      if (attachments.length > 0) this.#requireUploadsEnabled();
       const adapter = this.#adapters.require(prepared.snapshot.provider);
       submission = await adapter.openSubmission({
         session: prepared.snapshot,
@@ -700,6 +712,7 @@ export class SubmissionService {
     let attachments: readonly ProviderAttachment[];
     try {
       const expected = payload.uploadAttachments ?? payload.attachments;
+      if (expected.length > 0) this.#requireUploadsEnabled();
       attachments = await resolveProviderAttachments(
         expected.map((attachment) => attachment.path),
         this.#maxUploadFileBytes,

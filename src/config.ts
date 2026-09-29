@@ -45,6 +45,7 @@ export interface SessionPlaneConfig {
   readonly probeMax429BackoffMs: number;
   readonly tokenCacheTtlMs: number;
   readonly maxUploadFileBytes: number;
+  readonly uploadsEnabled: boolean;
   readonly maxArtifactFileBytes: number;
   readonly chatgptUrl: string;
   readonly geminiUrl: string;
@@ -78,6 +79,7 @@ export interface ConfigOverrides {
   readonly probeMax429BackoffMs?: number;
   readonly tokenCacheTtlMs?: number;
   readonly maxUploadFileBytes?: number;
+  readonly uploadsEnabled?: boolean;
   readonly maxArtifactFileBytes?: number;
   readonly chatgptUrl?: string;
   readonly geminiUrl?: string;
@@ -308,6 +310,8 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
     tokenCacheTtlMs:
       overrides.tokenCacheTtlMs ??
       parsePositiveInteger(env.SESSIONPLANE_TOKEN_CACHE_TTL_MS, 60_000, 'Token cache TTL'),
+    uploadsEnabled: overrides.uploadsEnabled ??
+      parseBoolean(env.SESSIONPLANE_UPLOADS_ENABLED, false, 'SESSIONPLANE_UPLOADS_ENABLED'),
     maxUploadFileBytes:
       overrides.maxUploadFileBytes ??
       parsePositiveInteger(
@@ -362,4 +366,3 @@ export function prepareRuntimeDirectories(config: SessionPlaneConfig): void {
     chmodSync(directory, 0o700);
   }
 }
-

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,7 @@ import test from 'node:test';
 import { callRpc, RpcClientError } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore, type CoreService } from '../../src/main.ts';
+import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 interface TeamSnapshot {
@@ -37,7 +38,39 @@ interface ArtifactList {
   readonly failures?: readonly Record<string, unknown>[];
 }
 
-test('provider uploads are hashed before submit and generated artifacts are durable', async () => {
+test('disabling uploads after restart prevents a pending attachment from submitting', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-upload-restart-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', uploadsEnabled: true });
+  const fake = new FakeProviderAdapter();
+  const open = fake.openSubmission.bind(fake);
+  t.mock.method(fake, 'openSubmission', async (...args: Parameters<typeof open>) => ({
+    ...await open(...args), prepareForObservation: async () => {},
+  }));
+  fake.prepareError = new ProviderSubmissionError('provider.preparation-required', 'Choose composer');
+  const start = (uploadsEnabled: boolean) => startCore({ config: { ...config, uploadsEnabled },
+    startBrowser: false, providerAdapters: [fake], logger: silentLogger() });
+  let service = await start(true);
+  try {
+    const file = path.join(root, 'input.txt');
+    writeFileSync(file, 'Attachment context');
+    const team = service.teamDirectory.createTeam({ clientId: 'upload-test' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    const identity = { clientId: 'upload-test', requestId: 'pending', sessionId: session.sessionId, generation: 1 };
+    await assert.rejects(service.submissionService.send({ ...identity, prompt: 'Review', files: [file], sessionDeadlineSec: 600 }),
+      (error: { errorCode: string }) => error.errorCode === 'provider.preparation-required');
+    await service.close();
+    service = await start(false);
+    await service.submissionService.withPendingPreparation(identity, async () => {});
+    const opened = fake.openCount;
+    await assert.rejects(service.submissionService.resumePreparation(identity),
+      (error: { errorCode: string }) => error.errorCode === 'capability.unsupported');
+    assert.equal(fake.openCount, opened);
+    assert.equal(fake.submitCount, 0);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).submissionState, 'failed_pre_submit');
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('uploads default off while generated artifacts remain downloadable and durable', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-provider-artifact-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const fake = new FakeProviderAdapter('chatgpt');
@@ -62,6 +95,11 @@ test('provider uploads are hashed before submit and generated artifacts are dura
       roleKey: 'main',
       provider: 'chatgpt',
     });
+    await assert.rejects(rpc(config.socketPath, 'session.send', {
+      clientId: 'artifact-client', requestId: 'disabled-upload', sessionId: session.sessionId,
+      prompt: 'Review file', files: ['/does-not-exist'], sessionDeadlineSec: 600,
+    }), (error: RpcClientError) => (error.data as { errorCode: string }).errorCode === 'capability.unsupported');
+    assert.equal(fake.submitCount, 0);
     const submitted = await rpc<SessionSnapshot>(config.socketPath, 'session.send', {
       clientId: 'artifact-client',
       requestId: 'artifact-send',
@@ -242,4 +280,3 @@ function silentLogger() {
     error() {},
   };
 }
-

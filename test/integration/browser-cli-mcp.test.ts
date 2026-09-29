@@ -309,7 +309,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
     </script>
   </body></html>`;
   const base = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
-  const config = { ...base, chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 250 };
+  const config = { ...base, uploadsEnabled: true, chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 250 };
   const start = async () => await startCore({ config, browserHeadless: true, logger: silentLogger() });
   let service: CoreService = await start();
   installPreparationFixtureRoute(service, fixture);

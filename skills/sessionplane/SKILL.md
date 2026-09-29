@@ -130,5 +130,6 @@ out prompts, infer consensus, or inject answers into other roles.
   Human verification must be completed by a human; never solve or bypass it.
 
 Search, context packaging, project-source management and special code ZIP flows
-are not SessionPlane tools. Use the agent's existing file/search tools and attach
-needed files to ordinary sends.
+are not SessionPlane tools. Use the agent's existing file/search tools and include
+needed text in the prompt. Uploads are disabled by default; send files only when
+the team's capabilities.uploadsEnabled is true. Downloads remain available.

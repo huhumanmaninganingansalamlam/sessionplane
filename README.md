@@ -197,12 +197,15 @@ automation transport, use sessplane login --manual --json, complete sign-in in
 the visible dedicated provider window, then run sessplane login --resume --json.
 
 Provider sessions support ChatGPT, Gemini, and Grok, including exact local file
-uploads and durable artifact capture.
+uploads (disabled by default) and durable artifact capture.
 
 ## Attachments, results and skills
 
-Attach ordinary files through `sessionplane_send.files`. Accepted bytes are retained
-for preparation and restart even if source files change. `sessionplane_wait`
+Downloads remain enabled. Attachment uploads are disabled by default. An operator
+can opt in by setting `SESSIONPLANE_UPLOADS_ENABLED=true` for the core process.
+Team snapshots expose `capabilities.uploadsEnabled`. When enabled, attach files
+through `sessionplane_send.files`; accepted bytes survive preparation and restart.
+`sessionplane_wait`
 returns exact answers and captured generated-file descriptors; outputDir exports
 files with their original integrity metadata. Check per-file capture failures.
 

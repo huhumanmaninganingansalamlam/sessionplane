@@ -17,7 +17,7 @@ export const workflowSchemas = {
   role_retire: z.object({ ...mutation, roleRef }).strict(),
   session_replace: z.object({ ...mutation, roleRef: roleRef.optional(), roleKey: z.string().trim().min(1).max(80).optional().describe('Instead of roleRef, use the observed roleKey only when the role has no session.'), provider: provider.removeDefault().optional().describe('Only for an empty role; defaults to chatgpt. Existing conversations retain their provider.') }).strict(),
   session_delete: z.object({ ...request, requestId, outputsRetrieved: z.literal(true) }).strict(),
-  send: z.object({ ...mutation, roleRef, prompt: z.string().min(1).max(200_000), model: z.string().trim().min(1).max(200).optional(), effort: z.string().trim().min(1).max(200).optional(), files: z.array(z.string().min(1).max(20_000)).max(20).optional(), sessionDeadlineSec: z.number().int().min(1).max(86_400).default(5400) }).strict(),
+  send: z.object({ ...mutation, roleRef, prompt: z.string().min(1).max(200_000), model: z.string().trim().min(1).max(200).optional(), effort: z.string().trim().min(1).max(200).optional(), files: z.array(z.string().min(1).max(20_000)).max(20).optional().describe('Attachment paths. Uploads are disabled by default; use only when team capabilities.uploadsEnabled is true.'), sessionDeadlineSec: z.number().int().min(1).max(86_400).default(5400) }).strict(),
   decide: z.union([
     z.object({ ...request, requestId, decision: z.literal('discover') }).strict(),
     z.object({ ...request, requestId, decision: z.literal('configure'), configurationId: z.string().regex(/^[a-f0-9]{24}$/).describe('Copy the ID of the desired combined configuration from configurationCatalog.options.') }).strict(),
