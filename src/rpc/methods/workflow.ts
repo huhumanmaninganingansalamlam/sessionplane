@@ -23,7 +23,7 @@ export const workflowSchemas = {
     z.object({ ...request, requestId, decision: z.literal('configure'), configurationId: z.string().regex(/^[a-f0-9]{24}$/).describe('Copy the ID of the desired combined configuration from configurationCatalog.options.') }).strict(),
     z.object({ ...request, requestId, decision: z.literal('acknowledge'), messageId: z.string().min(1).max(300), evidenceHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
     z.object({ ...request, requestId, decision: z.enum(['choose', 'reveal']), purpose: z.enum(['model', 'effort', 'composer', 'submit']), snapshotId: z.string().uuid(), ref: z.string().regex(/^@e\d+$/), value: z.number().optional() }).strict(),
-    z.object({ ...request, requestId, decision: z.literal('refresh') }).strict(),
+    z.object({ ...request, requestId, decision: z.enum(['refresh', 'focus']) }).strict(),
   ]),
   wait: z.object({ teamId, requestRefs: z.array(requestRef).min(1), waitMs: z.number().int().min(0).max(120_000).default(30_000), outputDir: z.string().min(1).optional() }).strict(),
   stop: z.object({ ...request, requestId }).strict(),

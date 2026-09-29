@@ -301,6 +301,7 @@ function serverInstructions(): string {
     'Preserve requested model/mode across replacements and honor explicit user corrections. Select an exact matching observed configuration; do not substitute a different version or treat account badges as configuration.',
     'Never resend submission_unknown. Use team_get with requestRef for read-only recovery.',
     'wait returns exact answers and files. waitExpired, backend-http-429 and probe pacing alone do not establish generation failure. Continue active work with bounded wait calls on the same requestRef and positive waitMs, including before nextCheckAt. nextCheckAt schedules core backend probes only, not result collection. Do not sleep until it: DOM observation continues and wait can return completion earlier. The core enforces probe cooldowns; do not bypass them with refresh or resend.',
+    'When the user wants to view or control a request in the browser, use decide decision focus with its teamId, requestRef and a fresh requestId. It activates only the exact connected tab; it never reloads, submits or opens another tab. Do not focus automatically during background work.',
     'For provider-actionable-alert, inspect evidence and report the visible error. decide refresh reloads the exact request page without resending when requested or warranted by visible recovery failure. Reinspect the same requestRef afterward. Await user action for human verification or persisting failures; do not poll indefinitely.',
   ].join(' ');
 }

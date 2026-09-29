@@ -75,6 +75,14 @@ out prompts, infer consensus, or inject answers into other roles.
 
 ## Recovery and cleanup
 
+- When the user asks to view or manually control a conversation, call
+  `sessionplane_decide` with `decision: "focus"`, its `teamId`, current `requestRef`
+  and a fresh stable `requestId`. It brings the connected tab to the foreground
+  without refreshing, resending or creating a tab. This also works for a current
+  completed request. A missing or mismatched tab returns an error; do not focus
+  an unrelated tab. Background observation never requires focus. After human
+  intervention, inspect the same request again before further decisions.
+
 - Select the requested combined model/effort label from the observed catalog.
   Preserve requested model/mode through cancellation and replacement. Honor exact
   versions; do not substitute or infer Pro from an account badge or High effort.

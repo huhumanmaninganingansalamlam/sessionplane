@@ -4,7 +4,7 @@ import type { SessionSnapshot } from '../domain/session.ts';
 import { ProviderSubmissionError, type ProviderName } from '../providers/provider-adapter.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import { OutboxRepository, type OutboxRecord } from '../storage/outbox-repository.ts';
-import type { ReceiptRepository } from '../storage/receipt-repository.ts';
+import { hashCanonical, type ReceiptRepository } from '../storage/receipt-repository.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import type { ArtifactService } from './artifact-service.ts';
@@ -132,9 +132,30 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'discover' } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'discover' } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
+    if (input.decision === 'focus') {
+      return await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
+        const method = 'workflow.focus';
+        const requestHash = hashCanonical({ method, payload: input });
+        const receipt = { clientId: request.clientId, requestId: input.requestId, method, requestHash };
+        const prior = this.services.receipts.get(receipt.clientId, receipt.requestId);
+        if (prior !== null) {
+          if (prior.method !== method || prior.requestHash !== requestHash) {
+            throw new SessionPlaneDomainError('input.idempotency-conflict', 'Focus request identity was reused with different arguments');
+          }
+          if (prior.status === 'complete') return JSON.parse(prior.resultJson) as Record<string, unknown>;
+        }
+        const session = this.#role({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}` });
+        this.services.receipts.record({ ...receipt, status: 'attempted', result: { requestRef: input.requestRef } });
+        const page = await this.services.ui.focus(session);
+        const result = { requestOk: true, activated: true, requestRef: input.requestRef,
+          sessionId: session.sessionId, generation: session.generation, ...page };
+        this.services.receipts.record({ ...receipt, status: 'complete', result });
+        return result;
+      });
+    }
     if (input.decision === 'discover') {
       await this.services.ui.inspect(owner);
       await this.services.ui.discover({ ...owner, decisionId: input.requestId });

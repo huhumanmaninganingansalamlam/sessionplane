@@ -252,6 +252,17 @@ export class SessionUiService {
     });
   }
 
+  async focus(session: SessionSnapshot) {
+    if (session.pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'No connected tab exists for this request');
+    try {
+      const page = this.#registry.requireSessionPage(session.pageKey, session);
+      await page.bringToFront();
+      return { pageKey: session.pageKey, url: page.url() };
+    } catch (error) {
+      throw typedUiError(error);
+    }
+  }
+
   async refresh(input: PreparationOwner & { readonly decisionId: string }): Promise<void> {
     try {
       await this.#submissions.refreshPage(input, async (session) => {
