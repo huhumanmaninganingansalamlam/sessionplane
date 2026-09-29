@@ -119,6 +119,25 @@ export class TeamRepository {
     return row ?? null;
   }
 
+  beginDeletion(teamId: string, timestamp: string): void {
+    this.#database.prepare("UPDATE teams SET team_state = 'archived', updated_at = ? WHERE team_id = ?")
+      .run(timestamp, teamId);
+    this.#database.prepare("UPDATE team_roles SET role_state = 'retired', retired_at = ? WHERE team_id = ?")
+      .run(timestamp, teamId);
+  }
+
+  deleteTeam(teamId: string): void {
+    // The caller holds a transaction. Artifact references cascade from generations;
+    // shared content blobs, exported files and idempotency receipts are retained.
+    this.#database.prepare('DELETE FROM generations WHERE session_id IN (SELECT session_id FROM sessions WHERE team_id = ?)').run(teamId);
+    this.#database.prepare('UPDATE sessions SET predecessor_session_id = NULL WHERE team_id = ?').run(teamId);
+    this.#database.prepare('DELETE FROM sessions WHERE team_id = ?').run(teamId);
+    this.#database.prepare('UPDATE team_roles SET reports_to_role_id = NULL WHERE team_id = ?').run(teamId);
+    for (const table of ['team_roles', 'team_briefs', 'outbox', 'page_bindings', 'events', 'teams']) {
+      this.#database.prepare(`DELETE FROM ${table} WHERE team_id = ?`).run(teamId);
+    }
+  }
+
   listTeamsByOwner(ownerClientId: string): readonly TeamRecord[] {
     return this.#database
       .prepare(`

@@ -122,6 +122,10 @@ out prompts, infer consensus, or inject answers into other roles.
   This recommendation does not authorize replaying an unresolved submission.
   If team_get shows an existing role with no session/roleRef, initialize it with
   session_replace using its roleKey instead. Do not recreate that role.
+- `sessionplane_team_delete` deletes an entire team, its roles and request history,
+  stops owned work and closes owned tabs. Retrieve needed outputs first. Provider
+  deletion is attempted once; per-session failures do not block local deletion.
+  Pass teamId and a stable requestId; exported files remain.
 - `sessionplane_role_retire` ends a non-primary role without deleting provider history.
 - `sessionplane_session_delete` permanently removes a completed provider conversation
   after retrieving required outputs. Pass its exact requestRef and outputsRetrieved:true.

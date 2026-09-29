@@ -35,6 +35,7 @@ export function resolveMcpToolTimeoutMs(options: {
 }
 
 const descriptions: Record<keyof typeof workflowSchemas, string> = {
+  team_delete: 'Permanently delete this entire team, including its roles, sessions, request history and artifact references. Stops owned work and closes owned tabs. Makes one best-effort provider conversation deletion attempt; cleanup failures are returned but do not block local deletion. Retrieve needed outputs first. Exported files and shared content remain. Reuse requestId for retries.',
   team_create: 'Create a durable team with its main conversation. Keep teamId and use team_get to resume.',
   team_get: 'Read roles and request references in a team. history:true lists all generations; continue with nextRequestRef as beforeRequestRef. Include requestRef to recover or inspect that exact request and fresh UI evidence.',
   role_create: 'Create an expert/reviewer role and its provider conversation in the team.',
@@ -54,7 +55,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = Object.entries(workflowSc
   inputSchema: { ...z.toJSONSchema(schema, { io: 'input' }), type: 'object' },
   annotations: {
     readOnlyHint: name === 'team_get',
-    destructiveHint: ['role_retire', 'session_replace', 'session_delete', 'stop'].includes(name),
+    destructiveHint: ['team_delete', 'role_retire', 'session_replace', 'session_delete', 'stop'].includes(name),
     idempotentHint: true,
     openWorldHint: true,
   },

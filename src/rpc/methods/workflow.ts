@@ -11,6 +11,7 @@ const mutation = { teamId, requestId };
 const request = { teamId, requestRef };
 
 export const workflowSchemas = {
+  team_delete: z.object(mutation).strict(),
   team_create: z.object({ requestId, name: z.string().max(500).optional(), objective: z.string().max(20_000).optional(), provider }).strict(),
   team_get: z.object({ teamId, requestRef: requestRef.optional(), maxNodes: z.number().int().min(1).max(5000).optional(), history: z.boolean().optional().describe('List all request generations in pages, newest first.'), beforeRequestRef: requestRef.optional().describe('Continue history using nextRequestRef returned by team_get.') }).strict(),
   role_create: z.object({ ...mutation, roleKey: z.string().trim().min(1).max(80), roleType: z.enum(['expert', 'reviewer', 'custom']).default('expert'), displayName: z.string().max(500).optional(), provider }).strict(),
@@ -30,6 +31,7 @@ export const workflowSchemas = {
 };
 
 export function registerWorkflowMethods(router: RpcRouter, workflow: TeamWorkflow) {
+  router.register('workflow.team_delete', workflowSchemas.team_delete, (input) => workflow.deleteTeam(input));
   router.register('workflow.team_create', workflowSchemas.team_create, (input) => workflow.createTeam(input));
   router.register('workflow.team_get', workflowSchemas.team_get, (input) => workflow.getTeam(input));
   router.register('workflow.role_create', workflowSchemas.role_create, (input) => workflow.createRole(input));

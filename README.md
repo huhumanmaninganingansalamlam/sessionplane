@@ -199,6 +199,12 @@ the visible dedicated provider window, then run sessplane login --resume --json.
 Provider sessions support ChatGPT, Gemini, and Grok, including exact local file
 uploads (disabled by default) and durable artifact capture.
 
+Delete an entire team with `sessionplane_team_delete` or
+`sessplane team delete TEAM_ID --request-id ID`. This removes local team history,
+stops owned work and closes its tabs. Provider conversation deletion is attempted
+once; individual failures are returned. Retrieve needed outputs before deletion;
+exported files, shared content and idempotency receipts remain.
+
 ## Attachments, results and skills
 
 Downloads remain enabled. Attachment uploads are disabled by default. An operator

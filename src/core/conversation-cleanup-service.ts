@@ -10,6 +10,8 @@ import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { EventRepository } from '../storage/event-repository.ts';
 import { ReceiptRepository, hashCanonical } from '../storage/receipt-repository.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
+import { TeamRepository } from '../storage/team-repository.ts';
+import type { StopService } from './stop-service.ts';
 
 export interface ConversationDeleteInput {
   readonly clientId: string;
@@ -34,6 +36,81 @@ export class ConversationCleanupService {
     directory: TeamDirectory; onDeleted: (sessionId: string) => void;
   }) {
     this.#options = options;
+  }
+
+  async deleteTeam(input: { clientId: string; requestId: string; teamId: string }, stops: StopService) {
+    const { database, directory, scheduler, registry, pageMutex } = this.#options;
+    const receipts = new ReceiptRepository(database);
+    const teams = new TeamRepository(database.raw);
+    const sessions = new SessionRepository(database.raw);
+    const requestHash = hashCanonical({ method: 'team.delete', payload: { teamId: input.teamId } });
+    return await this.#replacements.runExclusive('team:' + input.teamId, async () => {
+      const prior = receipts.get(input.clientId, input.requestId);
+      if (prior !== null) {
+        if (prior.method !== 'team.delete' || prior.requestHash !== requestHash) {
+          throw new SessionPlaneDomainError('input.idempotency-conflict', 'Team deletion request payload changed');
+        }
+        if (prior.status === 'complete') return JSON.parse(prior.resultJson) as TeamDeletionResult;
+      }
+      directory.getTeam(input.teamId);
+      const result: TeamDeletionResult = { requestOk: true, teamId: input.teamId, deleted: false, sessions: [] };
+      database.transaction(() => {
+        teams.beginDeletion(input.teamId, new Date().toISOString());
+        receipts.record({ ...input, method: 'team.delete', requestHash, status: 'attempted', result });
+      });
+      // Retired roles block new sends/replacements before awaiting any provider work.
+      for (const initial of sessions.listSnapshotsForTeam(input.teamId)) {
+        const cleanup = { sessionId: initial.sessionId, providerDeleted: false,
+          providerError: null as string | null, stopError: null as string | null,
+          closedPages: 0, pageErrors: [] as string[] };
+        const requestId = 'team-delete:' + hashCanonical({ requestId: input.requestId, sessionId: initial.sessionId });
+        if (!initial.terminal && initial.generation > 0) {
+          try {
+            await stops.stop({ clientId: input.clientId, requestId: 'stop:' + requestId,
+              sessionId: initial.sessionId, expectedGeneration: initial.generation });
+          } catch (error) { cleanup.stopError = cleanupErrorCode(error); }
+        }
+        // Drain current session mutations, retire observation, and wake waiting clients.
+        await scheduler.actorFor(initial.sessionId).enqueue(() => {
+          sessions.retireDeletedConversation(initial.sessionId, new Date().toISOString());
+          this.#options.onDeleted(initial.sessionId);
+          scheduler.refreshSession(initial.sessionId);
+        });
+        const current = sessions.getSnapshot(initial.sessionId)!;
+        if (current.conversationId !== null) {
+          try {
+            const deleted = await this.delete({ clientId: input.clientId, requestId,
+              sessionId: current.sessionId, generation: current.generation,
+              conversationId: current.conversationId, outputsRetrieved: true }, { replacement: true });
+            cleanup.providerDeleted = deleted.deleted;
+            cleanup.providerError = deleted.errorCode;
+          } catch (error) { cleanup.providerError = cleanupErrorCode(error); }
+        }
+        for (const binding of registry.listBindings({ includeClosed: false })) {
+          if (binding.sessionId !== current.sessionId) continue;
+          try {
+            await pageMutex.runExclusive(binding.pageKey, async () => {
+              const page = registry.requireSessionPage(binding.pageKey, {
+                sessionId: current.sessionId, generation: current.generation, conversationId: current.conversationId,
+              });
+              await page.close();
+              cleanup.closedPages += 1;
+            });
+          } catch (error) { cleanup.pageErrors.push(cleanupErrorCode(error)); }
+        }
+        // Remove live ownership even if the provider or browser rejected cleanup.
+        for (const binding of registry.listBindings({ includeClosed: true })) {
+          if (binding.sessionId === current.sessionId) registry.unbindPage(binding.pageKey);
+        }
+        result.sessions.push(cleanup);
+      }
+      database.transaction(() => {
+        teams.deleteTeam(input.teamId);
+        result.deleted = true;
+        receipts.record({ ...input, method: 'team.delete', requestHash, status: 'complete', result });
+      });
+      return result;
+    });
   }
 
   async replace(input: {
@@ -224,4 +301,17 @@ interface DeletionResult {
   conversationId: string;
   deleted: boolean;
   errorCode: string | null;
+}
+
+interface TeamDeletionResult {
+  requestOk: boolean;
+  teamId: string;
+  deleted: boolean;
+  sessions: Array<{ sessionId: string; providerDeleted: boolean; providerError: string | null;
+    stopError: string | null; closedPages: number; pageErrors: string[] }>;
+}
+
+function cleanupErrorCode(error: unknown): string {
+  return error !== null && typeof error === 'object' && 'errorCode' in error
+    ? String(error.errorCode) : 'browser.unavailable';
 }

@@ -7,7 +7,7 @@ is the durable outbox UUID, valid across client/core restarts and role replaceme
 References are identity handles, not authentication tokens; the owner-only local
 socket remains the trust boundary.
 
-The catalog has ten tools: `team_create`, `team_get`, `role_create`, `role_retire`,
+The catalog has eleven tools: `team_create`, `team_get`, `team_delete`, `role_create`, `role_retire`,
 `send`, `decide`, `wait`, `stop`, `session_replace`, `session_delete`, all prefixed
 `sessionplane_`. Creation includes the initial provider session. Provider defaults
 to ChatGPT; explicitly disabled providers fail before creating team/role state.
@@ -120,3 +120,10 @@ answer candidate at every user turn. Only the answer after the latest user turn 
 complete the request. No continuation keyword, special acknowledgement or resend
 is needed. A new SessionPlane send starts the next generation; completed results
 remain immutable and cannot be overwritten by later conversation activity.
+
+`team_delete` removes the entire team, its roles, sessions, requests, events and
+artifact references. It retires roles before cleanup, stops owned work and closes
+owned tabs. Provider conversation deletion is attempted once; failure does not
+block local deletion and is reported per session. Retrieve needed outputs first.
+Shared content blobs, exported files and idempotency receipts remain. Retry with
+the same requestId to receive the deletion result without repeating provider actions.

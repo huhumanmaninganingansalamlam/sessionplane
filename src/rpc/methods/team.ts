@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
 import type { TeamDirectory } from '../../core/team-directory.ts';
+import type { ConversationCleanupService } from '../../core/conversation-cleanup-service.ts';
+import type { StopService } from '../../core/stop-service.ts';
 import type { ReceiptRepository } from '../../storage/receipt-repository.ts';
 import type { RpcRouter } from '../router.ts';
 
@@ -13,7 +15,12 @@ export function registerTeamMethods(
   router: RpcRouter,
   directory: TeamDirectory,
   receipts: ReceiptRepository,
+  cleanup: ConversationCleanupService,
+  stops: StopService,
 ): void {
+  router.register('team.delete',
+    z.object({ clientId: ClientId, requestId: RequestId, teamId: TeamId }).strict(),
+    (input) => cleanup.deleteTeam(input, stops));
   router.register(
     'team.create',
     z
@@ -139,4 +146,3 @@ export function registerTeamMethods(
     },
   );
 }
-

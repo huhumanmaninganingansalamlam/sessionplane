@@ -684,6 +684,10 @@ async function runTeamCommand(
   const action = parsed.words[1];
   const rest = parsed.words.slice(2);
   switch (action) {
+    case 'delete':
+      return await printRpc(io, parsed, config, 'team.delete', {
+        ...mutationIdentity(parsed), teamId: requirePositional(rest, 0, 'teamId'),
+      }, sessionSendRpcTimeoutMs(config));
     case 'create':
       return await printRpc(io, parsed, config, 'team.create', {
         ...mutationIdentity(parsed),
@@ -1217,6 +1221,7 @@ Provider browser runtime:
 
 Team and role sessions:
   sessplane team create --name NAME [--objective TEXT] [--request-id ID]
+  sessplane team delete TEAM_ID [--request-id ID]
   sessplane team show TEAM_ID [--json]
   sessplane team list [--json]
   sessplane team wait TEAM_ID [--roles KEY,KEY] [--until CONDITION]

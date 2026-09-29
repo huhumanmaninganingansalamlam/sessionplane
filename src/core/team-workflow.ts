@@ -63,6 +63,10 @@ export class TeamWorkflow {
     };
   }
 
+  async deleteTeam(input: Mutation) {
+    return await this.services.cleanup.deleteTeam({ ...input, clientId: `team:${input.teamId}` }, this.services.stops);
+  }
+
   createRole(input: Mutation & { roleKey: string; roleType: 'expert' | 'reviewer' | 'custom'; provider: ProviderName; displayName?: string | undefined }) {
     this.#provider(input.provider);
     this.#mutate(input, 'role_create', () => {

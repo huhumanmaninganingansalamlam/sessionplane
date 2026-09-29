@@ -207,6 +207,7 @@ export class SessionRepository {
       .prepare(`
         ${SNAPSHOT_SELECT}
         WHERE s.session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
+          AND s.team_id IN (SELECT team_id FROM teams WHERE team_state != 'archived')
           AND g.submission_state IS NOT 'failed_pre_submit'
         ORDER BY s.created_at, s.session_id
       `)
@@ -226,11 +227,18 @@ export class SessionRepository {
     return rows.map(toSnapshot);
   }
 
+  listSnapshotsForTeam(teamId: string): readonly SessionSnapshot[] {
+    const rows = this.#database.prepare(`${SNAPSHOT_SELECT} WHERE s.team_id = ? ORDER BY s.created_at, s.session_id`)
+      .all(teamId) as unknown as SnapshotRow[];
+    return rows.map(toSnapshot);
+  }
+
   listRecoverableSnapshots(): readonly SessionSnapshot[] {
     const rows = this.#database
       .prepare(`
         ${SNAPSHOT_SELECT}
         WHERE s.session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
+          AND s.team_id IN (SELECT team_id FROM teams WHERE team_state != 'archived')
           AND s.current_generation > 0
           AND g.submission_state IS NOT 'failed_pre_submit'
         ORDER BY s.created_at, s.session_id
@@ -386,6 +394,7 @@ export class SessionRepository {
     const result = this.#database.prepare(`
       UPDATE sessions SET session_state = 'observing', updated_at = ?
       WHERE session_state IN ('superseded', 'cancelled') AND provider IN (${enabledProviders.map(() => '?').join(',')})
+        AND team_id IN (SELECT team_id FROM teams WHERE team_state != 'archived')
         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = sessions.session_id AND e.event_type = 'session.replaced')
         AND NOT EXISTS (SELECT 1 FROM request_receipts receipt WHERE receipt.method = 'session.delete'
           AND json_extract(receipt.result_json, '$.sessionId') = sessions.session_id

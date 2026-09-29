@@ -281,7 +281,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     registerBrowserControlMethods(router, browserControl);
   }
   registerArtifactMethods(router, artifactService);
-  registerTeamMethods(router, teamDirectory, receipts);
   const cleanup = new ConversationCleanupService({
     directory: teamDirectory, onDeleted: sessionId => recovery.forgetSession(sessionId),
     database, scheduler: actorScheduler, adapters: providerAdapters,
@@ -294,6 +293,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     chatgptUrl: config.chatgptUrl,
   });
   registerSessionUiMethods(router, ui);
+  registerTeamMethods(router, teamDirectory, receipts, cleanup, stopService);
   registerWorkflowMethods(router, new TeamWorkflow({
     database, directory: teamDirectory, receipts, submissions: submissionService, ui,
     scheduler: actorScheduler, artifacts: artifactService, stops: stopService, cleanup,
