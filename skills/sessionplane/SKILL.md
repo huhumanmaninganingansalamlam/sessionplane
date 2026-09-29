@@ -33,11 +33,12 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    these are supported operations, not recommendations. `evidence.interactive`
    only describes snapshot filtering, not permission or page capability.
    `sessionplane_decide` takes the requestRef,
-   fresh snapshotId/ref, purpose and `choose` or `reveal`. Model/effort reveal opens
-   observed related options, including nested menu items. Reveal a submenu before
-   choosing its options; opening it is not a model selection. Slider choices also
-   take a numeric value, interpreted from the observed labels and range. Core
-   executes the choice and continues the same request; there is no resume tool.
+   fresh snapshotId/ref, purpose and `choose` or `reveal`. Model/effort reveal explores
+   observed menus, enabled options and slider values without confirming or submitting.
+   Intermediate labels need not match the complete requested model: explore the
+   family/version and reasoning controls, then inspect the resulting configuration.
+   Slider decisions take a numeric value from the observed range. Reveal clears
+   prior configuration confirmation; choose confirms and continues the same request.
    Choose the composer, requested configuration and submit controls. New UI
    evidence can require another choice. Never reuse stale UI refs.
    Choose the composer first to authorize replacing its restored draft with this

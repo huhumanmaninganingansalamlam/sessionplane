@@ -378,11 +378,12 @@ test('MCP team decisions continue the same generation across restart, UI drift a
     let last: Record<string, unknown> = {};
     for (const [purpose, role, name, decision, value] of [
       ['composer', 'textbox', 'Prompt', 'choose'],
+      ['model', 'button', 'Submit settings', 'choose'],
       ['model', 'button', 'Submit settings', 'reveal'],
       ['model', 'menuitem', 'Model family', 'reveal'],
-      ['model', 'menuitemradio', 'GPT-5.6 Sol', 'choose'],
+      ['model', 'menuitemradio', 'GPT-5.6 Sol', 'reveal'],
       ['effort', 'button', 'Effort', 'reveal'],
-      ['effort', 'slider', 'Reasoning effort', 'choose', 4],
+      ['effort', 'slider', 'Reasoning effort', 'reveal', 4],
       ['effort', 'button', 'High', 'choose'],
       ['submit', 'button', '전송', 'choose'],
       ['model', 'menuitem', 'Model selection', 'choose'],
@@ -402,6 +403,11 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       }
       const result = await invoke('sessionplane_decide', args);
       assert.equal(result.isError, false, JSON.stringify(result));
+      if (decision === 'reveal') {
+        assert.equal(result.structuredContent.promptSubmitted, false);
+        assert.equal(result.structuredContent.choices.model, undefined);
+        assert.equal(result.structuredContent.choices.effort, undefined);
+      }
       if (purpose === 'submit') {
         assert.equal(result.structuredContent.status, 'needs_decision');
         assert.equal(result.structuredContent.promptSubmitted, false);

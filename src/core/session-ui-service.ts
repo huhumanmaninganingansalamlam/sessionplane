@@ -108,8 +108,7 @@ export class SessionUiService {
         }
         let actionTimeout: Error | undefined;
         try {
-          if (reveal) {
-            if (input.value !== undefined) throw new SessionPlaneDomainError('input.invalid', 'A reveal cannot include a selected value');
+          if (reveal && ['button', 'menuitem'].includes(currentNode.role)) {
             await element.evaluate((target) => {
               if ((target instanceof HTMLButtonElement && target.type === 'submit') ||
                   (target instanceof HTMLInputElement && target.type === 'submit') ||
@@ -119,11 +118,11 @@ export class SessionUiService {
             });
             await element.click({ timeout: 5_000 });
           }
-          if (!reveal && (purpose === 'model' || purpose === 'effort') && !['slider', 'button', 'menuitem'].includes(currentNode.role) && currentNode.selected !== true && currentNode.checked !== true) {
+          if ((purpose === 'model' || purpose === 'effort') && !['slider', 'button', 'menuitem'].includes(currentNode.role) && currentNode.selected !== true && currentNode.checked !== true) {
             if (input.value !== undefined) throw new SessionPlaneDomainError('input.invalid', 'A value is only valid when choosing a slider value');
             await element.click({ timeout: 5_000 });
           }
-          if (!reveal && currentNode.role === 'slider') {
+          if (currentNode.role === 'slider') {
             const value = input.value;
             if (!['model', 'effort'].includes(purpose) || value === undefined || !Number.isFinite(value) || currentNode.ariaValueMin === null || currentNode.ariaValueMax === null || value < Number(currentNode.ariaValueMin) || value > Number(currentNode.ariaValueMax)) {
               throw new SessionPlaneDomainError('input.invalid', 'A model or effort slider choice needs an explicit value within its observed range');
@@ -158,7 +157,7 @@ export class SessionUiService {
           const transitioned = ['menuitemradio', 'option', 'radio'].includes(currentNode.role) &&
             !after.nodes.some((node) => matchesPreparationTarget(node, target)) &&
             hasRevealedChoices(after.nodes, currentNode, currentObservation.nodes);
-          const verified = reveal
+          const verified = reveal && ['button', 'menuitem'].includes(currentNode.role)
             ? hasRevealedChoices(after.nodes, currentNode, currentObservation.nodes)
             : hasPreparationSelectionEvidence(after.nodes, target) || transitioned;
           if (verified) break;
@@ -168,14 +167,14 @@ export class SessionUiService {
           await page.waitForTimeout(100);
         }
         let choice = reveal ? null : target;
-        if (!reveal && currentNode.role === 'slider') {
+        if (currentNode.role === 'slider') {
           const openers = after.nodes.filter((node) => node.role === 'button' && node.expanded === true &&
             node.controls.some((id) => currentNode.ancestorIds.includes(id)));
           if (openers.length === 1 && after.nodes.some((node) => node.role === 'menu' && currentNode.ancestorIds.includes(node.id))) {
             await element.press('Escape');
             after = await this.#refs.capture({ pageKey: session.pageKey, bindingEpoch: binding.bindingEpoch, page, ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: 5_000 });
             const summary = after.nodes.find((node) => node.id === openers[0]!.id && node.role === 'button' && node.expanded === false);
-            if (summary !== undefined && summary.id !== '') choice = toPreparationTarget(purpose, summary);
+            if (!reveal && summary !== undefined && summary.id !== '') choice = toPreparationTarget(purpose, summary);
           }
         }
         return { choice, result: after };
@@ -238,7 +237,7 @@ function preparationActions(node: BrowserSnapshotNode, menuIds: ReadonlySet<stri
         ['menuitemradio', 'option', 'radio'].includes(node.role) || isPreparationSummary(node, insideMenu)) {
       choose.push('model', 'effort');
     }
-    if ((node.role === 'menuitem' && insideMenu) || (node.role === 'button' &&
+    if (['slider', 'menuitemradio', 'option', 'radio'].includes(node.role) || (node.role === 'menuitem' && insideMenu) || (node.role === 'button' &&
         (node.controls.length > 0 || ['menu', 'listbox', 'dialog', 'true'].includes(node.hasPopup ?? '')))) {
       reveal.push('model', 'effort');
     }

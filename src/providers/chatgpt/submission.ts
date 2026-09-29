@@ -157,7 +157,7 @@ export class ChatGptSubmission implements ProviderSubmission {
       });
       if (configuration === undefined || snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, configuration)) {
         throw new ProviderSubmissionError('provider.preparation-required',
-          'Inspect the requested model intent and current controls, then choose the final configuration using model or effort. One verified choice is sufficient; the request fields do not require separate UI controls. Continue this requestRef.');
+          'Use reveal to explore enabled model options and slider values without confirming or submitting. Intermediate labels need not match the full request. Inspect the resulting configuration, then choose it once using model or effort. Continue this requestRef.');
       }
     }
   }

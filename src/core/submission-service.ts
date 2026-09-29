@@ -921,19 +921,20 @@ export class SubmissionService {
             throw new SessionPlaneDomainError('internal.invariant-violation', 'Revealing choices cannot record a selected value');
           }
           this.#requirePreparationOwner(input);
+          const state = parsePreparationState(current);
+          const { model: _model, effort: _effort, ...otherChoices } = state.choices;
           if (selected.choice !== null) {
-            const state = parsePreparationState(current);
-            const { model: _model, effort: _effort, ...otherChoices } = state.choices;
             const configuration = selected.choice.purpose === 'model' || selected.choice.purpose === 'effort';
             choices = { ...(configuration ? otherChoices : state.choices), [selected.choice.purpose]: selected.choice };
+          } else {
+            choices = otherChoices;
           }
           result = selected.result;
         }
 
         let eventSequence = 0;
         this.#database.transaction(() => {
-          if (input.decision === 'choose') {
-            if (choices === null) throw new SessionPlaneDomainError('internal.invariant-violation', 'A choice must store its selected target');
+          if (choices !== null) {
             const updated = this.#outbox.transition(current.outboxId, ['prepared'], 'prepared', {
               updatedAt: this.#now().toISOString(),
               errorCode: 'provider.preparation-required',
