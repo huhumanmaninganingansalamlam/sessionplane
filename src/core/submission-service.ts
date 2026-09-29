@@ -858,11 +858,12 @@ export class SubmissionService {
     readonly sessionId: string;
     readonly generation: number;
     readonly decisionId: string;
-    readonly decision: 'choose' | 'reveal' | 'cancel';
+    readonly decision: 'choose' | 'reveal' | 'cancel' | 'discover' | 'configure';
     readonly purpose?: PreparationPurpose;
     readonly snapshotId?: string;
     readonly ref?: string;
     readonly value?: number | undefined;
+    readonly configurationId?: string | undefined;
   }, operation?: (snapshot: SessionSnapshot, payload: StoredOutboxPayload) => Promise<{ readonly choice: PreparationTarget | null; readonly result: Result }>): Promise<Result | SessionSnapshot> {
     const actor = this.#scheduler.actorFor(input.sessionId);
     const payload = {
@@ -874,6 +875,7 @@ export class SubmissionService {
       snapshotId: input.snapshotId ?? null,
       ref: input.ref ?? null,
       value: input.value ?? null,
+      ...(input.configurationId === undefined ? {} : { configurationId: input.configurationId }),
     };
     const method = 'session.preparation.decide';
     const requestHash = hashCanonical({ method, payload });
@@ -910,14 +912,15 @@ export class SubmissionService {
         if (input.decision === 'cancel') {
           result = this.#terminalizePreparation(actor, current, 'provider.preparation-cancelled');
         } else {
-          if (input.purpose === undefined || input.snapshotId === undefined || input.ref === undefined || operation === undefined) {
+          if (input.purpose === undefined || operation === undefined ||
+              (!['discover', 'configure'].includes(input.decision) && (input.snapshotId === undefined || input.ref === undefined))) {
             throw new SessionPlaneDomainError('input.invalid', 'Choosing a target requires purpose, snapshotId, ref, and a decision handler');
           }
           const selected = await operation(snapshot, parseOutboxPayload(current));
-          if (input.decision === 'choose' && selected.choice?.purpose !== input.purpose) {
+          if ((input.decision === 'choose' || input.decision === 'configure') && selected.choice?.purpose !== input.purpose) {
             throw new SessionPlaneDomainError('input.invalid', 'Preparation purpose does not match the observed choice');
           }
-          if (input.decision === 'reveal' && selected.choice !== null) {
+          if ((input.decision === 'reveal' || input.decision === 'discover') && selected.choice !== null) {
             throw new SessionPlaneDomainError('internal.invariant-violation', 'Revealing choices cannot record a selected value');
           }
           this.#requirePreparationOwner(input);
@@ -1384,7 +1387,7 @@ export class SubmissionService {
           'failed_pre_submit',
           {
             updatedAt: timestamp,
-            resultJson: JSON.stringify(snapshot),
+            resultJson: JSON.stringify({ ...snapshot, message: classified.message }),
             errorCode: classified.errorCode,
             promptSubmitted: false,
           },

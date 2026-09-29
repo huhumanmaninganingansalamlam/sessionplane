@@ -129,6 +129,8 @@ export class ObservationService {
   }
 
   async #run(initial: SessionSnapshot, signal: AbortSignal): Promise<void> {
+    const probeCaller = Symbol();
+    const withdrawProbe = () => this.#probeCoordinator.withdraw(`${initial.provider}:default`, probeCaller);
     const tracker = new ExactFinalTracker(this.#quietWindowMs);
     const observationStartedAtMs = this.#now().getTime();
     let lastExactProgressAtMs = this.#now().getTime();
@@ -155,6 +157,7 @@ export class ObservationService {
               generation: current.generation,
             });
           } catch {
+            withdrawProbe();
             await this.#recordUnavailable(current, 'dom-observer-open-failed');
             await waitForDelay(this.#quietSweepMs, signal);
             continue;
@@ -184,6 +187,7 @@ export class ObservationService {
             signal.removeEventListener('abort', abort);
           }
         } catch {
+          withdrawProbe();
           source.close();
           source = null;
           await this.#recordUnavailable(current, 'dom-observation-failed');
@@ -202,6 +206,7 @@ export class ObservationService {
             ? { ...observed, kind: 'unverified', reason: 'session-deadline-unverified' }
             : observed;
         const verifiedRedirect = isVerifiedChatGptRedirect(current, evidence);
+        if (decision.freshExactProgress || decision.kind === 'blocked' || decision.kind === 'interstitial') withdrawProbe();
         const preserveBackendDeferral =
           current.observationTransport === 'deferred' &&
           current.nextCheckAt !== null &&
@@ -240,7 +245,7 @@ export class ObservationService {
           !backendRecoveryPaced &&
           this.#now().getTime() - lastExactProgressAtMs >= this.#backendRecoveryAfterMs
         ) {
-          const recoveredResult = await this.#recover(persisted);
+          const recoveredResult = await this.#recover(persisted, probeCaller);
           const recovery: ProviderRecoveryResult =
             this.#now().getTime() >= deadlineMs && recoveredResult.kind === 'pending'
               ? { ...recoveredResult, kind: 'unverified', reason: 'session-deadline-unverified' }
@@ -267,6 +272,7 @@ export class ObservationService {
         else await waitForWakeOrAbort(source, sweepMs, signal);
       }
     } finally {
+      withdrawProbe();
       source?.close();
     }
   }
@@ -312,10 +318,11 @@ export class ObservationService {
     );
   }
 
-  async #recover(snapshot: SessionSnapshot): Promise<ProviderRecoveryResult> {
+  async #recover(snapshot: SessionSnapshot, caller: symbol): Promise<ProviderRecoveryResult> {
     const adapter = this.#adapters.require(snapshot.provider);
     return await this.#probeCoordinator.run(`${snapshot.provider}:default`, async () =>
       await adapter.recover({ session: snapshot, generation: snapshot.generation }),
+      caller,
     );
   }
 

@@ -4,6 +4,7 @@ import type { PageBindingSnapshot } from '../browser/page-binding.ts';
 
 export interface StoredPageBinding {
   readonly pageKey: string;
+  readonly targetId: string | null;
   readonly bindingEpoch: number;
   readonly teamId: string | null;
   readonly roleId: string | null;
@@ -27,13 +28,14 @@ export class PageBindingRepository {
       .prepare(`
         INSERT INTO page_bindings(
           page_key, binding_epoch, team_id, role_id, session_id, generation,
-          conversation_id, binding_state, url, last_seen_at
+          conversation_id, binding_state, url, last_seen_at, target_id
         )
-        SELECT ?, ?, s.team_id, s.role_id, ?, ?, ?, ?, ?, ?
+        SELECT ?, ?, s.team_id, s.role_id, ?, ?, ?, ?, ?, ?, ?
         FROM (SELECT ? AS session_id) binding
         LEFT JOIN sessions s ON s.session_id = binding.session_id
         WHERE true
         ON CONFLICT(page_key) DO UPDATE SET
+          target_id = excluded.target_id,
           binding_epoch = excluded.binding_epoch,
           team_id = excluded.team_id,
           role_id = excluded.role_id,
@@ -53,6 +55,7 @@ export class PageBindingRepository {
         binding.state,
         binding.url,
         binding.lastSeenAt,
+        binding.targetId ?? null,
         binding.sessionId,
       );
   }
@@ -62,6 +65,7 @@ export class PageBindingRepository {
       .prepare(`
         SELECT
           page_key AS pageKey,
+          target_id AS targetId,
           binding_epoch AS bindingEpoch,
           team_id AS teamId,
           role_id AS roleId,
@@ -89,6 +93,7 @@ export class PageBindingRepository {
       .prepare(`
         SELECT
           page_key AS pageKey,
+          target_id AS targetId,
           binding_epoch AS bindingEpoch,
           team_id AS teamId,
           role_id AS roleId,

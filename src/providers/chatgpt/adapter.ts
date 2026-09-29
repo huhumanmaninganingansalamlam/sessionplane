@@ -726,11 +726,11 @@ class ChatGptObservationSource implements ProviderObservationSource {
         activity: activity.strength,
         dialogKind: dialog.kind,
         networkActivity: network.activity,
-        observationTransport: dom.loadFailureStatus !== null || dom.actionableAlert ? 'unavailable' : 'fresh',
-        ...(dom.loadFailureStatus !== null ? { errorCode: 'provider.conversation-unavailable' }
+        observationTransport: !dom.conversationSurfaceAvailable || dom.actionableAlert ? 'unavailable' : 'fresh',
+        ...(!dom.conversationSurfaceAvailable ? { errorCode: 'provider.conversation-unavailable' }
           : dom.actionableAlert ? { errorCode: 'provider.observation-unavailable' } : {}),
-        reason: dialog.reason ?? (dom.loadFailureStatus !== null
-          ? 'conversation-load-http-' + dom.loadFailureStatus
+        reason: dialog.reason ?? (!dom.conversationSurfaceAvailable
+          ? 'conversation-surface-unavailable'
           : dom.actionableAlert ? 'provider-actionable-alert' : activity.reason),
       };
     } catch (error) {

@@ -135,12 +135,13 @@ test('stale DOM recovers an exact server final and backend 429 remains deferred,
       submittedUserFound: false, candidate: null, activity: 'unknown',
       observationTransport: 'unavailable',
       errorCode: 'provider.conversation-unavailable',
-      reason: 'conversation-load-http-429',
+      reason: 'conversation-surface-unavailable',
     });
     const unreadable = await waitForSnapshot(config.socketPath, limitedSession.sessionId,
       (snapshot) => snapshot.errorCode === 'provider.conversation-unavailable');
     assert.equal(unreadable.terminal, false);
     assert.equal(unreadable.providerState, 'unknown');
+    assert.equal(unreadable.reason, 'conversation-surface-unavailable');
     assert.equal(unreadable.submittedUserMessageId, deferred.submittedUserMessageId);
     fake.emitObservation(limitedSession.sessionId, {
       submittedUserFound: true, activity: 'weak', observationTransport: 'fresh',

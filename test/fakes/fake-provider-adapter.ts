@@ -59,6 +59,10 @@ export class FakeProviderAdapter implements ProviderAdapter {
     this.provider = provider;
   }
 
+  async openDeletion(_request: ProviderRecoveryRequest) {
+    return { alreadyDeleted: false, deleteOnce: async () => true, close: async () => {} };
+  }
+
   async openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission> {
     this.openCount += 1;
     this.submissionRequests.push(request);

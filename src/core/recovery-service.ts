@@ -172,6 +172,13 @@ export class RecoveryService {
       });
   }
 
+  forgetSession(sessionId: string): void {
+    this.#observations.stop(sessionId);
+    for (const [key, watcher] of this.#acknowledgementWatchers) {
+      if (key.startsWith(sessionId + ':')) watcher.controller.abort();
+    }
+  }
+
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
@@ -213,8 +220,7 @@ export class RecoveryService {
 
       if (
         this.#browserOwner !== null &&
-        shouldRecoverPage(snapshot) &&
-        snapshot.conversationId !== null
+        (shouldRecoverPage(snapshot) || isPendingPreparation(snapshot))
       ) {
         const reconciled = await this.#reconcilePage(snapshot);
         snapshot = reconciled.snapshot;
@@ -367,7 +373,7 @@ export class RecoveryService {
   }> {
     const conversationId = snapshot.conversationId;
     if (conversationId === null) {
-      return result(snapshot);
+      return await this.#reconcilePreparation(snapshot);
     }
     const matches = this.#pageRegistry
       .findByConversation(conversationId)
@@ -498,6 +504,39 @@ export class RecoveryService {
     }
   }
 
+  async #reconcilePreparation(snapshot: SessionSnapshot) {
+    if (!isPendingPreparation(snapshot) || snapshot.pageKey === null) return result(snapshot);
+    const stored = this.#pageBindings.get(snapshot.pageKey);
+    if (
+      stored?.targetId == null ||
+      stored.sessionId !== snapshot.sessionId ||
+      stored.generation !== snapshot.generation
+    ) return result(snapshot);
+
+    const match = this.#pageRegistry.listBindings({ includeClosed: false }).find(
+      (binding) => binding.targetId === stored.targetId,
+    );
+    if (match === undefined) return result(snapshot);
+    if (
+      !isProviderUrl(snapshot.provider, match.url) ||
+      match.conversationId !== null ||
+      (match.sessionId !== null &&
+        (match.sessionId !== snapshot.sessionId || match.generation !== snapshot.generation))
+    ) return await this.#recordUnavailable(snapshot, 'restart-preparation-target-mismatch');
+
+    this.#pageRegistry.reservePage(match.pageKey, {
+      sessionId: snapshot.sessionId,
+      generation: snapshot.generation,
+    });
+    const updated = await this.#recordPageState(snapshot, {
+      pageKey: match.pageKey,
+      observationTransport: 'fresh',
+      reason: 'restart-preparation-rebound',
+      errorCode: null,
+    }, 'generation.restart-preparation-rebound');
+    return result(updated, { rebound: true });
+  }
+
   async #recordUnavailable(
     snapshot: SessionSnapshot,
     reason: string,
@@ -597,6 +636,10 @@ function needsAcknowledgementRecovery(snapshot: SessionSnapshot): boolean {
     snapshot.submittedUserMessageId === null &&
     snapshot.submittedUserTurnId === null
   );
+}
+
+function isPendingPreparation(snapshot: SessionSnapshot): boolean {
+  return !snapshot.terminal && !snapshot.promptSubmitted && snapshot.submissionState === 'prepared';
 }
 
 function shouldRecoverPage(snapshot: SessionSnapshot): boolean {

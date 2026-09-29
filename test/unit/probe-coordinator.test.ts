@@ -114,6 +114,55 @@ test('ProbeCoordinator honors Retry-After, applies exponential 429 backoff, and 
   }
 });
 
+test('repeating observers cannot overtake queued exact requests, and stopped observers release their turn', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-probe-turns-'));
+  const database = SessionPlaneDatabase.open(path.join(root, 'sessionplane.sqlite'));
+  let nowMs = 0;
+  const coordinator = createCoordinator(database, () => new Date(nowMs));
+  const older = Symbol('older'), current = Symbol('current'), stopped = Symbol('stopped');
+  const calls: string[] = [];
+  const run = (caller: symbol, name: string) => coordinator.run('chatgpt:default', async () => {
+    calls.push(name);
+    return pending();
+  }, caller);
+  try {
+    await run(older, 'older');
+    await run(current, 'current');
+    await run(stopped, 'stopped');
+    nowMs += 30_000;
+    assert.equal((await run(older, 'older')).reason, 'probe-queued');
+    assert.equal((await run(current, 'current')).kind, 'pending');
+    coordinator.withdraw('chatgpt:default', stopped);
+    nowMs += 30_000;
+    assert.equal((await run(current, 'current')).reason, 'probe-queued');
+    assert.equal((await run(older, 'older')).kind, 'pending');
+    nowMs += 30_000;
+    assert.equal((await run(current, 'current')).kind, 'pending');
+    assert.deepEqual(calls, ['older', 'current', 'older', 'current']);
+  } finally {
+    database.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('negative jitter never schedules a probe before provider Retry-After', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-probe-retry-after-'));
+  const database = SessionPlaneDatabase.open(path.join(root, 'sessionplane.sqlite'));
+  const coordinator = new ProbeCoordinator({ database, successIntervalMs: 30_000,
+    min429BackoffMs: 60_000, max429BackoffMs: 900_000, jitterRatio: 0.1,
+    random: () => 0, now: () => new Date(0) });
+  try {
+    const result = await coordinator.run('chatgpt:default', async () => ({
+      ...pending(), kind: 'deferred', observationTransport: 'deferred',
+      reason: 'backend-http-429', retryAfterMs: 120_000,
+    }));
+    assert.equal(result.retryAfterMs, 120_000);
+  } finally {
+    database.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function createCoordinator(
   database: SessionPlaneDatabase,
   now: () => Date,

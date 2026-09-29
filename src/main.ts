@@ -281,6 +281,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   registerArtifactMethods(router, artifactService);
   registerTeamMethods(router, teamDirectory, receipts);
   const cleanup = new ConversationCleanupService({
+    directory: teamDirectory, onDeleted: sessionId => recovery.forgetSession(sessionId),
     database, scheduler: actorScheduler, adapters: providerAdapters,
     pageMutex: pageMutationMutex, registry: pageRegistry,
   });

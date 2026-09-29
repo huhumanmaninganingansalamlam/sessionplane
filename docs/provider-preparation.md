@@ -1,17 +1,25 @@
-# Agent-directed ChatGPT submission
+# Observed ChatGPT configuration and submission
 
 ## One execution path
 
 Every ChatGPT send begins a durable preparation request. The core opens the exact
 owned page, checks authentication, human verification and Chat-only boundaries,
 and returns `provider.preparation-required` before filling or submitting.
-There is no automatic model/menu/composer/send discovery path and no
-`assistedPreparation` opt-in. That input is removed, not an alias for the new flow.
+The first workflow send discovers available model/power combinations on its exact
+preparation page and returns `configurationCatalog`. Discovery reads actual version
+options and bounded power values, records the displayed combined labels, and restores
+the original configuration without touching the prompt or submitting. Disabled versions
+are reported separately. No model-name/version table is embedded in SessionPlane.
 
-The agent interprets current roles, labels, descriptions, relationships and
-selected state. It selects observed controls; it never sends executable
-JavaScript, selectors or coordinates. Core validates fresh evidence and owns
-all browser mutations, request receipts, submission attempts and answer identity.
+The core caches the catalog for its browser runtime. Later requests choose an option ID
+through `decide configure`; core applies the observed version and power and verifies
+that the combined label still matches on the request's own page. Drift invalidates the
+catalog and requires `decide discover`. A core restart also requires fresh discovery.
+Each returned option also includes a snapshot-bound `selection` using the existing
+choose/model/ref schema, so connected clients can select without restarting their MCP
+transport for the new configure schema. Both forms call the same selection implementation.
+Read-only team_get exposes the available catalog and never traverses menus itself.
+Discovery failure is explicit and does not claim that a model is unavailable.
 
 Preparation evidence excludes provider message subtrees and history navigation.
 Composer content stays in the accepted request, not the UI evidence. Controls,
@@ -40,35 +48,20 @@ the agent selects by observed labels, values and requested intent. Freshness,
 ownership and operation-specific checks still run at execution. Submitted
 request observations do not advertise preparation actions.
 
-Model and effort are intent hints, not a checklist of independent UI controls.
-The agent configures the observed controls and confirms the final configuration
-once using either purpose. A new model/effort choice replaces the previous
-configuration confirmation. Core verifies that selection before submission;
-the agent judges the full intent and follows explicit user corrections when
-request hints conflict. Choose submit after configuring all required controls.
+## Configuration selection
 
-Use `sessionplane_decide` with that requestRef, a unique requestId, fresh snapshotId,
-observed ref and purpose. A reveal opens related model/effort options. A choose
-verifies and records the selected control, then continues the same request.
-Composer selection can fill the prompt and reveal a previously hidden submit
-control. Submit selection can submit once all required choices are verified.
-There is no separate public resume operation. Subsequent decisions use newly
-returned evidence, or `team_get` with requestRef for a fresh inspection.
-If the editor does not retain the exact prompt or the selected send control
-becomes unavailable, preparation stays pending on the same requestRef. Inspect
-the current page and choose the affected control again; nothing was submitted.
+The normal model-selection flow is `send → configurationCatalog.options → decide
+configure(configurationId)`. The agent chooses a displayed combined label matching
+its intent; it does not derive a model from separate partial menus. Configure records
+one verified configuration and does not fill or submit. Choose composer and submit
+from fresh evidence afterward. Explicit user corrections take precedence over old
+request hints. No substitution is implicit.
 
-Core performs each mutation once and observes its result; unverified UI action
-outcomes remain typed `provider.action-unknown`. Use `sessionplane_stop` to cancel
-preparation and `sessionplane_wait` for exact answers and generated files.
-An option may replace itself with related configuration controls. That observed
-transition acknowledges the interaction, not the final configuration; submission
-still requires a selection verified against the current screen.
-
-Requested intent and observed selection are distinct. The agent is responsible
-for choosing evidence that satisfies the intent; a selected control alone does
-not prove that an unrelated option matches it. Preserve semantic `model=Pro`.
-ChatGPT Work is forbidden. Named-mode automatic switching is removed.
+Use `decide discover` to rebuild an unavailable or invalidated catalog on the exact
+pending request. The returned version labels, numeric values and combined labels are
+observations, not a promise about future availability. Selection revalidates them.
+Raw choose/reveal remains available for diagnostics and composer/submit selection.
+The existing freshness, page ownership, idempotency and pre-submit checks still apply.
 
 ## Identity and restart
 
@@ -153,16 +146,28 @@ Never interpolate arbitrary prompt text into shell commands.
 ## Verification
 
 Keep one end-to-end MCP decision flow, exact identity/restart/no-resend checks,
-and literal prompt transport coverage. Delete tests for removed automatic model
-selection behavior; do not retain a second implementation to satisfy them.
+literal prompt transport coverage, and catalog discovery/selection with UI drift.
+Discovery must preserve drafts and submission counts; selection must verify the current combined label.
 Live provider evidence must be reported separately from browser fixtures.
 
 ## Unreadable or long conversations
 
+Workflow responses and team roles expose `conversationUsage.confirmedTurnCount`.
+This counts distinct provider-acknowledged user messages recorded by SessionPlane
+in the same provider conversation, across restarts and any sessions sharing it.
+Failed preparation, unacknowledged attempts, and duplicate request replays do not
+increase it. Manually sent browser messages are not included in this durable count.
+At 10 turns, `handoffRecommended:true` recommends preparing a concise handoff and
+continuing in a new conversation after resolving the current request. Include the
+objective, decisions, evidence/artifact references, unresolved work, next step,
+and requested model/effort. This is advisory; it neither interrupts nor replaces
+a conversation automatically. A fresh conversation starts at zero.
+
 A successful health check only proves that the core and browser are available.
 For each operation, inspect the exact session and generation. If wait reports
-`provider.conversation-unavailable`, the conversation fetch failed and its
-message/composer surface is absent. This is not evidence of ongoing generation,
+`provider.conversation-unavailable`, its message/composer surface is absent.
+DOM availability is determined from the page, independently of backend HTTP
+status or whether a particular fetch appears in resource timings. This is not evidence of ongoing generation,
 permanent deletion, or non-submission. A 429 remains transport deferral: respect
 `nextCheckAt`, and do not replace a healthy conversation because of 429 alone.
 Use `sessionplane_team_get` with `requestRef` to inspect the live page and retrieve the
@@ -176,7 +181,7 @@ Already submitted predecessor generations keep observing until their results are
 Preserve completed answers and required artifacts, then carry only the relevant
 role brief, current objective, decisions, and unresolved work into the new send.
 Keep requested model/effort and verify attachment identity. Do not copy an entire
-long transcript or rotate on an arbitrary message count. New sends still require
+long transcript. The 10-turn recommendation is a handoff cue, not an automatic cutoff. New sends still require
 fresh preparation decisions. A new session does not imply permission to repeat
 an unresolved submission; follow the caller/operator's explicit recovery intent.
 An existing instruction to replace and continue is authorization; do not ask again.

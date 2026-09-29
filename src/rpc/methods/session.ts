@@ -40,12 +40,9 @@ export function registerSessionMethods(
         roleKey: params.roleKey,
         provider: params.provider,
       };
-      return receipts.execute({
-        clientId: params.clientId,
-        requestId: params.requestId,
-        method: 'session.create',
-        payload: command,
-        operation: () => directory.createSession(command),
+      return cleanup.replace({
+        clientId: params.clientId, requestId: params.requestId, method: 'session.create',
+        payload: command, ...command,
       });
     },
   );

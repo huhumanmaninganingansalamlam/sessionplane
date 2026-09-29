@@ -157,7 +157,7 @@ export class ChatGptSubmission implements ProviderSubmission {
       });
       if (configuration === undefined || snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, configuration)) {
         throw new ProviderSubmissionError('provider.preparation-required',
-          'Use reveal to explore enabled model options and slider values without confirming or submitting. Intermediate labels need not match the full request. Inspect the resulting configuration, then choose it once using model or effort. Continue this requestRef.');
+          'Choose a matching configurationCatalog option with decide configure and configurationId. If the catalog is missing or stale, use decide discover on this requestRef. Configuration must be verified before submission.');
       }
     }
   }
@@ -175,7 +175,7 @@ export class ChatGptSubmission implements ProviderSubmission {
       throw new ProviderSubmissionError('capability.unsupported', 'Named-mode automatic selection is not supported');
     }
     if (choices?.composer === undefined) {
-      throw new ProviderSubmissionError('provider.preparation-required', 'Choose the composer on this exact owned page to replace any provider-restored draft with this request prompt before model/effort selection');
+      throw new ProviderSubmissionError('provider.preparation-required', 'Choose the composer on this exact owned page to replace any provider-restored draft with this request prompt; select the requested configuration from configurationCatalog before submitting');
     }
     const composer = await this.#resolvePreparationTarget(choices.composer, COMPOSER_READY_TIMEOUT_MS);
     if (composer === null) {

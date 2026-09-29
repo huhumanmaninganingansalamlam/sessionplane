@@ -193,6 +193,13 @@ export class BrowserOwner {
       this.#context = context;
       this.#browser = browser;
       this.#pageRegistry.attach(context);
+      for (const page of context.pages()) {
+        try {
+          await this.#identifyPage(page);
+        } catch (error) {
+          if (!page.isClosed()) throw error;
+        }
+      }
       context.once('close', () => this.#handleDisconnect('BrowserContext closed'));
       browser.once('disconnected', () => this.#handleDisconnect('Browser disconnected'));
       this.#state = 'ready';
@@ -253,7 +260,17 @@ export class BrowserOwner {
   async createPage(): Promise<{ readonly page: Page; readonly binding: PageBindingSnapshot }> {
     const context = this.#requireContext();
     const page = await context.newPage();
-    return { page, binding: this.#pageRegistry.registerPage(page) };
+    return { page, binding: await this.#identifyPage(page) };
+  }
+
+  async #identifyPage(page: Page): Promise<PageBindingSnapshot> {
+    const session = await page.context().newCDPSession(page);
+    try {
+      const { targetInfo } = await session.send('Target.getTargetInfo');
+      return this.#pageRegistry.identifyPage(page, targetInfo.targetId);
+    } finally {
+      await session.detach();
+    }
   }
 
   async openLoginPage(loginUrl: string): Promise<PageBindingSnapshot> {

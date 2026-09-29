@@ -14,6 +14,14 @@ to ChatGPT; explicitly disabled providers fail before creating team/role state.
 
 Ordinary flow: team_get → send → decide when needed → wait.
 
+Team roles and exact request responses include `conversationUsage` with
+`confirmedTurnCount` and `handoffRecommended`. Ten distinct acknowledged user
+turns in the provider conversation trigger a recommendation to finish the current
+request, retrieve outputs, write a handoff, and use `session_replace` before
+continuing. The count survives restarts and excludes preparation failures,
+unacknowledged attempts, duplicate replays, and messages sent outside SessionPlane.
+Replacement starts a fresh count; it never automatically summarizes or resends work.
+
 The caller chooses model/mode from live evidence; the core verifies recorded controls
 remain selected. Honor explicit versions, otherwise use the latest matching option.
 Account badges and role names do not establish selection. Inspect nested choices
@@ -69,13 +77,19 @@ and confirm the final active controls; unavailable intent requires a user decisi
   refresh fails with `session.recovery-unavailable` and the same guidance.
   Its submission outcome remains unknown, not completed or definitely unsent.
   `promptSubmitted:true` in this state records an attempt, not provider acceptance.
-  The caller must explicitly decide whether to replace the session and continue
-  with new work, accounting for possible duplicate processing. Replacement itself
-  never replays the prompt; the old request remains inspectable. A provider outage
+  Replacement skips provider deletion when the exact conversation identity is unknown.
+  Replacement cannot claim deletion of an unidentified conversation and never
+  replays the prompt; the old request remains inspectable. A provider outage
   or slow answer alone does not meet this lost-page condition.
 - `stop` cancels preparation or stops the exact generating request. It cannot stop
-  a newer generation. `session_replace` explicitly changes routing without replaying
-  work or deleting history. `role_retire` prevents new work on a finished expert.
+  a newer generation. `session_replace` attempts to permanently delete the previous
+  provider conversation once, closes its owned tab and ends observation, then creates
+  the new session. Deletion failure, unsupported deletion or unknown conversation
+  identity does not block replacement; there is no automatic cleanup retry.
+  Retrieve needed outputs and write the handoff first. Stored local answers/files
+  remain available. The old session stays retired across restarts even when deletion
+  fails. Raw `session.create` for an occupied role uses the same replacement path.
+  `role_retire` prevents new work on a finished expert.
   If a role has no current session, session_replace accepts its observed roleKey
   instead of roleRef and creates its first session (ChatGPT by default). A roleKey
   cannot replace an occupied role; that still requires its fresh roleRef.

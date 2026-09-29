@@ -250,6 +250,12 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     assert.equal(composerFailureSnapshot.submissionState, 'failed_pre_submit');
     assert.equal(composerFailureSnapshot.terminal, true);
     assert.equal(composerFailureSnapshot.promptSubmitted, false);
+    const failedRequest = service.database.raw.prepare('SELECT outbox_id AS id FROM outbox WHERE session_id = ? AND generation = ?')
+      .get(composerFailure.sessionId, composerFailureSnapshot.generation) as { id: string };
+    const failureInspection = await rpc<{ request: { message: string } }>(config.socketPath, 'workflow.team_get', {
+      teamId: team.teamId, requestRef: failedRequest.id,
+    });
+    assert.equal(failureInspection.request.message, 'The exact composer could not retain the requested prompt.');
     fake.prepareError = null;
 
     await createRole(config.socketPath, team.teamId, 'expert.interrupted', 'interrupted-role');

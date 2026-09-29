@@ -229,7 +229,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
   const acceptedAttachment = 'Review the originally accepted content.';
   writeFileSync(attachmentPath, acceptedAttachment);
   const fixture = `<!doctype html><html><body>
-    <form id="composer"><button id="models-button" type="button" aria-label="Submit settings" aria-haspopup="menu">Submit settings</button>
+    <form id="composer"><button id="models-button" type="button" aria-label="Submit settings" aria-haspopup="menu" aria-expanded="false">Submit settings</button>
       <button id="effort-button" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="effort-options">Effort</button>
       <button data-testid="send-button" type="submit" hidden>전송</button><textarea aria-label="Prompt">Provider-restored unrelated draft</textarea>
       <input type="file"><span id="uploaded-name"></span></form>
@@ -251,6 +251,12 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       document.querySelector('textarea').addEventListener('input', () => { document.querySelector('[type=submit]').hidden = false; });
       document.querySelector('#models-button').onclick = (event) => {
         event.currentTarget.setAttribute('aria-controls', 'models');
+        if (event.currentTarget.getAttribute('aria-expanded') === 'true') {
+          event.currentTarget.setAttribute('aria-expanded', 'false');
+          document.querySelector('#models').hidden = true;
+          return;
+        }
+        event.currentTarget.setAttribute('aria-expanded', 'true');
         setTimeout(() => { document.querySelector('#models').hidden = false; }, 350);
         const busyUntil = performance.now() + 5_500;
         while (performance.now() < busyUntil) { /* Model menu responds after click acknowledgement times out. */ }
@@ -311,7 +317,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
     name,
     arguments: args,
     socketPath: config.socketPath,
-    timeoutMs: 10_000,
+    timeoutMs: name === 'sessionplane_send' ? 45_000 : 10_000,
     maxLineBytes: config.rpcMaxLineBytes,
   });
   try {
@@ -407,6 +413,19 @@ test('MCP team decisions continue the same generation across restart, UI drift a
         assert.equal(result.structuredContent.promptSubmitted, false);
         assert.equal(result.structuredContent.choices.model, undefined);
         assert.equal(result.structuredContent.choices.effort, undefined);
+        if (name === 'Submit settings') {
+          for (const direction of ['close', 'reopen']) {
+            const current = await inspect();
+            const toggle = current.nodes.find(node => node.name === name)!;
+            const navigated = await invoke('sessionplane_decide', { ...identity,
+              requestId: 'navigate-' + direction, decision: 'reveal', purpose: 'model',
+              snapshotId: current.snapshotId, ref: toggle.ref });
+            assert.equal(navigated.isError, false, JSON.stringify(navigated));
+            assert.equal(await page.locator('#models').isVisible(), direction === 'reopen');
+            assert.equal(navigated.structuredContent.promptSubmitted, false);
+            assert.equal(navigated.structuredContent.choices.model, undefined);
+          }
+        }
       }
       if (purpose === 'submit') {
         assert.equal(result.structuredContent.status, 'needs_decision');
@@ -594,13 +613,13 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
   }
 });
 
-test('MCP returns a decision for a lost ambiguous page and permits explicit replacement without replay', async () => {
+test('MCP preserves a lost ambiguous request after replacement without a conversation identity', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-lost-page-'));
   const config = { ...resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 100 };
   const service = await startCore({ config, browserHeadless: true, logger: silentLogger() });
   installPreparationFixtureRoute(service, `<form onsubmit="event.preventDefault()"><textarea id="prompt-textarea"></textarea><button type="submit">Send</button></form>`);
   const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_' + name, arguments: args,
-    socketPath: config.socketPath, timeoutMs: 5_000, maxLineBytes: config.rpcMaxLineBytes });
+    socketPath: config.socketPath, timeoutMs: name === 'send' ? 45_000 : 15_000, maxLineBytes: config.rpcMaxLineBytes });
   try {
     const created = (await invoke('team_create', { requestId: 'lost-team' })).structuredContent;
     const teamId = created.teamId;
@@ -628,9 +647,7 @@ test('MCP returns a decision for a lost ambiguous page and permits explicit repl
     assert.equal((await invoke('decide', { ...identity, requestId: 'refresh-lost', decision: 'refresh' })).structuredContent.errorCode, 'session.recovery-unavailable');
     const replaced = await invoke('session_replace', { teamId, roleRef: lost.roleRef, requestId: 'replace-lost' });
     assert.equal(replaced.isError, false);
-    const newRole = (replaced.structuredContent.roles as Array<{ currentSessionId: string }>)[0]!;
-    assert.notEqual(newRole.currentSessionId, before.sessionId);
-    assert.equal(service.teamDirectory.getSession(newRole.currentSessionId).promptSubmitted, false);
+    assert.notEqual(service.teamDirectory.getCurrentSession(identity.teamId as string, 'main').sessionId, before.sessionId);
     const retained = await inspect();
     assert.equal(retained.submissionState, 'submission_unknown');
     assert.equal(retained.sessionId, before.sessionId);

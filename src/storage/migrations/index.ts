@@ -5,6 +5,7 @@ import { runtimeCoordinationMigration } from './0002-runtime-coordination.ts';
 import { submissionOutboxMigration } from './0003-submission-outbox.ts';
 import { providerArtifactsMigration } from './0004-provider-artifacts.ts';
 import { teamOwnerIndexMigration } from './0005-team-owner-index.ts';
+import { pageTargetIdentityMigration } from './0006-page-target-identity.ts';
 
 export interface Migration {
   readonly version: number;
@@ -18,6 +19,7 @@ export const migrations: readonly Migration[] = [
   submissionOutboxMigration,
   providerArtifactsMigration,
   teamOwnerIndexMigration,
+  pageTargetIdentityMigration,
 ];
 
 export function runMigrations(database: DatabaseSync, now: () => Date = () => new Date()): number {

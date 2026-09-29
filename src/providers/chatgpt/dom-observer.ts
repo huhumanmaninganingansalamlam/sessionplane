@@ -5,7 +5,7 @@ import { readChatGptMessages } from './message-dom.ts';
 
 export interface ChatGptDomObservation {
   readonly actionableAlert: boolean;
-  readonly loadFailureStatus: number | null;
+  readonly conversationSurfaceAvailable: boolean;
   readonly submittedUserFound: boolean;
   readonly laterUserFound: boolean;
   readonly candidate: ProviderAssistantCandidate | null;
@@ -46,28 +46,14 @@ export async function observeChatGptDom(
       streamingMarker: message.streamingMarker,
     };
   }
-  // A failed conversation fetch plus an absent conversation surface is load
-  // failure, not evidence that the provider is still generating. Do not infer
-  // this from translated error copy, CSS classes, or a missing answer alone.
-  const loadFailureStatus = messages.length === 0 ? await page.evaluate(() => {
+  // DOM availability is independent of backend transport and provider progress.
+  // An absent surface cannot prove generation, failure, or non-submission.
+  const conversationSurfaceAvailable = messages.length > 0 || await page.evaluate(() => {
     const main = document.querySelector('main');
-    if (main === null || [...main.querySelectorAll<HTMLElement>('[contenteditable="true"], [role="textbox"], textarea')]
-      .some((element) => element.getClientRects().length > 0)) return null;
-    const conversationId = decodeURIComponent(location.pathname.split('/c/')[1] ?? '');
-    if (!conversationId || conversationId.includes('/')) return null;
-    const paths = new Set([
-      '/backend-api/conversation/' + conversationId,
-      '/backend-api/conversations/' + conversationId,
-    ]);
-    const requests = performance.getEntriesByType('resource') as PerformanceResourceTiming[];
-    for (let index = requests.length - 1; index >= 0; index -= 1) {
-      const request = requests[index]!;
-      const url = new URL(request.name, location.href);
-      if (url.origin !== location.origin || !paths.has(decodeURIComponent(url.pathname))) continue;
-      return request.responseStatus >= 400 ? request.responseStatus : null;
-    }
-    return null;
-  }) : null;
+    return main !== null && [...main.querySelectorAll<HTMLElement>('[contenteditable="true"], [role="textbox"], textarea')]
+      .some(element => element.closest('[aria-hidden="true"], [inert]') === null &&
+        element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
+  });
   const actionableAlert = submittedUserFound && !laterUserFound &&
     await page.evaluate((identity) => {
       const main = document.querySelector('main');
@@ -84,7 +70,7 @@ export async function observeChatGptDom(
         [...alert.querySelectorAll<HTMLElement>('button, [role="button"]')]
           .some((button) => button.getClientRects().length > 0));
     }, identity);
-  return { submittedUserFound, laterUserFound, candidate, loadFailureStatus, actionableAlert };
+  return { submittedUserFound, laterUserFound, candidate, conversationSurfaceAvailable, actionableAlert };
 }
 
 export async function waitForChatGptDomMutation(

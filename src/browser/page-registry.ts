@@ -16,6 +16,7 @@ interface PageRecord {
   readonly pageKey: string;
   readonly page: Page;
   readonly registrationOrder: number;
+  targetId: string | null;
   bindingEpoch: number;
   sessionId: string | null;
   generation: number | null;
@@ -119,6 +120,7 @@ export class PageRegistry {
       pageKey,
       page,
       registrationOrder: this.#registrationSequence,
+      targetId: null,
       bindingEpoch: 1,
       sessionId: null,
       generation: null,
@@ -148,6 +150,14 @@ export class PageRegistry {
     page.on('framenavigated', record.onFrameNavigated);
     page.on('close', record.onClose);
     this.#reconcileConflicts();
+    this.#emit(record);
+    return this.#snapshot(record);
+  }
+
+  identifyPage(page: Page, targetId: string): PageBindingSnapshot {
+    const binding = this.registerPage(page);
+    const record = this.#requireRecord(binding.pageKey);
+    record.targetId = targetId;
     this.#emit(record);
     return this.#snapshot(record);
   }
@@ -529,6 +539,7 @@ export class PageRegistry {
   #snapshot(record: PageRecord): PageBindingSnapshot {
     return Object.freeze({
       pageKey: record.pageKey,
+      targetId: record.targetId,
       bindingEpoch: record.bindingEpoch,
       sessionId: record.sessionId,
       generation: record.generation,

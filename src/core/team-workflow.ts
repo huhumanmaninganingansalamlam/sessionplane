@@ -55,7 +55,8 @@ export class TeamWorkflow {
       : { requests: this.#outbox.listForTeam(team.teamId), nextRequestRef: null };
     return {
       ...team,
-      roles: team.roles.map((r) => ({ ...r, roleRef: r.currentSessionId === null ? null : `${r.currentSessionId}:${r.generation}` })),
+      roles: team.roles.map((r) => ({ ...r, roleRef: r.currentSessionId === null ? null : `${r.currentSessionId}:${r.generation}`,
+        conversationUsage: this.#conversationUsage(r.currentSessionId) })),
       ...history,
       ...(input.requestRef === undefined ? {} : { request: await this.#observe(this.#request({ teamId: input.teamId, requestRef: input.requestRef }), input.maxNodes, true) }),
     };
@@ -79,20 +80,20 @@ export class TeamWorkflow {
     return this.getTeam(input);
   }
 
-  replaceSession(input: Mutation & { roleRef?: string | undefined; roleKey?: string | undefined; provider?: ProviderName | undefined }) {
+  async replaceSession(input: Mutation & { roleRef?: string | undefined; roleKey?: string | undefined; provider?: ProviderName | undefined }) {
     if ((input.roleRef === undefined) === (input.roleKey === undefined) || (input.roleRef !== undefined && input.provider !== undefined)) {
       throw new SessionPlaneDomainError('input.invalid', 'Use either a fresh roleRef, or an empty roleKey with an optional provider');
     }
-    this.#mutate(input, 'session_replace', () => {
-      if (input.roleRef === undefined) {
-        const role = this.services.directory.getTeam(input.teamId).roles.find((role) => role.roleKey === input.roleKey);
-        if (role === undefined || role.currentSessionId !== null) {
-          throw new SessionPlaneDomainError('input.invalid', 'Role must exist without a current session; refresh the team');
-        }
-        return this.services.directory.createSession({ teamId: input.teamId, roleKey: role.roleKey, provider: input.provider ?? 'chatgpt' });
-      }
-      const session = this.#role({ ...input, roleRef: input.roleRef });
-      return this.services.directory.createSession({ teamId: input.teamId, roleKey: session.roleKey, provider: session.provider });
+    const identity = input.roleRef === undefined ? null : parseRoleRef(input.roleRef);
+    const session = identity === null ? null : this.services.directory.getSession(identity[0]);
+    if (session !== null && session.teamId !== input.teamId) {
+      throw new SessionPlaneDomainError('input.invalid', 'Role reference belongs to another team');
+    }
+    await this.services.cleanup.replace({ clientId: `team:${input.teamId}`, requestId: input.requestId,
+      method: 'workflow.session_replace', payload: input, teamId: input.teamId,
+      roleKey: session?.roleKey ?? input.roleKey!, provider: session?.provider ?? input.provider ?? 'chatgpt',
+      expectedSessionId: session?.sessionId ?? null,
+      ...(identity === null ? {} : { expectedGeneration: identity[1] }),
     });
     return this.getTeam(input);
   }
@@ -125,12 +126,24 @@ export class TeamWorkflow {
     }
     const request = this.#outbox.getByRequest(clientId, input.requestId);
     if (request === null) throw new SessionPlaneDomainError('internal.invariant-violation', 'Accepted request has no outbox identity');
+    if (needsDecision(this.services.directory.getSession(request.sessionId)) && this.services.ui.configurationCatalog === null) {
+      await this.services.ui.discover({ ...ownerOf(request), decisionId: `catalog:${request.outboxId}` });
+    }
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'discover' } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
+    if (input.decision === 'discover') {
+      await this.services.ui.inspect(owner);
+      await this.services.ui.discover({ ...owner, decisionId: input.requestId });
+      return await this.#observe(this.#request(input));
+    }
+    if (input.decision === 'configure') {
+      await this.services.ui.configure({ ...owner, decisionId: input.requestId, configurationId: input.configurationId });
+      return await this.#observe(this.#request(input));
+    }
     if (input.decision === 'acknowledge') {
       await this.services.submissions.acknowledgeSubmission({ ...owner, decisionId: input.requestId, messageId: input.messageId, evidenceHash: input.evidenceHash });
       return await this.#observe(this.#request(input));
@@ -154,7 +167,7 @@ export class TeamWorkflow {
       purpose: input.purpose, snapshotId: input.snapshotId, ref: input.ref,
       ...(input.value === undefined ? {} : { value: input.value }),
     });
-    if (input.decision === 'choose') {
+    if (input.decision === 'choose' && Number(input.ref.slice(2)) <= 5000) {
       try { await this.services.ui.resume(owner); }
       catch (error) {
         if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.preparation-required') throw error;
@@ -259,24 +272,41 @@ export class TeamWorkflow {
   }
 
   async #observe(request: OutboxRecord, maxNodes?: number, inspectCurrent = false): Promise<Record<string, unknown>> {
+    const result = await this.#observeRequest(request, maxNodes, inspectCurrent);
+    return { ...result, conversationUsage: this.#conversationUsage(request.sessionId) };
+  }
+
+  #conversationUsage(sessionId: string | null) {
+    const confirmedTurnCount = sessionId === null ? 0 : this.#sessions.confirmedConversationTurns(sessionId);
+    return { confirmedTurnCount, handoffRecommended: confirmedTurnCount >= 10,
+      ...(confirmedTurnCount < 10 ? {} : {
+        recommendation: 'This conversation has at least 10 confirmed user turns. After resolving the current request and retrieving its answer/files, write a handoff with the objective, decisions, evidence/artifact references, unresolved work, next step, and requested model/effort. Use sessionplane_session_replace with a fresh roleRef, then send the handoff in the new conversation. Do not copy the entire transcript or replay unresolved submissions.',
+      }) };
+  }
+
+  async #observeRequest(request: OutboxRecord, maxNodes?: number, inspectCurrent = false): Promise<Record<string, unknown>> {
     let snapshot = this.services.directory.getSession(request.sessionId);
+    const failureMessage = request.submissionState === 'failed_pre_submit'
+      ? JSON.parse(request.resultJson ?? '{}').message as string | undefined : undefined;
     if (snapshot.generation !== request.generation) {
       return { requestOk: true, requestRef: request.outboxId, sessionId: request.sessionId, generation: request.generation,
-        ...this.#sessions.getGenerationResult(request.sessionId, request.generation), historical: true, terminal: true, waitExpired: false };
+        ...this.#sessions.getGenerationResult(request.sessionId, request.generation), historical: true, terminal: true, waitExpired: false,
+        ...(failureMessage === undefined ? {} : { message: failureMessage }) };
     }
     const recovery = this.#lostSubmission(snapshot);
     if (recovery !== null) return { ...snapshot, requestRef: request.outboxId, roleRef: roleRef(snapshot), ...recovery };
     if (needsDecision(snapshot)) {
-      const evidence = await this.services.ui.inspect({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });
+      const { configurationCatalog, ...evidence } = await this.services.ui.inspect({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });
       snapshot = this.services.directory.getSession(request.sessionId);
       const stored = this.#outbox.requireById(request.outboxId);
       const payload = JSON.parse(stored.payloadJson) as Record<string, unknown>;
       const preparation = JSON.parse(stored.resultJson ?? '{}') as Record<string, unknown>;
       return { ...snapshot, status: 'needs_decision', requestRef: request.outboxId, evidence,
+        configurationCatalog,
         requested: { model: payload.model, effort: payload.effort, surface: payload.surface }, choices: preparation.choices,
         message: preparation.message };
     }
-    if ((snapshot.submissionState === 'submission_unknown' && snapshot.provider === 'chatgpt') ||
+    if ((!snapshot.terminal && snapshot.submissionState === 'submission_unknown' && snapshot.provider === 'chatgpt') ||
         (snapshot.provider === 'chatgpt' && !snapshot.terminal && snapshot.submissionState === 'submitted' &&
           (inspectCurrent || snapshot.reason === 'provider-actionable-alert'))) {
       try {
@@ -292,10 +322,11 @@ export class TeamWorkflow {
           inspectionError: { errorCode: error.errorCode, message: error.message } };
       }
     }
-    if (snapshot.submissionState === 'submission_unknown') {
+    if (!snapshot.terminal && snapshot.submissionState === 'submission_unknown') {
       snapshot = await this.services.submissions.recoverAcknowledgement(snapshot);
     }
-    return { ...snapshot, requestRef: request.outboxId, roleRef: roleRef(snapshot) };
+    return { ...snapshot, requestRef: request.outboxId, roleRef: roleRef(snapshot),
+      ...(failureMessage === undefined ? {} : { message: failureMessage }) };
   }
 }
 

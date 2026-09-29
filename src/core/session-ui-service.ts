@@ -1,3 +1,4 @@
+import { ChatGptConfigurationMenu, type ConfigurationCatalog } from '../providers/chatgpt/configuration-catalog.ts';
 import { errors, type ElementHandle, type Page } from 'playwright-core';
 
 import { PageRegistry, PageRegistryError } from '../browser/page-registry.ts';
@@ -14,6 +15,50 @@ export class SessionUiService {
   readonly #registry: PageRegistry;
   readonly #chatgptOrigin: string;
   readonly #refs = new BrowserRefSnapshotStore();
+  #catalog: ConfigurationCatalog | null = null;
+  readonly #discoveryFailures = new Map<string, ConfigurationCatalog>();
+  readonly #configurationRefs = new Map<string, { snapshotId: string; ids: readonly string[] }>();
+
+  get configurationCatalog() { return this.#catalog; }
+
+  async discover(input: PreparationOwner & { decisionId: string }) {
+    const result = await this.#submissions.decidePreparation({ ...input, decision: 'discover', purpose: 'model' }, async session => {
+      try {
+        return { choice: null, result: await new ChatGptConfigurationMenu(this.#requirePage(session), session.pageKey!).discover() };
+      } catch (error) {
+        const result: ConfigurationCatalog = { status: 'unavailable', observedAt: new Date().toISOString(), options: [], unavailableVersions: [],
+          message: error instanceof Error ? error.message : String(error) };
+        return { choice: null, result };
+      }
+    });
+    // A receipt replay restores the observation without repeating UI mutations.
+    if ('options' in result) {
+      const key = `${input.sessionId}:${input.generation}`;
+      if (result.status === 'available') {
+        this.#catalog = result;
+        this.#discoveryFailures.delete(key);
+      } else this.#discoveryFailures.set(key, result);
+    }
+    return result;
+  }
+
+  async configure(input: PreparationOwner & { decisionId: string; configurationId: string }) {
+    return await this.#submissions.decidePreparation({ ...input, decision: 'configure', purpose: 'model' },
+      session => this.#selectConfiguration(session, input.configurationId));
+  }
+
+  async #selectConfiguration(session: SessionSnapshot, configurationId: string) {
+      const option = this.#catalog?.options.find(option => option.id === configurationId);
+      if (!option) throw new SessionPlaneDomainError('provider.configuration-stale', 'Discover current configurations and choose an observed configurationId');
+      try {
+        const summary = await new ChatGptConfigurationMenu(this.#requirePage(session), session.pageKey!).select(option);
+        return { choice: toPreparationTarget('model', summary), result: { configurationId: option.id, label: option.label } };
+      } catch (error) {
+        if (error instanceof SessionPlaneDomainError &&
+            ['provider.configuration-stale', 'provider.model-unavailable'].includes(error.errorCode)) this.#catalog = null;
+        throw typedUiError(error);
+      }
+  }
 
   constructor(input: { submissions: SubmissionService; registry: PageRegistry; chatgptUrl: string }) {
     this.#submissions = input.submissions;
@@ -37,8 +82,18 @@ export class SessionUiService {
     return await this.#submissions.withPendingPreparation(input,
       async (session) => {
         const snapshot = await this.#capture(session, input.maxNodes);
+        const catalog = this.#discoveryFailures.get(`${session.sessionId}:${session.generation}`) ?? this.#catalog;
         const menuIds = new Set(snapshot.nodes.filter((node) => node.role === 'menu' && node.id !== '').map((node) => node.id));
-        return { ...snapshot, nodes: snapshot.nodes.map((node) => ({ ...node, actions: preparationActions(node, menuIds) })) };
+        this.#configurationRefs.set(snapshot.pageKey, { snapshotId: snapshot.snapshotId,
+          ids: catalog?.options.map(option => option.id) ?? [] });
+        return { ...snapshot, nodes: snapshot.nodes.map((node) => ({ ...node, actions: preparationActions(node, menuIds) })),
+          configurationCatalog: catalog === null ? null : { ...catalog,
+            instruction: 'Select the desired combined label. Call sessionplane_decide with option.selection plus teamId, requestRef and a new requestId. No menu exploration is required.',
+            options: catalog.options.map((option, index) => ({ ...option,
+              // DOM snapshots contain at most 5000 refs. Configuration refs use
+              // the existing decision shape without pretending to be DOM nodes.
+              selection: { decision: 'choose' as const, purpose: 'model' as const,
+                snapshotId: snapshot.snapshotId, ref: `@e${5001 + index}` } })) } };
       });
   }
 
@@ -74,12 +129,23 @@ export class SessionUiService {
     readonly ref?: string;
     readonly value?: number | undefined;
   }) {
-      return await this.#submissions.decidePreparation(input, async (session) => {
+      return await this.#submissions.decidePreparation<BrowserSnapshot | { configurationId: string; label: string }>(input, async (session) => {
       const purpose = input.purpose;
       const snapshotId = input.snapshotId;
       const ref = input.ref;
       if (purpose === undefined || snapshotId === undefined || ref === undefined || session.pageKey === null) {
         throw new SessionPlaneDomainError('input.invalid', 'A choice needs purpose, snapshotId, and ref');
+      }
+      if (Number(ref.slice(2)) > 5000) {
+        const catalog = this.#configurationRefs.get(session.pageKey);
+        const configurationId = catalog?.ids[Number(ref.slice(2)) - 5001];
+        if (catalog?.snapshotId !== snapshotId || configurationId === undefined) {
+          throw new BrowserSnapshotError('browser.snapshot-stale', 'Inspect the current configuration catalog before choosing');
+        }
+        if (input.decision !== 'choose' || purpose !== 'model' || input.value !== undefined) {
+          throw new SessionPlaneDomainError('input.invalid', 'Use the configuration option selection exactly as returned');
+        }
+        return await this.#selectConfiguration(session, configurationId);
       }
       const page = this.#requirePage(session);
       const binding = this.#registry.refreshPage(session.pageKey);
@@ -158,7 +224,7 @@ export class SessionUiService {
             !after.nodes.some((node) => matchesPreparationTarget(node, target)) &&
             hasRevealedChoices(after.nodes, currentNode, currentObservation.nodes);
           const verified = reveal && ['button', 'menuitem'].includes(currentNode.role)
-            ? hasRevealedChoices(after.nodes, currentNode, currentObservation.nodes)
+            ? hasNavigationEvidence(after.nodes, currentNode, currentObservation.nodes)
             : hasPreparationSelectionEvidence(after.nodes, target) || transitioned;
           if (verified) break;
           if (performance.now() >= evidenceDeadline) {
@@ -256,6 +322,15 @@ function hasRevealedChoices(nodes: readonly BrowserSnapshotNode[], opener: Brows
   return nodes.some((node) => ['option', 'menuitem', 'menuitemradio', 'radio', 'slider'].includes(node.role) &&
     node.ancestorIds.some((id) => scopes.has(id)) &&
     !before.some((previous) => sameSnapshotSemantics(previous, node)));
+}
+
+function hasNavigationEvidence(nodes: readonly BrowserSnapshotNode[], opener: BrowserSnapshotNode, before: readonly BrowserSnapshotNode[]): boolean {
+  // Exploration can return from a submenu by closing its expanded chooser.
+  // Verify the control transition and closed scope, without confirming a value.
+  const collapsed = opener.expanded === true && opener.id !== '' &&
+    nodes.some(node => node.id === opener.id && node.expanded === false) &&
+    !nodes.some(node => opener.controls.includes(node.id));
+  return collapsed || hasRevealedChoices(nodes, opener, before);
 }
 
 function toPreparationTarget(purpose: PreparationPurpose, node: BrowserSnapshotNode, selectedValue?: number): PreparationTarget {

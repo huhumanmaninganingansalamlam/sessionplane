@@ -69,9 +69,8 @@ test('conversation deletion protects unresolved work, retains answers and persis
     await assert.rejects(rpc('session.delete', deletion(active, 'active')),
       (error: unknown) => JSON.stringify(error).includes('session.cleanup-not-ready'));
     assert.equal(fake.deleted.size, 0);
-    const successor = await rpc<SessionSnapshot>('session.create', {
-      requestId: 'replace-active', teamId: active.teamId, roleKey: active.roleKey, provider: 'chatgpt',
-    });
+    // Seed legacy routing-only retirement to retain coverage for old unresolved records.
+    const successor = core.teamDirectory.createSession({ teamId: active.teamId, roleKey: active.roleKey, provider: 'chatgpt' });
     assert.equal((await rpc<SessionSnapshot>('session.get', { sessionId: active.sessionId })).terminal, false);
     fake.emitObservation(active.sessionId, { candidate: { responseMessageId: 'old-final',
       answerText: 'Answer from predecessor', terminalMarker: true, streamingMarker: false }, activity: 'none' });
@@ -155,8 +154,7 @@ test('conversation deletion protects unresolved work, retains answers and persis
       sessionId: predecessor.sessionId, prompt: 'Unacknowledged followup' }),
       (error: unknown) => JSON.stringify(error).includes('session.submission-unknown'));
     const ambiguous = await rpc<SessionSnapshot>('session.get', { sessionId: predecessor.sessionId });
-    await rpc('session.create', { requestId: 'replace-ambiguous', teamId: ambiguous.teamId,
-      roleKey: ambiguous.roleKey, provider: 'chatgpt' });
+    core.teamDirectory.createSession({ teamId: ambiguous.teamId, roleKey: ambiguous.roleKey, provider: 'chatgpt' });
     await assert.rejects(rpc('session.delete', deletion(ambiguous, 'ambiguous')),
       (error: unknown) => JSON.stringify(error).includes('session.cleanup-not-ready'));
     await core.close();

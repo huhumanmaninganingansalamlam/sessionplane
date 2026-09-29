@@ -26,26 +26,20 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
 3. `sessionplane_send` takes teamId, a fresh roleRef, prompt and intended model/
    effort. Every mutation needs a distinct stable requestId; retry that ID only
    with identical arguments. A stale roleRef requires refreshing team_get.
-4. `status: needs_decision` is a normal handoff, not a failed send. Interpret the
-   fresh evidence and recorded choices.
-   Each preparation node lists supported purposes in `actions.choose` and
-   `actions.reveal`. Select by its observed meaning and requested intent;
-   these are supported operations, not recommendations. `evidence.interactive`
-   only describes snapshot filtering, not permission or page capability.
-   `sessionplane_decide` takes the requestRef,
-   fresh snapshotId/ref, purpose and `choose` or `reveal`. Model/effort reveal explores
-   observed menus, enabled options and slider values without confirming or submitting.
-   Intermediate labels need not match the complete requested model: explore the
-   family/version and reasoning controls, then inspect the resulting configuration.
-   Slider decisions take a numeric value from the observed range. Reveal clears
-   prior configuration confirmation; choose confirms and continues the same request.
-   Choose the composer, requested configuration and submit controls. New UI
-   evidence can require another choice. Never reuse stale UI refs.
-   Choose the composer first to authorize replacing its restored draft with this
-   request's prompt. Model and effort describe intent, not required UI dimensions.
-   Configure any independent controls needed, then confirm the final configuration
-   once using model or effort and choose submit last. A newer configuration choice
-   replaces the prior confirmation. A displayed summary can confirm without clicking.
+4. `status: needs_decision` is a normal handoff, not a failed send.
+   The first send returns `configurationCatalog.options`: combined configuration
+   labels observed by SessionPlane in the provider UI, each with an `id`.
+   Choose the option matching the requested model/effort: copy `option.selection`
+   into `sessionplane_decide` with teamId, requestRef and a stable requestId. This
+   uses the existing choose/model/snapshotId/ref tool schema. Updated clients may
+   also use `decision: "configure", configurationId: option.id`. Neither path needs
+   menu navigation, selectors or numeric power inference. Configure verifies the result and never submits.
+   Later requests reuse the catalog; each selection is revalidated on its own page.
+   If the catalog is null, unavailable or stale, call `decision: "discover"` on the
+   same requestRef. Incomplete discovery does not establish model unavailability.
+   Then choose the composer and submit from fresh evidence with `decision: "choose"`,
+   purpose and snapshotId/ref. Choose submit last. Raw choose/reveal remain available
+   for diagnostics; do not reconstruct model combinations from partial menus.
    Follow explicit user corrections when request hints conflict. Keep the same requestRef.
    When the user requests a page refresh, or visible stream/history recovery
    failure warrants one, call `sessionplane_decide` with decision `refresh`,
@@ -58,8 +52,12 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    Inspect each result and file failure. Old requests can capture files from their
    exact answer even after a newer send; unavailable provider content is a file error. A timeout does not stop provider work.
    When terminal:false, backend-http-429, probe pacing and waitExpired are
-   observation delays, not failed generation. Respect nextCheckAt and continue
-   waiting on the same requestRef. Do not ask the user to copy the answer merely
+   observation delays, not failed generation. Continue bounded `sessionplane_wait`
+   calls on the same requestRef with positive `waitMs`, including before `nextCheckAt`.
+   `nextCheckAt` schedules the core's backend probes only, not result collection.
+   Do not sleep until it: DOM observation continues and `wait` can return completion
+   earlier. The core enforces probe cooldowns; do not bypass them with refresh or resend.
+   Do not ask the user to copy the answer merely
    because observation is deferred. After an interrupted caller resumes, fetch
    that request again: the core keeps observing and may already have its answer.
    For provider-actionable-alert, inspect evidence or team_get on the same requestRef
@@ -77,16 +75,10 @@ out prompts, infer consensus, or inject answers into other roles.
 
 ## Recovery and cleanup
 
-- A requested model can combine a family/version with a reasoning tier. Select
-  those dimensions through the observed controls and confirm the final summary;
-  do not require the entire requested name to appear as one menu item. Truncated
-  evidence cannot establish that an option is unavailable.
-- Preserve requested model/mode through cancellation and replacement. Confirm active
-  model/effort controls: an account badge, High or Extra High does not establish Pro.
-  Inspect nested options, ranges and actual enabled state; nearby access hints alone
-  do not prove unavailability. Honor explicit versions; otherwise choose the latest
-  matching option. If unavailable, return evidence for a user decision.
-  Use Chat only, never Work. Do not substitute models/providers or bypass access controls.
+- Select the requested combined model/effort label from the observed catalog.
+  Preserve requested model/mode through cancellation and replacement. Honor exact
+  versions; do not substitute or infer Pro from an account badge or High effort.
+  Use Chat only, never Work. Do not bypass access controls.
 - `submission_unknown` means acknowledgement is ambiguous. Use team_get with the
   same requestRef for read-only recovery; never automatically resend it.
   If `evidence.submissionCandidates` contains the matching submitted message,
@@ -97,8 +89,8 @@ out prompts, infer consensus, or inject answers into other roles.
   If the result has status `recovery_required` and recovery.state `unavailable`,
   stop polling/refreshing: the owned page and durable conversation ID are both absent.
   `promptSubmitted:true` here is an attempt, not confirmed acceptance. Explicitly
-  decide whether to use session_replace and continue with new work, considering
-  possible duplicate processing and the user's authorization. Ask the user when
+  decide whether to replace the session and continue new work; deletion is skipped
+  for an unidentified conversation. Ask the user when
   that decision exceeds your authority; do not silently replay the old prompt.
   Keep the original requestRef and uncertainty; replacement does not delete it.
 - A definite pre-submit failure with promptSubmitted:false permits corrected new
@@ -106,8 +98,17 @@ out prompts, infer consensus, or inject answers into other roles.
 - After restart, team_get returns pending requests. Observe fresh evidence before
   making decisions on the same request. Do not create replacement sends to resume.
 - `sessionplane_stop` cancels preparation or stops exactly that request.
-- `sessionplane_session_replace` explicitly rotates a broken/long conversation;
-  carry forward necessary context yourself. It never replays unresolved work.
+- `sessionplane_session_replace` attempts to permanently delete the previous provider
+  conversation once, closes its tab and ends observation, then creates its successor.
+  Retrieve required outputs and write the handoff first. Local stored answers/files
+  remain. Deletion failure or unknown conversation identity does not block replacement;
+  there is no automatic cleanup retry. Old observation stays stopped across restarts.
+  It never replays unresolved work.
+  Read `conversationUsage`: at 10 confirmed user turns, `handoffRecommended:true`
+  recommends finishing the current request, retrieving outputs, and writing a
+  handoff with the objective, decisions, evidence/files, unresolved work, next step,
+  and model/effort. Then replace the session and send that handoff in the new chat.
+  This recommendation does not authorize replaying an unresolved submission.
   If team_get shows an existing role with no session/roleRef, initialize it with
   session_replace using its roleKey instead. Do not recreate that role.
 - `sessionplane_role_retire` ends a non-primary role without deleting provider history.

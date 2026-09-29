@@ -183,22 +183,22 @@ export class SessionRepository {
     return new Map(rows.map((row) => [row.sessionId, row]));
   }
 
-  conversationCleanupBlocker(sessionId: string, conversationId: string): boolean {
-    return this.#database.prepare(`
+  conversationCleanupBlocker(sessionId: string, conversationId: string, discard = false): boolean {
+    return (!discard && this.#database.prepare(`
       SELECT 1 FROM generations WHERE session_id = ? AND (
         submission_state = 'failed_pre_submit' OR
         (submission_state = 'submitted' AND completed_at IS NOT NULL AND response_message_id IS NOT NULL
           AND answer_text IS NOT NULL AND error_code IS NULL)
       ) IS NOT TRUE LIMIT 1
-    `).get(sessionId) !== undefined || this.#database.prepare(`
+    `).get(sessionId) !== undefined) || this.#database.prepare(`
       SELECT 1 FROM sessions WHERE conversation_id = ? AND session_id != ? LIMIT 1
     `).get(conversationId, sessionId) !== undefined;
   }
 
-  retireDeletedConversation(sessionId: string, timestamp: string): void {
+  retireDeletedConversation(sessionId: string, timestamp: string, keepRole = false): void {
     this.#database.prepare("UPDATE sessions SET session_state = 'superseded', next_check_at = NULL, updated_at = ? WHERE session_id = ?")
       .run(timestamp, sessionId);
-    this.#database.prepare('UPDATE team_roles SET current_session_id = NULL WHERE current_session_id = ?')
+    if (!keepRole) this.#database.prepare('UPDATE team_roles SET current_session_id = NULL WHERE current_session_id = ?')
       .run(sessionId);
   }
 
@@ -386,6 +386,10 @@ export class SessionRepository {
     const result = this.#database.prepare(`
       UPDATE sessions SET session_state = 'observing', updated_at = ?
       WHERE session_state IN ('superseded', 'cancelled') AND provider IN (${enabledProviders.map(() => '?').join(',')})
+        AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = sessions.session_id AND e.event_type = 'session.replaced')
+        AND NOT EXISTS (SELECT 1 FROM request_receipts receipt WHERE receipt.method = 'session.delete'
+          AND json_extract(receipt.result_json, '$.sessionId') = sessions.session_id
+          AND json_extract(receipt.result_json, '$.deleted') = 1)
         AND (EXISTS (SELECT 1 FROM sessions successor WHERE successor.predecessor_session_id = sessions.session_id)
           OR EXISTS (SELECT 1 FROM team_roles role WHERE role.role_id = sessions.role_id AND role.role_state = 'retired'))
         AND EXISTS (SELECT 1 FROM generations g WHERE g.session_id = sessions.session_id
@@ -407,6 +411,18 @@ export class SessionRepository {
   submittedMessageIds(sessionId: string): Set<string> {
     const rows = this.#database.prepare('SELECT submitted_user_message_id AS id FROM generations WHERE session_id = ? AND submitted_user_message_id IS NOT NULL').all(sessionId) as { id: string }[];
     return new Set(rows.map((row) => row.id));
+  }
+
+  confirmedConversationTurns(sessionId: string): number {
+    const row = this.#database.prepare(`
+      SELECT COUNT(DISTINCT COALESCE(g.submitted_user_message_id, g.submitted_user_turn_id)) AS turns
+      FROM sessions current
+      JOIN sessions s ON s.provider = current.provider AND
+        (s.session_id = current.session_id OR s.conversation_id = current.conversation_id)
+      JOIN generations g ON g.session_id = s.session_id
+      WHERE current.session_id = ? AND g.submission_state = 'submitted'
+    `).get(sessionId) as { turns: number };
+    return Number(row.turns);
   }
 
   getGenerationResult(sessionId: string, generation: number): Omit<GenerationRecord, 'sessionId' | 'teamBriefVersion' | 'promptHash'> | null {
