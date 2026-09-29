@@ -81,7 +81,10 @@ out prompts, infer consensus, or inject answers into other roles.
   without refreshing, resending or creating a tab. This also works for a current
   completed request. A missing or mismatched tab returns an error; do not focus
   an unrelated tab. Background observation never requires focus. After human
-  intervention, inspect the same request again before further decisions.
+  intervention, wait on the same request: while it is nonterminal, human follow-up
+  messages remain in that active request and its latest answer is collected
+  automatically. Do not resend or require a separate adoption decision. Completed
+  results remain unchanged; new SessionPlane sends start the next generation.
 
 - Select the requested combined model/effort label from the observed catalog.
   Preserve requested model/mode through cancellation and replacement. Honor exact

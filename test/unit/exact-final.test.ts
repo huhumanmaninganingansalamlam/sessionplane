@@ -46,21 +46,16 @@ test('quiet stability can finish despite an unverified stale stop control', () =
   );
 });
 
-test('later user turns and network-only evidence never publish a final', () => {
-  const laterUser = new ExactFinalTracker(10).evaluate(
-    evidence({
-      laterUserFound: true,
-      candidate: {
-        responseMessageId: 'historical-assistant',
-        answerText: 'Historical answer',
-        terminalMarker: true,
-        streamingMarker: false,
-      },
-    }),
-    100,
-  );
-  assert.equal(laterUser.kind, 'unverified');
-  assert.equal(laterUser.reason, 'dom-later-user-turn');
+test('human follow-ups use only the latest turn candidate; network activity alone is not final', () => {
+  const tracker = new ExactFinalTracker(10);
+  const waiting = tracker.evaluate(evidence({ laterUserFound: true, candidate: null }), 0);
+  assert.equal(waiting.kind, 'pending');
+  const continued = tracker.evaluate(evidence({ laterUserFound: true, candidate: {
+    responseMessageId: 'continued-answer', answerText: 'Answer after human follow-up',
+    terminalMarker: true, streamingMarker: false,
+  } }), 100);
+  assert.equal(continued.kind, 'complete');
+  assert.equal(continued.responseMessageId, 'continued-answer');
 
   const networkOnly = new ExactFinalTracker(10).evaluate(
     evidence({ candidate: null, networkActivity: true }),

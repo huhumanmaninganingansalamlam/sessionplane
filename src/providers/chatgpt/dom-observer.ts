@@ -23,6 +23,7 @@ export async function observeChatGptDom(
   const messages = await readChatGptMessages(page);
   let submittedUserFound = false;
   let laterUserFound = false;
+  let latestUser = identity;
   let candidate: ProviderAssistantCandidate | null = null;
   for (const message of messages) {
     if (!submittedUserFound) {
@@ -35,7 +36,9 @@ export async function observeChatGptDom(
     }
     if (message.role === 'user') {
       laterUserFound = true;
-      break;
+      candidate = null;
+      latestUser = { submittedUserMessageId: message.messageId, submittedUserTurnId: message.turnId };
+      continue;
     }
     const responseMessageId = message.messageId ?? message.turnId;
     if (responseMessageId === null || responseMessageId.startsWith('request-placeholder-')) continue;
@@ -54,7 +57,7 @@ export async function observeChatGptDom(
       .some(element => element.closest('[aria-hidden="true"], [inert]') === null &&
         element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
   });
-  const actionableAlert = submittedUserFound && !laterUserFound &&
+  const actionableAlert = submittedUserFound &&
     await page.evaluate((identity) => {
       const main = document.querySelector('main');
       if (main === null) return false;
@@ -69,7 +72,7 @@ export async function observeChatGptDom(
         alert.getClientRects().length > 0 && Boolean(alert.innerText.trim()) &&
         [...alert.querySelectorAll<HTMLElement>('button, [role="button"]')]
           .some((button) => button.getClientRects().length > 0));
-    }, identity);
+    }, latestUser);
   return { submittedUserFound, laterUserFound, candidate, conversationSurfaceAvailable, actionableAlert };
 }
 

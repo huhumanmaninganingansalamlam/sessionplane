@@ -69,6 +69,22 @@ test('current ChatGPT message units recover the exact submitted turn and answer'
     assert.equal(interrupted.actionableAlert, true);
     assert.equal(interrupted.candidate?.responseMessageId, 'partial-answer');
     assert.equal((await observeChatGptDom(page, { ...identity, submittedUserMessageId: 'other-turn' })).actionableAlert, false);
+    await page.locator('main').evaluate(main => {
+      main.insertAdjacentHTML('beforeend', '<div data-message-author-role="user" data-message-id="human-followup">Please finish the analysis with the corrected evidence.</div>');
+    });
+    const humanPending = await observeChatGptDom(page, identity);
+    assert.equal(humanPending.submittedUserFound, true);
+    assert.equal(humanPending.laterUserFound, true);
+    assert.equal(humanPending.candidate, null, 'The earlier partial answer must be discarded');
+    assert.equal(humanPending.actionableAlert, false, 'An earlier turn alert must not block the follow-up');
+    await page.locator('main').evaluate(main => {
+      main.insertAdjacentHTML('beforeend', '<div data-message-author-role="assistant" data-message-id="continued-final" data-end-turn="true">Completed review</div>');
+    });
+    const continued = await observeChatGptDom(page, identity);
+    assert.equal(continued.candidate?.responseMessageId, 'continued-final');
+    assert.equal(continued.candidate?.answerText, 'Completed review');
+    assert.equal(continued.candidate?.terminalMarker, true);
+    assert.equal((await observeChatGptDom(page, { ...identity, submittedUserMessageId: 'unrelated' })).candidate, null);
 
   } finally {
     await owner.close();

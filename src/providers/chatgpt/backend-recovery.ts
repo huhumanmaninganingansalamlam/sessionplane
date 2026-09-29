@@ -221,16 +221,16 @@ export function recoverExactServerFinal(
     }
     const role = messageRole(message);
     if (role === 'user') {
-      return unverified('backend-later-user-turn');
+      sawAssistant = false;
+      final = null;
+      continue;
     }
     if (role !== 'assistant') {
       continue;
     }
     sawAssistant = true;
     const candidate = exactServerFinal(nodeId, message);
-    if (candidate !== null) {
-      final = candidate;
-    }
+    final = candidate;
   }
 
   if (final !== null) {

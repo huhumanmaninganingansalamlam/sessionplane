@@ -93,6 +93,8 @@ export interface ProviderObservationEvidence {
   readonly conversationId: string | null;
   readonly submittedUserFound: boolean;
   readonly laterUserFound: boolean;
+  // Only the response after the latest user turn, with the original submitted
+  // anchor present. A human follow-up with no answer must clear the candidate.
   readonly candidate: ProviderAssistantCandidate | null;
   readonly activity: ProviderActivityStrength;
   readonly dialogKind: ProviderDialogKind | null;

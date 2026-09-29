@@ -828,8 +828,8 @@ async function observeProviderDom(
     (anchor.submittedUserTurnId !== null && turn.turnId === anchor.submittedUserTurnId),
   );
   const afterAnchor = anchorIndex < 0 ? [] : turns.slice(anchorIndex + 1);
-  const laterUserIndex = afterAnchor.findIndex((turn) => turn.role === 'user');
-  const candidateTurns = (laterUserIndex < 0 ? afterAnchor : afterAnchor.slice(0, laterUserIndex))
+  const laterUserIndex = afterAnchor.findLastIndex((turn) => turn.role === 'user');
+  const candidateTurns = afterAnchor.slice(laterUserIndex + 1)
     .filter((turn) => turn.role === 'assistant' && turn.text.length > 0);
   const candidateTurn = candidateTurns.at(-1) ?? null;
   const stopVisible = await anyVisible(page, selectors.stopControls);

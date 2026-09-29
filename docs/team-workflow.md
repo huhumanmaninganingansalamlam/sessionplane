@@ -111,3 +111,11 @@ file retrieval remain chat capabilities.
 Unchanged invariants: semantic model intent, Chat-only surface, no provider fallback,
 no automatic ambiguous resend, exact answer ancestry, one mutation owner per page,
 dedicated profile, human-only verification, durable restart observation.
+
+While a submitted request remains nonterminal, human messages in that same
+conversation continue its active generation. Observation keeps the original user
+anchor and follows the current branch through human follow-ups, clearing an older
+answer candidate at every user turn. Only the answer after the latest user turn can
+complete the request. No continuation keyword, special acknowledgement or resend
+is needed. A new SessionPlane send starts the next generation; completed results
+remain immutable and cannot be overwritten by later conversation activity.

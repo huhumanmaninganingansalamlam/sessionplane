@@ -23,6 +23,34 @@ interface WaitSnapshot extends SessionSnapshot {
   readonly latestEventSequence: number;
 }
 
+test('human follow-up final completes the same durable request after restart without resubmission', async () => {
+  const fixture = await createFixture('sessionplane-human-followup-');
+  let service = fixture.service;
+  try {
+    const { session } = await createSession(fixture.config.socketPath, 'main', 'human-followup');
+    await send(fixture.config.socketPath, session.sessionId, 'human-followup');
+    const submitted = service.teamDirectory.getSession(session.sessionId);
+    await service.close();
+    service = await startCore({ config: fixture.config, startBrowser: false,
+      providerAdapters: [fixture.fake], logger: silentLogger() });
+    fixture.fake.emitObservation(session.sessionId, {
+      laterUserFound: true, submittedUserFound: true, activity: 'none',
+      candidate: { responseMessageId: 'human-followup-final', answerText: 'Finished after human intervention',
+        terminalMarker: true, streamingMarker: false },
+    });
+    const final = await waitForSnapshot(fixture.config.socketPath, session.sessionId, s => s.terminal);
+    assert.equal(final.responseMessageId, 'human-followup-final');
+    assert.equal(final.answerText, 'Finished after human intervention');
+    assert.equal(final.generation, submitted.generation);
+    assert.equal(final.submittedUserMessageId, submitted.submittedUserMessageId);
+    assert.equal(fixture.fake.submitCount, 1);
+    await send(fixture.config.socketPath, session.sessionId, 'next-managed-request');
+    await assert.rejects(service.actorScheduler.updateGeneration(session.sessionId, final.generation,
+      { answerText: 'Late old answer', sessionState: 'complete' }), /stale/);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).answerText, null);
+  } finally { await service.close(); rmSync(fixture.root, { recursive: true, force: true }); }
+});
+
 test('an unresponsive renderer cannot block exact backend completion or core shutdown', { timeout: 5_000 }, async () => {
   class HungRenderer extends FakeProviderAdapter {
     override async openObservation(request: ProviderObservationRequest) {

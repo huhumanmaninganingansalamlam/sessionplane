@@ -27,7 +27,7 @@ test('backend recovery accepts only an exact final on the current branch', () =>
   assert.equal(result.answerText, 'Exact server answer');
 });
 
-test('backend recovery rejects historical branches and later user turns', () => {
+test('backend recovery rejects other branches and follows human turns on the anchored current branch', () => {
   const historical = recoverExactServerFinal(
     conversationPayload([
       node('root', null, null),
@@ -51,8 +51,17 @@ test('backend recovery rejects historical branches and later user turns', () => 
     ], 'later-final'),
     identity(),
   );
-  assert.equal(laterUser.kind, 'unverified');
-  assert.equal(laterUser.reason, 'backend-later-user-turn');
+  assert.equal(laterUser.kind, 'complete');
+  assert.equal(laterUser.responseMessageId, 'later-answer');
+  assert.equal(laterUser.answerText, 'Later answer');
+  const pending = recoverExactServerFinal(conversationPayload([
+    node('root', null, null),
+    node('user', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('old-final', 'user', finalAssistant('old-answer', 'Do not return this')),
+    node('human', 'old-final', userMessage('human-message', 'human-turn')),
+  ], 'human'), identity());
+  assert.equal(pending.kind, 'pending');
+  assert.equal(pending.answerText, null);
 });
 
 test('backend recovery requires final channel, finished status, end_turn, and nonempty text', () => {
