@@ -61,9 +61,12 @@ export class ConversationCleanupService {
       if (input.expectedSessionId !== undefined &&
           (role.currentSessionId !== input.expectedSessionId ||
            (input.expectedGeneration !== undefined && previous?.generation !== input.expectedGeneration))) {
-        throw new SessionPlaneDomainError('session.generation-superseded', 'Role reference is stale; refresh the team');
+        throw new SessionPlaneDomainError(
+          input.expectedSessionId === null ? 'input.invalid' : 'session.generation-superseded',
+          input.expectedSessionId === null ? 'Use a fresh roleRef for an occupied role' : 'Role reference is stale; refresh the team',
+        );
       }
-      this.#options.adapters.require(input.provider);
+      directory.requireEnabledProvider(input.provider);
       if (previous !== null && previous.conversationId !== null) {
         // Replacement makes one best-effort deletion attempt; cleanup cannot block routing.
         try {

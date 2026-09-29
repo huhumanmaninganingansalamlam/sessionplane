@@ -7,6 +7,7 @@ import test from 'node:test';
 import { callRpc } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
+import { migrations } from '../../src/storage/migrations/index.ts';
 
 test('system.health is served over an owner-only Unix socket and durable SQLite database', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-health-'));
@@ -31,7 +32,7 @@ test('system.health is served over an owner-only Unix socket and durable SQLite 
 
     assert.equal(result.requestOk, true);
     assert.equal(result.service, 'sessionplane');
-    assert.equal((result.database as Record<string, unknown>).schemaVersion, 5);
+    assert.equal((result.database as Record<string, unknown>).schemaVersion, migrations.at(-1)!.version);
     assert.equal((result.database as Record<string, unknown>).journalMode, 'wal');
     assert.equal((result.database as Record<string, unknown>).foreignKeys, true);
     assert.equal((result.database as Record<string, unknown>).integrity, 'ok');

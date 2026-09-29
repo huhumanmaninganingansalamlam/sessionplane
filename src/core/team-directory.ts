@@ -289,6 +289,21 @@ export class TeamDirectory {
     return this.getTeam(team.teamId);
   }
 
+  requireEnabledProvider(value: string): ProviderName {
+    assertDomain(
+      PROVIDERS.includes(value as (typeof PROVIDERS)[number]),
+      'input.invalid',
+      `Unsupported provider: ${value}`,
+    );
+    const provider = value as ProviderName;
+    assertDomain(
+      this.#enabledProviders.has(provider),
+      'provider.disabled',
+      'Provider is disabled by runtime configuration: ' + provider,
+    );
+    return provider;
+  }
+
   createSession(input: {
     readonly teamId: string;
     readonly roleKey: string;
@@ -297,17 +312,7 @@ export class TeamDirectory {
     const team = this.#requireTeam(input.teamId);
     const role = this.#requireRole(team.teamId, normalizeRoleKey(input.roleKey));
     assertDomain(role.roleState === 'active', 'input.invalid', 'Session can be created only for an active role');
-    assertDomain(
-      PROVIDERS.includes(input.provider as (typeof PROVIDERS)[number]),
-      'input.invalid',
-      `Unsupported provider: ${input.provider}`,
-    );
-    const provider = input.provider as ProviderName;
-    assertDomain(
-      this.#enabledProviders.has(provider),
-      'provider.disabled',
-      'Provider is disabled by runtime configuration: ' + provider,
-    );
+    const provider = this.requireEnabledProvider(input.provider);
 
     const timestamp = this.#now().toISOString();
     const sessionId = this.#uuid();
