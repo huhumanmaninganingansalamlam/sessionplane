@@ -259,8 +259,23 @@ export class BrowserOwner {
 
   async createPage(): Promise<{ readonly page: Page; readonly binding: PageBindingSnapshot }> {
     const context = this.#requireContext();
-    const page = await context.newPage();
-    return { page, binding: await this.#identifyPage(page) };
+    const session = await context.browser()!.newBrowserCDPSession();
+    const existing = new Set(context.pages());
+    try {
+      const { targetId } = await session.send('Target.createTarget', { url: 'about:blank', background: true });
+      const deadline = Date.now() + 10_000;
+      do {
+        for (const page of context.pages()) {
+          if (existing.has(page)) continue;
+          const binding = await this.#identifyPage(page);
+          if (binding.targetId === targetId) return { page, binding };
+        }
+        await new Promise(resolve => setTimeout(resolve, 20));
+      } while (Date.now() < deadline);
+      throw new BrowserOwnerError('browser.unavailable', 'Background page did not attach to its exact browser target');
+    } finally {
+      await session.detach();
+    }
   }
 
   async #identifyPage(page: Page): Promise<PageBindingSnapshot> {
