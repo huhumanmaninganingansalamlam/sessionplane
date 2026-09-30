@@ -323,7 +323,7 @@ test('an expired submitted generation still delivers its later final answer', as
 });
 
 
-test('future probe nextCheckAt suppresses repeated paced recovery calls until due', async () => {
+test('future probe nextCheckAt suppresses repeated paced recovery calls until due', async (t) => {
   const fixture = await createFixture(
     'sessionplane-backend-pacing-',
     new FakeProviderAdapter(),
@@ -362,6 +362,7 @@ test('future probe nextCheckAt suppresses repeated paced recovery calls until du
       session.sessionId,
       (snapshot) => snapshot.nextCheckAt !== null && snapshot.terminal === false,
     );
+    t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
     assert.notEqual(paced.nextCheckAt, null);
     assert.equal(fake.recoveryCount, 1);
 
@@ -378,6 +379,7 @@ test('future probe nextCheckAt suppresses repeated paced recovery calls until du
     );
     assert.equal(fake.recoveryCount, 1);
 
+    t.mock.timers.tick(Date.parse(paced.nextCheckAt!) - Date.now() + 1);
     const complete = await waitForSnapshot(
       config.socketPath,
       session.sessionId,
@@ -386,6 +388,7 @@ test('future probe nextCheckAt suppresses repeated paced recovery calls until du
     assert.equal(complete.answerText, 'Recovered after pacing window');
     assert.equal(fake.recoveryCount, 2);
   } finally {
+    t.mock.timers.reset();
     await service.close();
     rmSync(fixture.root, { recursive: true, force: true });
   }
