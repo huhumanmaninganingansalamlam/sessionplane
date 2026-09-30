@@ -14,6 +14,46 @@ import { recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submi
 
 const CONVERSATION_ID = 'conversation-observer-123456';
 
+test('missing DOM user binds only the exact backend prompt and retrieves its final without submission', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-backend-binding-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<main>Old completed response</main>' }));
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
+    const urls: string[] = [];
+    t.mock.method(page.context().request, 'get', async (url: string) => {
+      urls.push(url);
+      const body = url.endsWith('/api/auth/session') ? { accessToken: 'fixture-only-token' } : {
+        id: CONVERSATION_ID, current_node: 'answer', mapping: {
+          root: { parent: null, message: null },
+          user: { parent: 'root', message: { id: 'backend-user', author: { role: 'user' }, content: { parts: ['Question'] } } },
+          answer: { parent: 'user', message: { id: 'backend-answer', author: { role: 'assistant' }, channel: 'final', status: 'finished_successfully', end_turn: true, content: { parts: ['Exact recovered result'] } } },
+        },
+      };
+      return { status: () => 200, headers: () => ({}), json: async () => body, dispose: async () => {} };
+    });
+    const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/', acknowledgementTimeoutMs: 500 });
+    const session = { ...sessionSnapshot(binding.pageKey), submittedUserMessageId: null, submittedUserTurnId: null };
+    assert.equal(await adapter.recoverAcknowledgement({ session, generation: 1, prompt: 'Question', selection: { messageId: 'invented', evidenceHash: '0'.repeat(64) } }), null);
+    assert.equal(urls.length, 0, 'Explicit selections never bypass original evidence');
+    const acknowledgement = await adapter.recoverAcknowledgement({ session, generation: 1, prompt: 'Question' });
+    assert.equal(acknowledgement?.submittedUserMessageId, 'backend-user');
+    const result = await adapter.recover({ session: { ...session, ...acknowledgement }, generation: 1 });
+    assert.equal(result.kind, 'complete');
+    assert.equal(result.responseMessageId, 'backend-answer');
+    assert.equal(result.answerText, 'Exact recovered result');
+    assert.ok(urls.every(url => url.endsWith('/api/auth/session') || url.endsWith(`/backend-api/conversation/${CONVERSATION_ID}`)));
+    assert.equal(registry.getBinding(binding.pageKey).generation, 1);
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('current ChatGPT message units recover the exact submitted turn and answer', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-message-units-'));
   const owner = new BrowserOwner({

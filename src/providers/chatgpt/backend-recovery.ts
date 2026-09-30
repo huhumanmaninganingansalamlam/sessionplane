@@ -1,5 +1,6 @@
 import type {
   ProviderRecoveryRequest,
+  ProviderSubmissionAcknowledgement,
   ProviderRecoveryResult,
 } from '../provider-adapter.ts';
 
@@ -35,6 +36,7 @@ export class ChatGptBackendRecovery {
   readonly #tokenCacheTtlMs: number;
   readonly #now: () => Date;
   #token: CachedToken | null = null;
+  #acknowledgementRetryAt = 0;
 
   constructor(options: ChatGptBackendRecoveryOptions) {
     this.#requestTimeoutMs = options.requestTimeoutMs;
@@ -56,14 +58,41 @@ export class ChatGptBackendRecovery {
       return unavailable('backend-identity-incomplete');
     }
 
+    const result = await this.#conversation(conversationId, client, origin);
+    if ('recovery' in result) return result.recovery;
+    return recoverExactServerFinal(result.body, {
+      conversationId,
+      submittedUserMessageId: request.session.submittedUserMessageId,
+      submittedUserTurnId: request.session.submittedUserTurnId,
+    });
+  }
+
+  async recoverAcknowledgement(
+    conversationId: string, prompt: string, client: BackendJsonClient, origin: string,
+  ): Promise<ProviderSubmissionAcknowledgement | null> {
+    if (this.#now().getTime() < this.#acknowledgementRetryAt) return null;
+    // The shared account probe is bounded even when callers repeatedly inspect.
+    this.#acknowledgementRetryAt = this.#now().getTime() + 5_000;
+    const result = await this.#conversation(conversationId, client, origin);
+    if ('recovery' in result) {
+      if (result.recovery.kind === 'deferred') {
+        this.#acknowledgementRetryAt = this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0);
+      }
+      return null;
+    }
+    return recoverExactServerAcknowledgement(result.body, conversationId, prompt);
+  }
+
+  async #conversation(conversationId: string, client: BackendJsonClient, origin: string):
+    Promise<{ body: unknown } | { recovery: ProviderRecoveryResult }> {
     const normalizedOrigin = trustedOrigin(origin);
     if (normalizedOrigin === null) {
-      return unavailable('backend-origin-untrusted');
+      return { recovery: unavailable('backend-origin-untrusted') };
     }
 
     const tokenResult = await this.#accessToken(client, normalizedOrigin);
     if ('recovery' in tokenResult) {
-      return tokenResult.recovery;
+      return tokenResult;
     }
 
     let response: BackendJsonResponse;
@@ -79,28 +108,24 @@ export class ChatGptBackendRecovery {
         },
       );
     } catch {
-      return unavailable('backend-conversation-request-failed');
+      return { recovery: unavailable('backend-conversation-request-failed') };
     }
 
     if (response.status === 429) {
-      return rateLimited(response.headers, this.#now());
+      return { recovery: rateLimited(response.headers, this.#now()) };
     }
     if (response.status === 401 || response.status === 403) {
       this.#token = null;
-      return unavailable('backend-auth-rejected');
+      return { recovery: unavailable('backend-auth-rejected') };
     }
     if (response.status === 404) {
-      return unverified('backend-conversation-not-found');
+      return { recovery: unverified('backend-conversation-not-found') };
     }
     if (response.status < 200 || response.status >= 300) {
-      return unavailable(`backend-http-${response.status}`);
+      return { recovery: unavailable(`backend-http-${response.status}`) };
     }
 
-    return recoverExactServerFinal(response.body, {
-      conversationId,
-      submittedUserMessageId: request.session.submittedUserMessageId,
-      submittedUserTurnId: request.session.submittedUserTurnId,
-    });
+    return { body: response.body };
   }
 
   async #accessToken(
@@ -149,6 +174,27 @@ function trustedOrigin(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+export function recoverExactServerAcknowledgement(
+  payload: unknown, conversationId: string, prompt: string,
+): ProviderSubmissionAcknowledgement | null {
+  if (!isRecord(payload) || !isRecord(payload.mapping)) return null;
+  const ids = [readStringField(payload, 'id'), readStringField(payload, 'conversation_id')].filter(id => id !== null);
+  if (ids.length === 0 || ids.some(id => id !== conversationId)) return null;
+  const matches = Object.entries(payload.mapping).flatMap(([nodeId, node]) => {
+    const message = messageForNode(node);
+    if (message === null || messageRole(message) !== 'user' ||
+        messageText(message).replaceAll('\r\n', '\n') !== prompt.replaceAll('\r\n', '\n')) return [];
+    const messageId = readStringField(message, 'id');
+    if (messageId === null || messageId.length === 0) return [];
+    return [{ conversationId, submittedUserMessageId: messageId,
+      submittedUserTurnId: readStringField(message, 'turn_id') ?? nodeId }];
+  });
+  if (matches.length !== 1) return null;
+  const acknowledgement = matches[0]!;
+  const anchored = recoverExactServerFinal(payload, acknowledgement);
+  return anchored.kind === 'complete' || anchored.kind === 'pending' ? acknowledgement : null;
 }
 
 export function recoverExactServerFinal(

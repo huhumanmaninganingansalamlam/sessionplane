@@ -167,7 +167,7 @@ export class ChatGptAdapter implements ProviderAdapter {
       const binding = this.#pageRegistry.refreshPage(pageKey);
       if (isWebRedirect(binding, request.session.sessionId, request.generation, conversationId)) {
         const page = this.#pageRegistry.pageForObservation(pageKey);
-        const acknowledgement = await recoverChatGptAcknowledgement(
+        const acknowledgement = await this.#recoverAcknowledgement(
           page,
           request.prompt,
           binding.conversationId,
@@ -190,11 +190,19 @@ export class ChatGptAdapter implements ProviderAdapter {
         generation: request.generation,
         conversationId,
       });
-      const acknowledgement = await recoverChatGptAcknowledgement(page, request.prompt, conversationId, request.selection);
+      const acknowledgement = await this.#recoverAcknowledgement(page, request.prompt, conversationId, request.selection);
       return this.#pageRegistry.refreshPage(pageKey).bindingEpoch === binding.bindingEpoch ? acknowledgement : null;
     } catch {
       return null;
     }
+  }
+
+  async #recoverAcknowledgement(page: Page, prompt: string, conversationId: string,
+    selection?: { readonly messageId: string; readonly evidenceHash: string }) {
+    const dom = await recoverChatGptAcknowledgement(page, prompt, conversationId, selection);
+    if (dom !== null || selection !== undefined) return dom;
+    return await this.#backendRecovery.recoverAcknowledgement(
+      conversationId, prompt, backendClient(page), new URL(page.url()).origin);
   }
 
   async openObservation(request: ProviderObservationRequest): Promise<ProviderObservationSource> {
@@ -332,25 +340,7 @@ export class ChatGptAdapter implements ProviderAdapter {
       );
     }
 
-    const client: BackendJsonClient = {
-      async get(url, options) {
-        const response = await page.context().request.get(url, {
-          failOnStatusCode: false,
-          ...(options.headers === undefined ? {} : { headers: { ...options.headers } }),
-          timeout: options.timeoutMs,
-        });
-        try {
-          return {
-            status: response.status(),
-            headers: response.headers(),
-            body: await response.json().catch(() => null),
-          };
-        } finally {
-          await response.dispose();
-        }
-      },
-    };
-    return await this.#backendRecovery.recover(request, client, new URL(page.url()).origin);
+    return await this.#backendRecovery.recover(request, backendClient(page), new URL(page.url()).origin);
   }
 
   async discoverArtifacts(
@@ -795,4 +785,25 @@ class ChatGptObservationSource implements ProviderObservationSource {
       reason,
     };
   }
+}
+
+function backendClient(page: Page): BackendJsonClient {
+  return {
+      async get(url, options) {
+        const response = await page.context().request.get(url, {
+          failOnStatusCode: false,
+          ...(options.headers === undefined ? {} : { headers: { ...options.headers } }),
+          timeout: options.timeoutMs,
+        });
+        try {
+          return {
+            status: response.status(),
+            headers: response.headers(),
+            body: await response.json().catch(() => null),
+          };
+        } finally {
+          await response.dispose();
+        }
+      },
+  };
 }

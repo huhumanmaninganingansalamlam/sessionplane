@@ -6,6 +6,7 @@ import {
   ChatGptBackendRecovery,
   parseRetryAfterMs,
   recoverExactServerFinal,
+  recoverExactServerAcknowledgement,
   type BackendJsonClient,
   type BackendJsonResponse,
 } from '../../src/providers/chatgpt/backend-recovery.ts';
@@ -122,6 +123,50 @@ test('backend client caches access token in memory and classifies Retry-After 42
     parseRetryAfterMs({ 'retry-after': 'Thu, 17 Sep 2026 00:01:00 GMT' }, now),
     60_000,
   );
+});
+
+test('backend acknowledgement requires one exact user prompt on the verified current branch', () => {
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('assistant', 'user-node', finalAssistant('answer', 'Already complete')),
+  ], 'assistant');
+  const recover = (value: unknown, prompt = 'Question') => recoverExactServerAcknowledgement(value, CONVERSATION_ID, prompt);
+  assert.equal(recover(payload)?.submittedUserMessageId, 'user-message-1');
+  assert.equal(recover(payload)?.submittedUserTurnId, 'user-turn-1');
+  assert.equal(recover(payload, 'Different prompt'), null);
+  assert.equal(recover({ ...payload, id: 'other' }), null);
+  assert.equal(recover({ ...payload, id: undefined }), null);
+  assert.equal(recover({ ...payload, conversation_id: 'other' }), null);
+  assert.equal(recover({ ...payload, current_node: 'missing' }), null);
+  assert.equal(recover({ ...payload, current_node: 'root' }), null);
+  assert.equal(recover(conversationPayload([
+    ...Object.values(payload.mapping),
+    node('duplicate', 'root', userMessage('other-user', 'other-turn')),
+  ], 'assistant')), null);
+  assert.equal(recover(conversationPayload([
+    node('root', null, null),
+    node('user', 'root', { ...userMessage('user', 'turn'), id: undefined }),
+  ], 'user')), null);
+});
+
+test('backend acknowledgement preserves uncertainty and Retry-After without repeated probes', async () => {
+  let now = 0;
+  let calls = 0;
+  const recovery = new ChatGptBackendRecovery({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000, now: () => new Date(now) });
+  const client: BackendJsonClient = { async get(url) {
+    calls++;
+    return url.endsWith('/api/auth/session')
+      ? { status: 200, headers: {}, body: { accessToken: 'memory-only-token' } }
+      : { status: 429, headers: { 'retry-after': '120' }, body: null };
+  } };
+  assert.equal(await recovery.recoverAcknowledgement(CONVERSATION_ID, 'Question', client, 'https://chatgpt.com'), null);
+  now = 6000;
+  assert.equal(await recovery.recoverAcknowledgement(CONVERSATION_ID, 'Question', client, 'https://chatgpt.com'), null);
+  assert.equal(calls, 2);
+  now = 120001;
+  assert.equal(await recovery.recoverAcknowledgement(CONVERSATION_ID, 'Question', client, 'https://chatgpt.com'), null);
+  assert.equal(calls, 4);
 });
 
 function identity() {

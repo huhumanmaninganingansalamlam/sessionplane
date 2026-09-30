@@ -131,7 +131,12 @@ after the automatic recovery window expires. Recovered identity starts the
 existing answer observer on the same generation. Inspection never submits.
 
 During submission, outgoing user-message IDs are correlated with observed provider
-messages. Prompt text matching is a fallback, not a requirement for an ID-confirmed
+messages. If the exact user message is absent from DOM, read-only backend recovery
+can bind a single exact prompt match in the same verified conversation and current
+branch. Duplicate matches, missing identity, wrong branches and failed reads preserve
+submission uncertainty; Retry-After 429 is deferred. Explicit candidate selections
+still require their original DOM evidence hash. No submission is repeated.
+Prompt text matching is a fallback, not a requirement for an ID-confirmed
 submission. Provider formatting differences do not discard that identity.
 
 If automatic recovery cannot establish identity, inspection returns
