@@ -2,9 +2,11 @@ import type { Page } from 'playwright-core';
 
 import type { ProviderAssistantCandidate, ProviderWakeReason } from '../provider-adapter.ts';
 import { readChatGptMessages } from './message-dom.ts';
+import { CHATGPT_SELECTORS } from './selectors.ts';
 
 export interface ChatGptDomObservation {
   readonly actionableAlert: boolean;
+  readonly providerAlerts: readonly string[];
   readonly conversationSurfaceAvailable: boolean;
   readonly submittedUserFound: boolean;
   readonly laterUserFound: boolean;
@@ -57,23 +59,37 @@ export async function observeChatGptDom(
       .some(element => element.closest('[aria-hidden="true"], [inert]') === null &&
         element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
   });
-  const actionableAlert = submittedUserFound &&
-    await page.evaluate((identity) => {
-      const main = document.querySelector('main');
-      if (main === null) return false;
-      const ids = [identity.submittedUserMessageId, identity.submittedUserTurnId].filter(Boolean);
-      const anchor = [...main.querySelectorAll('[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')]
-        .find((node) => [node.getAttribute('data-message-id'), node.getAttribute('data-turn-id'),
-          ...(node.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/)]
-          .some((id) => id !== null && ids.includes(id)));
-      if (anchor === undefined) return false;
-      return [...main.querySelectorAll<HTMLElement>('[role="alert"]')].some((alert) =>
-        Boolean(anchor.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING) &&
-        alert.getClientRects().length > 0 && Boolean(alert.innerText.trim()) &&
-        [...alert.querySelectorAll<HTMLElement>('button, [role="button"]')]
-          .some((button) => button.getClientRects().length > 0));
-    }, latestUser);
-  return { submittedUserFound, laterUserFound, candidate, conversationSurfaceAvailable, actionableAlert };
+  const providerAlerts = await observeChatGptAlerts(page, latestUser);
+  return { submittedUserFound, laterUserFound, candidate, conversationSurfaceAvailable,
+    actionableAlert: providerAlerts.length > 0, providerAlerts };
+}
+
+export async function observeChatGptAlerts(page: Page, identity: SubmittedUserIdentity): Promise<string[]> {
+  return await page.evaluate(({ identity, messagesSelector, userSelector }) => {
+    const ids = [identity.submittedUserMessageId, identity.submittedUserTurnId].filter(Boolean);
+    let anchor = [...document.querySelectorAll('[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')]
+      .find(node => [node.getAttribute('data-message-id'), node.getAttribute('data-turn-id'),
+        ...(node.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/)]
+        .some(id => id !== null && ids.includes(id)));
+    if (anchor !== undefined) {
+      for (const user of document.querySelectorAll(userSelector)) {
+        if (anchor.compareDocumentPosition(user) & Node.DOCUMENT_POSITION_FOLLOWING) anchor = user;
+      }
+    }
+    const hasMessages = document.querySelector(messagesSelector) !== null;
+    return [...document.querySelectorAll<HTMLElement>('[role="alert"], [role="alertdialog"], .text-token-text-error, .text-danger')]
+      .filter(alert => {
+        if (alert.closest('nav, [role="navigation"], #app-shell-sidebar, [aria-hidden="true"], [inert]') !== null ||
+            !alert.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || !alert.innerText.trim()) return false;
+        // Global alerts do not depend on a readable transcript. Turn-local errors
+        // must follow the latest anchored user, never a quoted or historical turn.
+        if (!alert.closest('main, article, [data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')) return true;
+        if (!hasMessages) return true;
+        return anchor !== undefined &&
+          !alert.closest('[data-message-author-role="user"], [data-user-message-bubble]') &&
+          Boolean(anchor.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING);
+      }).map(alert => alert.innerText.trim().slice(0, 1_000));
+  }, { identity, messagesSelector: CHATGPT_SELECTORS.messages, userSelector: CHATGPT_SELECTORS.userMessages });
 }
 
 export async function waitForChatGptDomMutation(

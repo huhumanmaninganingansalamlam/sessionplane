@@ -663,7 +663,7 @@ class DomProviderStopOperation implements ProviderStopOperation {
     return this.#control !== null && (await this.#control.isEnabled().catch(() => false));
   }
 
-  async stopOnce(): Promise<void> {
+  async stopOnce(): Promise<'stopped' | 'unknown'> {
     if (this.#control === null) {
       throw new ProviderSubmissionError(
         'internal.invariant-violation',
@@ -673,6 +673,7 @@ class DomProviderStopOperation implements ProviderStopOperation {
     }
     this.#requireExactPage();
     await this.#control.click({ timeout: 10_000 });
+    return 'unknown';
   }
 
   #requireExactPage(): void {

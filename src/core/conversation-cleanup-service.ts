@@ -12,6 +12,7 @@ import { ReceiptRepository, hashCanonical } from '../storage/receipt-repository.
 import { SessionRepository } from '../storage/session-repository.ts';
 import { TeamRepository } from '../storage/team-repository.ts';
 import type { StopService } from './stop-service.ts';
+import { isProviderUrl } from '../browser/page-binding.ts';
 
 export interface ConversationDeleteInput {
   readonly clientId: string;
@@ -39,7 +40,7 @@ export class ConversationCleanupService {
   }
 
   async deleteTeam(input: { clientId: string; requestId: string; teamId: string }, stops: StopService) {
-    const { database, directory, scheduler, registry, pageMutex } = this.#options;
+    const { database, directory, scheduler, registry } = this.#options;
     const receipts = new ReceiptRepository(database);
     const teams = new TeamRepository(database.raw);
     const sessions = new SessionRepository(database.raw);
@@ -86,18 +87,7 @@ export class ConversationCleanupService {
             cleanup.providerError = deleted.errorCode;
           } catch (error) { cleanup.providerError = cleanupErrorCode(error); }
         }
-        for (const binding of registry.listBindings({ includeClosed: false })) {
-          if (binding.sessionId !== current.sessionId) continue;
-          try {
-            await pageMutex.runExclusive(binding.pageKey, async () => {
-              const page = registry.requireSessionPage(binding.pageKey, {
-                sessionId: current.sessionId, generation: current.generation, conversationId: current.conversationId,
-              });
-              await page.close();
-              cleanup.closedPages += 1;
-            });
-          } catch (error) { cleanup.pageErrors.push(cleanupErrorCode(error)); }
-        }
+        Object.assign(cleanup, await this.#closeSessionPages(current));
         // Remove live ownership even if the provider or browser rejected cleanup.
         for (const binding of registry.listBindings({ includeClosed: true })) {
           if (binding.sessionId === current.sessionId) registry.unbindPage(binding.pageKey);
@@ -118,7 +108,7 @@ export class ConversationCleanupService {
     teamId: string; roleKey: string; provider: string;
     expectedSessionId?: string | null; expectedGeneration?: number;
   }): Promise<SessionSnapshot> {
-    const { database, directory, scheduler, registry, pageMutex } = this.#options;
+    const { database, directory, scheduler } = this.#options;
     const receipts = new ReceiptRepository(database);
     const sessions = new SessionRepository(database.raw);
     const requestHash = hashCanonical({ method: input.method, payload: input.payload });
@@ -174,23 +164,36 @@ export class ConversationCleanupService {
         const successor = create();
         scheduler.refreshSession(previous.sessionId);
         this.#options.onDeleted(previous.sessionId);
-        for (const binding of registry.listBindings({ includeClosed: false })) {
-          if (binding.sessionId !== previous.sessionId) continue;
-          try {
-            await pageMutex.runExclusive(binding.pageKey, async () => {
-              const page = registry.requireSessionPage(binding.pageKey, {
-                sessionId: previous.sessionId, generation: previous.generation,
-                conversationId: previous.conversationId,
-              });
-              await page.close();
-            });
-          } catch {
-            // A missing or detached old tab cannot undo the durable replacement.
-          }
-        }
+        await this.#closeSessionPages(previous);
         return successor;
       });
     });
+  }
+
+  async #closeSessionPages(session: SessionSnapshot) {
+    const { database, registry, pageMutex } = this.#options;
+    const sessions = new SessionRepository(database.raw);
+    const result = { closedPages: 0, pageErrors: [] as string[] };
+    const isUnboundConversation = (binding: ReturnType<PageRegistry['getBinding']>) =>
+      binding.state === 'unbound' && binding.sessionId === null && session.conversationId !== null &&
+      binding.conversationId === session.conversationId && isProviderUrl(session.provider, binding.url) &&
+      !sessions.conversationCleanupBlocker(session.sessionId, session.conversationId, true);
+    for (const binding of registry.listBindings({ includeClosed: false })) {
+      if (binding.sessionId !== session.sessionId && !isUnboundConversation(binding)) continue;
+      try {
+        await pageMutex.runExclusive(binding.pageKey, async () => {
+          const current = registry.refreshPage(binding.pageKey);
+          const page = current.sessionId === session.sessionId
+            ? registry.requireSessionPage(binding.pageKey, { sessionId: session.sessionId,
+                generation: session.generation, conversationId: session.conversationId })
+            : isUnboundConversation(current) ? registry.pageForObservation(binding.pageKey, current.bindingEpoch) : null;
+          if (page === null) return;
+          await page.close();
+          result.closedPages += 1;
+        });
+      } catch (error) { result.pageErrors.push(cleanupErrorCode(error)); }
+    }
+    return result;
   }
 
   async delete(input: ConversationDeleteInput, options: { replacement?: boolean } = {}) {
@@ -271,20 +274,7 @@ export class ConversationCleanupService {
           this.#options.onDeleted(input.sessionId);
           actor.publish(sessions.getSnapshot(input.sessionId)!,
             new EventRepository(database.raw).latestSequenceForSession(input.sessionId));
-          if (session.pageKey !== null) {
-            try {
-              await pageMutex.runExclusive(session.pageKey, async () => {
-                const page = registry.requireOwnedPage(session.pageKey!, {
-                  sessionId: session.sessionId, generation: session.generation,
-                  conversationId: input.conversationId,
-                });
-                await page.close();
-              });
-            } catch {
-              // Provider acknowledgement and durable deletion are authoritative;
-              // a detached or already-closed Page cannot invalidate that result.
-            }
-          }
+          await this.#closeSessionPages(session);
           return result;
         } finally {
           // Closing a temporary Page cannot change the durable provider outcome.

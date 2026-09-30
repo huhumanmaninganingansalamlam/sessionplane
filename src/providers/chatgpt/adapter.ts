@@ -579,7 +579,7 @@ class ChatGptStopOperation implements ProviderStopOperation {
     return false;
   }
 
-  async stopOnce(): Promise<void> {
+  async stopOnce(): Promise<'stopped' | 'unknown'> {
     if (this.#selector === null) {
       throw new ProviderSubmissionError(
         'internal.invariant-violation',
@@ -598,7 +598,8 @@ class ChatGptStopOperation implements ProviderStopOperation {
         !(await control.isDisabled().catch(() => true))
       ) {
         await control.click({ timeout: 5_000 });
-        return;
+        // A successful browser click is not a provider cancellation acknowledgement.
+        return 'unknown';
       }
     }
     throw new ProviderSubmissionError(
@@ -727,11 +728,10 @@ class ChatGptObservationSource implements ProviderObservationSource {
         dialogKind: dialog.kind,
         networkActivity: network.activity,
         observationTransport: !dom.conversationSurfaceAvailable || dom.actionableAlert ? 'unavailable' : 'fresh',
-        ...(!dom.conversationSurfaceAvailable ? { errorCode: 'provider.conversation-unavailable' }
-          : dom.actionableAlert ? { errorCode: 'provider.observation-unavailable' } : {}),
-        reason: dialog.reason ?? (!dom.conversationSurfaceAvailable
-          ? 'conversation-surface-unavailable'
-          : dom.actionableAlert ? 'provider-actionable-alert' : activity.reason),
+        ...(dom.actionableAlert ? { errorCode: 'provider.actionable-alert' }
+          : !dom.conversationSurfaceAvailable ? { errorCode: 'provider.conversation-unavailable' } : {}),
+        reason: dialog.reason ?? (dom.actionableAlert ? 'provider-actionable-alert'
+          : !dom.conversationSurfaceAvailable ? 'conversation-surface-unavailable' : activity.reason),
       };
     } catch (error) {
       const binding = this.#pageRegistry.getBinding(this.pageKey);

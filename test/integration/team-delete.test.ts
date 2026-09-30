@@ -9,6 +9,8 @@ import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { invokeMcpTool, getMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { callRpc } from '../../src/cli/client.ts';
+import type { SessionSnapshot } from '../../src/domain/session.ts';
 
 test('team deletion removes only its owned state, cancels work and survives provider failure and replay', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-team-delete-'));
@@ -92,11 +94,24 @@ test('team deletion closes owned browser tabs and leaves unrelated tabs open', a
     const owned = await service.browserOwner!.createPage();
     service.pageRegistry.reservePage(owned.binding.pageKey, { sessionId: session.sessionId, generation: 0 });
     const other = await service.browserOwner!.createPage();
+    service.teamDirectory.createRole({ teamId: team.teamId, roleKey: 'expert.old-tab', roleType: 'expert' });
+    const old = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'expert.old-tab', provider: 'chatgpt' });
+    const submitted = await callRpc<SessionSnapshot>({ socketPath: config.socketPath, method: 'session.send',
+      params: { clientId: 'tabs', requestId: 'old-send', sessionId: old.sessionId, prompt: 'Fixture only' } });
+    const unbound = await service.browserOwner!.createPage();
+    await unbound.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main>Fixture</main>' }));
+    await unbound.page.goto('https://chatgpt.com/c/' + submitted.conversationId);
+    assert.equal(service.pageRegistry.getBinding(unbound.binding.pageKey).state, 'unbound', 'Completed tabs may be unbound after browser adoption');
+    const differentProvider = await service.browserOwner!.createPage();
+    await differentProvider.page.route('https://grok.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main>Other provider</main>' }));
+    await differentProvider.page.goto('https://grok.com/c/unrelated-provider-conversation');
     const result = await invokeMcpTool({ name: 'sessionplane_team_delete', arguments: { teamId: team.teamId, requestId: 'delete' },
       socketPath: config.socketPath, timeoutMs: 5000, maxLineBytes: config.rpcMaxLineBytes });
     assert.equal(result.isError, false, JSON.stringify(result));
     assert.equal(owned.page.isClosed(), true);
     assert.equal(other.page.isClosed(), false);
+    assert.equal(unbound.page.isClosed(), true);
+    assert.equal(differentProvider.page.isClosed(), false, 'Another provider is not cleanup ownership');
     assert.equal(service.pageRegistry.listBindings().some(b => b.sessionId === session.sessionId), false);
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });

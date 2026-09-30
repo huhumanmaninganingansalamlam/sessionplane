@@ -215,7 +215,6 @@ test('configuration selection verifies menu state without waiting for scheduled 
     await page.setContent(fixture);
     await page.locator('textarea').focus();
     await page.locator('#chooser').waitFor({ state: 'visible' });
-    await page.addStyleTag({ content: '@keyframes moving { from { transform: translateX(0); } to { transform: translateX(40px); } } #chooser { animation: moving 4s linear; }' });
     await page.evaluate(() => {
       document.querySelector('#chooser')!.addEventListener('click', () => {
         window.location.href = 'https://chatgpt.com/pending-menu-frame';

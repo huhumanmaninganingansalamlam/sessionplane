@@ -109,6 +109,12 @@ out prompts, infer consensus, or inject answers into other roles.
 - After restart, team_get returns pending requests. Observe fresh evidence before
   making decisions on the same request. Do not create replacement sends to resume.
 - `sessionplane_stop` cancels preparation or stops exactly that request.
+  A `provider.stop-unavailable` result means no mutation was attempted;
+  `provider.stop-unknown` means an attempt without provider acknowledgement.
+  Neither proves cancellation. Read the same request; do not repeat an uncertain
+  stop with another ID. Get/wait retain `stopOutcome.state:"unknown"` across restart.
+  `provider.actionable-alert` identifies a visible provider error separately from
+  conversation/read unavailability and backend 429. Inspect `evidence.providerAlerts`.
 - `sessionplane_session_replace` attempts to permanently delete the previous provider
   conversation once, closes its tab and ends observation, then creates its successor.
   Retrieve required outputs and write the handoff first. Local stored answers/files

@@ -166,7 +166,8 @@ export interface ProviderStopOperation {
   readonly provider: string;
   readonly pageKey: string;
   prepare(): Promise<boolean>;
-  stopOnce(): Promise<void>;
+  /** Return stopped only for a provider acknowledgement, not just a browser click. */
+  stopOnce(): Promise<'stopped' | 'unknown'>;
 }
 
 export interface ProviderAdapter {

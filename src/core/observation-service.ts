@@ -214,6 +214,7 @@ export class ObservationService {
           evidence.errorCode === undefined &&
           current.errorCode !== 'provider.conversation-unavailable' &&
           current.errorCode !== 'provider.observation-unavailable' &&
+          current.errorCode !== 'provider.actionable-alert' &&
           !decision.freshExactProgress &&
           !verifiedRedirect &&
           decision.kind !== 'complete' &&
@@ -304,8 +305,8 @@ export class ObservationService {
       sessionState: 'observing',
       providerState: 'unknown',
       observationTransport: 'unavailable',
-      reason,
-      errorCode: null,
+      reason: snapshot.errorCode === 'provider.actionable-alert' ? snapshot.reason : reason,
+      errorCode: snapshot.errorCode === 'provider.actionable-alert' ? snapshot.errorCode : 'provider.observation-unavailable',
     };
     if (!hasMeaningfulChange(snapshot, update)) {
       return;
@@ -335,7 +336,8 @@ export class ObservationService {
     const update = {
       ...updateForRecovery(recovery, this.#now().toISOString()),
       ...((previous.errorCode === 'provider.conversation-unavailable' ||
-          previous.errorCode === 'provider.observation-unavailable') && recovery.kind !== 'complete'
+          previous.errorCode === 'provider.observation-unavailable' ||
+          previous.errorCode === 'provider.actionable-alert') && recovery.kind !== 'complete'
         ? { errorCode: previous.errorCode, reason: previous.reason } : {}),
     };
     if (!hasMeaningfulChange(previous, update)) {

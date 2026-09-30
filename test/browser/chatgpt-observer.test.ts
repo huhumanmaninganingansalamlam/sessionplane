@@ -58,6 +58,10 @@ test('current ChatGPT message units recover the exact submitted turn and answer'
       main.append(alert);
     });
     assert.equal((await observeChatGptDom(page, identity)).actionableAlert, true);
+    await page.locator('main > aside').last().evaluate(alert => {
+      alert.innerHTML = 'network error';
+    });
+    assert.deepEqual((await observeChatGptDom(page, identity)).providerAlerts, ['network error']);
     await page.locator('main').evaluate((main) => {
       const response = document.createElement('div');
       response.setAttribute('data-message-author-role', 'assistant');
@@ -85,6 +89,20 @@ test('current ChatGPT message units recover the exact submitted turn and answer'
     assert.equal(continued.candidate?.answerText, 'Completed review');
     assert.equal(continued.candidate?.terminalMarker, true);
     assert.equal((await observeChatGptDom(page, { ...identity, submittedUserMessageId: 'unrelated' })).candidate, null);
+
+    await page.setContent('<aside role="alert">hostspan-desktop connection expired; reconnect before processing</aside><main><textarea></textarea></main>');
+    const global = await observeChatGptDom(page, identity);
+    assert.equal(global.submittedUserFound, false);
+    assert.equal(global.actionableAlert, true);
+    assert.match(global.providerAlerts[0]!, /connection expired/);
+    await page.setContent('<main><aside role="alert">Unable to load conversation</aside></main>');
+    const failedSurface = await observeChatGptDom(page, identity);
+    assert.equal(failedSurface.conversationSurfaceAvailable, false);
+    assert.deepEqual(failedSurface.providerAlerts, ['Unable to load conversation']);
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="user-exact">Question</div><div class="text-token-text-error">network error</div></main>');
+    assert.deepEqual((await observeChatGptDom(page, identity)).providerAlerts, ['network error']);
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="user-exact"><span class="text-token-text-error">quoted network error</span></div><aside role="alert" hidden>Hidden</aside></main><nav><aside role="alert">Sidebar notice</aside></nav>');
+    assert.equal((await observeChatGptDom(page, identity)).actionableAlert, false);
 
   } finally {
     await owner.close();
@@ -288,8 +306,14 @@ test('background ChatGPT Page yields exact DOM, dialog, and network evidence wit
       await target.page.evaluate(async (id) => { await (await fetch('/backend-api/conversations/' + id)).text(); }, CONVERSATION_ID);
       const unreadable = await source.observe();
       assert.equal(unreadable.errorCode, 'provider.conversation-unavailable');
+      await target.page.setContent('<aside role="alert">network error</aside><main><textarea></textarea></main>');
+      const alert = await source.observe();
+      assert.equal(alert.errorCode, 'provider.actionable-alert');
+      assert.equal(alert.reason, 'provider-actionable-alert');
+      assert.equal(new ExactFinalTracker(1_000).evaluate(alert, Date.now()).kind, 'unverified');
       assert.equal(unreadable.observationTransport, 'unavailable');
       assert.equal(new ExactFinalTracker(1_000).evaluate(unreadable, Date.now()).kind, 'unverified');
+      await target.page.locator('[role="alert"]').evaluate(element => element.remove());
       await target.page.locator('textarea').evaluate(element => { element.hidden = false; });
       const readable = await source.observe();
       assert.equal(readable.errorCode, undefined);

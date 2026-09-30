@@ -8,6 +8,7 @@ import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { PreparationPurpose, PreparationTarget } from '../providers/provider-adapter.ts';
 import { CHATGPT_PREPARATION_SNAPSHOT } from '../providers/chatgpt/selectors.ts';
 import { inspectChatGptSubmissionCandidates } from '../providers/chatgpt/submission.ts';
+import { observeChatGptAlerts } from '../providers/chatgpt/dom-observer.ts';
 import type { SubmissionService } from './submission-service.ts';
 
 export class SessionUiService {
@@ -99,13 +100,28 @@ export class SessionUiService {
 
   async inspectSubmission(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
     return await this.#submissions.inspectSubmission(input,
-      async (session, submittedMessageIds) => ({
-        ...await this.#capture(session, input.maxNodes),
-        ...(session.submissionState !== 'submission_unknown' || session.conversationId === null ? {} : {
-          submissionCandidates: (await inspectChatGptSubmissionCandidates(this.#requirePage(session), session.conversationId))
-            .filter((candidate) => !submittedMessageIds.has(candidate.messageId)),
-        }),
-      }));
+      async (session, submittedMessageIds) => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const evidence = await Promise.race([
+            (async () => ({
+              ...await this.#capture(session, input.maxNodes),
+              providerAlerts: await observeChatGptAlerts(this.#requirePage(session), session),
+              ...(session.submissionState !== 'submission_unknown' || session.conversationId === null ? {} : {
+                submissionCandidates: (await inspectChatGptSubmissionCandidates(this.#requirePage(session), session.conversationId))
+                  .filter((candidate) => !submittedMessageIds.has(candidate.messageId)),
+              }),
+            }))(),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(() => reject(new BrowserSnapshotError('browser.snapshot-timeout',
+                'The provider page did not respond to request inspection; submission and stop outcomes remain unchanged.')), 5_000);
+            }),
+          ]);
+          this.#requirePage(session);
+          return evidence;
+        } catch (error) { throw typedUiError(error); }
+        finally { clearTimeout(timer); }
+      });
   }
 
   async #capture(session: SessionSnapshot, maxNodes?: number) {

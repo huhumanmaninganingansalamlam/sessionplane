@@ -266,7 +266,7 @@ test('CLI and modern/legacy MCP expose the same core state across MCP process re
     ] as const;
     const firstAmbiguous = await runCliJson(ambiguousArgs);
     assert.equal(firstAmbiguous.code, 1);
-    assert.equal(JSON.parse(firstAmbiguous.stderr).errorCode, 'internal.invariant-violation');
+    assert.equal(JSON.parse(firstAmbiguous.stderr).errorCode, 'provider.stop-unknown');
     const stopCountAfterFirst = fake.stopCount;
     const secondAmbiguous = await runCliJson(ambiguousArgs);
     assert.equal(secondAmbiguous.code, 1);

@@ -89,7 +89,14 @@ and confirm the final active controls; unavailable intent requires a user decisi
   replays the prompt; the old request remains inspectable. A provider outage
   or slow answer alone does not meet this lost-page condition.
 - `stop` cancels preparation or stops the exact generating request. It cannot stop
-  a newer generation. `session_replace` attempts to permanently delete the previous
+  a newer generation. An absent control returns `provider.stop-unavailable`
+  (`outcome:"not_attempted"`); an unacknowledged mutation returns
+  `provider.stop-unknown` and get/wait expose `stopOutcome.state:"unknown"`.
+  A browser click alone never confirms cancellation. The request remains unresolved
+  and an uncertain stop is not repeated, even with a new ID or after restart.
+  `provider.actionable-alert` is a visible provider error; inspect
+  `evidence.providerAlerts` rather than treating it as browser read failure or 429.
+  `session_replace` attempts to permanently delete the previous
   provider conversation once, closes its owned tab and ends observation, then creates
   the new session. Deletion failure, unsupported deletion or unknown conversation
   identity does not block replacement; there is no automatic cleanup retry.

@@ -45,6 +45,7 @@ export class FakeProviderAdapter implements ProviderAdapter {
   artifactDownloadCount = 0;
   stopControlAvailable = true;
   stopThrows = false;
+  stopOutcome: 'stopped' | 'unknown' = 'stopped';
   autoFinalText: string | null = null;
   readonly #observationSources = new Map<string, FakeObservationSource>();
   readonly #pendingObservations = new Map<
@@ -198,11 +199,12 @@ export class FakeProviderAdapter implements ProviderAdapter {
         adapter.stopPrepareCount += 1;
         return adapter.stopControlAvailable;
       },
-      async stopOnce(): Promise<void> {
+      async stopOnce(): Promise<'stopped' | 'unknown'> {
         adapter.stopCount += 1;
         if (adapter.stopThrows) {
           throw new Error('Synthetic stop acknowledgement failure');
         }
+        return adapter.stopOutcome;
       },
     };
   }

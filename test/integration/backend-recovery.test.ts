@@ -51,6 +51,73 @@ test('human follow-up final completes the same durable request after restart wit
   } finally { await service.close(); rmSync(fixture.root, { recursive: true, force: true }); }
 });
 
+test('workflow reads expose provider alert text separately from backend 429 and exact recovery', async (t) => {
+  class AlertProvider extends FakeProviderAdapter {
+    alertActive = true;
+    override async openObservation(request: ProviderObservationRequest) {
+      const source = await super.openObservation(request);
+      const observe = source.observe.bind(source);
+      source.observe = async () => ({ ...await observe(), ...(this.alertActive ? {
+        observationTransport: 'unavailable' as const, errorCode: 'provider.actionable-alert',
+        reason: 'provider-actionable-alert', activity: 'unknown' as const, candidate: null,
+      } : { observationTransport: 'fresh' as const, errorCode: undefined, reason: null }) });
+      return source;
+    }
+  }
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-workflow-alert-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', backendRecoveryAfterMs: 10,
+    observationActiveSweepMs: 5, observationQuietSweepMs: 5, probeSuccessIntervalMs: 1,
+    probeMin429BackoffMs: 100, probeMax429BackoffMs: 100 });
+  const fake = new AlertProvider();
+  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake], logger: silentLogger() });
+  const backendSnapshots: SessionSnapshot[] = [];
+  const update = service.actorScheduler.updateGeneration.bind(service.actorScheduler);
+  t.mock.method(service.actorScheduler, 'updateGeneration', async (...args: Parameters<typeof update>) => {
+    const snapshot = await update(...args);
+    if (args[3] === 'generation.backend-deferred') backendSnapshots.push(snapshot);
+    return snapshot;
+  });
+  const workflow = <T>(method: string, params: object) => rpc<T>(config.socketPath, 'workflow.' + method, params);
+  try {
+    const { teamId, session } = await createSession(config.socketPath, 'main', 'visible-error');
+    fake.queueRecovery(session.sessionId, { kind: 'deferred', observationTransport: 'deferred',
+      responseMessageId: null, answerText: null, reason: 'backend-http-429', retryAfterMs: 100, nextCheckAt: null });
+    await send(config.socketPath, session.sessionId, 'visible-error');
+    const current = service.teamDirectory.getSession(session.sessionId);
+    const page = await service.browserOwner!.createPage();
+    await page.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html',
+      body: '<main><textarea></textarea></main><aside role="alert">network error</aside>' }));
+    await page.page.goto('https://chatgpt.com/c/' + current.conversationId);
+    service.pageRegistry.bindPage(page.binding.pageKey, { sessionId: session.sessionId, generation: 1,
+      conversationId: current.conversationId! });
+    await service.actorScheduler.updateGeneration(session.sessionId, 1, { pageKey: page.binding.pageKey });
+    const requestRef = (service.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id = ?')
+      .get(session.sessionId) as { outbox_id: string }).outbox_id;
+    await waitForSnapshot(config.socketPath, session.sessionId, state =>
+      state.errorCode === 'provider.actionable-alert' && backendSnapshots.length > 0);
+    assert.equal(backendSnapshots[0]!.observationTransport, 'deferred');
+    assert.equal(backendSnapshots[0]!.errorCode, 'provider.actionable-alert');
+    assert.equal(backendSnapshots[0]!.reason, 'provider-actionable-alert');
+    const read = await workflow<{ request: SessionSnapshot & { evidence: { providerAlerts: string[] } } }>(
+      'team_get', { teamId, requestRef });
+    assert.equal(read.request.errorCode, 'provider.actionable-alert');
+    assert.equal(read.request.reason, 'provider-actionable-alert');
+    assert.equal(read.request.terminal, false);
+    assert.deepEqual(read.request.evidence.providerAlerts, ['network error']);
+    const waited = await workflow<{ results: Array<SessionSnapshot & { evidence: { providerAlerts: string[] } }> }>(
+      'wait', { teamId, requestRefs: [requestRef], waitMs: 5 });
+    assert.equal(waited.results[0]!.errorCode, 'provider.actionable-alert');
+    assert.deepEqual(waited.results[0]!.evidence.providerAlerts, ['network error']);
+    fake.queueRecovery(session.sessionId, { kind: 'complete', observationTransport: 'fresh',
+      responseMessageId: 'exact-alert-recovery', answerText: 'Recovered exact final',
+      reason: 'backend-exact-final', retryAfterMs: null, nextCheckAt: null });
+    const final = await waitForSnapshot(config.socketPath, session.sessionId, state => state.terminal);
+    assert.equal(final.errorCode, null);
+    assert.equal(final.answerText, 'Recovered exact final');
+    assert.equal(fake.submitCount, 1);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('an unresponsive renderer cannot block exact backend completion or core shutdown', { timeout: 5_000 }, async () => {
   class HungRenderer extends FakeProviderAdapter {
     override async openObservation(request: ProviderObservationRequest) {

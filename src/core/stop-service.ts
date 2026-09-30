@@ -95,6 +95,15 @@ export class StopService {
     });
   }
 
+  hasUnconfirmedStop(sessionId: string, generation: number): boolean {
+    return this.#database.raw.prepare(`
+      SELECT 1 FROM request_receipts
+      WHERE method = 'session.stop' AND status = 'attempted'
+        AND json_extract(result_json, '$.sessionId') = ?
+        AND json_extract(result_json, '$.generation') = ? LIMIT 1
+    `).get(sessionId, generation) !== undefined;
+  }
+
   async #stopLocked(
     actor: SessionActor,
     sessionId: string,
@@ -116,6 +125,8 @@ export class StopService {
       );
     }
 
+    if (this.hasUnconfirmedStop(current.sessionId, current.generation)) throw this.#unknownStop(current);
+
     const adapter = this.#adapters.require(current.provider);
     const operation = await adapter.openStop({
       session: current,
@@ -125,25 +136,20 @@ export class StopService {
       const available = await operation.prepare();
       if (!available) {
         const refreshed = this.#requireSnapshot(sessionId);
-        this.#storeCompleteReceipt(input, requestHash, refreshed);
-        return refreshed;
+        if (refreshed.terminal) {
+          this.#storeCompleteReceipt(input, requestHash, refreshed);
+          return refreshed;
+        }
+        throw new SessionPlaneDomainError('provider.stop-unavailable',
+          'No exact stop control is available; no stop mutation was attempted',
+          { mutation: 'session.stop', outcome: 'not_attempted', snapshot: refreshed });
       }
 
       this.#storeAttemptedReceipt(input, requestHash, current);
       try {
-        await operation.stopOnce();
-      } catch (error) {
-        throw new SessionPlaneDomainError(
-          'internal.invariant-violation',
-          'Stop mutation outcome is unknown and automatic retry is forbidden',
-          {
-            mutation: 'session.stop',
-            outcome: 'unknown',
-            automaticRetry: false,
-            snapshot: current,
-            causeType: error instanceof Error ? error.name : typeof error,
-          },
-        );
+        if (await operation.stopOnce() !== 'stopped') throw this.#unknownStop(current);
+      } catch {
+        throw this.#unknownStop(current);
       }
 
       return this.#completeStop(actor, current, input);
@@ -218,16 +224,14 @@ export class StopService {
     if (receipt.status === 'complete') {
       return snapshot;
     }
-    throw new SessionPlaneDomainError(
-      'internal.invariant-violation',
-      'The original stop request has an ambiguous outcome and will not be repeated',
-      {
-        mutation: 'session.stop',
-        outcome: 'unknown',
-        automaticRetry: false,
-        snapshot,
-      },
-    );
+    const current = this.#requireSnapshot(snapshot.sessionId);
+    throw this.#unknownStop(current.generation === snapshot.generation ? current : snapshot);
+  }
+
+  #unknownStop(snapshot: SessionSnapshot): SessionPlaneDomainError {
+    return new SessionPlaneDomainError('provider.stop-unknown',
+      'Stop was attempted without a provider acknowledgement; observe the exact request without repeating the mutation',
+      { mutation: 'session.stop', outcome: 'unknown', automaticRetry: false, snapshot });
   }
 
   #resolveSession(input: SessionStopInput): SessionSnapshot {

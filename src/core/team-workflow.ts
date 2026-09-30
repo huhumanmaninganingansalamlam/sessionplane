@@ -299,7 +299,9 @@ export class TeamWorkflow {
 
   async #observe(request: OutboxRecord, maxNodes?: number, inspectCurrent = false): Promise<Record<string, unknown>> {
     const result = await this.#observeRequest(request, maxNodes, inspectCurrent);
-    return { ...result, conversationUsage: this.#conversationUsage(request.sessionId) };
+    return { ...result, conversationUsage: this.#conversationUsage(request.sessionId),
+      ...(this.services.stops.hasUnconfirmedStop(request.sessionId, request.generation)
+        ? { stopOutcome: { state: 'unknown', automaticRetry: false } } : {}) };
   }
 
   #conversationUsage(sessionId: string | null) {

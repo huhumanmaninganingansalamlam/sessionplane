@@ -174,10 +174,28 @@ Use `sessionplane_team_get` with `requestRef` to inspect the live page and retri
 original prompt, model, effort, surface, attachments (path/hash), and deadline.
 Do not endlessly repeat wait on a page that cannot display the conversation.
 
+`provider.actionable-alert` means a visible provider error, not a failed browser
+read. `reason: "provider-actionable-alert"` causes get/wait to include fresh
+`evidence.providerAlerts`, even for errors excluded from the compact control
+snapshot. Global alerts and current-turn errors need no action button. Historical
+turn errors do not block a later human follow-up. A backend 429 cannot erase this
+page evidence; fresh observation or an exact backend final can clear it.
+
+`sessionplane_stop` cancels unsubmitted preparation, or attempts one exact provider
+stop. `provider.stop-unavailable` with `outcome: "not_attempted"` means no control
+was available. `provider.stop-unknown` means a mutation was attempted without a
+provider acknowledgement, including a successful browser click. Neither confirms
+cancellation. The request stays nonterminal; get/wait expose `stopOutcome.state:
+"unknown"`. The attempted receipt survives restart and blocks repeat stop under
+another request ID. Continue read-only observation, never resend the prompt.
+
 When the caller decides the conversation must be replaced, or a completed long
 conversation needs a fresh context, use `sessionplane_session_replace` for the
 same `teamId`, `roleKey`, and provider with a new stable request ID. The new session records `predecessorSessionId` and becomes the current role route.
-Already submitted predecessor generations keep observing until their results are retrieved.
+Replacement attempts provider conversation deletion once, closes the predecessor's
+owned tabs, and ends its observation, including after restart. Retrieve required
+answers/files and write the handoff before replacing. Deletion failure or unknown
+conversation identity does not block the successor; there is no automatic retry.
 Preserve completed answers and required artifacts, then carry only the relevant
 role brief, current objective, decisions, and unresolved work into the new send.
 Keep requested model/effort and verify attachment identity. Do not copy an entire
@@ -186,10 +204,11 @@ fresh preparation decisions. A new session does not imply permission to repeat
 an unresolved submission; follow the caller/operator's explicit recovery intent.
 An existing instruction to replace and continue is authorization; do not ask again.
 
-Session replacement does not delete provider history. Cleanup is a separate
-operation after the role's work is complete and required answers/artifacts have
-been retrieved. Never delete active, unacknowledged, or unrecovered conversations
-merely because a successor exists or the page cannot be loaded.
+Replacement deliberately discards the predecessor's unresolved observation; it
+does not prove an uncertain submission was never accepted, nor that provider
+deletion succeeded. Stored local answers/files remain readable. An unreadable page
+alone does not authorize replacement or deletion. Explicit completed-conversation
+cleanup is also available through `sessionplane_session_delete`.
 
 Call `sessionplane_session_delete` with teamId, the exact requestRef, a stable
 requestId and `outputsRetrieved: true`. Core resolves the bound session, generation
@@ -200,11 +219,12 @@ conversation identities. It records the attempt before contacting the provider;
 `provider.deletion-unknown` survives restart and cannot be retried under another
 request ID. Successful replay returns the original deletion receipt.
 
-Role replacement and role retirement do not cancel submitted generations. Continue exact
+Role retirement alone does not cancel submitted generations. Continue exact
 requestRef waits to retrieve its result, then delete its completed history.
+Session replacement instead ends predecessor observation as described above.
 New submissions require the current session of an active role, checked again after
 provider preparation. Unsubmitted retired sessions wake existing waiters with a
-terminal snapshot. Submitted work continues observation across restart, and answers
+terminal snapshot. Submitted work on retired roles continues observation across restart, and answers
 remain readable after routing retirement.
 An uncertain deletion can be reconciled through the same deletion request: the core
 checks exact provider absence read-only and never repeats the uncertain mutation.
@@ -214,10 +234,8 @@ If observation reports `provider.observation-unavailable` with reason
 continues paced server observation independently, with only one outstanding DOM
 read. Inspect exact state; do not infer that the prompt was not submitted.
 
-`provider.observation-unavailable` with reason `provider-actionable-alert` means
-a visible actionable alert follows the exact submitted turn. Partial answer text
-does not establish completion while that alert is present. Inspect that session and generation to interpret the current provider
-evidence. This is not proof of non-submission or authorization to click retry.
+A visible provider alert does not establish completion, non-submission, or
+permission to click retry. Inspect the exact request and its `providerAlerts`.
 Read-only recovery continues; backend cooldown cannot hide the alert.
 
 Composite keyboard range controls expose one semantic slider ref on the visible

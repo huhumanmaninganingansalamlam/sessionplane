@@ -62,7 +62,7 @@ test('ChatGPT stop validates the exact owned Page and clicks the stop control on
       generation: 1,
     });
     assert.equal(await operation.prepare(), true);
-    await operation.stopOnce();
+    assert.equal(await operation.stopOnce(), 'unknown');
     assert.equal(
       await target.page.evaluate(() => (window as Window & { stopCount: number }).stopCount),
       1,
