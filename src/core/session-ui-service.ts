@@ -49,6 +49,11 @@ export class SessionUiService {
   }
 
   async #selectConfiguration(session: SessionSnapshot, configurationId: string) {
+      const current = await this.#capture(session, 5_000);
+      if (!current.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
+        throw new SessionPlaneDomainError('provider.preparation-unavailable',
+          'The exact page has no usable composer; configuration selection was not attempted');
+      }
       const option = this.#catalog?.options.find(option => option.id === configurationId);
       if (!option) throw new SessionPlaneDomainError('provider.configuration-stale', 'Discover current configurations and choose an observed configurationId');
       try {
@@ -83,18 +88,24 @@ export class SessionUiService {
     return await this.#submissions.withPendingPreparation(input,
       async (session) => {
         const snapshot = await this.#capture(session, input.maxNodes);
+        const composerAvailable = snapshot.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled);
         const catalog = this.#discoveryFailures.get(`${session.sessionId}:${session.generation}`) ?? this.#catalog;
         const menuIds = new Set(snapshot.nodes.filter((node) => node.role === 'menu' && node.id !== '').map((node) => node.id));
         this.#configurationRefs.set(snapshot.pageKey, { snapshotId: snapshot.snapshotId,
-          ids: catalog?.options.map(option => option.id) ?? [] });
+          ids: composerAvailable ? catalog?.options.map(option => option.id) ?? [] : [] });
         return { ...snapshot, nodes: snapshot.nodes.map((node) => ({ ...node, actions: preparationActions(node, menuIds) })),
+          preparationAvailability: { available: composerAvailable,
+            ...(composerAvailable ? {} : { reason: 'composer-unavailable' as const }) },
           configurationCatalog: catalog === null ? null : { ...catalog,
-            instruction: 'Select the desired combined label. Call sessionplane_decide with option.selection plus teamId, requestRef and a new requestId. No menu exploration is required.',
+            selectionAvailable: composerAvailable,
+            instruction: composerAvailable
+              ? 'Select the desired combined label. Call sessionplane_decide with option.selection plus teamId, requestRef and a new requestId. No menu exploration is required.'
+              : 'These cached model options are not selectable on this page. Read the same request again after the exact provider page has a usable composer; no configuration or submit action is available.',
             options: catalog.options.map((option, index) => ({ ...option,
               // DOM snapshots contain at most 5000 refs. Configuration refs use
               // the existing decision shape without pretending to be DOM nodes.
-              selection: { decision: 'choose' as const, purpose: 'model' as const,
-                snapshotId: snapshot.snapshotId, ref: `@e${5001 + index}` } })) } };
+              ...(composerAvailable ? { selection: { decision: 'choose' as const, purpose: 'model' as const,
+                snapshotId: snapshot.snapshotId, ref: `@e${5001 + index}` } } : {}) })) } };
       });
   }
 
@@ -322,8 +333,9 @@ export interface PreparationOwner {
 function preparationActions(node: BrowserSnapshotNode, menuIds: ReadonlySet<string>) {
   const choose: PreparationPurpose[] = [];
   const reveal: PreparationPurpose[] = [];
+  if (node.disabled) return { choose, reveal };
   if (node.editable && node.role === 'textbox') choose.push('composer');
-  if (node.role === 'button' && ['button', 'input'].includes(node.tag)) choose.push('submit');
+  if (node.role === 'button' && node.submitControl === true) choose.push('submit');
   const insideMenu = node.ancestorIds.some((id) => menuIds.has(id));
   if (!node.disabled) {
     if (node.role === 'slider' || (node.role === 'button' && node.hasPopup !== null) ||

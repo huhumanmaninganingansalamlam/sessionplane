@@ -50,6 +50,21 @@ request observations do not advertise preparation actions.
 
 ## Configuration selection
 
+Preparation evidence exposes `preparationAvailability`. Without a visible,
+enabled editable composer, `available:false` preserves the prepared request and
+does not offer submit. Ordinary Retry/reset buttons are not submit controls.
+Submit requires a native submission control associated with a usable composer
+or the provider's observed send marker; current decisions and provider preparation
+verify the same semantics. Disabled controls are not offered as actions.
+
+A cached configuration catalog is an inventory, not proof that this page can
+select a model. `selectionAvailable:false` omits option selections and rejects
+configuration mutation while the composer is unavailable. Read the same
+requestRef after the exact provider page becomes usable. Then select configuration
+and composer from fresh evidence before choosing submit. Inspection does not
+click Retry, reload, replace, resend, terminalize, or claim that the conversation
+was deleted. A Retry-only load error does not itself establish human verification.
+
 The normal model-selection flow is `send → configurationCatalog.options → decide
 configure(configurationId)`. The agent chooses a displayed combined label matching
 its intent; it does not derive a model from separate partial menus. Configure records

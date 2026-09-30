@@ -108,7 +108,8 @@ export class ChatGptSubmission implements ProviderSubmission {
         ...CHATGPT_PREPARATION_SNAPSHOT,
         maxNodes: 5_000,
       });
-      const matches = snapshot.nodes.filter((node) => matchesPreparationTarget(node, target));
+      const matches = snapshot.nodes.filter((node) => matchesPreparationTarget(node, target) &&
+        (target.purpose !== 'submit' || node.submitControl === true));
       if (snapshot.nodesTruncated || matches.length > 1) return null;
       const match = matches[0];
       if (match !== undefined) {

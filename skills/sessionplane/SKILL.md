@@ -35,6 +35,12 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    also use `decision: "configure", configurationId: option.id`. Neither path needs
    menu navigation, selectors or numeric power inference. Configure verifies the result and never submits.
    Later requests reuse the catalog; each selection is revalidated on its own page.
+   If `evidence.preparationAvailability.available` or catalog `selectionAvailable`
+   is false, the exact page has no usable composer: cached labels are not current
+   choices. Preserve the prepared request and inspect it again after the provider
+   page becomes usable. Do not choose Retry/reset as submit or wait for an answer
+   to a request with `promptSubmitted:false`. A Retry-only load error does not
+   itself establish human verification. No automatic refresh or resend is implied.
    If the catalog is null, unavailable or stale, call `decision: "discover"` on the
    same requestRef. Incomplete discovery does not establish model unavailability.
    Then choose the composer and submit from fresh evidence with `decision: "choose"`,

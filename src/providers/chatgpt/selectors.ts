@@ -57,6 +57,7 @@ export const CHATGPT_SELECTORS = {
 
 
 export const CHATGPT_PREPARATION_SNAPSHOT = {
+  submitSelector: '[data-testid="send-button"], #composer-submit-button',
   interactive: false,
   compact: true,
   controlScope: true,

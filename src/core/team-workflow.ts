@@ -332,7 +332,8 @@ export class TeamWorkflow {
       return { ...snapshot, status: 'needs_decision', requestRef: request.outboxId, evidence,
         configurationCatalog,
         requested: { model: payload.model, effort: payload.effort, surface: payload.surface }, choices: preparation.choices,
-        message: preparation.message };
+        message: evidence.preparationAvailability.available ? preparation.message
+          : 'The exact provider page has no usable composer. This request remains prepared and was not submitted. Read the same request after the provider page becomes usable; do not treat Retry or another ordinary button as submit.' };
     }
     if ((!snapshot.terminal && snapshot.submissionState === 'submission_unknown' && snapshot.provider === 'chatgpt') ||
         (snapshot.provider === 'chatgpt' && !snapshot.terminal && snapshot.submissionState === 'submitted' &&

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -52,6 +52,115 @@ const fixture = `<!doctype html><html><body><main><form>
   document.querySelector('textarea').onfocus = () => setTimeout(() => { chooser.hidden = false; }, 120);
   render();
 </script></body></html>`;
+
+test('unavailable preparation never offers Retry as submit and preserves the same request across restart and page restoration', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-preparation-unavailable-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const start = () => startCore({ config, browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  let service = await start();
+  const owner = service.browserOwner!;
+  const closeOwner = owner.close.bind(owner);
+  const createPage = owner.createPage.bind(owner);
+  owner.createPage = async (...args) => {
+    const created = await createPage(...args);
+    await created.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: fixture }));
+    return created;
+  };
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({
+    name: `sessionplane_${name}`, arguments: args, socketPath: config.socketPath,
+    timeoutMs: 30_000, maxLineBytes: config.rpcMaxLineBytes });
+  try {
+    const team = (await invoke('team_create', { requestId: 'unavailable-team' })).structuredContent;
+    const roleRef = (team.roles as { roleRef: string }[])[0]!.roleRef;
+    const pending = (await invoke('send', { teamId: team.teamId, roleRef,
+      requestId: 'unavailable-send', prompt: 'Preserve this exact request', model: 'Aurora-8 / Deep' })).structuredContent;
+    const identity = { teamId: team.teamId, requestRef: pending.requestRef };
+    const inspect = async () => {
+      const response = await invoke('team_get', identity);
+      assert.equal(response.isError, false, JSON.stringify(response));
+      return response.structuredContent.request as Record<string, any>;
+    };
+    const initial = await inspect();
+    const option = initial.configurationCatalog.options.find((o: any) => o.label === 'Aurora-8 / Deep');
+    assert.ok(option);
+    const page = service.pageRegistry.pageForObservation(initial.pageKey);
+    const originalBinding = service.pageRegistry.getBinding(initial.pageKey);
+    const staleSubmit = initial.evidence.nodes.find((n: any) => n.actions.choose.includes('submit'));
+    assert.ok(staleSubmit);
+    const assertUnavailable = async () => {
+      const current = await inspect();
+      assert.equal(current.sessionId, initial.sessionId);
+      assert.equal(current.generation, initial.generation);
+      assert.equal(current.requestRef, initial.requestRef);
+      assert.equal(current.submissionState, 'prepared');
+      assert.equal(current.promptSubmitted, false);
+      assert.equal(current.terminal, false);
+      assert.equal(current.evidence.preparationAvailability.available, false);
+      assert.ok(current.evidence.nodes.every((n: any) => !n.actions.choose.includes('submit')));
+      if (current.configurationCatalog !== null) {
+        assert.equal(current.configurationCatalog.selectionAvailable, false);
+        assert.ok(current.configurationCatalog.options.every((o: any) => o.selection === undefined));
+      }
+      return current;
+    };
+    await page.setContent('<main><div>Cannot load conversation</div><button type="button" onclick="window.retryClicks++">Retry</button></main><script>window.retryClicks=0</script>');
+    const unavailable = await assertUnavailable();
+    const retry = unavailable.evidence.nodes.find((n: any) => n.name === 'Retry');
+    const rejected = await invoke('decide', { ...identity, requestId: 'reject-retry-submit', decision: 'choose',
+      purpose: 'submit', snapshotId: unavailable.evidence.snapshotId, ref: retry.ref });
+    assert.equal(rejected.structuredContent.errorCode, 'input.invalid');
+    const configure = await invoke('decide', { ...identity, requestId: 'reject-unavailable-config',
+      decision: 'configure', configurationId: option.id });
+    assert.equal(configure.structuredContent.errorCode, 'provider.preparation-unavailable');
+    const stale = await invoke('decide', { ...identity, requestId: 'reject-old-submit-ref', decision: 'choose',
+      purpose: 'submit', snapshotId: initial.evidence.snapshotId, ref: staleSubmit.ref });
+    assert.equal(stale.isError, true);
+    assert.equal(await page.evaluate(() => (window as any).retryClicks), 0);
+    for (const editor of ['<textarea hidden></textarea>', '<textarea readonly></textarea>', '<textarea disabled></textarea>']) {
+      await page.setContent(`<main><form>${editor}<button type="submit" data-testid="send-button">Retry</button></form></main>`);
+      await assertUnavailable();
+    }
+    await page.setContent('<main><div>Cannot load conversation</div><button type="button">Retry</button></main>');
+    const registry = service.pageRegistry;
+    owner.close = async () => registry.detach();
+    await service.close();
+    const lockPath = path.join(owner.status.profileDir, '.sessionplane-profile.lock');
+    const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+    writeFileSync(lockPath, JSON.stringify({ ...lock, pid: 99_999_999 }));
+    service = await start();
+    const restarted = await assertUnavailable();
+    assert.equal(service.browserOwner!.status.browserPid, owner.status.browserPid);
+    assert.equal(service.pageRegistry.getBinding(restarted.pageKey).targetId, originalBinding.targetId);
+    const restoredPage = service.pageRegistry.pageForObservation(restarted.pageKey);
+    await restoredPage.setContent(fixture.replace('</form>', '<button type="button">Retry</button><button type="reset">Reset</button></form>')
+      .replace('<script>', '<script>(() => {').replace('</script>', '})();</script>'));
+    let restored = await inspect();
+    assert.equal(restored.requestRef, initial.requestRef);
+    assert.equal(restored.evidence.preparationAvailability.available, true);
+    assert.deepEqual(restored.evidence.nodes.filter((n: any) => n.actions.choose.includes('submit')).map((n: any) => n.name), ['Send']);
+    const discovered = await invoke('decide', { ...identity, requestId: 'restore-catalog', decision: 'discover' });
+    assert.equal(discovered.isError, false, JSON.stringify(discovered));
+    restored = await inspect();
+    assert.equal(restored.configurationCatalog.selectionAvailable, true);
+    const restoredOption = restored.configurationCatalog.options.find((o: any) => o.id === option.id);
+    const selected = await invoke('decide', { ...identity, requestId: 'restore-model', ...restoredOption.selection });
+    assert.equal(selected.isError, false, JSON.stringify(selected));
+    restored = await inspect();
+    const composer = restored.evidence.nodes.find((n: any) => n.actions.choose.includes('composer'));
+    const composed = await invoke('decide', { ...identity, requestId: 'restore-composer', decision: 'choose', purpose: 'composer',
+      snapshotId: restored.evidence.snapshotId, ref: composer.ref });
+    assert.equal(composed.isError, false, JSON.stringify(composed));
+    assert.equal(await restoredPage.locator('textarea').inputValue(), 'Preserve this exact request');
+    assert.equal(await restoredPage.evaluate(() => (window as any).submits), 0);
+    assert.equal(service.database.raw.prepare('SELECT COUNT(*) AS n FROM outbox').get()!.n, 1);
+    assert.equal(service.database.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE event_type='generation.submit-attempted'").get()!.n, 0);
+  } finally {
+    await service.close();
+    await closeOwner();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('first send returns observed combinations; subsequent requests select an ID without rediscovery or submission', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-configuration-'));

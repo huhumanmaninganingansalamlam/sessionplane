@@ -29,6 +29,7 @@ export interface BrowserSnapshotNode {
   readonly describedBy: readonly string[];
   readonly labelledBy: readonly string[];
   readonly editable: boolean;
+  readonly submitControl?: boolean;
   readonly expanded: boolean | null;
   readonly hasPopup: string | null;
   readonly box: {
@@ -88,12 +89,13 @@ export class BrowserRefSnapshotStore {
     readonly excludeSelector?: string;
     readonly controlScope?: boolean;
     readonly compact?: boolean;
+    readonly submitSelector?: string;
   }): Promise<BrowserSnapshot> {
     let snapshotId: string = randomUUID();
     const interactive = options.interactive ?? true;
     const maxNodes = Math.max(1, Math.min(5_000, options.maxNodes ?? 250));
     const evaluation = options.page.evaluate(
-      ({ snapshotId: browserSnapshotId, interactive: interactiveOnly, maxNodes: limit, refProperty, rootSelector, excludeSelector, controlScope, compact }) => {
+      ({ snapshotId: browserSnapshotId, interactive: interactiveOnly, maxNodes: limit, refProperty, rootSelector, excludeSelector, controlScope, compact, submitSelector }) => {
         type MutableSnapshotNode = {
           ref: string;
           token: string;
@@ -119,6 +121,7 @@ export class BrowserRefSnapshotStore {
           describedBy: string[];
           labelledBy: string[];
           editable: boolean;
+          submitControl: boolean;
           expanded: boolean | null;
           hasPopup: string | null;
           box: { x: number; y: number; width: number; height: number } | null;
@@ -262,6 +265,15 @@ export class BrowserRefSnapshotStore {
           );
         };
 
+        const editable = (element: Element): boolean => !element.matches(':disabled, [aria-disabled="true"]') &&
+          !('readOnly' in element && Boolean(element.readOnly)) &&
+          (element instanceof HTMLTextAreaElement ||
+            (element instanceof HTMLInputElement && !['button', 'submit', 'reset', 'checkbox', 'radio', 'file'].includes(element.type)) ||
+            (element instanceof HTMLElement && element.isContentEditable));
+        const hasComposer = (root: ParentNode): boolean =>
+          [...root.querySelectorAll('textarea, [role="textbox"], [contenteditable]')].some(element =>
+            editable(element) && isVisible(element) && element.closest('[aria-hidden="true"], [inert]') === null &&
+            (excludeSelector === null || element.closest(excludeSelector) === null));
         const nodes: MutableSnapshotNode[] = [];
         let truncated = false;
         let sequence = 0;
@@ -357,10 +369,10 @@ export class BrowserRefSnapshotStore {
               controls: relationship('aria-controls').ids,
               describedBy: describedBy.ids,
               labelledBy: relationship('aria-labelledby').ids,
-              editable:
-                element instanceof HTMLTextAreaElement ||
-                (element instanceof HTMLInputElement && !['button', 'submit', 'reset', 'checkbox', 'radio', 'file'].includes(element.type)) ||
-                (element instanceof HTMLElement && element.isContentEditable),
+              editable: editable(element),
+              submitControl: (element instanceof HTMLButtonElement || element instanceof HTMLInputElement) &&
+                (((element.type === 'submit' || element.type === 'image') && element.form !== null && hasComposer(element.form)) ||
+                  (submitSelector !== null && element.matches(submitSelector) && hasComposer(element.form ?? document))),
               expanded: element.getAttribute('aria-expanded') === null
                 ? null
                 : element.getAttribute('aria-expanded') === 'true',
@@ -433,6 +445,7 @@ export class BrowserRefSnapshotStore {
         excludeSelector: options.excludeSelector ?? null,
         controlScope: options.controlScope ?? false,
         compact: options.compact ?? false,
+        submitSelector: options.submitSelector ?? null,
       },
     );
 
@@ -457,7 +470,7 @@ export class BrowserRefSnapshotStore {
     });
     const scope = JSON.stringify([result.url, result.title, interactive, maxNodes,
       options.rootSelector ?? null, options.excludeSelector ?? null,
-      options.controlScope ?? false, options.compact ?? false, result.truncated]);
+      options.controlScope ?? false, options.compact ?? false, options.submitSelector ?? null, result.truncated]);
     const previous = this.#latestByPage.get(options.pageKey);
     if (previous?.bindingEpoch === options.bindingEpoch && previous.scope === scope &&
         previous.nodes.size === snapshotNodes.size && nodes.every(node => {
