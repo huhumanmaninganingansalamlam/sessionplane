@@ -220,6 +220,14 @@ snapshot. Global alerts and current-turn errors need no action button. Historica
 turn errors do not block a later human follow-up. A backend 429 cannot erase this
 page evidence; fresh observation or an exact backend final can clear it.
 
+ChatGPT's current-turn activity disclosure labelled `Thinking failed` / `생각 실패`
+also reports `provider.actionable-alert` when it follows the exact submitted user
+anchor. Ordinary message text and historical activity headers are not errors.
+This preserves the submitted request as nonterminal with no fabricated answer:
+an activity-completed indicator is not an attributable final response or proof of
+provider cancellation. Inspect the same request and report the visible failure;
+do not Retry/resubmit native operations that already executed before this error.
+
 `sessionplane_stop` cancels unsubmitted preparation, or attempts one exact provider
 stop. `provider.stop-unavailable` with `outcome: "not_attempted"` means no control
 was available. `provider.stop-unknown` means a mutation was attempted without a

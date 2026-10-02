@@ -14,6 +14,67 @@ import { recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submi
 
 const CONVERSATION_ID = 'conversation-observer-123456';
 
+test('thinking-failed activity headers report an exact nonterminal provider error, never an answer', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-thinking-failed-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  const user = (id: string, text = 'Question') => `<div data-chatgpt-search-message-ids="${id}"><div data-user-message-bubble>${text}</div></div>`;
+  const header = (text: string) => `<div class="group/activity-header">
+    <button aria-labelledby="failure-label" aria-expanded="false"></button>
+    <span id="failure-label"><span class="text-text/60">${text}</span></span>
+  </div>`;
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<main></main>' }));
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
+    const session = sessionSnapshot(binding.pageKey);
+    const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/' });
+    const source = await adapter.openObservation({ session, generation: 1 });
+    const identity = { submittedUserMessageId: 'user-message-1', submittedUserTurnId: null };
+    try {
+      for (const label of ['생각 실패', 'Thinking failed']) {
+        await page.setContent(`<main>${user('user-message-1')}${header(label)}<span role="status">Response complete</span><textarea></textarea></main>`);
+        const dom = await observeChatGptDom(page, identity);
+        assert.equal(dom.submittedUserFound, true);
+        assert.equal(dom.candidate, null);
+        assert.deepEqual(dom.providerAlerts, [label]);
+        const observed = await source.observe();
+        assert.equal(observed.errorCode, 'provider.actionable-alert');
+        assert.equal(observed.reason, 'provider-actionable-alert');
+        assert.equal(observed.submittedUserFound, true);
+        assert.equal(observed.candidate, null);
+        assert.equal(new ExactFinalTracker(1_000).evaluate(observed, Date.now()).kind, 'unverified');
+        assert.equal(session.promptSubmitted, true);
+        assert.equal(session.submittedUserMessageId, 'user-message-1');
+      }
+      const ordinaryAnswer = `<div data-message-author-role="assistant" data-message-id="answer"><div class="markdown">Thinking failed / 생각 실패</div></div>`;
+      for (const [name, html] of [
+        ['ordinary user/assistant words', `${user('user-message-1', 'Thinking failed / 생각 실패')}${ordinaryAnswer}`],
+        ['quoted provider markup in user', user('user-message-1', header('Thinking failed'))],
+        ['quoted provider markup in assistant', `${user('user-message-1')}<div data-chatgpt-selection-message-id="answer"><div class="markdown">${header('생각 실패')}</div></div>`],
+        ['historical error', `${header('Thinking failed')}${user('user-message-1')}`],
+        ['old error before human follow-up', `${user('user-message-1')}${header('생각 실패')}${user('human-followup')}`],
+        ['missing exact anchor', `${user('unrelated')}${header('Thinking failed')}`],
+        ['no message anchor', header('Thinking failed')],
+        ['ordinary activity completion', `${user('user-message-1')}${header('분석 완료')}`],
+        ['hidden error', `${user('user-message-1')}<div hidden>${header('생각 실패')}</div>`],
+        ['hidden disclosure label', `${user('user-message-1')}${header('생각 실패').replace('<span id=', '<span hidden id=')}`],
+        ['sidebar error', `${user('user-message-1')}<nav>${header('Thinking failed')}</nav>`],
+      ]) {
+        await page.setContent(`<main>${html}<textarea></textarea></main>`);
+        assert.deepEqual((await observeChatGptDom(page, identity)).providerAlerts, [], name);
+      }
+    } finally {
+      source.close();
+    }
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('missing DOM user binds only the exact backend prompt and retrieves its final without submission', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-backend-binding-'));
   const registry = new PageRegistry();

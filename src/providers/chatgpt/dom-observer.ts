@@ -77,7 +77,18 @@ export async function observeChatGptAlerts(page: Page, identity: SubmittedUserId
       }
     }
     const hasMessages = document.querySelector(messagesSelector) !== null;
-    return [...document.querySelectorAll<HTMLElement>('[role="alert"], [role="alertdialog"], .text-token-text-error, .text-danger')]
+    // Current reasoning failures use an activity disclosure, not an alert role.
+    // Only its labelled provider header counts, never words quoted in a message.
+    const thinkingFailures = anchor === undefined ? [] :
+      [...document.querySelectorAll<HTMLElement>('[class~="group/activity-header"]')].filter(header => {
+        if (header.closest('[data-message-author-role="user"], [data-user-message-bubble], [data-chatgpt-selection-message-id], [data-message-content], .markdown') !== null) return false;
+        const labelId = header.querySelector('button[aria-labelledby]')?.getAttribute('aria-labelledby');
+        const label = labelId ? document.getElementById(labelId) : null;
+        return label !== null && header.contains(label) &&
+          label.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+          /^(생각 실패|Thinking failed)$/i.test(label.innerText.trim());
+      });
+    return [...document.querySelectorAll<HTMLElement>('[role="alert"], [role="alertdialog"], .text-token-text-error, .text-danger'), ...thinkingFailures]
       .filter(alert => {
         if (alert.closest('nav, [role="navigation"], #app-shell-sidebar, [aria-hidden="true"], [inert]') !== null ||
             !alert.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || !alert.innerText.trim()) return false;
