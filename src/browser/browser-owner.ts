@@ -1121,6 +1121,16 @@ function readProfileLock(lockPath: string): ProfileLockPayload {
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
+    if (process.platform === 'linux') {
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+        const state = stat.slice(stat.lastIndexOf(')') + 2).split(' ', 1)[0];
+        if (state === 'Z' || state === 'X') return false;
+      } catch (error) {
+        if (isErrno(error, 'ENOENT')) return false;
+        // An unreadable state is not evidence that a live owner has exited.
+      }
+    }
     return true;
   } catch (error) {
     return isErrno(error, 'EPERM');

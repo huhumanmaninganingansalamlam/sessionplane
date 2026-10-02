@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import {
   existsSync,
   mkdirSync,
@@ -24,6 +25,52 @@ import {
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 
 const HOST_BROWSER = findHostBrowser();
+
+test('a zombie core lock owner permits adoption of the same live browser and tabs', { skip: process.platform !== 'linux' }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-zombie-owner-'));
+  const registry = new PageRegistry();
+  const first = new BrowserOwner({ profileDir: root, pageRegistry: new PageRegistry(), headless: true,
+    browserExecutable: HOST_BROWSER?.executable ?? null });
+  const second = new BrowserOwner({ profileDir: root, pageRegistry: registry, headless: true,
+    browserExecutable: HOST_BROWSER?.executable ?? null });
+  // Keep a genuinely exited child unreaped, unlike Node's normally reaped children.
+  const holder = spawn('python3', ['-c', 'import os,sys\npid=os.fork()\nif pid==0: os._exit(0)\nprint(pid,flush=True)\nsys.stdin.readline()\nos.waitpid(pid,0)']);
+  const exit = once(holder, 'exit');
+  try {
+    const [data] = await once(holder.stdout, 'data');
+    const deadPid = Number(String(data).trim());
+    const statPath = `/proc/${deadPid}/stat`;
+    const deadline = Date.now() + 5_000;
+    while (readFileSync(statPath, 'utf8').split(') ')[1]?.split(' ')[0] !== 'Z' && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(readFileSync(statPath, 'utf8').split(') ')[1]?.split(' ')[0], 'Z');
+    assert.doesNotThrow(() => process.kill(deadPid, 0), 'kill(pid, 0) alone incorrectly reports a zombie as live');
+    await first.start();
+    const page = await first.createPage();
+    await page.page.setContent('<p>Keep this original fixture tab</p>');
+    const browserPid = first.status.browserPid;
+    const port = first.status.debuggingPort;
+    const lockPath = path.join(root, '.sessionplane-profile.lock');
+    const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+    writeFileSync(lockPath, JSON.stringify({ ...lock, pid: deadPid }));
+    await second.start();
+    assert.equal(second.status.state, 'ready');
+    assert.equal(second.status.ownership, 'adopted');
+    assert.equal(second.status.browserPid, browserPid);
+    assert.equal(second.status.debuggingPort, port);
+    assert.equal(second.status.profileDir, root);
+    assert.ok(registry.listBindings().some(binding => binding.targetId === page.binding.targetId));
+    assert.equal(await page.page.locator('p').innerText(), 'Keep this original fixture tab');
+    assert.equal(JSON.parse(readFileSync(lockPath, 'utf8')).pid, process.pid);
+  } finally {
+    await second.close();
+    await first.close();
+    holder.stdin.end('\n');
+    await exit;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('BrowserOwner owns one dedicated persistent profile and fails closed for a second owner', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-owner-'));
