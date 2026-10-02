@@ -158,7 +158,10 @@ export class ChatGptSubmission implements ProviderSubmission {
       });
       if (configuration === undefined || snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, configuration)) {
         throw new ProviderSubmissionError('provider.preparation-required',
-          'Choose a matching configurationCatalog option with decide configure and configurationId. If the catalog is missing or stale, use decide discover on this requestRef. Configuration must be verified before submission.');
+          'Configuration must be verified before submission. Choose a matching configurationCatalog option with decide configure and configurationId. ' +
+          'After a click timeout, the original Coordinator must first team_get this same requestRef and check promptSubmitted, submissionState, terminal and saved choices. ' +
+          'Only while still prepared/unsubmitted, native choose/model can verify a fresh current combined model/version/effort summary matching the user intent; otherwise discover or report the evidence gap. ' +
+          'Reinspect after menu/composer changes. A saved Submit choice may resume on a later raw choose.');
       }
     }
   }

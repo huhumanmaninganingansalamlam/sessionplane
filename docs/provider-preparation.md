@@ -78,6 +78,25 @@ observations, not a promise about future availability. Selection revalidates the
 Raw choose/reveal remains available for diagnostics and composer/submit selection.
 The existing freshness, page ownership, idempotency and pre-submit checks still apply.
 
+After a catalog/configuration click timeout, the original Coordinator first reads
+`team_get` on the same requestRef and checks `promptSubmitted`, submissionState and
+terminal. Submitted, ambiguous or terminal requests must not receive preparation
+choices. For a still prepared/unsubmitted request, fresh exact-page evidence of the
+currently selected combined model/version/effort can be recorded with native
+`choose`, purpose `model`, and that summary's `snapshotId/ref`. This avoids another
+catalog traversal; it does not treat a timeout or UI text alone as verification.
+Match the user's intent and preserve the actual version, including 5.5 Pro when
+that is the intended configuration. Partial menus, badges and guessed slider
+power are not combined configuration evidence. If evidence is absent or mismatches,
+preserve the pending request and report that gap rather than repeat unchanged clicks.
+
+Menu closure or composer preparation can invalidate an earlier summary target.
+Reinspect the same request and validate its current summary; do not reuse stale refs.
+Before each raw choose, recheck current submission/terminal state and saved choices:
+raw choose resumes preparation and can submit when a Submit choice was already
+saved. Only the original Coordinator performs this recovery. Without a saved Submit
+choice, recovery leaves the request ready for that Coordinator to choose Submit last.
+
 ## Identity and restart
 
 On acceptance, core snapshots attachment bytes into owner-private

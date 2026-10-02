@@ -308,6 +308,146 @@ test('a failed discovery stays on its request and does not poison another reques
   }
 });
 
+test('timeout recovery validates fresh summaries, rejects closed-menu evidence and resumes saved Submit exactly once', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-summary-recovery-'));
+  const config = { ...resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), submissionAckTimeoutMs: 250 };
+  const service = await startCore({ config, browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const owner = service.browserOwner!;
+  const createPage = owner.createPage.bind(owner);
+  owner.createPage = async (...args) => {
+    const created = await createPage(...args);
+    // A previous Pro version is intentional, not a latest-version fallback.
+    await created.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html',
+      body: fixture.replaceAll('Aurora-8', '5.5').replaceAll('Deep', 'Pro').replaceAll(' / ', ' ')
+        .replace('</script>', `document.querySelector('form').addEventListener('submit', () => {
+          history.pushState({}, '', '/c/11111111-1111-4111-8111-111111111111');
+          const user = document.createElement('div');
+          user.setAttribute('data-message-author-role', 'user');
+          user.setAttribute('data-message-id', 'summary-fixture-user');
+          user.setAttribute('data-turn-id', 'summary-fixture-turn');
+          user.textContent = document.querySelector('textarea').value;
+          document.querySelector('main').appendChild(user);
+        });</script>`) }));
+    return created;
+  };
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({
+    name: `sessionplane_${name}`, arguments: args, socketPath: config.socketPath,
+    timeoutMs: 30_000, maxLineBytes: config.rpcMaxLineBytes });
+  const success = async (name: string, args: Record<string, unknown>) => {
+    const r = await invoke(name, args);
+    assert.equal(r.isError, false, JSON.stringify(r));
+    return r.structuredContent as Record<string, any>;
+  };
+  try {
+    const team = await success('team_create', { requestId: 'summary-team' });
+    const prompt = 'Keep the original review prompt';
+    const pending = await success('send', { teamId: team.teamId, roleRef: team.roles[0].roleRef,
+      requestId: 'summary-send', prompt, model: '5.5 Pro' });
+    const identity = { teamId: team.teamId, requestRef: pending.requestRef };
+    const inspect = async () => (await success('team_get', identity)).request as Record<string, any>;
+    // Each recovery decision reads current request state first, as the skill requires.
+    const prepared = async () => {
+      const q = await inspect();
+      assert.equal(q.requestRef, pending.requestRef);
+      assert.equal(q.sessionId, pending.sessionId);
+      assert.equal(q.generation, pending.generation);
+      assert.equal(q.submissionState, 'prepared');
+      assert.equal(q.promptSubmitted, false);
+      assert.equal(q.terminal, false);
+      return q;
+    };
+    const page = service.pageRegistry.pageForObservation(pending.pageKey);
+    const hashes = () => service.database.raw.prepare(
+      'SELECT request_hash, session_id, generation FROM outbox WHERE outbox_id = ?').get(pending.requestRef);
+    const original = hashes();
+    const option = pending.configurationCatalog.options.find((o: any) => o.label === '5.5 Pro');
+    assert.ok(option);
+    let pickerAttempts = 0;
+    t.mock.method(ChatGptConfigurationMenu.prototype, 'select', async () => {
+      pickerAttempts++;
+      // A timeout can leave the intended configuration already visible.
+      await page.evaluate(() => {
+        const w = window as any;
+        w.version = '5.5'; w.powerValue = 2; w.render();
+        (document.querySelector('#chooser') as HTMLButtonElement).click();
+      });
+      throw new errors.TimeoutError('Fixture configuration click timed out');
+    }, { times: 1 });
+    await prepared();
+    const timedOut = await invoke('decide', { ...identity, requestId: 'summary-timeout',
+      decision: 'configure', configurationId: option.id });
+    assert.equal(timedOut.structuredContent.errorCode, 'browser.unavailable');
+    const choose = async (q: Record<string, any>, purpose: string, node: Record<string, any>, requestId: string) =>
+      success('decide', { ...identity, requestId, decision: 'choose', purpose,
+        snapshotId: q.evidence.snapshotId, ref: node.ref });
+    const q = await prepared();
+    assert.equal(q.choices.submit, undefined);
+    const summary = q.evidence.nodes.find((n: any) => n.role === 'menuitem' && n.text === '5.5 Pro');
+    assert.ok(summary);
+    const opens = await page.evaluate(() => (window as any).opens);
+    const recovered = await choose(q, 'model', summary, 'summary-model');
+    assert.equal(recovered.choices.model.text, '5.5 Pro');
+    assert.equal(recovered.promptSubmitted, false);
+    assert.equal(await page.evaluate(() => (window as any).opens), opens);
+    assert.equal(pickerAttempts, 1, 'recovery does not repeat the failed picker operation');
+    const compose = await prepared();
+    await choose(compose, 'composer', compose.evidence.nodes.find((n: any) => n.editable), 'summary-composer');
+    assert.equal(await page.locator('textarea').inputValue(), prompt);
+
+    // Closing the menu invalidates its old target even though the model is unchanged.
+    const beforeClose = await prepared();
+    const oldSummary = beforeClose.evidence.nodes.find((n: any) => n.role === 'menuitem' && n.text === '5.5 Pro');
+    await page.locator('#chooser').click();
+    await page.locator('#configuration').waitFor({ state: 'hidden' });
+    await prepared();
+    const stale = await invoke('decide', { ...identity, requestId: 'summary-stale-menu', decision: 'choose',
+      purpose: 'model', snapshotId: beforeClose.evidence.snapshotId, ref: oldSummary.ref });
+    assert.equal(stale.isError, true);
+    assert.equal(stale.structuredContent.errorCode, 'browser.snapshot-stale');
+    const closed = await prepared();
+    assert.equal(closed.choices.model.role, 'menuitem', 'old target is not silently adopted as a new target');
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+    const gated = await choose(closed, 'submit', closed.evidence.nodes.find((n: any) => n.submitControl), 'summary-save-submit');
+    assert.equal(gated.promptSubmitted, false, 'closed-menu evidence cannot pass pre-submit validation');
+    assert.equal(gated.choices.submit.purpose, 'submit');
+    assert.equal(service.database.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE event_type='generation.submit-attempted'").get()!.n, 0);
+
+    // A changed label cannot be accepted using the previously observed chooser.
+    const current = await prepared();
+    const chooser = current.evidence.nodes.find((n: any) => n.id === 'chooser');
+    await page.evaluate(() => { (window as any).version = 'Aurora-9'; (window as any).render(); });
+    await prepared();
+    const mismatch = await invoke('decide', { ...identity, requestId: 'summary-changed-model', decision: 'choose',
+      purpose: 'model', snapshotId: current.evidence.snapshotId, ref: chooser.ref });
+    assert.equal(mismatch.isError, true);
+    assert.equal(mismatch.structuredContent.errorCode, 'browser.snapshot-stale');
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+
+    await page.evaluate(() => { (window as any).version = '5.5'; (window as any).render(); });
+    const final = await prepared();
+    assert.equal(final.choices.submit.purpose, 'submit');
+    const finalChooser = final.evidence.nodes.find((n: any) => n.id === 'chooser');
+    assert.equal(finalChooser.text, '5.5 Pro');
+    const recovery = { ...identity, requestId: 'summary-current-owner-recovery', decision: 'choose',
+      purpose: 'model', snapshotId: final.evidence.snapshotId, ref: finalChooser.ref };
+    const submitted = await success('decide', recovery);
+    assert.equal(submitted.promptSubmitted, true, 'original Coordinator recovery resumes its saved Submit');
+    assert.equal((await inspect()).promptSubmitted, true, 'fresh status excludes any new preparation choice');
+    // Replay the identical completed decision receipt only to verify idempotency.
+    await success('decide', recovery);
+    assert.equal(await page.evaluate(() => (window as any).submits), 1);
+    assert.equal(service.database.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE event_type='generation.submit-attempted'").get()!.n, 1);
+    assert.equal(service.database.raw.prepare('SELECT COUNT(*) AS n FROM outbox').get()!.n, 1);
+    assert.deepEqual(hashes(), original);
+    assert.equal(await page.locator('textarea').inputValue(), prompt);
+    assert.equal(await page.locator('#chooser').innerText(), '5.5 Pro');
+  } finally {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('configuration selection verifies menu state without waiting for scheduled navigation', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-menu-navigation-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });

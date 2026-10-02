@@ -42,10 +42,24 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    to a request with `promptSubmitted:false`. A Retry-only load error does not
    itself establish human verification. No automatic refresh or resend is implied.
    If the catalog is null, unavailable or stale, call `decision: "discover"` on the
-   same requestRef. Incomplete discovery does not establish model unavailability.
+   same requestRef, except after a click timeout: use current-summary recovery
+   below first. Incomplete discovery does not establish model unavailability.
    Then choose the composer and submit from fresh evidence with `decision: "choose"`,
    purpose and snapshotId/ref. Choose submit last. Raw choose/reveal remain available
    for diagnostics; do not reconstruct model combinations from partial menus.
+   After a configuration click timeout, the original Coordinator must first read
+   `team_get` on the same requestRef and check `promptSubmitted`, submissionState
+   and terminal. Submitted, ambiguous or terminal requests are not preparation work.
+   If still prepared/unsubmitted, use fresh exact-page evidence: when the current
+   combined model/version/effort summary matches the user's intent, record that
+   observed summary with native choose/model and its snapshotId/ref instead of
+   repeating the failed catalog click. Preserve the actual version; generic Pro
+   does not require switching an already intended 5.5 Pro to 5.6 Pro. Reinspect
+   after menu/composer changes and use the current summary, never an old menu ref,
+   account badge or inferred slider power. Missing or mismatching evidence is not
+   readiness. A saved Submit choice can resume after any later raw choose, so
+   only the original Coordinator performs this recovery; readiness-only work must
+   have no saved Submit choice. Recheck current status before each such choose.
    Follow explicit user corrections when request hints conflict. Keep the same requestRef.
    When the user requests a page refresh, or visible stream/history recovery
    failure warrants one, call `sessionplane_decide` with decision `refresh`,
