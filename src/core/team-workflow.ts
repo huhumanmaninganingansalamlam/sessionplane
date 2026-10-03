@@ -94,13 +94,15 @@ export class TeamWorkflow {
     if (session !== null && session.teamId !== input.teamId) {
       throw new SessionPlaneDomainError('input.invalid', 'Role reference belongs to another team');
     }
-    await this.services.cleanup.replace({ clientId: `team:${input.teamId}`, requestId: input.requestId,
+    const replacement = await this.services.cleanup.replace({ clientId: `team:${input.teamId}`, requestId: input.requestId,
       method: 'workflow.session_replace', payload: input, teamId: input.teamId,
       roleKey: session?.roleKey ?? input.roleKey!, provider: session?.provider ?? input.provider ?? 'chatgpt',
       expectedSessionId: session?.sessionId ?? null,
       ...(identity === null ? {} : { expectedGeneration: identity[1] }),
     });
-    return this.getTeam(input);
+    return { ...await this.getTeam(input), replacement: {
+      requestId: input.requestId, sessionId: replacement.sessionId, cleanup: replacement.cleanup,
+    } };
   }
 
   async send(input: RoleInput & { prompt: string; model?: string | undefined; effort?: string | undefined; files?: string[] | undefined; sessionDeadlineSec: number }) {
@@ -308,7 +310,7 @@ export class TeamWorkflow {
     const confirmedTurnCount = sessionId === null ? 0 : this.#sessions.confirmedConversationTurns(sessionId);
     return { confirmedTurnCount, handoffRecommended: confirmedTurnCount >= 10,
       ...(confirmedTurnCount < 10 ? {} : {
-        recommendation: 'This conversation has at least 10 confirmed user turns. After resolving the current request and retrieving its answer/files, write a handoff with the objective, decisions, evidence/artifact references, unresolved work, next step, and requested model/effort. Use sessionplane_session_replace with a fresh roleRef, then send the handoff in the new conversation. Do not copy the entire transcript or replay unresolved submissions.',
+        recommendation: 'This conversation has at least 10 confirmed user turns. After resolving the current request and retrieving its answer/files, write a handoff with the objective, decisions, evidence/artifact references, unresolved work, next step, and requested model/effort. For a nondeleting continuation, use sessionplane_role_create with a unique custom role in the same team. sessionplane_session_replace attempts permanent deletion of the old conversation and requires specific deletion confirmation; this turn-count recommendation is not confirmation. Do not copy the entire transcript or replay unresolved submissions.',
       }) };
   }
 

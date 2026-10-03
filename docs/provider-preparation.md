@@ -249,13 +249,25 @@ Keep requested model/effort and verify attachment identity. Do not copy an entir
 long transcript. The 10-turn recommendation is a handoff cue, not an automatic cutoff. New sends still require
 fresh preparation decisions. A new session does not imply permission to repeat
 an unresolved submission; follow the caller/operator's explicit recovery intent.
-An existing instruction to replace and continue is authorization; do not ask again.
+Use replacement only with the required specific deletion confirmation. An
+instruction to hand off or continue, including the 10-turn cue, is not that
+confirmation. A supported nondeleting handoff uses `sessionplane_role_create`
+with a unique custom role in the same team; the original role/session remains
+available and the primary route is unchanged. Replacement has no preserve-old option.
 
 Replacement deliberately discards the predecessor's unresolved observation; it
 does not prove an uncertain submission was never accepted, nor that provider
 deletion succeeded. Stored local answers/files remain readable. An unreadable page
 alone does not authorize replacement or deletion. Explicit completed-conversation
 cleanup is also available through `sessionplane_session_delete`.
+
+Replacement returns its durable cleanup evidence separately from routing success
+in `replacement.cleanup`: predecessor session/generation/conversation, deletion
+request ID, actual deletion receipt client/request/status (or null), outcome and
+error code. `confirmed`, `refused`, `uncertain` and `not-attempted` describe the
+provider deletion result; a successful successor is not confirmation of deletion.
+Historical receipts missing this evidence remain `unknown` on every replay,
+without a provider operation or retroactive success claim.
 
 Call `sessionplane_session_delete` with teamId, the exact requestRef, a stable
 requestId and `outputsRetrieved: true`. Core resolves the bound session, generation

@@ -100,6 +100,14 @@ and confirm the final active controls; unavailable intent requires a user decisi
   provider conversation once, closes its owned tab and ends observation, then creates
   the new session. Deletion failure, unsupported deletion or unknown conversation
   identity does not block replacement; there is no automatic cleanup retry.
+  The existing team fields remain unchanged. The replacement response adds
+  `replacement.requestId`, `replacement.sessionId` and `replacement.cleanup`.
+  Cleanup records the exact predecessor session/generation/conversation,
+  `deletionRequestId`, the actual `deletionReceipt` client/request/status when one
+  exists, `outcome` and `errorCode`. Outcomes are `confirmed` (provider deletion
+  confirmed), `refused`, `uncertain`, or `not-attempted`; historical replacement
+  receipts without cleanup evidence return `unknown` without rewriting history
+  or retrying deletion. Routing `requestOk:true` never establishes provider deletion.
   Retrieve needed outputs and write the handoff first. Stored local answers/files
   remain available. The old session stays retired across restarts even when deletion
   fails. Raw `session.create` for an occupied role uses the same replacement path.
@@ -109,6 +117,15 @@ and confirm the final active controls; unavailable intent requires a user decisi
   cannot replace an occupied role; that still requires its fresh roleRef.
   `session_delete` separately requires an exact request and `outputsRetrieved:true`;
   existing cleanup checks reject unresolved/shared conversations.
+
+For a handoff that preserves the old provider conversation, use `role_create`
+with a unique `roleKey` and `roleType:"custom"` in the same team, then carry the
+handoff into that role under its own fresh roleRef. This keeps the old role/session
+and does not repoint the primary role. `session_replace` has no preserve-old option;
+raw occupied-role `session.create` has the same deleting behavior. Obtain the
+required specific deletion confirmation before choosing that path. A 10-turn
+recommendation is only a handoff cue, never deletion confirmation. This is a
+caller authorization requirement, not a new confirmation field in the API.
 
 General search/research, context packaging, project-source management and code ZIP
 orchestration are outside the agent chat workflow. They are not optional MCP profiles

@@ -141,10 +141,20 @@ out prompts, infer consensus, or inject answers into other roles.
   remain. Deletion failure or unknown conversation identity does not block replacement;
   there is no automatic cleanup retry. Old observation stays stopped across restarts.
   It never replays unresolved work.
+  Routing success is separate from `replacement.cleanup`: inspect its exact
+  predecessor session/generation/conversation, deletion request ID and actual
+  deletion receipt client/request/status. Outcomes are `confirmed`, `refused`,
+  `uncertain`, `not-attempted`; historical missing results stay `unknown` without
+  cleanup retry. Obtain required specific deletion confirmation before replacement;
+  a handoff or turn-count recommendation is not confirmation.
   Read `conversationUsage`: at 10 confirmed user turns, `handoffRecommended:true`
   recommends finishing the current request, retrieving outputs, and writing a
   handoff with the objective, decisions, evidence/files, unresolved work, next step,
-  and model/effort. Then replace the session and send that handoff in the new chat.
+  and model/effort. For a nondeleting handoff, use `sessionplane_role_create` with
+  a unique roleKey and roleType `custom` in the same team, then continue through
+  that role's fresh roleRef. The old role/session stays available; this does not
+  repoint the primary role. Replacement has no preserve-old option; use it only
+  with the required specific deletion confirmation.
   This recommendation does not authorize replaying an unresolved submission.
   If team_get shows an existing role with no session/roleRef, initialize it with
   session_replace using its roleKey instead. Do not recreate that role.

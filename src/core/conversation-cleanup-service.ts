@@ -23,6 +23,18 @@ export interface ConversationDeleteInput {
   readonly outputsRetrieved: true;
 }
 
+export interface ReplacementCleanup {
+  predecessorSessionId: string | null;
+  predecessorGeneration: number | null;
+  conversationId: string | null;
+  deletionRequestId: string | null;
+  deletionReceipt: { clientId: string; requestId: string; status: string } | null;
+  outcome: 'confirmed' | 'refused' | 'uncertain' | 'not-attempted' | 'unknown';
+  errorCode: string | null;
+}
+
+type ReplacementResult = SessionSnapshot & { cleanup: ReplacementCleanup };
+
 export class ConversationCleanupService {
   readonly #replacements = new KeyedMutex();
   readonly #options: {
@@ -107,7 +119,7 @@ export class ConversationCleanupService {
     clientId: string; requestId: string; method: string; payload: unknown;
     teamId: string; roleKey: string; provider: string;
     expectedSessionId?: string | null; expectedGeneration?: number;
-  }): Promise<SessionSnapshot> {
+  }): Promise<ReplacementResult> {
     const { database, directory, scheduler } = this.#options;
     const receipts = new ReceiptRepository(database);
     const sessions = new SessionRepository(database.raw);
@@ -118,7 +130,15 @@ export class ConversationCleanupService {
         if (receipt.method !== input.method || receipt.requestHash !== requestHash) {
           throw new SessionPlaneDomainError('input.idempotency-conflict', 'Replacement request payload changed');
         }
-        if (receipt.status === 'complete') return JSON.parse(receipt.resultJson) as SessionSnapshot;
+        if (receipt.status === 'complete') {
+          const result = JSON.parse(receipt.resultJson) as SessionSnapshot & { cleanup?: ReplacementCleanup };
+          // Historical receipts do not establish cleanup, and must never retry it.
+          return { ...result, cleanup: result.cleanup ?? {
+            predecessorSessionId: result.predecessorSessionId, predecessorGeneration: null,
+            conversationId: null, deletionRequestId: null, deletionReceipt: null,
+            outcome: 'unknown', errorCode: 'provider.deletion-unknown',
+          } };
+        }
       }
       const role = directory.getTeam(input.teamId).roles.find(role => role.roleKey === input.roleKey);
       if (role === undefined || role.roleState !== 'active') {
@@ -134,15 +154,45 @@ export class ConversationCleanupService {
         );
       }
       directory.requireEnabledProvider(input.provider);
+      const cleanup: ReplacementCleanup = {
+        predecessorSessionId: previous?.sessionId ?? null,
+        predecessorGeneration: previous?.generation ?? null,
+        conversationId: previous?.conversationId ?? null,
+        deletionRequestId: null, deletionReceipt: null, outcome: 'not-attempted', errorCode: null,
+      };
       if (previous !== null && previous.conversationId !== null) {
         // Replacement makes one best-effort deletion attempt; cleanup cannot block routing.
+        cleanup.deletionRequestId = 'replacement-delete:' + input.requestId;
+        let deletion: DeletionResult | null = null;
         try {
-          await this.delete({ clientId: input.clientId,
-            requestId: 'replacement-delete:' + input.requestId,
+          deletion = await this.delete({ clientId: input.clientId,
+            requestId: cleanup.deletionRequestId,
             sessionId: previous.sessionId, generation: previous.generation,
             conversationId: previous.conversationId, outputsRetrieved: true }, { replacement: true });
-        } catch {
-          // Unsupported providers, lost pages and rejected deletion still permit replacement.
+        } catch (error) {
+          cleanup.errorCode = cleanupErrorCode(error);
+        }
+        const deletionReceipt = receipts.get(input.clientId, cleanup.deletionRequestId)
+          ?? receipts.findConversationDeletion(previous.conversationId);
+        if (deletionReceipt !== null) {
+          cleanup.deletionReceipt = { clientId: deletionReceipt.clientId,
+            requestId: deletionReceipt.requestId, status: deletionReceipt.status };
+          const recorded = JSON.parse(deletionReceipt.resultJson) as DeletionResult;
+          if (deletionReceipt.method === 'session.delete' &&
+              recorded.sessionId === previous.sessionId && recorded.generation === previous.generation &&
+              recorded.conversationId === previous.conversationId) {
+            deletion = recorded;
+          } else {
+            cleanup.outcome = 'uncertain';
+            cleanup.errorCode = 'session.conversation-mismatch';
+          }
+        }
+        if (deletion !== null) {
+          cleanup.outcome = cleanup.deletionReceipt?.status === 'complete' && deletion.requestOk &&
+              deletion.deleted && deletion.errorCode === null ? 'confirmed'
+            : cleanup.deletionReceipt?.status === 'complete' && deletion.errorCode === 'provider.deletion-rejected'
+              ? 'refused' : 'uncertain';
+          cleanup.errorCode = deletion.errorCode ?? (cleanup.outcome === 'uncertain' ? 'provider.deletion-unknown' : null);
         }
       }
       const create = () => receipts.execute({ clientId: input.clientId, requestId: input.requestId,
@@ -156,7 +206,7 @@ export class ConversationCleanupService {
               sessionId: previous.sessionId, generation: previous.generation,
               eventType: 'session.replaced', payload: { successorSessionId: successor.sessionId }, createdAt: timestamp });
           }
-          return successor;
+          return { ...successor, cleanup };
         },
       });
       if (previous === null) return create();

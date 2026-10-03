@@ -9,6 +9,9 @@ import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
 import type { ProviderRecoveryRequest } from '../../src/providers/provider-adapter.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import type { ReplacementCleanup } from '../../src/core/conversation-cleanup-service.ts';
+import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
+import { ReceiptRepository } from '../../src/storage/receipt-repository.ts';
 
 class DeletingProvider extends FakeProviderAdapter {
   readonly deleted = new Set<string>();
@@ -45,14 +48,24 @@ test('replacement attempts deletion once, continues on failure, and never resurr
       sessionId: old.sessionId, prompt: 'Pending work to discard' });
     adapter.loseAcknowledgement = true;
     const replace = { teamId: team.teamId, roleRef: old.sessionId + ':1', requestId: 'replace' };
-    const replaced = await rpc<{ roles: Array<{ currentSessionId: string }> }>('workflow.session_replace', replace);
+    const replaced = await rpc<{ roles: Array<{ currentSessionId: string }>;
+      replacement: { requestId: string; sessionId: string; cleanup: ReplacementCleanup } }>('workflow.session_replace', replace);
     const successor = replaced.roles[0]!.currentSessionId;
     assert.notEqual(successor, old.sessionId);
     assert.equal(core.teamDirectory.getSession(successor).predecessorSessionId, old.sessionId);
     assert.equal(core.teamDirectory.getSession(old.sessionId).sessionState, 'superseded');
     assert.equal(core.teamDirectory.getSession(old.sessionId).submissionState, 'submitted');
     assert.equal(core.observationService.observerCount, 0);
-    await rpc('workflow.session_replace', replace);
+    assert.equal(replaced.replacement.requestId, replace.requestId);
+    assert.equal(replaced.replacement.sessionId, successor);
+    assert.deepEqual(replaced.replacement.cleanup, {
+      predecessorSessionId: old.sessionId, predecessorGeneration: 1,
+      conversationId: submitted.conversationId, deletionRequestId: 'replacement-delete:replace',
+      deletionReceipt: { clientId: `team:${team.teamId}`, requestId: 'replacement-delete:replace', status: 'attempted' },
+      outcome: 'uncertain', errorCode: 'provider.deletion-unknown',
+    });
+    const replay = await rpc<typeof replaced>('workflow.session_replace', replace);
+    assert.deepEqual(replay.replacement, replaced.replacement);
     assert.equal(core.teamDirectory.getCurrentSession(team.teamId, 'main').sessionId, successor);
     assert.equal(adapter.deleteCount, 1);
     await core.close();
@@ -61,6 +74,13 @@ test('replacement attempts deletion once, continues on failure, and never resurr
     assert.equal(core.observationService.observerCount, 0);
     assert.equal(core.pageBindings.listForSession(old.sessionId).length, 0);
     assert.equal(adapter.deleted.has(submitted.conversationId!), true);
+
+    // The existing same-team custom-role path does not replace or clean up main.
+    await rpc('workflow.role_create', { teamId: team.teamId, requestId: 'preserving-handoff',
+      roleKey: 'main.continuation', roleType: 'custom', provider: 'chatgpt' });
+    assert.equal(core.teamDirectory.getCurrentSession(team.teamId, 'main').sessionId, successor);
+    assert.equal(adapter.deleteCount, 1);
+    assert.equal(core.teamDirectory.getSession(old.sessionId).conversationId, submitted.conversationId);
 
     // Raw session.create shares replacement semantics, including completion and retry.
     adapter.loseAcknowledgement = false;
@@ -109,7 +129,8 @@ test('best-effort replacement survives deletion failure and persistent recovery'
       adapters: new ProviderAdapterRegistry([adapter]), registry: new PageRegistry(),
       pageMutex: new PageMutationMutex(), onDeleted: id => retired.push(id) });
     const team = directory.createTeam({ clientId: 'boundary' });
-    for (const mode of ['success', 'unknown-ack', 'open-failure', 'rejected', 'no-identity']) {
+    let historicalInput: Parameters<typeof cleanup.replace>[0] | undefined;
+    for (const mode of ['success', 'unknown-ack', 'open-failure', 'rejected', 'no-identity', 'wrong-receipt', 'ambiguous-receipt']) {
       const old = directory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
       await scheduler.startGeneration({ sessionId: old.sessionId, teamBriefVersion: 0, promptHash: mode });
       database.raw.prepare("UPDATE generations SET submission_state = 'submission_unknown', prompt_submitted = 1 WHERE session_id = ?").run(old.sessionId);
@@ -118,7 +139,7 @@ test('best-effort replacement survives deletion failure and persistent recovery'
       let attempts = 0;
       adapter.openDeletion = async () => {
         attempts++;
-        if (mode === 'open-failure') throw new Error('Provider unavailable');
+        if (mode === 'open-failure') throw new SessionPlaneDomainError('provider.unavailable', 'Provider unavailable');
         return { alreadyDeleted: false, deleteOnce: async () => {
           if (mode === 'unknown-ack') throw new Error('Lost acknowledgement');
           return mode !== 'rejected';
@@ -126,19 +147,64 @@ test('best-effort replacement survives deletion failure and persistent recovery'
       };
       const input = { clientId: 'boundary', requestId: mode, method: 'session.create', payload: { mode },
         teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' };
+      const receipts = new ReceiptRepository(database);
+      if (mode === 'wrong-receipt') receipts.record({ clientId: 'other', requestId: 'unrelated-deletion',
+        method: 'session.delete', requestHash: 'fixture', status: 'complete', result: {
+          sessionId: 'other-session', generation: 1, conversationId: old.sessionId,
+          requestOk: true, deleted: true, errorCode: null,
+        } });
+      if (mode === 'ambiguous-receipt') receipts.record({ clientId: 'other', requestId: 'ambiguous-deletion',
+        method: 'session.delete', requestHash: 'fixture', status: 'attempted', result: {
+          sessionId: old.sessionId, generation: 1, conversationId: old.sessionId,
+          requestOk: false, deleted: true, errorCode: null,
+        } });
       const next = await cleanup.replace(input);
       assert.equal(next.predecessorSessionId, old.sessionId);
       assert.equal(directory.getCurrentSession(team.teamId, 'main').sessionId, next.sessionId);
       assert.equal(directory.getSession(old.sessionId).sessionState, 'superseded');
       assert.equal(directory.getSession(old.sessionId).submissionState, 'submission_unknown');
       assert.ok(retired.includes(old.sessionId));
+      assert.equal(next.cleanup.predecessorSessionId, old.sessionId);
+      assert.equal(next.cleanup.predecessorGeneration, 1);
+      assert.equal(next.cleanup.conversationId, mode === 'no-identity' ? null : old.sessionId);
+      assert.equal(next.cleanup.outcome, mode === 'success' ? 'confirmed'
+        : mode === 'rejected' ? 'refused' : ['unknown-ack', 'wrong-receipt', 'ambiguous-receipt'].includes(mode) ? 'uncertain' : 'not-attempted');
+      assert.equal(next.cleanup.errorCode, mode === 'unknown-ack' || mode === 'ambiguous-receipt' ? 'provider.deletion-unknown'
+        : mode === 'rejected' ? 'provider.deletion-rejected' : mode === 'open-failure' ? 'provider.unavailable'
+          : mode === 'wrong-receipt' ? 'session.conversation-mismatch' : null);
+      assert.equal(next.cleanup.deletionRequestId, mode === 'no-identity' ? null : 'replacement-delete:' + mode);
+      assert.deepEqual(next.cleanup.deletionReceipt, mode === 'no-identity' || mode === 'open-failure' ? null
+        : mode === 'wrong-receipt' ? { clientId: 'other', requestId: 'unrelated-deletion', status: 'complete' }
+          : mode === 'ambiguous-receipt' ? { clientId: 'other', requestId: 'ambiguous-deletion', status: 'attempted' }
+          : { clientId: 'boundary', requestId: 'replacement-delete:' + mode, status: mode === 'unknown-ack' ? 'attempted' : 'complete' });
+      assert.deepEqual(JSON.parse(receipts.get('boundary', mode)!.resultJson).cleanup, next.cleanup);
       assert.deepEqual(await cleanup.replace(input), next);
-      assert.equal(attempts, mode === 'no-identity' ? 0 : 1);
+      assert.equal(attempts, mode === 'no-identity' || mode === 'wrong-receipt' ? 0 : 1);
+      if (mode === 'open-failure') {
+        historicalInput = input;
+        const { cleanup: ignored, ...historical } = next;
+        database.raw.prepare('UPDATE request_receipts SET result_json = ? WHERE client_id = ? AND request_id = ?')
+          .run(JSON.stringify(historical), 'boundary', mode);
+        const stored = receipts.get('boundary', mode)!.resultJson;
+        assert.equal((await cleanup.replace(input)).cleanup.outcome, 'unknown');
+        assert.equal(receipts.get('boundary', mode)!.resultJson, stored);
+        assert.equal(attempts, 1);
+      }
     }
     database.close();
     database = SessionPlaneDatabase.open(path.join(root, 'state.db'));
     assert.equal(new SessionRepository(database.raw).restorePendingRetiredSessions(['chatgpt']), 0);
     for (const id of retired) assert.equal(new SessionRepository(database.raw).getSnapshot(id)!.sessionState, 'superseded');
+    const restored = new ConversationCleanupService({ database, directory: new TeamDirectory(database),
+      scheduler: new ActorScheduler(database), adapters: new ProviderAdapterRegistry([adapter]),
+      registry: new PageRegistry(), pageMutex: new PageMutationMutex(), onDeleted: () => {} });
+    adapter.openDeletion = async () => { assert.fail('Historical replay must not contact the provider'); };
+    const stored = new ReceiptRepository(database).get('boundary', 'open-failure')!.resultJson;
+    const historical = await restored.replace(historicalInput!);
+    assert.deepEqual(historical.cleanup, { predecessorSessionId: historical.predecessorSessionId,
+      predecessorGeneration: null, conversationId: null, deletionRequestId: null,
+      deletionReceipt: null, outcome: 'unknown', errorCode: 'provider.deletion-unknown' });
+    assert.equal(new ReceiptRepository(database).get('boundary', 'open-failure')!.resultJson, stored);
   } finally {
     database.close();
     rmSync(root, { recursive: true, force: true });
