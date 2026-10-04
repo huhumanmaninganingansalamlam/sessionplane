@@ -21,6 +21,7 @@ interface ObserverRuntime {
 }
 
 export interface ObservationServiceOptions {
+  readonly onActionableAlert?: (snapshot: SessionSnapshot, signal: AbortSignal) => Promise<void>;
   readonly database: SessionPlaneDatabase;
   readonly scheduler: ActorScheduler;
   readonly adapters: ProviderAdapterRegistry;
@@ -50,8 +51,10 @@ export class ObservationService {
   readonly #metrics: RuntimeMetrics | null;
   readonly #runtimes = new Map<string, ObserverRuntime>();
   #closed = false;
+  readonly #onActionableAlert: ObservationServiceOptions['onActionableAlert'];
 
   constructor(options: ObservationServiceOptions) {
+    this.#onActionableAlert = options.onActionableAlert;
     this.#scheduler = options.scheduler;
     this.#adapters = options.adapters;
     this.#sessions = new SessionRepository(options.database.raw);
@@ -223,6 +226,11 @@ export class ObservationService {
         const persisted = preserveBackendDeferral
           ? current
           : await this.#persistDecision(current, evidence, decision);
+        if (persisted.errorCode === 'provider.actionable-alert' && this.#onActionableAlert) {
+          await this.#onActionableAlert(persisted, signal);
+          const latest = this.#sessions.getSnapshot(initial.sessionId);
+          if (signal.aborted || latest?.terminal || latest?.generation !== initial.generation) return;
+        }
         if (persisted.terminal || decision.kind === 'complete') {
           if (decision.kind === 'complete') {
             this.#metrics?.observe(

@@ -31,6 +31,13 @@ import { ReceiptRepository, hashCanonical } from '../storage/receipt-repository.
 import { SessionRepository } from '../storage/session-repository.ts';
 import type { TeamDirectory } from './team-directory.ts';
 
+export interface FailureContinuation {
+  readonly rootRequestRef: string;
+  readonly failedRequestRef: string;
+  readonly attempt: number;
+  readonly deadlineAt: string;
+}
+
 export interface SessionSendInput {
   readonly clientId: string;
   readonly requestId: string;
@@ -44,6 +51,8 @@ export interface SessionSendInput {
   readonly surface?: string | null;
   readonly files?: readonly string[];
   readonly sessionDeadlineSec: number;
+  readonly thinkingFailureRecovery?: true;
+  readonly failureContinuation?: FailureContinuation;
 }
 
 interface PendingPreparation {
@@ -61,6 +70,8 @@ interface StoredOutboxPayload {
   readonly sessionDeadlineSec: number;
   readonly attachments: readonly ProviderAttachment[];
   readonly uploadAttachments?: readonly ProviderAttachment[];
+  readonly thinkingFailureRecovery?: true;
+  readonly failureContinuation?: FailureContinuation;
 }
 
 interface PreparedOutbox {
@@ -86,6 +97,7 @@ export class SubmissionService {
   readonly #onSubmissionUnknown: ((snapshot: SessionSnapshot) => void) | null;
   readonly #maxUploadFileBytes: number;
   readonly #requestMutex = new KeyedMutex();
+  readonly #beforeFailureContinuation: ((snapshot: SessionSnapshot, continuation: FailureContinuation) => Promise<void>) | null;
 
   constructor(options: {
     readonly database: SessionPlaneDatabase;
@@ -97,8 +109,10 @@ export class SubmissionService {
     readonly uploadsEnabled?: boolean;
     readonly onSubmitted?: (snapshot: SessionSnapshot) => void;
     readonly onSubmissionUnknown?: (snapshot: SessionSnapshot) => void;
+    readonly beforeFailureContinuation?: (snapshot: SessionSnapshot, continuation: FailureContinuation) => Promise<void>;
     readonly now?: () => Date;
   }) {
+    this.#beforeFailureContinuation = options.beforeFailureContinuation ?? null;
     this.#database = options.database;
     this.#directory = options.directory;
     this.#scheduler = options.scheduler;
@@ -448,6 +462,8 @@ export class SubmissionService {
       surface,
       attachments,
       sessionDeadlineSec: input.sessionDeadlineSec,
+      ...(input.thinkingFailureRecovery === true ? { thinkingFailureRecovery: true } : {}),
+      ...(input.failureContinuation === undefined ? {} : { failureContinuation: input.failureContinuation }),
     };
     const requestHash = hashCanonical({ method: 'session.send', payload });
     const requestKey = JSON.stringify([input.clientId, input.requestId]);
@@ -474,6 +490,8 @@ export class SubmissionService {
           'Provider is disabled by runtime configuration: ' + selected.provider,
         );
       }
+      if (input.thinkingFailureRecovery === true && selected.provider !== 'chatgpt') throw new SessionPlaneDomainError(
+        'capability.unsupported', 'Thinking-failed continuation is ChatGPT-only');
       const actor = this.#scheduler.actorFor(selected.sessionId);
       return await actor.enqueue(async () =>
         await this.#sendLocked(
@@ -578,13 +596,29 @@ export class SubmissionService {
     this.#persistPageKey(actor, prepared.outbox, submission.pageKey);
     return await this.#pageMutex.runExclusive(submission.pageKey, async () => {
       const stageTimeoutMs = Math.min(PROVIDER_STAGE_TIMEOUT_MS, input.sessionDeadlineSec * 1_000);
+      const verifyContinuation = async () => {
+        if (input.failureContinuation === undefined) return;
+        if (this.#beforeFailureContinuation === null) throw new ProviderSubmissionError(
+          'provider.preparation-required', 'Automatic continuation validation is unavailable; preserve this prepared request');
+        await this.#beforeFailureContinuation(this.#requireSnapshot(prepared.outbox.sessionId), input.failureContinuation);
+      };
       try {
+        await verifyContinuation();
         await withProviderStageTimeout(
           submission.prepare(choices),
           stageTimeoutMs,
           () => submission.abandon(),
         );
         this.#requireActiveRoleSession(this.#requireSnapshot(prepared.outbox.sessionId));
+        await verifyContinuation();
+        if (input.thinkingFailureRecovery === true) {
+          const model = choices?.model ?? choices?.effort;
+          if (model === undefined) throw new ProviderSubmissionError(
+            'provider.preparation-required', 'Opt-in recovery requires a freshly selected combined configuration');
+          new ReceiptRepository(this.#database).execute({ clientId: input.clientId,
+            requestId: `thinking-failure-configuration:${prepared.outbox.outboxId}`,
+            method: 'session.thinking-failure.configuration', payload: { model }, operation: () => ({ model }) });
+        }
       } catch (error) {
         try { this.#requireActiveRoleSession(this.#requireSnapshot(prepared.outbox.sessionId)); }
         catch (retired) { submission.abandon(); error = retired; }
@@ -753,7 +787,7 @@ export class SubmissionService {
     };
     const initial = await actor.enqueue(requireOwner);
     if (!initial.snapshot.terminal) await this.recoverAcknowledgement(initial.snapshot);
-    return await actor.enqueue(async () => {
+    return await this.#scheduler.actorFor(input.sessionId).enqueue(async () => {
       const { outbox, snapshot } = requireOwner();
       const requested = parseOutboxPayload(outbox);
       const result = {
@@ -1180,9 +1214,13 @@ export class SubmissionService {
       const team = this.#requireActiveRoleSession(session);
       const generation = session.currentGeneration + 1;
       const timestamp = this.#now().toISOString();
-      const deadlineAt = new Date(
+      const deadlineAt = input.failureContinuation?.deadlineAt ?? new Date(
         this.#now().getTime() + input.sessionDeadlineSec * 1_000,
       ).toISOString();
+      if (input.failureContinuation !== undefined &&
+          (deadlineAt !== session.deadlineAt || Date.parse(deadlineAt) <= this.#now().getTime())) {
+        throw new SessionPlaneDomainError('session.deadline-expired', 'Automatic continuation cannot reset or exceed the original deadline');
+      }
       this.#sessions.insertGeneration({
         sessionId,
         generation,
@@ -1823,6 +1861,8 @@ function sessionSendInputFromOutbox(outbox: OutboxRecord, payload: StoredOutboxP
     surface: payload.surface,
     files: payload.attachments.map((attachment) => attachment.path),
     sessionDeadlineSec: payload.sessionDeadlineSec,
+    ...(payload.thinkingFailureRecovery === true ? { thinkingFailureRecovery: true } : {}),
+    ...(payload.failureContinuation === undefined ? {} : { failureContinuation: payload.failureContinuation }),
   };
 }
 

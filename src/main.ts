@@ -1,3 +1,4 @@
+import { ThinkingFailureRecovery } from './core/thinking-failure-recovery.ts';
 import { TeamWorkflow } from './core/team-workflow.ts';
 import { registerWorkflowMethods } from './rpc/methods/workflow.ts';
 import { SessionRepository } from './storage/session-repository.ts';
@@ -65,6 +66,7 @@ export interface CoreService {
   readonly pageBindings: PageBindingRepository;
   readonly providerAdapters: ProviderAdapterRegistry;
   readonly observationService: ObservationService;
+  readonly thinkingFailureRecovery: ThinkingFailureRecovery;
   readonly recoveryService: RecoveryService;
   readonly submissionService: SubmissionService;
   readonly stopService: StopService;
@@ -167,7 +169,9 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     max429BackoffMs: config.probeMax429BackoffMs,
     metrics,
   });
+  let thinkingFailureRecovery: ThinkingFailureRecovery | null = null;
   const observationService = new ObservationService({
+    onActionableAlert: async (snapshot, signal) => { await thinkingFailureRecovery?.observe(snapshot, signal); },
     database,
     scheduler: actorScheduler,
     adapters: providerAdapters,
@@ -189,6 +193,10 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     adapters: providerAdapters,
     maxUploadFileBytes: config.maxUploadFileBytes,
     uploadsEnabled: config.uploadsEnabled,
+    beforeFailureContinuation: async (snapshot, continuation) => {
+      if (!thinkingFailureRecovery) throw new Error('Thinking-failure validation is unavailable');
+      await thinkingFailureRecovery.validateContinuation(snapshot, continuation);
+    },
     onSubmitted: (snapshot) => observationService.start(snapshot),
     onSubmissionUnknown: (snapshot) =>
       recoveryService?.watchAcknowledgementRecovery(snapshot),
@@ -292,6 +300,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     registry: pageRegistry,
     chatgptUrl: config.chatgptUrl,
   });
+  thinkingFailureRecovery = new ThinkingFailureRecovery({ database, submissions: submissionService, ui });
   registerSessionUiMethods(router, ui);
   registerTeamMethods(router, teamDirectory, receipts, cleanup, stopService);
   registerWorkflowMethods(router, new TeamWorkflow({
@@ -315,6 +324,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     await rpcServer.listen();
   } catch (error) {
     await recovery.close();
+    await thinkingFailureRecovery.close();
     await observationService.close();
     await browserOwner?.close();
     actorScheduler.close();
@@ -324,6 +334,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     throw error;
   }
 
+  thinkingFailureRecovery.restore();
   let closed = false;
   let browserRecovery: Promise<Readonly<Record<string, unknown>>> | null = null;
   const restartBrowser = (): Promise<Readonly<Record<string, unknown>>> => {
@@ -369,6 +380,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageBindings,
     providerAdapters,
     observationService,
+    thinkingFailureRecovery,
     recoveryService: recovery,
     submissionService,
     stopService,
@@ -385,6 +397,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       await browserRecovery?.catch(() => undefined);
       await rpcServer.close();
       await recovery.close();
+      await thinkingFailureRecovery?.close();
       await observationService.close();
       await browserOwner?.close();
       actorScheduler.close();

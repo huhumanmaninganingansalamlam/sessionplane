@@ -146,6 +146,13 @@ is needed. For an idle exact Thinking failed, explicit `decide/reconcile_failure
 the original submission as terminal failed without provider mutation. After that,
 an authorized native follow-up starts the next generation in the same conversation;
 it does not replay the failed operation. See `provider-preparation.md`.
+Automatic literal `계속` follow-ups are default off. Only an explicitly authorized
+new ChatGPT request with `send(thinkingFailureRecovery:true)` hands this chain's
+sender ownership to the core. Do not send in parallel; use the returned
+`thinkingFailureRecovery.successorRequestRef` to collect each successor. Exact
+failure/configuration guards, original deadline, durable idempotency and backoff
+apply. A normal final ends automation; a pause returns a reason and owner control
+without retrying. Original failed receipts and answers retain separate identities.
 A new SessionPlane send starts the next generation; completed results
 remain immutable and cannot be overwritten by later conversation activity.
 

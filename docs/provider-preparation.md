@@ -250,6 +250,30 @@ not submit it or grant permission to rerun tools. A subsequent genuine Thinking
 failed requires a new exact evidence check and authorized follow-up; normal
 activity, refusal or elapsed time never justifies automatic continuation.
 
+An explicitly recovery-authorized task can opt a **new** ChatGPT request chain in
+with `sessionplane_send(thinkingFailureRecovery: true)`. Omission keeps automatic
+sending off; old requests are never enabled by an upgrade. This flag transfers
+follow-up sender ownership to the core, so the Coordinator must not send in
+parallel. The core uses the same exact idle Thinking-failed evidence guard and
+native reconciliation, then sends only literal `계속` once per failed generation
+in the same conversation. It neither replays the original prompt/tools nor resets
+the original absolute session deadline. Backoff is 1, 2, 4 seconds, capped at 60;
+restart uses durable failure/configuration receipts and the same child request ID.
+If the current owned binding cannot be verified after restart, the chain pauses;
+it does not reopen a failed terminal page or manufacture readiness.
+
+Fresh exact combined model/version/effort and a unique usable composer are required;
+the actual configured model is preserved. A later user turn, final candidate, live
+activity, foreign draft (including a manually entered `계속`), changed/missing model
+evidence, ambiguous submit, another alert or expired deadline stops automation.
+No menu reset, refresh, fallback or refusal/authentication retry is performed.
+`get`/`wait` expose `thinkingFailureRecovery.successorRequestRef`: collect that new
+generation without attaching its answer to the original failed request. A normal
+final sets `enabled:false`, `state:complete`. Uncertainty records `state:paused`
+with the saved requestRef/reason and returns sender ownership to the Coordinator;
+it is not permission to resend an uncertain submission. There is no automatic
+retry of a paused chain. Inspect the saved exact request before any owner action.
+
 `sessionplane_stop` cancels unsubmitted preparation, or attempts one exact provider
 stop. `provider.stop-unavailable` with `outcome: "not_attempted"` means no control
 was available. `provider.stop-unknown` means a mutation was attempted without a

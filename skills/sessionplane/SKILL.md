@@ -92,7 +92,18 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    submitted:true, original evidence and conversation; no Stop, deletion or replay
    occurs. Only then may the original Coordinator send an explicitly authorized
    follow-up as the next generation in the same chat. This does not authorize tool
-   reexecution. A later genuine Thinking failed needs its own fresh reconciliation;
+   reexecution. For an explicitly recovery-authorized task, a **new** ChatGPT send
+   may set `thinkingFailureRecovery:true` to hand follow-up sending to the core.
+   Default is off; existing requests stay manual. While enabled, do not send in
+   parallel: the core reconciles only an exact idle Thinking failed, preserves the
+   actual combined model/effort and original deadline, and sends literal `계속`
+   once per failed generation with backoff. Follow
+   `thinkingFailureRecovery.successorRequestRef` to collect the successor; the
+   original failure remains separate. Normal final stops the chain. `state:paused`
+   returns its saved requestRef/reason and owner control; inspect it without
+   blindly resending. Missing/stale configuration, manual draft/follow-up, active
+   generation, ambiguous submit, other alerts or auth/refusal never auto-retry.
+   A later genuine Thinking failed in manual mode needs its own fresh reconciliation;
    never repeat a live send or treat timeout/refusal as this failure.
    Escalate persisting failures instead of polling indefinitely. A Retry control
    alone does not imply human verification; Retry/resend is not read-only recovery.

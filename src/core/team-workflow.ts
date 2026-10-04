@@ -105,7 +105,7 @@ export class TeamWorkflow {
     } };
   }
 
-  async send(input: RoleInput & { prompt: string; model?: string | undefined; effort?: string | undefined; files?: string[] | undefined; sessionDeadlineSec: number }) {
+  async send(input: RoleInput & { prompt: string; model?: string | undefined; effort?: string | undefined; files?: string[] | undefined; thinkingFailureRecovery?: true | undefined; sessionDeadlineSec: number }) {
     this.services.directory.getTeam(input.teamId);
     const clientId = `team:${input.teamId}`;
     const existing = this.#outbox.getByRequest(clientId, input.requestId);
@@ -121,6 +121,7 @@ export class TeamWorkflow {
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.effort === undefined ? {} : { effort: input.effort }),
         ...(input.files === undefined ? {} : { files: input.files }),
+        ...(input.thinkingFailureRecovery === undefined ? {} : { thinkingFailureRecovery: input.thinkingFailureRecovery }),
       });
     } catch (error) {
       if (!(error instanceof SessionPlaneDomainError)) throw error;
@@ -305,7 +306,25 @@ export class TeamWorkflow {
 
   async #observe(request: OutboxRecord, maxNodes?: number, inspectCurrent = false): Promise<Record<string, unknown>> {
     const result = await this.#observeRequest(request, maxNodes, inspectCurrent);
-    return { ...result, conversationUsage: this.#conversationUsage(request.sessionId),
+    const payload = JSON.parse(request.payloadJson);
+    const optedIn = payload.thinkingFailureRecovery === true;
+    const rootRequestRef = payload.failureContinuation?.rootRequestRef ?? request.outboxId;
+    const paused = optedIn ? this.services.receipts.get(request.clientId, `thinking-failure-paused:${rootRequestRef}`) : null;
+    const successor = optedIn ? this.#outbox.getByRequest(request.clientId, `thinking-failure-continue:${request.outboxId}`) : null;
+    let tail = request;
+    if (optedIn) {
+      for (let child = successor; child !== null; child = this.#outbox.getByRequest(request.clientId, `thinking-failure-continue:${tail.outboxId}`)) tail = child;
+    }
+    const current = this.#sessions.getSnapshot(request.sessionId)!;
+    const tailResult = this.#sessions.getGenerationResult(tail.sessionId, tail.generation);
+    const complete = current.generation === tail.generation ? current.sessionState === 'complete'
+      : tailResult?.completedAt != null && tailResult.errorCode === null && tailResult.responseMessageId !== null;
+    const stopped = current.generation > tail.generation ||
+      (current.generation === tail.generation && current.terminal && !complete && current.reason !== 'thinking-failed-reconciled');
+    return { ...result, ...(optedIn ? { thinkingFailureRecovery: {
+      enabled: paused === null && !complete && !stopped, sender: paused || complete || stopped ? 'coordinator' : 'core',
+      ...(paused ? JSON.parse(paused.resultJson) : { state: complete ? 'complete' : stopped ? 'stopped' : 'observing' }),
+      successorRequestRef: successor?.outboxId ?? null } } : {}), conversationUsage: this.#conversationUsage(request.sessionId),
       ...(this.services.stops.hasUnconfirmedStop(request.sessionId, request.generation)
         ? { stopOutcome: { state: 'unknown', automaticRetry: false } } : {}) };
   }

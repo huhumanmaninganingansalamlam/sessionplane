@@ -137,39 +137,96 @@ export class SessionUiService {
   }
 
   async reconcileFailure(input: PreparationOwner & { readonly decisionId: string }) {
-    return await this.#submissions.reconcileFailure(input, async session => {
-      const page = this.#requirePage(session);
-      const binding = this.#registry.refreshPage(session.pageKey!);
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const evidence = await Promise.race([
-          (async () => {
-            const controls = await this.#capture(session);
-            const dom = await observeChatGptDom(page, session);
-            const activity = await observeChatGptActivity(page, dom);
-            const alerts = await observeChatGptAlerts(page, session, true);
-            this.#requirePage(session);
-            const after = this.#registry.refreshPage(session.pageKey!);
-            if (binding.bindingEpoch !== after.bindingEpoch || !dom.submittedUserFound || dom.laterUserFound ||
-                dom.candidate !== null || activity.strength !== 'none' || alerts.length === 0 ||
-                dom.providerAlerts.some(alert => !alerts.includes(alert)) ||
-                controls.nodes.some(node => node.role === 'dialog' || node.role === 'alertdialog') ||
-                !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
-              throw new SessionPlaneDomainError('provider.failure-unverified',
-                'No exact idle current-turn Thinking failed surface; preserve this submitted request and observe it');
-            }
-            return { kind: 'thinking-failed' as const, pageKey: session.pageKey!, bindingEpoch: after.bindingEpoch,
-              conversationId: session.conversationId!, submittedUserMessageId: session.submittedUserMessageId,
-              submittedUserTurnId: session.submittedUserTurnId, observedAt: controls.capturedAt, providerAlerts: alerts };
-          })(),
-          new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(new SessionPlaneDomainError('provider.failure-unverified',
-              'Failure inspection timed out; this submitted request remains unchanged')), 5_000);
-          }),
-        ]);
-        return evidence;
-      } finally { clearTimeout(timer); }
+    return await this.#submissions.reconcileFailure(input, session => this.#failureEvidence(session, session));
+  }
+
+  async #failureEvidence(session: SessionSnapshot, anchor: SessionSnapshot) {
+    const page = this.#requirePage(session);
+    const binding = this.#registry.refreshPage(session.pageKey!);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const evidence = await Promise.race([
+        (async () => {
+          const controls = await this.#capture(session);
+          const dom = await observeChatGptDom(page, anchor);
+          const activity = await observeChatGptActivity(page, dom);
+          const alerts = await observeChatGptAlerts(page, anchor, true);
+          this.#requirePage(session);
+          const after = this.#registry.refreshPage(session.pageKey!);
+          if (binding.bindingEpoch !== after.bindingEpoch || !dom.submittedUserFound || dom.laterUserFound ||
+              dom.candidate !== null || activity.strength !== 'none' || alerts.length === 0 ||
+              dom.providerAlerts.some(alert => !alerts.includes(alert)) ||
+              controls.nodes.some(node => node.role === 'dialog' || node.role === 'alertdialog') ||
+              !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
+            throw new SessionPlaneDomainError('provider.failure-unverified',
+              'No exact idle current-turn Thinking failed surface; preserve this submitted request and observe it');
+          }
+          return { kind: 'thinking-failed' as const, pageKey: session.pageKey!, bindingEpoch: after.bindingEpoch,
+            conversationId: session.conversationId!, submittedUserMessageId: anchor.submittedUserMessageId,
+            submittedUserTurnId: anchor.submittedUserTurnId, observedAt: controls.capturedAt, providerAlerts: alerts };
+        })(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new SessionPlaneDomainError('provider.failure-unverified',
+            'Failure inspection timed out; this submitted request remains unchanged')), 5_000);
+        }),
+      ]);
+      return evidence;
+    } finally { clearTimeout(timer); }
+  }
+
+  async verifyFailureContinuation(session: SessionSnapshot, failed: SessionSnapshot, model: PreparationTarget) {
+    await this.#failureEvidence(session, failed);
+    const snapshot = await this.#capture(session, 5_000);
+    const composers = snapshot.nodes.filter(node => node.role === 'textbox' && node.editable && !node.disabled);
+    const combinedSummary = model.role === 'menuitem' && model.name.trim() !== '' &&
+      model.text.trim() !== '' && model.text.trim() !== model.name.trim();
+    if (!combinedSummary || snapshot.nodesTruncated || composers.length !== 1 || !hasPreparationSelectionEvidence(snapshot.nodes, model)) {
+      throw new SessionPlaneDomainError('provider.failure-unverified', 'Exact configured model/effort or sole composer is unavailable');
+    }
+    const element = await this.#refs.resolve({ pageKey: session.pageKey!, bindingEpoch: snapshot.bindingEpoch,
+      page: this.#requirePage(session), snapshotId: snapshot.snapshotId, ref: composers[0]!.ref });
+    try {
+      const draft = await element.evaluate(node => node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement
+        ? node.value : node.textContent ?? '');
+      if (draft.trim() !== '' && (session.generation === failed.generation || draft !== '계속')) throw new SessionPlaneDomainError(
+        'provider.failure-unverified', 'A separate composer draft is present; automatic continuation is paused');
+    } finally { await element.dispose(); }
+  }
+
+  async prepareFailureContinuation(input: PreparationOwner, model: PreparationTarget) {
+    // These are ordinary durable preparation choices; provider mutation stays in resumePreparation.
+    await this.inspect(input);
+    for (const purpose of ['model', 'composer'] as const) {
+      await this.#submissions.decidePreparation({ ...input, decisionId: `thinking-failure-${purpose}:${input.requestId}`,
+        decision: 'configure', purpose }, async session => {
+        const snapshot = await this.#capture(session, 5_000);
+        if (snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, model)) throw new SessionPlaneDomainError(
+          'provider.failure-unverified', 'Fresh configured model/version/effort evidence is missing');
+        const composers = snapshot.nodes.filter(node => node.role === 'textbox' && node.editable && !node.disabled);
+        if (composers.length !== 1) throw new SessionPlaneDomainError('provider.failure-unverified', 'No unique usable composer');
+        return { choice: purpose === 'model' ? { ...model, purpose } : toPreparationTarget(purpose, composers[0]!), result: { purpose } };
+      });
+    }
+    try {
+      const result = await this.#submissions.resumePreparation(input);
+      if (result.submissionState === 'submitted') return result;
+      if (result.submissionState !== 'prepared') throw new SessionPlaneDomainError(
+        result.errorCode ?? 'provider.failure-unverified', 'Continuation is not confirmed; inspect the saved request without resending');
+    } catch (error) {
+      if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.preparation-required') throw error;
+    }
+    await this.#submissions.decidePreparation({ ...input, decisionId: `thinking-failure-submit:${input.requestId}`,
+      decision: 'configure', purpose: 'submit' }, async session => {
+      const snapshot = await this.#capture(session, 5_000);
+      const submits = snapshot.nodes.filter(node => node.submitControl === true && !node.disabled);
+      if (snapshot.nodesTruncated || submits.length !== 1 || !hasPreparationSelectionEvidence(snapshot.nodes, model)) throw new SessionPlaneDomainError(
+        'provider.failure-unverified', 'Fresh configuration or unique enabled submit evidence is missing');
+      return { choice: toPreparationTarget('submit', submits[0]!), result: { purpose: 'submit' } };
     });
+    const result = await this.#submissions.resumePreparation(input);
+    if (result.submissionState !== 'submitted') throw new SessionPlaneDomainError(
+      result.errorCode ?? 'provider.failure-unverified', 'Continuation is not confirmed; inspect the saved request without resending');
+    return result;
   }
 
   async #capture(session: SessionSnapshot, maxNodes?: number) {
