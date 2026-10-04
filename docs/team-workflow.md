@@ -142,7 +142,11 @@ conversation continue its active generation. Observation keeps the original user
 anchor and follows the current branch through human follow-ups, clearing an older
 answer candidate at every user turn. Only the answer after the latest user turn can
 complete the request. No continuation keyword, special acknowledgement or resend
-is needed. A new SessionPlane send starts the next generation; completed results
+is needed. For an idle exact Thinking failed, explicit `decide/reconcile_failure` can preserve
+the original submission as terminal failed without provider mutation. After that,
+an authorized native follow-up starts the next generation in the same conversation;
+it does not replay the failed operation. See `provider-preparation.md`.
+A new SessionPlane send starts the next generation; completed results
 remain immutable and cannot be overwritten by later conversation activity.
 
 `team_delete` removes the entire team, its roles, sessions, requests, events and

@@ -139,7 +139,7 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'discover' } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'discover' } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'reconcile_failure' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
     if (input.decision === 'focus') {
@@ -162,6 +162,10 @@ export class TeamWorkflow {
         this.services.receipts.record({ ...receipt, status: 'complete', result });
         return result;
       });
+    }
+    if (input.decision === 'reconcile_failure') {
+      const reconciliation = await this.services.ui.reconcileFailure({ ...owner, decisionId: input.requestId });
+      return { ...await this.#observe(request), reconciliation };
     }
     if (input.decision === 'discover') {
       await this.services.ui.inspect(owner);

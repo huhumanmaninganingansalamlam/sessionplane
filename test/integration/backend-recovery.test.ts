@@ -118,6 +118,84 @@ test('workflow reads expose provider alert text separately from backend 429 and 
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('explicit failure reconciliation preserves submission, rejects unproved/live errors and permits one next same-chat send', async () => {
+  class FailedProvider extends FakeProviderAdapter {
+    override async openObservation(request: ProviderObservationRequest) {
+      const source = await super.openObservation(request);
+      const observe = source.observe.bind(source);
+      source.observe = async () => ({ ...await observe(), observationTransport: 'unavailable' as const,
+        errorCode: 'provider.actionable-alert', reason: 'provider-actionable-alert', activity: 'unknown' as const, candidate: null });
+      return source;
+    }
+  }
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-failure-reconcile-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', backendRecoveryAfterMs: 60_000 });
+  const fake = new FailedProvider();
+  let service = await startCore({ config, browserHeadless: true, providerAdapters: [fake], logger: silentLogger() });
+  const workflow = <T>(method: string, params: object) => rpc<T>(config.socketPath, 'workflow.' + method, params);
+  try {
+    const { teamId, session } = await createSession(config.socketPath, 'main', 'failed-review');
+    await send(config.socketPath, session.sessionId, 'failed-review');
+    const original = service.teamDirectory.getSession(session.sessionId);
+    const { page, binding } = await service.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main></main>' }));
+    await page.goto('https://chatgpt.com/c/' + original.conversationId);
+    service.pageRegistry.bindPage(binding.pageKey, { sessionId: session.sessionId, generation: 1, conversationId: original.conversationId! });
+    await service.actorScheduler.updateGeneration(session.sessionId, 1, { pageKey: binding.pageKey });
+    await waitForSnapshot(config.socketPath, session.sessionId, state => state.errorCode === 'provider.actionable-alert');
+    const requestRef = (service.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=?').get(session.sessionId) as { outbox_id: string }).outbox_id;
+    const user = `<div data-message-author-role="user" data-message-id="${original.submittedUserMessageId}">Question</div>`;
+    const failure = '<div class="group/activity-header"><button aria-labelledby="fail"></button><span id="fail">Thinking failed</span></div>';
+    const choose = { teamId, requestRef, requestId: 'close-failure', decision: 'reconcile_failure' };
+    for (const [name, body] of [
+      ['general timeout', `${user}<div role="alert">Request timed out</div>`],
+      ['refusal', `${user}<div data-message-author-role="assistant" data-message-id="refusal" data-end-turn="true">I cannot help</div>`],
+      ['ordinary words', `${user}<div data-message-author-role="assistant" data-message-id="ordinary"><div class="markdown">Thinking failed</div></div>`],
+      ['missing anchor', failure], ['historical error', failure + user],
+      ['auth alert', `${user}${failure}<aside role="alert">Sign in to continue</aside>`],
+      ['verification dialog', `${user}${failure}<div role="dialog">Verify you are human</div>`],
+      ['safety alert', `${user}${failure}<aside role="alert">Request blocked</aside>`],
+      ['live stop', `${user}${failure}<button aria-label="Stop generating">Stop</button>`],
+      ['live thinking', `${user}${failure}<span data-testid="thinking">Thinking</span>`],
+      ['later user', `${user}${failure}<div data-message-author-role="user" data-message-id="later">Continue</div>`],
+      ['final candidate', `${user}${failure}<div data-message-author-role="assistant" data-message-id="final" data-end-turn="true">Answer</div>`],
+      ['quoted header', `${user}<div class="markdown">${failure}</div>`],
+      ['hidden error', `${user}<div hidden>${failure}</div>`],
+      ['closed composer', `${user}${failure}`],
+    ]) {
+      await page.setContent(`<main>${body}<textarea></textarea></main>`);
+      if (name === 'closed composer') await page.locator('textarea').evaluate(node => node.remove());
+      await assert.rejects(workflow('decide', choose), /Thinking failed|unverified/i, name);
+      assert.equal(service.teamDirectory.getSession(session.sessionId).terminal, false, name);
+      assert.equal(service.database.raw.prepare("SELECT count(*) AS n FROM request_receipts WHERE request_id='close-failure'").get()!.n, 0);
+    }
+    await page.setContent(`<main>${user}${failure}<textarea></textarea></main>`);
+    const result = await workflow<SessionSnapshot & { reconciliation: { evidence: { providerAlerts: string[] } } }>('decide', choose);
+    assert.equal(result.sessionState, 'failed'); assert.equal(result.terminal, true);
+    assert.equal(result.submissionState, 'submitted'); assert.equal(result.promptSubmitted, true);
+    assert.equal(result.errorCode, 'provider.execution-failed'); assert.equal(result.responseMessageId, null);
+    assert.equal(result.answerText, null); assert.equal(result.submittedUserMessageId, original.submittedUserMessageId);
+    assert.deepEqual(result.reconciliation.evidence.providerAlerts, ['Thinking failed']);
+    assert.equal((await workflow<SessionSnapshot>('decide', choose)).terminal, true);
+    await assert.rejects(workflow('decide', { ...choose, decision: 'focus' }), /identity|arguments|different/i);
+    await assert.rejects(service.actorScheduler.updateGeneration(session.sessionId, 1, { sessionState: 'observing' }), /terminal/i);
+    assert.equal(service.database.raw.prepare("SELECT count(*) AS n FROM events WHERE event_type='generation.failure-reconciled'").get()!.n, 1);
+    await service.close();
+    service = await startCore({ config, startBrowser: false, providerAdapters: [fake], logger: silentLogger() });
+    const restored = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(restored.terminal, true); assert.equal(restored.submittedUserMessageId, original.submittedUserMessageId);
+    const followup = { teamId, roleRef: `${session.sessionId}:1`, requestId: 'next-analysis-only', prompt: 'Continue without execution', model: '5.6 Pro', sessionDeadlineSec: 60 };
+    await workflow('send', followup); await workflow('send', followup);
+    assert.equal(fake.submitCount, 2, 'One original and one idempotent next generation; no replay');
+    assert.equal(service.teamDirectory.getSession(session.sessionId).generation, 2);
+    await assert.rejects(workflow('decide', { ...choose, requestId: 'stale-close' }), /current|superseded/i);
+    const saved = service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(session.sessionId)!;
+    assert.equal(saved.submitted_user_message_id, original.submittedUserMessageId);
+    assert.equal(saved.prompt_submitted, 1); assert.equal(saved.error_code, 'provider.execution-failed');
+    assert.equal(saved.response_message_id, null);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('an unresponsive renderer cannot block exact backend completion or core shutdown', { timeout: 5_000 }, async () => {
   class HungRenderer extends FakeProviderAdapter {
     override async openObservation(request: ProviderObservationRequest) {

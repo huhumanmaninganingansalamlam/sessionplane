@@ -64,8 +64,8 @@ export async function observeChatGptDom(
     actionableAlert: providerAlerts.length > 0, providerAlerts };
 }
 
-export async function observeChatGptAlerts(page: Page, identity: SubmittedUserIdentity): Promise<string[]> {
-  return await page.evaluate(({ identity, messagesSelector, userSelector }) => {
+export async function observeChatGptAlerts(page: Page, identity: SubmittedUserIdentity, thinkingFailuresOnly = false): Promise<string[]> {
+  return await page.evaluate(({ identity, messagesSelector, userSelector, thinkingFailuresOnly }) => {
     const ids = [identity.submittedUserMessageId, identity.submittedUserTurnId].filter(Boolean);
     let anchor = [...document.querySelectorAll('[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')]
       .find(node => [node.getAttribute('data-message-id'), node.getAttribute('data-turn-id'),
@@ -73,7 +73,10 @@ export async function observeChatGptAlerts(page: Page, identity: SubmittedUserId
         .some(id => id !== null && ids.includes(id)));
     if (anchor !== undefined) {
       for (const user of document.querySelectorAll(userSelector)) {
-        if (anchor.compareDocumentPosition(user) & Node.DOCUMENT_POSITION_FOLLOWING) anchor = user;
+        if (anchor.compareDocumentPosition(user) & Node.DOCUMENT_POSITION_FOLLOWING) {
+          if (thinkingFailuresOnly) return [];
+          anchor = user;
+        }
       }
     }
     const hasMessages = document.querySelector(messagesSelector) !== null;
@@ -88,19 +91,19 @@ export async function observeChatGptAlerts(page: Page, identity: SubmittedUserId
           label.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
           /^(생각 실패|Thinking failed)$/i.test(label.innerText.trim());
       });
-    return [...document.querySelectorAll<HTMLElement>('[role="alert"], [role="alertdialog"], .text-token-text-error, .text-danger'), ...thinkingFailures]
+    return [...(thinkingFailuresOnly ? [] : document.querySelectorAll<HTMLElement>('[role="alert"], [role="alertdialog"], .text-token-text-error, .text-danger')), ...thinkingFailures]
       .filter(alert => {
         if (alert.closest('nav, [role="navigation"], #app-shell-sidebar, [aria-hidden="true"], [inert]') !== null ||
             !alert.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || !alert.innerText.trim()) return false;
         // Global alerts do not depend on a readable transcript. Turn-local errors
         // must follow the latest anchored user, never a quoted or historical turn.
-        if (!alert.closest('main, article, [data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')) return true;
-        if (!hasMessages) return true;
+        if (!alert.closest('main, article, [data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')) return !thinkingFailuresOnly;
+        if (!hasMessages) return !thinkingFailuresOnly;
         return anchor !== undefined &&
           !alert.closest('[data-message-author-role="user"], [data-user-message-bubble]') &&
           Boolean(anchor.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING);
       }).map(alert => alert.innerText.trim().slice(0, 1_000));
-  }, { identity, messagesSelector: CHATGPT_SELECTORS.messages, userSelector: CHATGPT_SELECTORS.userMessages });
+  }, { identity, messagesSelector: CHATGPT_SELECTORS.messages, userSelector: CHATGPT_SELECTORS.userMessages, thinkingFailuresOnly });
 }
 
 export async function waitForChatGptDomMutation(

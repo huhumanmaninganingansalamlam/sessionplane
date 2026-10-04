@@ -83,6 +83,17 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    For provider-actionable-alert, inspect evidence or team_get on the same requestRef
    and report the visible error. Active thinking/streaming needs waiting; a visible
    stream/history recovery failure may need scoped refresh, then reinspection.
+   For an idle current-turn Thinking failed, the original Coordinator can use
+   decide with decision `reconcile_failure`, the same teamId/requestRef and a
+   stable requestId. The core freshly verifies the original submitted anchor,
+   actual failure header and composer, rejecting later user turns, answer candidates,
+   Stop/thinking/streaming, stale/missing evidence, generic alerts and refusals.
+   Success records failed/terminal with provider.execution-failed while keeping
+   submitted:true, original evidence and conversation; no Stop, deletion or replay
+   occurs. Only then may the original Coordinator send an explicitly authorized
+   follow-up as the next generation in the same chat. This does not authorize tool
+   reexecution. A later genuine Thinking failed needs its own fresh reconciliation;
+   never repeat a live send or treat timeout/refusal as this failure.
    Escalate persisting failures instead of polling indefinitely. A Retry control
    alone does not imply human verification; Retry/resend is not read-only recovery.
    Provider completion is not task completion. If a completed answer stops at a

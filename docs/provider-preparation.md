@@ -228,6 +228,28 @@ an activity-completed indicator is not an attributable final response or proof o
 provider cancellation. Inspect the same request and report the visible failure;
 do not Retry/resubmit native operations that already executed before this error.
 
+For a verified current-turn Thinking failed with no ongoing activity, the original
+Coordinator may explicitly call `sessionplane_decide` with `decision:
+"reconcile_failure"`, the same teamId/requestRef and a stable requestId. This is
+an evidence-preserving native failure disposition, not a provider Stop, Retry or
+cancellation claim. The core freshly reads the exact bound page under its actor
+and page lock. It requires the confirmed submitted anchor, a visible provider
+activity failure header, usable composer, no later user turn, no assistant
+candidate and no thinking/Stop/streaming activity. Missing/stale evidence, generic
+alerts, timeouts, refusals, authentication/verification dialogs, other concurrent
+provider alerts and ambiguous submissions cannot use this path.
+
+The result remains submitted/promptSubmitted:true, becomes failed/terminal:true
+with provider.execution-failed, and retains the original anchors, conversation,
+prompt and partial evidence. Its reconciliation receipt/event records the exact
+failure evidence. No provider operation is replayed or cancelled, no conversation
+is deleted, and repeats of the same decision ID do not repeat disposition. An
+explicitly authorized fresh send may then start the next generation in the same
+conversation. Only the original Coordinator sends that follow-up; reconcile does
+not submit it or grant permission to rerun tools. A subsequent genuine Thinking
+failed requires a new exact evidence check and authorized follow-up; normal
+activity, refusal or elapsed time never justifies automatic continuation.
+
 `sessionplane_stop` cancels unsubmitted preparation, or attempts one exact provider
 stop. `provider.stop-unavailable` with `outcome: "not_attempted"` means no control
 was available. `provider.stop-unknown` means a mutation was attempted without a

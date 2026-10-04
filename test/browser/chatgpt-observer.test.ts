@@ -8,7 +8,7 @@ import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
-import { observeChatGptDom } from '../../src/providers/chatgpt/dom-observer.ts';
+import { observeChatGptAlerts, observeChatGptDom } from '../../src/providers/chatgpt/dom-observer.ts';
 import { ExactFinalTracker } from '../../src/providers/chatgpt/exact-final.ts';
 import { recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submission.ts';
 
@@ -40,6 +40,7 @@ test('thinking-failed activity headers report an exact nonterminal provider erro
         assert.equal(dom.submittedUserFound, true);
         assert.equal(dom.candidate, null);
         assert.deepEqual(dom.providerAlerts, [label]);
+        assert.deepEqual(await observeChatGptAlerts(page, identity, true), [label]);
         const observed = await source.observe();
         assert.equal(observed.errorCode, 'provider.actionable-alert');
         assert.equal(observed.reason, 'provider-actionable-alert');
@@ -65,6 +66,7 @@ test('thinking-failed activity headers report an exact nonterminal provider erro
       ]) {
         await page.setContent(`<main>${html}<textarea></textarea></main>`);
         assert.deepEqual((await observeChatGptDom(page, identity)).providerAlerts, [], name);
+        assert.deepEqual(await observeChatGptAlerts(page, identity, true), [], name);
       }
     } finally {
       source.close();

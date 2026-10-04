@@ -772,6 +772,62 @@ export class SubmissionService {
     });
   }
 
+  async reconcileFailure(
+    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string },
+    observe: (snapshot: SessionSnapshot) => Promise<{
+      readonly kind: 'thinking-failed'; readonly pageKey: string; readonly bindingEpoch: number;
+      readonly conversationId: string; readonly submittedUserMessageId: string | null;
+      readonly submittedUserTurnId: string | null; readonly observedAt: string; readonly providerAlerts: readonly string[];
+    }>,
+  ) {
+    const method = 'session.failure.reconcile';
+    const payload = { requestId: input.requestId, sessionId: input.sessionId, generation: input.generation };
+    const receipts = new ReceiptRepository(this.#database);
+    return await this.#scheduler.actorFor(input.sessionId).enqueue(async () => {
+      const prior = receipts.get(input.clientId, input.decisionId);
+      if (prior !== null) return receipts.execute({ clientId: input.clientId, requestId: input.decisionId,
+        method, payload, operation: () => { throw new Error('Existing receipt must replay'); } });
+      const outbox = this.#outbox.getByRequest(input.clientId, input.requestId);
+      const snapshot = this.#requireSnapshot(input.sessionId);
+      if (outbox === null || outbox.sessionId !== input.sessionId || outbox.generation !== input.generation ||
+          snapshot.generation !== input.generation) {
+        throw new SessionPlaneDomainError('session.generation-superseded', 'Failure reconciliation requires the exact current request');
+      }
+      this.#requireActiveRoleSession(snapshot);
+      this.#adapters.require(snapshot.provider);
+      if (snapshot.provider !== 'chatgpt' || snapshot.terminal || snapshot.submissionState !== 'submitted' ||
+          !snapshot.promptSubmitted || snapshot.conversationId === null || snapshot.pageKey === null ||
+          (snapshot.submittedUserMessageId === null && snapshot.submittedUserTurnId === null) ||
+          snapshot.errorCode !== 'provider.actionable-alert') {
+        throw new SessionPlaneDomainError('provider.failure-unverified', 'Requires a confirmed submitted current provider failure, not preparation or an ambiguous submission');
+      }
+      return await this.#pageMutex.runExclusive(snapshot.pageKey, async () => {
+        const evidence = await observe(snapshot);
+        if (evidence.conversationId !== snapshot.conversationId || evidence.pageKey !== snapshot.pageKey ||
+            evidence.submittedUserMessageId !== snapshot.submittedUserMessageId ||
+            evidence.submittedUserTurnId !== snapshot.submittedUserTurnId || evidence.kind !== 'thinking-failed') {
+          throw new SessionPlaneDomainError('provider.failure-unverified', 'Failure evidence does not match the submitted binding');
+        }
+        const result = receipts.execute({ clientId: input.clientId, requestId: input.decisionId, method, payload,
+          operation: () => {
+            const timestamp = this.#now().toISOString();
+            if (!this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
+              sessionState: 'failed', providerState: 'error', observationTransport: 'fresh', nextCheckAt: null,
+              completedAt: timestamp, errorCode: 'provider.execution-failed', reason: 'thinking-failed-reconciled',
+            }, timestamp)) throw new SessionPlaneDomainError('session.generation-superseded', 'Failed generation is no longer current');
+            this.#events.append({ teamId: snapshot.teamId, roleId: snapshot.roleId, sessionId: snapshot.sessionId,
+              generation: snapshot.generation, eventType: 'generation.failure-reconciled',
+              payload: { requestRef: outbox.outboxId, receiptId: input.decisionId, evidence }, createdAt: timestamp });
+            return { requestOk: true, requestRef: outbox.outboxId, sessionId: snapshot.sessionId,
+              generation: snapshot.generation, disposition: 'failed', errorCode: 'provider.execution-failed',
+              providerMutation: false, evidence };
+          } });
+        this.#scheduler.refreshSession(snapshot.sessionId);
+        return result;
+      });
+    });
+  }
+
   async refreshPage(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string },
     reload: (snapshot: SessionSnapshot) => Promise<void>,
@@ -1108,7 +1164,10 @@ export class SubmissionService {
       if (session === null) {
         throw new SessionPlaneDomainError('input.session-not-found', `Unknown session: ${sessionId}`);
       }
-      if (!['created', 'ready', 'complete'].includes(session.sessionState)) {
+      if (!['created', 'ready', 'complete'].includes(session.sessionState) &&
+          !(session.sessionState === 'failed' &&
+            this.#requireSnapshot(sessionId).reason === 'thinking-failed-reconciled' &&
+            this.#requireSnapshot(sessionId).errorCode === 'provider.execution-failed')) {
         throw new SessionPlaneDomainError(
           'session.busy',
           `Session ${sessionId} already has active generation ${session.currentGeneration}`,

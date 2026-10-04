@@ -8,7 +8,8 @@ import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { PreparationPurpose, PreparationTarget } from '../providers/provider-adapter.ts';
 import { CHATGPT_PREPARATION_SNAPSHOT } from '../providers/chatgpt/selectors.ts';
 import { inspectChatGptSubmissionCandidates } from '../providers/chatgpt/submission.ts';
-import { observeChatGptAlerts } from '../providers/chatgpt/dom-observer.ts';
+import { observeChatGptActivity } from '../providers/chatgpt/activity-observer.ts';
+import { observeChatGptDom, observeChatGptAlerts } from '../providers/chatgpt/dom-observer.ts';
 import type { SubmissionService } from './submission-service.ts';
 
 export class SessionUiService {
@@ -133,6 +134,42 @@ export class SessionUiService {
         } catch (error) { throw typedUiError(error); }
         finally { clearTimeout(timer); }
       });
+  }
+
+  async reconcileFailure(input: PreparationOwner & { readonly decisionId: string }) {
+    return await this.#submissions.reconcileFailure(input, async session => {
+      const page = this.#requirePage(session);
+      const binding = this.#registry.refreshPage(session.pageKey!);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const evidence = await Promise.race([
+          (async () => {
+            const controls = await this.#capture(session);
+            const dom = await observeChatGptDom(page, session);
+            const activity = await observeChatGptActivity(page, dom);
+            const alerts = await observeChatGptAlerts(page, session, true);
+            this.#requirePage(session);
+            const after = this.#registry.refreshPage(session.pageKey!);
+            if (binding.bindingEpoch !== after.bindingEpoch || !dom.submittedUserFound || dom.laterUserFound ||
+                dom.candidate !== null || activity.strength !== 'none' || alerts.length === 0 ||
+                dom.providerAlerts.some(alert => !alerts.includes(alert)) ||
+                controls.nodes.some(node => node.role === 'dialog' || node.role === 'alertdialog') ||
+                !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
+              throw new SessionPlaneDomainError('provider.failure-unverified',
+                'No exact idle current-turn Thinking failed surface; preserve this submitted request and observe it');
+            }
+            return { kind: 'thinking-failed' as const, pageKey: session.pageKey!, bindingEpoch: after.bindingEpoch,
+              conversationId: session.conversationId!, submittedUserMessageId: session.submittedUserMessageId,
+              submittedUserTurnId: session.submittedUserTurnId, observedAt: controls.capturedAt, providerAlerts: alerts };
+          })(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new SessionPlaneDomainError('provider.failure-unverified',
+              'Failure inspection timed out; this submitted request remains unchanged')), 5_000);
+          }),
+        ]);
+        return evidence;
+      } finally { clearTimeout(timer); }
+    });
   }
 
   async #capture(session: SessionSnapshot, maxNodes?: number) {
