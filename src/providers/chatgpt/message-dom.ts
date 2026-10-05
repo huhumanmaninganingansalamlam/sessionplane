@@ -3,6 +3,7 @@ import type { Page } from 'playwright-core';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
 export interface ChatGptMessage {
+  readonly elementIndex?: number;
   readonly role: 'user' | 'assistant';
   readonly messageId: string | null;
   readonly turnId: string | null;
@@ -17,7 +18,7 @@ export async function readChatGptMessages(page: Page, includeArtifacts = false):
     const messages: ChatGptMessage[] = [];
     const seen = new Set<Element>();
     const nodes = document.querySelectorAll<HTMLElement>(selector);
-    for (const node of nodes) {
+    for (const [elementIndex, node] of nodes.entries()) {
       const identityNode = node.closest<HTMLElement>('[data-message-id], [data-turn-id]') ?? node;
       const legacyRole = node.getAttribute('data-message-author-role');
       const userBubble = node.querySelector<HTMLElement>('[data-user-message-bubble]');
@@ -52,6 +53,7 @@ export async function readChatGptMessages(page: Page, includeArtifacts = false):
           '[data-message-content], [data-testid="message-content"], .markdown',
         ) ?? node;
       messages.push({
+        ...(includeArtifacts ? { elementIndex } : {}),
         ...(includeArtifacts ? { artifacts: [...identityNode.querySelectorAll(artifactSelector)].map((element) => ({
           source: element instanceof HTMLAnchorElement ? element.href : element instanceof HTMLImageElement ? element.src : '',
           name: (element instanceof HTMLAnchorElement ? element.download : element instanceof HTMLImageElement ? element.alt : '') || element.textContent?.trim() || '',

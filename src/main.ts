@@ -137,6 +137,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       ? []
       : [
           new ChatGptAdapter({
+            pageMutex: pageMutationMutex,
             browserOwner,
             pageRegistry,
             loginUrl: config.chatgptUrl,

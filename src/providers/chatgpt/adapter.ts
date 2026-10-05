@@ -1,3 +1,5 @@
+import { PageMutationMutex } from '../../browser/page-mutex.ts';
+import { discoverFileCards, downloadFileCard } from './file-cards.ts';
 import { createHash } from 'node:crypto';
 import type { Page } from 'playwright-core';
 import path from 'node:path';
@@ -37,6 +39,7 @@ import { CHATGPT_SELECTORS } from './selectors.ts';
 import { ChatGptSubmission, recoverChatGptAcknowledgement } from './submission.ts';
 
 export interface ChatGptAdapterOptions {
+  readonly pageMutex?: PageMutationMutex;
   readonly browserOwner: BrowserOwner;
   readonly pageRegistry: PageRegistry;
   readonly loginUrl: string;
@@ -47,6 +50,7 @@ export interface ChatGptAdapterOptions {
 
 export class ChatGptAdapter implements ProviderAdapter {
   readonly provider = 'chatgpt';
+  readonly #pageMutex: PageMutationMutex;
   readonly #browserOwner: BrowserOwner;
   readonly #pageRegistry: PageRegistry;
   readonly #loginUrl: string;
@@ -54,6 +58,7 @@ export class ChatGptAdapter implements ProviderAdapter {
   readonly #backendRecovery: ChatGptBackendRecovery;
 
   constructor(options: ChatGptAdapterOptions) {
+    this.#pageMutex = options.pageMutex ?? new PageMutationMutex();
     this.#browserOwner = options.browserOwner;
     this.#pageRegistry = options.pageRegistry;
     this.#loginUrl = options.loginUrl;
@@ -357,7 +362,11 @@ export class ChatGptAdapter implements ProviderAdapter {
       await waitForChatGptDomMutation(page, Math.min(500, deadline - Date.now()));
     } while (Date.now() < deadline);
     if (message === undefined) throw new ProviderSubmissionError('provider.artifacts-unavailable', 'Exact answer is not present for file discovery');
-    const rows = message.artifacts ?? [];
+    const cards = await this.#pageMutex.runExclusive(request.session.pageKey!, async () => {
+      this.#requireExactArtifactPage(request);
+      return await discoverFileCards(page, request, () => { this.#requireExactArtifactPage(request); });
+    });
+    const rows = [...(message.artifacts ?? []), ...cards];
     const seen = new Set<string>();
     const candidates: ProviderArtifactCandidate[] = [];
     for (const row of rows) {
@@ -383,6 +392,12 @@ export class ChatGptAdapter implements ProviderAdapter {
     candidate: ProviderArtifactCandidate,
   ): Promise<ProviderArtifactDownload> {
     const page = this.#requireExactArtifactPage(request);
+    if (candidate.sourceUrl.startsWith('sessionplane-file-card:')) {
+      return await this.#pageMutex.runExclusive(request.session.pageKey!, async () => {
+        this.#requireExactArtifactPage(request);
+        return await downloadFileCard(page, request, candidate, () => { this.#requireExactArtifactPage(request); });
+      });
+    }
     const result = await page.evaluate(async (sourceUrl) => {
       const response = await fetch(sourceUrl, { credentials: 'include' }).catch(() => null);
       if (response === null || !response.ok) {

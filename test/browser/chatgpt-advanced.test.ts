@@ -144,6 +144,47 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
       image,
     );
     assert.equal(Buffer.from(downloaded?.bytes ?? []).toString('utf8'), 'PNGDATA');
+    // Current provider file cards have no href; the preview overlay intercepts pointer clicks.
+    await created.page.evaluate(() => {
+      document.querySelector('[data-message-id="artifact-response"]')!.remove();
+      const answer = document.createElement('div');
+      answer.setAttribute('data-chatgpt-search-message-ids', 'artifact-response');
+      answer.innerHTML = '<div data-chatgpt-selection-message-id="artifact-response">Original answer</div>';
+      const card = (name: string, bytes: string) => {
+        const box = document.createElement('div');
+        box.style.cssText = 'position:relative;width:300px;height:60px';
+        const button = document.createElement('button');
+        button.type = 'button'; button.setAttribute('aria-label', 'Download file');
+        button.textContent = 'Download';
+        button.onclick = () => {
+          const a = document.createElement('a'); a.download = name;
+          a.href = URL.createObjectURL(new Blob([bytes])); a.click();
+        };
+        const preview = document.createElement('button');
+        preview.type = 'button'; preview.setAttribute('aria-label', 'Open preview of ' + name);
+        preview.style.cssText = 'position:absolute;inset:0;z-index:1';
+        preview.onclick = () => { throw new Error('Preview must not be activated'); };
+        box.append(button, preview); return box;
+      };
+      answer.append(card('authority.zip', 'EXACT-ZIP-BYTES'));
+      const more = document.createElement('button'); more.textContent = '1 more'; more.type = 'button';
+      more.onclick = () => { answer.append(card('manifest.json', '{"exact":true}')); more.remove(); };
+      answer.append(more); document.body.append(answer);
+    });
+    const cardRequest = { session: observedSession, generation: 1, bindingGeneration: 2 };
+    const fileCards = await adapter.discoverArtifacts(cardRequest);
+    assert.deepEqual(fileCards.map(c => c.name), ['authority.zip', 'manifest.json']);
+    assert.ok(fileCards.every(c => c.sourceUrl.startsWith('sessionplane-file-card:')));
+    assert.equal(Buffer.from((await adapter.downloadArtifact(cardRequest, fileCards[0]!)).bytes).toString(), 'EXACT-ZIP-BYTES');
+    assert.equal(Buffer.from((await adapter.downloadArtifact(cardRequest, fileCards[1]!)).bytes).toString(), '{"exact":true}');
+    await assert.rejects(adapter.downloadArtifact({ ...cardRequest, bindingGeneration: 99 }, fileCards[0]!));
+    await created.page.evaluate(() => {
+      const root = document.querySelector('[data-chatgpt-search-message-ids="artifact-response"]')!;
+      root.append(root.querySelector('[aria-label="Download file"]')!.parentElement!.cloneNode(true));
+    });
+    await assert.rejects(adapter.discoverArtifacts(cardRequest), /ambiguous/);
+    await assert.rejects(adapter.downloadArtifact(cardRequest, fileCards[0]!), /ambiguous/);
+
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });
