@@ -96,7 +96,7 @@ and confirm the final active controls; unavailable intent requires a user decisi
   and an uncertain stop is not repeated, even with a new ID or after restart.
   `provider.actionable-alert` is a visible provider error; inspect
   `evidence.providerAlerts` rather than treating it as browser read failure or 429.
-  `session_replace` attempts to permanently delete the previous
+  By default, `session_replace` attempts to permanently delete the previous
   provider conversation once, closes its owned tab and ends observation, then creates
   the new session. Deletion failure, unsupported deletion or unknown conversation
   identity does not block replacement; there is no automatic cleanup retry.
@@ -118,12 +118,32 @@ and confirm the final active controls; unavailable intent requires a user decisi
   `session_delete` separately requires an exact request and `outputsRetrieved:true`;
   existing cleanup checks reject unresolved/shared conversations.
 
-For a handoff that preserves the old provider conversation, use `role_create`
+For an explicitly authorized recovery of an unreadable bound chat whose current
+request is provably prepared and unsubmitted, use `session_replace` with
+`preserveConversation:true`, a fresh `roleRef`, and a distinct stable `requestId`.
+This keeps the **same role ID/key and provider**, creates an empty successor session
+with `predecessorSessionId`, and returns `replacement.cleanup.outcome:"preserved"`.
+The old session's routing state becomes `superseded`; its generation/outbox draft,
+request IDs, conversation, page bindings, answers and evidence remain retained.
+No provider deletion, tab close, Stop, refresh or prompt replay occurs. Old requests
+remain readable but cannot be submitted after routing has moved. Confirm the new
+session/roleRef, then separately prepare current work and verify model/effort; the
+replacement itself does not send or adopt the old draft.
+
+This mode rejects submitted/UNKNOWN work, non-null submission/response anchors,
+non-prepared states, inconsistent outbox evidence, prior conversation deletion
+attempts, changed provider and stale roleRefs. Guards run in the original session's
+actor queue, after any in-flight mutation. It is not an automatic page-error
+handler or permission to route around an access/security restriction. No original
+preparation cancellation is needed. Do not migrate an already active continuation
+without its coordinator's explicit routing decision.
+
+For other authorized handoffs that preserve the old provider conversation, use `role_create`
 with a unique `roleKey` and `roleType:"custom"` in the same team, then carry the
 handoff into that role under its own fresh roleRef. This keeps the old role/session
-and does not repoint the primary role. `session_replace` has no preserve-old option;
-raw occupied-role `session.create` has the same deleting behavior. Obtain the
-required specific deletion confirmation before choosing that path. A 10-turn
+and does not repoint the primary role. Raw occupied-role `session.create` retains
+the default deleting behavior; it does not expose preserving recovery. Obtain the
+required specific deletion confirmation before choosing the deleting path. A 10-turn
 recommendation is only a handoff cue, never deletion confirmation. This is a
 caller authorization requirement, not a new confirmation field in the API.
 

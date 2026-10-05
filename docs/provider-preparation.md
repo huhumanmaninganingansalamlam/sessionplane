@@ -282,7 +282,21 @@ cancellation. The request stays nonterminal; get/wait expose `stopOutcome.state:
 "unknown"`. The attempted receipt survives restart and blocks repeat stop under
 another request ID. Continue read-only observation, never resend the prompt.
 
-When the caller decides the conversation must be replaced, or a completed long
+For explicitly authorized unreadable-chat recovery with a bound, current
+prepared/unsubmitted request, `sessionplane_session_replace` accepts
+`preserveConversation:true` with its fresh roleRef and a new stable requestId.
+It preserves the role ID/key, provider, old chat/pages, request/draft and all
+generation evidence. Only predecessor routing becomes `superseded`; the successor
+is empty and records `predecessorSessionId`. No old prompt is sent or canceled.
+The result's `replacement.cleanup.outcome` is `preserved`, with no deletion receipt.
+Submitted/UNKNOWN requests, anchors, stale references, inconsistent outbox state
+and existing deletion attempts are rejected under actor serialization. This
+does not bypass access restrictions or choose recovery automatically. A separate
+explicit new send must use the successor's fresh roleRef and current candidate;
+model/effort and submission are verified normally. Do not replace or duplicate an
+already active continuation without coordinating its current owner.
+
+When the caller chooses default deletion-backed replacement, or a completed long
 conversation needs a fresh context, use `sessionplane_session_replace` for the
 same `teamId`, `roleKey`, and provider with a new stable request ID. The new session records `predecessorSessionId` and becomes the current role route.
 Replacement attempts provider conversation deletion once, closes the predecessor's
@@ -295,13 +309,14 @@ Keep requested model/effort and verify attachment identity. Do not copy an entir
 long transcript. The 10-turn recommendation is a handoff cue, not an automatic cutoff. New sends still require
 fresh preparation decisions. A new session does not imply permission to repeat
 an unresolved submission; follow the caller/operator's explicit recovery intent.
-Use replacement only with the required specific deletion confirmation. An
+Use deletion-backed replacement only with the required specific deletion confirmation. An
 instruction to hand off or continue, including the 10-turn cue, is not that
 confirmation. A supported nondeleting handoff uses `sessionplane_role_create`
 with a unique custom role in the same team; the original role/session remains
-available and the primary route is unchanged. Replacement has no preserve-old option.
+available and the primary route is unchanged. The preserving mode above is the
+narrow same-role option for prepared/unsubmitted recovery, not submitted work.
 
-Replacement deliberately discards the predecessor's unresolved observation; it
+Default deleting replacement deliberately discards the predecessor's unresolved observation; it
 does not prove an uncertain submission was never accepted, nor that provider
 deletion succeeded. Stored local answers/files remain readable. An unreadable page
 alone does not authorize replacement or deletion. Explicit completed-conversation
@@ -311,7 +326,8 @@ Replacement returns its durable cleanup evidence separately from routing success
 in `replacement.cleanup`: predecessor session/generation/conversation, deletion
 request ID, actual deletion receipt client/request/status (or null), outcome and
 error code. `confirmed`, `refused`, `uncertain` and `not-attempted` describe the
-provider deletion result; a successful successor is not confirmation of deletion.
+provider deletion result; `preserved` identifies explicit nondeleting recovery,
+with no deletion attempt or receipt. A successful successor is not confirmation of deletion.
 Historical receipts missing this evidence remain `unknown` on every replay,
 without a provider operation or retroactive success claim.
 

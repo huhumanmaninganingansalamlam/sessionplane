@@ -157,7 +157,19 @@ out prompts, infer consensus, or inject answers into other roles.
   stop with another ID. Get/wait retain `stopOutcome.state:"unknown"` across restart.
   `provider.actionable-alert` identifies a visible provider error separately from
   conversation/read unavailability and backend 429. Inspect `evidence.providerAlerts`.
-- `sessionplane_session_replace` attempts to permanently delete the previous provider
+- For an explicitly authorized recovery of an unreadable bound conversation with
+  a current prepared/unsubmitted request, use `sessionplane_session_replace` with
+  `preserveConversation:true`, its fresh roleRef and a distinct stable requestId.
+  It keeps the same role ID/key and provider; preserves the old chat/pages,
+  request/draft and evidence; and creates an empty successor with predecessorSessionId.
+  Only predecessor routing becomes superseded. Inspect cleanup.outcome `preserved`,
+  then use the successor's fresh roleRef for separately authorized current work,
+  with fresh model/effort and once-only submission. No original stop is needed.
+  Submitted/UNKNOWN states, anchors, inconsistent evidence, stale references and
+  prior deletion attempts are rejected. This is not an access/security bypass or
+  automatic recovery; do not duplicate or migrate an active continuation without
+  its current coordinator's routing decision.
+- By default, `sessionplane_session_replace` attempts to permanently delete the previous provider
   conversation once, closes its tab and ends observation, then creates its successor.
   Retrieve required outputs and write the handoff first. Local stored answers/files
   remain. Deletion failure or unknown conversation identity does not block replacement;
@@ -175,8 +187,9 @@ out prompts, infer consensus, or inject answers into other roles.
   and model/effort. For a nondeleting handoff, use `sessionplane_role_create` with
   a unique roleKey and roleType `custom` in the same team, then continue through
   that role's fresh roleRef. The old role/session stays available; this does not
-  repoint the primary role. Replacement has no preserve-old option; use it only
-  with the required specific deletion confirmation.
+  repoint the primary role. For the narrow prepared/unsubmitted same-role case,
+  use preserving replacement above. Default deleting replacement still requires
+  specific deletion confirmation.
   This recommendation does not authorize replaying an unresolved submission.
   If team_get shows an existing role with no session/roleRef, initialize it with
   session_replace using its roleKey instead. Do not recreate that role.

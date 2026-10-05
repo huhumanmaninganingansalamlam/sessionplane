@@ -85,7 +85,7 @@ export class TeamWorkflow {
     return this.getTeam(input);
   }
 
-  async replaceSession(input: Mutation & { roleRef?: string | undefined; roleKey?: string | undefined; provider?: ProviderName | undefined }) {
+  async replaceSession(input: Mutation & { roleRef?: string | undefined; roleKey?: string | undefined; provider?: ProviderName | undefined; preserveConversation?: true | undefined }) {
     if ((input.roleRef === undefined) === (input.roleKey === undefined) || (input.roleRef !== undefined && input.provider !== undefined)) {
       throw new SessionPlaneDomainError('input.invalid', 'Use either a fresh roleRef, or an empty roleKey with an optional provider');
     }
@@ -99,6 +99,7 @@ export class TeamWorkflow {
       roleKey: session?.roleKey ?? input.roleKey!, provider: session?.provider ?? input.provider ?? 'chatgpt',
       expectedSessionId: session?.sessionId ?? null,
       ...(identity === null ? {} : { expectedGeneration: identity[1] }),
+      ...(input.preserveConversation === true ? { preserveConversation: true as const } : {}),
     });
     return { ...await this.getTeam(input), replacement: {
       requestId: input.requestId, sessionId: replacement.sessionId, cleanup: replacement.cleanup,

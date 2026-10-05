@@ -7,11 +7,12 @@ import { callRpc } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
-import type { ProviderRecoveryRequest } from '../../src/providers/provider-adapter.ts';
+import { ProviderSubmissionError, type ProviderRecoveryRequest } from '../../src/providers/provider-adapter.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 import type { ReplacementCleanup } from '../../src/core/conversation-cleanup-service.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { ReceiptRepository } from '../../src/storage/receipt-repository.ts';
+import { OutboxRepository } from '../../src/storage/outbox-repository.ts';
 
 class DeletingProvider extends FakeProviderAdapter {
   readonly deleted = new Set<string>();
@@ -31,6 +32,122 @@ class DeletingProvider extends FakeProviderAdapter {
     };
   }
 }
+
+test('explicit preserving replacement retains the stable role, unsent draft and chat across restart', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-preserving-replacement-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const adapter = new DeletingProvider();
+  const open = adapter.openSubmission.bind(adapter);
+  t.mock.method(adapter, 'openSubmission', async (...args: Parameters<typeof open>) => ({
+    ...await open(...args), prepareForObservation: async () => {},
+  }));
+  adapter.prepareError = new ProviderSubmissionError('provider.preparation-required', 'Conversation cannot load');
+  const options = { config, startBrowser: false, providerAdapters: [adapter],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } };
+  let core = await startCore(options);
+  const rpc = <T>(method: string, params: object) => callRpc<T>({ socketPath: config.socketPath,
+    method, params, timeoutMs: 5000 });
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'preserving-test' });
+    const old = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    await assert.rejects(core.submissionService.send({ clientId: `team:${team.teamId}`, requestId: 'old-draft',
+      sessionId: old.sessionId, prompt: 'Old candidate hash; never submit', sessionDeadlineSec: 600 }),
+      (e: { errorCode: string }) => e.errorCode === 'provider.preparation-required');
+    // Model a known conversation whose latest prepared request has no provider submission.
+    core.database.raw.prepare('UPDATE sessions SET conversation_id = ? WHERE session_id = ?').run('preserved-chat', old.sessionId);
+    core.pageBindings.upsert({ pageKey: 'retained-page', bindingEpoch: 2, sessionId: old.sessionId,
+      generation: 1, conversationId: 'preserved-chat', state: 'bound',
+      url: 'https://chatgpt.com/c/preserved-chat', lastSeenAt: new Date().toISOString(), targetId: null });
+    const draft = new OutboxRepository(core.database).getByRequest(`team:${team.teamId}`, 'old-draft')!;
+    const generation = core.database.raw.prepare('SELECT * FROM generations WHERE session_id = ?').get(old.sessionId);
+    const bindings = core.pageBindings.listForSession(old.sessionId);
+    const input = { teamId: team.teamId, roleRef: old.sessionId + ':1', requestId: 'preserve', preserveConversation: true };
+
+    await assert.rejects(rpc('workflow.session_replace', { ...input, roleRef: old.sessionId + ':0' }),
+      (e: unknown) => JSON.stringify(e).includes('session.generation-superseded'));
+    // Reject submitted, UNKNOWN, partially filled and inconsistent acknowledgement evidence.
+    for (const state of ['submitted', 'submission_unknown', 'submit_attempted', 'composer_filled']) {
+      core.database.raw.prepare('UPDATE generations SET submission_state = ? WHERE session_id = ?').run(state, old.sessionId);
+      await assert.rejects(rpc('workflow.session_replace', input),
+        (e: unknown) => JSON.stringify(e).includes('session.preservation-not-ready'));
+    }
+    core.database.raw.prepare("UPDATE generations SET submission_state = 'prepared', submitted_user_message_id = 'unexpected-anchor' WHERE session_id = ?").run(old.sessionId);
+    await assert.rejects(rpc('workflow.session_replace', input),
+      (e: unknown) => JSON.stringify(e).includes('session.preservation-not-ready'));
+    core.database.raw.prepare('UPDATE generations SET submitted_user_message_id = NULL WHERE session_id = ?').run(old.sessionId);
+    core.database.raw.prepare('UPDATE outbox SET prompt_submitted = 1 WHERE outbox_id = ?').run(draft.outboxId);
+    await assert.rejects(rpc('workflow.session_replace', input),
+      (e: unknown) => JSON.stringify(e).includes('session.preservation-not-ready'));
+    core.database.raw.prepare('UPDATE outbox SET prompt_submitted = 0 WHERE outbox_id = ?').run(draft.outboxId);
+    assert.equal(core.teamDirectory.getCurrentSession(team.teamId, 'main').sessionId, old.sessionId);
+
+    core.receipts.record({ clientId: 'fixture', requestId: 'prior-delete', method: 'session.delete',
+      requestHash: 'fixture', status: 'attempted', result: { conversationId: 'preserved-chat' } });
+    await assert.rejects(rpc('workflow.session_replace', input),
+      (e: unknown) => JSON.stringify(e).includes('session.cleanup-pending'));
+    core.database.raw.prepare("DELETE FROM request_receipts WHERE client_id = 'fixture' AND request_id = 'prior-delete'").run();
+
+    // A submission already queued on the actor must win over a prior prepared snapshot.
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const actor = core.actorScheduler.actorFor(old.sessionId);
+    const queuedMutation = actor.enqueue(async () => {
+      await held;
+      core.database.raw.prepare("UPDATE generations SET submission_state = 'submission_unknown', prompt_submitted = 1 WHERE session_id = ?").run(old.sessionId);
+    });
+    const replacement = rpc('workflow.session_replace', input);
+    const rejected = assert.rejects(replacement,
+      (e: unknown) => JSON.stringify(e).includes('session.preservation-not-ready'));
+    try {
+      const deadline = Date.now() + 2000;
+      while (core.actorScheduler.totalQueueDepth < 2 && Date.now() < deadline) {
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      assert.ok(core.actorScheduler.totalQueueDepth >= 2, 'Replacement queues behind the existing mutation');
+    } finally { release(); }
+    await queuedMutation;
+    await rejected;
+    core.database.raw.prepare("UPDATE generations SET submission_state = 'prepared', prompt_submitted = 0 WHERE session_id = ?").run(old.sessionId);
+
+    const result = await rpc<{ replacement: { sessionId: string; cleanup: ReplacementCleanup } }>('workflow.session_replace', input);
+    const next = core.teamDirectory.getCurrentSession(team.teamId, 'main');
+    assert.equal(next.sessionId, result.replacement.sessionId);
+    assert.equal(next.roleId, old.roleId);
+    assert.equal(next.predecessorSessionId, old.sessionId);
+    assert.equal(next.generation, 0);
+    assert.equal(next.conversationId, null);
+    assert.equal(next.promptSubmitted, false);
+    assert.equal(core.teamDirectory.getTeam(team.teamId).roles.length, 1);
+    assert.equal(result.replacement.cleanup.outcome, 'preserved');
+    assert.equal(result.replacement.cleanup.deletionRequestId, null);
+    assert.equal(result.replacement.cleanup.deletionReceipt, null);
+    assert.equal(core.teamDirectory.getSession(old.sessionId).sessionState, 'superseded');
+    assert.deepEqual(new OutboxRepository(core.database).getById(draft.outboxId), draft);
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations WHERE session_id = ?').get(old.sessionId), generation);
+    assert.deepEqual(core.pageBindings.listForSession(old.sessionId), bindings);
+    const read = await rpc<{ request: { promptSubmitted: boolean; submissionState: string; conversationId: string } }>(
+      'workflow.team_get', { teamId: team.teamId, requestRef: draft.outboxId });
+    assert.equal(read.request.promptSubmitted, false);
+    assert.equal(read.request.submissionState, 'prepared');
+    assert.equal(read.request.conversationId, 'preserved-chat');
+    await assert.rejects(rpc('workflow.session_replace', { ...input, preserveConversation: undefined }),
+      (e: unknown) => JSON.stringify(e).includes('input.idempotency-conflict'));
+    await assert.rejects(core.submissionService.resumePreparation({ clientId: draft.clientId,
+      requestId: draft.requestId, sessionId: old.sessionId, generation: 1 }),
+      (e: { errorCode: string }) => e.errorCode === 'session.generation-superseded');
+    const opened = adapter.openCount;
+    await core.close();
+    core = await startCore(options);
+    assert.deepEqual((await rpc<typeof result>('workflow.session_replace', input)).replacement, result.replacement);
+    assert.deepEqual(new OutboxRepository(core.database).getById(draft.outboxId), draft);
+    assert.deepEqual(core.pageBindings.listForSession(old.sessionId), bindings);
+    assert.equal(core.teamDirectory.getCurrentSession(team.teamId, 'main').sessionId, next.sessionId);
+    assert.equal(adapter.openCount, opened);
+    assert.equal(adapter.submitCount, 0);
+    assert.equal(adapter.deleteCount, 0);
+    assert.equal(adapter.stopCount, 0);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('replacement attempts deletion once, continues on failure, and never resurrects retired work', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-replacement-'));

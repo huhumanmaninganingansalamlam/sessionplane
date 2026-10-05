@@ -11,6 +11,7 @@ import { EventRepository } from '../storage/event-repository.ts';
 import { ReceiptRepository, hashCanonical } from '../storage/receipt-repository.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
 import { TeamRepository } from '../storage/team-repository.ts';
+import { OutboxRepository } from '../storage/outbox-repository.ts';
 import type { StopService } from './stop-service.ts';
 import { isProviderUrl } from '../browser/page-binding.ts';
 
@@ -29,7 +30,7 @@ export interface ReplacementCleanup {
   conversationId: string | null;
   deletionRequestId: string | null;
   deletionReceipt: { clientId: string; requestId: string; status: string } | null;
-  outcome: 'confirmed' | 'refused' | 'uncertain' | 'not-attempted' | 'unknown';
+  outcome: 'confirmed' | 'refused' | 'uncertain' | 'not-attempted' | 'unknown' | 'preserved';
   errorCode: string | null;
 }
 
@@ -119,6 +120,7 @@ export class ConversationCleanupService {
     clientId: string; requestId: string; method: string; payload: unknown;
     teamId: string; roleKey: string; provider: string;
     expectedSessionId?: string | null; expectedGeneration?: number;
+    preserveConversation?: true | undefined;
   }): Promise<ReplacementResult> {
     const { database, directory, scheduler } = this.#options;
     const receipts = new ReceiptRepository(database);
@@ -160,6 +162,43 @@ export class ConversationCleanupService {
         conversationId: previous?.conversationId ?? null,
         deletionRequestId: null, deletionReceipt: null, outcome: 'not-attempted', errorCode: null,
       };
+      if (input.preserveConversation === true) {
+        if (previous === null || input.expectedSessionId !== previous.sessionId ||
+            input.expectedGeneration !== previous.generation || input.provider !== previous.provider) {
+          throw new SessionPlaneDomainError('input.invalid', 'Preserving replacement requires a fresh roleRef and the same provider');
+        }
+        return await scheduler.actorFor(previous.sessionId).enqueue(() => {
+          // Recheck after queued submission work: the roleRef alone is not proof of no send.
+          const current = directory.getCurrentSession(input.teamId, input.roleKey);
+          const outbox = new OutboxRepository(database).getByGeneration(previous.sessionId, previous.generation);
+          if (current.sessionId !== previous.sessionId || current.generation !== previous.generation) {
+            throw new SessionPlaneDomainError('session.generation-superseded', 'Role reference changed before preserving replacement');
+          }
+          if (current.sessionState !== 'submitting' || current.submissionState !== 'prepared' ||
+              current.errorCode !== 'provider.preparation-required' || current.promptSubmitted ||
+              current.conversationId === null || current.submittedUserMessageId !== null ||
+              current.submittedUserTurnId !== null || current.responseMessageId !== null ||
+              outbox?.submissionState !== 'prepared' || outbox.promptSubmitted ||
+              outbox.errorCode !== 'provider.preparation-required') {
+            throw new SessionPlaneDomainError('session.preservation-not-ready',
+              'Preserving replacement requires a bound, prepared, provably unsubmitted request; submitted or uncertain work must remain on its original session');
+          }
+          if (receipts.findConversationDeletion(current.conversationId) !== null) {
+            throw new SessionPlaneDomainError('session.cleanup-pending', 'A deletion attempt already exists for this conversation');
+          }
+          const successor = receipts.execute({ clientId: input.clientId, requestId: input.requestId,
+            method: input.method, payload: input.payload, operation: () => {
+              // Existing routing retirement keeps generation/outbox payloads and bindings intact.
+              const next = directory.createSession({ teamId: input.teamId, roleKey: input.roleKey, provider: input.provider });
+              new EventRepository(database.raw).append({ teamId: current.teamId, roleId: current.roleId,
+                sessionId: current.sessionId, generation: current.generation, eventType: 'session.replaced',
+                payload: { successorSessionId: next.sessionId, preserveConversation: true }, createdAt: new Date().toISOString() });
+              return { ...next, cleanup: { ...cleanup, outcome: 'preserved' as const } };
+            } });
+          scheduler.refreshSession(previous.sessionId);
+          return successor;
+        });
+      }
       if (previous !== null && previous.conversationId !== null) {
         // Replacement makes one best-effort deletion attempt; cleanup cannot block routing.
         cleanup.deletionRequestId = 'replacement-delete:' + input.requestId;
