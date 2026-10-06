@@ -383,7 +383,9 @@ list429 holds only the list budget; detail429 holds that conversation's recovery
 Other endpoint categories do not imply account-wide restrictions. Valid Retry-After
 seconds/date is honored; absent/invalid headers retain the15min fallback in that
 scope. An unquantified visible service-limit notice holds that conversation.
-Existing unexpired legacy deadlines are retained until expiry; attempts never reset.
+A legacy blanket deadline is relocated only when its exact durable event proves
+list-only origin; unknown/operator/broader holds remain. The original event and
+reclassification evidence are retained, and attempts never reset.
 Normal long post-submission generation waits remain unchanged.
 
 SQLite migration7 only adds `conversation_load_recovery`; existing request/session/

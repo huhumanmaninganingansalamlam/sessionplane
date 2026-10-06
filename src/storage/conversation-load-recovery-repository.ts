@@ -40,6 +40,43 @@ export class ConversationLoadRecoveryRepository {
     const b = new ProbeBudgetRepository(this.database.raw).get(LOAD_RECOVERY_SCOPE);
     return [b?.nextAllowedAt, b?.blockedUntil].filter((v): v is string => !!v).sort().at(-1) ?? null;
   }
+  /** Relocate only a legacy blanket hold whose exact persisted deadline has list-only proof. */
+  reclassifyLegacyListCooldown(now: string, intervalMs: number): void {
+    this.database.transaction(() => {
+      const budgets = new ProbeBudgetRepository(this.database.raw), prior = budgets.get('chatgpt:default');
+      if (!prior?.blockedUntil || prior.blockedUntil <= now || prior.backoffLevel || prior.consecutiveFailures ||
+          (prior.nextAllowedAt && prior.nextAllowedAt > prior.blockedUntil)) return;
+      const signals = this.database.raw.prepare(`SELECT sequence,team_id,payload_json FROM events
+        WHERE event_type='provider.rate-limit-observed'
+          AND json_extract(payload_json,'$.policyScope')='chatgpt:default'
+          AND json_extract(payload_json,'$.policyUntil')>?`).all(now) as
+        { sequence: number; team_id: string; payload_json: string }[];
+      const listOnly = (p: Record<string, any>) => p.method === 'GET' && p.endpointCategory === 'conversation-list' &&
+        !['account','user','ip','global'].some(scope => [p.serverScope,p.headers?.['ratelimit-scope'],p.headers?.['x-ratelimit-scope']].includes(scope));
+      const proof = signals.find(row => { const p = JSON.parse(row.payload_json); return p.policyUntil === prior.blockedUntil && listOnly(p); });
+      if (!proof) return; // Unknown provenance is retained, never weakened.
+      const other = signals.map(row => JSON.parse(row.payload_json)).filter(p => !listOnly(p)).map(p => p.policyUntil);
+      // Unattributed operator holds remain conservative; old receipts themselves are immutable.
+      const receipts = this.database.raw.prepare(`SELECT result_json FROM request_receipts WHERE status='complete'
+        AND method='system.defer_account_cooldown' AND json_extract(result_json,'$.account.blockedUntil')>?`).all(now) as {result_json:string}[];
+      other.push(...receipts.map(row => JSON.parse(row.result_json).account.blockedUntil));
+      const retained = other.sort().at(-1) ?? null;
+      if (retained === prior.blockedUntil) return;
+      const listUntil = signals.map(row => JSON.parse(row.payload_json)).filter(listOnly).map(p => p.policyUntil).sort().at(-1)!;
+      const listPrior = budgets.get('chatgpt:conversation-list');
+      budgets.save({ ...prior, scope: 'chatgpt:conversation-list', blockedUntil: [listUntil,listPrior?.blockedUntil].filter(Boolean).sort().at(-1)!,
+        nextAllowedAt: [listUntil,listPrior?.nextAllowedAt].filter(Boolean).sort().at(-1)!, updatedAt: now });
+      budgets.save({ ...prior, blockedUntil: retained, nextAllowedAt: retained, updatedAt: now });
+      const ui = budgets.get(LOAD_RECOVERY_SCOPE);
+      if (ui?.nextAllowedAt === prior.blockedUntil && !ui.blockedUntil) {
+        const lastAttempt = this.list().map(row => row.lastAttemptAt).filter((v): v is string => !!v).sort().at(-1);
+        budgets.save({ ...ui, nextAllowedAt: lastAttempt ? new Date(Date.parse(lastAttempt) + intervalMs).toISOString() : null, updatedAt: now });
+      }
+      this.database.raw.prepare(`INSERT INTO events(team_id,event_type,payload_json,created_at) VALUES (?,?,?,?)`)
+        .run(proof.team_id, 'provider.rate-limit-scope-reclassified', JSON.stringify({ evidenceSequence: proof.sequence,
+          originalUntil: prior.blockedUntil, scope: 'chatgpt:conversation-list', retainedAccountUntil: retained }), now);
+    });
+  }
   serviceNextAllowedAt(conversationId?: string): string | null {
     const budgets = new ProbeBudgetRepository(this.database.raw);
     return [budgets.get('chatgpt:default')?.blockedUntil,

@@ -1,3 +1,4 @@
+import { ProbeBudgetRepository } from '../../src/storage/probe-budget-repository.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -296,4 +297,31 @@ test('detail Retry-After holds only its conversation; explicit broad scope holds
     f.advance(19_999);await service.sweep();assert.equal(f.clicks.length,2);
     f.advance(1);await service.sweep();assert.equal(f.clicks.length,3);
   } finally { await f.dispose(service); }
+});
+
+test('legacy list-only deadline is relocated with proof; unknown/broader holds and original attempts remain', async () => {
+  const f=fixture(1), first=f.make();let resumed:ConversationLoadRecovery|undefined;
+  try {
+    await first.sweep();await first.close();
+    const before=f.database.raw.prepare('SELECT * FROM generations').all();
+    const until='2026-10-06T00:15:00.000Z';
+    f.probes.defer('chatgpt:default',until);first.repository.defer(until,'2026-10-06T00:00:00.000Z');
+    first.repository.reclassifyLegacyListCooldown('2026-10-06T00:00:00.000Z',5000);
+    assert.equal(first.repository.pacing().account!.blockedUntil,until,'unknown provenance remains');
+    const team=f.database.raw.prepare('SELECT team_id FROM sessions LIMIT 1').get()!.team_id;
+    f.database.raw.prepare('INSERT INTO events(team_id,event_type,payload_json,created_at) VALUES (?,?,?,?)').run(team,
+      'provider.rate-limit-observed',JSON.stringify({method:'GET',endpointCategory:'conversation-detail',policyScope:'chatgpt:default',
+        policyUntil:'2026-10-06T00:00:10.000Z',headers:{}}),'2026-10-06T00:00:00.000Z');
+    f.database.raw.prepare('INSERT INTO events(team_id,event_type,payload_json,created_at) VALUES (?,?,?,?)').run(team,
+      'provider.rate-limit-observed',JSON.stringify({method:'GET',endpointCategory:'conversation-list',policyScope:'chatgpt:default',policyUntil:until,headers:{}}),
+      '2026-10-06T00:00:00.000Z');
+    resumed=f.make();
+    assert.equal(new ProbeBudgetRepository(f.database.raw).get('chatgpt:conversation-list')!.blockedUntil,until);
+    assert.equal(resumed.repository.pacing().account!.blockedUntil,'2026-10-06T00:00:10.000Z');
+    assert.equal(resumed.repository.get('conversation-0')!.attempts,1);
+    f.advance();await resumed.sweep();assert.equal(f.clicks.length,1);
+    f.advance();await resumed.sweep();assert.equal(f.clicks.length,2);
+    assert.deepEqual(f.database.raw.prepare('SELECT * FROM generations').all(),before);
+    assert.equal(f.database.raw.prepare("SELECT count(*) AS n FROM events WHERE event_type='provider.rate-limit-scope-reclassified'").get()!.n,1);
+  } finally {await f.dispose(first,...(resumed?[resumed]:[]));}
 });

@@ -56,6 +56,7 @@ export class ConversationLoadRecovery {
     this.#events = new EventRepository(services.database.raw);
     this.#origin = new URL(services.chatgptUrl).origin;
     this.intervalMs = Math.max(LOAD_RECOVERY_INTERVAL_MS, services.minimumIntervalMs ?? 0);
+    this.repository.reclassifyLegacyListCooldown(new Date(this.now()).toISOString(), this.intervalMs);
   }
   start(): void {
     if (this.#timer || this.#closed) return;
