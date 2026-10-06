@@ -49,6 +49,20 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     });
     const main = await createSession(config.socketPath, team.teamId, 'main', 'main-session');
 
+    const openSubmission = fake.openSubmission.bind(fake);
+    fake.openSubmission = async (request) => {
+      const submission = await openSubmission(request);
+      const capture = submission.captureAcknowledgement.bind(submission);
+      submission.captureAcknowledgement = async () => {
+        const attempt = service.database.raw.prepare('SELECT submission_state AS state, submitted_user_message_id AS anchor FROM generations WHERE session_id=? AND generation=?')
+          .get(request.session.sessionId, request.generation) as { state: string; anchor: string | null };
+        assert.equal(attempt.state, 'submit_attempted');
+        assert.equal(attempt.anchor, null, 'a click/outgoing ID is not a confirmed anchor');
+        return await capture();
+      };
+      return submission;
+    };
+
     const successfulRequest = {
       clientId: 'client-send',
       requestId: 'send-success',
@@ -73,6 +87,14 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     assert.equal(submitted.submittedUserTurnId, 'user-turn-1');
     assert.equal(fake.submitCount, 1);
     assert.equal(fake.bindCount, 1);
+    const ackEvent = service.database.raw.prepare("SELECT payload_json AS payload FROM events WHERE session_id=? AND event_type='generation.submitted'")
+      .get(main.sessionId) as { payload: string };
+    assert.deepEqual(JSON.parse(ackEvent.payload), {
+      hasConversationId: true, hasSubmittedUserMessageId: true, hasSubmittedUserTurnId: true,
+      acknowledgementEvidence: 'provider-adapter', conversationId: submitted.conversationId,
+      submittedUserMessageId: 'user-message-1', submittedUserTurnId: 'user-turn-1',
+    });
+
 
     const replayed = await rpc<SessionSnapshot>(
       config.socketPath,
@@ -530,6 +552,16 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     const pending = service.database.raw.prepare('SELECT outbox_id AS id FROM outbox WHERE session_id = ? AND generation = 1')
       .get(unknown.sessionId) as { id: string };
     afterRestart.acknowledgementRecoveryMode = 'success';
+    service.database.raw.prepare("INSERT INTO generations(session_id,generation,team_brief_version,prompt_hash,submission_state,submitted_user_message_id,submitted_user_turn_id,prompt_submitted) VALUES (?,0,1,'history','submitted','historical-user','historical-turn',1)")
+      .run(unknown.sessionId);
+    const recovery = afterRestart.recoverAcknowledgement.bind(afterRestart);
+    afterRestart.recoverAcknowledgement = async () => ({ conversationId: 'conversation-' + unknown.sessionId,
+      submittedUserMessageId: 'historical-user', submittedUserTurnId: 'historical-turn' });
+    const stillUnknown = await service.submissionService.recoverAcknowledgement(service.teamDirectory.getSession(unknown.sessionId));
+    assert.equal(stillUnknown.submissionState, 'submission_unknown', 'a prior generation anchor cannot confirm this request');
+    assert.equal(stillUnknown.submittedUserMessageId, null);
+    afterRestart.recoverAcknowledgement = recovery;
+
     const decision = { teamId: team.teamId, requestRef: pending.id, requestId: 'confirm-existing-message',
       decision: 'acknowledge', messageId: 'recovered-user-message-1', evidenceHash: 'a'.repeat(64) };
     await assert.rejects(rpc(config.socketPath, 'workflow.decide', { ...decision, messageId: 'wrong-message' }),

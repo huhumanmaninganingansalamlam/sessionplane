@@ -27,27 +27,28 @@ test('ChatGPT acknowledgement recovery uses exact text or an unchanged explicit 
       await route.fulfill({
         status: 200,
         contentType: 'text/html',
-        body: '<html><body><div data-message-author-role="user" data-message-id="user-1" data-turn-id="turn-1"><button aria-expanded="false"></button><div id="prompt" class="whitespace-pre-wrap" hidden>Recover <code>C17=B</code> exactly</div><script>document.querySelector("button").addEventListener("click", () => { document.querySelector("#prompt").hidden = false; });</script></div></body></html>',
+        body: '<html><body><div id="prompt-textarea" contenteditable="true"></div><div data-message-author-role="user" data-message-id="user-1" data-turn-id="turn-1"><button aria-expanded="false"></button><div id="prompt" class="whitespace-pre-wrap" hidden>Recover <code>C17=B</code> exactly</div><script>document.querySelector("button").addEventListener("click", () => { document.querySelector("#prompt").hidden = false; });</script></div></body></html>',
       });
     });
     await created.page.goto('https://chatgpt.com/c/auditconv123');
     const recovered = await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123');
     assert.deepEqual(recovered, {
+      evidence: 'stable-anchor-cleared-composer',
       conversationId: 'auditconv123',
       submittedUserMessageId: 'user-1',
       submittedUserTurnId: 'turn-1',
     });
 
-    await created.page.setContent('<div data-chatgpt-search-message-ids="user-1"><div data-user-message-bubble><div><div><p>First paragraph</p><p>URL: <a style="display:block">https://example.com/</a> exactly</p></div><button aria-expanded="true">Collapse</button></div></div></div>');
+    await created.page.setContent('<div id="prompt-textarea" contenteditable="true"></div><div data-chatgpt-search-message-ids="user-1"><div data-user-message-bubble><div><div><p>First paragraph</p><p>URL: <a style="display:block">https://example.com/</a> exactly</p></div><button aria-expanded="true">Collapse</button></div></div></div>');
     const structuredPrompt = 'First paragraph\n\nURL: https://example.com/ exactly';
     assert.equal((await recoverChatGptAcknowledgement(created.page, structuredPrompt, 'auditconv123'))?.submittedUserMessageId, 'user-1');
     assert.equal(await recoverChatGptAcknowledgement(created.page, structuredPrompt + ' changed', 'auditconv123'), null);
 
-    await created.page.setContent('<div data-message-id="old-user"><div data-message-author-role="user"><div data-message-author-role="user">Older prompt</div></div></div><div data-message-author-role="user" data-message-id="exact-user"><div class="whitespace-pre-wrap">Recover <code>C17=B</code> exactly</div></div>');
+    await created.page.setContent('<div id="prompt-textarea" contenteditable="true"></div><div data-message-id="old-user"><div data-message-author-role="user"><div data-message-author-role="user">Older prompt</div></div></div><div data-message-author-role="user" data-message-id="exact-user"><div class="whitespace-pre-wrap">Recover <code>C17=B</code> exactly</div></div>');
     assert.equal((await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123'))?.submittedUserMessageId, 'exact-user');
 
     await created.page.setContent(
-      '<div data-message-author-role="user" data-message-id="user-1" data-turn-id="turn-1"><div class="whitespace-pre-wrap">Recover <code>C17=B</code> exactly</div></div><div data-message-author-role="user" data-message-id="user-2" data-turn-id="turn-2"><div class="whitespace-pre-wrap">Recover <code>C17=B</code> exactly</div></div>',
+      '<div id="prompt-textarea" contenteditable="true"></div><div data-message-author-role="user" data-message-id="user-1" data-turn-id="turn-1"><div class="whitespace-pre-wrap">Recover <code>C17=B</code> exactly</div></div><div data-message-author-role="user" data-message-id="user-2" data-turn-id="turn-2"><div class="whitespace-pre-wrap">Recover <code>C17=B</code> exactly</div></div>',
     );
     assert.equal(
       await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123'),
@@ -124,6 +125,7 @@ test('ChatGPT submission captures exact conversation and user-turn acknowledgeme
     assert.notEqual(await created.page.locator('[data-message-id="user-message-1"]').innerText(), request.prompt);
     const acknowledgement = await submission.captureAcknowledgement();
     assert.deepEqual(acknowledgement, {
+      evidence: 'accepted-request-stable-anchor-cleared-composer',
       conversationId: 'conversation-123456',
       submittedUserMessageId: 'user-message-1',
       submittedUserTurnId: 'user-turn-1',
@@ -138,6 +140,33 @@ test('ChatGPT submission captures exact conversation and user-turn acknowledgeme
     assert.equal(binding.state, 'owned');
     assert.equal(binding.sessionId, 'session-exact');
     assert.equal(binding.generation, 1);
+    // A positive DOM cannot turn a rejected provider POST into success.
+    const rejectedPage = await owner.createPage();
+    await rejectedPage.page.route('https://chatgpt.com/**', async (route) => {
+      if (route.request().method() === 'POST') await route.fulfill({ status: 429, body: 'rate limited' });
+      else await route.fulfill({ status: 200, contentType: 'text/html', body: chatGptFixture(false).replaceAll('conversation-123456', 'rejected-conversation') });
+    });
+    await rejectedPage.page.goto('https://chatgpt.com/');
+    registry.refreshPage(rejectedPage.binding.pageKey);
+    registry.reservePage(rejectedPage.binding.pageKey, { sessionId: 'rejected-session', generation: 1, conversationId: null });
+    const rejected = new ChatGptSubmission({ page: rejectedPage.page, pageKey: rejectedPage.binding.pageKey,
+      pageRegistry: registry, request: { ...request, session: sessionSnapshot({ sessionId: 'rejected-session', pageKey: rejectedPage.binding.pageKey }) },
+      acknowledgementTimeoutMs: 500 });
+    await prepareFixture(rejected, rejectedPage.page);
+    await rejected.submitOnce();
+    assert.equal(await rejected.captureAcknowledgement(), null);
+    assert.equal(await rejectedPage.page.evaluate(() => (window as Window & { sendCount: number }).sendCount), 1);
+
+    // Same request: no second click, even when an optimistic node survives with
+    // a retained draft or disappears after one observation.
+    await created.page.locator('#prompt-textarea').fill(request.prompt + '\n');
+    assert.equal(await submission.captureAcknowledgement(), null);
+    assert.equal(await recoverChatGptAcknowledgement(created.page, request.prompt, 'conversation-123456'), null);
+    await created.page.locator('#prompt-textarea').fill('');
+    await created.page.evaluate(() => setTimeout(() => document.querySelector('[data-message-id="user-message-1"]')?.remove(), 100));
+    assert.equal(await submission.captureAcknowledgement(), null);
+    assert.equal(await created.page.evaluate(() => (window as Window & { sendCount: number }).sendCount), 1);
+
     assert.equal(binding.conversationId, 'conversation-123456');
 
     await created.page.goto('https://chatgpt.com/c/another-conversation-999');
@@ -250,6 +279,7 @@ test('ChatGPT submission waits for a controlled composer to commit the filled pr
       acknowledgementTimeoutMs: 500,
     });
 
+    await created.page.locator('#prompt-textarea').waitFor({ state: 'visible' });
     await prepareFixture(submission, created.page);
     assert.equal(await created.page.locator('#prompt-textarea').textContent(), prompt);
     assert.equal(
@@ -325,6 +355,7 @@ test('ChatGPT submission preserves exact multiline text through ProseMirror bloc
 
     await submission.submitOnce();
     assert.deepEqual(await submission.captureAcknowledgement(), {
+      evidence: 'accepted-request-stable-anchor-cleared-composer',
       conversationId: 'conversation-123456',
       submittedUserMessageId: 'user-message-1',
       submittedUserTurnId: 'user-turn-1',
@@ -556,6 +587,7 @@ test('ChatGPT submission extends acknowledgement while exact user identity hydra
     await prepareFixture(submission, created.page);
     await submission.submitOnce();
     assert.deepEqual(await submission.captureAcknowledgement(), {
+      evidence: 'accepted-request-stable-anchor-cleared-composer',
       conversationId: 'conversation-123456',
       submittedUserMessageId: 'user-message-1',
       submittedUserTurnId: 'user-turn-1',
@@ -710,6 +742,8 @@ function chatGptFixture(
             const prompt = ${proseMirrorBlocks}
               ? Array.from(composer.children).map((child) => child.textContent ?? '').join('\\n')
               : composer.textContent;
+            void fetch('/backend-api/conversation', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({messages:[{id:'user-message-1',author:{role:'user'}}]})});
+            composer.textContent = '';
             history.pushState({}, '', '/c/conversation-123456');
             const message = document.createElement('article');
             message.setAttribute('data-message-author-role', 'user');

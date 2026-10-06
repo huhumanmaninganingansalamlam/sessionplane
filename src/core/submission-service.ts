@@ -357,6 +357,7 @@ export class SubmissionService {
         if (
           acknowledgement === undefined ||
           acknowledgement === null ||
+          this.#sessions.submittedMessageIds(current.sessionId).has(acknowledgement.submittedUserMessageId) ||
           (selection !== undefined && acknowledgement.submittedUserMessageId !== selection.messageId) ||
           (acknowledgement.conversationId !== currentConversationId &&
             !(current.provider === 'chatgpt' &&
@@ -423,6 +424,10 @@ export class SubmissionService {
               hasConversationId: true,
               hasSubmittedUserMessageId: true,
               hasSubmittedUserTurnId: true,
+              acknowledgementEvidence: acknowledgement.evidence ?? 'provider-adapter',
+              conversationId: acknowledgement.conversationId,
+              submittedUserMessageId: acknowledgement.submittedUserMessageId,
+              submittedUserTurnId: acknowledgement.submittedUserTurnId,
               promptSubmitted: true,
             },
             createdAt: timestamp,
@@ -658,6 +663,8 @@ export class SubmissionService {
           errorCode: null,
         },
         'generation.submit-attempted',
+        // Compatibility: promptSubmitted marks a possible irreversible attempt,
+        // not acceptance. Only submissionState="submitted" confirms identity.
         { promptSubmitted: true },
       );
 
@@ -1442,6 +1449,10 @@ export class SubmissionService {
           hasConversationId: true,
           hasSubmittedUserMessageId: true,
           hasSubmittedUserTurnId: true,
+          acknowledgementEvidence: acknowledgement.evidence ?? 'provider-adapter',
+          conversationId: acknowledgement.conversationId,
+          submittedUserMessageId: acknowledgement.submittedUserMessageId,
+          submittedUserTurnId: acknowledgement.submittedUserTurnId,
         },
         createdAt: timestamp,
       });

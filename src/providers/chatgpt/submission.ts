@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { ElementHandle, Locator, Page, Request } from 'playwright-core';
+import type { ElementHandle, Locator, Page, Request, Response } from 'playwright-core';
 
 import type { PageRegistry } from '../../browser/page-registry.ts';
 import { parseChatGptConversationId } from '../../browser/page-binding.ts';
@@ -55,6 +55,8 @@ export class ChatGptSubmission implements ProviderSubmission {
   #baselineConversationId: string | null = null;
   #baselineUserIds = new Set<string>();
   readonly #sentMessageIds = new Set<string>();
+  readonly #sentRequests = new Map<Request, Set<string>>();
+  readonly #acceptedMessageIds = new Set<string>();
   readonly #captureSentIdentity = (request: Request): void => {
     if (request.method() !== 'POST' || new URL(request.url()).origin !== new URL(this.#page.url()).origin) return;
     try {
@@ -67,9 +69,22 @@ export class ChatGptSubmission implements ProviderSubmission {
         const author = message.author;
         if (author !== null && typeof author === 'object' && 'role' in author && author.role === 'user') {
           this.#sentMessageIds.add(message.id);
+          const ids = this.#sentRequests.get(request) ?? new Set<string>();
+          ids.add(message.id);
+          this.#sentRequests.set(request, ids);
         }
       }
     } catch { /* Unrelated non-JSON browser requests do not carry message identities. */ }
+  };
+
+  readonly #captureAcceptance = (response: Response): void => {
+    // Outgoing IDs prove an attempt only. Also observe the provider accepting
+    // that exact request; optimistic DOM alone must never confirm submission.
+    if (!response.ok()) return;
+    for (const id of this.#sentRequests.get(response.request()) ?? []) this.#acceptedMessageIds.add(id);
+  };
+  readonly #captureFailedRequest = (request: Request): void => {
+    for (const id of this.#sentRequests.get(request) ?? []) this.#acceptedMessageIds.delete(id);
   };
 
   constructor(options: ChatGptSubmissionOptions) {
@@ -229,6 +244,8 @@ export class ChatGptSubmission implements ProviderSubmission {
 
   abandon(): void {
     this.#page.off('request', this.#captureSentIdentity);
+    this.#page.off('response', this.#captureAcceptance);
+    this.#page.off('requestfailed', this.#captureFailedRequest);
     void this.#page.close().catch(() => undefined);
   }
 
@@ -242,6 +259,8 @@ export class ChatGptSubmission implements ProviderSubmission {
     }
     this.#requireExactPage();
     this.#page.on('request', this.#captureSentIdentity);
+    this.#page.on('response', this.#captureAcceptance);
+    this.#page.on('requestfailed', this.#captureFailedRequest);
     await this.#sendButton.click({ timeout: 5_000 });
   }
 
@@ -250,6 +269,9 @@ export class ChatGptSubmission implements ProviderSubmission {
       let deadline = Date.now() + this.#acknowledgementTimeoutMs;
       let hydrationGraceApplied = false;
       const hydrationGraceMs = acknowledgementHydrationGraceMs(this.#acknowledgementTimeoutMs);
+      let candidateKey: string | null = null;
+      let candidateSince = 0;
+      let confirmationGraceApplied = false;
       while (Date.now() < deadline) {
         const conversationId = parseChatGptConversationId(this.#page.url());
         if (
@@ -261,6 +283,7 @@ export class ChatGptSubmission implements ProviderSubmission {
           hydrationGraceApplied = true;
         }
         const messages = (await readChatGptMessages(this.#page)).filter((message) => message.role === 'user');
+        let candidate: ProviderSubmissionAcknowledgement | null = null;
         for (let index = Math.max(0, messages.length - 8); index < messages.length; index += 1) {
           const message = messages[index]!;
           if (!(message.messageId !== null && this.#sentMessageIds.has(message.messageId)) &&
@@ -272,24 +295,42 @@ export class ChatGptSubmission implements ProviderSubmission {
           if (identity !== null && this.#baselineUserIds.has(identity.identityKey)) {
             continue;
           }
-          if (identity === null || conversationId === null) {
+          if (identity === null || conversationId === null || !this.#acceptedMessageIds.has(identity.messageId)) {
             if (hydrationGraceApplied === false) {
               deadline = Math.max(deadline, Date.now() + hydrationGraceMs);
               hydrationGraceApplied = true;
             }
             continue;
           }
-          return {
+          if (this.#baselineConversationId !== null && conversationId !== this.#baselineConversationId) continue;
+          candidate = {
             conversationId,
             submittedUserMessageId: identity.messageId,
             submittedUserTurnId: identity.turnId,
           };
+          break;
+        }
+        // A single optimistic user node is not acknowledgement. Require the same
+        // exact anchor AND an observed empty composer across the commit window.
+        const key = candidate !== null && await hasClearedComposer(this.#page)
+          ? JSON.stringify(candidate) : null;
+        if (key === null || key !== candidateKey) {
+          candidateKey = key;
+          candidateSince = Date.now();
+        } else if (Date.now() - candidateSince >= COMPOSER_STABLE_WINDOW_MS) {
+          return { ...candidate!, evidence: 'accepted-request-stable-anchor-cleared-composer' };
+        }
+        if (key !== null && !confirmationGraceApplied) {
+          deadline = Math.max(deadline, Date.now() + COMPOSER_STABLE_WINDOW_MS + 200);
+          confirmationGraceApplied = true;
         }
         await this.#page.waitForTimeout(100);
       }
       return null;
     } finally {
       this.#page.off('request', this.#captureSentIdentity);
+      this.#page.off('response', this.#captureAcceptance);
+      this.#page.off('requestfailed', this.#captureFailedRequest);
     }
   }
 
@@ -318,7 +359,36 @@ export class ChatGptSubmission implements ProviderSubmission {
 
 }
 
+// Read-only confirmation: a failed/rolled-back submit may leave its full draft
+// alongside an optimistic user node. Missing/ambiguous composers fail closed.
+async function hasClearedComposer(page: Page): Promise<boolean> {
+  const editors = page.locator('#prompt-textarea, [data-testid="prompt-textarea"]');
+  let visible = 0;
+  for (let index = 0; index < await editors.count(); index += 1) {
+    const editor = editors.nth(index);
+    if (!(await editor.isVisible())) continue;
+    visible += 1;
+    const values = await readExactTextCandidates(editor);
+    if (values.length === 0 || values.some((value) => value.trim() !== '')) return false;
+  }
+  return visible === 1;
+}
+
 export async function recoverChatGptAcknowledgement(
+  page: Page,
+  prompt: string,
+  expectedConversationId: string,
+  selection?: { readonly messageId: string; readonly evidenceHash: string },
+): Promise<ProviderSubmissionAcknowledgement | null> {
+  const first = await readChatGptAcknowledgement(page, prompt, expectedConversationId, selection);
+  if (first === null || !(await hasClearedComposer(page))) return null;
+  await page.waitForTimeout(COMPOSER_STABLE_WINDOW_MS);
+  const second = await readChatGptAcknowledgement(page, prompt, expectedConversationId, selection);
+  if (second === null || JSON.stringify(first) !== JSON.stringify(second) || !(await hasClearedComposer(page))) return null;
+  return { ...second, evidence: 'stable-anchor-cleared-composer' };
+}
+
+async function readChatGptAcknowledgement(
   page: Page,
   prompt: string,
   expectedConversationId: string,
