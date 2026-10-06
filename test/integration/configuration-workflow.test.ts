@@ -85,6 +85,17 @@ test('unavailable preparation never offers Retry as submit and preserves the sam
     const option = initial.configurationCatalog.options.find((o: any) => o.label === 'Aurora-8 / Deep');
     assert.ok(option);
     const page = service.pageRegistry.pageForObservation(initial.pageKey);
+    let authRequests = 0;
+    page.on('request', request => { if (new URL(request.url()).pathname === '/api/auth/session') authRequests++; });
+    await inspect();
+    await invoke('wait', { teamId: identity.teamId, requestRefs: [identity.requestRef], waitMs: 1 });
+    assert.equal(authRequests, 0, 'get/wait inspect existing DOM without authentication requests');
+    await page.setContent('<main><div id="challenge-stage">Verify you are human</div></main>');
+    const guardedRefresh = await invoke('decide', { ...identity, requestId: 'guarded-refresh', decision: 'refresh' });
+    assert.equal(guardedRefresh.isError, true);
+    assert.equal(guardedRefresh.structuredContent.errorCode, 'provider.human-action-required');
+    assert.equal(service.database.raw.prepare('SELECT COUNT(*) AS n FROM request_receipts WHERE request_id=?').get('guarded-refresh')!.n, 0);
+    await page.setContent(fixture);
     const originalBinding = service.pageRegistry.getBinding(initial.pageKey);
     const staleSubmit = initial.evidence.nodes.find((n: any) => n.actions.choose.includes('submit'));
     assert.ok(staleSubmit);
@@ -133,6 +144,7 @@ test('unavailable preparation never offers Retry as submit and preserves the sam
     assert.equal(service.browserOwner!.status.browserPid, owner.status.browserPid);
     assert.equal(service.pageRegistry.getBinding(restarted.pageKey).targetId, originalBinding.targetId);
     const restoredPage = service.pageRegistry.pageForObservation(restarted.pageKey);
+    restoredPage.on('request', request => { if (new URL(request.url()).pathname === '/api/auth/session') authRequests++; });
     await restoredPage.setContent(fixture.replace('</form>', '<button type="button">Retry</button><button type="reset">Reset</button></form>')
       .replace('<script>', '<script>(() => {').replace('</script>', '})();</script>'));
     let restored = await inspect();
@@ -148,9 +160,11 @@ test('unavailable preparation never offers Retry as submit and preserves the sam
     assert.equal(selected.isError, false, JSON.stringify(selected));
     restored = await inspect();
     const composer = restored.evidence.nodes.find((n: any) => n.actions.choose.includes('composer'));
+    const beforePrepareAuth = authRequests;
     const composed = await invoke('decide', { ...identity, requestId: 'restore-composer', decision: 'choose', purpose: 'composer',
       snapshotId: restored.evidence.snapshotId, ref: composer.ref });
     assert.equal(composed.isError, false, JSON.stringify(composed));
+    assert.ok(authRequests > beforePrepareAuth, 'actual preparation retains its authentication check');
     assert.equal(await restoredPage.locator('textarea').inputValue(), 'Preserve this exact request');
     assert.equal(await restoredPage.evaluate(() => (window as any).submits), 0);
     assert.equal(service.database.raw.prepare('SELECT COUNT(*) AS n FROM outbox').get()!.n, 1);

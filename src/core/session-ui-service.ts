@@ -5,9 +5,9 @@ import { PageRegistry, PageRegistryError } from '../browser/page-registry.ts';
 import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionEvidence, isPreparationSummary, matchesPreparationTarget, sameSnapshotSemantics, type BrowserSnapshot, type BrowserSnapshotNode } from '../browser/ref-snapshot.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
-import type { PreparationPurpose, PreparationTarget } from '../providers/provider-adapter.ts';
+import { ProviderSubmissionError, type PreparationPurpose, type PreparationTarget } from '../providers/provider-adapter.ts';
 import { CHATGPT_PREPARATION_SNAPSHOT } from '../providers/chatgpt/selectors.ts';
-import { inspectChatGptSubmissionCandidates, prepareChatGptObservation } from '../providers/chatgpt/submission.ts';
+import { inspectChatGptSubmissionCandidates, inspectChatGptPageReady, prepareChatGptObservation } from '../providers/chatgpt/submission.ts';
 import { observeChatGptActivity } from '../providers/chatgpt/activity-observer.ts';
 import { observeChatGptDom, observeChatGptAlerts } from '../providers/chatgpt/dom-observer.ts';
 import type { SubmissionService } from './submission-service.ts';
@@ -88,7 +88,7 @@ export class SessionUiService {
   async inspect(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
     return await this.#submissions.withPendingPreparation(input,
       async (session) => {
-        await prepareChatGptObservation(this.#requirePage(session), session.pageKey!);
+        await inspectChatGptPageReady(this.#requirePage(session), session.pageKey!);
         const snapshot = await this.#capture(session, input.maxNodes);
         const composerAvailable = snapshot.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled);
         const catalog = this.#discoveryFailures.get(`${session.sessionId}:${session.generation}`) ?? this.#catalog;
@@ -402,6 +402,8 @@ export class SessionUiService {
         await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
         this.#requirePage(session);
         this.#refs.clear(session.pageKey!);
+      }, async (session) => {
+        await prepareChatGptObservation(this.#requirePage(session), session.pageKey!);
       });
     } catch (error) {
       throw typedUiError(error);
@@ -489,6 +491,7 @@ function toPreparationTarget(purpose: PreparationPurpose, node: BrowserSnapshotN
 
 function typedUiError(error: unknown): SessionPlaneDomainError {
   if (error instanceof SessionPlaneDomainError) return error;
+  if (error instanceof ProviderSubmissionError) return new SessionPlaneDomainError(error.errorCode, error.message, error.details);
   if (error instanceof PageRegistryError || error instanceof BrowserSnapshotError) {
     return new SessionPlaneDomainError(error.errorCode, error.message);
   }

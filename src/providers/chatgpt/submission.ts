@@ -444,12 +444,16 @@ function submissionEvidenceHash(conversationId: string, message: ChatGptMessage)
   return createHash('sha256').update(JSON.stringify([conversationId, message.messageId, message.turnId, message.text])).digest('hex');
 }
 
-/** Readiness/security checks on an existing page; never navigates or opens a submission. */
-export async function prepareChatGptObservation(page: Page, pageKey: string): Promise<void> {
+/** Passive readiness/security checks on an existing page; no authentication request. */
+export async function inspectChatGptPageReady(page: Page, pageKey: string): Promise<void> {
   await waitForProviderPageReady({ page, provider: 'chatgpt', pageKey });
   await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey });
-  await assertChatGptAuthenticated(page);
   await assertChatOnlySurface(page);
+}
+
+export async function prepareChatGptObservation(page: Page, pageKey: string): Promise<void> {
+  await inspectChatGptPageReady(page, pageKey);
+  await assertChatGptAuthenticated(page);
 }
 
 async function assertChatGptAuthenticated(page: Page): Promise<void> {

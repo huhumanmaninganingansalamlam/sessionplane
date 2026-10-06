@@ -640,6 +640,13 @@ test('failed restart navigation closes the newly reserved recovery Page', async 
     assert.equal(service.pageRegistry.listBindings().length, before, 'a missing page read must not create or navigate a tab');
     assert.deepEqual(service.teamDirectory.getSession(submitted.sessionId), ambiguous,
       'a read preserves the original submission evidence and identity');
+    await rpc(config.socketPath, 'system.defer_account_cooldown', {
+      requestId: 'isolated-recovery-cooldown', observedAt: new Date().toISOString(),
+      until: new Date(Date.now() + 60_000).toISOString(), evidenceRef: 'isolated-fixture-429',
+    });
+    await assert.rejects(service.recoveryService.ensurePage(submitted.sessionId, submitted.generation, { openMissing: true }),
+      { errorCode: 'provider.observation-deferred' });
+    assert.equal(service.pageRegistry.listBindings().length, before, 'paced explicit recovery must not navigate first');
     const recovery = await service.recoveryService.restore({ forceObservers: true });
     const after = service.pageRegistry.listBindings({ includeClosed: false }).length;
     assert.equal(recovery.unavailable, 1);

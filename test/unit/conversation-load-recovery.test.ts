@@ -250,6 +250,28 @@ test('scheduler turn deferral is distinct from account cooldown and normal refre
   } finally { await f.dispose(service); }
 });
 
+test('a cooldown arriving during the actor wait defers the click without spending an attempt', async () => {
+  const f = fixture(1), service = f.make();
+  let release!: () => void;
+  try {
+    const before = f.database.raw.prepare('SELECT * FROM generations').all();
+    const held = f.scheduler.actorFor(f.controls[0]!.sessionId).enqueue(() => new Promise<void>(resolve => { release = resolve; }));
+    await new Promise(resolve => setImmediate(resolve));
+    const sweep = service.sweep();
+    await new Promise(resolve => setImmediate(resolve));
+    f.probes.defer('chatgpt:default', '2026-10-06T00:15:00.000Z');
+    release(); await Promise.all([held, sweep]);
+    assert.deepEqual(f.clicks, []);
+    const waiting = service.repository.get('conversation-0')!;
+    assert.equal(waiting.reason, 'account-cooldown');
+    assert.equal(waiting.attempts, 0);
+    assert.equal(waiting.lastAttemptAt, null);
+    f.advance(900_000); await service.sweep();
+    assert.deepEqual(f.clicks, ['conversation-0']);
+    assert.deepEqual(f.database.raw.prepare('SELECT * FROM generations').all(), before);
+  } finally { release?.(); await f.dispose(service); }
+});
+
 test('closing/reopening SQLite preserves100-attempt receipt and global spacing without altering original data', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-load-db-restart-'));
   const file = path.join(root, 'state.sqlite');

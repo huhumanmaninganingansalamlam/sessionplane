@@ -175,6 +175,11 @@ export class ConversationLoadRecovery {
               this.#record(record, current, 'held', surface.reason); return;
             }
             if (record.attempts >= LOAD_RECOVERY_MAX_ATTEMPTS) { this.#exhaust(record, current); return; }
+            // The actor/page wait or surface read may outlive the probe's original permission.
+            const blockedUntil = this.repository.pacing().account?.blockedUntil;
+            if (blockedUntil && Date.parse(blockedUntil) > this.now()) {
+              this.#record(record, current, 'waiting', 'account-cooldown'); return;
+            }
             record.attempts++;
             record.lastAttemptAt = new Date(this.now()).toISOString();
             record.lastOutcome = 'uncertain';

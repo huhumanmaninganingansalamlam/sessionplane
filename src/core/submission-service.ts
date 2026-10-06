@@ -879,6 +879,7 @@ export class SubmissionService {
   async refreshPage(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string },
     reload: (snapshot: SessionSnapshot) => Promise<void>,
+    verifyPage?: (snapshot: SessionSnapshot) => Promise<void>,
   ): Promise<void> {
     const method = 'session.page.refresh';
     const requestHash = hashCanonical({ method, requestId: input.requestId, sessionId: input.sessionId, generation: input.generation });
@@ -902,11 +903,16 @@ export class SubmissionService {
       if (snapshot.pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'Inspect the exact request to recover its page before refreshing');
       await this.#pageMutex.runExclusive(snapshot.pageKey, async () => {
         const recovery = new ConversationLoadRecoveryRepository(this.#database);
-        const nextAllowedAt = recovery.effectiveNextAllowedAt();
-        if (nextAllowedAt !== null && Date.parse(nextAllowedAt) > this.#now().getTime()) {
-          throw new SessionPlaneDomainError('provider.observation-deferred',
-            `Page refresh was not dispatched: shared ChatGPT pacing requires waiting until ${nextAllowedAt}`);
-        }
+        const requireReady = () => {
+          const nextAllowedAt = recovery.effectiveNextAllowedAt();
+          if (nextAllowedAt !== null && Date.parse(nextAllowedAt) > this.#now().getTime()) {
+            throw new SessionPlaneDomainError('provider.observation-deferred',
+              `Page refresh was not dispatched: shared ChatGPT pacing requires waiting until ${nextAllowedAt}`);
+          }
+        };
+        requireReady();
+        await verifyPage?.(snapshot);
+        requireReady();
         const record = (status: 'attempted' | 'complete') => receipts.record({
           clientId: input.clientId, requestId: input.decisionId, method, requestHash, status,
           result: { requestId: input.requestId, sessionId: input.sessionId, generation: input.generation,

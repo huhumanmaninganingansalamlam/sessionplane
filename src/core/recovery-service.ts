@@ -12,6 +12,7 @@ import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { PageBindingRepository } from '../storage/page-binding-repository.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
+import { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
 import type { RuntimeMetrics } from '../telemetry/metrics.ts';
 import type { ObservationService } from './observation-service.ts';
 import type { SubmissionService } from './submission-service.ts';
@@ -60,6 +61,7 @@ export class RecoveryService {
   readonly #adapters: ProviderAdapterRegistry;
   readonly #submissions: SubmissionService;
   readonly #sessions: SessionRepository;
+  readonly #loadRecovery: ConversationLoadRecoveryRepository;
   readonly #pageBindings: PageBindingRepository;
   readonly #providerUrls: RecoveryProviderUrls;
   readonly #metrics: RuntimeMetrics | null;
@@ -79,6 +81,7 @@ export class RecoveryService {
     this.#adapters = options.adapters;
     this.#submissions = options.submissions;
     this.#sessions = new SessionRepository(options.database.raw);
+    this.#loadRecovery = new ConversationLoadRecoveryRepository(options.database);
     this.#pageBindings = new PageBindingRepository(options.database.raw);
     this.#providerUrls = {
       chatgptUrl: options.chatgptUrl,
@@ -118,6 +121,13 @@ export class RecoveryService {
           return;
         } catch (error) {
           if (!(error instanceof PageRegistryError) || error.errorCode !== 'browser.unavailable') throw error;
+        }
+      }
+      if (options.openMissing === true && snapshot.provider === 'chatgpt') {
+        const nextAllowedAt = this.#loadRecovery.effectiveNextAllowedAt();
+        if (nextAllowedAt !== null && Date.parse(nextAllowedAt) > this.#now().getTime()) {
+          throw new SessionPlaneDomainError('provider.observation-deferred',
+            `Missing-page recovery was not dispatched: shared ChatGPT pacing requires waiting until ${nextAllowedAt}`);
         }
       }
       const recovered = await this.#reconcilePage(snapshot, options.openMissing === true);
