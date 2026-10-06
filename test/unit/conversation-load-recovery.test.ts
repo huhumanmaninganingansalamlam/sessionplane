@@ -191,16 +191,42 @@ test('changed surface in the last click guard dispatches nothing and retains req
   } finally { await f.dispose(service); }
 });
 
-test('429 Retry-After from a bound page defers all tabs and survives recovery owner restart', async () => {
+test('bound-page429 retains sanitized server evidence and unchanged global protection across restart', async () => {
   const f = fixture(2), service = f.make(); const resumed = f.make();
+  const before = f.database.raw.prepare('SELECT * FROM generations').all();
   try {
     await service.sweep();
-    f.controls[0]!.response!({ status: () => 429, url: () => 'https://chatgpt.com/backend-api/conversation', headers: () => ({ 'retry-after': '600' }) });
+    const response = (headers: Record<string, string>) => ({ status: () => 429,
+      url: () => 'https://chatgpt.com/backend-api/f/conversations/private-id?token=private-query',
+      request: () => ({ method: () => 'GET' }), headers: () => headers,
+      body: () => { throw Error('Response bodies must never be collected'); } });
+    f.controls[0]!.response!(response({ 'retry-after': '600', 'ratelimit-remaining': '0', 'x-ratelimit-scope': 'endpoint',
+      'x-ratelimit-reset-requests': '1m2s', 'ratelimit-limit': 'private-label',
+      'set-cookie': 'private-cookie', authorization: 'private-token', 'x-extra': 'private-extra' }));
+    const evidence = () => f.database.raw.prepare("SELECT payload_json FROM events WHERE event_type='provider.rate-limit-observed' ORDER BY sequence").all()
+      .map(r => JSON.parse(r.payload_json as string));
+    assert.equal(evidence().length, 1);
+    assert.deepEqual(evidence()[0].headers, { 'ratelimit-remaining': '0', 'x-ratelimit-reset-requests': '1m2s',
+      'x-ratelimit-scope': 'endpoint', 'retry-after': '600' });
+    assert.equal(evidence()[0].endpointCategory, 'conversation-list');
+    assert.equal(evidence()[0].method, 'GET');
+    assert.equal(evidence()[0].serverScope, 'unverified');
+    assert.equal(evidence()[0].retryAfterSource, 'valid-header');
     await service.close(); f.advance(60_000); await resumed.sweep(); assert.equal(f.clicks.length, 1);
     const pacing = resumed.status();
     assert.equal(pacing.nextAllowedAt, pacing.pacing.account!.blockedUntil);
     assert.equal(pacing.pacing.ui!.nextAllowedAt, pacing.nextAllowedAt);
     f.advance(540_000); await resumed.sweep(); assert.equal(f.clicks.length, 2);
+    f.controls[1]!.response!(response({}));
+    assert.equal(evidence()[1].retryAfterSource, 'header-absent-fallback');
+    assert.equal(evidence()[1].fallbackMs, 900_000);
+    assert.equal(evidence()[1].effectiveUntil, '2026-10-06T00:25:00.000Z');
+    f.controls[1]!.response!(response({ 'retry-after': 'private-invalid' }));
+    assert.equal(evidence()[2].retryAfterSource, 'header-invalid-fallback');
+    assert.deepEqual(evidence()[2].headers, {});
+    assert.ok(!JSON.stringify(evidence()).includes('private-'));
+    await resumed.sweep(); assert.equal(f.clicks.length, 2);
+    assert.deepEqual(f.database.raw.prepare('SELECT * FROM generations').all(), before);
   } finally { await f.dispose(service, resumed); }
 });
 

@@ -12,6 +12,27 @@ import { conversationLoadSurface, type LoadSurface } from '../providers/chatgpt/
 
 export const LOAD_RECOVERY_INTERVAL_MS = 60_000;
 export const LOAD_RECOVERY_MAX_ATTEMPTS = 100;
+function limitationHeaders(headers: Record<string, string>): Record<string, string> {
+  const safe: Record<string, string> = {};
+  for (const name of ['ratelimit-limit', 'ratelimit-remaining', 'ratelimit-reset',
+    'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset',
+    'x-ratelimit-limit-requests', 'x-ratelimit-remaining-requests', 'x-ratelimit-reset-requests']) {
+    const value = headers[name]?.trim();
+    if (value && value.length <= 80 && /^(?:\d+(?:\.\d+)?|(?:\d+(?:\.\d+)?(?:ms|s|m|h|d))+)$/.test(value)) safe[name] = value;
+  }
+  for (const name of ['ratelimit-scope', 'x-ratelimit-scope']) {
+    const value = headers[name]?.trim().toLowerCase();
+    if (value && /^(account|user|ip|endpoint|route|model|global)$/.test(value)) safe[name] = value;
+  }
+  return safe;
+}
+
+function endpointCategory(path: string): string {
+  if (/^\/backend-api\/(?:f\/)?conversations(?:\/|$)/.test(path)) return 'conversation-list';
+  if (/^\/backend-api\/(?:f\/)?conversation(?:\/|$)/.test(path)) return 'conversation-detail';
+  if (/telemetry|metrics|analytics|events/.test(path)) return 'telemetry-or-events';
+  return path.startsWith('/backend-api/') ? 'other-backend' : 'other-chatgpt';
+}
 type Services = { database: SessionPlaneDatabase; registry: PageRegistry; pageMutex: PageMutationMutex;
   scheduler: ActorScheduler; probes: ProbeCoordinator; chatgptUrl: string; minimumIntervalMs?: number };
 
@@ -68,16 +89,37 @@ export class ConversationLoadRecovery {
       })]);
     } finally { clearTimeout(timer); }
   }
-  #attach(page: Page): void {
+  #attach(page: Page, pageKey: string): void {
     if (this.#attached.has(page)) return;
     this.#attached.add(page);
     page.on('response', response => {
       if (this.#closed || response.status() !== 429 || new URL(response.url()).origin !== this.#origin) return;
-      const header = response.headers()['retry-after'];
-      const specified = header && /^\d+(?:\.\d+)?$/.test(header) ? this.now() + Number(header) * 1000 : Date.parse(header ?? '');
-      const until = new Date(Math.max(this.now() + this.intervalMs, Number.isFinite(specified) ? specified : this.now() + 15 * 60_000)).toISOString();
-      this.repository.defer(until, new Date(this.now()).toISOString());
+      const received = this.now(), headers = response.headers(), header = headers['retry-after'];
+      const specified = header && /^\d+(?:\.\d+)?$/.test(header) ? received + Number(header) * 1000 : Date.parse(header ?? '');
+      const valid = Number.isFinite(specified);
+      const until = new Date(Math.max(received + this.intervalMs, valid ? specified : received + 15 * 60_000)).toISOString();
+      this.repository.defer(until, new Date(received).toISOString());
       this.services.probes.defer('chatgpt:default', until);
+      // Passive evidence only: no body read, probe, raw URL/query or arbitrary header values.
+      try {
+        const binding = this.services.registry.getBinding(pageKey);
+        const session = binding.sessionId && this.#sessions.getSnapshot(binding.sessionId);
+        if (binding.state !== 'owned' || !session || session.pageKey !== pageKey ||
+          session.generation !== binding.generation || session.conversationId !== binding.conversationId) return;
+        const safeHeaders = limitationHeaders(headers);
+        if (valid) safeHeaders['retry-after'] = /^\d+(?:\.\d+)?$/.test(header!) ? String(Number(header)) : new Date(specified).toUTCString();
+        const method = response.request().method();
+        this.#events.append({ teamId: session.teamId, roleId: session.roleId, sessionId: session.sessionId,
+          generation: session.generation, eventType: 'provider.rate-limit-observed', createdAt: new Date(received).toISOString(),
+          payload: { status: 429, method: /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(method) ? method : 'unknown',
+            endpointCategory: endpointCategory(new URL(response.url()).pathname), headers: safeHeaders,
+            pageKey, bindingEpoch: binding.bindingEpoch, association: 'owned-page-at-response',
+            retryAfterSource: valid ? 'valid-header' : header === undefined ? 'header-absent-fallback' : 'header-invalid-fallback',
+            retryAfterDurationMs: valid ? Math.max(0, specified - received) : null,
+            minimumIntervalMs: this.intervalMs, fallbackMs: valid ? null : 900_000,
+            policyScope: 'chatgpt:default', serverScope: 'unverified', policyUntil: until,
+            effectiveUntil: this.repository.effectiveNextAllowedAt() } });
+      } catch { /* Evidence failure cannot weaken or retry the existing cooldown operation. */ }
     });
   }
   async #sweep(): Promise<void> {
@@ -89,7 +131,7 @@ export class ConversationLoadRecovery {
           session.generation !== binding.generation || ['submitting', 'queued'].includes(session.submissionState ?? '')) continue;
       try {
         const page = this.services.registry.requireSessionPage(binding.pageKey, session);
-        this.#attach(page);
+        this.#attach(page, binding.pageKey);
         const surface = await this.#surface(page, session, false);
         targets.set(binding.conversationId, session);
         const prior = this.repository.get(binding.conversationId);
