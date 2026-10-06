@@ -194,6 +194,7 @@ test('first send returns observed combinations; subsequent requests select an ID
     const option = catalog.options.find(o => o.label === 'Aurora-8 / Deep')!;
     assert.ok(option);
     const page = pages.find(p => p.url() === 'https://chatgpt.com/')!;
+    await page.waitForFunction(() => document.querySelector('#chooser')?.textContent === 'Balanced', undefined, { timeout: 5_000 });
     assert.equal(await page.locator('#chooser').innerText(), 'Balanced', 'discovery restores configuration');
     assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');
     assert.equal(first.promptSubmitted, false);
