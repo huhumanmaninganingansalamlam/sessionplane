@@ -368,8 +368,12 @@ async function hasClearedComposer(page: Page): Promise<boolean> {
     const editor = editors.nth(index);
     if (!(await editor.isVisible())) continue;
     visible += 1;
-    const values = await readExactTextCandidates(editor);
-    if (values.length === 0 || values.some((value) => value.trim() !== '')) return false;
+    const cleared = await editor.evaluate((element) => {
+      // textarea textContent is its default value, not the current draft.
+      if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) return element.value.trim() === '';
+      return element instanceof HTMLElement && element.innerText.trim() === '' && (element.textContent ?? '').trim() === '';
+    }, undefined, { timeout: COMPOSER_READ_TIMEOUT_MS }).catch(() => false);
+    if (!cleared) return false;
   }
   return visible === 1;
 }

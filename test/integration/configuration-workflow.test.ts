@@ -319,7 +319,7 @@ test('timeout recovery validates fresh summaries, rejects closed-menu evidence a
     const created = await createPage(...args);
     // A previous Pro version is intentional, not a latest-version fallback.
     await created.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html',
-      body: fixture.replaceAll('Aurora-8', '5.5').replaceAll('Deep', 'Pro').replaceAll(' / ', ' ')
+      body: fixture.replace('<textarea', '<textarea id="prompt-textarea"').replaceAll('Aurora-8', '5.5').replaceAll('Deep', 'Pro').replaceAll(' / ', ' ')
         .replace('</script>', `document.querySelector('form').addEventListener('submit', () => {
           history.pushState({}, '', '/c/11111111-1111-4111-8111-111111111111');
           const user = document.createElement('div');
@@ -327,6 +327,9 @@ test('timeout recovery validates fresh summaries, rejects closed-menu evidence a
           user.setAttribute('data-message-id', 'summary-fixture-user');
           user.setAttribute('data-turn-id', 'summary-fixture-turn');
           user.textContent = document.querySelector('textarea').value;
+          void fetch('/backend-api/conversation', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: [{ id: 'summary-fixture-user', author: { role: 'user' } }] }) });
+          document.querySelector('textarea').value = '';
           document.querySelector('main').appendChild(user);
         });</script>`) }));
     return created;
@@ -440,7 +443,7 @@ test('timeout recovery validates fresh summaries, rejects closed-menu evidence a
     assert.equal(service.database.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE event_type='generation.submit-attempted'").get()!.n, 1);
     assert.equal(service.database.raw.prepare('SELECT COUNT(*) AS n FROM outbox').get()!.n, 1);
     assert.deepEqual(hashes(), original);
-    assert.equal(await page.locator('textarea').inputValue(), prompt);
+    assert.equal(await page.locator('textarea').inputValue(), '');
     assert.equal(await page.locator('#chooser').innerText(), '5.5 Pro');
   } finally {
     await service.close();
