@@ -13,6 +13,12 @@ import { ActorScheduler } from '../../src/scheduler/actor-scheduler.ts';
 import { ProbeCoordinator } from '../../src/scheduler/probe-coordinator.ts';
 import type { LoadSurface } from '../../src/providers/chatgpt/conversation-load-recovery.ts';
 import { ConversationLoadRecoveryRepository } from '../../src/storage/conversation-load-recovery-repository.ts';
+import { startCore } from '../../src/main.ts';
+import { resolveConfig } from '../../src/config.ts';
+import { invokeMcpTool } from '../../src/mcp/tools.ts';
+import { OutboxRepository } from '../../src/storage/outbox-repository.ts';
+import { PassThrough } from 'node:stream';
+import { runMcpServer } from '../../src/mcp/server.ts';
 
 function fixture(count = 3) {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-load-recovery-'));
@@ -73,12 +79,78 @@ test('99 to100 never clicks101, exhaustion notice is durable and emitted once', 
     await service.sweep(); const r = service.repository.get('conversation-0')!;
     r.attempts = 99; service.repository.save(r);
     f.advance(); await service.sweep(); assert.equal(service.repository.get(r.conversationId)!.attempts, 100);
+    const before = f.database.raw.prepare('SELECT * FROM generations').all();
+    const waiting = f.scheduler.waitSession(f.controls[0]!.sessionId, { waitMs: 30_000 });
+    assert.equal(f.scheduler.totalSubscriberCount, 1);
     f.advance(); await service.sweep(); const exhausted = service.repository.get(r.conversationId)!;
+    assert.equal((await waiting).waitExpired, false, 'exhaustion wakes the existing native actor wait');
+    assert.deepEqual(f.database.raw.prepare('SELECT * FROM generations').all(), before);
     assert.equal(exhausted.state, 'exhausted'); assert.ok(exhausted.notifiedAt);
     for (let n = 0; n < 3; n++) { f.advance(); await service.sweep(); }
     assert.equal(f.clicks.length, 2);
     assert.equal(f.database.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE json_extract(payload_json,'$.state')='exhausted'").get()!.n, 1);
   } finally { await f.dispose(service); }
+});
+
+test('isolated MCP get/wait delivers an actionable exhaustion notice without terminalizing or resending', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-load-notice-mcp-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({ config, startBrowser: false, logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'notice-fixture' });
+    const session = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    const generation = await core.actorScheduler.startGeneration({ sessionId: session.sessionId, teamBriefVersion: 0, promptHash: 'original-hash' });
+    await core.actorScheduler.updateGeneration(session.sessionId, generation.generation, {
+      sessionState: 'observing', providerState: 'unknown', submissionState: 'submission_unknown',
+      promptSubmitted: true, submittedUserMessageId: 'original-anchor', conversationId: 'fixture-conversation',
+      answerText: 'retained-partial'.repeat(5000),
+    });
+    const request = new OutboxRepository(core.database).insert({ clientId: 'notice-fixture', requestId: 'original-request',
+      teamId: team.teamId, roleId: session.roleId, sessionId: session.sessionId, generation: generation.generation,
+      payloadJson: '{}', requestHash: 'original-request-hash', createdAt: new Date().toISOString() });
+    const repo = core.conversationLoadRecovery.repository;
+    const record = { conversationId: 'fixture-conversation', url: 'https://chatgpt.com/c/fixture-conversation',
+      sessionId: session.sessionId, pageKey: 'fixture-page', bindingEpoch: 1, attempts: 100,
+      state: 'exhausted' as const, reason: '100-load-retries-exhausted', lastOutcome: 'clicked' as const,
+      lastCheckedAt: '2026-10-06T00:00:00Z', lastAttemptAt: '2026-10-06T00:00:00Z', notifiedAt: '2026-10-06T00:01:00Z' };
+    repo.save(record);
+    const before = core.database.raw.prepare('SELECT * FROM generations').all();
+    const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: `sessionplane_${name}`,
+      arguments: args, socketPath: config.socketPath, timeoutMs: 3000, maxLineBytes: config.rpcMaxLineBytes });
+    const teamResult = await invoke('team_get', { teamId: team.teamId });
+    const notification = (teamResult.structuredContent.notifications as { id: string; requestRef: string; url: string }[])[0]!;
+    assert.equal(notification.requestRef, request.outboxId); assert.equal(notification.url, record.url);
+    assert.match(JSON.stringify(teamResult.structuredContent), /Automatic conversation-load recovery stopped after100 attempts/);
+    const exact = await invoke('team_get', { teamId: team.teamId, requestRef: request.outboxId });
+    const waited = await invoke('wait', { teamId: team.teamId, requestRefs: [request.outboxId], waitMs: 30_000 });
+    for (const result of [exact.structuredContent.request, (waited.structuredContent.results as Record<string, unknown>[])[0]!]) {
+      const value = result as Record<string, any>;
+      assert.equal(value.status, 'recovery_required'); assert.equal(value.recovery.state, 'exhausted');
+      assert.equal(value.notification.id, notification.id); assert.equal(value.submissionState, 'submission_unknown');
+      assert.equal(value.promptSubmitted, true); assert.equal(value.terminal, false);
+      assert.equal(value.submittedUserMessageId, 'original-anchor'); assert.equal(value.waitExpired, false);
+    }
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations').all(), before);
+    assert.equal(core.database.raw.prepare('SELECT count(*) AS n FROM outbox').get()!.n, 1);
+    const input = new PassThrough(), output = new PassThrough(), error = new PassThrough();
+    let wire = ''; output.on('data', chunk => { wire += String(chunk); });
+    const server = runMcpServer({ config, input, output, error });
+    input.end([
+      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sessionplane_team_get', arguments: { teamId: team.teamId, requestRef: request.outboxId } } },
+    ].map(value => JSON.stringify(value) + '\n').join(''));
+    await server;
+    const response = wire.trim().split('\n').map(line => JSON.parse(line)).find(value => value.id === 2);
+    const visible = JSON.parse(response.result.content[0].text);
+    assert.equal(visible.truncatedInText, true);
+    assert.equal(visible.notifications.length, 1, 'team and exact notice deduplicate in visible text');
+    assert.equal(visible.notifications[0].id, notification.id);
+    assert.equal(visible.notifications[0].url, record.url);
+    assert.match(visible.notifications[0].message, /Review the original conversation/);
+    assert.equal(response.result.structuredContent.request.submittedUserMessageId, 'original-anchor');
+    repo.save({ ...record, state: 'recovered', reason: 'conversation-rendered' });
+    assert.equal((await invoke('team_get', { teamId: team.teamId })).structuredContent.notifications, undefined);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test('restart and page rebinding retain attempt count, global deadline and fair next tab', async () => {

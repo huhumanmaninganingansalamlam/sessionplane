@@ -273,6 +273,13 @@ function callToolResult(
   isError: boolean,
 ): Readonly<Record<string, unknown>> {
   const serialized = JSON.stringify(structuredContent);
+  const notices = [
+    ...(Array.isArray(structuredContent.notifications) ? structuredContent.notifications : []),
+    ...[structuredContent, structuredContent.request,
+      ...(Array.isArray(structuredContent.results) ? structuredContent.results : [])]
+      .flatMap(value => isRecord(value) && isRecord(value.notification) ? [value.notification] : []),
+  ].filter(value => isRecord(value) && value.type === 'conversation-load-recovery-exhausted' && typeof value.id === 'string');
+  const notifications = [...new Map(notices.map(value => [value.id, value])).values()];
   const text =
     Buffer.byteLength(serialized, 'utf8') <= 64 * 1024
       ? serialized
@@ -281,6 +288,7 @@ function callToolResult(
           truncatedInText: true,
           byteLength: Buffer.byteLength(serialized, 'utf8'),
           note: 'The exact full result is available in structuredContent.',
+          ...(notifications.length === 0 ? {} : { notifications }),
         });
   return {
     content: [{ type: 'text', text }],

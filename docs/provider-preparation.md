@@ -396,7 +396,20 @@ automatically reset by a later error on the same conversation.
 and per-conversation state/URL/attempts/last outcome/binding identity. Exact native
 team_get adds the same conversation's `conversationLoadRecovery` record. State
 transitions append body-free `conversation.load-recovery` events; `notifiedAt`
-identifies a single exhaustion notice for the target, without repeated alerts.
+records creation of a single exhaustion notice, not proof of human delivery/read.
+On exhaustion, the committed event also wakes existing actor/native waiters.
+Exact `sessionplane_team_get` and `sessionplane_wait` return `status: recovery_required`,
+`recovery.state: exhausted`, a human-readable message and `notification` with the
+original URL, requestRef,100 attempts and a stable per-conversation ID. Team get
+without a requestRef exposes the pending roles' notices in `notifications`.
+A later wait returns this condition immediately rather than waiting for another
+generation event. The MCP tool's text and structured result carry the notice to
+the Coordinator, which reports the target and required manual review to the user
+once per notification ID. A disconnected/idle Coordinator receives it on its next
+get/wait; there is no unsolicited desktop popup, email or proof the user read it.
+The same stable notice remains retrievable across restart without creating a new
+alert. Normal manual recovery clears the active notice. This never changes the
+request's submitted/terminal status or fabricates an answer.
 States distinguish waiting, held, attempting, recovered and exhausted. A returned
 click is only dispatch evidence, not proof of page recovery. Recovery requires the
 exact loaded history and composer; screenshot/compositor health remains independent.

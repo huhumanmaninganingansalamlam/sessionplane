@@ -117,6 +117,15 @@ out prompts, infer consensus, or inject answers into other roles.
 
 ## Recovery and cleanup
 
+- If get/wait returns `recovery.state: "exhausted"`, automatic conversation-load
+  clicks stopped at100. Report its `notification.message` and original URL to the
+  user once per stable notification ID, then await manual review of that original
+  conversation. Team get also exposes pending notices in `notifications`.
+  Preserve submitted/UNKNOWN identities and stored results; do not reset the
+  counter, resend, replace or delete as a substitute. No terminal generation is
+  implied. Existing waits wake on this notice; offline clients see it on next
+  get/wait. `notifiedAt` is notice creation, not a human read acknowledgement.
+
 - The core automatically recovers an exact ChatGPT **conversation-load** error
   by clicking only the page button immediately below that error (not a generation
   Retry). All owned conversations share one durable fair queue: at most one attempt

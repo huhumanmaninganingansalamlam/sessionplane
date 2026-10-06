@@ -22,6 +22,7 @@ type RoleInput = Mutation & { roleRef: string };
 export class TeamWorkflow {
   readonly #outbox: OutboxRepository;
   readonly #sessions: SessionRepository;
+  readonly #loadRecovery: ConversationLoadRecoveryRepository;
   readonly services: {
     database: SessionPlaneDatabase; directory: TeamDirectory; receipts: ReceiptRepository;
     submissions: SubmissionService; ui: SessionUiService; scheduler: ActorScheduler;
@@ -33,6 +34,7 @@ export class TeamWorkflow {
     this.services = services;
     this.#outbox = new OutboxRepository(services.database);
     this.#sessions = new SessionRepository(services.database.raw);
+    this.#loadRecovery = new ConversationLoadRecoveryRepository(services.database);
   }
 
   createTeam(input: { requestId: string; name?: string | undefined; objective?: string | undefined; provider: ProviderName }) {
@@ -50,6 +52,10 @@ export class TeamWorkflow {
 
   async getTeam(input: { teamId: string; requestRef?: string | undefined; maxNodes?: number | undefined; history?: boolean | undefined; beforeRequestRef?: string | undefined }) {
     const team = this.services.directory.getTeam(input.teamId);
+    const notifications = team.roles.flatMap(role => {
+      const notice = role.currentSessionId === null ? null : this.#loadRecoveryNotice(this.services.directory.getSession(role.currentSessionId));
+      return notice === null ? [] : [notice];
+    });
     const before = input.beforeRequestRef === undefined ? undefined : this.#request({ teamId: input.teamId, requestRef: input.beforeRequestRef });
     const history = input.history === true || before !== undefined
       ? this.#outbox.historyForTeam(team.teamId, before)
@@ -60,6 +66,7 @@ export class TeamWorkflow {
       roles: team.roles.map((r) => ({ ...r, roleRef: r.currentSessionId === null ? null : `${r.currentSessionId}:${r.generation}`,
         conversationUsage: this.#conversationUsage(r.currentSessionId) })),
       ...history,
+      ...(notifications.length === 0 ? {} : { notifications }),
       ...(input.requestRef === undefined ? {} : { request: await this.#observe(this.#request({ teamId: input.teamId, requestRef: input.requestRef }), input.maxNodes, true) }),
     };
   }
@@ -219,7 +226,7 @@ export class TeamWorkflow {
         const request = this.#request({ teamId: input.teamId, requestRef });
         const current = this.services.directory.getSession(request.sessionId);
         let waitExpired = false;
-        if (current.generation === request.generation && !needsDecision(current) && this.#lostSubmission(current) === null) {
+        if (current.generation === request.generation && !needsDecision(current) && this.#loadRecoveryNotice(current) === null && this.#lostSubmission(current) === null) {
           const waited = await this.services.scheduler.waitSession(request.sessionId, { expectedGeneration: request.generation, waitMs: input.waitMs });
           waitExpired = waited.waitExpired;
         }
@@ -307,7 +314,13 @@ export class TeamWorkflow {
   }
 
   async #observe(request: OutboxRecord, maxNodes?: number, inspectCurrent = false): Promise<Record<string, unknown>> {
-    const result = await this.#observeRequest(request, maxNodes, inspectCurrent);
+    const notificationSnapshot = this.#sessions.getSnapshot(request.sessionId)!;
+    const notice = notificationSnapshot.generation === request.generation ? this.#loadRecoveryNotice(notificationSnapshot) : null;
+    const result = notice === null ? await this.#observeRequest(request, maxNodes, inspectCurrent)
+      : { ...notificationSnapshot, requestRef: request.outboxId, roleRef: roleRef(notificationSnapshot), status: 'recovery_required',
+        message: notice.message, notification: notice,
+        recovery: { state: 'exhausted', reason: '100-load-retries-exhausted', automaticRetry: false,
+          nextAction: notice.nextAction, url: notice.url } };
     const payload = JSON.parse(request.payloadJson);
     const optedIn = payload.thinkingFailureRecovery === true;
     const rootRequestRef = payload.failureContinuation?.rootRequestRef ?? request.outboxId;
@@ -323,14 +336,24 @@ export class TeamWorkflow {
       : tailResult?.completedAt != null && tailResult.errorCode === null && tailResult.responseMessageId !== null;
     const stopped = current.generation > tail.generation ||
       (current.generation === tail.generation && current.terminal && !complete && current.reason !== 'thinking-failed-reconciled');
-    const loadRepository = new ConversationLoadRecoveryRepository(this.services.database);
-    const loadRecovery = typeof result.conversationId === 'string' ? loadRepository.get(result.conversationId) : null;
-    return { ...result, ...(loadRecovery ? { conversationLoadRecovery: { ...loadRecovery, nextAllowedAt: loadRepository.nextAllowedAt() } } : {}), ...(optedIn ? { thinkingFailureRecovery: {
+    const loadRecovery = typeof result.conversationId === 'string' ? this.#loadRecovery.get(result.conversationId) : null;
+    return { ...result, ...(loadRecovery ? { conversationLoadRecovery: { ...loadRecovery, nextAllowedAt: this.#loadRecovery.nextAllowedAt() } } : {}), ...(optedIn ? { thinkingFailureRecovery: {
       enabled: paused === null && !complete && !stopped, sender: paused || complete || stopped ? 'coordinator' : 'core',
       ...(paused ? JSON.parse(paused.resultJson) : { state: complete ? 'complete' : stopped ? 'stopped' : 'observing' }),
       successorRequestRef: successor?.outboxId ?? null } } : {}), conversationUsage: this.#conversationUsage(request.sessionId),
       ...(this.services.stops.hasUnconfirmedStop(request.sessionId, request.generation)
         ? { stopOutcome: { state: 'unknown', automaticRetry: false } } : {}) };
+  }
+
+  #loadRecoveryNotice(snapshot: SessionSnapshot) {
+    if (snapshot.terminal || snapshot.conversationId === null) return null;
+    const record = this.#loadRecovery.get(snapshot.conversationId);
+    if (record?.state !== 'exhausted') return null;
+    return { id: `conversation-load-exhausted:${record.conversationId}`, type: 'conversation-load-recovery-exhausted',
+      requestRef: this.#outbox.getByGeneration(snapshot.sessionId, snapshot.generation)?.outboxId ?? null,
+      conversationId: record.conversationId, url: record.url, attempts: record.attempts,
+      createdAt: record.notifiedAt, automaticRetry: false, nextAction: 'human_review_original_conversation',
+      message: `Automatic conversation-load recovery stopped after100 attempts. Review the original conversation: ${record.url}. The existing request, submission identity and results are preserved. Do not resend, reset the counter or replace/delete the conversation as an automatic recovery action.` };
   }
 
   #conversationUsage(sessionId: string | null) {
