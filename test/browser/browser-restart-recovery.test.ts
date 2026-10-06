@@ -635,6 +635,11 @@ test('failed restart navigation closes the newly reserved recovery Page', async 
     assert.equal(ambiguous.pageKey, null);
 
     const before = service.pageRegistry.listBindings({ includeClosed: false }).length;
+    await assert.rejects(service.recoveryService.ensurePage(submitted.sessionId, submitted.generation),
+      { errorCode: 'browser.unavailable' });
+    assert.equal(service.pageRegistry.listBindings().length, before, 'a missing page read must not create or navigate a tab');
+    assert.deepEqual(service.teamDirectory.getSession(submitted.sessionId), ambiguous,
+      'a read preserves the original submission evidence and identity');
     const recovery = await service.recoveryService.restore({ forceObservers: true });
     const after = service.pageRegistry.listBindings({ includeClosed: false }).length;
     assert.equal(recovery.unavailable, 1);

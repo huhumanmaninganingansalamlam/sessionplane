@@ -941,28 +941,16 @@ export class SubmissionService {
       const pending = this.#requirePreparationOwner(input);
       let snapshot = this.#requireSnapshot(input.sessionId);
       this.#requireAccountReady(snapshot);
-      const payload = parseOutboxPayload(pending);
-      const adapter = this.#adapters.require(snapshot.provider);
-      const submission = await adapter.openSubmission({
-        session: snapshot,
-        generation: snapshot.generation,
-        prompt: payload.prompt,
-        model: payload.model,
-        effort: payload.effort,
-        surface: payload.surface,
-        attachments: payload.attachments,
-      });
-      if (submission.provider !== 'chatgpt' || submission.prepareForObservation === undefined) {
+      this.#adapters.require(snapshot.provider);
+      if (snapshot.provider !== 'chatgpt') {
         throw new SessionPlaneDomainError('capability.unsupported', 'Provider cannot inspect assisted preparation state');
       }
-      if (snapshot.pageKey !== submission.pageKey) {
-        snapshot = this.#persistPageKey(actor, pending, submission.pageKey);
-      }
-      const pageKey = submission.pageKey;
+      // Status inspection must not open a submission or navigate a missing page.
+      const pageKey = snapshot.pageKey;
+      if (pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'Exact preparation page is unavailable');
       return await this.#pageMutex.runExclusive(pageKey, async () => {
         this.#requirePreparationOwner(input);
         this.#requireAccountReady(this.#requireSnapshot(input.sessionId));
-        await submission.prepareForObservation?.();
         snapshot = this.#requireSnapshot(input.sessionId);
         if (snapshot.pageKey !== pageKey || pending.sessionId !== snapshot.sessionId) {
           throw new SessionPlaneDomainError('session.generation-superseded', 'Preparation page changed during inspection');

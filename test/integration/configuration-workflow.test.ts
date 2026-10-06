@@ -155,6 +155,23 @@ test('unavailable preparation never offers Retry as submit and preserves the sam
     assert.equal(await restoredPage.evaluate(() => (window as any).submits), 0);
     assert.equal(service.database.raw.prepare('SELECT COUNT(*) AS n FROM outbox').get()!.n, 1);
     assert.equal(service.database.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE event_type='generation.submit-attempted'").get()!.n, 0);
+    const beforeLostPage = service.teamDirectory.getSession(initial.sessionId);
+    const pagesBeforeRead = service.pageRegistry.listBindings().length;
+    owner.createPage = async () => { throw new Error('A status read must not create a provider page'); };
+    await restoredPage.close();
+    const lost = await inspect();
+    const waited = await invoke('wait', { teamId: identity.teamId, requestRefs: [identity.requestRef], waitMs: 1 });
+    assert.equal(waited.isError, false, JSON.stringify(waited));
+    for (const current of [lost, (waited.structuredContent.results as any[])[0]]) {
+      assert.equal(current.requestRef, initial.requestRef);
+      assert.equal(current.generation, initial.generation);
+      assert.equal(current.submissionState, 'prepared');
+      assert.equal(current.promptSubmitted, false);
+      assert.equal(current.evidence, null);
+      assert.equal(current.inspectionError.errorCode, 'browser.unavailable');
+    }
+    assert.equal(service.pageRegistry.listBindings().length, pagesBeforeRead);
+    assert.deepEqual(service.teamDirectory.getSession(initial.sessionId), beforeLostPage);
   } finally {
     await service.close();
     await closeOwner();

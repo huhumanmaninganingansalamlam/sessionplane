@@ -334,7 +334,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     database, directory: teamDirectory, receipts, submissions: submissionService, ui,
     scheduler: actorScheduler, artifacts: artifactService, stops: stopService, cleanup,
     enabledProviders: config.enabledProviders,
-    ensurePage: (sessionId, generation) => recovery.ensurePage(sessionId, generation),
+    ensurePage: (sessionId, generation, options) => recovery.ensurePage(sessionId, generation, options),
   }));
   registerSendMethods(router, submissionService);
   registerStopMethods(router, stopService);

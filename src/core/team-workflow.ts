@@ -29,7 +29,7 @@ export class TeamWorkflow {
     submissions: SubmissionService; ui: SessionUiService; scheduler: ActorScheduler;
     artifacts: ArtifactService; stops: StopService; cleanup: ConversationCleanupService;
     enabledProviders: readonly ProviderName[];
-    ensurePage: (sessionId: string, generation: number) => Promise<void>;
+    ensurePage: (sessionId: string, generation: number, options?: { openMissing?: boolean }) => Promise<void>;
   };
   constructor(services: TeamWorkflow['services']) {
     this.services = services;
@@ -197,7 +197,7 @@ export class TeamWorkflow {
         });
       }
       if (current.conversationId !== null && prior === null) {
-        await this.services.ensurePage(request.sessionId, request.generation);
+        await this.services.ensurePage(request.sessionId, request.generation, { openMissing: true });
       }
       await this.services.ui.refresh({ ...owner, decisionId: input.requestId });
       return await this.#observe(this.#request(input), undefined, true);
@@ -401,7 +401,16 @@ export class TeamWorkflow {
       if (nextCheckAt !== null) return { ...snapshot, requestRef: request.outboxId, roleRef: roleRef(snapshot),
         status: 'needs_decision', reason: 'account-cooldown', nextCheckAt,
         message: 'The same prepared request is waiting for the shared ChatGPT account cooldown. Web preparation and submission are deferred; retain its existing draft and read it again after nextCheckAt.' };
-      const { configurationCatalog, ...evidence } = await this.services.ui.inspect({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });
+      let inspected;
+      try {
+        inspected = await this.services.ui.inspect({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });
+      } catch (error) {
+        if (!(error instanceof SessionPlaneDomainError) ||
+            (!error.errorCode.startsWith('browser.') && error.errorCode !== 'session.page-identity-unverified')) throw error;
+        return { ...snapshot, requestRef: request.outboxId, roleRef: roleRef(snapshot), status: 'needs_decision', evidence: null,
+          inspectionError: { errorCode: error.errorCode, message: error.message } };
+      }
+      const { configurationCatalog, ...evidence } = inspected;
       snapshot = this.services.directory.getSession(request.sessionId);
       const stored = this.#outbox.requireById(request.outboxId);
       const payload = JSON.parse(stored.payloadJson) as Record<string, unknown>;

@@ -102,7 +102,7 @@ export class RecoveryService {
     return operation;
   }
 
-  async ensurePage(sessionId: string, generation: number): Promise<void> {
+  async ensurePage(sessionId: string, generation: number, options: { openMissing?: boolean } = {}): Promise<void> {
     const operation = this.#tail.then(async () => {
       const snapshot = this.#sessions.getSnapshot(sessionId);
       if (snapshot === null || snapshot.generation !== generation) {
@@ -120,7 +120,7 @@ export class RecoveryService {
           if (!(error instanceof PageRegistryError) || error.errorCode !== 'browser.unavailable') throw error;
         }
       }
-      const recovered = await this.#reconcilePage(snapshot);
+      const recovered = await this.#reconcilePage(snapshot, options.openMissing === true);
       if (recovered.unavailable || recovered.conflict || recovered.snapshot.pageKey === null) {
         throw new SessionPlaneDomainError('browser.unavailable', 'Exact request conversation page could not be recovered');
       }
@@ -319,7 +319,7 @@ export class RecoveryService {
         !pageRecoveryAttempted
       ) {
         pageRecoveryAttempted = true;
-        identified = (await this.#reconcilePage(identified)).snapshot;
+        identified = (await this.#reconcilePage(identified, false)).snapshot;
       }
       if (identified.pageKey !== null && identified.conversationId !== null) {
         const recovered = await this.#submissions.recoverAcknowledgement(identified);
@@ -364,7 +364,7 @@ export class RecoveryService {
     );
   }
 
-  async #reconcilePage(snapshot: SessionSnapshot): Promise<{
+  async #reconcilePage(snapshot: SessionSnapshot, openMissing = true): Promise<{
     readonly snapshot: SessionSnapshot;
     readonly rebound: boolean;
     readonly opened: boolean;
@@ -450,7 +450,8 @@ export class RecoveryService {
       }
     }
 
-    if (this.#browserOwner === null) {
+    // Reads may reattach an existing exact page, but never open/navigate a replacement.
+    if (this.#browserOwner === null || !openMissing) {
       return result(snapshot, { unavailable: true });
     }
     let createdPage: Page | null = null;
