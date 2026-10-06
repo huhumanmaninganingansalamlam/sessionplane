@@ -10,7 +10,9 @@ export function conversationLoadSurface(input: { origin: string; conversationId:
   if (!main) return result('other', 'main-unavailable');
   const messages = '[data-message-author-role], [data-chatgpt-search-message-ids], [data-testid="conversation-turn"]';
   const noticePattern = /^(이 ChatGPT 대화를 불러올 수 없습니다|대화를 불러올 수 없습니다|Unable to load conversation(?:\s+[a-f0-9-]+)?|This conversation could not be loaded|Cannot load conversation)[.!]?$/i;
-  const notices = [...main.querySelectorAll('div,p,h1,h2,span')].filter(e => visible(e) && !e.closest(messages) && e.children.length === 0 && noticePattern.test((e.textContent ?? '').trim()));
+  // The live error card has a direct text node followed by its button, not a leaf notice.
+  const ownText = (e: Element) => [...e.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent ?? '').join('').trim();
+  const notices = [...main.querySelectorAll('div,p,h1,h2,span')].filter(e => visible(e) && !e.closest(messages) && noticePattern.test(ownText(e)));
   loadError = notices.length > 0;
   const edits = [...document.querySelectorAll('textarea,input:not([type=hidden]),[contenteditable=true],[role=textbox]')].filter(visible);
   const composer = edits.some(e => e.closest('main') && (e.matches('[contenteditable=true],[role=textbox],textarea')));
@@ -24,13 +26,15 @@ export function conversationLoadSurface(input: { origin: string; conversationId:
   if (notices.length !== 1 || main.querySelector(messages)) return result('held', 'mixed-or-ambiguous-surface');
   if (/captcha|verify you|human verification|로그인|인증|권한|permission|sign in|log in/i.test(main.innerText)) return result('held', 'verification-or-permission');
   if (/too many requests|rate limit|429|사용량.*제한|요청.*너무|잠시 후.*다시/i.test(main.innerText)) return result('held', 'service-limited');
-  let scope: Element | null = notices[0]!.parentElement;
+  let scope: Element | null = notices[0]!;
   for (let i = 0; scope && scope !== main && i < 3; i++, scope = scope.parentElement) {
     const nearby = [...scope.querySelectorAll('button')].filter(visible);
     if (nearby.length !== 1) continue;
     const button = nearby[0]!;
     if (!/^(다시 시도|새로고침|Retry|Reload|Refresh)$/i.test(button.innerText.trim()) || button.disabled || button.getAttribute('aria-disabled') === 'true') continue;
-    const noticeRect = notices[0]!.getBoundingClientRect(), buttonRect = button.getBoundingClientRect();
+    const textNode = [...notices[0]!.childNodes].find(n => n.nodeType === Node.TEXT_NODE && n.textContent?.trim())!;
+    const range = document.createRange(); range.selectNodeContents(textNode);
+    const noticeRect = range.getBoundingClientRect(), buttonRect = button.getBoundingClientRect();
     if (buttonRect.top < noticeRect.bottom - 2 || !scope.contains(notices[0]!)) continue;
     const hit = document.elementFromPoint(buttonRect.x + buttonRect.width / 2, buttonRect.y + buttonRect.height / 2);
     if (!hit || !button.contains(hit)) return result('held', 'load-retry-button-obscured');

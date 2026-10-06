@@ -23,6 +23,14 @@ test('exact error-surface Retry is isolated from generation retries, drafts, bar
       assert.equal((await inspect(true)).clicked, true);
       assert.equal(await page.evaluate(() => (window as unknown as { clicks: number }).clicks), 1);
     });
+    await t.test('live error-card direct text and child button are detected without matching transcript content', async () => {
+      const card = '<div>이 ChatGPT 대화를 불러올 수 없습니다<button style="display:flex" onclick="window.cardClicks=(window.cardClicks||0)+1">다시 시도</button></div>';
+      await page.setContent('<main>' + card + '</main>');
+      assert.equal((await inspect(true)).clicked, true);
+      assert.equal(await page.evaluate(() => (window as unknown as { cardClicks: number }).cardClicks), 1);
+      await page.setContent('<main><div data-message-author-role="assistant">' + card + '</div><textarea></textarea></main>');
+      assert.equal((await inspect(true)).clicked, false);
+    });
     for (const [name, extra, expected] of [
       ['draft', '<textarea>retained draft</textarea>', 'manual-draft'],
       ['active generation', '<button aria-label="중지">Stop</button>', 'generation-active'],
