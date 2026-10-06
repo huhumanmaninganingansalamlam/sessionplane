@@ -880,7 +880,7 @@ export class SubmissionService {
   async refreshPage(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string },
     reload: (snapshot: SessionSnapshot) => Promise<void>,
-    verifyPage?: (snapshot: SessionSnapshot) => Promise<void>,
+    verifyPage?: (snapshot: SessionSnapshot) => Promise<boolean | void>,
   ): Promise<void> {
     const method = 'session.page.refresh';
     const requestHash = hashCanonical({ method, requestId: input.requestId, sessionId: input.sessionId, generation: input.generation });
@@ -904,15 +904,17 @@ export class SubmissionService {
       if (snapshot.pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'Inspect the exact request to recover its page before refreshing');
       await this.#pageMutex.runExclusive(snapshot.pageKey, async () => {
         const recovery = new ConversationLoadRecoveryRepository(this.#database);
+        let loadError = false;
         const requireReady = () => {
-          const nextAllowedAt = recovery.effectiveNextAllowedAt(snapshot.conversationId ?? undefined);
+          const nextAllowedAt = loadError ? recovery.effectiveNextAllowedAt(snapshot.conversationId ?? undefined)
+            : recovery.serviceNextAllowedAt(snapshot.conversationId ?? undefined);
           if (nextAllowedAt !== null && Date.parse(nextAllowedAt) > this.#now().getTime()) {
             throw new SessionPlaneDomainError('provider.observation-deferred',
               `Page refresh was not dispatched: shared ChatGPT pacing requires waiting until ${nextAllowedAt}`);
           }
         };
         requireReady();
-        await verifyPage?.(snapshot);
+        loadError = await verifyPage?.(snapshot) === true;
         requireReady();
         const record = (status: 'attempted' | 'complete') => receipts.record({
           clientId: input.clientId, requestId: input.decisionId, method, requestHash, status,
@@ -922,7 +924,7 @@ export class SubmissionService {
             conversationRecovered: null },
         });
         this.#database.transaction(() => {
-          if (!recovery.reserveRefresh(this.#now().toISOString(), 5_000, snapshot.conversationId ?? undefined)) {
+          if (loadError && !recovery.reserveRefresh(this.#now().toISOString(), 5_000, snapshot.conversationId ?? undefined)) {
             throw new SessionPlaneDomainError('provider.observation-deferred', 'Shared refresh pacing changed; no reload was dispatched');
           }
           record('attempted');

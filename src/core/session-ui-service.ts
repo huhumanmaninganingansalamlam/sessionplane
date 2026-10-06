@@ -1,3 +1,4 @@
+import { conversationLoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
 import { ChatGptConfigurationMenu, type ConfigurationCatalog } from '../providers/chatgpt/configuration-catalog.ts';
 import { errors, type ElementHandle, type Page } from 'playwright-core';
 
@@ -403,7 +404,11 @@ export class SessionUiService {
         this.#requirePage(session);
         this.#refs.clear(session.pageKey!);
       }, async (session) => {
-        await prepareChatGptObservation(this.#requirePage(session), session.pageKey!);
+        const page = this.#requirePage(session);
+        const surface = session.conversationId ? await page.evaluate(conversationLoadSurface, {
+          origin: this.#chatgptOrigin, conversationId: session.conversationId, click: false }) : null;
+        await prepareChatGptObservation(page, session.pageKey!);
+        return surface?.loadError === true;
       });
     } catch (error) {
       throw typedUiError(error);

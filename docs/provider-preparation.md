@@ -377,7 +377,8 @@ The final guard and DOM button dispatch are in one renderer task, with a5s lease
 preventing a delayed evaluation from clicking in a later scheduler turn.
 
 Default spacing is5s **across all conversations**, independent of backend probe
-success cadence. The same durable UI clock also spaces explicit refreshes.
+success cadence. The same durable UI clock also spaces explicit load-error refreshes.
+Normal refresh/preparation/submission/observation do not share this UI wait.
 Account/user/IP/global scope evidence on a429 holds all affected actions. Otherwise
 list429 holds only the list budget; detail429 holds that conversation's recovery.
 Other endpoint categories do not imply account-wide restrictions. Valid Retry-After
