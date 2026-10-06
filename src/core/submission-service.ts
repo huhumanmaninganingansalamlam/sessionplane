@@ -349,6 +349,7 @@ export class SubmissionService {
         if (selection !== undefined && this.#sessions.submittedMessageIds(current.sessionId).has(selection.messageId)) {
           throw new SessionPlaneDomainError('input.invalid', 'Selected message already belongs to another generation');
         }
+        if (this.accountCooldown(current)) return current;
         const acknowledgement = await adapter.recoverAcknowledgement?.({
           session: current,
           generation: current.generation,
@@ -904,7 +905,7 @@ export class SubmissionService {
       await this.#pageMutex.runExclusive(snapshot.pageKey, async () => {
         const recovery = new ConversationLoadRecoveryRepository(this.#database);
         const requireReady = () => {
-          const nextAllowedAt = recovery.effectiveNextAllowedAt();
+          const nextAllowedAt = recovery.effectiveNextAllowedAt(snapshot.conversationId ?? undefined);
           if (nextAllowedAt !== null && Date.parse(nextAllowedAt) > this.#now().getTime()) {
             throw new SessionPlaneDomainError('provider.observation-deferred',
               `Page refresh was not dispatched: shared ChatGPT pacing requires waiting until ${nextAllowedAt}`);
@@ -921,7 +922,7 @@ export class SubmissionService {
             conversationRecovered: null },
         });
         this.#database.transaction(() => {
-          if (!recovery.reserveRefresh(this.#now().toISOString(), 60_000)) {
+          if (!recovery.reserveRefresh(this.#now().toISOString(), 5_000, snapshot.conversationId ?? undefined)) {
             throw new SessionPlaneDomainError('provider.observation-deferred', 'Shared refresh pacing changed; no reload was dispatched');
           }
           record('attempted');
@@ -1114,9 +1115,8 @@ export class SubmissionService {
 
   accountCooldown(snapshot: SessionSnapshot): string | null {
     if (snapshot.provider !== 'chatgpt') return null;
-    const account = new ConversationLoadRecoveryRepository(this.#database).pacing().account;
-    if (!account?.blockedUntil || Date.parse(account.blockedUntil) <= this.#now().getTime()) return null;
-    return [account.blockedUntil, account.nextAllowedAt].filter((v): v is string => !!v).sort().at(-1)!;
+    const until = new ConversationLoadRecoveryRepository(this.#database).serviceNextAllowedAt(snapshot.conversationId ?? undefined);
+    return until && Date.parse(until) > this.#now().getTime() ? until : null;
   }
 
   #requireAccountReady(snapshot: SessionSnapshot): void {

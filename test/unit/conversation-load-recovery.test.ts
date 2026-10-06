@@ -56,7 +56,7 @@ function fixture(count = 3) {
   }
   const make = () => new ConversationLoadRecovery({ database, registry, scheduler, probes,
     pageMutex: new PageMutationMutex(), chatgptUrl: 'https://chatgpt.com' }, now);
-  return { database, registry, scheduler, controls, clicks, probes, make, advance: (ms = 60_000) => { clock += ms; },
+  return { database, registry, scheduler, controls, clicks, probes, make, advance: (ms = 5_000) => { clock += ms; },
     dispose: async (...services: ConversationLoadRecovery[]) => { await Promise.all(services.map(s => s.close())); scheduler.close(); database.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
@@ -66,8 +66,8 @@ test('one coalesced global round-robin loop spaces simultaneous tab failures and
   try {
     await Promise.all([service.sweep(), service.sweep(), service.sweep()]);
     assert.deepEqual(f.clicks, ['conversation-0']);
-    await service.sweep(); assert.equal(f.clicks.length, 1);
-    f.advance(); await service.sweep(); f.advance(); await service.sweep(); f.advance(); await service.sweep();
+    f.advance(4_999); await service.sweep(); assert.equal(f.clicks.length, 1);
+    f.advance(1); await service.sweep(); f.advance(); await service.sweep(); f.advance(); await service.sweep();
     assert.deepEqual(f.clicks, ['conversation-0', 'conversation-1', 'conversation-2', 'conversation-0']);
     assert.deepEqual(f.database.raw.prepare('SELECT * FROM generations').all(), before);
   } finally { await f.dispose(service); }
@@ -191,7 +191,7 @@ test('changed surface in the last click guard dispatches nothing and retains req
   } finally { await f.dispose(service); }
 });
 
-test('bound-page429 retains sanitized server evidence and unchanged global protection across restart', async () => {
+test('list429 keeps sanitized scoped evidence across restart without holding unrelated UI recovery', async () => {
   const f = fixture(2), service = f.make(); const resumed = f.make();
   const before = f.database.raw.prepare('SELECT * FROM generations').all();
   try {
@@ -210,17 +210,17 @@ test('bound-page429 retains sanitized server evidence and unchanged global prote
       'x-ratelimit-scope': 'endpoint', 'retry-after': '600' });
     assert.equal(evidence()[0].endpointCategory, 'conversation-list');
     assert.equal(evidence()[0].method, 'GET');
-    assert.equal(evidence()[0].serverScope, 'unverified');
+    assert.equal(evidence()[0].serverScope, 'endpoint');
+    assert.equal(evidence()[0].policyScope, 'chatgpt:conversation-list');
     assert.equal(evidence()[0].retryAfterSource, 'valid-header');
-    await service.close(); f.advance(60_000); await resumed.sweep(); assert.equal(f.clicks.length, 1);
-    const pacing = resumed.status();
-    assert.equal(pacing.nextAllowedAt, pacing.pacing.account!.blockedUntil);
-    assert.equal(pacing.pacing.ui!.nextAllowedAt, pacing.nextAllowedAt);
-    f.advance(540_000); await resumed.sweep(); assert.equal(f.clicks.length, 2);
+    await service.close(); f.advance(); await resumed.sweep(); assert.equal(f.clicks.length, 2);
+    assert.equal(resumed.repository.pacing().account, null);
+    assert.equal(resumed.repository.serviceNextAllowedAt('conversation-0'), null);
     f.controls[1]!.response!(response({}));
     assert.equal(evidence()[1].retryAfterSource, 'header-absent-fallback');
     assert.equal(evidence()[1].fallbackMs, 900_000);
-    assert.equal(evidence()[1].effectiveUntil, '2026-10-06T00:25:00.000Z');
+    assert.equal(evidence()[1].policyUntil, '2026-10-06T00:15:05.000Z');
+    assert.equal(evidence()[1].effectiveUntil, '2026-10-06T00:00:10.000Z');
     f.controls[1]!.response!(response({ 'retry-after': 'private-invalid' }));
     assert.equal(evidence()[2].retryAfterSource, 'header-invalid-fallback');
     assert.deepEqual(evidence()[2].headers, {});
@@ -230,20 +230,14 @@ test('bound-page429 retains sanitized server evidence and unchanged global prote
   } finally { await f.dispose(service, resumed); }
 });
 
-test('scheduler turn deferral is distinct from account cooldown and normal refresh shares the global gap', async () => {
+test('backend cadence stays separate; explicit refresh and UI retries share only their durable5s gap', async () => {
   const f = fixture(1), service = f.make();
   try {
     const before = f.database.raw.prepare('SELECT * FROM generations').all();
-    const caller = Symbol('existing-observer');
-    f.probes.defer('chatgpt:default', '2026-10-06T00:01:00.000Z');
-    await f.probes.run('chatgpt:default', async () => { throw Error('must not dispatch'); }, caller);
-    f.advance(); await service.sweep();
-    assert.equal(service.repository.get('conversation-0')!.reason, 'account-probe-queued');
-    assert.equal(service.repository.get('conversation-0')!.attempts, 0);
-    f.probes.withdraw('chatgpt:default', caller);
-    f.advance();
-    assert.equal(service.repository.reserveRefresh('2026-10-06T00:02:00.000Z', 60_000), true);
-    assert.equal(service.repository.reserveRefresh('2026-10-06T00:02:30.000Z', 60_000), false);
+    await f.probes.run('chatgpt:default', async () => ({kind:'pending', observationTransport:'fresh',
+      responseMessageId:null,answerText:null,reason:'fixture',retryAfterMs:null,nextCheckAt:null}));
+    assert.equal(service.repository.reserveRefresh('2026-10-06T00:00:00.000Z', 5_000), true);
+    assert.equal(service.repository.reserveRefresh('2026-10-06T00:00:04.999Z', 5_000), false);
     await service.sweep(); assert.equal(f.clicks.length, 0);
     f.advance(); await service.sweep(); assert.equal(f.clicks.length, 1);
     assert.deepEqual(f.database.raw.prepare('SELECT * FROM generations').all(), before);
@@ -263,7 +257,7 @@ test('a cooldown arriving during the actor wait defers the click without spendin
     release(); await Promise.all([held, sweep]);
     assert.deepEqual(f.clicks, []);
     const waiting = service.repository.get('conversation-0')!;
-    assert.equal(waiting.reason, 'account-cooldown');
+    assert.equal(waiting.reason, 'service-or-ui-cooldown');
     assert.equal(waiting.attempts, 0);
     assert.equal(waiting.lastAttemptAt, null);
     f.advance(900_000); await service.sweep();
@@ -286,4 +280,20 @@ test('closing/reopening SQLite preserves100-attempt receipt and global spacing w
     assert.equal(restored.nextAllowedAt(), '2026-10-06T00:15:00.000Z');
     assert.equal(restored.reserveTurn(record, '2026-10-06T00:10:00.000Z', 60_000), false);
   } finally { second.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('detail Retry-After holds only its conversation; explicit broad scope holds all recovery until expiry', async () => {
+  const f=fixture(2), service=f.make();
+  try {
+    await service.sweep();
+    const response=(path:string,headers:Record<string,string>)=>({status:()=>429,url:()=>`https://chatgpt.com${path}`,
+      request:()=>({method:()=> 'GET'}),headers:()=>headers});
+    f.controls[0]!.response!(response('/backend-api/conversation/conversation-0',{'retry-after':'12'}));
+    f.advance();await service.sweep();assert.deepEqual(f.clicks,['conversation-0','conversation-1']);
+    f.advance();await service.sweep();assert.equal(f.clicks.length,2);
+    assert.equal(service.repository.get('conversation-0')!.attempts,1);
+    f.controls[1]!.response!(response('/backend-api/conversations',{'retry-after':'20','ratelimit-scope':'account'}));
+    f.advance(19_999);await service.sweep();assert.equal(f.clicks.length,2);
+    f.advance(1);await service.sweep();assert.equal(f.clicks.length,3);
+  } finally { await f.dispose(service); }
 });

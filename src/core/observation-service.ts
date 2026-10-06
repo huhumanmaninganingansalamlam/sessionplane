@@ -1,3 +1,4 @@
+import { conversationLimitScope } from '../storage/conversation-load-recovery-repository.ts';
 import type { CurrentGenerationUpdate } from '../domain/generation.ts';
 import { isTerminalSessionState, type SessionSnapshot } from '../domain/session.ts';
 import type { Logger } from '../logging.ts';
@@ -133,7 +134,8 @@ export class ObservationService {
 
   async #run(initial: SessionSnapshot, signal: AbortSignal): Promise<void> {
     const probeCaller = Symbol();
-    const withdrawProbe = () => this.#probeCoordinator.withdraw(`${initial.provider}:default`, probeCaller);
+    const withdrawProbe = () => this.#probeCoordinator.withdraw(initial.provider === 'chatgpt' && initial.conversationId
+      ? conversationLimitScope(initial.conversationId) : `${initial.provider}:default`, probeCaller);
     const tracker = new ExactFinalTracker(this.#quietWindowMs);
     const observationStartedAtMs = this.#now().getTime();
     let lastExactProgressAtMs = this.#now().getTime();
@@ -329,7 +331,8 @@ export class ObservationService {
 
   async #recover(snapshot: SessionSnapshot, caller: symbol): Promise<ProviderRecoveryResult> {
     const adapter = this.#adapters.require(snapshot.provider);
-    return await this.#probeCoordinator.run(`${snapshot.provider}:default`, async () =>
+    return await this.#probeCoordinator.run(snapshot.provider === 'chatgpt' && snapshot.conversationId
+      ? conversationLimitScope(snapshot.conversationId) : `${snapshot.provider}:default`, async () =>
       await adapter.recover({ session: snapshot, generation: snapshot.generation }),
       caller,
     );

@@ -7,10 +7,10 @@ import type { ProbeCoordinator } from '../scheduler/probe-coordinator.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
 import { EventRepository } from '../storage/event-repository.ts';
-import { ConversationLoadRecoveryRepository, type LoadRecoveryRecord } from '../storage/conversation-load-recovery-repository.ts';
+import { ConversationLoadRecoveryRepository, conversationLimitScope, type LoadRecoveryRecord } from '../storage/conversation-load-recovery-repository.ts';
 import { conversationLoadSurface, type LoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
 
-export const LOAD_RECOVERY_INTERVAL_MS = 60_000;
+export const LOAD_RECOVERY_INTERVAL_MS = 5_000;
 export const LOAD_RECOVERY_MAX_ATTEMPTS = 100;
 function limitationHeaders(headers: Record<string, string>): Record<string, string> {
   const safe: Record<string, string> = {};
@@ -36,7 +36,7 @@ function endpointCategory(path: string): string {
 type Services = { database: SessionPlaneDatabase; registry: PageRegistry; pageMutex: PageMutationMutex;
   scheduler: ActorScheduler; probes: ProbeCoordinator; chatgptUrl: string; minimumIntervalMs?: number };
 
-/** One owner-wide queue; all UI retries also share the existing ChatGPT account probe budget. */
+/** One owner-wide UI queue; backend probe cadence is separate from proven service holds. */
 export class ConversationLoadRecovery {
   readonly repository: ConversationLoadRecoveryRepository;
   readonly #sessions: SessionRepository;
@@ -44,7 +44,6 @@ export class ConversationLoadRecovery {
   readonly #origin: string;
   readonly intervalMs: number;
   readonly #attached = new WeakSet<Page>();
-  readonly #probeCaller = Symbol('conversation-load-recovery');
   #timer: ReturnType<typeof setInterval> | null = null;
   #pending: Promise<void> | null = null;
   #closed = false;
@@ -68,7 +67,6 @@ export class ConversationLoadRecovery {
     this.#closed = true;
     if (this.#timer) clearInterval(this.#timer);
     await this.#pending?.catch(() => undefined);
-    this.services.probes.withdraw('chatgpt:default', this.#probeCaller);
   }
   status() { return { intervalMs: this.intervalMs, maxAttempts: LOAD_RECOVERY_MAX_ATTEMPTS,
     nextAllowedAt: this.repository.effectiveNextAllowedAt(), pacing: this.repository.pacing(), conversations: this.repository.list() }; }
@@ -98,26 +96,32 @@ export class ConversationLoadRecovery {
       const specified = header && /^\d+(?:\.\d+)?$/.test(header) ? received + Number(header) * 1000 : Date.parse(header ?? '');
       const valid = Number.isFinite(specified);
       const until = new Date(Math.max(received + this.intervalMs, valid ? specified : received + 15 * 60_000)).toISOString();
-      this.repository.defer(until, new Date(received).toISOString());
-      this.services.probes.defer('chatgpt:default', until);
+      const safeHeaders = limitationHeaders(headers);
+      const serverScope = safeHeaders['ratelimit-scope'] ?? safeHeaders['x-ratelimit-scope'] ?? 'unverified';
+      const category = endpointCategory(new URL(response.url()).pathname);
+      const broad = ['ratelimit-scope', 'x-ratelimit-scope'].some(name =>
+        ['account', 'user', 'ip', 'global'].includes(safeHeaders[name] ?? ''));
+      const binding = this.services.registry.getBinding(pageKey);
+      const detailId = new URL(response.url()).pathname.match(/^\/backend-api\/(?:f\/)?conversation\/([^/]+)$/)?.[1];
+      const policyScope = broad ? 'chatgpt:default' : category === 'conversation-detail' && (detailId || binding.conversationId)
+        ? conversationLimitScope(detailId || binding.conversationId!) : `chatgpt:${category}`;
+      this.services.probes.defer(policyScope, until);
       // Passive evidence only: no body read, probe, raw URL/query or arbitrary header values.
       try {
-        const binding = this.services.registry.getBinding(pageKey);
         const session = binding.sessionId && this.#sessions.getSnapshot(binding.sessionId);
         if (binding.state !== 'owned' || !session || session.pageKey !== pageKey ||
           session.generation !== binding.generation || session.conversationId !== binding.conversationId) return;
-        const safeHeaders = limitationHeaders(headers);
         if (valid) safeHeaders['retry-after'] = /^\d+(?:\.\d+)?$/.test(header!) ? String(Number(header)) : new Date(specified).toUTCString();
         const method = response.request().method();
         this.#events.append({ teamId: session.teamId, roleId: session.roleId, sessionId: session.sessionId,
           generation: session.generation, eventType: 'provider.rate-limit-observed', createdAt: new Date(received).toISOString(),
           payload: { status: 429, method: /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(method) ? method : 'unknown',
-            endpointCategory: endpointCategory(new URL(response.url()).pathname), headers: safeHeaders,
+            endpointCategory: category, headers: safeHeaders,
             pageKey, bindingEpoch: binding.bindingEpoch, association: 'owned-page-at-response',
             retryAfterSource: valid ? 'valid-header' : header === undefined ? 'header-absent-fallback' : 'header-invalid-fallback',
             retryAfterDurationMs: valid ? Math.max(0, specified - received) : null,
             minimumIntervalMs: this.intervalMs, fallbackMs: valid ? null : 900_000,
-            policyScope: 'chatgpt:default', serverScope: 'unverified', policyUntil: until,
+            policyScope, serverScope, policyUntil: until,
             effectiveUntil: this.repository.effectiveNextAllowedAt() } });
       } catch { /* Evidence failure cannot weaken or retry the existing cooldown operation. */ }
     });
@@ -151,58 +155,48 @@ export class ConversationLoadRecovery {
     const next = this.repository.nextAllowedAt();
     if (next && Date.parse(next) > this.now()) return;
     const record = this.repository.list().find(r => ['waiting', 'held', 'attempting'].includes(r.state) && targets.has(r.conversationId));
-    if (!record) { this.services.probes.withdraw('chatgpt:default', this.#probeCaller); return; }
+    if (!record) return;
     const session = targets.get(record.conversationId)!;
     // Fair turns include held pages. Persist before actor/page work or any click.
     if (!this.repository.reserveTurn(record, new Date(this.now()).toISOString(), this.intervalMs)) return;
-    const probe = await this.services.probes.run('chatgpt:default', async () => {
-      await this.services.scheduler.actorFor(session.sessionId).enqueue(async () => {
-        if (this.#closed) return;
-        const current = this.#sessions.getSnapshot(session.sessionId);
-        if (!current || current.pageKey !== session.pageKey || current.conversationId !== session.conversationId || current.generation !== session.generation ||
-            ['submitting', 'queued'].includes(current.submissionState ?? '')) { this.#record(record, session, 'held', 'request-state-changed'); return; }
-        await this.services.pageMutex.runExclusive(record.pageKey, async () => {
-          try {
-            const page = this.services.registry.requireSessionPage(record.pageKey, current);
-            const surface = await this.#surface(page, current, false);
-            if (surface.kind === 'normal') { this.#record(record, current, 'recovered', surface.reason); return; }
-            if (surface.kind !== 'retry') {
-              if (surface.reason === 'service-limited') {
-                const until = new Date(this.now() + 15 * 60_000).toISOString();
-                this.repository.defer(until, new Date(this.now()).toISOString());
-                this.services.probes.defer('chatgpt:default', until);
-              }
-              this.#record(record, current, 'held', surface.reason); return;
-            }
-            if (record.attempts >= LOAD_RECOVERY_MAX_ATTEMPTS) { this.#exhaust(record, current); return; }
-            // The actor/page wait or surface read may outlive the probe's original permission.
-            const blockedUntil = this.repository.pacing().account?.blockedUntil;
-            if (blockedUntil && Date.parse(blockedUntil) > this.now()) {
-              this.#record(record, current, 'waiting', 'account-cooldown'); return;
-            }
-            record.attempts++;
-            record.lastAttemptAt = new Date(this.now()).toISOString();
-            record.lastOutcome = 'uncertain';
-            this.#record(record, current, 'attempting', 'load-retry-dispatched');
-            const clicked = await this.#surface(page, current, true);
-            if (!clicked.clicked) {
-              record.attempts--; record.lastOutcome = 'not-clicked';
-              this.#record(record, current, clicked.kind === 'normal' ? 'recovered' : 'held', clicked.reason);
-            } else {
-              record.lastOutcome = 'clicked';
-              this.#record(record, current, 'waiting', 'load-retry-clicked');
-            }
-          } catch {
-            this.#record(record, current, 'held', record.state === 'attempting' ? 'click-outcome-uncertain' : 'page-inspection-unavailable');
+    const priorAttemptAt = record.lastAttemptAt;
+    await this.services.scheduler.actorFor(session.sessionId).enqueue(async () => {
+      if (this.#closed) return;
+      const current = this.#sessions.getSnapshot(session.sessionId);
+      if (!current || current.pageKey !== session.pageKey || current.conversationId !== session.conversationId || current.generation !== session.generation ||
+          ['submitting', 'queued'].includes(current.submissionState ?? '')) { this.#record(record, session, 'held', 'request-state-changed'); return; }
+      await this.services.pageMutex.runExclusive(record.pageKey, async () => {
+        try {
+          const page = this.services.registry.requireSessionPage(record.pageKey, current);
+          const surface = await this.#surface(page, current, false);
+          if (surface.kind === 'normal') { this.#record(record, current, 'recovered', surface.reason); return; }
+          if (surface.kind !== 'retry') {
+            this.#record(record, current, 'held', surface.reason); return;
           }
-        });
+          if (record.attempts >= LOAD_RECOVERY_MAX_ATTEMPTS) { this.#exhaust(record, current); return; }
+          // Recheck scoped service holds and reserve global UI spacing at actual dispatch.
+          if (!this.repository.reserveRefresh(new Date(this.now()).toISOString(), this.intervalMs, current.conversationId!)) {
+            this.#record(record, current, 'waiting', 'service-or-ui-cooldown'); return;
+          }
+          record.attempts++;
+          record.lastAttemptAt = new Date(this.now()).toISOString();
+          record.lastOutcome = 'uncertain';
+          this.#record(record, current, 'attempting', 'load-retry-dispatched');
+          const clicked = await this.#surface(page, current, true);
+          if (!clicked.clicked) {
+            record.attempts--; record.lastOutcome = 'not-clicked';
+            this.#record(record, current, clicked.kind === 'normal' ? 'recovered' : 'held', clicked.reason);
+          } else {
+            record.lastOutcome = 'clicked';
+            this.#record(record, current, 'waiting', 'load-retry-clicked');
+          }
+        } catch {
+          this.#record(record, current, 'held', record.state === 'attempting' ? 'click-outcome-uncertain' : 'page-inspection-unavailable');
+        }
       });
-      return { kind: 'pending', observationTransport: 'fresh', responseMessageId: null, answerText: null,
-        reason: 'conversation-load-recovery', retryAfterMs: null, nextCheckAt: null };
-    }, this.#probeCaller, this.intervalMs);
-    if (probe.kind === 'deferred' && probe.nextCheckAt) {
-      this.repository.defer(probe.nextCheckAt, new Date(this.now()).toISOString());
-      this.#record(record, session, 'waiting', probe.reason === 'probe-queued' ? 'account-probe-queued' : 'account-probe-paced');
+    });
+    if (record.lastAttemptAt !== priorAttemptAt) {
+      this.repository.defer(new Date(this.now() + this.intervalMs).toISOString(), new Date(this.now()).toISOString());
     }
   }
   #record(record: LoadRecoveryRecord, session: SessionSnapshot, state: LoadRecoveryRecord['state'], reason: string): void {

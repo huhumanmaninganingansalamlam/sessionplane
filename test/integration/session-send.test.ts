@@ -599,7 +599,12 @@ test('account cooldown parks the same request, blocks preparation, and rechecks 
       prompt: 'Retain this exact draft.', sessionDeadlineSec: 600 };
     const until = new Date(Date.now() + 900_000).toISOString();
     const coordination = { requestId: 'cooldown-proof', observedAt: new Date().toISOString(), until,
-      evidenceRef: 'isolated-429-fixture' };
+      evidenceRef: 'isolated-429-fixture', scope: 'chatgpt:default' };
+    await rpc(config.socketPath, 'system.defer_account_cooldown', { ...coordination, requestId: 'list-only-proof', scope: undefined });
+    assert.equal(budgets.get('chatgpt:conversation-list')!.blockedUntil, until);
+    assert.equal(budgets.get('chatgpt:default'), null);
+    assert.equal(service.submissionService.accountCooldown(service.teamDirectory.getSession(session.sessionId)), null,
+      'list-only cooldown must not block normal preparation or submission');
     await rpc(config.socketPath, 'system.defer_account_cooldown', coordination);
     await rpc(config.socketPath, 'system.defer_account_cooldown', coordination);
     await rpc(config.socketPath, 'system.defer_account_cooldown', { ...coordination, requestId: 'earlier-proof',

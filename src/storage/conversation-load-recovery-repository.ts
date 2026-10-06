@@ -1,6 +1,7 @@
 import type { SessionPlaneDatabase } from './database.ts';
 import { ProbeBudgetRepository } from './probe-budget-repository.ts';
 
+export const conversationLimitScope = (conversationId: string) => `chatgpt:conversation-detail:${conversationId}`;
 export const LOAD_RECOVERY_SCOPE = 'chatgpt:conversation-load-ui';
 export interface LoadRecoveryRecord {
   conversationId: string; url: string; sessionId: string; pageKey: string; bindingEpoch: number;
@@ -39,35 +40,36 @@ export class ConversationLoadRecoveryRepository {
     const b = new ProbeBudgetRepository(this.database.raw).get(LOAD_RECOVERY_SCOPE);
     return [b?.nextAllowedAt, b?.blockedUntil].filter((v): v is string => !!v).sort().at(-1) ?? null;
   }
-  effectiveNextAllowedAt(): string | null {
-    const { ui, account } = this.pacing();
-    return [ui?.nextAllowedAt, ui?.blockedUntil, account?.nextAllowedAt, account?.blockedUntil]
+  serviceNextAllowedAt(conversationId?: string): string | null {
+    const budgets = new ProbeBudgetRepository(this.database.raw);
+    return [budgets.get('chatgpt:default')?.blockedUntil,
+      conversationId ? budgets.get(conversationLimitScope(conversationId))?.blockedUntil : null]
+      .filter((v): v is string => !!v).sort().at(-1) ?? null;
+  }
+  effectiveNextAllowedAt(conversationId?: string): string | null {
+    const { ui } = this.pacing();
+    return [ui?.nextAllowedAt, ui?.blockedUntil, this.serviceNextAllowedAt(conversationId)]
       .filter((v): v is string => !!v).sort().at(-1) ?? null;
   }
   pacing() {
     const budgets = new ProbeBudgetRepository(this.database.raw);
     return { ui: budgets.get(LOAD_RECOVERY_SCOPE), account: budgets.get('chatgpt:default') };
   }
-  reserveRefresh(now: string, intervalMs: number): boolean {
+  reserveRefresh(now: string, intervalMs: number, conversationId?: string): boolean {
     return this.database.transaction(() => {
-      const deadline = this.effectiveNextAllowedAt();
+      const deadline = this.effectiveNextAllowedAt(conversationId);
       if (deadline && Date.parse(deadline) > Date.parse(now)) return false;
       const until = new Date(Date.parse(now) + intervalMs).toISOString();
       this.defer(until, now);
-      const budgets = new ProbeBudgetRepository(this.database.raw);
-      const prior = budgets.get('chatgpt:default');
-      budgets.save({ scope: 'chatgpt:default', nextAllowedAt: until, blockedUntil: prior?.blockedUntil ?? null,
-        backoffLevel: prior?.backoffLevel ?? 0, consecutiveFailures: prior?.consecutiveFailures ?? 0, updatedAt: now });
       return true;
     });
   }
-  reserveTurn(record: LoadRecoveryRecord, now: string, intervalMs: number): boolean {
+  reserveTurn(record: LoadRecoveryRecord, now: string, _intervalMs: number): boolean {
     return this.database.transaction(() => {
       const deadline = this.nextAllowedAt();
       if (deadline && Date.parse(deadline) > Date.parse(now)) return false;
       record.lastCheckedAt = now;
       this.save(record);
-      this.defer(new Date(Date.parse(now) + intervalMs).toISOString(), now);
       return true;
     });
   }

@@ -70,7 +70,8 @@ export class ProbeCoordinator {
   ): Promise<ProviderRecoveryResult> {
     const now = this.#now();
     const budget = this.#budgets.get(scope);
-    const earliest = latestTimestamp(budget?.nextAllowedAt ?? null, budget?.blockedUntil ?? null);
+    const earliest = latestTimestamp(latestTimestamp(budget?.nextAllowedAt ?? null, budget?.blockedUntil ?? null),
+      scope.startsWith('chatgpt:conversation-detail:') ? this.#budgets.get('chatgpt:default')?.blockedUntil ?? null : null);
     if (caller !== undefined) {
       const waiting = this.#waiting.get(scope) ?? new Set<symbol>();
       waiting.add(caller);

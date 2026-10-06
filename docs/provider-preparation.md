@@ -376,12 +376,15 @@ login/CAPTCHA/permission, mixed message/error and missing-button evidence hold i
 The final guard and DOM button dispatch are in one renderer task, with a5s lease
 preventing a delayed evaluation from clicking in a later scheduler turn.
 
-Default spacing is60s **across all conversations**, conservatively matching the
-existing minimum429 backoff (ordinary successful probes are30s). Larger configured
-probe/minimum429 intervals win. The queue also shares the existing account probe
-coordinator, so native backend probes and UI recovery do not race a known cooldown.
-Retry-After seconds/date from429 responses is honored; missing Retry-After or a
-visible unquantified service-limit notice defers15min. Existing longer delays win.
+Default spacing is5s **across all conversations**, independent of backend probe
+success cadence. The same durable UI clock also spaces explicit refreshes.
+Account/user/IP/global scope evidence on a429 holds all affected actions. Otherwise
+list429 holds only the list budget; detail429 holds that conversation's recovery.
+Other endpoint categories do not imply account-wide restrictions. Valid Retry-After
+seconds/date is honored; absent/invalid headers retain the15min fallback in that
+scope. An unquantified visible service-limit notice holds that conversation.
+Existing unexpired legacy deadlines are retained until expiry; attempts never reset.
+Normal long post-submission generation waits remain unchanged.
 
 SQLite migration7 only adds `conversation_load_recovery`; existing request/session/
 generation/binding data is untouched. Unique conversation identity merges callers
@@ -399,8 +402,10 @@ Get/wait exposes its current `nextCheckAt` without opening or mutating provider 
 Independent cores do not automatically share account deadlines. For a confirmed
 same-account operational handoff, the owning operator may call native socket RPC
 `system.defer_account_cooldown` with `requestId`, ISO UTC `observedAt`/`until` and a
-body-free retained429 `evidenceRef`. Its idempotent receipt only extends both
-existing budgets; it never resets attempts, weakens a deadline or touches pages.
+body-free retained429 `evidenceRef`. Optional `scope` now defaults to `chatgpt:conversation-list`; explicit
+`chatgpt:default` is reserved for
+confirmed broad limitations. Its idempotent receipt only extends the selected
+existing budget; it never resets attempts, weakens a deadline or touches pages.
 
 Health also exposes the global deadline
 and per-conversation state/URL/attempts/last outcome/binding identity. Exact native
