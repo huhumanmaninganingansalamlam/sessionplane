@@ -7,7 +7,7 @@ import type { SessionSnapshot } from '../domain/session.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { PreparationPurpose, PreparationTarget } from '../providers/provider-adapter.ts';
 import { CHATGPT_PREPARATION_SNAPSHOT } from '../providers/chatgpt/selectors.ts';
-import { inspectChatGptSubmissionCandidates } from '../providers/chatgpt/submission.ts';
+import { inspectChatGptSubmissionCandidates, prepareChatGptObservation } from '../providers/chatgpt/submission.ts';
 import { observeChatGptActivity } from '../providers/chatgpt/activity-observer.ts';
 import { observeChatGptDom, observeChatGptAlerts } from '../providers/chatgpt/dom-observer.ts';
 import type { SubmissionService } from './submission-service.ts';
@@ -88,6 +88,7 @@ export class SessionUiService {
   async inspect(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
     return await this.#submissions.withPendingPreparation(input,
       async (session) => {
+        await prepareChatGptObservation(this.#requirePage(session), session.pageKey!);
         const snapshot = await this.#capture(session, input.maxNodes);
         const composerAvailable = snapshot.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled);
         const catalog = this.#discoveryFailures.get(`${session.sessionId}:${session.generation}`) ?? this.#catalog;

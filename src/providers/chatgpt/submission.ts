@@ -100,13 +100,9 @@ export class ChatGptSubmission implements ProviderSubmission {
     if (this.#initialUrl !== null) {
       await navigateProviderPage({ page: this.#page, provider: this.provider, pageKey: this.pageKey, url: this.#initialUrl, timeoutMs: 30_000 });
       this.#registry.refreshPage(this.pageKey);
-    } else {
-      await waitForProviderPageReady({ page: this.#page, provider: this.provider, pageKey: this.pageKey });
     }
     this.#requireExactPage();
-    await assertNoHumanVerification({ page: this.#page, provider: this.provider, pageKey: this.pageKey });
-    await assertChatGptAuthenticated(this.#page);
-    await assertChatOnlySurface(this.#page);
+    await prepareChatGptObservation(this.#page, this.pageKey);
   }
 
   async #resolvePreparationTarget(
@@ -446,6 +442,14 @@ export async function inspectChatGptSubmissionCandidates(page: Page, conversatio
 
 function submissionEvidenceHash(conversationId: string, message: ChatGptMessage): string {
   return createHash('sha256').update(JSON.stringify([conversationId, message.messageId, message.turnId, message.text])).digest('hex');
+}
+
+/** Readiness/security checks on an existing page; never navigates or opens a submission. */
+export async function prepareChatGptObservation(page: Page, pageKey: string): Promise<void> {
+  await waitForProviderPageReady({ page, provider: 'chatgpt', pageKey });
+  await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey });
+  await assertChatGptAuthenticated(page);
+  await assertChatOnlySurface(page);
 }
 
 async function assertChatGptAuthenticated(page: Page): Promise<void> {
