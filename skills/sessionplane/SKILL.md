@@ -117,6 +117,20 @@ out prompts, infer consensus, or inject answers into other roles.
 
 ## Recovery and cleanup
 
+- The core automatically recovers an exact ChatGPT **conversation-load** error
+  by clicking only the page button immediately below that error (not a generation
+  Retry). All owned conversations share one durable fair queue: at most one attempt
+  per60s across the profile, up to100 attempts per conversation without resetting
+  on restart/rebind. Existing longer account cooldowns and Retry-After win; unknown
+  429/visible service limits wait15min. Drafts, generation, verification/permissions,
+  missing/ambiguous buttons and changed binding/surface hold the attempt. Each click
+  rechecks those guards atomically; this never submits, stops or terminalizes work.
+  Normal loaded history/composer ends recovery, including manual recovery. Inspect
+  `conversationLoadRecovery` in exact team_get and health for attempts, outcome,
+  holds, nextAllowedAt and the deduplicated exhaustion notice. Preserve UNKNOWN
+  submission and original anchors; do not start a competing refresh loop or replay.
+  This does not recover screenshot/compositor failures merely because DOM responds.
+
 - When the user asks to view or manually control a conversation, call
   `sessionplane_decide` with `decision: "focus"`, its `teamId`, current `requestRef`
   and a fresh stable `requestId`. It brings the connected tab to the foreground

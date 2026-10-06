@@ -6,6 +6,7 @@ import { submissionOutboxMigration } from './0003-submission-outbox.ts';
 import { providerArtifactsMigration } from './0004-provider-artifacts.ts';
 import { teamOwnerIndexMigration } from './0005-team-owner-index.ts';
 import { pageTargetIdentityMigration } from './0006-page-target-identity.ts';
+import { conversationLoadRecoveryMigration } from './0007-conversation-load-recovery.ts';
 
 export interface Migration {
   readonly version: number;
@@ -20,6 +21,7 @@ export const migrations: readonly Migration[] = [
   providerArtifactsMigration,
   teamOwnerIndexMigration,
   pageTargetIdentityMigration,
+  conversationLoadRecoveryMigration,
 ];
 
 export function runMigrations(database: DatabaseSync, now: () => Date = () => new Date()): number {

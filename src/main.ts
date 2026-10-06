@@ -1,4 +1,5 @@
 import { ThinkingFailureRecovery } from './core/thinking-failure-recovery.ts';
+import { ConversationLoadRecovery } from './core/conversation-load-recovery.ts';
 import { TeamWorkflow } from './core/team-workflow.ts';
 import { registerWorkflowMethods } from './rpc/methods/workflow.ts';
 import { SessionRepository } from './storage/session-repository.ts';
@@ -67,6 +68,7 @@ export interface CoreService {
   readonly providerAdapters: ProviderAdapterRegistry;
   readonly observationService: ObservationService;
   readonly thinkingFailureRecovery: ThinkingFailureRecovery;
+  readonly conversationLoadRecovery: ConversationLoadRecovery;
   readonly recoveryService: RecoveryService;
   readonly submissionService: SubmissionService;
   readonly stopService: StopService;
@@ -268,8 +270,11 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     throw error;
   }
 
+  const conversationLoadRecovery = new ConversationLoadRecovery({ database, registry: pageRegistry,
+    pageMutex: pageMutationMutex, scheduler: actorScheduler, probes: probeCoordinator,
+    chatgptUrl: config.chatgptUrl, minimumIntervalMs: Math.max(config.probeSuccessIntervalMs, config.probeMin429BackoffMs) });
   router.register('system.health', z.object({}).strict(), () =>
-    getSystemHealth({
+    ({ ...getSystemHealth({
       config,
       database,
       startedAt,
@@ -278,7 +283,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       actorScheduler,
       observationService,
       metrics,
-    }),
+    }), conversationLoadRecovery: conversationLoadRecovery.status() }),
   );
   registerBrowserMethods(router, {
     browserOwner,
@@ -336,6 +341,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   }
 
   thinkingFailureRecovery.restore();
+  if (browserOwner && config.enabledProviders.includes('chatgpt')) conversationLoadRecovery.start();
   let closed = false;
   let browserRecovery: Promise<Readonly<Record<string, unknown>>> | null = null;
   const restartBrowser = (): Promise<Readonly<Record<string, unknown>>> => {
@@ -382,6 +388,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     providerAdapters,
     observationService,
     thinkingFailureRecovery,
+    conversationLoadRecovery,
     recoveryService: recovery,
     submissionService,
     stopService,
@@ -397,6 +404,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       if (browserRecoveryTimer !== null) clearInterval(browserRecoveryTimer);
       await browserRecovery?.catch(() => undefined);
       await rpcServer.close();
+      await conversationLoadRecovery.close();
       await recovery.close();
       await thinkingFailureRecovery?.close();
       await observationService.close();

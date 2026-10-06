@@ -9,6 +9,23 @@ import { ProbeCoordinator } from '../../src/scheduler/probe-coordinator.ts';
 import { SessionPlaneDatabase } from '../../src/storage/database.ts';
 import { ProbeBudgetRepository } from '../../src/storage/probe-budget-repository.ts';
 
+test('UI recovery reserves a longer shared interval before dispatch and retains late429 cooldown', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-probe-ui-'));
+  const database = SessionPlaneDatabase.open(path.join(root, 'state.sqlite'));
+  let nowMs = Date.parse('2026-10-06T00:00:00Z');
+  const coordinator = createCoordinator(database, () => new Date(nowMs));
+  try {
+    await coordinator.run('chatgpt:default', async () => {
+      assert.equal(new ProbeBudgetRepository(database.raw).get('chatgpt:default')!.nextAllowedAt, '2026-10-06T00:01:00.000Z');
+      coordinator.defer('chatgpt:default', '2026-10-06T00:10:00.000Z');
+      return pending();
+    }, undefined, 60_000);
+    nowMs += 60_000;
+    const result = await createCoordinator(database, () => new Date(nowMs)).run('chatgpt:default', async () => { assert.fail('must not bypass limit'); });
+    assert.equal(result.nextCheckAt, '2026-10-06T00:10:00.000Z');
+  } finally { database.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('ProbeCoordinator serializes account probes and preserves caller isolation', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-probe-'));
   const database = SessionPlaneDatabase.open(path.join(root, 'sessionplane.sqlite'));

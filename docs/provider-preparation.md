@@ -364,3 +364,39 @@ keyboard receiver. Bounds and current value come from its unique descendant
 range, even when that visual thumb is accessibility-hidden. Actions use the
 receiver and freshly observed values; model names and tier ordering remain agent
 decisions. Hidden or inert menu views do not become actionable.
+# Conversation-load recovery
+
+The core owns one profile-wide durable ChatGPT conversation-load retry queue.
+Only a fresh exact `/c/<conversationId>` main-page load-error notice and its
+single enabled Retry/Reload button immediately below it authorize a click. This
+is separate from generation Retry, browser reload, Thinking-failed continuation,
+submission preparation and terminal reconciliation. It never sends a prompt,
+creates a generation or rewrites an answer/anchor. Draft, Stop/thinking/streaming,
+login/CAPTCHA/permission, mixed message/error and missing-button evidence hold it.
+The final guard and DOM button dispatch are in one renderer task, with a5s lease
+preventing a delayed evaluation from clicking in a later scheduler turn.
+
+Default spacing is60s **across all conversations**, conservatively matching the
+existing minimum429 backoff (ordinary successful probes are30s). Larger configured
+probe/minimum429 intervals win. The queue also shares the existing account probe
+coordinator, so native backend probes and UI recovery do not race a known cooldown.
+Retry-After seconds/date from429 responses is honored; missing Retry-After or a
+visible unquantified service-limit notice defers15min. Existing longer delays win.
+
+SQLite migration7 only adds `conversation_load_recovery`; existing request/session/
+generation/binding data is untouched. Unique conversation identity merges callers
+and page rebindings. The global clock uses the existing probe-budget table and is
+reserved before dispatch. Persisted fair turns include held pages; restart/rebind
+does not reset attempts, notifications or spacing. Ambiguous dispatch consumes one
+attempt conservatively. A definitive guard rejection consumes none. At100 no101st
+click occurs; normal UI/manual recovery may still be observed. Counts are not
+automatically reset by a later error on the same conversation.
+
+`system.health.conversationLoadRecovery` exposes interval, maximum, global deadline
+and per-conversation state/URL/attempts/last outcome/binding identity. Exact native
+team_get adds the same conversation's `conversationLoadRecovery` record. State
+transitions append body-free `conversation.load-recovery` events; `notifiedAt`
+identifies a single exhaustion notice for the target, without repeated alerts.
+States distinguish waiting, held, attempting, recovered and exhausted. A returned
+click is only dispatch evidence, not proof of page recovery. Recovery requires the
+exact loaded history and composer; screenshot/compositor health remains independent.

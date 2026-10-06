@@ -6,6 +6,7 @@ import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import { OutboxRepository, type OutboxRecord } from '../storage/outbox-repository.ts';
 import { hashCanonical, type ReceiptRepository } from '../storage/receipt-repository.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
+import { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import type { ArtifactService } from './artifact-service.ts';
 import type { ConversationCleanupService } from './conversation-cleanup-service.ts';
@@ -322,7 +323,9 @@ export class TeamWorkflow {
       : tailResult?.completedAt != null && tailResult.errorCode === null && tailResult.responseMessageId !== null;
     const stopped = current.generation > tail.generation ||
       (current.generation === tail.generation && current.terminal && !complete && current.reason !== 'thinking-failed-reconciled');
-    return { ...result, ...(optedIn ? { thinkingFailureRecovery: {
+    const loadRepository = new ConversationLoadRecoveryRepository(this.services.database);
+    const loadRecovery = typeof result.conversationId === 'string' ? loadRepository.get(result.conversationId) : null;
+    return { ...result, ...(loadRecovery ? { conversationLoadRecovery: { ...loadRecovery, nextAllowedAt: loadRepository.nextAllowedAt() } } : {}), ...(optedIn ? { thinkingFailureRecovery: {
       enabled: paused === null && !complete && !stopped, sender: paused || complete || stopped ? 'coordinator' : 'core',
       ...(paused ? JSON.parse(paused.resultJson) : { state: complete ? 'complete' : stopped ? 'stopped' : 'observing' }),
       successorRequestRef: successor?.outboxId ?? null } } : {}), conversationUsage: this.#conversationUsage(request.sessionId),

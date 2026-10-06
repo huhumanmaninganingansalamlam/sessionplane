@@ -47,12 +47,13 @@ export class ProbeCoordinator {
     scope: string,
     operation: () => Promise<ProviderRecoveryResult>,
     caller?: symbol,
+    minimumIntervalMs = 0,
   ): Promise<ProviderRecoveryResult> {
     const normalizedScope = scope.trim();
     if (normalizedScope.length === 0) {
       return Promise.reject(new Error('Probe scope must not be empty'));
     }
-    return this.#mutex.runExclusive(normalizedScope, () => this.#run(normalizedScope, operation, caller));
+    return this.#mutex.runExclusive(normalizedScope, () => this.#run(normalizedScope, operation, caller, minimumIntervalMs));
   }
 
   withdraw(scope: string, caller: symbol): void {
@@ -65,6 +66,7 @@ export class ProbeCoordinator {
     scope: string,
     operation: () => Promise<ProviderRecoveryResult>,
     caller?: symbol,
+    minimumIntervalMs = 0,
   ): Promise<ProviderRecoveryResult> {
     const now = this.#now();
     const budget = this.#budgets.get(scope);
@@ -89,7 +91,7 @@ export class ProbeCoordinator {
         nextCheckAt,
       });
     }
-    return this.#execute(scope, budget?.backoffLevel ?? 0, budget?.consecutiveFailures ?? 0, operation)
+    return this.#execute(scope, budget?.backoffLevel ?? 0, budget?.consecutiveFailures ?? 0, operation, minimumIntervalMs)
       .finally(() => { if (caller !== undefined) this.withdraw(scope, caller); });
   }
 
@@ -98,7 +100,13 @@ export class ProbeCoordinator {
     backoffLevel: number,
     consecutiveFailures: number,
     operation: () => Promise<ProviderRecoveryResult>,
+    minimumIntervalMs = 0,
   ): Promise<ProviderRecoveryResult> {
+    // Reserve UI load-recovery spacing before its side effect, including across an owner restart.
+    if (minimumIntervalMs > 0) {
+      const now = this.#now();
+      this.#save(scope, new Date(now.getTime() + minimumIntervalMs).toISOString(), null, backoffLevel, consecutiveFailures, now);
+    }
     this.#metrics?.increment('backend_probe_total');
     let result: ProviderRecoveryResult;
     try {
@@ -148,7 +156,7 @@ export class ProbeCoordinator {
       this.#metrics?.increment('backend_probe_deferred_total');
     }
 
-    const nextAllowedAt = new Date(now.getTime() + this.#successIntervalMs).toISOString();
+    const nextAllowedAt = new Date(now.getTime() + Math.max(this.#successIntervalMs, minimumIntervalMs)).toISOString();
     this.#save(scope, nextAllowedAt, null, 0, 0, now);
     return { ...result, nextCheckAt: result.nextCheckAt ?? nextAllowedAt };
   }
@@ -162,15 +170,21 @@ export class ProbeCoordinator {
     now: Date,
   ): void {
     this.#database.transaction(() => {
+      const existing = this.#budgets.get(scope);
       this.#budgets.save({
         scope,
-        nextAllowedAt,
-        blockedUntil,
+        nextAllowedAt: latestTimestamp(nextAllowedAt, existing?.nextAllowedAt ?? null),
+        blockedUntil: latestTimestamp(blockedUntil, existing?.blockedUntil ?? null),
         backoffLevel,
         consecutiveFailures,
         updatedAt: now.toISOString(),
       });
     });
+  }
+
+  defer(scope: string, until: string): void {
+    const prior = this.#budgets.get(scope);
+    this.#save(scope, until, until, prior?.backoffLevel ?? 0, prior?.consecutiveFailures ?? 0, this.#now());
   }
 
   #jitter(valueMs: number): number {
