@@ -393,6 +393,16 @@ click occurs; normal UI/manual recovery may still be observed. Counts are not
 automatically reset by a later error on the same conversation.
 
 `system.health.conversationLoadRecovery` exposes interval, maximum, global deadline
+and per-owner account pacing. Web preparation and new/resumed submission respect
+the persisted account cooldown, retaining the same prepared request and choices.
+Get/wait exposes its current `nextCheckAt` without opening or mutating provider UI.
+Independent cores do not automatically share account deadlines. For a confirmed
+same-account operational handoff, the owning operator may call native socket RPC
+`system.defer_account_cooldown` with `requestId`, ISO UTC `observedAt`/`until` and a
+body-free retained429 `evidenceRef`. Its idempotent receipt only extends both
+existing budgets; it never resets attempts, weakens a deadline or touches pages.
+
+Health also exposes the global deadline
 and per-conversation state/URL/attempts/last outcome/binding identity. Exact native
 team_get adds the same conversation's `conversationLoadRecovery` record. State
 transitions append body-free `conversation.load-recovery` events; `notifiedAt`

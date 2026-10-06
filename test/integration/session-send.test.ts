@@ -598,7 +598,13 @@ test('account cooldown parks the same request, blocks preparation, and rechecks 
     const send = { clientId: 'client-send', requestId: 'cooldown-send', sessionId: session.sessionId,
       prompt: 'Retain this exact draft.', sessionDeadlineSec: 600 };
     const until = new Date(Date.now() + 900_000).toISOString();
-    service.probeCoordinator.defer('chatgpt:default', until);
+    const coordination = { requestId: 'cooldown-proof', observedAt: new Date().toISOString(), until,
+      evidenceRef: 'isolated-429-fixture' };
+    await rpc(config.socketPath, 'system.defer_account_cooldown', coordination);
+    await rpc(config.socketPath, 'system.defer_account_cooldown', coordination);
+    await rpc(config.socketPath, 'system.defer_account_cooldown', { ...coordination, requestId: 'earlier-proof',
+      until: new Date(Date.now() + 60_000).toISOString() });
+    assert.equal(budgets.get('chatgpt:default')!.blockedUntil, until, 'coordination cannot shorten an existing limit');
     await assert.rejects(rpc(config.socketPath, 'session.send', send), hasRpcError('provider.preparation-required', false));
     const pending = service.database.raw.prepare('SELECT outbox_id AS id, generation FROM outbox WHERE request_id=?').get(send.requestId)!;
     const owner = { clientId: send.clientId, requestId: send.requestId, sessionId: session.sessionId, generation: Number(pending.generation) };

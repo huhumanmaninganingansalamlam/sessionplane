@@ -281,6 +281,19 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   const conversationLoadRecovery = new ConversationLoadRecovery({ database, registry: pageRegistry,
     pageMutex: pageMutationMutex, scheduler: actorScheduler, probes: probeCoordinator,
     chatgptUrl: config.chatgptUrl, minimumIntervalMs: Math.max(config.probeSuccessIntervalMs, config.probeMin429BackoffMs) });
+  router.register('system.defer_account_cooldown', z.object({
+    requestId: z.string().min(1).max(200), observedAt: z.iso.datetime(), until: z.iso.datetime(),
+    evidenceRef: z.string().min(1).max(500),
+  }).strict().refine(input => Date.parse(input.until) >= Date.parse(input.observedAt),
+    'Cooldown cannot end before its observed rate-limit signal'), input => receipts.execute({
+      clientId: 'operator-account-coordination', requestId: input.requestId,
+      method: 'system.defer_account_cooldown', payload: input,
+      operation: () => {
+        conversationLoadRecovery.repository.defer(input.until, new Date().toISOString());
+        probeCoordinator.defer('chatgpt:default', input.until);
+        return { deferred: true, ...conversationLoadRecovery.repository.pacing() };
+      },
+    }));
   router.register('system.health', z.object({}).strict(), () =>
     ({ ...getSystemHealth({
       config,
