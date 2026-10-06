@@ -397,19 +397,19 @@ and per-conversation state/URL/attempts/last outcome/binding identity. Exact nat
 team_get adds the same conversation's `conversationLoadRecovery` record. State
 transitions append body-free `conversation.load-recovery` events; `notifiedAt`
 records creation of a single exhaustion notice, not proof of human delivery/read.
-On exhaustion, the committed event also wakes existing actor/native waiters.
-Exact `sessionplane_team_get` and `sessionplane_wait` return `status: recovery_required`,
-`recovery.state: exhausted`, a human-readable message and `notification` with the
-original URL, requestRef,100 attempts and a stable per-conversation ID. Team get
-without a requestRef exposes the pending roles' notices in `notifications`.
-A later wait returns this condition immediately rather than waiting for another
-generation event. The MCP tool's text and structured result carry the notice to
-the Coordinator, which reports the target and required manual review to the user
-once per notification ID. A disconnected/idle Coordinator receives it on its next
-get/wait; there is no unsolicited desktop popup, email or proof the user read it.
-The same stable notice remains retrievable across restart without creating a new
-alert. Normal manual recovery clears the active notice. This never changes the
-request's submitted/terminal status or fabricates an answer.
+Exhaustion does not add a push message or wake an existing waiter. The next normal
+exact `sessionplane_team_get` or `sessionplane_wait` returns
+`status: recovery_required`, `userActionRequired: true` and a readable message.
+`recovery` specifies the original URL, `state: exhausted`,
+`reason:100-load-retries-exhausted`,100 attempts and `automaticRetry:false`.
+Team get without a requestRef displays this state on the affected role. A new
+wait returns the already-known condition immediately; an in-flight wait keeps its
+existing wake/timeout behavior. The Coordinator can report the required user
+review after reading that response. Large MCP responses retain this compact
+recovery state in the visible text as well as full structuredContent.
+There is no separate popup/email or delivery/read acknowledgement. Existing
+single-event deduplication remains unchanged. Normal manual recovery clears the
+required-user-review state without changing submitted/terminal status or answers.
 States distinguish waiting, held, attempting, recovered and exhausted. A returned
 click is only dispatch evidence, not proof of page recovery. Recovery requires the
 exact loaded history and composer; screenshot/compositor health remains independent.

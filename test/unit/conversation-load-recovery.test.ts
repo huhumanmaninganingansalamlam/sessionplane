@@ -80,10 +80,7 @@ test('99 to100 never clicks101, exhaustion notice is durable and emitted once', 
     r.attempts = 99; service.repository.save(r);
     f.advance(); await service.sweep(); assert.equal(service.repository.get(r.conversationId)!.attempts, 100);
     const before = f.database.raw.prepare('SELECT * FROM generations').all();
-    const waiting = f.scheduler.waitSession(f.controls[0]!.sessionId, { waitMs: 30_000 });
-    assert.equal(f.scheduler.totalSubscriberCount, 1);
     f.advance(); await service.sweep(); const exhausted = service.repository.get(r.conversationId)!;
-    assert.equal((await waiting).waitExpired, false, 'exhaustion wakes the existing native actor wait');
     assert.deepEqual(f.database.raw.prepare('SELECT * FROM generations').all(), before);
     assert.equal(exhausted.state, 'exhausted'); assert.ok(exhausted.notifiedAt);
     for (let n = 0; n < 3; n++) { f.advance(); await service.sweep(); }
@@ -92,7 +89,7 @@ test('99 to100 never clicks101, exhaustion notice is durable and emitted once', 
   } finally { await f.dispose(service); }
 });
 
-test('isolated MCP get/wait delivers an actionable exhaustion notice without terminalizing or resending', async () => {
+test('isolated MCP get/wait displays required user review without terminalizing or resending', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-load-notice-mcp-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const core = await startCore({ config, startBrowser: false, logger: { debug() {}, info() {}, warn() {}, error() {} } });
@@ -118,15 +115,17 @@ test('isolated MCP get/wait delivers an actionable exhaustion notice without ter
     const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: `sessionplane_${name}`,
       arguments: args, socketPath: config.socketPath, timeoutMs: 3000, maxLineBytes: config.rpcMaxLineBytes });
     const teamResult = await invoke('team_get', { teamId: team.teamId });
-    const notification = (teamResult.structuredContent.notifications as { id: string; requestRef: string; url: string }[])[0]!;
-    assert.equal(notification.requestRef, request.outboxId); assert.equal(notification.url, record.url);
-    assert.match(JSON.stringify(teamResult.structuredContent), /Automatic conversation-load recovery stopped after100 attempts/);
+    const required = (teamResult.structuredContent.roles as Record<string, any>[])[0]!;
+    assert.equal(required.requestRef, request.outboxId); assert.equal(required.recovery.url, record.url);
+    assert.match(JSON.stringify(teamResult.structuredContent), /User review required/);
     const exact = await invoke('team_get', { teamId: team.teamId, requestRef: request.outboxId });
     const waited = await invoke('wait', { teamId: team.teamId, requestRefs: [request.outboxId], waitMs: 30_000 });
     for (const result of [exact.structuredContent.request, (waited.structuredContent.results as Record<string, unknown>[])[0]!]) {
       const value = result as Record<string, any>;
       assert.equal(value.status, 'recovery_required'); assert.equal(value.recovery.state, 'exhausted');
-      assert.equal(value.notification.id, notification.id); assert.equal(value.submissionState, 'submission_unknown');
+      assert.equal(value.userActionRequired, true); assert.equal(value.recovery.url, record.url);
+      assert.equal(value.recovery.attempts, 100); assert.equal(value.recovery.reason, '100-load-retries-exhausted');
+      assert.equal(value.submissionState, 'submission_unknown');
       assert.equal(value.promptSubmitted, true); assert.equal(value.terminal, false);
       assert.equal(value.submittedUserMessageId, 'original-anchor'); assert.equal(value.waitExpired, false);
     }
@@ -143,13 +142,13 @@ test('isolated MCP get/wait delivers an actionable exhaustion notice without ter
     const response = wire.trim().split('\n').map(line => JSON.parse(line)).find(value => value.id === 2);
     const visible = JSON.parse(response.result.content[0].text);
     assert.equal(visible.truncatedInText, true);
-    assert.equal(visible.notifications.length, 1, 'team and exact notice deduplicate in visible text');
-    assert.equal(visible.notifications[0].id, notification.id);
-    assert.equal(visible.notifications[0].url, record.url);
-    assert.match(visible.notifications[0].message, /Review the original conversation/);
+    assert.equal(visible.recoveryRequired.length, 1, 'role and exact result display the same required user review');
+    assert.equal(visible.recoveryRequired[0].userActionRequired, true);
+    assert.equal(visible.recoveryRequired[0].recovery.url, record.url);
+    assert.match(visible.recoveryRequired[0].message, /Review the original conversation/);
     assert.equal(response.result.structuredContent.request.submittedUserMessageId, 'original-anchor');
     repo.save({ ...record, state: 'recovered', reason: 'conversation-rendered' });
-    assert.equal((await invoke('team_get', { teamId: team.teamId })).structuredContent.notifications, undefined);
+    assert.equal(((await invoke('team_get', { teamId: team.teamId })).structuredContent.roles as Record<string, any>[])[0]!.userActionRequired, undefined);
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

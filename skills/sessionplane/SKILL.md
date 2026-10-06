@@ -117,15 +117,6 @@ out prompts, infer consensus, or inject answers into other roles.
 
 ## Recovery and cleanup
 
-- If get/wait returns `recovery.state: "exhausted"`, automatic conversation-load
-  clicks stopped at100. Report its `notification.message` and original URL to the
-  user once per stable notification ID, then await manual review of that original
-  conversation. Team get also exposes pending notices in `notifications`.
-  Preserve submitted/UNKNOWN identities and stored results; do not reset the
-  counter, resend, replace or delete as a substitute. No terminal generation is
-  implied. Existing waits wake on this notice; offline clients see it on next
-  get/wait. `notifiedAt` is notice creation, not a human read acknowledgement.
-
 - The core automatically recovers an exact ChatGPT **conversation-load** error
   by clicking only the page button immediately below that error (not a generation
   Retry). All owned conversations share one durable fair queue: at most one attempt
@@ -136,9 +127,18 @@ out prompts, infer consensus, or inject answers into other roles.
   rechecks those guards atomically; this never submits, stops or terminalizes work.
   Normal loaded history/composer ends recovery, including manual recovery. Inspect
   `conversationLoadRecovery` in exact team_get and health for attempts, outcome,
-  holds, nextAllowedAt and the deduplicated exhaustion notice. Preserve UNKNOWN
+  holds and nextAllowedAt. Preserve UNKNOWN
   submission and original anchors; do not start a competing refresh loop or replay.
   This does not recover screenshot/compositor failures merely because DOM responds.
+
+- If the next normal get/wait returns `recovery.state: "exhausted"` and
+  `userActionRequired:true`, automatic conversation-load clicks stopped at100.
+  Read its message and original `recovery.url`, then report the required manual
+  review to the user. Team get also displays this state on the affected role.
+  Preserve submitted/UNKNOWN identities and stored results; do not reset the
+  counter, resend, replace or delete as a substitute. No terminal generation or
+  push alert is implied. Existing waits keep their normal wake/timeout behavior;
+  `notifiedAt` records the existing state event, not delivery/read acknowledgement.
 
 - When the user asks to view or manually control a conversation, call
   `sessionplane_decide` with `decision: "focus"`, its `teamId`, current `requestRef`

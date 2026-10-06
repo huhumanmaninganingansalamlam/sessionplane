@@ -273,13 +273,12 @@ function callToolResult(
   isError: boolean,
 ): Readonly<Record<string, unknown>> {
   const serialized = JSON.stringify(structuredContent);
-  const notices = [
-    ...(Array.isArray(structuredContent.notifications) ? structuredContent.notifications : []),
-    ...[structuredContent, structuredContent.request,
-      ...(Array.isArray(structuredContent.results) ? structuredContent.results : [])]
-      .flatMap(value => isRecord(value) && isRecord(value.notification) ? [value.notification] : []),
-  ].filter(value => isRecord(value) && value.type === 'conversation-load-recovery-exhausted' && typeof value.id === 'string');
-  const notifications = [...new Map(notices.map(value => [value.id, value])).values()];
+  const required = [structuredContent, structuredContent.request,
+    ...(Array.isArray(structuredContent.results) ? structuredContent.results : []),
+    ...(Array.isArray(structuredContent.roles) ? structuredContent.roles : [])]
+    .filter(value => isRecord(value) && value.userActionRequired === true);
+  const recoveryRequired = [...new Map(required.map(value => [value.requestRef,
+    { requestRef: value.requestRef, status: value.status, userActionRequired: true, message: value.message, recovery: value.recovery }])).values()];
   const text =
     Buffer.byteLength(serialized, 'utf8') <= 64 * 1024
       ? serialized
@@ -288,7 +287,7 @@ function callToolResult(
           truncatedInText: true,
           byteLength: Buffer.byteLength(serialized, 'utf8'),
           note: 'The exact full result is available in structuredContent.',
-          ...(notifications.length === 0 ? {} : { notifications }),
+          ...(recoveryRequired.length === 0 ? {} : { recoveryRequired }),
         });
   return {
     content: [{ type: 'text', text }],

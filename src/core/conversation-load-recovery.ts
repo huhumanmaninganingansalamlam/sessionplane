@@ -162,17 +162,13 @@ export class ConversationLoadRecovery {
     const previous = this.repository.get(record.conversationId);
     if (state === 'recovered' && previous?.state !== 'recovered') record.lastCheckedAt = new Date(this.now()).toISOString();
     Object.assign(record, { state, reason });
-    let changed = false;
     this.services.database.transaction(() => {
       this.repository.save(record);
       if (previous?.state === state && previous.reason === reason && previous.attempts === record.attempts && previous.lastOutcome === record.lastOutcome) return;
-      changed = true;
       this.#events.append({ teamId: session.teamId, roleId: session.roleId, sessionId: session.sessionId,
         generation: session.generation, eventType: 'conversation.load-recovery', createdAt: new Date(this.now()).toISOString(),
         payload: { ...record } });
     });
-    // Publish the committed notice to existing native waiters without changing the generation.
-    if (changed && state === 'exhausted') this.services.scheduler.refreshSession(session.sessionId);
   }
   #exhaust(record: LoadRecoveryRecord, session: SessionSnapshot): void {
     record.notifiedAt ??= new Date(this.now()).toISOString();

@@ -52,10 +52,6 @@ export class TeamWorkflow {
 
   async getTeam(input: { teamId: string; requestRef?: string | undefined; maxNodes?: number | undefined; history?: boolean | undefined; beforeRequestRef?: string | undefined }) {
     const team = this.services.directory.getTeam(input.teamId);
-    const notifications = team.roles.flatMap(role => {
-      const notice = role.currentSessionId === null ? null : this.#loadRecoveryNotice(this.services.directory.getSession(role.currentSessionId));
-      return notice === null ? [] : [notice];
-    });
     const before = input.beforeRequestRef === undefined ? undefined : this.#request({ teamId: input.teamId, requestRef: input.beforeRequestRef });
     const history = input.history === true || before !== undefined
       ? this.#outbox.historyForTeam(team.teamId, before)
@@ -64,9 +60,9 @@ export class TeamWorkflow {
       ...team,
       capabilities: { uploadsEnabled: this.services.submissions.uploadsEnabled, downloadsEnabled: true },
       roles: team.roles.map((r) => ({ ...r, roleRef: r.currentSessionId === null ? null : `${r.currentSessionId}:${r.generation}`,
-        conversationUsage: this.#conversationUsage(r.currentSessionId) })),
+        conversationUsage: this.#conversationUsage(r.currentSessionId),
+        ...(r.currentSessionId === null ? {} : this.#loadRecoveryRequired(this.services.directory.getSession(r.currentSessionId)) ?? {}) })),
       ...history,
-      ...(notifications.length === 0 ? {} : { notifications }),
       ...(input.requestRef === undefined ? {} : { request: await this.#observe(this.#request({ teamId: input.teamId, requestRef: input.requestRef }), input.maxNodes, true) }),
     };
   }
@@ -226,7 +222,7 @@ export class TeamWorkflow {
         const request = this.#request({ teamId: input.teamId, requestRef });
         const current = this.services.directory.getSession(request.sessionId);
         let waitExpired = false;
-        if (current.generation === request.generation && !needsDecision(current) && this.#loadRecoveryNotice(current) === null && this.#lostSubmission(current) === null) {
+        if (current.generation === request.generation && !needsDecision(current) && this.#loadRecoveryRequired(current) === null && this.#lostSubmission(current) === null) {
           const waited = await this.services.scheduler.waitSession(request.sessionId, { expectedGeneration: request.generation, waitMs: input.waitMs });
           waitExpired = waited.waitExpired;
         }
@@ -314,13 +310,10 @@ export class TeamWorkflow {
   }
 
   async #observe(request: OutboxRecord, maxNodes?: number, inspectCurrent = false): Promise<Record<string, unknown>> {
-    const notificationSnapshot = this.#sessions.getSnapshot(request.sessionId)!;
-    const notice = notificationSnapshot.generation === request.generation ? this.#loadRecoveryNotice(notificationSnapshot) : null;
-    const result = notice === null ? await this.#observeRequest(request, maxNodes, inspectCurrent)
-      : { ...notificationSnapshot, requestRef: request.outboxId, roleRef: roleRef(notificationSnapshot), status: 'recovery_required',
-        message: notice.message, notification: notice,
-        recovery: { state: 'exhausted', reason: '100-load-retries-exhausted', automaticRetry: false,
-          nextAction: notice.nextAction, url: notice.url } };
+    const snapshot = this.#sessions.getSnapshot(request.sessionId)!;
+    const required = snapshot.generation === request.generation ? this.#loadRecoveryRequired(snapshot) : null;
+    const result = required === null ? await this.#observeRequest(request, maxNodes, inspectCurrent)
+      : { ...snapshot, ...required, requestRef: request.outboxId, roleRef: roleRef(snapshot) };
     const payload = JSON.parse(request.payloadJson);
     const optedIn = payload.thinkingFailureRecovery === true;
     const rootRequestRef = payload.failureContinuation?.rootRequestRef ?? request.outboxId;
@@ -345,15 +338,15 @@ export class TeamWorkflow {
         ? { stopOutcome: { state: 'unknown', automaticRetry: false } } : {}) };
   }
 
-  #loadRecoveryNotice(snapshot: SessionSnapshot) {
+  #loadRecoveryRequired(snapshot: SessionSnapshot) {
     if (snapshot.terminal || snapshot.conversationId === null) return null;
     const record = this.#loadRecovery.get(snapshot.conversationId);
     if (record?.state !== 'exhausted') return null;
-    return { id: `conversation-load-exhausted:${record.conversationId}`, type: 'conversation-load-recovery-exhausted',
+    return { status: 'recovery_required', userActionRequired: true,
       requestRef: this.#outbox.getByGeneration(snapshot.sessionId, snapshot.generation)?.outboxId ?? null,
-      conversationId: record.conversationId, url: record.url, attempts: record.attempts,
-      createdAt: record.notifiedAt, automaticRetry: false, nextAction: 'human_review_original_conversation',
-      message: `Automatic conversation-load recovery stopped after100 attempts. Review the original conversation: ${record.url}. The existing request, submission identity and results are preserved. Do not resend, reset the counter or replace/delete the conversation as an automatic recovery action.` };
+      recovery: { state: 'exhausted', reason: '100-load-retries-exhausted', attempts: record.attempts,
+        url: record.url, automaticRetry: false, nextAction: 'human_review_original_conversation' },
+      message: `User review required: automatic conversation-load recovery stopped after100 attempts. Review the original conversation: ${record.url}. The existing request, submission identity and results are preserved. Do not resend, reset the counter or replace/delete the conversation as an automatic recovery action.` };
   }
 
   #conversationUsage(sessionId: string | null) {
