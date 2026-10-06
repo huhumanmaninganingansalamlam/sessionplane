@@ -35,11 +35,13 @@ import { observeChatGptDialog } from './dialog-observer.ts';
 import { observeChatGptDom, waitForChatGptDomMutation } from './dom-observer.ts';
 import { ChatGptNetworkObserver } from './network-observer.ts';
 import { readChatGptMessages } from './message-dom.ts';
+import { restoreLatestPosition } from './latest-position-recovery.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 import { ChatGptSubmission, recoverChatGptAcknowledgement } from './submission.ts';
 
 export interface ChatGptAdapterOptions {
   readonly pageMutex?: PageMutationMutex;
+  readonly canRestoreLatestPosition?: (request: ProviderObservationRequest) => boolean;
   readonly browserOwner: BrowserOwner;
   readonly pageRegistry: PageRegistry;
   readonly loginUrl: string;
@@ -51,6 +53,7 @@ export interface ChatGptAdapterOptions {
 export class ChatGptAdapter implements ProviderAdapter {
   readonly provider = 'chatgpt';
   readonly #pageMutex: PageMutationMutex;
+  readonly #canRestoreLatestPosition: (request: ProviderObservationRequest) => boolean;
   readonly #browserOwner: BrowserOwner;
   readonly #pageRegistry: PageRegistry;
   readonly #loginUrl: string;
@@ -59,6 +62,7 @@ export class ChatGptAdapter implements ProviderAdapter {
 
   constructor(options: ChatGptAdapterOptions) {
     this.#pageMutex = options.pageMutex ?? new PageMutationMutex();
+    this.#canRestoreLatestPosition = options.canRestoreLatestPosition ?? (() => true);
     this.#browserOwner = options.browserOwner;
     this.#pageRegistry = options.pageRegistry;
     this.#loginUrl = options.loginUrl;
@@ -241,6 +245,8 @@ export class ChatGptAdapter implements ProviderAdapter {
             conversationId,
           });
       return new ChatGptObservationSource({
+        pageMutex: this.#pageMutex,
+        canRestoreLatestPosition: this.#canRestoreLatestPosition,
         pageKey,
         page,
         pageRegistry: this.#pageRegistry,
@@ -624,6 +630,8 @@ class ChatGptStopOperation implements ProviderStopOperation {
 }
 
 interface ChatGptObservationSourceOptions {
+  readonly pageMutex: PageMutationMutex;
+  readonly canRestoreLatestPosition: (request: ProviderObservationRequest) => boolean;
   readonly pageKey: string;
   readonly page: ReturnType<PageRegistry['requireOwnedPage']>;
   readonly pageRegistry: PageRegistry;
@@ -639,10 +647,15 @@ class ChatGptObservationSource implements ProviderObservationSource {
   #conversationId: string;
   readonly #network: ChatGptNetworkObserver;
   #lastNetworkRevision = 0;
+  readonly #pageMutex: PageMutationMutex;
+  readonly #canRestoreLatestPosition: (request: ProviderObservationRequest) => boolean;
+  #latestPositionAttempted = false;
   #closed = false;
 
   constructor(options: ChatGptObservationSourceOptions) {
     this.pageKey = options.pageKey;
+    this.#pageMutex = options.pageMutex;
+    this.#canRestoreLatestPosition = options.canRestoreLatestPosition;
     this.#page = options.page;
     this.#pageRegistry = options.pageRegistry;
     this.#request = options.request;
@@ -687,13 +700,44 @@ class ChatGptObservationSource implements ProviderObservationSource {
         conversationId: this.#conversationId,
       });
       const before = this.#pageRegistry.getBinding(this.pageKey);
-      const [dom, dialog] = await Promise.all([
+      let [dom, dialog] = await Promise.all([
         observeChatGptDom(this.#page, {
           submittedUserMessageId: this.#request.session.submittedUserMessageId,
           submittedUserTurnId: this.#request.session.submittedUserTurnId,
         }),
         observeChatGptDialog(this.#page),
       ]);
+      if (!dom.submittedUserFound && dom.conversationSurfaceAvailable && !dom.actionableAlert &&
+          dialog.kind === null && !this.#latestPositionAttempted) {
+        const restored = await this.#pageMutex.runExclusive(this.pageKey, async () => {
+          if (this.#closed || !this.#request.session.promptSubmitted ||
+              this.#request.session.terminal || !this.#canRestoreLatestPosition(this.#request)) return false;
+          const binding = this.#pageRegistry.refreshPage(this.pageKey);
+          this.#pageRegistry.requireOwnedPage(this.pageKey, {
+            sessionId: this.#request.session.sessionId, generation: this.#request.generation,
+            conversationId: this.#conversationId,
+          });
+          if (binding.bindingEpoch !== before.bindingEpoch) return false;
+          try {
+            const clicked = await this.#page.evaluate(restoreLatestPosition, {
+              origin: new URL(binding.url).origin, conversationId: this.#conversationId,
+              anchorIds: [this.#request.session.submittedUserMessageId,
+                this.#request.session.submittedUserTurnId].filter((id): id is string => id !== null),
+              expiresAt: Date.now() + 5_000,
+            });
+            this.#latestPositionAttempted = clicked;
+            return clicked;
+          } catch (error) {
+            // An ambiguous dispatch never repeats within this observation source.
+            this.#latestPositionAttempted = true;
+            throw error;
+          }
+        });
+        if (restored) dom = await observeChatGptDom(this.#page, {
+          submittedUserMessageId: this.#request.session.submittedUserMessageId,
+          submittedUserTurnId: this.#request.session.submittedUserTurnId,
+        });
+      }
       const activity = await observeChatGptActivity(this.#page, dom);
       const after = this.#pageRegistry.refreshPage(this.pageKey);
       if (

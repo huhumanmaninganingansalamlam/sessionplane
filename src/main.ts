@@ -140,6 +140,14 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       : [
           new ChatGptAdapter({
             pageMutex: pageMutationMutex,
+            canRestoreLatestPosition: ({ session, generation }) => {
+              const current = teamDirectory.getSession(session.sessionId);
+              return current.generation === generation && !current.terminal && current.promptSubmitted &&
+                current.pageKey === session.pageKey && current.conversationId === session.conversationId &&
+                current.submittedUserMessageId === session.submittedUserMessageId &&
+                current.submittedUserTurnId === session.submittedUserTurnId &&
+                !receipts.hasFocusedGeneration(session.sessionId, generation);
+            },
             browserOwner,
             pageRegistry,
             loginUrl: config.chatgptUrl,

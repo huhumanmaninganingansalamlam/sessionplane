@@ -96,6 +96,16 @@ export class ReceiptRepository {
     return row === undefined ? null : this.get(row.clientId, row.requestId);
   }
 
+  /** Explicit native focus reserves this generation's display for human observation. */
+  hasFocusedGeneration(sessionId: string, generation: number): boolean {
+    return this.#database.raw.prepare(`
+      SELECT 1 FROM request_receipts WHERE method = 'workflow.focus' AND status = 'complete'
+        AND json_extract(result_json, '$.activated') = 1
+        AND json_extract(result_json, '$.sessionId') = ?
+        AND json_extract(result_json, '$.generation') = ? LIMIT 1
+    `).get(sessionId, generation) !== undefined;
+  }
+
   get(clientId: string, requestId: string): ReceiptRow | null {
     const row = this.#database.raw
       .prepare(`

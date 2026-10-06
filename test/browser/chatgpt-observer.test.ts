@@ -14,6 +14,69 @@ import { recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submi
 
 const CONVERSATION_ID = 'conversation-observer-123456';
 
+test('virtualized submitted anchor/final is restored once through same-chat display UI, preserving human holds and identity', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-virtualized-final-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  let held = true;
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    let networkRequests = 0;
+    await page.route('https://chatgpt.com/**', route => {
+      networkRequests++;
+      return route.fulfill({ status: 200, contentType: 'text/html', body: '<main></main>' });
+    });
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
+    const session = { ...sessionSnapshot(binding.pageKey), nextCheckAt: '2099-01-01T00:00:00.000Z' };
+    const original = { ...session };
+    const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/',
+      acknowledgementTimeoutMs: 500, canRestoreLatestPosition: () => !held });
+    const source = await adapter.openObservation({ session, generation: 1 });
+    await page.setContent(`<main><div id="turns"><article data-message-author-role="user" data-message-id="old">Old generation</article></div>
+      <textarea></textarea><button aria-label="맨 아래로 스크롤">↓</button><span role="status">Response complete</span></main>`);
+    await page.evaluate(() => {
+      // Headless fixtures do not model a user's foreground tab.
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      document.querySelector('button')!.onclick = () => {
+        document.querySelector('button')!.dataset.clicks = String(Number(document.querySelector('button')!.dataset.clicks ?? 0) + 1);
+        document.querySelector('#turns')!.innerHTML = `<article data-message-author-role="user" data-message-id="user-message-1">Exact submitted turn</article>
+          <article data-message-author-role="assistant" data-message-id="original-final"><div class="markdown">Original generation final</div></article>`;
+      };
+    });
+    try {
+      assert.equal((await source.observe()).candidate, null, 'Human hold does not infer a final from generic completion');
+      held = false;
+      await page.locator('textarea').fill('Retained manual draft');
+      assert.equal((await source.observe()).submittedUserFound, false, 'Draft is never disturbed');
+      await page.locator('textarea').fill('');
+      await page.evaluate(() => Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }));
+      assert.equal((await source.observe()).submittedUserFound, false, 'Visible user tab is preserved');
+      await page.evaluate(() => Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' }));
+      const observed = await source.observe();
+      assert.equal(observed.submittedUserFound, true);
+      assert.equal(observed.candidate?.responseMessageId, 'original-final');
+      assert.equal(observed.candidate?.answerText, 'Original generation final');
+      const tracker = new ExactFinalTracker(1);
+      tracker.evaluate(observed, Date.now());
+      assert.equal(tracker.evaluate(await source.observe(), Date.now() + 1).kind, 'complete');
+      assert.equal(await page.locator('button').getAttribute('data-clicks'), '1');
+      assert.equal(networkRequests, 1, 'Display recovery does not use a synthetic backend probe during cooldown');
+      assert.deepEqual(session, original, 'No request/anchor/draft/submission state rewriting');
+      const stale = await adapter.openObservation({ session, generation: 1 });
+      registry.unbindPage(binding.pageKey);
+      registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 2, conversationId: CONVERSATION_ID });
+      assert.equal((await stale.observe()).observationTransport, 'stale');
+      assert.equal(await page.locator('button').getAttribute('data-clicks'), '1', 'Changed generation cannot recover display or attribute answer');
+      stale.close();
+    } finally { source.close(); }
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('thinking-failed activity headers report an exact nonterminal provider error, never an answer', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-thinking-failed-'));
   const registry = new PageRegistry();
