@@ -584,6 +584,7 @@ export class SubmissionService {
   ): Promise<SessionSnapshot> {
     let submission: ProviderSubmission;
     try {
+      this.#requireAccountReady(prepared.snapshot);
       if (attachments.length > 0) this.#requireUploadsEnabled();
       const adapter = this.#adapters.require(prepared.snapshot.provider);
       submission = await adapter.openSubmission({
@@ -596,6 +597,9 @@ export class SubmissionService {
         attachments,
       });
     } catch (error) {
+      if (error instanceof SessionPlaneDomainError && error.errorCode === 'provider.preparation-required') {
+        return await this.#recordPreparationRequired(actor, prepared.outbox, error);
+      }
       return await this.#failPreSubmit(actor, prepared.outbox, error);
     }
 
@@ -610,6 +614,7 @@ export class SubmissionService {
       };
       try {
         await verifyContinuation();
+        this.#requireAccountReady(this.#requireSnapshot(prepared.outbox.sessionId));
         await withProviderStageTimeout(
           submission.prepare(choices),
           stageTimeoutMs,
@@ -617,6 +622,7 @@ export class SubmissionService {
         );
         this.#requireActiveRoleSession(this.#requireSnapshot(prepared.outbox.sessionId));
         await verifyContinuation();
+        this.#requireAccountReady(this.#requireSnapshot(prepared.outbox.sessionId));
         if (input.thinkingFailureRecovery === true) {
           const model = choices?.model ?? choices?.effort;
           if (model === undefined) throw new ProviderSubmissionError(
@@ -628,7 +634,7 @@ export class SubmissionService {
       } catch (error) {
         try { this.#requireActiveRoleSession(this.#requireSnapshot(prepared.outbox.sessionId)); }
         catch (retired) { submission.abandon(); error = retired; }
-        if (error instanceof ProviderSubmissionError && error.errorCode === 'provider.preparation-required') {
+        if ((error instanceof ProviderSubmissionError || error instanceof SessionPlaneDomainError) && error.errorCode === 'provider.preparation-required') {
           return await this.#recordPreparationRequired(actor, prepared.outbox, error);
         }
         return await this.#failPreSubmit(actor, prepared.outbox, error);
@@ -934,6 +940,7 @@ export class SubmissionService {
     return await actor.enqueue(async () => {
       const pending = this.#requirePreparationOwner(input);
       let snapshot = this.#requireSnapshot(input.sessionId);
+      this.#requireAccountReady(snapshot);
       const payload = parseOutboxPayload(pending);
       const adapter = this.#adapters.require(snapshot.provider);
       const submission = await adapter.openSubmission({
@@ -954,6 +961,7 @@ export class SubmissionService {
       const pageKey = submission.pageKey;
       return await this.#pageMutex.runExclusive(pageKey, async () => {
         this.#requirePreparationOwner(input);
+        this.#requireAccountReady(this.#requireSnapshot(input.sessionId));
         await submission.prepareForObservation?.();
         snapshot = this.#requireSnapshot(input.sessionId);
         if (snapshot.pageKey !== pageKey || pending.sessionId !== snapshot.sessionId) {
@@ -1018,12 +1026,14 @@ export class SubmissionService {
       }
       this.#requirePreparationOwner(input);
       const initialSnapshot = this.#requireSnapshot(input.sessionId);
+      if (input.decision !== 'cancel') this.#requireAccountReady(initialSnapshot);
       const pageKey = initialSnapshot.pageKey;
       if (pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'Exact preparation page is unavailable');
       return await this.#pageMutex.runExclusive(pageKey, async () => {
         const current = this.#requirePreparationOwner(input);
         const snapshot = this.#requireSnapshot(input.sessionId);
         if (snapshot.pageKey !== pageKey) throw new SessionPlaneDomainError('session.generation-superseded', 'Preparation page changed before decision');
+        if (input.decision !== 'cancel') this.#requireAccountReady(snapshot);
         const timestamp = this.#now().toISOString();
         this.#database.raw.prepare(`
           INSERT INTO request_receipts(client_id, request_id, method, result_json, created_at, request_hash, status, updated_at)
@@ -1108,8 +1118,24 @@ export class SubmissionService {
     return outbox;
   }
 
+  accountCooldown(snapshot: SessionSnapshot): string | null {
+    if (snapshot.provider !== 'chatgpt') return null;
+    const account = new ConversationLoadRecoveryRepository(this.#database).pacing().account;
+    if (!account?.blockedUntil || Date.parse(account.blockedUntil) <= this.#now().getTime()) return null;
+    return [account.blockedUntil, account.nextAllowedAt].filter((v): v is string => !!v).sort().at(-1)!;
+  }
+
+  #requireAccountReady(snapshot: SessionSnapshot): void {
+    const nextCheckAt = this.accountCooldown(snapshot);
+    if (nextCheckAt !== null) throw new SessionPlaneDomainError('provider.preparation-required',
+      'ChatGPT account cooldown: keep the same prepared request and wait before web preparation or submission',
+      { reason: 'account-cooldown', nextCheckAt, promptSubmitted: false,
+        sessionId: snapshot.sessionId, generation: snapshot.generation });
+  }
+
   async #recordPreparationRequired(actor: SessionActor, outbox: OutboxRecord, cause: unknown): Promise<SessionSnapshot> {
     const classified = classifyPreSubmitError(cause);
+    const nextCheckAt = this.accountCooldown(this.#requireSnapshot(outbox.sessionId));
     let snapshot!: SessionSnapshot;
     let eventSequence = 0;
     const state = {
@@ -1126,7 +1152,8 @@ export class SubmissionService {
           submissionState: 'prepared',
           providerState: 'pending',
           observationTransport: 'fresh',
-          reason: 'agent-preparation-required',
+          reason: nextCheckAt === null ? 'agent-preparation-required' : 'account-cooldown',
+          nextCheckAt,
           errorCode: 'provider.preparation-required',
           promptSubmitted: false,
         },
@@ -1154,7 +1181,8 @@ export class SubmissionService {
     actor.publish(snapshot, eventSequence);
     throw new SessionPlaneDomainError(
       'provider.preparation-required',
-      'Provider UI needs a caller decision before the same request can continue',
+      nextCheckAt === null ? 'Provider UI needs a caller decision before the same request can continue'
+        : 'The same prepared request is waiting for the shared ChatGPT account cooldown',
       { promptSubmitted: false, requestId: outbox.requestId, sessionId: outbox.sessionId, generation: outbox.generation, snapshot },
     );
   }

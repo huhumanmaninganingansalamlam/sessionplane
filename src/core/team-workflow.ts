@@ -397,6 +397,10 @@ export class TeamWorkflow {
     const recovery = this.#lostSubmission(snapshot);
     if (recovery !== null) return { ...snapshot, requestRef: request.outboxId, roleRef: roleRef(snapshot), ...recovery };
     if (needsDecision(snapshot)) {
+      const nextCheckAt = this.services.submissions.accountCooldown(snapshot);
+      if (nextCheckAt !== null) return { ...snapshot, requestRef: request.outboxId, roleRef: roleRef(snapshot),
+        status: 'needs_decision', reason: 'account-cooldown', nextCheckAt,
+        message: 'The same prepared request is waiting for the shared ChatGPT account cooldown. Web preparation and submission are deferred; retain its existing draft and read it again after nextCheckAt.' };
       const { configurationCatalog, ...evidence } = await this.services.ui.inspect({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });
       snapshot = this.services.directory.getSession(request.sessionId);
       const stored = this.#outbox.requireById(request.outboxId);

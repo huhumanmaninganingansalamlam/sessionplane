@@ -9,6 +9,7 @@ import { resolveConfig } from '../../src/config.ts';
 import { startCore, type CoreService } from '../../src/main.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { ProbeBudgetRepository } from '../../src/storage/probe-budget-repository.ts';
 
 interface TeamSnapshot {
   readonly teamId: string;
@@ -579,6 +580,62 @@ test('session.send submits once, persists exact acknowledgement, and never resen
     await service.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('account cooldown parks the same request, blocks preparation, and rechecks before submit', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-send-cooldown-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const service = await startCore({ config, startBrowser: false, providerAdapters: [fake], logger: silentLogger() });
+  const budgets = new ProbeBudgetRepository(service.database.raw);
+  const expire = () => budgets.save({ scope: 'chatgpt:default', nextAllowedAt: null, blockedUntil: null,
+    backoffLevel: 0, consecutiveFailures: 0, updatedAt: new Date().toISOString() });
+  try {
+    const team = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'client-send', requestId: 'cooldown-team', primaryRoleKey: 'main',
+    });
+    const session = await createSession(config.socketPath, team.teamId, 'main', 'cooldown-session');
+    const send = { clientId: 'client-send', requestId: 'cooldown-send', sessionId: session.sessionId,
+      prompt: 'Retain this exact draft.', sessionDeadlineSec: 600 };
+    const until = new Date(Date.now() + 900_000).toISOString();
+    service.probeCoordinator.defer('chatgpt:default', until);
+    await assert.rejects(rpc(config.socketPath, 'session.send', send), hasRpcError('provider.preparation-required', false));
+    const pending = service.database.raw.prepare('SELECT outbox_id AS id, generation FROM outbox WHERE request_id=?').get(send.requestId)!;
+    const owner = { clientId: send.clientId, requestId: send.requestId, sessionId: session.sessionId, generation: Number(pending.generation) };
+    await assert.rejects(service.submissionService.resumePreparation(owner), /account|same request/i);
+    let decisions = 0;
+    await assert.rejects(service.submissionService.decidePreparation({ ...owner, decisionId: 'cooldown-choice',
+      decision: 'discover', purpose: 'model' }, async () => { decisions++; return { choice: null, result: {} }; }), /cooldown/);
+    const observed = await rpc<any>(config.socketPath, 'workflow.team_get', { teamId: team.teamId, requestRef: pending.id });
+    assert.equal(observed.request.nextCheckAt, until);
+    assert.equal(observed.request.reason, 'account-cooldown');
+    assert.equal(observed.request.generation, pending.generation);
+    assert.equal(fake.openCount, 0);
+    assert.equal(decisions, 0);
+    assert.equal(service.database.raw.prepare('SELECT count(*) AS n FROM request_receipts WHERE request_id=?').get('cooldown-choice')!.n, 0);
+    expire();
+    const submitted = await service.submissionService.resumePreparation(owner);
+    assert.equal(submitted.submissionState, 'submitted');
+    service.probeCoordinator.defer('chatgpt:default', until);
+    await rpc(config.socketPath, 'session.send', send); // Reading an already submitted receipt remains safe.
+    assert.equal(fake.submitCount, 1);
+    assert.equal(service.database.raw.prepare('SELECT count(*) AS n FROM outbox').get()!.n, 1);
+
+    await createRole(config.socketPath, team.teamId, 'expert.race', 'race-role');
+    const race = await createSession(config.socketPath, team.teamId, 'expert.race', 'race-session');
+    expire();
+    const originalOpen = fake.openSubmission.bind(fake);
+    fake.openSubmission = async request => {
+      const submission = await originalOpen(request), prepare = submission.prepare.bind(submission);
+      submission.prepare = async choices => { await prepare(choices); service.probeCoordinator.defer('chatgpt:default', until); };
+      return submission;
+    };
+    await assert.rejects(rpc(config.socketPath, 'session.send', { ...send, requestId: 'race-send', sessionId: race.sessionId }),
+      hasRpcError('provider.preparation-required', false));
+    assert.equal(fake.submitCount, 1, '429 arriving during preparation must prevent the irreversible submit');
+    assert.equal(service.teamDirectory.getSession(race.sessionId).submissionState, 'prepared');
+    assert.equal(service.teamDirectory.getSession(race.sessionId).promptSubmitted, false);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 async function createRole(
