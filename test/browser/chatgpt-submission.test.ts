@@ -58,6 +58,19 @@ test('ChatGPT acknowledgement recovery uses exact text or an unchanged explicit 
     assert.ok(candidate);
     const selection = { messageId: candidate.messageId, evidenceHash: candidate.evidenceHash };
     assert.equal((await recoverChatGptAcknowledgement(created.page, 'Original text with different formatting', 'auditconv123', selection))?.submittedUserMessageId, candidate.messageId);
+    // Live Deeptrade renders an unlabelled-id composer as the supported main textbox.
+    await created.page.locator('#prompt-textarea').evaluate(element => {
+      const main = document.createElement('main'); element.before(main); main.append(element);
+      element.removeAttribute('id'); element.setAttribute('role', 'textbox');
+    });
+    const composer = created.page.locator('main [role="textbox"]');
+    assert.equal((await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123', selection))?.submittedUserMessageId, candidate.messageId);
+    await composer.evaluate(element => { element.textContent = 'Retained manual draft'; });
+    assert.equal(await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123', selection), null);
+    assert.equal(await composer.innerText(), 'Retained manual draft');
+    await composer.evaluate(element => { element.textContent = ''; element.insertAdjacentHTML('afterend', '<div role="textbox" contenteditable="true"></div>'); });
+    assert.equal(await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123', selection), null);
+    await composer.nth(1).evaluate(element => element.remove());
     assert.equal(await recoverChatGptAcknowledgement(created.page, prompt, 'other-conversation', selection), null);
     await created.page.locator('[data-message-id="user-1"] .whitespace-pre-wrap').evaluate((element) => { element.textContent = 'edited'; });
     assert.equal(await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123', selection), null);

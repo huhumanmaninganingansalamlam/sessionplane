@@ -362,7 +362,7 @@ export class ChatGptSubmission implements ProviderSubmission {
 // Read-only confirmation: a failed/rolled-back submit may leave its full draft
 // alongside an optimistic user node. Missing/ambiguous composers fail closed.
 async function hasClearedComposer(page: Page): Promise<boolean> {
-  const editors = page.locator('#prompt-textarea, [data-testid="prompt-textarea"]');
+  const editors = page.locator('#prompt-textarea, [data-testid="prompt-textarea"], main [role="textbox"][contenteditable="true"]');
   let visible = 0;
   for (let index = 0; index < await editors.count(); index += 1) {
     const editor = editors.nth(index);
