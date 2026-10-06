@@ -164,6 +164,7 @@ export class ActorScheduler {
     generation: number,
     update: CurrentGenerationUpdate,
     eventType = 'generation.updated',
+    recoveryReason?: string | null,
   ): Promise<SessionSnapshot> {
     const actor = this.actorFor(sessionId);
     return await actor.enqueue(() => {
@@ -210,7 +211,11 @@ export class ActorScheduler {
           sessionId,
           generation,
           eventType,
-          payload: summarizeUpdate(update),
+          payload: {
+            ...summarizeUpdate(update),
+            ...(recoveryReason != null && /^[a-z0-9-]{1,120}$/.test(recoveryReason)
+              ? { recoveryReason } : {}),
+          },
           createdAt: timestamp,
         });
       });

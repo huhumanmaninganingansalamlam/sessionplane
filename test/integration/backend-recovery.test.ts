@@ -98,6 +98,10 @@ test('workflow reads expose provider alert text separately from backend 429 and 
     assert.equal(backendSnapshots[0]!.observationTransport, 'deferred');
     assert.equal(backendSnapshots[0]!.errorCode, 'provider.actionable-alert');
     assert.equal(backendSnapshots[0]!.reason, 'provider-actionable-alert');
+    const deferredEvent = service.database.raw.prepare(
+      "SELECT payload_json FROM events WHERE session_id = ? AND event_type = 'generation.backend-deferred' ORDER BY sequence DESC LIMIT 1",
+    ).get(session.sessionId) as { payload_json: string };
+    assert.equal(JSON.parse(deferredEvent.payload_json).recoveryReason, 'backend-http-429');
     const read = await workflow<{ request: SessionSnapshot & { evidence: { providerAlerts: string[] } } }>(
       'team_get', { teamId, requestRef });
     assert.equal(read.request.errorCode, 'provider.actionable-alert');
@@ -108,6 +112,12 @@ test('workflow reads expose provider alert text separately from backend 429 and 
       'wait', { teamId, requestRefs: [requestRef], waitMs: 5 });
     assert.equal(waited.results[0]!.errorCode, 'provider.actionable-alert');
     assert.deepEqual(waited.results[0]!.evidence.providerAlerts, ['network error']);
+    fake.queueRecovery(session.sessionId, { kind: 'unavailable', observationTransport: 'unavailable',
+      responseMessageId: null, answerText: null, reason: 'backend-auth-rejected',
+      retryAfterMs: null, nextCheckAt: null });
+    await waitForSnapshot(config.socketPath, session.sessionId, () => !!service.database.raw.prepare(
+      "SELECT 1 FROM events WHERE session_id = ? AND event_type = 'generation.backend-unavailable' AND json_extract(payload_json, '$.recoveryReason') = 'backend-auth-rejected'",
+    ).get(session.sessionId));
     fake.queueRecovery(session.sessionId, { kind: 'complete', observationTransport: 'fresh',
       responseMessageId: 'exact-alert-recovery', answerText: 'Recovered exact final',
       reason: 'backend-exact-final', retryAfterMs: null, nextCheckAt: null });

@@ -348,14 +348,13 @@ export class ObservationService {
           previous.errorCode === 'provider.actionable-alert') && recovery.kind !== 'complete'
         ? { errorCode: previous.errorCode, reason: previous.reason } : {}),
     };
-    if (!hasMeaningfulChange(previous, update)) {
-      return previous;
-    }
+    // Retain the paced recovery result even when the visible page error is unchanged.
     return await this.#scheduler.updateGeneration(
       previous.sessionId,
       previous.generation,
       update,
       eventTypeForRecovery(recovery),
+      recovery.reason,
     );
   }
 }

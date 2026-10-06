@@ -41,6 +41,16 @@ test('backend recovery rejects other branches and follows human turns on the anc
   );
   assert.equal(historical.kind, 'unverified');
   assert.equal(historical.reason, 'backend-user-anchor-not-on-current-branch');
+  assert.equal(historical.answerText, null);
+  const absent = recoverExactServerFinal(conversationPayload([
+    node('root', null, null),
+    node('other-user', 'root', userMessage('other-message', 'other-turn')),
+    node('current-final', 'other-user', finalAssistant('user-message-1', 'Unrelated final')),
+  ], 'current-final'), identity());
+  assert.equal(absent.kind, 'unverified');
+  assert.equal(absent.reason, 'backend-user-anchor-absent-from-mapping');
+  assert.equal(absent.responseMessageId, null);
+  assert.equal(absent.answerText, null);
 
   const laterUser = recoverExactServerFinal(
     conversationPayload([

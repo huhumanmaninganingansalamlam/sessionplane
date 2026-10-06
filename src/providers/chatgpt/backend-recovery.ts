@@ -251,7 +251,13 @@ export function recoverExactServerFinal(
     }
   }
   if (submittedIndex < 0) {
-    return unverified('backend-user-anchor-not-on-current-branch');
+    const onOtherBranch = Object.entries(mapping).some(([nodeId, node]) => {
+      const message = messageForNode(node);
+      return message !== null && isExactSubmittedUser(nodeId, message, identity);
+    });
+    return unverified(onOtherBranch
+      ? 'backend-user-anchor-not-on-current-branch'
+      : 'backend-user-anchor-absent-from-mapping');
   }
 
   let sawAssistant = false;
