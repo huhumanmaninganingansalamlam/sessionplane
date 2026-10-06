@@ -355,6 +355,8 @@ export class ObservationService {
       update,
       eventTypeForRecovery(recovery),
       recovery.reason,
+      { conversationId: previous.conversationId, pageKey: previous.pageKey,
+        submittedUserMessageId: previous.submittedUserMessageId, submittedUserTurnId: previous.submittedUserTurnId },
     );
   }
 }

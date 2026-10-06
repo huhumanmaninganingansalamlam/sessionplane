@@ -165,6 +165,7 @@ export class ActorScheduler {
     update: CurrentGenerationUpdate,
     eventType = 'generation.updated',
     recoveryReason?: string | null,
+    recoveryIdentity?: Pick<SessionSnapshot, 'conversationId' | 'pageKey' | 'submittedUserMessageId' | 'submittedUserTurnId'>,
   ): Promise<SessionSnapshot> {
     const actor = this.actorFor(sessionId);
     return await actor.enqueue(() => {
@@ -214,7 +215,7 @@ export class ActorScheduler {
           payload: {
             ...summarizeUpdate(update),
             ...(recoveryReason != null && /^[a-z0-9-]{1,120}$/.test(recoveryReason)
-              ? { recoveryReason } : {}),
+              ? { recoveryReason, ...(recoveryIdentity ? { recoveryIdentity } : {}) } : {}),
           },
           createdAt: timestamp,
         });
@@ -277,4 +278,3 @@ function summarizeUpdate(update: CurrentGenerationUpdate): Readonly<Record<strin
     hasAnswer: update.answerText !== undefined && update.answerText !== null,
   };
 }
-

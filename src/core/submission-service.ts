@@ -29,6 +29,7 @@ import {
 } from '../storage/outbox-repository.ts';
 import { ReceiptRepository, hashCanonical } from '../storage/receipt-repository.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
+import { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
 import type { TeamDirectory } from './team-directory.ts';
 
 export interface FailureContinuation {
@@ -894,11 +895,23 @@ export class SubmissionService {
       if (snapshot.provider !== 'chatgpt') throw new SessionPlaneDomainError('capability.unsupported', 'Page refresh currently supports ChatGPT only');
       if (snapshot.pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'Inspect the exact request to recover its page before refreshing');
       await this.#pageMutex.runExclusive(snapshot.pageKey, async () => {
+        const recovery = new ConversationLoadRecoveryRepository(this.#database);
+        const nextAllowedAt = recovery.effectiveNextAllowedAt();
+        if (nextAllowedAt !== null && Date.parse(nextAllowedAt) > this.#now().getTime()) {
+          throw new SessionPlaneDomainError('provider.observation-deferred',
+            `Page refresh was not dispatched: shared ChatGPT pacing requires waiting until ${nextAllowedAt}`);
+        }
         const record = (status: 'attempted' | 'complete') => receipts.record({
           clientId: input.clientId, requestId: input.decisionId, method, requestHash, status,
-          result: { sessionId: input.sessionId, generation: input.generation },
+          result: { requestId: input.requestId, sessionId: input.sessionId, generation: input.generation,
+            pageKey: snapshot.pageKey, conversationId: snapshot.conversationId,
+            dispatch: status === 'complete' ? 'reload-returned' : 'attempted-outcome-unknown',
+            conversationRecovered: null },
         });
         this.#database.transaction(() => {
+          if (!recovery.reserveRefresh(this.#now().toISOString(), 60_000)) {
+            throw new SessionPlaneDomainError('provider.observation-deferred', 'Shared refresh pacing changed; no reload was dispatched');
+          }
           record('attempted');
           if (outbox.submissionState === 'prepared' && outbox.errorCode === 'provider.preparation-required') {
             this.#outbox.transition(outbox.outboxId, ['prepared'], 'prepared', {

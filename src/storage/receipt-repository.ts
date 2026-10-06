@@ -96,6 +96,14 @@ export class ReceiptRepository {
     return row === undefined ? null : this.get(row.clientId, row.requestId);
   }
 
+  latestPageRefresh(clientId: string, sessionId: string, generation: number): ReceiptRow | null {
+    const row = this.#database.raw.prepare(`SELECT request_id AS requestId FROM request_receipts
+      WHERE client_id=? AND method='session.page.refresh'
+        AND json_extract(result_json, '$.sessionId')=? AND json_extract(result_json, '$.generation')=?
+      ORDER BY updated_at DESC LIMIT 1`).get(clientId, sessionId, generation) as { requestId: string } | undefined;
+    return row ? this.get(clientId, row.requestId) : null;
+  }
+
   /** Explicit native focus reserves this generation's display for human observation. */
   hasFocusedGeneration(sessionId: string, generation: number): boolean {
     return this.#database.raw.prepare(`
@@ -202,4 +210,3 @@ function requireIdentity(value: string, name: string): string {
   }
   return normalized;
 }
-

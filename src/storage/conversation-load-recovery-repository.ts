@@ -39,6 +39,28 @@ export class ConversationLoadRecoveryRepository {
     const b = new ProbeBudgetRepository(this.database.raw).get(LOAD_RECOVERY_SCOPE);
     return [b?.nextAllowedAt, b?.blockedUntil].filter((v): v is string => !!v).sort().at(-1) ?? null;
   }
+  effectiveNextAllowedAt(): string | null {
+    const { ui, account } = this.pacing();
+    return [ui?.nextAllowedAt, ui?.blockedUntil, account?.nextAllowedAt, account?.blockedUntil]
+      .filter((v): v is string => !!v).sort().at(-1) ?? null;
+  }
+  pacing() {
+    const budgets = new ProbeBudgetRepository(this.database.raw);
+    return { ui: budgets.get(LOAD_RECOVERY_SCOPE), account: budgets.get('chatgpt:default') };
+  }
+  reserveRefresh(now: string, intervalMs: number): boolean {
+    return this.database.transaction(() => {
+      const deadline = this.effectiveNextAllowedAt();
+      if (deadline && Date.parse(deadline) > Date.parse(now)) return false;
+      const until = new Date(Date.parse(now) + intervalMs).toISOString();
+      this.defer(until, now);
+      const budgets = new ProbeBudgetRepository(this.database.raw);
+      const prior = budgets.get('chatgpt:default');
+      budgets.save({ scope: 'chatgpt:default', nextAllowedAt: until, blockedUntil: prior?.blockedUntil ?? null,
+        backoffLevel: prior?.backoffLevel ?? 0, consecutiveFailures: prior?.consecutiveFailures ?? 0, updatedAt: now });
+      return true;
+    });
+  }
   reserveTurn(record: LoadRecoveryRecord, now: string, intervalMs: number): boolean {
     return this.database.transaction(() => {
       const deadline = this.nextAllowedAt();
@@ -53,7 +75,7 @@ export class ConversationLoadRecoveryRepository {
     this.database.transaction(() => {
       const budgets = new ProbeBudgetRepository(this.database.raw);
       const prior = budgets.get(LOAD_RECOVERY_SCOPE);
-      budgets.save({ scope: LOAD_RECOVERY_SCOPE, nextAllowedAt: [until, this.nextAllowedAt()].filter((v): v is string => !!v).sort().at(-1)!,
+      budgets.save({ scope: LOAD_RECOVERY_SCOPE, nextAllowedAt: [until, prior?.nextAllowedAt, prior?.blockedUntil].filter((v): v is string => !!v).sort().at(-1)!,
         blockedUntil: prior?.blockedUntil ?? null, backoffLevel: 0, consecutiveFailures: 0, updatedAt: now });
     });
   }

@@ -6,6 +6,7 @@ import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import { OutboxRepository, type OutboxRecord } from '../storage/outbox-repository.ts';
 import { hashCanonical, type ReceiptRepository } from '../storage/receipt-repository.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
+import { EventRepository } from '../storage/event-repository.ts';
 import { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import type { ArtifactService } from './artifact-service.ts';
@@ -330,12 +331,39 @@ export class TeamWorkflow {
     const stopped = current.generation > tail.generation ||
       (current.generation === tail.generation && current.terminal && !complete && current.reason !== 'thinking-failed-reconciled');
     const loadRecovery = typeof result.conversationId === 'string' ? this.#loadRecovery.get(result.conversationId) : null;
-    return { ...result, ...(loadRecovery ? { conversationLoadRecovery: { ...loadRecovery, nextAllowedAt: this.#loadRecovery.nextAllowedAt() } } : {}), ...(optedIn ? { thinkingFailureRecovery: {
+    const refresh = this.services.receipts.latestPageRefresh(request.clientId, request.sessionId, request.generation);
+    const verification = this.#submissionVerification(request, result);
+    return { ...result, ...verification,
+      ...(refresh ? { pageRefresh: { receiptId: refresh.requestId, status: refresh.status,
+        createdAt: refresh.createdAt, updatedAt: refresh.updatedAt,
+        dispatch: refresh.status === 'complete' ? 'reload-returned' : 'attempted-outcome-unknown',
+        conversationRecovered: null } } : {}),
+      ...(loadRecovery ? { conversationLoadRecovery: { ...loadRecovery, nextAllowedAt: this.#loadRecovery.effectiveNextAllowedAt(),
+        pacing: this.#loadRecovery.pacing() } } : {}), ...(optedIn ? { thinkingFailureRecovery: {
       enabled: paused === null && !complete && !stopped, sender: paused || complete || stopped ? 'coordinator' : 'core',
       ...(paused ? JSON.parse(paused.resultJson) : { state: complete ? 'complete' : stopped ? 'stopped' : 'observing' }),
       successorRequestRef: successor?.outboxId ?? null } } : {}), conversationUsage: this.#conversationUsage(request.sessionId),
       ...(this.services.stops.hasUnconfirmedStop(request.sessionId, request.generation)
         ? { stopOutcome: { state: 'unknown', automaticRetry: false } } : {}) };
+  }
+
+  #submissionVerification(request: OutboxRecord, result: Record<string, unknown>) {
+    if (result.historical || result.terminal || result.submissionState !== 'submitted') return {};
+    const backend = new EventRepository(this.services.database.raw).latestAnchorRecovery(request.sessionId, request.generation);
+    const identity = backend?.recoveryIdentity as Record<string, unknown> | undefined;
+    const identityMatches = identity != null && identity.conversationId === result.conversationId &&
+      identity.pageKey === result.pageKey && identity.submittedUserMessageId === result.submittedUserMessageId &&
+      identity.submittedUserTurnId === result.submittedUserTurnId;
+    const dom = (result.evidence as { submissionVerification?: { anchorPresent: boolean } } | undefined)?.submissionVerification;
+    const missing = dom?.anchorPresent === false || (dom === undefined && identityMatches &&
+      backend?.recoveryReason === 'backend-user-anchor-absent-from-mapping');
+    return { submissionVerification: { state: missing ? 'anchor-unverified' : dom?.anchorPresent ? 'anchor-observed' : 'unverified',
+      storedSubmissionState: 'submitted', automaticResubmit: false, dom: dom ?? null,
+      backend: backend ? { ...backend, currentIdentityMatches: identityMatches,
+        identityScope: identity ? 'recorded-conversation-page-anchor' : 'historical-session-generation-only' } : null,
+      nextAction: 'read_same_request' },
+      ...(missing ? { status: 'recovery_required',
+        message: 'The legacy submitted record is retained, but the original anchor is not verified in the observed surface. This proves neither non-submission nor completion. Revalidate this same request through get/wait and the existing paced observer; preserve its draft, conversation and anchor. Do not resend or attach another generation\'s answer.' } : {}) };
   }
 
   #loadRecoveryRequired(snapshot: SessionSnapshot) {
@@ -382,7 +410,10 @@ export class TeamWorkflow {
     }
     if ((!snapshot.terminal && snapshot.submissionState === 'submission_unknown' && snapshot.provider === 'chatgpt') ||
         (snapshot.provider === 'chatgpt' && !snapshot.terminal && snapshot.submissionState === 'submitted' &&
-          (inspectCurrent || snapshot.reason === 'provider-actionable-alert'))) {
+          (inspectCurrent || snapshot.reason === 'provider-actionable-alert' || snapshot.reason === 'dom-user-anchor-missing' ||
+            snapshot.reason === 'backend-user-anchor-absent-from-mapping' || snapshot.reason === 'backend-user-anchor-not-on-current-branch' ||
+            /^(backend-user-anchor-absent-from-mapping|backend-user-anchor-not-on-current-branch)$/.test(
+              String(new EventRepository(this.services.database.raw).latestAnchorRecovery(snapshot.sessionId, snapshot.generation)?.recoveryReason))))) {
       try {
         if (snapshot.conversationId !== null) await this.services.ensurePage(snapshot.sessionId, snapshot.generation);
         const inspected = await this.services.ui.inspectSubmission({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });

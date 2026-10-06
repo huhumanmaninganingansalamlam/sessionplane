@@ -50,7 +50,7 @@ export class ConversationLoadRecovery {
     this.services.probes.withdraw('chatgpt:default', this.#probeCaller);
   }
   status() { return { intervalMs: this.intervalMs, maxAttempts: LOAD_RECOVERY_MAX_ATTEMPTS,
-    nextAllowedAt: this.repository.nextAllowedAt(), conversations: this.repository.list() }; }
+    nextAllowedAt: this.repository.effectiveNextAllowedAt(), pacing: this.repository.pacing(), conversations: this.repository.list() }; }
   sweep(): Promise<void> {
     if (this.#closed) return Promise.resolve();
     if (this.#pending) return this.#pending;
@@ -155,7 +155,7 @@ export class ConversationLoadRecovery {
     }, this.#probeCaller, this.intervalMs);
     if (probe.kind === 'deferred' && probe.nextCheckAt) {
       this.repository.defer(probe.nextCheckAt, new Date(this.now()).toISOString());
-      this.#record(record, session, 'waiting', 'account-probe-paced');
+      this.#record(record, session, 'waiting', probe.reason === 'probe-queued' ? 'account-probe-queued' : 'account-probe-paced');
     }
   }
   #record(record: LoadRecoveryRecord, session: SessionSnapshot, state: LoadRecoveryRecord['state'], reason: string): void {

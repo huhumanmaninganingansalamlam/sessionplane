@@ -197,8 +197,31 @@ test('429 Retry-After from a bound page defers all tabs and survives recovery ow
     await service.sweep();
     f.controls[0]!.response!({ status: () => 429, url: () => 'https://chatgpt.com/backend-api/conversation', headers: () => ({ 'retry-after': '600' }) });
     await service.close(); f.advance(60_000); await resumed.sweep(); assert.equal(f.clicks.length, 1);
+    const pacing = resumed.status();
+    assert.equal(pacing.nextAllowedAt, pacing.pacing.account!.blockedUntil);
+    assert.equal(pacing.pacing.ui!.nextAllowedAt, pacing.nextAllowedAt);
     f.advance(540_000); await resumed.sweep(); assert.equal(f.clicks.length, 2);
   } finally { await f.dispose(service, resumed); }
+});
+
+test('scheduler turn deferral is distinct from account cooldown and normal refresh shares the global gap', async () => {
+  const f = fixture(1), service = f.make();
+  try {
+    const before = f.database.raw.prepare('SELECT * FROM generations').all();
+    const caller = Symbol('existing-observer');
+    f.probes.defer('chatgpt:default', '2026-10-06T00:01:00.000Z');
+    await f.probes.run('chatgpt:default', async () => { throw Error('must not dispatch'); }, caller);
+    f.advance(); await service.sweep();
+    assert.equal(service.repository.get('conversation-0')!.reason, 'account-probe-queued');
+    assert.equal(service.repository.get('conversation-0')!.attempts, 0);
+    f.probes.withdraw('chatgpt:default', caller);
+    f.advance();
+    assert.equal(service.repository.reserveRefresh('2026-10-06T00:02:00.000Z', 60_000), true);
+    assert.equal(service.repository.reserveRefresh('2026-10-06T00:02:30.000Z', 60_000), false);
+    await service.sweep(); assert.equal(f.clicks.length, 0);
+    f.advance(); await service.sweep(); assert.equal(f.clicks.length, 1);
+    assert.deepEqual(f.database.raw.prepare('SELECT * FROM generations').all(), before);
+  } finally { await f.dispose(service); }
 });
 
 test('closing/reopening SQLite preserves100-attempt receipt and global spacing without altering original data', () => {

@@ -51,6 +51,63 @@ test('human follow-up final completes the same durable request after restart wit
   } finally { await service.close(); rmSync(fixture.root, { recursive: true, force: true }); }
 });
 
+test('legacy submitted reads revalidate missing original anchor without adopting old answers or losing draft', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-legacy-anchor-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', backendRecoveryAfterMs: 10,
+    observationActiveSweepMs: 5, observationQuietSweepMs: 5, probeSuccessIntervalMs: 30_000 });
+  const fake = new FakeProviderAdapter();
+  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake], logger: silentLogger() });
+  try {
+    const { teamId, session } = await createSession(config.socketPath, 'main', 'legacy-anchor');
+    fake.queueRecovery(session.sessionId, { kind: 'pending', observationTransport: 'fresh', responseMessageId: null,
+      answerText: null, reason: 'backend-user-anchor-absent-from-mapping', retryAfterMs: null, nextCheckAt: null });
+    await send(config.socketPath, session.sessionId, 'legacy-anchor');
+    const original = service.teamDirectory.getSession(session.sessionId);
+    const page = await service.browserOwner!.createPage();
+    const draft = 'x'.repeat(3411);
+    await page.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html',
+      body: `<main><div data-message-author-role="user" data-message-id="old-user">Old</div>
+        <div data-message-author-role="assistant" data-message-id="old-answer">Old answer</div><textarea>${draft}</textarea></main>` }));
+    await page.page.goto('https://chatgpt.com/c/' + original.conversationId);
+    service.pageRegistry.bindPage(page.binding.pageKey, { sessionId: session.sessionId, generation: 1, conversationId: original.conversationId! });
+    await service.actorScheduler.updateGeneration(session.sessionId, 1, { pageKey: page.binding.pageKey, reason: 'dom-user-anchor-missing' });
+    const requestRef = (service.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=?')
+      .get(session.sessionId) as { outbox_id: string }).outbox_id;
+    // Backend evidence must record the identity of the source snapshot, not infer it from a later binding.
+    await service.actorScheduler.updateGeneration(session.sessionId, 1, {}, 'generation.backend-pending',
+      'backend-user-anchor-absent-from-mapping', { pageKey: page.binding.pageKey, conversationId: original.conversationId,
+        submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId });
+    const read = async () => (await rpc<{ request: Record<string, any> }>(config.socketPath, 'workflow.team_get', { teamId, requestRef })).request;
+    const missing = await read();
+    assert.equal(missing.status, 'recovery_required'); assert.equal(missing.terminal, false);
+    assert.equal(missing.submissionState, 'submitted'); assert.equal(missing.responseMessageId, null);
+    assert.equal(missing.submittedUserMessageId, original.submittedUserMessageId);
+    assert.equal(missing.submissionVerification.backend.currentIdentityMatches, true);
+    assert.equal(missing.submissionVerification.backend.recoveryReason, 'backend-user-anchor-absent-from-mapping');
+    const waited = await rpc<{ results: Record<string, any>[] }>(config.socketPath, 'workflow.wait', { teamId, requestRefs: [requestRef], waitMs: 5 });
+    assert.equal(waited.results[0]!.submissionVerification.dom.anchorPresent, false);
+    assert.equal(await page.page.locator('textarea').inputValue(), draft);
+    let reloads = 0;
+    const refresh = { clientId: 'backend-client', requestId: 'send-legacy-anchor', sessionId: session.sessionId, generation: 1, decisionId: 'paced-refresh' };
+    service.probeCoordinator.defer('chatgpt:default', new Date(Date.now() + 60_000).toISOString());
+    await assert.rejects(service.submissionService.refreshPage(refresh, async () => { reloads++; }), /not dispatched/);
+    assert.equal(reloads, 0);
+    assert.equal(service.database.raw.prepare('SELECT 1 FROM request_receipts WHERE request_id=?').get(refresh.decisionId), undefined);
+    // Simulate retained historical receipt evidence, not provider success or a live refresh.
+    service.receipts.record({ clientId: refresh.clientId, requestId: 'old-refresh', method: 'session.page.refresh', requestHash: 'old-refresh-hash',
+      status: 'complete', result: { sessionId: session.sessionId, generation: 1 } });
+    const receipt = (await read()).pageRefresh;
+    assert.equal(receipt.receiptId, 'old-refresh'); assert.equal(receipt.dispatch, 'reload-returned'); assert.equal(receipt.conversationRecovered, null);
+    await page.page.setContent(`<main><div data-message-author-role="user" data-message-id="${original.submittedUserMessageId}">Original</div><textarea>${draft}</textarea></main>`);
+    assert.equal((await read()).submissionVerification.state, 'anchor-observed');
+    fake.emitObservation(session.sessionId, { submittedUserFound: true, activity: 'none',
+      candidate: { responseMessageId: 'original-final', answerText: 'Original answer', terminalMarker: true, streamingMarker: false } });
+    const final = await waitForSnapshot(config.socketPath, session.sessionId, s => s.terminal);
+    assert.equal(final.responseMessageId, 'original-final'); assert.equal(final.submittedUserMessageId, original.submittedUserMessageId);
+    assert.equal(fake.submitCount, 1); assert.equal(await page.page.locator('textarea').inputValue(), draft);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('workflow reads expose provider alert text separately from backend 429 and exact recovery', async (t) => {
   class AlertProvider extends FakeProviderAdapter {
     alertActive = true;
