@@ -10,6 +10,8 @@ import { ProviderSubmissionError, type PreparationPurpose, type PreparationTarge
 import { CHATGPT_PREPARATION_SNAPSHOT } from '../providers/chatgpt/selectors.ts';
 import { inspectChatGptSubmissionCandidates, inspectChatGptPageReady, prepareChatGptObservation } from '../providers/chatgpt/submission.ts';
 import { observeChatGptActivity } from '../providers/chatgpt/activity-observer.ts';
+import { restoreLatestPosition } from '../providers/chatgpt/latest-position-recovery.ts';
+import { readChatGptMessages } from '../providers/chatgpt/message-dom.ts';
 import { observeChatGptDom, observeChatGptAlerts } from '../providers/chatgpt/dom-observer.ts';
 import type { SubmissionService } from './submission-service.ts';
 
@@ -404,6 +406,31 @@ export class SessionUiService {
     } catch (error) {
       throw typedUiError(error);
     }
+  }
+
+  /** Caller holds the current request actor and exact page mutation lock. */
+  async latest(session: SessionSnapshot) {
+    if (session.provider !== 'chatgpt' || !session.terminal || session.sessionState !== 'complete' ||
+        session.errorCode !== null || !session.promptSubmitted || session.responseMessageId === null ||
+        session.conversationId === null) {
+      throw new SessionPlaneDomainError('session.recovery-unavailable', 'Latest display requires the current exact completed ChatGPT answer');
+    }
+    const page = this.#requirePage(session);
+    const mounted = async () => (await readChatGptMessages(page)).some(message =>
+      message.role === 'assistant' && message.messageId === session.responseMessageId);
+    let outcome: 'already-present' | 'clicked' | 'not-dispatched' = 'already-present';
+    if (!await mounted()) {
+      const clicked = await page.evaluate(restoreLatestPosition, {
+        origin: this.#chatgptOrigin, conversationId: session.conversationId,
+        anchorIds: [session.responseMessageId], expiresAt: Date.now() + 5_000, explicit: true,
+      });
+      outcome = clicked ? 'clicked' : 'not-dispatched';
+    }
+    this.#requirePage(session);
+    return { pageKey: session.pageKey, conversationId: session.conversationId,
+      responseMessageId: session.responseMessageId, displayOutcome: outcome, responseMounted: await mounted(),
+      ...(outcome !== 'not-dispatched' ? {} : { reason: 'display-guard-or-latest-control-unavailable',
+        message: 'No click: preserve draft, selection, active generation and alerts; a unique enabled latest-position button must be visible.' }) };
   }
 
   async refresh(input: PreparationOwner & { readonly decisionId: string }): Promise<void> {

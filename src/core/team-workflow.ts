@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
+import type { PageMutationMutex } from '../browser/page-mutex.ts';
 import { ProviderSubmissionError, type ProviderName } from '../providers/provider-adapter.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import { OutboxRepository, type OutboxRecord } from '../storage/outbox-repository.ts';
@@ -27,6 +28,7 @@ export class TeamWorkflow {
   readonly services: {
     database: SessionPlaneDatabase; directory: TeamDirectory; receipts: ReceiptRepository;
     submissions: SubmissionService; ui: SessionUiService; scheduler: ActorScheduler;
+    pageMutex: PageMutationMutex;
     artifacts: ArtifactService; stops: StopService; cleanup: ConversationCleanupService;
     enabledProviders: readonly ProviderName[];
     ensurePage: (sessionId: string, generation: number, options?: { openMissing?: boolean }) => Promise<void>;
@@ -146,9 +148,34 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'discover' } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'reconcile_failure' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'discover' } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
+    if (input.decision === 'latest') {
+      return await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
+        const method = 'workflow.latest';
+        const requestHash = hashCanonical({ method, payload: input });
+        const receipt = { clientId: request.clientId, requestId: input.requestId, method, requestHash };
+        const prior = this.services.receipts.get(receipt.clientId, receipt.requestId);
+        if (prior !== null) {
+          if (prior.method !== method || prior.requestHash !== requestHash) throw new SessionPlaneDomainError(
+            'input.idempotency-conflict', 'Latest display identity was reused with different arguments');
+          if (prior.status === 'complete') return JSON.parse(prior.resultJson) as Record<string, unknown>;
+          throw new SessionPlaneDomainError('provider.action-unknown', 'Latest display was attempted; inspect this request without repeating the action');
+        }
+        const session = this.#role({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}` });
+        if (session.pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'No connected request page');
+        return await this.services.pageMutex.runExclusive(session.pageKey, async () => {
+          const current = this.#role({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}` });
+          this.services.receipts.record({ ...receipt, status: 'attempted', result: { requestRef: input.requestRef } });
+          const displayed = await this.services.ui.latest(current);
+          const result = { requestOk: true, requestRef: input.requestRef, sessionId: current.sessionId,
+            generation: current.generation, ...displayed };
+          this.services.receipts.record({ ...receipt, status: 'complete', result });
+          return result;
+        });
+      });
+    }
     if (input.decision === 'focus') {
       return await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
         const method = 'workflow.focus';

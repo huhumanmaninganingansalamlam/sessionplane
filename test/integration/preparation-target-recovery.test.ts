@@ -10,8 +10,9 @@ import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { callRpc, RpcClientError } from '../../src/cli/client.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 
-test('deferred preparation inspects its same-owned predecessor page without sending or borrowing another owner', async t => {
+test('explicit completed display and deferred preparation preserve exact ownership, drafts and one submission', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-deferred-binding-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const fake = new FakeProviderAdapter();
@@ -41,6 +42,43 @@ test('deferred preparation inspects its same-owned predecessor page without send
     await rpc('session.send', { clientId: 'deferred-owner', requestId: 'first', sessionId: session.sessionId, prompt: 'First' });
     await rpc('session.wait', { clientId: 'deferred-owner', sessionId: session.sessionId, generation: 1, waitMs: 2000 });
     assert.equal(service.teamDirectory.getSession(session.sessionId).terminal, true);
+    const first = service.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=?').get(session.sessionId)!;
+    const latest = (requestId: string) => invokeMcpTool({ name: 'sessionplane_decide',
+      arguments: { teamId: team.teamId, requestRef: first.outbox_id, requestId, decision: 'latest' },
+      socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    await page.setContent('<main><article data-message-author-role="assistant" data-message-id="old">Selected old answer</article><textarea></textarea><button aria-label="맨 아래로 스크롤">↓</button></main>');
+    await page.evaluate(() => {
+      document.querySelector('button')!.onclick = () => {
+        const button = document.querySelector('button')!;
+        button.dataset.clicks = String(Number(button.dataset.clicks ?? 0) + 1);
+        document.querySelector('article')!.outerHTML = '<article data-message-author-role="assistant" data-message-id="chatgpt-auto-final-1"><div class="markdown">Original completed answer</div><a download="original.md" href="data:text/plain,EXACT-ORIGINAL">Original file</a></article>';
+      };
+      const range = document.createRange(); range.selectNodeContents(document.querySelector('article')!);
+      const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
+    });
+    assert.equal((await latest('selected')).structuredContent.displayOutcome, 'not-dispatched');
+    assert.equal(await page.evaluate(() => document.getSelection()!.toString()), 'Selected old answer');
+    await page.evaluate(() => document.getSelection()!.removeAllRanges());
+    await page.locator('textarea').fill('Unsent user draft');
+    assert.equal((await latest('draft')).structuredContent.displayOutcome, 'not-dispatched');
+    assert.equal(await page.locator('textarea').inputValue(), 'Unsent user draft');
+    await page.locator('textarea').fill('');
+    const displayed = await latest('original-latest');
+    assert.equal(displayed.isError, false, JSON.stringify(displayed));
+    assert.equal(displayed.structuredContent.displayOutcome, 'clicked');
+    assert.equal(displayed.structuredContent.responseMounted, true);
+    assert.deepEqual((await latest('original-latest')).structuredContent, displayed.structuredContent);
+    assert.equal(await page.locator('button').getAttribute('data-clicks'), '1');
+    const real = new ChatGptAdapter({ browserOwner: service.browserOwner!, pageRegistry: service.pageRegistry,
+      loginUrl: config.chatgptUrl, acknowledgementTimeoutMs: 500 });
+    t.mock.method(fake, 'discoverArtifacts', request => real.discoverArtifacts(request));
+    t.mock.method(fake, 'downloadArtifact', (request, candidate) => real.downloadArtifact(request, candidate));
+    const files = await service.artifactService.capture({ sessionId: session.sessionId, generation: 1 });
+    const artifact = (files.artifacts as Array<{ artifactId: string; sizeBytes: number; sha256: string }>)[0]!;
+    assert.equal(artifact.sizeBytes, Buffer.byteLength('EXACT-ORIGINAL'));
+    assert.ok(artifact.sha256);
+    assert.equal(fake.submitCount, 1);
+    assert.equal(routed, 1);
     await assert.rejects(rpc('session.send', { clientId: 'deferred-owner', requestId: 'pending', sessionId: session.sessionId, prompt: 'Retained pending prompt' }),
       (error: RpcClientError) => (error.data as any).errorCode === 'provider.preparation-required');
     await page.locator('textarea').fill('Independent user draft');
@@ -48,6 +86,7 @@ test('deferred preparation inspects its same-owned predecessor page without send
     assert.equal(service.teamDirectory.getSession(session.sessionId).generation, 2);
     assert.equal(service.teamDirectory.getSession(session.sessionId).promptSubmitted, false);
     assert.equal(service.pageRegistry.getBinding(binding.pageKey).generation, 1);
+    assert.equal((await latest('old-generation')).structuredContent.errorCode, 'session.generation-superseded');
     const caller = { clientId: 'deferred-owner', requestId: 'pending', sessionId: session.sessionId, generation: 2 };
     const evidence = await rpc('session.preparation.inspect', caller);
     assert.equal(evidence.pageKey, binding.pageKey);

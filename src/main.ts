@@ -336,6 +336,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   registerWorkflowMethods(router, new TeamWorkflow({
     database, directory: teamDirectory, receipts, submissions: submissionService, ui,
     scheduler: actorScheduler, artifacts: artifactService, stops: stopService, cleanup,
+    pageMutex: pageMutationMutex,
     enabledProviders: config.enabledProviders,
     ensurePage: (sessionId, generation, options) => recovery.ensurePage(sessionId, generation, options),
   }));

@@ -1,9 +1,10 @@
 /** Same-chat display recovery only; all renderer guards and dispatch share one task. */
 export function restoreLatestPosition(input: {
-  origin: string; conversationId: string; anchorIds: string[]; expiresAt: number;
+  origin: string; conversationId: string; anchorIds: string[]; expiresAt: number; explicit?: boolean;
 }): boolean {
   if (Date.now() > input.expiresAt || location.origin !== input.origin ||
-      location.pathname !== `/c/${input.conversationId}` || document.visibilityState === 'visible') return false;
+      location.pathname !== `/c/${input.conversationId}` ||
+      (document.visibilityState === 'visible' && input.explicit !== true)) return false;
   const main = document.querySelector('main');
   if (!main || input.anchorIds.length === 0) return false;
   const messages = '[data-message-author-role], [data-chatgpt-search-message-ids], [data-testid="conversation-turn"]';
@@ -13,6 +14,7 @@ export function restoreLatestPosition(input: {
       ...(e.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/)]
       .some(id => id !== null && input.anchorIds.includes(id)))) return false;
   const visible = (e: Element) => e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+  if (document.getSelection()?.isCollapsed === false) return false;
   if ([...document.querySelectorAll('textarea,input:not([type=hidden]),[contenteditable=true],[role=textbox]')]
     .filter(visible).some(e => ((e as HTMLInputElement).value ?? (e as HTMLElement).innerText ?? '').trim())) return false;
   if ([...document.querySelectorAll('[role=dialog],[role=alertdialog],[role=alert],iframe,[data-testid="stop-button"],[data-is-streaming=true]')].some(visible)) return false;
