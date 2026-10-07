@@ -374,6 +374,18 @@ test('restart recovers a unique ambiguous follow-up acknowledgement without rese
       'generation.followup-recovery-first-complete',
     );
 
+    const pageCount = service.pageRegistry.listBindings().length;
+    await assert.rejects(service.artifactService.capture({ sessionId: first.sessionId, generation: first.generation }),
+      { errorCode: 'browser.unavailable' });
+    assert.equal(service.pageRegistry.listBindings().length, pageCount, 'an artifact read never creates a missing page');
+    // Fake submission has no physical page. Prepare the exact page explicitly before testing read/restart recovery.
+    const exactPage = await service.browserOwner!.createPage();
+    await navigateFixture(exactPage.page, `https://chatgpt.com/c/${encodeURIComponent(first.conversationId!)}`);
+    service.pageRegistry.bindPage(exactPage.binding.pageKey, {
+      sessionId: first.sessionId, generation: first.generation, conversationId: first.conversationId!,
+    });
+    await service.actorScheduler.updateGeneration(first.sessionId, first.generation,
+      { pageKey: exactPage.binding.pageKey }, 'generation.fixture-page-prepared');
     const recoveredFiles = await service.artifactService.capture({ sessionId: first.sessionId, generation: first.generation });
     assert.equal(recoveredFiles.requestOk, true);
     const completed = service.teamDirectory.getSession(first.sessionId);
@@ -668,14 +680,26 @@ test('failed restart navigation closes the newly reserved recovery Page', async 
 });
 
 async function navigateFixture(page: Page, url: string): Promise<void> {
-  await page.route('https://chatgpt.com/**', async (route) => {
+  // Fail closed even if CDP interception fails: fixture navigation must never reach the provider.
+  await page.context().setOffline(true);
+  let intercepted = 0;
+  let fulfilled = 0;
+  await page.route('**/*', async (route) => {
+    intercepted++;
+    if (route.request().url() !== url) { await route.abort('blockedbyclient'); return; }
     await route.fulfill({
       status: 200,
       contentType: 'text/html',
       body: '<!doctype html><html><body><main>restart fixture</main></body></html>',
     });
+    fulfilled++;
   });
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10_000 });
+  } catch (error) {
+    throw new Error(`Isolated navigation failed; local mock requests intercepted: ${intercepted}, fulfilled: ${fulfilled}`, { cause: error });
+  }
+  assert.ok(fulfilled > 0, 'navigation is fulfilled locally; every other request is aborted');
 }
 
 async function rpc<Result>(socketPath: string, method: string, params: unknown): Promise<Result> {
