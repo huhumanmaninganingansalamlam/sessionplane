@@ -393,7 +393,9 @@ export class RecoveryService {
         .filter(binding => binding.targetId === stored.targetId);
       const match = matches.length === 1 ? matches[0] : undefined;
       if (match === undefined || !isProviderUrl(snapshot.provider, match.url) ||
-          match.conversationId !== snapshot.conversationId) return result(snapshot, { unavailable: true });
+          match.conversationId !== snapshot.conversationId ||
+          (match.sessionId !== null && (match.sessionId !== snapshot.sessionId ||
+            match.generation !== snapshot.generation))) return result(snapshot, { unavailable: true });
       try {
         const identity = { sessionId: snapshot.sessionId, generation: snapshot.generation,
           conversationId: snapshot.conversationId };

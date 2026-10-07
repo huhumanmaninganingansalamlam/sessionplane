@@ -15,6 +15,7 @@ import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { EventRepository } from '../../src/storage/event-repository.ts';
 import { ProbeBudgetRepository } from '../../src/storage/probe-budget-repository.ts';
 import { callRpc as rpcCall } from '../../src/cli/client.ts';
+import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 const callRpc = (socketPath: string, method: string, params: unknown) => rpcCall({ socketPath, method, params });
@@ -204,5 +205,44 @@ test('failed approved preparation reattaches the persisted target after restart 
     assert.equal(fake.submitCount, 1, 'Rebind/reprepare never dispatches or creates a generation');
     assert.equal(service.teamDirectory.getSession(session.sessionId).generation, 2);
     assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(original.outbox_id), original);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('failed preparation with no conversation cannot steal the same session target from another generation', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-failed-generation-conflict-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  fake.prepareError = new ProviderSubmissionError('browser.unavailable', 'Fixture pre-submit failure');
+  const start = () => startCore({ config, startBrowser: false, providerAdapters: [fake] });
+  let service = await start();
+  const page = Object.assign(new EventEmitter(), { url: () => 'https://chatgpt.com/', isClosed: () => false }) as unknown as Page;
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'generation-owner' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: team.primaryRoleKey, provider: 'chatgpt' });
+    const stored = service.pageRegistry.identifyPage(page, 'retained-new-conversation-target');
+    service.pageRegistry.reservePage(stored.pageKey, { sessionId: session.sessionId, generation: 1 });
+    const open = fake.openSubmission.bind(fake);
+    t.mock.method(fake, 'openSubmission', async request => ({ ...await open(request), pageKey: stored.pageKey }));
+    await assert.rejects(service.submissionService.send({ clientId: 'generation-owner', requestId: 'failed-original',
+      sessionId: session.sessionId, prompt: 'Retained unsubmitted draft', sessionDeadlineSec: 600 }), /Fixture pre-submit failure/);
+    const before = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(before.submissionState, 'failed_pre_submit');
+    assert.equal(before.conversationId, null);
+    const outbox = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(session.sessionId);
+    await service.close();
+    service = await start();
+    const live = service.pageRegistry.identifyPage(page, stored.targetId!);
+    service.pageRegistry.reservePage(live.pageKey, { sessionId: session.sessionId, generation: 2 });
+    await assert.rejects(service.recoveryService.ensurePage(session.sessionId, 1, { openMissing: false }), /could not be recovered/);
+    assert.equal(service.pageRegistry.getBinding(live.pageKey).generation, 2);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).pageKey, before.pageKey);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(session.sessionId), outbox);
+    service.pageRegistry.unbindPage(live.pageKey);
+    await service.recoveryService.ensurePage(session.sessionId, 1, { openMissing: false });
+    assert.equal(service.teamDirectory.getSession(session.sessionId).pageKey, live.pageKey);
+    assert.equal(service.pageRegistry.getBinding(live.pageKey).generation, 1);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).submissionState, 'failed_pre_submit');
+    assert.equal(fake.submitCount, 0);
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
