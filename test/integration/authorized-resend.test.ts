@@ -22,9 +22,11 @@ test('approved resend reserves once across restart, preserves uncertainty, and s
   t.mock.method(fake, 'recover', async () => { canonicalReads += 1; return { kind: 'unverified', observationTransport: 'fresh',
     responseMessageId: null, answerText: null, reason: 'backend-user-anchor-absent-from-mapping', retryAfterMs: null, nextCheckAt: null }; });
   let lateAnswer = false;
+  let transientPreSubmitFailure = false;
   t.mock.method(SessionUiService.prototype, 'reserveResendPage', () => {});
   t.mock.method(SessionUiService.prototype, 'verifyAuthorizedResend', async (_current, _original, _prompt, afterPrepare) => {
     if (lateAnswer && afterPrepare) throw new SessionPlaneDomainError('provider.preparation-required', 'Original answer appeared; do not dispatch', { responseMessageId: 'original-late-final' });
+    if (transientPreSubmitFailure && afterPrepare) throw new SessionPlaneDomainError('browser.unavailable', 'Provider browser operation timed out');
   });
   let service = await startCore({ config, startBrowser: false, providerAdapters: [fake] });
   try {
@@ -64,11 +66,6 @@ test('approved resend reserves once across restart, preserves uncertainty, and s
     assert.deepEqual(await service.submissionService.withPendingPreparation(preparedOwner, async () => ({ inspected: true })), { inspected: true });
     assert.deepEqual(await service.submissionService.decidePreparation({ ...preparedOwner, decisionId: 'settings-during-read-backoff',
       decision: 'discover', purpose: 'model' }, async () => ({ choice: null, result: { discovered: true } })), { discovered: true });
-    await assert.rejects(service.submissionService.resumePreparation(preparedOwner), /canonical recovery: probe-paced/);
-    assert.equal(canonicalReads, 0, 'Dispatch still honors the persisted provider recovery deadline');
-    assert.equal(fake.submitCount, 1, 'Settings/read remain available but a resend still needs paced original proof');
-    budgets.save({ scope: `chatgpt:conversation-detail:${source.conversationId}`, nextAllowedAt: new Date(0).toISOString(),
-      blockedUntil: null, backoffLevel: 0, consecutiveFailures: 0, updatedAt: new Date().toISOString() });
     await service.close();
     service = await startCore({ config, startBrowser: false, providerAdapters: [fake] });
     assert.deepEqual(await callRpc(config.socketPath, 'workflow.decide', approval), reservation);
@@ -89,20 +86,39 @@ test('approved resend reserves once across restart, preserves uncertainty, and s
     const secondSource = await service.submissionService.send({ clientId, requestId: 'second-original', sessionId: second.sessionId,
       prompt: 'Second exact follow-up', sessionDeadlineSec: 600 });
     const secondOutbox = service.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=? AND generation=1').get(second.sessionId)! as { outbox_id: string };
-    new EventRepository(service.database.raw).append({ teamId: team.teamId, roleId: secondSource.roleId,
-      sessionId: second.sessionId, generation: 1, eventType: 'generation.backend-unverified',
-      payload: { recoveryReason: 'backend-user-anchor-absent-from-mapping', recoveryIdentity: {
-        conversationId: secondSource.conversationId, submittedUserMessageId: secondSource.submittedUserMessageId,
-        submittedUserTurnId: secondSource.submittedUserTurnId } }, createdAt: new Date().toISOString() });
-    await callRpc(config.socketPath, 'workflow.decide', { ...approval, requestRef: secondOutbox.outbox_id, requestId: 'second-approved-once' });
+    // GET 429 says nothing about acceptance of the original submission. The user
+    // accepts that uncertainty; no absent-mapping proof or new GET is required.
+    const readDeadline = new Date(Date.now() + 120_000).toISOString();
+    const currentBudgets = new ProbeBudgetRepository(service.database.raw);
+    currentBudgets.save({ scope: `chatgpt:conversation-detail:${secondSource.conversationId}`, nextAllowedAt: readDeadline,
+      blockedUntil: readDeadline, backoffLevel: 1, consecutiveFailures: 1, updatedAt: new Date().toISOString() });
+    const secondApproval = { ...approval, requestRef: secondOutbox.outbox_id, requestId: 'second-approved-once' };
+    const secondReservation = await callRpc(config.socketPath, 'workflow.decide', secondApproval);
     const secondOwner = { clientId, requestId: 'second-approved-once', sessionId: second.sessionId, generation: 2 };
+    currentBudgets.save({ scope: 'chatgpt:default', nextAllowedAt: readDeadline, blockedUntil: readDeadline,
+      backoffLevel: 0, consecutiveFailures: 0, updatedAt: new Date().toISOString() });
+    await assert.rejects(service.submissionService.resumePreparation(secondOwner), /account cooldown/);
+    assert.equal(fake.submitCount, 2, 'An explicit broad service hold still prevents submission');
+    currentBudgets.save({ scope: 'chatgpt:default', nextAllowedAt: null, blockedUntil: null,
+      backoffLevel: 0, consecutiveFailures: 0, updatedAt: new Date().toISOString() });
+    transientPreSubmitFailure = true;
+    await assert.rejects(service.submissionService.resumePreparation(secondOwner), /browser operation timed out/);
+    assert.equal(service.teamDirectory.getSession(second.sessionId).submissionState, 'failed_pre_submit');
+    assert.equal(fake.submitCount, 2, 'A pre-submit timeout did not dispatch or consume the one-shot send');
+    await assert.rejects(callRpc(config.socketPath, 'workflow.decide', { ...secondApproval, approvalRef: 'different-approval' }), /one authorized resend/);
+    assert.deepEqual(await callRpc(config.socketPath, 'workflow.decide', secondApproval), secondReservation);
+    assert.equal(service.teamDirectory.getSession(second.sessionId).generation, 2, 'Reopening retains the same successor');
+    await service.submissionService.withPendingPreparation(secondOwner, async () => ({ inspected: true }));
+    transientPreSubmitFailure = false;
     const submitted = await service.submissionService.resumePreparation(secondOwner);
     assert.equal(submitted.generation, 2);
     assert.equal(submitted.conversationId, secondSource.conversationId);
     assert.notEqual(submitted.submittedUserMessageId, secondSource.submittedUserMessageId);
     assert.equal(fake.submitCount, 3, 'Two source submits plus exactly one successor dispatch');
-    assert.equal(canonicalReads, 1, 'Actual dispatch requires a fresh original canonical verification');
+    assert.equal(canonicalReads, 0, 'Approved UI dispatch neither calls nor bypasses the restricted GET');
+    assert.equal(currentBudgets.get(`chatgpt:conversation-detail:${secondSource.conversationId}`)?.blockedUntil, readDeadline);
     assert.deepEqual(await service.submissionService.resumePreparation(secondOwner), submitted);
+    assert.deepEqual(await callRpc(config.socketPath, 'workflow.decide', secondApproval), secondReservation);
     assert.equal(fake.submitCount, 3);
 
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }

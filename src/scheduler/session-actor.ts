@@ -107,6 +107,22 @@ export class SessionActor {
     this.#retireIfIdleTerminal();
   }
 
+  /** Explicit owner recovery only; no dispatched or completed generation can reopen. */
+  publishResumedPreparation(snapshot: SessionSnapshot, revision: number): void {
+    const prior = this.#snapshot;
+    if (prior.sessionId !== snapshot.sessionId || prior.generation !== snapshot.generation ||
+        prior.submissionState !== 'failed_pre_submit' || prior.promptSubmitted ||
+        prior.submittedUserMessageId !== null || prior.submittedUserTurnId !== null || prior.responseMessageId !== null ||
+        prior.answerText !== null || prior.sessionState !== 'ready' ||
+        snapshot.submissionState !== 'prepared' || snapshot.sessionState !== 'submitting' ||
+        snapshot.terminal || snapshot.promptSubmitted || snapshot.submittedUserMessageId !== null ||
+        snapshot.submittedUserTurnId !== null || snapshot.responseMessageId !== null || snapshot.answerText !== null) {
+      throw new SessionPlaneDomainError('internal.invariant-violation', 'Only a proven unsubmitted preparation can resume');
+    }
+    this.#snapshot = { ...prior, terminal: false };
+    this.publish(snapshot, revision);
+  }
+
   async wait(options: SessionWaitOptions): Promise<SessionWaitSnapshot> {
     this.#assertGeneration(options.expectedGeneration);
     const afterRevision = options.afterRevision ?? this.#revision;

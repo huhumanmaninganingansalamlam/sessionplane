@@ -857,7 +857,46 @@ export class SubmissionService {
       if (previous !== null) {
         if (previous.method !== method || previous.requestHash !== requestHash) throw new SessionPlaneDomainError(
           'input.idempotency-conflict', 'This original request already has its one authorized resend reservation');
-        return JSON.parse(previous.resultJson) as Record<string, unknown>;
+        const result = JSON.parse(previous.resultJson) as Record<string, unknown>;
+        const successor = typeof result.requestRef === 'string' ? this.#outbox.getById(result.requestRef) : null;
+        // The same owner/approval may reopen a proven pre-submit failure, never
+        // an attempted/unknown send. No new request, generation or approval.
+        if (successor?.submissionState === 'failed_pre_submit' && !successor.promptSubmitted) {
+          const current = this.#requireSnapshot(input.sessionId);
+          if (successor.clientId !== input.clientId || successor.sessionId !== input.sessionId ||
+              current.generation !== successor.generation || current.promptSubmitted || current.pageKey === null ||
+              current.sessionState !== 'ready' || current.submissionState !== 'failed_pre_submit' ||
+              current.submittedUserMessageId !== null || current.submittedUserTurnId !== null ||
+              current.responseMessageId !== null || current.answerText !== null) throw new SessionPlaneDomainError(
+            'session.generation-superseded', 'The approved pre-submit request is no longer current');
+          const authorization = parseOutboxPayload(successor).authorizedResend;
+          if (authorization?.requestRef !== original.outboxId || authorization.approvalRef !== input.approvalRef) throw new SessionPlaneDomainError(
+            'input.invalid', 'Pre-submit recovery must retain the exact original approval');
+          await this.#pageMutex.runExclusive(current.pageKey, async () => {
+            await this.#verifyAuthorizedResend({ ...current, terminal: false }, authorization, false);
+            let sequence = 0;
+            this.#database.transaction(() => {
+              const timestamp = this.#now().toISOString();
+              if (!this.#sessions.updateCurrentGeneration(current.sessionId, current.generation, {
+                sessionState: 'submitting', providerState: 'unknown', observationTransport: 'unavailable',
+                submissionState: 'prepared', reason: 'authorized-resend-prepared',
+                errorCode: 'provider.preparation-required', nextCheckAt: null, promptSubmitted: false,
+              }, timestamp) || !this.#outbox.transition(successor.outboxId, ['failed_pre_submit'], 'prepared', {
+                updatedAt: timestamp, resultJson: JSON.stringify({ kind: 'pending-preparation', choices: {}, requiresInspection: true }),
+                errorCode: 'provider.preparation-required', promptSubmitted: false,
+              })) throw new SessionPlaneDomainError('session.generation-superseded', 'Approved preparation ownership changed');
+              sequence = this.#events.append({ teamId: successor.teamId, roleId: successor.roleId,
+                sessionId: successor.sessionId, generation: successor.generation, eventType: 'generation.preparation-required',
+                payload: { originalRequestRef: original.outboxId, approvalRef: input.approvalRef,
+                  reason: 'authorized-resend-pre-submit-reopened', promptSubmitted: false, originalDisposition: 'unresolved-preserved',
+                  priorFailure: { reason: current.reason, errorCode: successor.errorCode, recordedAt: successor.updatedAt,
+                    resultHash: hashCanonical(JSON.parse(successor.resultJson ?? 'null')) } },
+                createdAt: timestamp });
+            });
+            this.#scheduler.actorFor(input.sessionId).publishResumedPreparation(this.#requireSnapshot(input.sessionId), sequence);
+          });
+        }
+        return result;
       }
       if (this.#outbox.getByRequest(input.clientId, input.decisionId) !== null ||
           receipts.get(input.clientId, input.decisionId) !== null) throw new SessionPlaneDomainError(
@@ -922,14 +961,24 @@ export class SubmissionService {
         ![source.generation, source.generation + 1].includes(current.generation) ||
         original.submissionState !== 'submitted' || !original.promptSubmitted || original.completedAt !== null ||
         original.responseMessageId !== null || original.answerText !== null ||
-        (original.submittedUserMessageId === null && original.submittedUserTurnId === null) ||
-        proof?.recoveryReason !== 'backend-user-anchor-absent-from-mapping') throw new SessionPlaneDomainError(
-      'provider.preparation-required', 'Original submission remains unresolved; exact missing-anchor evidence is required before this approved resend');
-    const identity = proof.recoveryIdentity as Record<string, unknown> | undefined;
-    if (!identity || identity.conversationId !== current.conversationId ||
+        (original.submittedUserMessageId === null && original.submittedUserTurnId === null)) throw new SessionPlaneDomainError(
+      'provider.preparation-required', 'Approved resend requires the exact unresolved original request');
+    const identity = proof?.recoveryIdentity as Record<string, unknown> | undefined;
+    if (proof && (!identity || identity.conversationId !== current.conversationId ||
         identity.submittedUserMessageId !== original.submittedUserMessageId ||
-        identity.submittedUserTurnId !== original.submittedUserTurnId) throw new SessionPlaneDomainError(
+        identity.submittedUserTurnId !== original.submittedUserTurnId)) throw new SessionPlaneDomainError(
       'session.page-identity-unverified', 'Missing-anchor evidence belongs to another request or conversation');
+    if (proof && proof.recoveryReason !== 'backend-user-anchor-absent-from-mapping') throw new SessionPlaneDomainError(
+      'provider.preparation-required', 'Original anchor or answer was found; preserve and collect it before any resend');
+    if (current.generation === source.generation + 1) {
+      const approval = receipts.get(source.clientId, `authorized-resend:${source.outboxId}`);
+      const reserved = approval?.method === 'session.resend.prepare' ? JSON.parse(approval.resultJson) as Record<string, unknown> : null;
+      const successor = typeof reserved?.requestRef === 'string' ? this.#outbox.getById(reserved.requestRef) : null;
+      if (!reserved || reserved.originalRequestRef !== source.outboxId || reserved.approvalRef !== authorization.approvalRef ||
+          successor?.clientId !== source.clientId || successor.sessionId !== current.sessionId || successor.generation !== current.generation) {
+        throw new SessionPlaneDomainError('input.invalid', 'Exact durable duplicate-risk approval does not own this successor');
+      }
+    }
     this.#requireActiveRoleSession(current);
     this.#requireAccountReady(current);
     if (this.#beforeAuthorizedResend === null) throw new SessionPlaneDomainError(

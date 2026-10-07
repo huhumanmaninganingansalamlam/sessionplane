@@ -4,7 +4,6 @@ import { TeamWorkflow } from './core/team-workflow.ts';
 import { registerWorkflowMethods } from './rpc/methods/workflow.ts';
 import { SessionRepository } from './storage/session-repository.ts';
 import { EventRepository } from './storage/event-repository.ts';
-import { SessionPlaneDomainError } from './domain/errors.ts';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -222,23 +221,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     },
     beforeAuthorizedResend: async (current, original, prompt, beforeDispatch) => {
       await ui.verifyAuthorizedResend(current, original, prompt, beforeDispatch);
-      // Reservation uses the caller-owned exact stored proof checked by SubmissionService.
-      // Only dispatch needs a fresh paced probe; the old observer must not starve local approval.
-      if (!beforeDispatch) return;
-      // Use the existing shared paced recovery, never a separate/bypassing probe.
-      const scope = `chatgpt:conversation-detail:${current.conversationId}`;
-      const caller = Symbol('approved-resend-original');
-      const result = await probeCoordinator.run(scope,
-        () => providerAdapters.require(current.provider).recover({ session: { ...current,
-          submittedUserMessageId: original.submittedUserMessageId,
-          submittedUserTurnId: original.submittedUserTurnId }, generation: current.generation }), caller)
-        .finally(() => probeCoordinator.withdraw(scope, caller));
-      if (result.kind === 'unverified' && result.reason === 'backend-user-anchor-absent-from-mapping') return;
-      throw new SessionPlaneDomainError('provider.preparation-required',
-        'Approved resend paused by original canonical recovery: ' + result.reason,
-        { originalGeneration: original.generation, responseMessageId: result.responseMessageId,
-          originalAnchorFound: result.kind === 'complete' || result.kind === 'pending' ||
-            result.reason === 'backend-user-anchor-not-on-current-branch', nextCheckAt: result.nextCheckAt });
+      // Explicit duplicate-risk approval preserves the unresolved original.
+      // Recovery GET pacing remains with its observer; it does not gate this UI dispatch.
     },
     reserveResendPage: (original, successor) => ui.reserveResendPage(original, successor),
     onSubmitted: (snapshot) => observationService.start(snapshot),
