@@ -3,7 +3,8 @@ import { ProviderSubmissionError, type ProviderArtifactCandidate, type ProviderA
 import { readChatGptMessages } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
-const downloadSelector = 'button[aria-label="Download file"]';
+const downloadSelector = 'button[aria-label="Download file"],button[aria-label="파일 다운로드"]';
+const previewSelector = 'button[aria-label^="Open preview of "],button[aria-label$=" 미리보기 열기"]';
 const source = (response: string, name: string) => `sessionplane-file-card:${encodeURIComponent(response)}/${encodeURIComponent(name)}`;
 function unavailable(message: string): never {
   throw new ProviderSubmissionError('provider.artifacts-unavailable', message);
@@ -37,18 +38,19 @@ async function exactRoot(page: Page, request: ProviderArtifactRequest, requireAn
 }
 
 async function cards(root: ElementHandle<HTMLElement>) {
-  return await root.evaluate((root, selector) => [...root.querySelectorAll<HTMLButtonElement>(selector)].map((button, index) => {
+  return await root.evaluate((root, { downloadSelector, previewSelector }) => [...root.querySelectorAll<HTMLButtonElement>(downloadSelector)].map((button, index) => {
     let parent = button.parentElement;
     while (parent && root.contains(parent)) {
-      const previews = parent.querySelectorAll<HTMLButtonElement>('button[aria-label^="Open preview of "]');
-      if (previews.length === 1 && parent.querySelectorAll(selector).length === 1) {
-        return { index, name: previews[0]!.getAttribute('aria-label')!.slice('Open preview of '.length) };
+      const previews = parent.querySelectorAll<HTMLButtonElement>(previewSelector);
+      if (previews.length === 1 && parent.querySelectorAll(downloadSelector).length === 1) {
+        const label = previews[0]!.getAttribute('aria-label')!;
+        return { index, name: label.startsWith('Open preview of ') ? label.slice('Open preview of '.length) : label.slice(0, -' 미리보기 열기'.length) };
       }
       if (parent === root) break;
       parent = parent.parentElement;
     }
     return { index, name: '' };
-  }), downloadSelector);
+  }), { downloadSelector, previewSelector });
 }
 
 export async function discoverFileCards(page: Page, request: ProviderArtifactRequest, check: () => void) {
@@ -84,16 +86,19 @@ export async function downloadFileCard(page: Page, request: ProviderArtifactRequ
     const buttons = await root.$$(downloadSelector);
     const button = buttons[found[0]!.index];
     if (!button || !await button.isVisible() || !await button.isEnabled()) unavailable('Exact download control is unavailable');
-    const stillNamed = await button.evaluate((button, expected) => {
+    const stillNamed = await button.evaluate((button, { expected, previewSelector }) => {
       let parent = button.parentElement;
       while (parent) {
-        const previews = parent.querySelectorAll('button[aria-label^="Open preview of "]');
-        if (previews.length === 1) return previews[0]!.getAttribute('aria-label') === 'Open preview of ' + expected;
+        const previews = parent.querySelectorAll(previewSelector);
+        if (previews.length === 1) {
+          const label = previews[0]!.getAttribute('aria-label');
+          return label === 'Open preview of ' + expected || label === expected + ' 미리보기 열기';
+        }
         if (previews.length > 1) return false;
         parent = parent.parentElement;
       }
       return false;
-    }, found[0]!.name);
+    }, { expected: found[0]!.name, previewSelector });
     if (!stillNamed) unavailable('File card changed before download');
     check();
     // Keyboard activation avoids the observed preview overlay; never force-click it.
