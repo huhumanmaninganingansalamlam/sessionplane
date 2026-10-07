@@ -39,6 +39,28 @@ test('late ACK uses durable dispatch identity among duplicate questions, never r
     'two dispatched identities must not be resolved by latest timestamp');
 });
 
+test('exact dispatch ACK and final never cross the next user turn', () => {
+  const attempt = { conversationId: CONVERSATION_ID, messageId: 'user-message-1', parentMessageId: 'root',
+    textHash: createHash('sha256').update('Question').digest('hex'), observedAt: '2026-10-07T18:37:54.258Z' };
+  for (const originalFinal of [true, false]) {
+    const first = { ...finalAssistant('answer-A', 'Answer A'),
+      ...(originalFinal ? {} : { status: 'in_progress', end_turn: false }) };
+    const payload = conversationPayload([
+      node('root', null, null), node('user-A', 'root', userMessage('user-message-1', 'user-turn-1')),
+      node('final-A', 'user-A', first), node('user-B', 'final-A', userMessage('user-message-B', 'user-turn-B')),
+      node('final-B', 'user-B', finalAssistant('answer-B', 'Answer B')),
+    ], 'final-B');
+    const ack = recoverExactServerAcknowledgement(payload, CONVERSATION_ID, 'Question', [attempt]);
+    assert.equal(ack?.submittedUserMessageId, 'user-message-1');
+    for (const result of [recoverExactServerFinal(payload, identity()), recoverExactServerFinal(payload, ack!)]) {
+      assert.equal(result.kind, originalFinal ? 'complete' : 'pending');
+      assert.equal(result.responseMessageId, originalFinal ? 'answer-A' : null);
+      assert.equal(result.answerText, originalFinal ? 'Answer A' : null);
+      if (!originalFinal) assert.equal(result.reason, 'backend-next-user-turn-before-final');
+    }
+  }
+});
+
 test('backend recovery accepts only an exact final on the current branch', () => {
   const result = recoverExactServerFinal(
     conversationPayload([
@@ -54,7 +76,7 @@ test('backend recovery accepts only an exact final on the current branch', () =>
   assert.equal(result.answerText, 'Exact server answer');
 });
 
-test('backend recovery rejects other branches and follows human turns on the anchored current branch', () => {
+test('backend recovery rejects other branches and preserves the anchored turn before human follow-ups', () => {
   const historical = recoverExactServerFinal(
     conversationPayload([
       node('root', null, null),
@@ -89,16 +111,17 @@ test('backend recovery rejects other branches and follows human turns on the anc
     identity(),
   );
   assert.equal(laterUser.kind, 'complete');
-  assert.equal(laterUser.responseMessageId, 'later-answer');
-  assert.equal(laterUser.answerText, 'Later answer');
+  assert.equal(laterUser.responseMessageId, 'first-answer');
+  assert.equal(laterUser.answerText, 'First answer');
   const pending = recoverExactServerFinal(conversationPayload([
     node('root', null, null),
     node('user', 'root', userMessage('user-message-1', 'user-turn-1')),
-    node('old-final', 'user', finalAssistant('old-answer', 'Do not return this')),
+    node('old-final', 'user', finalAssistant('old-answer', 'Original answer')),
     node('human', 'old-final', userMessage('human-message', 'human-turn')),
   ], 'human'), identity());
-  assert.equal(pending.kind, 'pending');
-  assert.equal(pending.answerText, null);
+  assert.equal(pending.kind, 'complete');
+  assert.equal(pending.responseMessageId, 'old-answer');
+  assert.equal(pending.answerText, 'Original answer');
 });
 
 test('backend recovery requires final channel, finished status, end_turn, and nonempty text', () => {

@@ -295,6 +295,7 @@ export function recoverExactServerFinal(
   }
 
   let sawAssistant = false;
+  let nextUserFound = false;
   let final: { readonly id: string; readonly text: string } | null = null;
   for (let index = submittedIndex + 1; index < branchIds.length; index += 1) {
     const nodeId = branchIds[index];
@@ -307,9 +308,8 @@ export function recoverExactServerFinal(
     }
     const role = messageRole(message);
     if (role === 'user') {
-      sawAssistant = false;
-      final = null;
-      continue;
+      nextUserFound = true;
+      break;
     }
     if (role !== 'assistant') {
       continue;
@@ -335,7 +335,8 @@ export function recoverExactServerFinal(
     observationTransport: 'fresh',
     responseMessageId: null,
     answerText: null,
-    reason: sawAssistant ? 'backend-assistant-not-final' : 'backend-assistant-missing',
+    reason: nextUserFound ? 'backend-next-user-turn-before-final' :
+      sawAssistant ? 'backend-assistant-not-final' : 'backend-assistant-missing',
     retryAfterMs: null,
     nextCheckAt: null,
   };

@@ -302,6 +302,7 @@ test('current ChatGPT message units recover the exact submitted turn and answer'
           <h4 data-conversation-role="assistant">Answer</h4>
           <div data-chatgpt-selection-message-id="answer-exact"><div class="markdown">Result</div></div>
         </div>
+        <main><textarea id="prompt-textarea"></textarea></main>
       ` });
     });
     await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
@@ -354,9 +355,18 @@ test('current ChatGPT message units recover the exact submitted turn and answer'
       main.insertAdjacentHTML('beforeend', '<div data-message-author-role="assistant" data-message-id="continued-final" data-end-turn="true">Completed review</div>');
     });
     const continued = await observeChatGptDom(page, identity);
-    assert.equal(continued.candidate?.responseMessageId, 'continued-final');
-    assert.equal(continued.candidate?.answerText, 'Completed review');
-    assert.equal(continued.candidate?.terminalMarker, true);
+    assert.equal(continued.candidate, null, 'Follow-up final must never complete the original partial');
+    await page.setContent(`<main>
+      <div data-message-author-role="user" data-message-id="user-exact">Question A</div>
+      <div data-message-author-role="assistant" data-message-id="original-final" data-end-turn="true">Answer A</div>
+      <div data-message-author-role="user" data-message-id="human-followup">Question B</div>
+      <div data-message-author-role="assistant" data-message-id="continued-final" data-end-turn="true">Answer B</div>
+    </main>`);
+    const originalFinal = await observeChatGptDom(page, identity);
+    assert.equal(originalFinal.laterUserFound, true);
+    assert.equal(originalFinal.candidate?.responseMessageId, 'original-final');
+    assert.equal(originalFinal.candidate?.answerText, 'Answer A');
+    assert.equal(originalFinal.candidate?.terminalMarker, true);
     assert.equal((await observeChatGptDom(page, { ...identity, submittedUserMessageId: 'unrelated' })).candidate, null);
 
     await page.setContent('<aside role="alert">hostspan-desktop connection expired; reconnect before processing</aside><main><textarea></textarea></main>');

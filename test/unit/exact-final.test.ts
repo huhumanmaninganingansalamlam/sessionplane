@@ -46,16 +46,25 @@ test('quiet stability can finish despite an unverified stale stop control', () =
   );
 });
 
-test('human follow-ups use only the latest turn candidate; network activity alone is not final', () => {
+test('next user turn requires an original terminal candidate; network activity alone is not final', () => {
   const tracker = new ExactFinalTracker(10);
   const waiting = tracker.evaluate(evidence({ laterUserFound: true, candidate: null }), 0);
-  assert.equal(waiting.kind, 'pending');
+  assert.equal(waiting.kind, 'unverified');
+  assert.equal(waiting.reason, 'dom-next-user-turn-before-final');
   const continued = tracker.evaluate(evidence({ laterUserFound: true, candidate: {
-    responseMessageId: 'continued-answer', answerText: 'Answer after human follow-up',
+    responseMessageId: 'original-answer', answerText: 'Original answer before human follow-up',
     terminalMarker: true, streamingMarker: false,
   } }), 100);
   assert.equal(continued.kind, 'complete');
-  assert.equal(continued.responseMessageId, 'continued-answer');
+  assert.equal(continued.responseMessageId, 'original-answer');
+  for (const now of [0, 100]) {
+    const partial = tracker.evaluate(evidence({ laterUserFound: true, candidate: {
+      responseMessageId: 'partial-answer', answerText: 'Incomplete original answer',
+      terminalMarker: false, streamingMarker: false,
+    } }), now);
+    assert.equal(partial.kind, 'unverified');
+    assert.equal(partial.answerText, null, 'quiet time cannot finalize a partial before another user');
+  }
 
   const networkOnly = new ExactFinalTracker(10).evaluate(
     evidence({ candidate: null, networkActivity: true }),

@@ -25,7 +25,6 @@ export async function observeChatGptDom(
   const messages = await readChatGptMessages(page);
   let submittedUserFound = false;
   let laterUserFound = false;
-  let latestUser = identity;
   let candidate: ProviderAssistantCandidate | null = null;
   for (const message of messages) {
     if (!submittedUserFound) {
@@ -38,9 +37,9 @@ export async function observeChatGptDom(
     }
     if (message.role === 'user') {
       laterUserFound = true;
-      candidate = null;
-      latestUser = { submittedUserMessageId: message.messageId, submittedUserTurnId: message.turnId };
-      continue;
+      // A later question cannot supply this request's answer or prove a partial final.
+      if (!candidate?.terminalMarker || candidate.streamingMarker) candidate = null;
+      break;
     }
     const responseMessageId = message.messageId ?? message.turnId;
     if (responseMessageId === null || responseMessageId.startsWith('request-placeholder-')) continue;
@@ -59,7 +58,7 @@ export async function observeChatGptDom(
       .some(element => element.closest('[aria-hidden="true"], [inert]') === null &&
         element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
   });
-  const providerAlerts = await observeChatGptAlerts(page, latestUser);
+  const providerAlerts = await observeChatGptAlerts(page, identity);
   return { submittedUserFound, laterUserFound, candidate, conversationSurfaceAvailable,
     actionableAlert: providerAlerts.length > 0, providerAlerts };
 }

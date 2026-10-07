@@ -10,6 +10,7 @@ import { resolveConfig } from '../../src/config.ts';
 import { startCore, type CoreService } from '../../src/main.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { EventRepository } from '../../src/storage/event-repository.ts';
 import { ProbeBudgetRepository } from '../../src/storage/probe-budget-repository.ts';
 import { recoverExactServerAcknowledgement } from '../../src/providers/chatgpt/backend-recovery.ts';
 
@@ -63,6 +64,13 @@ test('restart retains request-bound dispatch proof and recovers late duplicate A
     assert.equal(service.teamDirectory.getSession(session.sessionId).submittedUserMessageId, null);
     const preserved = service.database.raw.prepare('SELECT payload_json FROM outbox WHERE session_id=? ORDER BY generation')
       .all(session.sessionId);
+    const events = new EventRepository(service.database.raw);
+    const proof = events.submissionAttempts(session.sessionId, 2)[0]!;
+    // Same prompt/conversation do not transfer proof across a request or generation.
+    for (const generation of [1, 2]) events.append({ teamId: team.teamId, sessionId: session.sessionId,
+      generation, eventType: 'generation.submission-attempt-evidence', createdAt: attempt.observedAt,
+      payload: { ...proof, ...(generation === 2 ? { requestRef: 'foreign-request' } : {}),
+        attempt: { ...attempt, messageId: `foreign-user-${generation}` } } });
     await service.close();
     const restarted = new FakeProviderAdapter();
     restarted.autoFinalText = 'Exact new answer';

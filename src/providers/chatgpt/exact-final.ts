@@ -48,9 +48,12 @@ export class ExactFinalTracker {
       this.#reset();
       return decision('unverified', evidence.reason ?? 'dom-user-anchor-missing');
     }
-    // Adapters select only the answer after the latest user turn on the original
-    // request's branch. Human follow-ups remain in the active managed generation.
+    // Adapters must select only the answer before the next user turn.
     const candidate = evidence.candidate;
+    if (evidence.laterUserFound && (!candidate?.terminalMarker || candidate.streamingMarker)) {
+      this.#reset();
+      return decision('unverified', 'dom-next-user-turn-before-final');
+    }
     if (candidate === null) {
       this.#reset();
       if (evidence.activity === 'strong') {
