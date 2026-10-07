@@ -1,3 +1,6 @@
+import { createServer } from 'node:http';
+import { once } from 'node:events';
+import type { AddressInfo } from 'node:net';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,14 +12,16 @@ import { conversationLoadSurface } from '../../src/providers/chatgpt/conversatio
 
 test('exact error-surface Retry is isolated from generation retries, drafts, barriers and stale state', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-load-surface-'));
+  const server = createServer((_request, response) => { response.setHeader('content-type', 'text/html'); response.end('<main></main>'); });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: new PageRegistry(), headless: true });
   try {
     await owner.start(); const { page } = await owner.createPage();
-    await page.route('**/*', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<main></main>' }));
-    await page.goto('https://chatgpt.com/c/fixture-conversation');
+    await page.goto(origin + '/c/fixture-conversation');
     const error = '<div><p>이 ChatGPT 대화를 불러올 수 없습니다</p><div><button onclick="window.clicks=(window.clicks||0)+1">다시 시도</button></div></div>';
     const inspect = (click = false, expiresAt = Date.now() + 5000) => page.evaluate(conversationLoadSurface,
-      { origin: 'https://chatgpt.com', conversationId: 'fixture-conversation', click, expiresAt });
+      { origin, conversationId: 'fixture-conversation', click, expiresAt });
     await t.test('observed Korean load error clicks only its below-notice button', async () => {
       await page.setContent('<main>' + error + '</main>');
       assert.equal((await inspect()).kind, 'retry');
@@ -30,6 +35,20 @@ test('exact error-surface Retry is isolated from generation retries, drafts, bar
       assert.equal(await page.evaluate(() => (window as unknown as { cardClicks: number }).cardClicks), 1);
       await page.setContent('<main><div data-message-author-role="assistant">' + card + '</div><textarea></textarea></main>');
       assert.equal((await inspect(true)).clicked, false);
+    });
+    await t.test('quoted code/new transcript wrappers and bare words never become a provider load error', async () => {
+      for (const quote of [
+        '<code><span>이 ChatGPT 대화를 불러올 수 없습니다</span></code>',
+        '<div class="MarkdownRoot-rZKhxa">' + error + '</div>',
+        '<article data-testid="conversation-turn-102">' + error + '</article>',
+        '<blockquote>' + error + '</blockquote>',
+        '<p>이 ChatGPT 대화를 불러올 수 없습니다</p>',
+      ]) {
+        await page.setContent('<main>' + quote + '<textarea></textarea></main>');
+        const result = await inspect(true);
+        assert.equal(result.loadError, false, quote);
+        assert.equal(result.clicked, false, quote);
+      }
     });
     for (const [name, extra, expected] of [
       ['draft', '<textarea>retained draft</textarea>', 'manual-draft'],
@@ -69,8 +88,8 @@ test('exact error-surface Retry is isolated from generation retries, drafts, bar
       await page.setContent('<main><div data-message-author-role="assistant">Retained final</div><textarea>new manual draft</textarea></main>');
       const recovered = await inspect(true); assert.equal(recovered.kind, 'normal'); assert.equal(recovered.clicked, false);
       assert.equal(await page.locator('textarea').inputValue(), 'new manual draft');
-      await page.goto('https://chatgpt.com/c/another-conversation'); await page.setContent('<main>' + error + '</main>');
+      await page.goto(origin + '/c/another-conversation'); await page.setContent('<main>' + error + '</main>');
       assert.equal((await inspect(true)).reason, 'binding-url-changed');
     });
-  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+  } finally { await owner.close(); server.close(); rmSync(root, { recursive: true, force: true }); }
 });
