@@ -152,6 +152,16 @@ export class TeamWorkflow {
     const request = this.#request(input);
     const owner = ownerOf(request);
     if (input.decision === 'latest') {
+      if (this.services.receipts.get(request.clientId, input.requestId) === null) {
+        const current = this.#role({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}` });
+        if (current.provider !== 'chatgpt' || !current.terminal || current.sessionState !== 'complete' ||
+            current.conversationId === null || current.responseMessageId === null) {
+          throw new SessionPlaneDomainError('session.recovery-unavailable', 'Latest display requires the current completed ChatGPT answer');
+        }
+        // Completed generations are not rebound during startup. Recover only
+        // the retained conversation page, without opening or navigating one.
+        await this.services.ensurePage(request.sessionId, request.generation, { openMissing: false });
+      }
       return await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
         const method = 'workflow.latest';
         const requestHash = hashCanonical({ method, payload: input });

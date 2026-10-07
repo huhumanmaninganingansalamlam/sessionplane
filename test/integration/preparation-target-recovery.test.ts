@@ -17,13 +17,16 @@ test('explicit completed display and deferred preparation preserve exact ownersh
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const fake = new FakeProviderAdapter();
   fake.autoFinalText = 'Original completed answer';
-  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+  const start = () => startCore({ config, browserHeadless: true, providerAdapters: [fake],
     logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  let service = await start();
+  const firstOwner = service.browserOwner!;
+  const closeFirst = firstOwner.close.bind(firstOwner);
   const rpc = <T = any>(method: string, params: Record<string, unknown>) => callRpc<T>({ socketPath: config.socketPath, method, params });
   try {
     const team = service.teamDirectory.createTeam({ clientId: 'deferred-owner' });
     const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
-    const { page, binding } = await service.browserOwner!.createPage();
+    let { page, binding } = await service.browserOwner!.createPage();
     let routed = 0;
     await page.route('https://chatgpt.com/**', route => {
       routed++;
@@ -46,6 +49,15 @@ test('explicit completed display and deferred preparation preserve exact ownersh
     const latest = (requestId: string) => invokeMcpTool({ name: 'sessionplane_decide',
       arguments: { teamId: team.teamId, requestRef: first.outbox_id, requestId, decision: 'latest' },
       socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    const browserPid = firstOwner.status.browserPid;
+    const firstRegistry = service.pageRegistry;
+    firstOwner.close = async () => firstRegistry.detach();
+    await service.close();
+    const lockPath = path.join(firstOwner.status.profileDir, '.sessionplane-profile.lock');
+    const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+    writeFileSync(lockPath, JSON.stringify({ ...lock, pid: 99_999_999 }));
+    service = await start();
+    assert.equal(service.browserOwner!.status.browserPid, browserPid);
     await page.setContent('<main><article data-message-author-role="assistant" data-message-id="old">Selected old answer</article><textarea></textarea><button aria-label="맨 아래로 스크롤">↓</button></main>');
     await page.evaluate(() => {
       document.querySelector('button')!.onclick = () => {
@@ -57,6 +69,8 @@ test('explicit completed display and deferred preparation preserve exact ownersh
       const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
     });
     assert.equal((await latest('selected')).structuredContent.displayOutcome, 'not-dispatched');
+    binding = service.pageRegistry.getBinding(service.teamDirectory.getSession(session.sessionId).pageKey!);
+    page = service.pageRegistry.pageForObservation(binding.pageKey);
     assert.equal(await page.evaluate(() => document.getSelection()!.toString()), 'Selected old answer');
     await page.evaluate(() => document.getSelection()!.removeAllRanges());
     await page.locator('textarea').fill('Unsent user draft');
@@ -103,7 +117,7 @@ test('explicit completed display and deferred preparation preserve exact ownersh
       (error: RpcClientError) => (error.data as any).errorCode === 'session.page-identity-unverified');
     assert.equal(fake.submitCount, 1);
     assert.equal(service.database.raw.prepare('SELECT COUNT(*) AS count FROM outbox').get()!.count, 2);
-  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+  } finally { await service.close(); await closeFirst(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test('core restart reconnects prepared request to its exact live target, not an identical draft', async () => {
