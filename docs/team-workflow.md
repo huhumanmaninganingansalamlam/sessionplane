@@ -147,6 +147,29 @@ required specific deletion confirmation before choosing the deleting path. A 10-
 recommendation is only a handoff cue, never deletion confirmation. This is a
 caller authorization requirement, not a new confirmation field in the API.
 
+An explicit user-approved, duplicate-risk-accepted resend of a legacy unresolved
+ChatGPT submission uses `decide` with the **original** `requestRef`,
+`decision:"prepare_resend"`, a stable new `requestId`, `approvalRef` identifying
+that approval, and `duplicateRiskAccepted:true`. This reserves exactly one
+successor generation in the same session/conversation and returns its new
+`requestRef`/`roleRef`; it does **not send**. The original generation/outbox,
+anchors, answers and failure evidence remain unchanged and unresolved. Its
+observation routing moves to the successor; this is not proof of non-submission,
+failure, completion or provider cancellation. Reusing the exact approval returns
+the reservation; a different approval/request ID cannot reserve another resend
+for that original. Only the original coordinator prepares fresh configuration
+and submits the successor through ordinary `decide` choices. Do not use ordinary
+`send` to dispatch that reservation.
+
+This narrow path requires stored exact-conversation missing-anchor evidence,
+current role/page ownership and a passive usable conversation surface. Before
+preparation and immediately before dispatch, original message/answer discovery,
+activity, alerts, selection, another draft or service cooldown pauses the prepared
+successor. Only its exact staged prompt is allowed after composer preparation.
+An ambiguous irreversible attempt is never repeated. No attachments, automatic
+continuation, browser navigation, refresh, Stop, deletion or safety bypass is
+introduced. Ordinary `send` still refuses every unrelated active generation.
+
 General search/research, context packaging, project-source management and code ZIP
 orchestration are outside the agent chat workflow. They are not optional MCP profiles
 or hidden commands behind a generic execute tool. Generated file retrieval remains

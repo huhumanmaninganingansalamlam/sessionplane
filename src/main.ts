@@ -211,6 +211,9 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       if (!thinkingFailureRecovery) throw new Error('Thinking-failure validation is unavailable');
       await thinkingFailureRecovery.validateContinuation(snapshot, continuation);
     },
+    beforeAuthorizedResend: (current, original, prompt, allowPreparedDraft) =>
+      ui.verifyAuthorizedResend(current, original, prompt, allowPreparedDraft),
+    reserveResendPage: (original, successor) => ui.reserveResendPage(original, successor),
     onSubmitted: (snapshot) => observationService.start(snapshot),
     onSubmissionUnknown: (snapshot) =>
       recoveryService?.watchAcknowledgementRecovery(snapshot),

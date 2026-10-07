@@ -148,9 +148,14 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'discover' } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
+    if (input.decision === 'prepare_resend') {
+      const prepared = await this.services.submissions.prepareAuthorizedResend({ ...owner,
+        decisionId: input.requestId, approvalRef: input.approvalRef, duplicateRiskAccepted: input.duplicateRiskAccepted });
+      return { ...prepared, roleRef: `${prepared.sessionId}:${prepared.generation}` };
+    }
     if (input.decision === 'latest') {
       if (this.services.receipts.get(request.clientId, input.requestId) === null) {
         const current = this.#role({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}` });

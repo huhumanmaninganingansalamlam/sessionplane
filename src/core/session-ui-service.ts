@@ -164,6 +164,47 @@ export class SessionUiService {
     return await this.#submissions.reconcileFailure(input, session => this.#failureEvidence(session, session));
   }
 
+  /** Passive, exact-owner checks; this never dispatches or clears a draft. */
+  async verifyAuthorizedResend(current: SessionSnapshot, original: SessionSnapshot, prompt: string, allowPreparedDraft: boolean) {
+    const page = this.#requirePage(current);
+    await inspectChatGptPageReady(page, current.pageKey!);
+    const binding = this.#registry.refreshPage(current.pageKey!);
+    const dom = await observeChatGptDom(page, original);
+    const activity = await observeChatGptActivity(page, dom);
+    const messages = await readChatGptMessages(page);
+    const matchingPromptFound = messages.some(message => message.role === 'user' &&
+      message.text.replaceAll('\r\n', '\n') === prompt.replaceAll('\r\n', '\n'));
+    const state = await page.evaluate(() => {
+      const editors = [...document.querySelectorAll('#prompt-textarea, [data-testid="prompt-textarea"], main [role="textbox"][contenteditable="true"]')]
+        .filter(element => element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
+      return { drafts: editors.map(element => element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+        ? element.value : (element as HTMLElement).innerText), selection: window.getSelection()?.isCollapsed === false };
+    });
+    if (dom.submittedUserFound || dom.candidate !== null || activity.strength !== 'none' ||
+        dom.actionableAlert || !dom.conversationSurfaceAvailable || state.selection || state.drafts.length !== 1 ||
+        state.drafts.some(draft => draft.trim() !== '' && (!allowPreparedDraft || draft !== prompt)) ||
+        matchingPromptFound) {
+      throw new SessionPlaneDomainError('provider.preparation-required',
+        'Approved resend paused: original message/answer, activity, alert, selection or separate draft is present; do not send',
+        { originalGeneration: original.generation, originalAnchorFound: dom.submittedUserFound,
+          responseMessageId: dom.candidate?.responseMessageId ?? null, matchingPromptFound, activity: activity.strength });
+    }
+    this.#requirePage(current);
+    if (this.#registry.refreshPage(current.pageKey!).bindingEpoch !== binding.bindingEpoch) throw new SessionPlaneDomainError(
+      'session.page-identity-unverified', 'Page changed during approved resend validation');
+  }
+
+  reserveResendPage(original: SessionSnapshot, successor: SessionSnapshot) {
+    this.#requirePage(original);
+    if (original.sessionId !== successor.sessionId || original.pageKey !== successor.pageKey ||
+        original.conversationId !== successor.conversationId || successor.generation !== original.generation + 1) {
+      throw new SessionPlaneDomainError('session.page-identity-unverified', 'Resend must retain the exact original session and page');
+    }
+    // Ordinary same-session generation ownership advance; no browser action.
+    this.#registry.reservePage(original.pageKey!, { sessionId: original.sessionId,
+      generation: successor.generation, conversationId: original.conversationId });
+  }
+
   async #failureEvidence(session: SessionSnapshot, anchor: SessionSnapshot) {
     const page = this.#requirePage(session);
     const binding = this.#registry.refreshPage(session.pageKey!);

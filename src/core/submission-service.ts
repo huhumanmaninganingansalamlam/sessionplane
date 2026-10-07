@@ -39,6 +39,11 @@ export interface FailureContinuation {
   readonly deadlineAt: string;
 }
 
+interface AuthorizedResend {
+  readonly requestRef: string;
+  readonly approvalRef: string;
+}
+
 export interface SessionSendInput {
   readonly clientId: string;
   readonly requestId: string;
@@ -54,6 +59,7 @@ export interface SessionSendInput {
   readonly sessionDeadlineSec: number;
   readonly thinkingFailureRecovery?: true;
   readonly failureContinuation?: FailureContinuation;
+  readonly authorizedResend?: AuthorizedResend;
 }
 
 interface PendingPreparation {
@@ -73,6 +79,7 @@ interface StoredOutboxPayload {
   readonly uploadAttachments?: readonly ProviderAttachment[];
   readonly thinkingFailureRecovery?: true;
   readonly failureContinuation?: FailureContinuation;
+  readonly authorizedResend?: AuthorizedResend;
 }
 
 interface PreparedOutbox {
@@ -99,6 +106,8 @@ export class SubmissionService {
   readonly #maxUploadFileBytes: number;
   readonly #requestMutex = new KeyedMutex();
   readonly #beforeFailureContinuation: ((snapshot: SessionSnapshot, continuation: FailureContinuation) => Promise<void>) | null;
+  readonly #beforeAuthorizedResend: ((current: SessionSnapshot, original: SessionSnapshot, prompt: string, allowPreparedDraft: boolean) => Promise<void>) | null;
+  readonly #reserveResendPage: ((original: SessionSnapshot, successor: SessionSnapshot) => void) | null;
 
   constructor(options: {
     readonly database: SessionPlaneDatabase;
@@ -111,9 +120,13 @@ export class SubmissionService {
     readonly onSubmitted?: (snapshot: SessionSnapshot) => void;
     readonly onSubmissionUnknown?: (snapshot: SessionSnapshot) => void;
     readonly beforeFailureContinuation?: (snapshot: SessionSnapshot, continuation: FailureContinuation) => Promise<void>;
+    readonly beforeAuthorizedResend?: (current: SessionSnapshot, original: SessionSnapshot, prompt: string, allowPreparedDraft: boolean) => Promise<void>;
+    readonly reserveResendPage?: (original: SessionSnapshot, successor: SessionSnapshot) => void;
     readonly now?: () => Date;
   }) {
     this.#beforeFailureContinuation = options.beforeFailureContinuation ?? null;
+    this.#beforeAuthorizedResend = options.beforeAuthorizedResend ?? null;
+    this.#reserveResendPage = options.reserveResendPage ?? null;
     this.#database = options.database;
     this.#directory = options.directory;
     this.#scheduler = options.scheduler;
@@ -586,6 +599,7 @@ export class SubmissionService {
     let submission: ProviderSubmission;
     try {
       this.#requireAccountReady(prepared.snapshot);
+      await this.#verifyAuthorizedResend(prepared.snapshot, input.authorizedResend, false);
       if (attachments.length > 0) this.#requireUploadsEnabled();
       const adapter = this.#adapters.require(prepared.snapshot.provider);
       submission = await adapter.openSubmission({
@@ -615,6 +629,7 @@ export class SubmissionService {
       };
       try {
         await verifyContinuation();
+        await this.#verifyAuthorizedResend(this.#requireSnapshot(prepared.outbox.sessionId), input.authorizedResend, false);
         this.#requireAccountReady(this.#requireSnapshot(prepared.outbox.sessionId));
         await withProviderStageTimeout(
           submission.prepare(choices),
@@ -623,6 +638,7 @@ export class SubmissionService {
         );
         this.#requireActiveRoleSession(this.#requireSnapshot(prepared.outbox.sessionId));
         await verifyContinuation();
+        await this.#verifyAuthorizedResend(this.#requireSnapshot(prepared.outbox.sessionId), input.authorizedResend, true);
         this.#requireAccountReady(this.#requireSnapshot(prepared.outbox.sessionId));
         if (input.thinkingFailureRecovery === true) {
           const model = choices?.model ?? choices?.effort;
@@ -819,6 +835,119 @@ export class SubmissionService {
         ...result, evidence: await observe(snapshot, this.#sessions.submittedMessageIds(snapshot.sessionId)),
       }));
     });
+  }
+
+  async prepareAuthorizedResend(input: {
+    clientId: string; requestId: string; sessionId: string; generation: number;
+    decisionId: string; approvalRef: string; duplicateRiskAccepted: true;
+  }) {
+    if (input.duplicateRiskAccepted !== true || input.approvalRef.trim() === '') throw new SessionPlaneDomainError(
+      'input.invalid', 'A specific user approval after duplicate-risk disclosure is required');
+    const original = this.#outbox.getByRequest(input.clientId, input.requestId);
+    if (original === null || original.sessionId !== input.sessionId || original.generation !== input.generation) {
+      throw new SessionPlaneDomainError('input.invalid', 'Resend requires the original caller-owned request');
+    }
+    return await this.#scheduler.actorFor(input.sessionId).enqueue(async () => {
+      const receipts = new ReceiptRepository(this.#database);
+      const method = 'session.resend.prepare';
+      // One durable reservation per original request, across IDs and restarts.
+      const receiptId = `authorized-resend:${original.outboxId}`;
+      const requestHash = hashCanonical({ method, payload: input });
+      const previous = receipts.get(input.clientId, receiptId);
+      if (previous !== null) {
+        if (previous.method !== method || previous.requestHash !== requestHash) throw new SessionPlaneDomainError(
+          'input.idempotency-conflict', 'This original request already has its one authorized resend reservation');
+        return JSON.parse(previous.resultJson) as Record<string, unknown>;
+      }
+      if (this.#outbox.getByRequest(input.clientId, input.decisionId) !== null ||
+          receipts.get(input.clientId, input.decisionId) !== null) throw new SessionPlaneDomainError(
+        'input.idempotency-conflict', 'Resend request ID already belongs to another submission');
+      const current = this.#requireSnapshot(input.sessionId);
+      if (current.generation !== original.generation || current.pageKey === null) throw new SessionPlaneDomainError(
+        'session.generation-superseded', 'Resend requires the exact current original request page');
+      const authorization = { requestRef: original.outboxId, approvalRef: input.approvalRef };
+      return await this.#pageMutex.runExclusive(current.pageKey, async () => {
+        await this.#verifyAuthorizedResend(current, authorization, false);
+        const source = parseOutboxPayload(original);
+        if (this.#reserveResendPage === null) throw new SessionPlaneDomainError(
+          'capability.unsupported', 'Exact same-page resend reservation is unavailable');
+        if (source.attachments.length !== 0) throw new SessionPlaneDomainError(
+          'capability.unsupported', 'This narrow resend path does not replay attachment uploads');
+        const payload = { prompt: source.prompt, model: source.model, effort: source.effort,
+          surface: source.surface, attachments: [], sessionDeadlineSec: source.sessionDeadlineSec,
+          authorizedResend: authorization };
+        const sendInput: SessionSendInput = { clientId: input.clientId, requestId: input.decisionId,
+          sessionId: input.sessionId, prompt: source.prompt, sessionDeadlineSec: source.sessionDeadlineSec };
+        const result = receipts.execute({ clientId: input.clientId, requestId: receiptId, method, payload: input,
+          operation: () => {
+            const prepared = this.#prepareOutbox(this.#scheduler.actorFor(input.sessionId), input.sessionId,
+              sendInput, payload, hashCanonical({ method: 'session.resend.send', payload }), original);
+            this.#reserveResendPage!(current, prepared.snapshot);
+            const timestamp = this.#now().toISOString();
+            this.#sessions.updateCurrentGeneration(input.sessionId, prepared.snapshot.generation,
+              { reason: 'authorized-resend-prepared', errorCode: 'provider.preparation-required' }, timestamp);
+            this.#outbox.transition(prepared.outbox.outboxId, ['prepared'], 'prepared', {
+              updatedAt: timestamp, errorCode: 'provider.preparation-required',
+              resultJson: JSON.stringify({ kind: 'pending-preparation', choices: {} }), promptSubmitted: false });
+            this.#events.append({ teamId: original.teamId, roleId: original.roleId, sessionId: original.sessionId,
+              generation: original.generation, eventType: 'generation.resend-authorized',
+              payload: { originalRequestRef: original.outboxId, successorRequestRef: prepared.outbox.outboxId,
+                successorGeneration: prepared.snapshot.generation, receiptId, approvalRef: input.approvalRef,
+                duplicateRiskAccepted: true, originalDisposition: 'unresolved-preserved', providerMutation: false },
+              createdAt: timestamp });
+            const result = { requestOk: true, requestRef: prepared.outbox.outboxId, originalRequestRef: original.outboxId,
+              sessionId: input.sessionId, generation: prepared.snapshot.generation, receiptId,
+              approvalRef: input.approvalRef, status: 'needs_decision', submissionState: 'prepared',
+              originalDisposition: 'unresolved-preserved', providerMutation: false };
+            receipts.record({ clientId: input.clientId, requestId: input.decisionId, method, requestHash, status: 'complete', result });
+            return result;
+          } });
+        this.#scheduler.refreshSession(input.sessionId);
+        return result;
+      });
+    });
+  }
+
+  async #verifyAuthorizedResend(current: SessionSnapshot, authorization: AuthorizedResend | undefined, allowPreparedDraft: boolean) {
+    if (authorization === undefined) return;
+    const receipts = new ReceiptRepository(this.#database);
+    const stopId = `authorized-resend-stopped:${authorization.requestRef}`;
+    if (receipts.get(`team:${current.teamId}`, stopId) !== null) throw new SessionPlaneDomainError(
+      'provider.preparation-required', 'This approved resend was stopped after original progress/answer discovery; preserve and collect the original request');
+    const source = this.#outbox.getById(authorization.requestRef);
+    const original = source === null ? null : this.#sessions.getGenerationResult(source.sessionId, source.generation);
+    const proof = source === null ? null : this.#events.latestAnchorRecovery(source.sessionId, source.generation);
+    if (source === null || original === null || source.sessionId !== current.sessionId || source.teamId !== current.teamId ||
+        current.provider !== 'chatgpt' || current.terminal ||
+        ![source.generation, source.generation + 1].includes(current.generation) ||
+        original.submissionState !== 'submitted' || !original.promptSubmitted || original.completedAt !== null ||
+        original.responseMessageId !== null || original.answerText !== null ||
+        (original.submittedUserMessageId === null && original.submittedUserTurnId === null) ||
+        proof?.recoveryReason !== 'backend-user-anchor-absent-from-mapping') throw new SessionPlaneDomainError(
+      'provider.preparation-required', 'Original submission remains unresolved; exact missing-anchor evidence is required before this approved resend');
+    const identity = proof.recoveryIdentity as Record<string, unknown> | undefined;
+    if (!identity || identity.conversationId !== current.conversationId ||
+        identity.submittedUserMessageId !== original.submittedUserMessageId ||
+        identity.submittedUserTurnId !== original.submittedUserTurnId) throw new SessionPlaneDomainError(
+      'session.page-identity-unverified', 'Missing-anchor evidence belongs to another request or conversation');
+    this.#requireActiveRoleSession(current);
+    this.#requireAccountReady(current);
+    if (this.#beforeAuthorizedResend === null) throw new SessionPlaneDomainError(
+      'provider.preparation-required', 'Approved resend display validation is unavailable');
+    const originalSnapshot = { ...current, ...original, generation: source.generation, terminal: false };
+    try {
+      await withProviderStageTimeout(
+        this.#beforeAuthorizedResend(current, originalSnapshot, parseOutboxPayload(source).prompt, allowPreparedDraft), 5_000);
+    } catch (error) {
+      const detail = error instanceof SessionPlaneDomainError ? preSubmitDetails(error.details) : {};
+      if (detail.originalAnchorFound === true || detail.matchingPromptFound === true ||
+          typeof detail.responseMessageId === 'string' || detail.activity === 'strong') {
+        receipts.execute({ clientId: `team:${current.teamId}`, requestId: stopId,
+          method: 'session.resend.dispatch-stopped', payload: { originalRequestRef: source.outboxId },
+          operation: () => ({ originalRequestRef: source.outboxId, stoppedAt: this.#now().toISOString(), evidence: detail }) });
+      }
+      throw error;
+    }
   }
 
   async reconcileFailure(
@@ -1175,11 +1304,14 @@ export class SubmissionService {
       });
     });
     actor.publish(snapshot, eventSequence);
+    const authorizedResend = parseOutboxPayload(outbox).authorizedResend;
     throw new SessionPlaneDomainError(
       'provider.preparation-required',
-      nextCheckAt === null ? 'Provider UI needs a caller decision before the same request can continue'
+      authorizedResend !== undefined ? classified.message : nextCheckAt === null ? 'Provider UI needs a caller decision before the same request can continue'
         : 'The same prepared request is waiting for the shared ChatGPT account cooldown',
-      { promptSubmitted: false, requestId: outbox.requestId, sessionId: outbox.sessionId, generation: outbox.generation, snapshot },
+      { promptSubmitted: false, requestId: outbox.requestId, sessionId: outbox.sessionId, generation: outbox.generation, snapshot,
+        ...(authorizedResend === undefined ? {} : { originalRequestRef: authorizedResend.requestRef,
+          pauseReason: classified.message, ...preSubmitDetails(classified.details) }) },
     );
   }
 
@@ -1233,6 +1365,7 @@ export class SubmissionService {
     input: SessionSendInput,
     payload: Readonly<Record<string, unknown>>,
     requestHash: string,
+    authorizedOriginal?: OutboxRecord,
   ): PreparedOutbox {
     let outbox!: OutboxRecord;
     let snapshot!: SessionSnapshot;
@@ -1242,7 +1375,11 @@ export class SubmissionService {
       if (session === null) {
         throw new SessionPlaneDomainError('input.session-not-found', `Unknown session: ${sessionId}`);
       }
-      if (!['created', 'ready', 'complete'].includes(session.sessionState) &&
+      if (authorizedOriginal !== undefined && (authorizedOriginal.sessionId !== sessionId ||
+          authorizedOriginal.generation !== session.currentGeneration ||
+          payload.authorizedResend === undefined)) throw new SessionPlaneDomainError(
+        'session.generation-superseded', 'Authorized resend source is no longer current');
+      if (authorizedOriginal === undefined && !['created', 'ready', 'complete'].includes(session.sessionState) &&
           !(session.sessionState === 'failed' &&
             this.#requireSnapshot(sessionId).reason === 'thinking-failed-reconciled' &&
             this.#requireSnapshot(sessionId).errorCode === 'provider.execution-failed')) {
@@ -1911,6 +2048,7 @@ function sessionSendInputFromOutbox(outbox: OutboxRecord, payload: StoredOutboxP
     sessionDeadlineSec: payload.sessionDeadlineSec,
     ...(payload.thinkingFailureRecovery === true ? { thinkingFailureRecovery: true } : {}),
     ...(payload.failureContinuation === undefined ? {} : { failureContinuation: payload.failureContinuation }),
+    ...(payload.authorizedResend === undefined ? {} : { authorizedResend: payload.authorizedResend }),
   };
 }
 
