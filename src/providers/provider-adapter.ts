@@ -50,7 +50,7 @@ export interface PreparationTarget {
 export type PreparationChoices = Readonly<Partial<Record<PreparationPurpose, PreparationTarget>>>;
 
 export interface ProviderSubmissionAcknowledgement {
-  readonly evidence?: 'stable-anchor-cleared-composer' | 'accepted-request-stable-anchor-cleared-composer';
+  readonly evidence?: 'stable-anchor-cleared-composer' | 'accepted-request-stable-anchor-cleared-composer' | 'backend-exact-user';
   readonly conversationId: string;
   readonly submittedUserMessageId: string;
   readonly submittedUserTurnId: string;

@@ -183,6 +183,66 @@ test('thinking-failed activity headers report an exact nonterminal provider erro
   }
 });
 
+test('automatic UNKNOWN recovery never confirms an optimistic DOM anchor without the same canonical user', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-optimistic-ack-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    let pageRequests = 0;
+    await page.route('https://chatgpt.com/**', route => {
+      pageRequests++;
+      return route.fulfill({ status: 200, contentType: 'text/html', body: '<main><div data-message-author-role="user" data-message-id="optimistic-user">Question</div><textarea id="prompt-textarea"></textarea></main>' });
+    });
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
+    let status = 200;
+    let userId: string | null = null;
+    let probes = 0;
+    t.mock.method(page.context().request, 'get', async (url: string) => {
+      probes++;
+      return { status: () => url.endsWith('/api/auth/session') ? 200 : status,
+        headers: () => ({ 'retry-after': '120' }), dispose: async () => {},
+        json: async () => url.endsWith('/api/auth/session') ? { accessToken: 'fixture-only-token' } : {
+          id: CONVERSATION_ID, current_node: userId === null ? 'root' : 'user', mapping: {
+            root: { parent: null, message: null },
+            ...(userId === null ? {} : { user: { parent: 'root', message: { id: userId, author: { role: 'user' }, content: { parts: ['Question'] } } } }),
+          },
+        },
+      };
+    });
+    const session = { ...sessionSnapshot(binding.pageKey), submissionState: 'submission_unknown' as const,
+      submittedUserMessageId: null, submittedUserTurnId: null };
+    const original = { ...session };
+    for (const scenario of [
+      { status: 200, userId: null },
+      { status: 429, userId: 'optimistic-user' },
+      { status: 200, userId: 'different-user' },
+      { status: 200, userId: 'optimistic-user' },
+    ]) {
+      status = scenario.status; userId = scenario.userId;
+      const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/', acknowledgementTimeoutMs: 500 });
+      const acknowledgement = await adapter.recoverAcknowledgement({ session, generation: 1, prompt: 'Question' });
+      if (status === 200 && userId === 'optimistic-user') {
+        assert.equal(acknowledgement?.submittedUserMessageId, userId);
+        assert.equal(acknowledgement?.evidence, 'backend-exact-user');
+      } else {
+        assert.equal(acknowledgement, null, JSON.stringify(scenario));
+      }
+      if (status === 429) {
+        const before = probes;
+        assert.equal(await adapter.recoverAcknowledgement({ session, generation: 1, prompt: 'Question' }), null);
+        assert.equal(probes, before, 'Retry-After prevents another backend probe');
+      }
+    }
+    assert.equal(pageRequests, 1, 'No submit or navigation after the isolated fixture load');
+    assert.equal(await page.locator('textarea').inputValue(), '');
+    assert.deepEqual(session, original);
+    assert.equal(registry.getBinding(binding.pageKey).generation, 1);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('missing DOM user binds only the exact backend prompt and retrieves its final without submission', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-backend-binding-'));
   const registry = new PageRegistry();
@@ -319,7 +379,7 @@ test('current ChatGPT message units recover the exact submitted turn and answer'
   }
 });
 
-test('ChatGPT WEB redirect follows only the exact submitted user turn', async () => {
+test('ChatGPT WEB redirect follows only the exact submitted user turn', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-redirect-'));
   const registry = new PageRegistry();
   const owner = new BrowserOwner({
@@ -348,6 +408,14 @@ test('ChatGPT WEB redirect follows only the exact submitted user turn', async ()
       generation: 1,
       conversationId: webId,
     });
+    t.mock.method(created.page.context().request, 'get', async (url: string) => ({
+      status: () => 200, headers: () => ({}), dispose: async () => {},
+      json: async () => url.endsWith('/api/auth/session') ? { accessToken: 'fixture-only-token' } : {
+        id: CONVERSATION_ID, current_node: 'user', mapping: {
+          user: { parent: null, message: { id: 'user-message-1', author: { role: 'user' }, content: { parts: ['Question'] } } },
+        },
+      },
+    }));
     const adapter = new ChatGptAdapter({
       browserOwner: owner,
       pageRegistry: registry,
