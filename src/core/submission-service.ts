@@ -1246,7 +1246,9 @@ export class SubmissionService {
 
   accountCooldown(snapshot: SessionSnapshot): string | null {
     if (snapshot.provider !== 'chatgpt') return null;
-    const until = new ConversationLoadRecoveryRepository(this.#database).serviceNextAllowedAt(snapshot.conversationId ?? undefined);
+    // Recovery GET pacing is not a restriction on settings or the submission POST.
+    // Only an explicit broad service hold applies to unrelated web preparation.
+    const until = new ConversationLoadRecoveryRepository(this.#database).serviceNextAllowedAt();
     return until && Date.parse(until) > this.#now().getTime() ? until : null;
   }
 

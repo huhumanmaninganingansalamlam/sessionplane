@@ -49,7 +49,9 @@ test('approved resend reserves once across restart, preserves uncertainty, and s
     const budgets = new ProbeBudgetRepository(service.database.raw);
     budgets.save({ scope: `chatgpt:conversation-detail:${source.conversationId}`, nextAllowedAt: new Date(Date.now() + 120_000).toISOString(),
       blockedUntil: new Date(Date.now() + 120_000).toISOString(), backoffLevel: 1, consecutiveFailures: 0, updatedAt: new Date().toISOString() });
-    await assert.rejects(callRpc(config.socketPath, 'workflow.decide', approval), /cooldown/);
+    assert.equal(service.submissionService.accountCooldown(source), null,
+      'A recovery GET backoff is not an account-wide preparation restriction');
+    await assert.rejects(callRpc(config.socketPath, 'workflow.decide', approval), /canonical recovery: probe-paced/);
     budgets.save({ scope: `chatgpt:conversation-detail:${source.conversationId}`, nextAllowedAt: new Date(0).toISOString(),
       blockedUntil: null, backoffLevel: 0, consecutiveFailures: 0, updatedAt: new Date().toISOString() });
     const reservation = await callRpc(config.socketPath, 'workflow.decide', approval) as { requestRef: string; generation: number };
@@ -57,6 +59,16 @@ test('approved resend reserves once across restart, preserves uncertainty, and s
     assert.equal(fake.submitCount, 1, 'Preparing approval never sends');
     assert.deepEqual(generationRow(), preserved);
     assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(original.outbox_id), original);
+    const preparedOwner = { clientId, requestId: 'approved-once', sessionId: source.sessionId, generation: 2 };
+    budgets.save({ scope: `chatgpt:conversation-detail:${source.conversationId}`, nextAllowedAt: new Date(Date.now() + 120_000).toISOString(),
+      blockedUntil: new Date(Date.now() + 120_000).toISOString(), backoffLevel: 1, consecutiveFailures: 1, updatedAt: new Date().toISOString() });
+    assert.deepEqual(await service.submissionService.withPendingPreparation(preparedOwner, async () => ({ inspected: true })), { inspected: true });
+    assert.deepEqual(await service.submissionService.decidePreparation({ ...preparedOwner, decisionId: 'settings-during-read-backoff',
+      decision: 'discover', purpose: 'model' }, async () => ({ choice: null, result: { discovered: true } })), { discovered: true });
+    await assert.rejects(service.submissionService.resumePreparation(preparedOwner), /canonical recovery: probe-paced/);
+    assert.equal(fake.submitCount, 1, 'Settings/read remain available but a resend still needs paced original proof');
+    budgets.save({ scope: `chatgpt:conversation-detail:${source.conversationId}`, nextAllowedAt: new Date(0).toISOString(),
+      blockedUntil: null, backoffLevel: 0, consecutiveFailures: 0, updatedAt: new Date().toISOString() });
     await service.close();
     service = await startCore({ config, startBrowser: false, providerAdapters: [fake] });
     assert.deepEqual(await callRpc(config.socketPath, 'workflow.decide', approval), reservation);

@@ -1,4 +1,5 @@
 import type { Page } from 'playwright-core';
+import { limitationHeaders } from '../providers/chatgpt/rate-limit-evidence.ts';
 import type { PageRegistry } from '../browser/page-registry.ts';
 import type { PageMutationMutex } from '../browser/page-mutex.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
@@ -12,20 +13,6 @@ import { conversationLoadSurface, type LoadSurface } from '../providers/chatgpt/
 
 export const LOAD_RECOVERY_INTERVAL_MS = 5_000;
 export const LOAD_RECOVERY_MAX_ATTEMPTS = 100;
-function limitationHeaders(headers: Record<string, string>): Record<string, string> {
-  const safe: Record<string, string> = {};
-  for (const name of ['ratelimit-limit', 'ratelimit-remaining', 'ratelimit-reset',
-    'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset',
-    'x-ratelimit-limit-requests', 'x-ratelimit-remaining-requests', 'x-ratelimit-reset-requests']) {
-    const value = headers[name]?.trim();
-    if (value && value.length <= 80 && /^(?:\d+(?:\.\d+)?|(?:\d+(?:\.\d+)?(?:ms|s|m|h|d))+)$/.test(value)) safe[name] = value;
-  }
-  for (const name of ['ratelimit-scope', 'x-ratelimit-scope']) {
-    const value = headers[name]?.trim().toLowerCase();
-    if (value && /^(account|user|ip|endpoint|route|model|global)$/.test(value)) safe[name] = value;
-  }
-  return safe;
-}
 
 function endpointCategory(path: string): string {
   if (/^\/backend-api\/(?:f\/)?conversations(?:\/|$)/.test(path)) return 'conversation-list';

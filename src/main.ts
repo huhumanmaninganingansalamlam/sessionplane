@@ -3,6 +3,7 @@ import { ConversationLoadRecovery } from './core/conversation-load-recovery.ts';
 import { TeamWorkflow } from './core/team-workflow.ts';
 import { registerWorkflowMethods } from './rpc/methods/workflow.ts';
 import { SessionRepository } from './storage/session-repository.ts';
+import { EventRepository } from './storage/event-repository.ts';
 import { SessionPlaneDomainError } from './domain/errors.ts';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -140,6 +141,13 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       ? []
       : [
           new ChatGptAdapter({
+            onBackendRateLimit: ({ session, generation }, evidence) => {
+              new EventRepository(database.raw).append({ teamId: session.teamId, roleId: session.roleId,
+                sessionId: session.sessionId, generation, eventType: 'provider.backend-rate-limit-observed',
+                createdAt: evidence.receivedAt, payload: { ...evidence,
+                  policyScope: `chatgpt:conversation-detail:${session.conversationId}`,
+                  serverScope: evidence.headers['ratelimit-scope'] ?? evidence.headers['x-ratelimit-scope'] ?? 'unverified' } });
+            },
             pageMutex: pageMutationMutex,
             canRestoreLatestPosition: ({ session, generation }) => {
               const current = teamDirectory.getSession(session.sessionId);

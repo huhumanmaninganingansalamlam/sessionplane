@@ -605,6 +605,11 @@ test('account cooldown parks the same request, blocks preparation, and rechecks 
     assert.equal(budgets.get('chatgpt:default'), null);
     assert.equal(service.submissionService.accountCooldown(service.teamDirectory.getSession(session.sessionId)), null,
       'list-only cooldown must not block normal preparation or submission');
+    budgets.save({ scope: 'chatgpt:conversation-detail:read-only-conversation', nextAllowedAt: until,
+      blockedUntil: until, backoffLevel: 5, consecutiveFailures: 5, updatedAt: new Date().toISOString() });
+    assert.equal(service.submissionService.accountCooldown({ ...service.teamDirectory.getSession(session.sessionId),
+      conversationId: 'read-only-conversation' }), null,
+      'The same conversation recovery GET backoff must not become a settings/submission hold');
     await rpc(config.socketPath, 'system.defer_account_cooldown', coordination);
     await rpc(config.socketPath, 'system.defer_account_cooldown', coordination);
     await rpc(config.socketPath, 'system.defer_account_cooldown', { ...coordination, requestId: 'earlier-proof',

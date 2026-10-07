@@ -9,6 +9,7 @@ import {
   recoverExactServerAcknowledgement,
   type BackendJsonClient,
   type BackendJsonResponse,
+  type BackendRateLimitEvidence,
 } from '../../src/providers/chatgpt/backend-recovery.ts';
 
 const CONVERSATION_ID = 'conversation-backend-1';
@@ -107,6 +108,7 @@ test('backend client caches access token in memory and classifies Retry-After 42
     { status: 429, headers: { 'retry-after': '120' }, body: null },
   ];
   const urls: string[] = [];
+  const evidence: BackendRateLimitEvidence[] = [];
   const client: BackendJsonClient = {
     async get(url): Promise<BackendJsonResponse> {
       urls.push(url);
@@ -119,6 +121,7 @@ test('backend client caches access token in memory and classifies Retry-After 42
     requestTimeoutMs: 1_000,
     tokenCacheTtlMs: 60_000,
     now: () => now,
+    onRateLimit: (_request, value) => evidence.push(value),
   });
   const request = { session: sessionSnapshot(), generation: 1 } as const;
 
@@ -127,12 +130,35 @@ test('backend client caches access token in memory and classifies Retry-After 42
   assert.equal(limited.kind, 'deferred');
   assert.equal(limited.reason, 'backend-http-429');
   assert.equal(limited.retryAfterMs, 120_000);
+  assert.deepEqual(evidence, [{ status: 429, method: 'GET', endpointCategory: 'conversation-detail',
+    receivedAt: now.toISOString(), source: 'sessionplane-backend-recovery', headers: { 'retry-after': '120' },
+    retryAfterSource: 'valid-header', retryAfterDurationMs: 120_000 }]);
   assert.equal(urls.filter((url) => url.endsWith('/api/auth/session')).length, 1);
   assert.equal(parseRetryAfterMs({ 'Retry-After': '2' }, now), 2_000);
   assert.equal(
     parseRetryAfterMs({ 'retry-after': 'Thu, 17 Sep 2026 00:01:00 GMT' }, now),
     60_000,
   );
+});
+
+test('auth GET429 keeps its own safe provenance and cannot leak or create a conversation request', async () => {
+  const evidence: BackendRateLimitEvidence[] = [], urls: string[] = [];
+  const recovery = new ChatGptBackendRecovery({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000,
+    now: () => new Date(0), onRateLimit: (_request, value) => evidence.push(value) });
+  const client: BackendJsonClient = { async get(url) {
+    urls.push(url);
+    return { status: 429, headers: { 'set-cookie': 'private', authorization: 'private',
+      'retry-after': 'invalid-private-value', 'x-ratelimit-scope': 'endpoint', 'x-ratelimit-remaining': '0' },
+      body: { private: 'not retained' } };
+  } };
+  const result = await recovery.recover({ session: sessionSnapshot(), generation: 1 }, client, 'https://chatgpt.com');
+  assert.equal(result.reason, 'backend-http-429');
+  assert.equal(result.retryAfterMs, null);
+  assert.deepEqual(urls, ['https://chatgpt.com/api/auth/session']);
+  assert.deepEqual(evidence, [{ status: 429, method: 'GET', endpointCategory: 'auth-session',
+    receivedAt: new Date(0).toISOString(), source: 'sessionplane-backend-recovery',
+    headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-scope': 'endpoint' },
+    retryAfterSource: 'header-invalid-fallback', retryAfterDurationMs: null }]);
 });
 
 test('backend acknowledgement requires one exact user prompt on the verified current branch', () => {

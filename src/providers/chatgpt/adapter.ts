@@ -29,6 +29,7 @@ import {
 import { observeChatGptActivity } from './activity-observer.ts';
 import {
   ChatGptBackendRecovery,
+  type ChatGptBackendRecoveryOptions,
   type BackendJsonClient,
 } from './backend-recovery.ts';
 import { observeChatGptDialog } from './dialog-observer.ts';
@@ -40,6 +41,7 @@ import { CHATGPT_SELECTORS } from './selectors.ts';
 import { ChatGptSubmission, recoverChatGptAcknowledgement } from './submission.ts';
 
 export interface ChatGptAdapterOptions {
+  readonly onBackendRateLimit?: ChatGptBackendRecoveryOptions['onRateLimit'];
   readonly pageMutex?: PageMutationMutex;
   readonly canRestoreLatestPosition?: (request: ProviderObservationRequest) => boolean;
   readonly browserOwner: BrowserOwner;
@@ -68,6 +70,7 @@ export class ChatGptAdapter implements ProviderAdapter {
     this.#loginUrl = options.loginUrl;
     this.#acknowledgementTimeoutMs = options.acknowledgementTimeoutMs;
     this.#backendRecovery = new ChatGptBackendRecovery({
+      ...(options.onBackendRateLimit === undefined ? {} : { onRateLimit: options.onBackendRateLimit }),
       requestTimeoutMs: options.backendRequestTimeoutMs ?? 15_000,
       tokenCacheTtlMs: options.tokenCacheTtlMs ?? 60_000,
     });
