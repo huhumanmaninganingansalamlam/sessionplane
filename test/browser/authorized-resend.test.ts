@@ -25,6 +25,9 @@ test('approved resend display guard preserves drafts/selection and stops origina
       conversationId: 'resend-owned-conversation', submittedUserMessageId: null, submittedUserTurnId: null } as SessionSnapshot;
     const original = { ...current, generation: 1, submittedUserMessageId: 'original-user', submittedUserTurnId: 'original-user' };
     const ui = new SessionUiService({ submissions: {} as SubmissionService, registry, chatgptUrl: 'https://chatgpt.com/' });
+    await page.locator('textarea').fill('Original follow-up');
+    await assert.rejects(ui.verifyAuthorizedResend(original, original, 'Original follow-up', false));
+    await page.locator('textarea').fill('');
     ui.reserveResendPage(original, current);
     assert.equal(registry.getBinding(binding.pageKey).generation, 2);
     const baseline = await page.content();
@@ -52,7 +55,7 @@ test('approved resend display guard preserves drafts/selection and stops origina
     assert.equal(await page.evaluate(() => window.getSelection()!.toString()), 'User selection');
     await page.evaluate(() => window.getSelection()!.removeAllRanges());
     await page.locator('textarea').fill('Original follow-up');
-    await assert.rejects(ui.verifyAuthorizedResend(current, original, 'Original follow-up', false));
+    await ui.verifyAuthorizedResend(current, original, 'Original follow-up', false);
     await ui.verifyAuthorizedResend(current, original, 'Original follow-up', true);
     await assert.rejects(ui.verifyAuthorizedResend({ ...current, sessionId: 'other-owner' }, original, 'Original follow-up', true));
     assert.equal(requests, 1, 'Only the isolated initial route: no refresh, authentication probe, submit or navigation');

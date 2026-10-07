@@ -16,8 +16,10 @@ const callRpc = (socketPath: string, method: string, params: unknown) => rpcCall
 
 test('approved resend reserves once across restart, preserves uncertainty, and stops a late answer before dispatch', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-approved-resend-'));
-  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const config = resolveConfig({ cwd: root, env: { SESSIONPLANE_PROBE_SUCCESS_INTERVAL_MS: '1' }, stateDir: '.state' });
   const fake = new FakeProviderAdapter();
+  t.mock.method(fake, 'recover', async () => ({ kind: 'unverified', observationTransport: 'fresh',
+    responseMessageId: null, answerText: null, reason: 'backend-user-anchor-absent-from-mapping', retryAfterMs: null, nextCheckAt: null }));
   let lateAnswer = false;
   t.mock.method(SessionUiService.prototype, 'reserveResendPage', () => {});
   t.mock.method(SessionUiService.prototype, 'verifyAuthorizedResend', async (_current, _original, _prompt, afterPrepare) => {

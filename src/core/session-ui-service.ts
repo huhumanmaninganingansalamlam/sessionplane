@@ -182,7 +182,8 @@ export class SessionUiService {
     });
     if (dom.submittedUserFound || dom.candidate !== null || activity.strength !== 'none' ||
         dom.actionableAlert || !dom.conversationSurfaceAvailable || state.selection || state.drafts.length !== 1 ||
-        state.drafts.some(draft => draft.trim() !== '' && (!allowPreparedDraft || draft !== prompt)) ||
+        state.drafts.some(draft => draft.trim() !== '' &&
+          ((!allowPreparedDraft && current.generation === original.generation) || draft !== prompt)) ||
         matchingPromptFound) {
       throw new SessionPlaneDomainError('provider.preparation-required',
         'Approved resend paused: original message/answer, activity, alert, selection or separate draft is present; do not send',
