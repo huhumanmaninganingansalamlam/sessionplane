@@ -56,6 +56,10 @@ export const CHATGPT_SELECTORS = {
 } as const;
 
 
+// Response code editors are editable textboxes too, but never the chat draft.
+export const CHATGPT_COMPOSER_SELECTOR =
+  `:is(#prompt-textarea, [data-testid="prompt-textarea"], main [role="textbox"][contenteditable="true"]):not(:is(${CHATGPT_SELECTORS.messages}, article, nav, aside, [data-editor-search-surface]) *)`;
+
 export const CHATGPT_PREPARATION_SNAPSHOT = {
   submitSelector: '[data-testid="send-button"], #composer-submit-button',
   interactive: false,

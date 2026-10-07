@@ -7,7 +7,7 @@ import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionE
 import type { SessionSnapshot } from '../domain/session.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import { ProviderSubmissionError, type PreparationPurpose, type PreparationTarget } from '../providers/provider-adapter.ts';
-import { CHATGPT_PREPARATION_SNAPSHOT } from '../providers/chatgpt/selectors.ts';
+import { CHATGPT_PREPARATION_SNAPSHOT, CHATGPT_COMPOSER_SELECTOR } from '../providers/chatgpt/selectors.ts';
 import { inspectChatGptSubmissionCandidates, inspectChatGptPageReady, prepareChatGptObservation } from '../providers/chatgpt/submission.ts';
 import { observeChatGptActivity } from '../providers/chatgpt/activity-observer.ts';
 import { restoreLatestPosition } from '../providers/chatgpt/latest-position-recovery.ts';
@@ -174,12 +174,12 @@ export class SessionUiService {
     const messages = await readChatGptMessages(page);
     const matchingPromptFound = messages.some(message => message.role === 'user' &&
       message.text.replaceAll('\r\n', '\n') === prompt.replaceAll('\r\n', '\n'));
-    const state = await page.evaluate(() => {
-      const editors = [...document.querySelectorAll('#prompt-textarea, [data-testid="prompt-textarea"], main [role="textbox"][contenteditable="true"]')]
+    const state = await page.evaluate((composerSelector) => {
+      const editors = [...document.querySelectorAll(composerSelector)]
         .filter(element => element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
       return { drafts: editors.map(element => element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
         ? element.value : (element as HTMLElement).innerText), selection: window.getSelection()?.isCollapsed === false };
-    });
+    }, CHATGPT_COMPOSER_SELECTOR);
     if (dom.submittedUserFound || dom.candidate !== null || activity.strength !== 'none' ||
         dom.actionableAlert || !dom.conversationSurfaceAvailable || state.selection || state.drafts.length !== 1 ||
         state.drafts.some(draft => draft.trim() !== '' &&

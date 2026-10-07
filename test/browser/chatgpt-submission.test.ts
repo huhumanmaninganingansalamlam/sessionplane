@@ -65,6 +65,12 @@ test('ChatGPT acknowledgement recovery uses exact text or an unchanged explicit 
     });
     const composer = created.page.locator('main [role="textbox"]');
     assert.equal((await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123', selection))?.submittedUserMessageId, candidate.messageId);
+    await created.page.locator('main').evaluate(element => element.insertAdjacentHTML('afterbegin',
+      '<article data-chatgpt-search-message-ids="assistant-code"><div role="textbox" contenteditable="true" aria-label="코드 편집">Keep this response code intact</div></article>'));
+    assert.equal((await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123', selection))?.submittedUserMessageId,
+      candidate.messageId, 'A response code editor is not a retained composer draft');
+    assert.equal(await created.page.locator('article [role="textbox"]').innerText(), 'Keep this response code intact');
+    await created.page.locator('article').evaluate(element => element.remove());
     await composer.evaluate(element => { element.textContent = 'Retained manual draft'; });
     assert.equal(await recoverChatGptAcknowledgement(created.page, prompt, 'auditconv123', selection), null);
     assert.equal(await composer.innerText(), 'Retained manual draft');

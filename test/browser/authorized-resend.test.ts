@@ -30,6 +30,8 @@ test('approved resend display guard preserves drafts/selection and stops origina
     await page.locator('textarea').fill('');
     ui.reserveResendPage(original, current);
     assert.equal(registry.getBinding(binding.pageKey).generation, 2);
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('afterbegin',
+      '<article data-chatgpt-search-message-ids="old-code"><div role="textbox" contenteditable="true" aria-label="코드 편집">Earlier response code</div></article>'));
     const baseline = await page.content();
     await ui.verifyAuthorizedResend(current, original, 'Original follow-up', false);
     assert.equal(await page.content(), baseline);

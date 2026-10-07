@@ -19,7 +19,7 @@ import {
   waitForProviderPageReady,
 } from '../human-verification.ts';
 import { attachmentsAcknowledged } from '../attachment-evidence.ts';
-import { CHATGPT_SELECTORS, CHATGPT_PREPARATION_SNAPSHOT } from './selectors.ts';
+import { CHATGPT_SELECTORS, CHATGPT_PREPARATION_SNAPSHOT, CHATGPT_COMPOSER_SELECTOR } from './selectors.ts';
 import { readChatGptMessages, type ChatGptMessage } from './message-dom.ts';
 
 const COMPOSER_HYDRATION_TIMEOUT_MS = 3_000;
@@ -358,7 +358,7 @@ export class ChatGptSubmission implements ProviderSubmission {
 // Read-only confirmation: a failed/rolled-back submit may leave its full draft
 // alongside an optimistic user node. Missing/ambiguous composers fail closed.
 async function hasClearedComposer(page: Page): Promise<boolean> {
-  const editors = page.locator('#prompt-textarea, [data-testid="prompt-textarea"], main [role="textbox"][contenteditable="true"]');
+  const editors = page.locator(CHATGPT_COMPOSER_SELECTOR);
   let visible = 0;
   for (let index = 0; index < await editors.count(); index += 1) {
     const editor = editors.nth(index);
