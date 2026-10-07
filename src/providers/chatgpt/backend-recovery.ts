@@ -242,11 +242,10 @@ export function recoverExactServerFinal(
   if (!isRecord(payload)) {
     return unavailable('backend-response-malformed');
   }
-  const responseConversationId = readStringField(payload, 'id');
-  if (
-    responseConversationId !== null &&
-    responseConversationId !== identity.conversationId
-  ) {
+  const responseConversationIds = [readStringField(payload, 'id'), readStringField(payload, 'conversation_id')]
+    .filter(id => id !== null);
+  if (responseConversationIds.length === 0) return unverified('backend-conversation-unverified');
+  if (responseConversationIds.some(id => id !== identity.conversationId)) {
     return unverified('backend-conversation-mismatch');
   }
   const currentNode = readStringField(payload, 'current_node');

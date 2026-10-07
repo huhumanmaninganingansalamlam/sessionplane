@@ -66,18 +66,13 @@ export async function observeChatGptDom(
 export async function observeChatGptAlerts(page: Page, identity: SubmittedUserIdentity, thinkingFailuresOnly = false): Promise<string[]> {
   return await page.evaluate(({ identity, messagesSelector, userSelector, thinkingFailuresOnly }) => {
     const ids = [identity.submittedUserMessageId, identity.submittedUserTurnId].filter(Boolean);
-    let anchor = [...document.querySelectorAll('[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')]
+    const anchor = [...document.querySelectorAll('[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')]
       .find(node => [node.getAttribute('data-message-id'), node.getAttribute('data-turn-id'),
         ...(node.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/)]
         .some(id => id !== null && ids.includes(id)));
-    if (anchor !== undefined) {
-      for (const user of document.querySelectorAll(userSelector)) {
-        if (anchor.compareDocumentPosition(user) & Node.DOCUMENT_POSITION_FOLLOWING) {
-          if (thinkingFailuresOnly) return [];
-          anchor = user;
-        }
-      }
-    }
+    const nextUser = anchor === undefined ? undefined : [...document.querySelectorAll(userSelector)]
+      .find(user => !anchor.contains(user) &&
+        Boolean(anchor.compareDocumentPosition(user) & Node.DOCUMENT_POSITION_FOLLOWING));
     const hasMessages = document.querySelector(messagesSelector) !== null;
     // Current reasoning failures use an activity disclosure, not an alert role.
     // Only its labelled provider header counts, never words quoted in a message.
@@ -95,12 +90,13 @@ export async function observeChatGptAlerts(page: Page, identity: SubmittedUserId
         if (alert.closest('nav, [role="navigation"], #app-shell-sidebar, [aria-hidden="true"], [inert]') !== null ||
             !alert.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || !alert.innerText.trim()) return false;
         // Global alerts do not depend on a readable transcript. Turn-local errors
-        // must follow the latest anchored user, never a quoted or historical turn.
+        // belong only between the exact submitted user and the next user.
         if (!alert.closest('main, article, [data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')) return !thinkingFailuresOnly;
         if (!hasMessages) return !thinkingFailuresOnly;
         return anchor !== undefined &&
           !alert.closest('[data-message-author-role="user"], [data-user-message-bubble]') &&
-          Boolean(anchor.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING);
+          Boolean(anchor.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+          (nextUser === undefined || Boolean(alert.compareDocumentPosition(nextUser) & Node.DOCUMENT_POSITION_FOLLOWING));
       }).map(alert => alert.innerText.trim().slice(0, 1_000));
   }, { identity, messagesSelector: CHATGPT_SELECTORS.messages, userSelector: CHATGPT_SELECTORS.userMessages, thinkingFailuresOnly });
 }

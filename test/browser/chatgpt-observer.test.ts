@@ -120,6 +120,33 @@ test('virtualized submitted anchor/final is restored once through same-chat disp
   }
 });
 
+test('turn-local alerts stay between exact user and next user while global errors remain visible', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-alert-turn-boundary-'));
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: new PageRegistry(), headless: true });
+  const user = (id: string) => `<div data-chatgpt-search-message-ids="${id}"><div data-user-message-bubble>Question</div></div>`;
+  const failed = `<div class="group/activity-header"><button aria-labelledby="error-label"></button><span id="error-label">Thinking failed</span></div>`;
+  const identity = { submittedUserMessageId: 'user-A', submittedUserTurnId: null };
+  try {
+    await owner.start();
+    const { page } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<main></main>' }));
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    await page.setContent(`<main>${user('user-A')}<div data-message-author-role="assistant" data-message-id="answer-A" data-end-turn="true">Answer A</div>
+      ${user('user-B')}<aside role="alert">B error</aside>${failed}</main>`);
+    const normalA = await observeChatGptDom(page, identity);
+    assert.equal(normalA.candidate?.responseMessageId, 'answer-A');
+    assert.equal(normalA.actionableAlert, false, 'B error must not block normal A');
+    assert.deepEqual(await observeChatGptAlerts(page, identity, true), []);
+    await page.setContent(`<main>${user('user-A')}<aside role="alert">A error</aside>${failed}${user('user-B')}<aside role="alert">B error</aside></main>`);
+    assert.deepEqual(await observeChatGptAlerts(page, identity), ['A error', 'Thinking failed']);
+    assert.deepEqual(await observeChatGptAlerts(page, identity, true), ['Thinking failed']);
+    await page.setContent(`<aside role="alertdialog">Conversation unavailable</aside><main>${user('user-A')}${user('user-B')}<aside role="alert">B error</aside></main>`);
+    assert.deepEqual(await observeChatGptAlerts(page, identity), ['Conversation unavailable']);
+    await page.setContent('<main><aside role="alert">Unable to load conversation</aside></main>');
+    assert.deepEqual(await observeChatGptAlerts(page, identity), ['Unable to load conversation']);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('thinking-failed activity headers report an exact nonterminal provider error, never an answer', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-thinking-failed-'));
   const registry = new PageRegistry();
@@ -162,7 +189,7 @@ test('thinking-failed activity headers report an exact nonterminal provider erro
         ['quoted provider markup in user', user('user-message-1', header('Thinking failed'))],
         ['quoted provider markup in assistant', `${user('user-message-1')}<div data-chatgpt-selection-message-id="answer"><div class="markdown">${header('생각 실패')}</div></div>`],
         ['historical error', `${header('Thinking failed')}${user('user-message-1')}`],
-        ['old error before human follow-up', `${user('user-message-1')}${header('생각 실패')}${user('human-followup')}`],
+        ['next-turn error after human follow-up', `${user('user-message-1')}${user('human-followup')}${header('생각 실패')}`],
         ['missing exact anchor', `${user('unrelated')}${header('Thinking failed')}`],
         ['no message anchor', header('Thinking failed')],
         ['ordinary activity completion', `${user('user-message-1')}${header('분석 완료')}`],
@@ -350,7 +377,7 @@ test('current ChatGPT message units recover the exact submitted turn and answer'
     assert.equal(humanPending.submittedUserFound, true);
     assert.equal(humanPending.laterUserFound, true);
     assert.equal(humanPending.candidate, null, 'The earlier partial answer must be discarded');
-    assert.equal(humanPending.actionableAlert, false, 'An earlier turn alert must not block the follow-up');
+    assert.equal(humanPending.actionableAlert, true, 'A own error must stay attached to A after a follow-up');
     await page.locator('main').evaluate(main => {
       main.insertAdjacentHTML('beforeend', '<div data-message-author-role="assistant" data-message-id="continued-final" data-end-turn="true">Completed review</div>');
     });

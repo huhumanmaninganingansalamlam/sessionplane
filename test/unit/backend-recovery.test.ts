@@ -76,6 +76,29 @@ test('backend recovery accepts only an exact final on the current branch', () =>
   assert.equal(result.answerText, 'Exact server answer');
 });
 
+test('direct final and ACK reject missing or conflicting conversation aliases even with the same message ID', () => {
+  const branch = conversationPayload([
+    node('root', null, null), node('user', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('answer', 'user', finalAssistant('exact-answer', 'Original answer')),
+  ], 'answer');
+  for (const aliases of [
+    { id: undefined, conversation_id: 'foreign-conversation' },
+    { id: CONVERSATION_ID, conversation_id: 'foreign-conversation' },
+    { id: 'foreign-conversation', conversation_id: CONVERSATION_ID },
+    { id: undefined, conversation_id: undefined },
+  ]) {
+    const payload = { ...branch, ...aliases };
+    const result = recoverExactServerFinal(payload, identity());
+    assert.equal(result.kind, 'unverified');
+    assert.equal(result.responseMessageId, null);
+    assert.equal(result.answerText, null);
+    assert.equal(recoverExactServerAcknowledgement(payload, CONVERSATION_ID, 'Question'), null);
+  }
+  const aliasOnly = { ...branch, id: undefined, conversation_id: CONVERSATION_ID };
+  assert.equal(recoverExactServerFinal(aliasOnly, identity()).responseMessageId, 'exact-answer');
+  assert.equal(recoverExactServerAcknowledgement(aliasOnly, CONVERSATION_ID, 'Question')?.submittedUserMessageId, 'user-message-1');
+});
+
 test('backend recovery rejects other branches and preserves the anchored turn before human follow-ups', () => {
   const historical = recoverExactServerFinal(
     conversationPayload([
