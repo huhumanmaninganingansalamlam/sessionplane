@@ -59,6 +59,20 @@ test('approved resend display guard preserves drafts/selection and stops origina
     await page.locator('textarea').fill('Original follow-up');
     await ui.verifyAuthorizedResend(current, original, 'Original follow-up', false);
     await ui.verifyAuthorizedResend(current, original, 'Original follow-up', true);
+    // Burncore150: ProseMirror paragraphs add layout newlines to innerText,
+    // while the exact authored block text already passed preparation.
+    await page.setContent('<main><div role="textbox" contenteditable="true"><p>Original follow-up</p><p><br></p><p>Second line</p></div></main>');
+    const multilinePrompt = 'Original follow-up\n\nSecond line';
+    const preparedHtml = await page.content();
+    assert.notEqual(await page.locator('[role="textbox"]').innerText(), multilinePrompt);
+    await ui.verifyAuthorizedResend(current, original, multilinePrompt, true);
+    assert.equal(await page.content(), preparedHtml);
+    await assert.rejects(ui.verifyAuthorizedResend(current, original, multilinePrompt + ' edited', true),
+      (error: unknown) => {
+        const details = (error as { details: { blockingReasons: string[] } }).details;
+        assert.deepEqual(details.blockingReasons, ['separate-draft']);
+        return true;
+      });
     await assert.rejects(ui.verifyAuthorizedResend({ ...current, sessionId: 'other-owner' }, original, 'Original follow-up', true));
     assert.equal(requests, 1, 'Only the isolated initial route: no refresh, authentication probe, submit or navigation');
     assert.equal(registry.getBinding(binding.pageKey).sessionId, 'exact-session');

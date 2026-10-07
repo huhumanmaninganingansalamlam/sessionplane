@@ -8,7 +8,7 @@ import type { SessionSnapshot } from '../domain/session.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import { ProviderSubmissionError, type PreparationPurpose, type PreparationTarget } from '../providers/provider-adapter.ts';
 import { CHATGPT_PREPARATION_SNAPSHOT, CHATGPT_COMPOSER_SELECTOR } from '../providers/chatgpt/selectors.ts';
-import { inspectChatGptSubmissionCandidates, inspectChatGptPageReady, prepareChatGptObservation } from '../providers/chatgpt/submission.ts';
+import { composerHasExactValue, inspectChatGptSubmissionCandidates, inspectChatGptPageReady, prepareChatGptObservation } from '../providers/chatgpt/submission.ts';
 import { observeChatGptActivity } from '../providers/chatgpt/activity-observer.ts';
 import { restoreLatestPosition } from '../providers/chatgpt/latest-position-recovery.ts';
 import { readChatGptMessages } from '../providers/chatgpt/message-dom.ts';
@@ -176,19 +176,32 @@ export class SessionUiService {
       message.text.replaceAll('\r\n', '\n') === prompt.replaceAll('\r\n', '\n'));
     const state = await page.evaluate((composerSelector) => {
       const editors = [...document.querySelectorAll(composerSelector)]
-        .filter(element => element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
-      return { drafts: editors.map(element => element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
-        ? element.value : (element as HTMLElement).innerText), selection: window.getSelection()?.isCollapsed === false };
+        .map((element, index) => ({ element, index }))
+        .filter(({ element }) => element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
+      return { drafts: editors.map(({ element, index }) => ({ index,
+        text: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+          ? element.value : (element as HTMLElement).innerText })), selection: window.getSelection()?.isCollapsed === false };
     }, CHATGPT_COMPOSER_SELECTOR);
-    if (dom.submittedUserFound || dom.candidate !== null || activity.strength !== 'none' ||
-        dom.actionableAlert || !dom.conversationSurfaceAvailable || state.selection || state.drafts.length !== 1 ||
-        state.drafts.some(draft => draft.trim() !== '' &&
-          ((!allowPreparedDraft && current.generation === original.generation) || draft !== prompt)) ||
-        matchingPromptFound) {
+    // The same exact-text contract as preparation: ProseMirror innerText can
+    // contain layout-only newlines absent from the authored paragraph text.
+    const separateDraft = (await Promise.all(state.drafts.map(async draft => draft.text.trim() !== '' &&
+      ((!allowPreparedDraft && current.generation === original.generation) ||
+        !await composerHasExactValue(page.locator(CHATGPT_COMPOSER_SELECTOR).nth(draft.index), prompt))))).some(Boolean);
+    const blockingReasons = [
+      dom.submittedUserFound && 'original-anchor', dom.candidate !== null && 'original-answer',
+      activity.strength !== 'none' && 'provider-activity', dom.actionableAlert && 'provider-alert',
+      !dom.conversationSurfaceAvailable && 'conversation-surface-unavailable', state.selection && 'user-selection',
+      state.drafts.length !== 1 && 'composer-count', separateDraft && 'separate-draft',
+      matchingPromptFound && 'matching-user-message',
+    ].filter((reason): reason is string => typeof reason === 'string');
+    if (blockingReasons.length > 0) {
       throw new SessionPlaneDomainError('provider.preparation-required',
-        'Approved resend paused: original message/answer, activity, alert, selection or separate draft is present; do not send',
+        `Approved resend paused: ${blockingReasons.join(', ')}; do not send`,
         { originalGeneration: original.generation, originalAnchorFound: dom.submittedUserFound,
-          responseMessageId: dom.candidate?.responseMessageId ?? null, matchingPromptFound, activity: activity.strength });
+          responseMessageId: dom.candidate?.responseMessageId ?? null, matchingPromptFound, activity: activity.strength,
+          activityReason: activity.reason, actionableAlert: dom.actionableAlert,
+          conversationSurfaceAvailable: dom.conversationSurfaceAvailable, selectionPresent: state.selection,
+          composerCount: state.drafts.length, separateDraft, blockingReasons });
     }
     this.#requirePage(current);
     if (this.#registry.refreshPage(current.pageKey!).bindingEpoch !== binding.bindingEpoch) throw new SessionPlaneDomainError(

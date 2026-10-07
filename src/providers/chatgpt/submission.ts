@@ -699,7 +699,7 @@ async function readExactTextCandidates(locator: PreparationElement, messageConte
     .catch(() => [] as string[]);
 }
 
-async function composerHasExactValue(
+export async function composerHasExactValue(
   composer: PreparationElement,
   expected: string,
 ): Promise<boolean> {
