@@ -222,7 +222,9 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     },
     beforeAuthorizedResend: async (current, original, prompt, beforeDispatch) => {
       await ui.verifyAuthorizedResend(current, original, prompt, beforeDispatch);
-      if (current.generation !== original.generation && !beforeDispatch) return;
+      // Reservation uses the caller-owned exact stored proof checked by SubmissionService.
+      // Only dispatch needs a fresh paced probe; the old observer must not starve local approval.
+      if (!beforeDispatch) return;
       // Use the existing shared paced recovery, never a separate/bypassing probe.
       const scope = `chatgpt:conversation-detail:${current.conversationId}`;
       const caller = Symbol('approved-resend-original');
