@@ -21,7 +21,7 @@ test('exact error-surface Retry is isolated from generation retries, drafts, bar
     await page.goto(origin + '/c/fixture-conversation');
     const error = '<div><p>이 ChatGPT 대화를 불러올 수 없습니다</p><div><button onclick="window.clicks=(window.clicks||0)+1">다시 시도</button></div></div>';
     const inspect = (click = false, expiresAt = Date.now() + 5000) => page.evaluate(conversationLoadSurface,
-      { origin, conversationId: 'fixture-conversation', click, expiresAt });
+      { origin, conversationId: 'fixture-conversation', submittedUserMessageId: 'original-anchor', click, expiresAt });
     await t.test('observed Korean load error clicks only its below-notice button', async () => {
       await page.setContent('<main>' + error + '</main>');
       assert.equal((await inspect()).kind, 'retry');
@@ -35,6 +35,27 @@ test('exact error-surface Retry is isolated from generation retries, drafts, bar
       assert.equal(await page.evaluate(() => (window as unknown as { cardClicks: number }).cardClicks), 1);
       await page.setContent('<main><div data-message-author-role="assistant">' + card + '</div><textarea></textarea></main>');
       assert.equal((await inspect(true)).clicked, false);
+    });
+    await t.test('Burncore standalone alert after retained history is detected and uses only its same-row Retry', async () => {
+      const history = '<div data-chatgpt-search-message-ids="original-anchor">Retained original user turn</div>';
+      const alert = '<aside role="alert"><div><div style="display:flex;align-items:center;gap:20px"><div><div><div>대화를 불러올 수 없습니다</div></div></div><div><button onclick="window.alertClicks=(window.alertClicks||0)+1">다시 시도</button></div></div></div></aside>';
+      await page.setContent('<main>' + history + alert + '<textarea>\n</textarea></main>');
+      const detected = await inspect(); assert.equal(detected.loadError, true); assert.equal(detected.kind, 'retry');
+      assert.equal((await inspect(true)).clicked, true);
+      assert.equal(await page.evaluate(() => (window as unknown as { alertClicks: number }).alertClicks), 1);
+      assert.equal(await page.locator('[data-chatgpt-search-message-ids]').getAttribute('data-chatgpt-search-message-ids'), 'original-anchor');
+      await page.setContent('<main>' + history.replace('original-anchor', 'older-anchor') + alert + '<textarea></textarea></main>');
+      assert.equal((await inspect(true)).reason, 'mixed-or-ambiguous-surface');
+      await page.setContent('<main>' + history + '<div data-message-author-role="assistant">Uncollected answer</div>' + alert + '<textarea></textarea></main>');
+      assert.equal((await inspect(true)).reason, 'mixed-or-ambiguous-surface');
+      // An old alert before a later turn, a quoted alert or an offscreen control cannot authorize a click.
+      await page.setContent('<main>' + alert + history + '<textarea></textarea></main>');
+      assert.equal((await inspect(true)).reason, 'mixed-or-ambiguous-surface');
+      await page.setContent('<main><div data-message-author-role="assistant">' + alert + '</div><textarea></textarea></main>');
+      assert.equal((await inspect(true)).loadError, false);
+      await page.setContent('<main>' + history + '<div style="margin-top:2000px">' + alert + '</div><textarea></textarea></main>');
+      const offscreen = await inspect(true); assert.equal(offscreen.loadError, true); assert.equal(offscreen.clicked, false);
+      assert.equal(offscreen.kind, 'held');
     });
     await t.test('quoted code/new transcript wrappers and bare words never become a provider load error', async () => {
       for (const quote of [

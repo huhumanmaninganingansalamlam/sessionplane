@@ -80,7 +80,8 @@ export class ConversationLoadRecovery {
   async #surface(page: Page, session: SessionSnapshot, click: boolean): Promise<LoadSurface> {
     // The renderer also checks this lease: a late queued evaluation must never click on recovery's next turn.
     const operation = page.evaluate(conversationLoadSurface, { origin: this.#origin,
-      conversationId: session.conversationId!, click, expiresAt: this.now() + 5_000 });
+      conversationId: session.conversationId!, submittedUserMessageId: session.submittedUserMessageId,
+      click, expiresAt: this.now() + 5_000 });
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([operation, new Promise<LoadSurface>((_, reject) => {

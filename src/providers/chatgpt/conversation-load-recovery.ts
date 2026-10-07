@@ -1,7 +1,7 @@
 export type LoadSurface = { kind: 'retry' | 'normal' | 'held' | 'other'; reason: string; clicked: boolean; loadError: boolean };
 
 /** Self-contained for Page.evaluate: inspect and optional click run in one renderer task. */
-export function conversationLoadSurface(input: { origin: string; conversationId: string; click: boolean; expiresAt?: number }): LoadSurface {
+export function conversationLoadSurface(input: { origin: string; conversationId: string; submittedUserMessageId?: string | null; click: boolean; expiresAt?: number }): LoadSurface {
   let loadError = false;
   const result = (kind: LoadSurface['kind'], reason: string, clicked = false): LoadSurface => ({ kind, reason, clicked, loadError });
   if (location.origin !== input.origin || location.pathname !== `/c/${input.conversationId}`) return result('held', 'binding-url-changed');
@@ -13,18 +13,26 @@ export function conversationLoadSurface(input: { origin: string; conversationId:
   // The live error card has a direct text node followed by its button, not a leaf notice.
   const ownText = (e: Element) => [...e.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent ?? '').join('').trim();
   const notices = [...main.querySelectorAll('div,p,h1,h2,span')].filter(e => visible(e) && !e.closest(`${messages},pre,code,blockquote`) && noticePattern.test(ownText(e)));
-  // Words in a transcript are not provider state: require the same card's below-notice Retry.
+  // Words in a transcript are not provider state. Standalone alerts can use a same-row Retry.
   const cards = notices.flatMap(notice => {
+    const alert = notice.closest('[role=alert]');
+    const scopes: Element[] = alert && main.contains(alert) && !alert.closest(`${messages},pre,code,blockquote`) &&
+      !alert.querySelector(messages) ? [alert] : [];
     let scope: Element | null = notice;
     for (let i = 0; scope && scope !== main && i < 3; i++, scope = scope.parentElement) {
+      if (!scopes.includes(scope)) scopes.push(scope);
+    }
+    for (const scope of scopes) {
       const nearby = [...scope.querySelectorAll('button')].filter(visible);
       if (nearby.length !== 1) continue;
       const button = nearby[0]!;
       if (!/^(다시 시도|새로고침|Retry|Reload|Refresh)$/i.test(button.innerText.trim())) continue;
       const textNode = [...notice.childNodes].find(n => n.nodeType === Node.TEXT_NODE && n.textContent?.trim())!;
       const range = document.createRange(); range.selectNodeContents(textNode);
-      if (button.getBoundingClientRect().top < range.getBoundingClientRect().bottom - 2) continue;
-      return [{ button }];
+      if (scope === alert) {
+        if (!(notice.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING)) continue;
+      } else if (button.getBoundingClientRect().top < range.getBoundingClientRect().bottom - 2) continue;
+      return [{ button, alert: scope === alert ? alert : null }];
     }
     return [];
   });
@@ -38,7 +46,16 @@ export function conversationLoadSurface(input: { origin: string; conversationId:
       [...main.querySelectorAll('[data-is-streaming=true],[data-testid*=thinking],[data-testid*=reasoning]')].some(visible)) return result('held', 'generation-active');
   const barriers = [...document.querySelectorAll('[role=alert],[role=alertdialog],[role=dialog],iframe')].filter(visible);
   if (barriers.some(e => !e.closest(messages) && /captcha|verify you|human verification|로그인|인증|권한|permission|sign in|log in/i.test((e as HTMLElement).innerText || e.getAttribute('title') || e.getAttribute('src') || ''))) return result('held', 'verification-or-permission');
-  if (notices.length !== 1 || cards.length !== 1 || main.querySelector(messages)) return result('held', 'mixed-or-ambiguous-surface');
+  const history = [...main.querySelectorAll(messages)];
+  const anchor = history.find(message => {
+    const ids = new Set((message.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/).filter(Boolean));
+    return !!input.submittedUserMessageId && (message.getAttribute('data-message-id') === input.submittedUserMessageId ||
+      (ids.size === 1 && ids.has(input.submittedUserMessageId)));
+  });
+  if (notices.length !== 1 || cards.length !== 1 || history.some(message => !cards[0]!.alert ||
+      !anchor || !(message.compareDocumentPosition(cards[0]!.alert) & Node.DOCUMENT_POSITION_FOLLOWING) ||
+      (message !== anchor && !message.contains(anchor) && !anchor.contains(message) &&
+        !(message.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_FOLLOWING)))) return result('held', 'mixed-or-ambiguous-surface');
   if (/captcha|verify you|human verification|로그인|인증|권한|permission|sign in|log in/i.test(main.innerText)) return result('held', 'verification-or-permission');
   if (/too many requests|rate limit|429|사용량.*제한|요청.*너무|잠시 후.*다시/i.test(main.innerText)) return result('held', 'service-limited');
   const button = cards[0]!.button;
