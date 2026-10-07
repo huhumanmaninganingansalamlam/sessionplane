@@ -7,6 +7,65 @@ import test from 'node:test';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
+import { callRpc, RpcClientError } from '../../src/cli/client.ts';
+import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
+import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+
+test('deferred preparation inspects its same-owned predecessor page without sending or borrowing another owner', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-deferred-binding-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  fake.autoFinalText = 'Original completed answer';
+  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const rpc = <T = any>(method: string, params: Record<string, unknown>) => callRpc<T>({ socketPath: config.socketPath, method, params });
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'deferred-owner' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    const { page, binding } = await service.browserOwner!.createPage();
+    let routed = 0;
+    await page.route('https://chatgpt.com/**', route => {
+      routed++;
+      return route.fulfill({ contentType: 'text/html', body: '<main><textarea id="prompt-textarea"></textarea><button>Send</button></main>' });
+    });
+    await page.goto(`https://chatgpt.com/c/conversation-${session.sessionId}`);
+    const open = fake.openSubmission.bind(fake);
+    const opened = t.mock.method(fake, 'openSubmission', async request => {
+      if (request.generation === 2) throw new SessionPlaneDomainError('provider.preparation-required', 'Deferred before page reservation');
+      const submission = await open(request);
+      return { ...submission, pageKey: binding.pageKey, bindAcknowledgement() {
+        service.pageRegistry.reservePage(binding.pageKey, { sessionId: session.sessionId, generation: 1,
+          conversationId: `conversation-${session.sessionId}` });
+      } };
+    });
+    await rpc('session.send', { clientId: 'deferred-owner', requestId: 'first', sessionId: session.sessionId, prompt: 'First' });
+    await rpc('session.wait', { clientId: 'deferred-owner', sessionId: session.sessionId, generation: 1, waitMs: 2000 });
+    assert.equal(service.teamDirectory.getSession(session.sessionId).terminal, true);
+    await assert.rejects(rpc('session.send', { clientId: 'deferred-owner', requestId: 'pending', sessionId: session.sessionId, prompt: 'Retained pending prompt' }),
+      (error: RpcClientError) => (error.data as any).errorCode === 'provider.preparation-required');
+    await page.locator('textarea').fill('Independent user draft');
+    assert.equal(service.teamDirectory.getSession(session.sessionId).submissionState, 'prepared');
+    assert.equal(service.teamDirectory.getSession(session.sessionId).generation, 2);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).promptSubmitted, false);
+    assert.equal(service.pageRegistry.getBinding(binding.pageKey).generation, 1);
+    const caller = { clientId: 'deferred-owner', requestId: 'pending', sessionId: session.sessionId, generation: 2 };
+    const evidence = await rpc('session.preparation.inspect', caller);
+    assert.equal(evidence.pageKey, binding.pageKey);
+    assert.equal(service.pageRegistry.getBinding(binding.pageKey).generation, 2);
+    assert.equal(await page.locator('textarea').inputValue(), 'Independent user draft');
+    assert.equal(service.teamDirectory.getSession(session.sessionId).promptSubmitted, false);
+    assert.equal(fake.submitCount, 1);
+    assert.equal(opened.mock.callCount(), 2);
+    assert.equal(routed, 1);
+    service.pageRegistry.unbindPage(binding.pageKey);
+    service.pageRegistry.reservePage(binding.pageKey, { sessionId: 'another-owner', generation: 1,
+      conversationId: `conversation-${session.sessionId}` });
+    await assert.rejects(rpc('session.preparation.inspect', caller),
+      (error: RpcClientError) => (error.data as any).errorCode === 'session.page-identity-unverified');
+    assert.equal(fake.submitCount, 1);
+    assert.equal(service.database.raw.prepare('SELECT COUNT(*) AS count FROM outbox').get()!.count, 2);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('core restart reconnects prepared request to its exact live target, not an identical draft', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-prepared-target-'));

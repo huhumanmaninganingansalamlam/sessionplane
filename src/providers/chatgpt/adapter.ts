@@ -359,12 +359,25 @@ export class ChatGptAdapter implements ProviderAdapter {
   ): Promise<readonly ProviderArtifactCandidate[]> {
     const page = this.#requireExactArtifactPage(request);
     const deadline = Date.now() + 10_000;
+    let restoreAttempted = false;
     let message;
     do {
       this.#requireExactArtifactPage(request);
       message = (await readChatGptMessages(page, true)).find((message) =>
         message.role === 'assistant' && message.messageId !== null && message.messageId === request.session.responseMessageId);
       if (message !== undefined || Date.now() >= deadline) break;
+      if (!restoreAttempted && request.session.terminal && request.session.responseMessageId !== null) {
+        restoreAttempted = true;
+        await this.#pageMutex.runExclusive(request.session.pageKey!, async () => {
+          this.#requireExactArtifactPage(request);
+          if ((request.bindingGeneration ?? request.generation) !== request.generation ||
+              !this.#canRestoreLatestPosition(request)) return;
+          await page.evaluate(restoreLatestPosition, {
+            origin: new URL(page.url()).origin, conversationId: request.session.conversationId!,
+            anchorIds: [request.session.responseMessageId!], expiresAt: Date.now() + 5_000,
+          });
+        });
+      }
       await waitForChatGptDomMutation(page, Math.min(500, deadline - Date.now()));
     } while (Date.now() < deadline);
     if (message === undefined) throw new ProviderSubmissionError('provider.artifacts-unavailable', 'Exact answer is not present for file discovery');

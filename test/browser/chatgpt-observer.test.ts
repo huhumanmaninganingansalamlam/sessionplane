@@ -14,6 +14,49 @@ import { recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submi
 
 const CONVERSATION_ID = 'conversation-observer-123456';
 
+test('completed exact artifact discovery restores a virtualized answer through the existing latest-position button', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-virtualized-artifact-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    let networkRequests = 0;
+    await page.route('https://chatgpt.com/**', route => {
+      networkRequests++;
+      return route.fulfill({ status: 200, contentType: 'text/html', body: '<main></main>' });
+    });
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
+    await page.setContent(`<main><div id="turns"><article data-message-author-role="user" data-message-id="old">Old turn</article></div>
+      <textarea></textarea><button aria-label="맨 아래로 스크롤">↓</button></main>`);
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      document.querySelector('button')!.onclick = () => {
+        const button = document.querySelector('button')!;
+        button.dataset.clicks = String(Number(button.dataset.clicks ?? 0) + 1);
+        document.querySelector('#turns')!.innerHTML = `<article data-message-author-role="user" data-message-id="user-message-1">Original question</article>
+          <article data-message-author-role="assistant" data-message-id="original-final"><div class="markdown">Original final</div>
+            <a download="original.md" href="data:text/plain,EXACT-FIXTURE-BYTES">Original file</a></article>`;
+      };
+    });
+    const session = { ...sessionSnapshot(binding.pageKey), terminal: true, sessionState: 'complete' as const,
+      providerState: 'complete' as const, responseMessageId: 'original-final' };
+    const original = { ...session };
+    const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/', acknowledgementTimeoutMs: 500 });
+    const request = { session, generation: 1, bindingGeneration: 1 };
+    const [file] = await adapter.discoverArtifacts(request);
+    assert.equal(file?.name, 'original.md');
+    assert.equal(Buffer.from((await adapter.downloadArtifact(request, file!)).bytes).toString(), 'EXACT-FIXTURE-BYTES');
+    await adapter.discoverArtifacts(request);
+    assert.equal(await page.locator('button').getAttribute('data-clicks'), '1');
+    assert.equal(networkRequests, 1, 'Only the isolated initial navigation reaches a route');
+    assert.equal(await page.locator('textarea').inputValue(), '');
+    assert.deepEqual(session, original);
+    assert.equal(registry.getBinding(binding.pageKey).sessionId, original.sessionId);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('virtualized submitted anchor/final is restored once through same-chat display UI, preserving human holds and identity', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-virtualized-final-'));
   const registry = new PageRegistry();

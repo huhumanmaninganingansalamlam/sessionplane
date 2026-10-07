@@ -89,6 +89,16 @@ export class SessionUiService {
   async inspect(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
     return await this.#submissions.withPendingPreparation(input,
       async (session) => {
+        // A service deferral can precede openSubmission's same-session reservation.
+        // withPendingPreparation holds the exact current request's actor/page locks.
+        if (session.pageKey !== null) {
+          const binding = this.#registry.refreshPage(session.pageKey);
+          if (binding.state === 'owned' && binding.sessionId === session.sessionId &&
+              binding.generation !== null && binding.generation < session.generation) {
+            this.#requirePage({ ...session, generation: binding.generation });
+            this.#registry.reservePage(session.pageKey, session);
+          }
+        }
         await inspectChatGptPageReady(this.#requirePage(session), session.pageKey!);
         const snapshot = await this.#capture(session, input.maxNodes);
         const composerAvailable = snapshot.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled);

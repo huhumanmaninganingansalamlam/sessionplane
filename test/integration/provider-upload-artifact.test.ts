@@ -70,7 +70,7 @@ test('disabling uploads after restart prevents a pending attachment from submitt
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test('uploads default off while generated artifacts remain downloadable and durable', async () => {
+test('uploads default off while generated artifacts remain downloadable and durable', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-provider-artifact-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const fake = new FakeProviderAdapter('chatgpt');
@@ -108,6 +108,19 @@ test('uploads default off while generated artifacts remain downloadable and dura
       sessionDeadlineSec: 600,
     });
     assert.equal(submitted.generation, 1);
+
+    const missing = t.mock.method(fake, 'discoverArtifacts', async () => {
+      throw new ProviderSubmissionError('provider.artifacts-unavailable', 'Exact answer is not present for file discovery');
+    });
+    for (const method of ['artifact.discover', 'artifact.capture']) {
+      await assert.rejects(rpc(config.socketPath, method, {
+        clientId: 'artifact-client', sessionId: session.sessionId, generation: 1,
+      }), (error: RpcClientError) =>
+        (error.data as { errorCode: string }).errorCode === 'provider.artifacts-unavailable' &&
+        error.message === 'Exact answer is not present for file discovery');
+    }
+    missing.mock.restore();
+    assert.equal(fake.submitCount, 1, 'Missing artifact evidence must never resubmit');
 
     const artifactBytes = Buffer.from('durable provider artifact\n', 'utf8');
     fake.addArtifact(

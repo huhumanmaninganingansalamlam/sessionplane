@@ -14,9 +14,12 @@ import path from 'node:path';
 
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
-import type {
-  ProviderAdapterRegistry,
-  ProviderArtifactCandidate,
+import {
+  ProviderSubmissionError,
+  type ProviderAdapter,
+  type ProviderArtifactRequest,
+  type ProviderAdapterRegistry,
+  type ProviderArtifactCandidate,
 } from '../providers/provider-adapter.ts';
 import { KeyedMutex } from '../scheduler/keyed-mutex.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
@@ -78,7 +81,7 @@ export class ArtifactService {
           `Provider ${snapshot.provider} does not expose artifact discovery`,
         );
       }
-      const candidates = await adapter.discoverArtifacts({
+      const candidates = await this.#discoverArtifacts(adapter, {
         session: snapshot,
         generation: snapshot.generation, bindingGeneration,
       });
@@ -108,7 +111,7 @@ export class ArtifactService {
         );
       }
 
-      const candidates = await adapter.discoverArtifacts({
+      const candidates = await this.#discoverArtifacts(adapter, {
         session: snapshot, generation: snapshot.generation, bindingGeneration,
       });
       const discovered = this.#persistCandidates(snapshot, candidates);
@@ -181,7 +184,7 @@ export class ArtifactService {
             artifactId: artifact.artifactId,
             name: artifact.name,
             errorCode:
-              error instanceof SessionPlaneDomainError
+              error instanceof SessionPlaneDomainError || error instanceof ProviderSubmissionError
                 ? error.errorCode
                 : 'provider.artifact-download-failed',
             message: error instanceof Error ? error.message : String(error),
@@ -209,6 +212,17 @@ export class ArtifactService {
       this.#artifacts.list(snapshot.sessionId, generation),
       generation,
     );
+  }
+
+  async #discoverArtifacts(adapter: ProviderAdapter, request: ProviderArtifactRequest) {
+    try {
+      return await adapter.discoverArtifacts!(request);
+    } catch (error) {
+      if (error instanceof ProviderSubmissionError) {
+        throw new SessionPlaneDomainError(error.errorCode, error.message, error.details);
+      }
+      throw error;
+    }
   }
 
   get(artifactId: string): Readonly<Record<string, unknown>> {

@@ -142,7 +142,10 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
             pageMutex: pageMutationMutex,
             canRestoreLatestPosition: ({ session, generation }) => {
               const current = teamDirectory.getSession(session.sessionId);
-              return current.generation === generation && !current.terminal && current.promptSubmitted &&
+              const completedAnswer = session.terminal && current.sessionState === 'complete' &&
+                current.errorCode === null && session.responseMessageId !== null &&
+                current.responseMessageId === session.responseMessageId;
+              return current.generation === generation && (!current.terminal || completedAnswer) && current.promptSubmitted &&
                 current.pageKey === session.pageKey && current.conversationId === session.conversationId &&
                 current.submittedUserMessageId === session.submittedUserMessageId &&
                 current.submittedUserTurnId === session.submittedUserTurnId &&
