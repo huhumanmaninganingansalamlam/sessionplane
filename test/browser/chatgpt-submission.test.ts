@@ -2,14 +2,68 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { prepareFixture } from '../helpers/preparation-fixture.ts';
 
 import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry, PageRegistryError } from '../../src/browser/page-registry.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
-import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
+import { ProviderSubmissionError, type ProviderSubmissionAttempt } from '../../src/providers/provider-adapter.ts';
 import { ChatGptSubmission, recoverChatGptAcknowledgement, inspectChatGptSubmissionCandidates } from '../../src/providers/chatgpt/submission.ts';
+
+test('an accepted dispatch with only the older duplicate mounted preserves attempt identity without ACK', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-dispatch-proof-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  const attempts: ProviderSubmissionAttempt[] = [];
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', async route => {
+      if (route.request().url().endsWith('/api/auth/session')) {
+        return await route.fulfill({ json: { accessToken: 'fixture-only-token' } });
+      }
+      if (route.request().method() === 'POST') return await route.fulfill({ json: {} });
+      await route.fulfill({ contentType: 'text/html', body: `<main>
+        <div data-message-author-role="user" data-message-id="old-user">Question</div>
+        <div id="prompt-textarea" contenteditable="true"></div><button data-testid="send-button">Send</button>
+        <script>window.sendCount=0;document.querySelector('button').onclick=()=>{
+          window.sendCount++;const composer=document.querySelector('#prompt-textarea');
+          for(const id of (window.duplicate?['new-user-2','new-user-3']:['new-user'])) {
+          void fetch('/backend-api/f/conversation',{method:'POST',headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({action:'next',conversation_id:'proofconv123',parent_message_id:'old-answer',
+              messages:[{id,author:{role:'user'},content:{content_type:'text',parts:[composer.textContent]}}]})});
+          if(window.duplicate){const node=document.createElement('div');node.setAttribute('data-message-author-role','user');
+            node.setAttribute('data-message-id',id);node.textContent=composer.textContent;document.querySelector('main').append(node);}}
+          composer.textContent='';};</script></main>` });
+    });
+    await page.goto('https://chatgpt.com/c/proofconv123');
+    registry.refreshPage(binding.pageKey);
+    registry.reservePage(binding.pageKey, { sessionId: 'proof-session', generation: 2, conversationId: 'proofconv123' });
+    const newSubmission = () => new ChatGptSubmission({ page, pageKey: binding.pageKey, pageRegistry: registry,
+      request: { session: { ...sessionSnapshot({ sessionId: 'proof-session', pageKey: binding.pageKey }),
+        generation: 2, conversationId: 'proofconv123' }, generation: 2, prompt: 'Question', model: null,
+        onSubmissionAttempt: attempt => attempts.push(attempt) }, acknowledgementTimeoutMs: 100 });
+    const submission = newSubmission();
+    await prepareFixture(submission, page);
+    await submission.submitOnce();
+    assert.equal(await submission.captureAcknowledgement(), null);
+    assert.equal(attempts.length, 1);
+    assert.deepEqual({ ...attempts[0], observedAt: null }, { conversationId: 'proofconv123',
+      messageId: 'new-user', parentMessageId: 'old-answer',
+      textHash: createHash('sha256').update('Question').digest('hex'), observedAt: null });
+    assert.equal(await page.evaluate(() => (window as Window & { sendCount: number }).sendCount), 1);
+    assert.equal(await page.locator('[data-message-id]').count(), 1, 'no new DOM identity was invented');
+    await page.evaluate(() => { (window as Window & { duplicate: boolean }).duplicate = true; });
+    const ambiguous = newSubmission();
+    await prepareFixture(ambiguous, page);
+    await ambiguous.submitOnce();
+    assert.equal(await ambiguous.captureAcknowledgement(), null, 'two accepted new IDs must not pick the first DOM node');
+    assert.deepEqual(attempts.slice(1).map(a => a.messageId), ['new-user-2', 'new-user-3']);
+    assert.equal(await page.evaluate(() => (window as Window & { sendCount: number }).sendCount), 2);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('ChatGPT acknowledgement recovery uses exact text or an unchanged explicit message selection', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-ack-recovery-'));

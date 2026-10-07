@@ -19,6 +19,16 @@ export interface ProviderSubmissionRequest {
   readonly effort?: string | null;
   readonly surface?: string | null;
   readonly attachments?: readonly ProviderAttachment[];
+  readonly onSubmissionAttempt?: (attempt: ProviderSubmissionAttempt) => void;
+}
+
+/** Correlation evidence for an attempt, never proof of provider acceptance. */
+export interface ProviderSubmissionAttempt {
+  readonly conversationId: string;
+  readonly messageId: string;
+  readonly parentMessageId: string;
+  readonly textHash: string;
+  readonly observedAt: string;
 }
 
 export type PreparationPurpose = 'model' | 'effort' | 'composer' | 'submit';
@@ -61,6 +71,7 @@ export interface ProviderAcknowledgementRecoveryRequest {
   readonly generation: number;
   readonly prompt: string;
   readonly selection?: { readonly messageId: string; readonly evidenceHash: string };
+  readonly attempts?: readonly ProviderSubmissionAttempt[];
 }
 
 export interface ProviderSubmission {

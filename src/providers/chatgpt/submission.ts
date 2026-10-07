@@ -54,6 +54,7 @@ export class ChatGptSubmission implements ProviderSubmission {
   #sendButton: PreparationElement | null = null;
   #baselineConversationId: string | null = null;
   #baselineUserIds = new Set<string>();
+  readonly #preparedPromptHashes = new Set<string>();
   readonly #sentMessageIds = new Set<string>();
   readonly #sentRequests = new Map<Request, Set<string>>();
   readonly #acceptedMessageIds = new Set<string>();
@@ -63,6 +64,30 @@ export class ChatGptSubmission implements ProviderSubmission {
       const body: unknown = request.postDataJSON();
       if (body === null || typeof body !== 'object' || !('messages' in body) || !Array.isArray(body.messages)) return;
       if (this.#baselineConversationId !== null && 'conversation_id' in body && body.conversation_id != null && body.conversation_id !== this.#baselineConversationId) return;
+      // Preserve exact dispatch correlation before the DOM ACK deadline expires.
+      // Only the real continuation POST on this prepared page can supply it.
+      const users = body.messages.filter((m: unknown) => m !== null && typeof m === 'object' &&
+        'author' in m && m.author !== null && typeof m.author === 'object' &&
+        'role' in m.author && m.author.role === 'user');
+      if (/^\/backend-api\/(?:f\/)?conversation$/.test(new URL(request.url()).pathname) &&
+          'action' in body && body.action === 'next' && users.length === 1 &&
+          'conversation_id' in body && body.conversation_id === this.#baselineConversationId &&
+          typeof body.conversation_id === 'string' && 'parent_message_id' in body &&
+          typeof body.parent_message_id === 'string' && body.parent_message_id !== '') {
+        const message = users[0] as Record<string, unknown>;
+        const content = message.content as { content_type?: unknown; parts?: unknown } | undefined;
+        if (typeof message.id === 'string' && message.id !== '' &&
+            ![...this.#baselineUserIds].some(id => id.startsWith(`${message.id}\u0000`)) &&
+            content?.content_type === 'text' && Array.isArray(content.parts) &&
+            content.parts.every((part: unknown) => typeof part === 'string')) {
+          const textHash = createHash('sha256').update(content.parts.join('\n').replaceAll('\r\n', '\n')).digest('hex');
+          if (this.#preparedPromptHashes.has(textHash)) {
+            this.#request.onSubmissionAttempt?.({ conversationId: body.conversation_id,
+              messageId: message.id, parentMessageId: body.parent_message_id,
+              textHash, observedAt: new Date().toISOString() });
+          }
+        }
+      }
       for (const message of body.messages as unknown[]) {
         if (message === null || typeof message !== 'object' || !('id' in message) ||
             typeof message.id !== 'string' || message.id === '' || !('author' in message)) continue;
@@ -254,6 +279,13 @@ export class ChatGptSubmission implements ProviderSubmission {
       );
     }
     this.#requireExactPage();
+    const composers = this.#page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
+    if (await composers.count() === 1) {
+      const values = await readExactTextCandidates(composers.first());
+      if (values.some(value => normalizeLineEndings(value) === normalizeLineEndings(this.#request.prompt))) {
+        for (const value of values) this.#preparedPromptHashes.add(createHash('sha256').update(normalizeLineEndings(value)).digest('hex'));
+      }
+    }
     this.#page.on('request', this.#captureSentIdentity);
     this.#page.on('response', this.#captureAcceptance);
     this.#page.on('requestfailed', this.#captureFailedRequest);
@@ -306,6 +338,8 @@ export class ChatGptSubmission implements ProviderSubmission {
           };
           break;
         }
+        if ([...this.#sentMessageIds].filter(id =>
+          ![...this.#baselineUserIds].some(baseline => baseline.startsWith(`${id}\u0000`))).length !== 1) candidate = null;
         // A single optimistic user node is not acknowledgement. Require the same
         // exact anchor AND an observed empty composer across the commit window.
         const key = candidate !== null && await hasClearedComposer(this.#page)

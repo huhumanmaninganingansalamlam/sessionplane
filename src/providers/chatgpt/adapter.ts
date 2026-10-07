@@ -184,6 +184,7 @@ export class ChatGptAdapter implements ProviderAdapter {
           request.prompt,
           binding.conversationId,
           request.selection,
+          request.attempts,
         );
         if (acknowledgement === null ||
           this.#pageRegistry.refreshPage(pageKey).bindingEpoch !== binding.bindingEpoch) {
@@ -202,7 +203,7 @@ export class ChatGptAdapter implements ProviderAdapter {
         generation: request.generation,
         conversationId,
       });
-      const acknowledgement = await this.#recoverAcknowledgement(page, request.prompt, conversationId, request.selection);
+      const acknowledgement = await this.#recoverAcknowledgement(page, request.prompt, conversationId, request.selection, request.attempts);
       return this.#pageRegistry.refreshPage(pageKey).bindingEpoch === binding.bindingEpoch ? acknowledgement : null;
     } catch {
       return null;
@@ -210,13 +211,16 @@ export class ChatGptAdapter implements ProviderAdapter {
   }
 
   async #recoverAcknowledgement(page: Page, prompt: string, conversationId: string,
-    selection?: { readonly messageId: string; readonly evidenceHash: string }) {
-    const dom = await recoverChatGptAcknowledgement(page, prompt, conversationId, selection);
-    if (selection !== undefined) return dom;
+    selection?: { readonly messageId: string; readonly evidenceHash: string },
+    attempts?: ProviderAcknowledgementRecoveryRequest['attempts']) {
+    if (selection !== undefined) return await recoverChatGptAcknowledgement(page, prompt, conversationId, selection);
+    // Durable dispatch evidence identifies the exact user even when only an
+    // older duplicate is mounted. Canonical identity/parent/hash stay mandatory.
+    const dom = attempts?.length ? null : await recoverChatGptAcknowledgement(page, prompt, conversationId);
     // An optimistic user node and cleared composer prove no server acceptance.
     // Automatic UNKNOWN recovery needs canonical evidence for that exact user.
     const server = await this.#backendRecovery.recoverAcknowledgement(
-      conversationId, prompt, backendClient(page), new URL(page.url()).origin);
+      conversationId, prompt, backendClient(page), new URL(page.url()).origin, attempts);
     if (dom !== null && dom.submittedUserMessageId !== server?.submittedUserMessageId) return null;
     return server === null ? null : { ...server, evidence: 'backend-exact-user' as const };
   }

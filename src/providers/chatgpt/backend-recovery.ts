@@ -1,8 +1,10 @@
 import type {
+  ProviderSubmissionAttempt,
   ProviderRecoveryRequest,
   ProviderSubmissionAcknowledgement,
   ProviderRecoveryResult,
 } from '../provider-adapter.ts';
+import { createHash } from 'node:crypto';
 import { limitationHeaders } from './rate-limit-evidence.ts';
 
 export interface BackendRateLimitEvidence {
@@ -85,6 +87,7 @@ export class ChatGptBackendRecovery {
 
   async recoverAcknowledgement(
     conversationId: string, prompt: string, client: BackendJsonClient, origin: string,
+    attempts?: readonly ProviderSubmissionAttempt[],
   ): Promise<ProviderSubmissionAcknowledgement | null> {
     if (this.#now().getTime() < this.#acknowledgementRetryAt) return null;
     // The shared account probe is bounded even when callers repeatedly inspect.
@@ -96,7 +99,7 @@ export class ChatGptBackendRecovery {
       }
       return null;
     }
-    return recoverExactServerAcknowledgement(result.body, conversationId, prompt);
+    return recoverExactServerAcknowledgement(result.body, conversationId, prompt, attempts);
   }
 
   async #conversation(conversationId: string, client: BackendJsonClient, origin: string,
@@ -196,16 +199,29 @@ function trustedOrigin(value: string): string | null {
 
 export function recoverExactServerAcknowledgement(
   payload: unknown, conversationId: string, prompt: string,
+  attempts?: readonly ProviderSubmissionAttempt[],
 ): ProviderSubmissionAcknowledgement | null {
   if (!isRecord(payload) || !isRecord(payload.mapping)) return null;
   const ids = [readStringField(payload, 'id'), readStringField(payload, 'conversation_id')].filter(id => id !== null);
   if (ids.length === 0 || ids.some(id => id !== conversationId)) return null;
-  const matches = Object.entries(payload.mapping).flatMap(([nodeId, node]) => {
+  const mapping = payload.mapping;
+  const attempted = attempts?.length ? [...new Map(attempts.map(a => [JSON.stringify([
+    a.conversationId, a.messageId, a.parentMessageId, a.textHash]), a])).values()] : [];
+  if (attempted.length > 1 || attempted.some(a => a.conversationId !== conversationId)) return null;
+  const exactAttempt = attempted[0];
+  const matches = Object.entries(mapping).flatMap(([nodeId, node]) => {
     const message = messageForNode(node);
-    if (message === null || messageRole(message) !== 'user' ||
-        messageText(message).replaceAll('\r\n', '\n') !== prompt.replaceAll('\r\n', '\n')) return [];
+    if (message === null || messageRole(message) !== 'user') return [];
+    const text = messageText(message).replaceAll('\r\n', '\n');
     const messageId = readStringField(message, 'id');
     if (messageId === null || messageId.length === 0) return [];
+    if (exactAttempt !== undefined) {
+      const parent = readStringField(node, 'parent');
+      const parentMessage = parent === null ? null : messageForNode(mapping[parent]);
+      if (messageId !== exactAttempt.messageId ||
+          createHash('sha256').update(text).digest('hex') !== exactAttempt.textHash ||
+          (parent !== exactAttempt.parentMessageId && readStringField(parentMessage, 'id') !== exactAttempt.parentMessageId)) return [];
+    } else if (text !== prompt.replaceAll('\r\n', '\n')) return [];
     return [{ conversationId, submittedUserMessageId: messageId,
       submittedUserTurnId: readStringField(message, 'turn_id') ?? nodeId }];
   });

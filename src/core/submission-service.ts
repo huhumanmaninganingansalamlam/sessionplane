@@ -13,6 +13,7 @@ import {
   type ProviderAttachment,
   type ProviderSubmission,
   type ProviderSubmissionAcknowledgement,
+  type ProviderSubmissionAttempt,
   type PreparationChoices,
   type PreparationPurpose,
   type PreparationTarget,
@@ -363,10 +364,15 @@ export class SubmissionService {
           throw new SessionPlaneDomainError('input.invalid', 'Selected message already belongs to another generation');
         }
         if (this.accountCooldown(current)) return current;
+        const attempts = this.#events.submissionAttempts(current.sessionId, current.generation)
+          .filter(e => e.requestRef === currentOutbox.outboxId && e.conversationId === currentConversationId &&
+            e.promptHash === createHash('sha256').update(currentPrompt).digest('hex'))
+          .map(e => e.attempt as ProviderSubmissionAttempt);
         const acknowledgement = await adapter.recoverAcknowledgement?.({
           session: current,
           generation: current.generation,
           prompt: currentPrompt,
+          attempts,
           ...(selection === undefined ? {} : { selection }),
         });
         if (
@@ -610,6 +616,19 @@ export class SubmissionService {
         effort: normalizeOptional(input.effort),
         surface: normalizeOptional(input.surface),
         attachments,
+        onSubmissionAttempt: attempt => {
+          const current = this.#outbox.requireById(prepared.outbox.outboxId);
+          const snapshot = this.#requireSnapshot(current.sessionId);
+          if (current.submissionState !== 'submit_attempted' || snapshot.generation !== current.generation ||
+              snapshot.pageKey !== submission.pageKey || snapshot.conversationId !== attempt.conversationId) return;
+          const prior = this.#events.submissionAttempts(current.sessionId, current.generation);
+          if (prior.some(e => e.requestRef === current.outboxId && hashCanonical(e.attempt) === hashCanonical(attempt))) return;
+          this.#events.append({ teamId: current.teamId, roleId: current.roleId, sessionId: current.sessionId,
+            generation: current.generation, eventType: 'generation.submission-attempt-evidence',
+            payload: { requestRef: current.outboxId, conversationId: attempt.conversationId,
+              promptHash: createHash('sha256').update(input.prompt).digest('hex'), attempt },
+            createdAt: attempt.observedAt });
+        },
       });
     } catch (error) {
       if (error instanceof SessionPlaneDomainError && error.errorCode === 'provider.preparation-required') {

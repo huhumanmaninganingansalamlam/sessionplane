@@ -85,6 +85,13 @@ export class EventRepository {
     return row ? { sequence: Number(row.sequence), observedAt: row.createdAt, ...parsePayload(row.payloadJson) } : null;
   }
 
+  submissionAttempts(sessionId: string, generation: number): readonly Readonly<Record<string, unknown>>[] {
+    return (this.#database.prepare(`SELECT payload_json AS payloadJson FROM events
+      WHERE session_id=? AND generation=? AND event_type='generation.submission-attempt-evidence'
+      ORDER BY sequence`).all(sessionId, generation) as Array<{ payloadJson: string }>)
+      .map(row => parsePayload(row.payloadJson));
+  }
+
   latestSequencesForSessions(sessionIds: readonly string[]): ReadonlyMap<string, number> {
     const sequences = new Map<string, number>();
     const batchSize = 900;

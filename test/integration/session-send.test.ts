@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import { callRpc, RpcClientError } from '../../src/cli/client.ts';
@@ -10,6 +11,7 @@ import { startCore, type CoreService } from '../../src/main.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 import { ProbeBudgetRepository } from '../../src/storage/probe-budget-repository.ts';
+import { recoverExactServerAcknowledgement } from '../../src/providers/chatgpt/backend-recovery.ts';
 
 interface TeamSnapshot {
   readonly teamId: string;
@@ -29,6 +31,69 @@ interface SessionSnapshot {
   readonly promptSubmitted: boolean;
   readonly errorCode: string | null;
 }
+
+test('restart retains request-bound dispatch proof and recovers late duplicate ACK without another submit', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-durable-dispatch-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  fake.autoFinalText = 'Old answer';
+  let service = await startCore({ config, startBrowser: false, providerAdapters: [fake], logger: silentLogger() });
+  try {
+    const team = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'client-send', requestId: 'proof-team', name: 'Late ACK', primaryRoleKey: 'main' });
+    const session = await createSession(config.socketPath, team.teamId, 'main', 'proof-session');
+    const input = { clientId: 'client-send', sessionId: session.sessionId, prompt: 'Question', sessionDeadlineSec: 600 };
+    const old = await rpc<SessionSnapshot>(config.socketPath, 'session.send', { ...input, requestId: 'old-question' });
+    const oldFinal = await rpc<SessionSnapshot>(config.socketPath, 'session.wait', {
+      clientId: input.clientId, sessionId: session.sessionId, generation: 1, waitMs: 1000 });
+    assert.equal(oldFinal.terminal, true);
+    fake.autoFinalText = null;
+    fake.acknowledgementMode = 'missing';
+    const attempt = { conversationId: old.conversationId!, messageId: 'user-message-2', parentMessageId: 'chatgpt-auto-final-1',
+      textHash: createHash('sha256').update(input.prompt).digest('hex'), observedAt: '2026-10-07T18:37:54.258Z' };
+    const open = fake.openSubmission.bind(fake);
+    fake.openSubmission = async request => {
+      const submission = await open(request), submit = submission.submitOnce.bind(submission);
+      submission.submitOnce = async () => { await submit(); request.onSubmissionAttempt?.(attempt); };
+      return submission;
+    };
+    await assert.rejects(rpc(config.socketPath, 'session.send', { ...input, requestId: 'new-question' }),
+      hasRpcError('session.submission-unknown', true));
+    assert.equal(fake.submitCount, 2);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).submittedUserMessageId, null);
+    const preserved = service.database.raw.prepare('SELECT payload_json FROM outbox WHERE session_id=? ORDER BY generation')
+      .all(session.sessionId);
+    await service.close();
+    const restarted = new FakeProviderAdapter();
+    restarted.autoFinalText = 'Exact new answer';
+    restarted.recoverAcknowledgement = async request => {
+      assert.deepEqual(request.attempts, [attempt]);
+      return recoverExactServerAcknowledgement({ id: old.conversationId, current_node: 'new-final', mapping: {
+        'old-user': { parent: null, message: { id: 'user-message-1', author: { role: 'user' }, content: { parts: ['Question'] } } },
+        'old-final': { parent: 'old-user', message: { id: 'chatgpt-auto-final-1', author: { role: 'assistant' }, content: { parts: ['Old answer'] } } },
+        'new-user': { parent: 'old-final', message: { id: 'user-message-2', author: { role: 'user' }, content: { parts: ['Question'] } } },
+        'new-final': { parent: 'new-user', message: { id: 'chatgpt-auto-final-2', author: { role: 'assistant' },
+          status: 'finished_successfully', end_turn: true, content: { parts: ['Exact new answer'] } } },
+      } }, old.conversationId!, request.prompt, request.attempts);
+    };
+    service = await startCore({ config, startBrowser: false, providerAdapters: [restarted], logger: silentLogger() });
+    const recovered = await service.submissionService.recoverAcknowledgement(service.teamDirectory.getSession(session.sessionId));
+    assert.equal(recovered.generation, 2);
+    assert.equal(recovered.submittedUserMessageId, 'user-message-2');
+    assert.equal(recovered.submissionState, 'submitted');
+    const final = await rpc<SessionSnapshot & { responseMessageId: string; answerText: string }>(config.socketPath, 'session.wait', {
+      clientId: input.clientId, sessionId: session.sessionId, generation: 2, waitMs: 1000 });
+    assert.equal(final.terminal, true);
+    assert.equal(final.responseMessageId, 'chatgpt-auto-final-2');
+    assert.equal(final.answerText, 'Exact new answer');
+    assert.equal(restarted.submitCount, 0);
+    assert.deepEqual(service.database.raw.prepare('SELECT payload_json FROM outbox WHERE session_id=? ORDER BY generation')
+      .all(session.sessionId), preserved);
+    const oldAnchor = service.database.raw.prepare('SELECT submitted_user_message_id AS id FROM generations WHERE session_id=? AND generation=1')
+      .get(session.sessionId) as { id: string };
+    assert.equal(oldAnchor.id, old.submittedUserMessageId);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('session.send submits once, persists exact acknowledgement, and never resends ambiguity', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-send-'));

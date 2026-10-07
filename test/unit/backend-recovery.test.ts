@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import type { SessionSnapshot } from '../../src/domain/session.ts';
@@ -13,6 +14,30 @@ import {
 } from '../../src/providers/chatgpt/backend-recovery.ts';
 
 const CONVERSATION_ID = 'conversation-backend-1';
+
+test('late ACK uses durable dispatch identity among duplicate questions, never recency', () => {
+  const old = [node('root', null, null), node('old-user', 'root', userMessage('old-user', 'old-turn')),
+    node('old-final', 'old-user', finalAssistant('old-answer', 'Previous answer'))];
+  const attempt = { conversationId: CONVERSATION_ID, messageId: 'new-user', parentMessageId: 'old-answer',
+    textHash: createHash('sha256').update('Question').digest('hex'), observedAt: '2026-10-07T18:37:54.258Z' };
+  const recover = (payload: unknown, attempts = [attempt]) =>
+    recoverExactServerAcknowledgement(payload, CONVERSATION_ID, 'Question', attempts);
+  assert.equal(recover(conversationPayload(old, 'old-final')), null, 'attempt alone is not ACK');
+  const payload = conversationPayload([...old,
+    node('new-user', 'old-final', userMessage('new-user', 'new-turn')),
+    node('new-final', 'new-user', finalAssistant('new-answer', 'Original new answer'))], 'new-final');
+  assert.equal(recoverExactServerAcknowledgement(payload, CONVERSATION_ID, 'Question'), null,
+    'legacy duplicate prompts remain uncertain without dispatch evidence');
+  const ack = recover(payload);
+  assert.equal(ack?.submittedUserMessageId, 'new-user');
+  assert.equal(recoverExactServerFinal(payload, ack!).responseMessageId, 'new-answer');
+  assert.equal(recover(payload, [{ ...attempt, parentMessageId: 'wrong-parent' }]), null);
+  assert.equal(recover(payload, [{ ...attempt, textHash: '0'.repeat(64) }]), null);
+  assert.equal(recover(payload, [{ ...attempt, conversationId: 'other-conversation' }]), null);
+  assert.equal(recover({ ...payload, current_node: 'old-final' }), null, 'another branch is not this ACK');
+  assert.equal(recover(payload, [attempt, { ...attempt, messageId: 'old-user', parentMessageId: 'root' }]), null,
+    'two dispatched identities must not be resolved by latest timestamp');
+});
 
 test('backend recovery accepts only an exact final on the current branch', () => {
   const result = recoverExactServerFinal(
