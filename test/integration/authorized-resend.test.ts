@@ -1,4 +1,9 @@
 import assert from 'node:assert/strict';
+import { RecoveryService } from '../../src/core/recovery-service.ts';
+import type { BrowserOwner } from '../../src/browser/browser-owner.ts';
+import { EventEmitter } from 'node:events';
+import type { Page } from 'playwright-core';
+import { SessionRepository } from '../../src/storage/session-repository.ts';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -121,5 +126,83 @@ test('approved resend reserves once across restart, preserves uncertainty, and s
     assert.deepEqual(await callRpc(config.socketPath, 'workflow.decide', secondApproval), secondReservation);
     assert.equal(fake.submitCount, 3);
 
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('failed approved preparation reattaches the persisted target after restart without reopening or dispatching', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-failed-preparation-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const start = () => startCore({ config, startBrowser: false, providerAdapters: [fake] });
+  let service = await start();
+  t.mock.method(SessionUiService.prototype, 'reserveResendPage', (original, successor) => {
+    service.pageRegistry.reservePage(original.pageKey!, { sessionId: successor.sessionId,
+      generation: successor.generation, conversationId: successor.conversationId });
+  });
+  let fail = false;
+  t.mock.method(SessionUiService.prototype, 'verifyAuthorizedResend', async (current, _original, _prompt, afterPrepare) => {
+    try { service.pageRegistry.requireSessionPage(current.pageKey!, { sessionId: current.sessionId,
+      generation: current.generation, conversationId: current.conversationId }); }
+    catch (error) { throw new SessionPlaneDomainError((error as { errorCode: string }).errorCode, (error as Error).message); }
+    if (fail && afterPrepare) throw new SessionPlaneDomainError('browser.unavailable', 'Fixture pre-submit timeout');
+  });
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'failed-owner' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: team.primaryRoleKey, provider: 'chatgpt' });
+    const conversationId = `conversation-${session.sessionId}`;
+    const page = Object.assign(new EventEmitter(), { url: () => `https://chatgpt.com/c/${conversationId}`,
+      isClosed: () => false }) as unknown as Page;
+    const binding = service.pageRegistry.identifyPage(page, 'exact-retained-target');
+    const open = fake.openSubmission.bind(fake);
+    t.mock.method(fake, 'openSubmission', async request => ({ ...await open(request), pageKey: binding.pageKey,
+      bindAcknowledgement() { service.pageRegistry.bindPage(binding.pageKey,
+        { sessionId: session.sessionId, generation: 1, conversationId }); } }));
+    const clientId = `team:${team.teamId}`;
+    await service.submissionService.send({ clientId, requestId: 'original', sessionId: session.sessionId,
+      prompt: 'Exact retained draft', sessionDeadlineSec: 600 });
+    const original = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=1').get(session.sessionId)!;
+    const approval = { teamId: team.teamId, requestRef: original.outbox_id, requestId: 'approved-once',
+      decision: 'prepare_resend', approvalRef: 'one-user-approval', duplicateRiskAccepted: true };
+    const rpc = () => callRpc(config.socketPath, 'workflow.decide', approval);
+    const reserved = await rpc() as { requestRef: string };
+    await service.submissionService.withPendingPreparation({ clientId, requestId: 'approved-once', sessionId: session.sessionId,
+      generation: 2 }, async () => ({}));
+    fail = true;
+    await assert.rejects(service.submissionService.resumePreparation({ clientId, requestId: 'approved-once',
+      sessionId: session.sessionId, generation: 2 }), /Fixture pre-submit timeout/);
+    const failed = service.teamDirectory.getSession(session.sessionId);
+    const outbox = service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(reserved.requestRef);
+    const generation = service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=2').get(session.sessionId);
+    await service.close();
+    service = await start();
+    const adopted = service.pageRegistry.identifyPage(page, binding.targetId!);
+    assert.notEqual(adopted.pageKey, failed.pageKey);
+    assert.ok(new SessionRepository(service.database.raw).listRecoverableSnapshots().some(s => s.sessionId === session.sessionId));
+    await assert.rejects(rpc(), /Unknown pageKey/, 'Reproduces the actual native failure before reconciliation');
+    service.pageRegistry.bindPage(adopted.pageKey, { sessionId: 'foreign-owner', generation: 1, conversationId });
+    await assert.rejects(service.recoveryService.ensurePage(session.sessionId, 2, { openMissing: false }), /could not be recovered/);
+    service.pageRegistry.unbindPage(adopted.pageKey);
+    const recovery = new RecoveryService({ database: service.database,
+      browserOwner: { createPage: () => { throw new Error('Must not open a replacement page'); } } as unknown as BrowserOwner,
+      pageRegistry: service.pageRegistry, scheduler: service.actorScheduler, observations: service.observationService,
+      adapters: service.providerAdapters, submissions: service.submissionService,
+      chatgptUrl: config.chatgptUrl, geminiUrl: config.geminiUrl, grokUrl: config.grokUrl });
+    const report = await recovery.restore();
+    assert.equal(report.rebound, 1);
+    assert.equal(report.opened, 0);
+    assert.equal(report.observersStarted, 0);
+    await recovery.close();
+    const restored = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(restored.pageKey, adopted.pageKey);
+    assert.equal(restored.submissionState, 'failed_pre_submit');
+    assert.equal(restored.reason, failed.reason);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=2').get(session.sessionId), generation);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(reserved.requestRef), outbox);
+    assert.deepEqual(await rpc(), reserved);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).submissionState, 'prepared');
+    assert.equal(fake.submitCount, 1, 'Rebind/reprepare never dispatches or creates a generation');
+    assert.equal(service.teamDirectory.getSession(session.sessionId).generation, 2);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(original.outbox_id), original);
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });

@@ -230,7 +230,8 @@ export class RecoveryService {
 
       if (
         this.#browserOwner !== null &&
-        (shouldRecoverPage(snapshot) || isPendingPreparation(snapshot))
+        (shouldRecoverPage(snapshot) || isPendingPreparation(snapshot) ||
+          snapshot.submissionState === 'failed_pre_submit')
       ) {
         const reconciled = await this.#reconcilePage(snapshot);
         snapshot = reconciled.snapshot;
@@ -381,6 +382,35 @@ export class RecoveryService {
     readonly conflict: boolean;
     readonly unavailable: boolean;
   }> {
+    // A failed preparation remains failed. Reattach only its persisted target;
+    // never create a page or infer ownership from a matching conversation alone.
+    if (snapshot.submissionState === 'failed_pre_submit') {
+      const stored = snapshot.pageKey === null ? null : this.#pageBindings.get(snapshot.pageKey);
+      if (snapshot.promptSubmitted || stored?.targetId == null ||
+          stored.sessionId !== snapshot.sessionId || stored.generation !== snapshot.generation ||
+          stored.conversationId !== snapshot.conversationId) return result(snapshot, { unavailable: true });
+      const matches = this.#pageRegistry.listBindings({ includeClosed: false })
+        .filter(binding => binding.targetId === stored.targetId);
+      const match = matches.length === 1 ? matches[0] : undefined;
+      if (match === undefined || !isProviderUrl(snapshot.provider, match.url) ||
+          match.conversationId !== snapshot.conversationId) return result(snapshot, { unavailable: true });
+      try {
+        const identity = { sessionId: snapshot.sessionId, generation: snapshot.generation,
+          conversationId: snapshot.conversationId };
+        if (snapshot.conversationId === null) this.#pageRegistry.reservePage(match.pageKey, identity);
+        else this.#pageRegistry.bindPage(match.pageKey, { ...identity, conversationId: snapshot.conversationId });
+        const updated = await this.#recordPageState(snapshot, {
+          pageKey: match.pageKey, observationTransport: 'fresh',
+          reason: 'restart-failed-preparation-rebound', errorCode: null,
+        }, 'generation.restart-failed-preparation-rebound');
+        return result(updated, { rebound: true });
+      } catch (error) {
+        this.#logger?.warn('recovery.failed-preparation-page-unavailable', {
+          sessionId: snapshot.sessionId, generation: snapshot.generation, reason: classifyPageFailure(error),
+        });
+        return result(snapshot, { unavailable: true });
+      }
+    }
     const conversationId = snapshot.conversationId;
     if (conversationId === null) {
       return await this.#reconcilePreparation(snapshot);

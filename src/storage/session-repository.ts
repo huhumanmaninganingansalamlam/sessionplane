@@ -240,7 +240,6 @@ export class SessionRepository {
         WHERE s.session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
           AND s.team_id IN (SELECT team_id FROM teams WHERE team_state != 'archived')
           AND s.current_generation > 0
-          AND g.submission_state IS NOT 'failed_pre_submit'
         ORDER BY s.created_at, s.session_id
       `)
       .all() as unknown as SnapshotRow[];
