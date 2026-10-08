@@ -140,6 +140,29 @@ test('ChatGPT acknowledgement recovery uses exact text or an unchanged explicit 
   }
 });
 
+test('submission candidates preserve text beyond 4000 characters and reject a changed tail', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-full-candidate-'));
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: new PageRegistry(), headless: true });
+  const prompt = 'x'.repeat(4000) + '\nExact final paragraph 끝';
+  try {
+    await owner.start();
+    const { page } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html',
+      body: '<main><div id="prompt-textarea" contenteditable="true"></div><div data-message-author-role="user" data-message-id="long-user" data-turn-id="long-turn" style="white-space: pre-wrap"></div></main>' }));
+    await page.goto('https://chatgpt.com/c/fullcandidate123');
+    const user = page.locator('[data-message-id="long-user"]');
+    await user.evaluate((element, text) => { element.textContent = text; }, prompt);
+    const [candidate] = await inspectChatGptSubmissionCandidates(page, 'fullcandidate123');
+    assert.ok(candidate);
+    assert.equal(candidate.text, prompt);
+    assert.equal(candidate.textTruncated, false);
+    const selection = { messageId: candidate.messageId, evidenceHash: candidate.evidenceHash };
+    assert.equal((await recoverChatGptAcknowledgement(page, prompt, 'fullcandidate123', selection))?.submittedUserTurnId, 'long-turn');
+    await user.evaluate(element => { element.textContent += ' changed'; });
+    assert.equal(await recoverChatGptAcknowledgement(page, prompt, 'fullcandidate123', selection), null);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('ChatGPT submission captures exact conversation and user-turn acknowledgement', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-submit-'));
   const registry = new PageRegistry();

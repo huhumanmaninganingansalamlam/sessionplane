@@ -470,7 +470,7 @@ export async function inspectChatGptSubmissionCandidates(page: Page, conversatio
     const identity = userIdentity(message);
     return identity === null ? [] : [{ messageId: identity.messageId,
       evidenceHash: submissionEvidenceHash(conversationId, message),
-      text: message.text.slice(0, 4000), textTruncated: message.text.length > 4000 }];
+      text: message.text, textTruncated: false }];
   });
 }
 
