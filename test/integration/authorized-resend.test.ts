@@ -20,11 +20,13 @@ import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 const callRpc = (socketPath: string, method: string, params: unknown) => rpcCall({ socketPath, method, params });
 
-test('explicit refresh reopens the closed preceding-generation conversation without replaying a failed submit', async t => {
+for (const staleState of ['closed', 'owned'] as const) {
+test(`explicit refresh reopens a missing conversation with a stale ${staleState} preceding-generation binding without replaying submit`, async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-explicit-failed-page-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const fake = new FakeProviderAdapter();
-  const service = await startCore({ config, startBrowser: false, providerAdapters: [fake] });
+  const start = () => startCore({ config, startBrowser: false, providerAdapters: [fake] });
+  let service = await start();
   let recovery: RecoveryService | undefined;
   try {
     const team = service.teamDirectory.createTeam({ clientId: 'page-recovery-owner' });
@@ -52,8 +54,10 @@ test('explicit refresh reopens the closed preceding-generation conversation with
     service.observationService.stop(session.sessionId, 1);
     await service.actorScheduler.updateGeneration(session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
       completedAt: new Date().toISOString(), responseMessageId: 'previous-answer', answerText: 'done' });
-    closed = true;
-    oldPage.emit('close');
+    if (staleState === 'closed') {
+      closed = true;
+      oldPage.emit('close');
+    }
     fake.prepareError = new ProviderSubmissionError('browser.unavailable', 'Exact request conversation page could not be recovered');
     const failedSend = { clientId, requestId: 'failed-review', sessionId: session.sessionId,
       prompt: 'The unsubmitted primary review', sessionDeadlineSec: 600 };
@@ -62,10 +66,18 @@ test('explicit refresh reopens the closed preceding-generation conversation with
     assert.equal(failed.generation, 2);
     const savedBinding = service.database.raw.prepare('SELECT * FROM page_bindings WHERE page_key=?').get(binding.pageKey);
     assert.equal(savedBinding!.generation, 1);
-    assert.equal(savedBinding!.binding_state, 'closed');
+    assert.equal(savedBinding!.binding_state, staleState);
     const savedFailure = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId)!;
     const savedGeneration = service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=2').get(session.sessionId);
     const savedFirst = service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(session.sessionId);
+    if (staleState === 'owned') {
+      // A new core registry cannot see the old target even though its persisted row says owned.
+      await service.close();
+      service = await start();
+      assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(savedFailure.outbox_id), savedFailure);
+    }
+    const blank = Object.assign(new EventEmitter(), { url: () => 'about:blank', isClosed: () => false }) as unknown as Page;
+    const blankBinding = service.pageRegistry.identifyPage(blank, 'unrelated-existing-blank-target');
     let creations = 0, navigations = 0, reloads = 0;
     let wrongConversation = true;
     const browser = { createPage: async () => {
@@ -107,7 +119,7 @@ test('explicit refresh reopens the closed preceding-generation conversation with
       backoffLevel: 0, consecutiveFailures: 0, updatedAt: new Date().toISOString() });
     await assert.rejects(callRpc(config.socketPath, 'workflow.decide', refresh), /could not be recovered/);
     assert.equal(creations, 1);
-    assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).length, 0, 'A different conversation is never retained or bound');
+    assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).length, 1, 'Only the unrelated blank page remains after rejecting a wrong conversation');
     assert.deepEqual(service.teamDirectory.getSession(session.sessionId), failed);
     wrongConversation = false;
     for (const owner of ['foreign-session', session.sessionId]) {
@@ -138,6 +150,7 @@ test('explicit refresh reopens the closed preceding-generation conversation with
     assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(savedFailure.outbox_id), savedFailure);
     assert.deepEqual(service.database.raw.prepare('SELECT * FROM page_bindings WHERE page_key=?').get(failed.pageKey), savedBinding);
     assert.deepEqual(service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(session.sessionId), savedFirst);
+    assert.deepEqual(service.pageRegistry.getBinding(blankBinding.pageKey), blankBinding, 'The existing blank page is neither navigated nor assigned to this request');
     await callRpc(config.socketPath, 'workflow.decide', refresh);
     assert.equal(creations, 2);
     assert.equal(reloads, 1, 'Repeating the recovery action receipt does not reload twice');
@@ -155,6 +168,7 @@ test('explicit refresh reopens the closed preceding-generation conversation with
     assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(savedFailure.outbox_id), savedFailure);
   } finally { await recovery?.close(); await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
+}
 
 test('approved resend reserves once across restart, preserves uncertainty, and stops a late answer before dispatch', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-approved-resend-'));
