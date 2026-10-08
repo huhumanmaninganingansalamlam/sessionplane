@@ -20,6 +20,142 @@ import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 const callRpc = (socketPath: string, method: string, params: unknown) => rpcCall({ socketPath, method, params });
 
+test('explicit refresh reopens the closed preceding-generation conversation without replaying a failed submit', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-explicit-failed-page-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const service = await startCore({ config, startBrowser: false, providerAdapters: [fake] });
+  let recovery: RecoveryService | undefined;
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'page-recovery-owner' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: team.primaryRoleKey, provider: 'chatgpt' });
+    const clientId = `team:${team.teamId}`;
+    const conversationId = `conversation-${session.sessionId}`;
+    const url = `https://chatgpt.com/c/${conversationId}`;
+    let closed = false;
+    const oldPage = Object.assign(new EventEmitter(), { url: () => url, isClosed: () => closed }) as unknown as Page;
+    let binding = service.pageRegistry.identifyPage(oldPage, 'closed-generation-one-target');
+    const open = fake.openSubmission.bind(fake);
+    t.mock.method(fake, 'openSubmission', async request => {
+      const submission = await open(request);
+      return { ...submission, pageKey: binding.pageKey,
+        async prepare() {
+          await submission.prepare();
+          service.pageRegistry.reservePage(binding.pageKey,
+            { sessionId: session.sessionId, generation: request.generation, conversationId });
+        },
+        bindAcknowledgement() { service.pageRegistry.bindPage(binding.pageKey,
+          { sessionId: session.sessionId, generation: request.generation, conversationId }); } };
+    });
+    const first = await service.submissionService.send({ clientId, requestId: 'first', sessionId: session.sessionId,
+      prompt: 'Previous completed review', sessionDeadlineSec: 600 });
+    service.observationService.stop(session.sessionId, 1);
+    await service.actorScheduler.updateGeneration(session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
+      completedAt: new Date().toISOString(), responseMessageId: 'previous-answer', answerText: 'done' });
+    closed = true;
+    oldPage.emit('close');
+    fake.prepareError = new ProviderSubmissionError('browser.unavailable', 'Exact request conversation page could not be recovered');
+    const failedSend = { clientId, requestId: 'failed-review', sessionId: session.sessionId,
+      prompt: 'The unsubmitted primary review', sessionDeadlineSec: 600 };
+    await assert.rejects(service.submissionService.send(failedSend), /could not be recovered/);
+    const failed = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(failed.generation, 2);
+    const savedBinding = service.database.raw.prepare('SELECT * FROM page_bindings WHERE page_key=?').get(binding.pageKey);
+    assert.equal(savedBinding!.generation, 1);
+    assert.equal(savedBinding!.binding_state, 'closed');
+    const savedFailure = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId)!;
+    const savedGeneration = service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=2').get(session.sessionId);
+    const savedFirst = service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(session.sessionId);
+    let creations = 0, navigations = 0, reloads = 0;
+    let wrongConversation = true;
+    const browser = { createPage: async () => {
+      creations++;
+      let currentUrl = 'about:blank', pageClosed = false;
+      const page = Object.assign(new EventEmitter(), { url: () => currentUrl, isClosed: () => pageClosed,
+        close: async () => { pageClosed = true; page.emit('close'); },
+        goto: async (target: string) => { navigations++; currentUrl = wrongConversation ? 'https://chatgpt.com/c/other-conversation' : target; },
+      }) as unknown as Page;
+      return { page, binding: service.pageRegistry.identifyPage(page, `new-target-${creations}`) };
+    } } as unknown as BrowserOwner;
+    recovery = new RecoveryService({ database: service.database, browserOwner: browser,
+      pageRegistry: service.pageRegistry, scheduler: service.actorScheduler, observations: service.observationService,
+      adapters: service.providerAdapters, submissions: service.submissionService,
+      chatgptUrl: config.chatgptUrl, geminiUrl: config.geminiUrl, grokUrl: config.grokUrl });
+    t.mock.method(service.recoveryService, 'ensurePage', (...args: Parameters<RecoveryService['ensurePage']>) => recovery!.ensurePage(...args));
+    // Exercise the real native dispatch, receipt and ownership checks with a local reload callback.
+    t.mock.method(SessionUiService.prototype, 'refresh', async input => {
+      await service.submissionService.refreshPage(input, async current => {
+        const page = service.pageRegistry.requireSessionPage(current.pageKey!, current);
+        assert.equal(page.url(), url);
+        reloads++;
+      });
+    });
+    const read = await callRpc(config.socketPath, 'workflow.team_get', { teamId: team.teamId, requestRef: savedFailure.outbox_id }) as { request: { submissionState: string } };
+    assert.equal(read.request.submissionState, 'failed_pre_submit');
+    await assert.rejects(recovery.ensurePage(session.sessionId, 2), /could not be recovered/);
+    await recovery.restore();
+    assert.equal(creations, 0, 'Reads and startup must not reopen a failed preparation');
+    const budgets = new ProbeBudgetRepository(service.database.raw);
+    const until = new Date(Date.now() + 60_000).toISOString();
+    budgets.save({ scope: `chatgpt:conversation-detail:${conversationId}`, nextAllowedAt: until, blockedUntil: until,
+      backoffLevel: 1, consecutiveFailures: 1, updatedAt: new Date().toISOString() });
+    const refresh = { teamId: team.teamId, requestRef: savedFailure.outbox_id,
+      requestId: 'explicit-restore-existing-chat', decision: 'refresh' };
+    await assert.rejects(callRpc(config.socketPath, 'workflow.decide', refresh), /requires waiting/);
+    assert.equal(creations, 0);
+    budgets.save({ scope: `chatgpt:conversation-detail:${conversationId}`, nextAllowedAt: null, blockedUntil: null,
+      backoffLevel: 0, consecutiveFailures: 0, updatedAt: new Date().toISOString() });
+    await assert.rejects(callRpc(config.socketPath, 'workflow.decide', refresh), /could not be recovered/);
+    assert.equal(creations, 1);
+    assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).length, 0, 'A different conversation is never retained or bound');
+    assert.deepEqual(service.teamDirectory.getSession(session.sessionId), failed);
+    wrongConversation = false;
+    for (const owner of ['foreign-session', session.sessionId]) {
+      let takenClosed = false;
+      const taken = Object.assign(new EventEmitter(), { url: () => url, isClosed: () => takenClosed }) as unknown as Page;
+      const live = service.pageRegistry.identifyPage(taken, `busy-${owner}`);
+      service.pageRegistry.bindPage(live.pageKey, { sessionId: owner, generation: 3, conversationId });
+      await assert.rejects(recovery.ensurePage(session.sessionId, 2, { openMissing: true }), /could not be recovered/);
+      assert.equal(service.pageRegistry.getBinding(live.pageKey).sessionId, owner);
+      assert.equal(service.pageRegistry.getBinding(live.pageKey).generation, 3);
+      assert.equal(creations, 1, 'An owned live conversation is not bypassed by opening another page');
+      assert.deepEqual(service.teamDirectory.getSession(session.sessionId), failed);
+      takenClosed = true;
+      taken.emit('close');
+    }
+    await callRpc(config.socketPath, 'workflow.decide', refresh);
+    const restored = service.teamDirectory.getSession(session.sessionId);
+    binding = service.pageRegistry.getBinding(restored.pageKey!);
+    assert.notEqual(restored.pageKey, failed.pageKey);
+    assert.equal(binding.generation, 2);
+    assert.equal(binding.sessionId, session.sessionId);
+    assert.equal(binding.conversationId, conversationId);
+    assert.equal(restored.submissionState, 'failed_pre_submit');
+    assert.equal(restored.promptSubmitted, false);
+    assert.equal(restored.submittedUserMessageId, null);
+    assert.equal(restored.responseMessageId, null);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=2').get(session.sessionId), savedGeneration);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(savedFailure.outbox_id), savedFailure);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM page_bindings WHERE page_key=?').get(failed.pageKey), savedBinding);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(session.sessionId), savedFirst);
+    await callRpc(config.socketPath, 'workflow.decide', refresh);
+    assert.equal(creations, 2);
+    assert.equal(reloads, 1, 'Repeating the recovery action receipt does not reload twice');
+    assert.equal(fake.submitCount, 1, 'Page recovery never sends the failed review');
+    await assert.rejects(service.submissionService.send(failedSend), /failed before provider submission/);
+    fake.prepareError = null;
+    const retry = { ...failedSend, requestId: 'owner-explicit-retry', expectedGeneration: 2 };
+    const sent = await service.submissionService.send(retry);
+    assert.equal(sent.generation, 3);
+    assert.equal(sent.conversationId, conversationId);
+    assert.equal(fake.submitCount, 2);
+    await service.submissionService.send(retry);
+    assert.equal(fake.submitCount, 2, 'An explicit owner retry dispatches once and then replays its receipt');
+    assert.equal(first.conversationId, sent.conversationId);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(savedFailure.outbox_id), savedFailure);
+  } finally { await recovery?.close(); await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('approved resend reserves once across restart, preserves uncertainty, and stops a late answer before dispatch', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-approved-resend-'));
   const config = resolveConfig({ cwd: root, env: { SESSIONPLANE_PROBE_SUCCESS_INTERVAL_MS: '1' }, stateDir: '.state' });

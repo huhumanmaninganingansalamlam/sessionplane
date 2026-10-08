@@ -124,13 +124,13 @@ export class RecoveryService {
         }
       }
       if (options.openMissing === true && snapshot.provider === 'chatgpt') {
-        const nextAllowedAt = this.#loadRecovery.effectiveNextAllowedAt();
+        const nextAllowedAt = this.#loadRecovery.effectiveNextAllowedAt(snapshot.conversationId ?? undefined);
         if (nextAllowedAt !== null && Date.parse(nextAllowedAt) > this.#now().getTime()) {
           throw new SessionPlaneDomainError('provider.observation-deferred',
             `Missing-page recovery was not dispatched: shared ChatGPT pacing requires waiting until ${nextAllowedAt}`);
         }
       }
-      const recovered = await this.#reconcilePage(snapshot, options.openMissing === true);
+      const recovered = await this.#reconcilePage(snapshot, options.openMissing === true, options.openMissing === true);
       if (recovered.unavailable || recovered.conflict || recovered.snapshot.pageKey === null) {
         throw new SessionPlaneDomainError('browser.unavailable', 'Exact request conversation page could not be recovered');
       }
@@ -375,16 +375,22 @@ export class RecoveryService {
     );
   }
 
-  async #reconcilePage(snapshot: SessionSnapshot, openMissing = true): Promise<{
+  async #reconcilePage(snapshot: SessionSnapshot, openMissing = true, reopenFailedPreparation = false): Promise<{
     readonly snapshot: SessionSnapshot;
     readonly rebound: boolean;
     readonly opened: boolean;
     readonly conflict: boolean;
     readonly unavailable: boolean;
   }> {
-    // A failed preparation remains failed. Reattach only its persisted target;
-    // never create a page or infer ownership from a matching conversation alone.
-    if (snapshot.submissionState === 'failed_pre_submit') {
+    const explicitFailedPreparation = reopenFailedPreparation && openMissing && snapshot.submissionState === 'failed_pre_submit';
+    if (explicitFailedPreparation && (snapshot.promptSubmitted || snapshot.conversationId === null ||
+        snapshot.submittedUserMessageId !== null || snapshot.submittedUserTurnId !== null ||
+        snapshot.responseMessageId !== null || snapshot.answerText !== null || snapshot.sessionState !== 'ready')) {
+      return result(snapshot, { unavailable: true });
+    }
+    // Reads/startup may only reattach the exact retained target. An explicit
+    // missing-page recovery may reopen the stored conversation, never the submit.
+    if (snapshot.submissionState === 'failed_pre_submit' && !explicitFailedPreparation) {
       const stored = snapshot.pageKey === null ? null : this.#pageBindings.get(snapshot.pageKey);
       if (snapshot.promptSubmitted || stored?.targetId == null ||
           stored.sessionId !== snapshot.sessionId || stored.generation !== snapshot.generation ||
@@ -421,6 +427,7 @@ export class RecoveryService {
       .findByConversation(conversationId)
       .filter((page) => isProviderUrl(snapshot.provider, page.url));
     if (matches.length > 1) {
+      if (explicitFailedPreparation) return result(snapshot, { conflict: true });
       const updated = await this.#recordPageState(snapshot, {
         pageKey: null,
         observationTransport: 'stale',
@@ -449,6 +456,7 @@ export class RecoveryService {
         }, 'generation.restart-page-rebound');
         return result(updated, { rebound: true });
       } catch (error) {
+        if (explicitFailedPreparation) return result(snapshot, { unavailable: true });
         return await this.#recordUnavailable(snapshot, classifyPageFailure(error));
       }
     }
@@ -512,6 +520,14 @@ export class RecoveryService {
       );
       await this.#navigatePage(created.page, target);
       const navigated = this.#pageRegistry.refreshPage(created.binding.pageKey);
+      if (explicitFailedPreparation) {
+        const current = this.#sessions.getSnapshot(snapshot.sessionId);
+        if (current === null || current.generation !== snapshot.generation ||
+            current.conversationId !== snapshot.conversationId || current.pageKey !== snapshot.pageKey ||
+            current.submissionState !== 'failed_pre_submit' || current.promptSubmitted || current.sessionState !== 'ready') {
+          throw new SessionPlaneDomainError('session.generation-superseded', 'Request changed during explicit page recovery');
+        }
+      }
       if (
         snapshot.provider === 'chatgpt' &&
         conversationId.startsWith('WEB:') &&
@@ -543,6 +559,7 @@ export class RecoveryService {
       return result(updated, { opened: true, rebound: true });
     } catch (error) {
       await createdPage?.close().catch(() => undefined);
+      if (explicitFailedPreparation) return result(snapshot, { unavailable: true });
       return await this.#recordUnavailable(snapshot, classifyPageFailure(error));
     }
   }
