@@ -181,6 +181,8 @@ export class SessionUiService {
           messages.slice(original + 1, user).some(m => m.role === 'assistant') ||
           messages.some(m => m.streamingMarker) || activity.strength !== 'none' || dom.actionableAlert ||
           !dom.conversationSurfaceAvailable || !dom.submittedUserFound || dom.laterUserFound ||
+          dom.candidate?.responseMessageId !== input.responseMessageId || dom.candidate.streamingMarker ||
+          createHash('sha256').update(dom.candidate.answerText).digest('hex') !== input.responseSha256 ||
           controls.nodesTruncated || controls.nodes.some(n => ['dialog', 'alertdialog'].includes(n.role)) ||
           !controls.nodes.some(n => n.role === 'textbox' && n.editable && !n.disabled) ||
           binding.bindingEpoch !== after.bindingEpoch) {
