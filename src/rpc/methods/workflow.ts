@@ -20,6 +20,9 @@ export const workflowSchemas = {
   session_delete: z.object({ ...request, requestId, outputsRetrieved: z.literal(true) }).strict(),
   send: z.object({ ...mutation, roleRef, thinkingFailureRecovery: z.literal(true).optional().describe('Explicit sender handoff to core for same-chat 계속 after exact idle Thinking failed; off when omitted. Preserves original deadline and failure; no refusal/auth retry.'), prompt: z.string().min(1).max(200_000), model: z.string().trim().min(1).max(200).optional(), effort: z.string().trim().min(1).max(200).optional(), files: z.array(z.string().min(1).max(20_000)).max(20).optional().describe('Attachment paths. Uploads are disabled by default; use only when team capabilities.uploadsEnabled is true.'), sessionDeadlineSec: z.number().int().min(1).max(86_400).default(5400) }).strict(),
   decide: z.union([
+    z.object({ ...request, requestId, decision: z.literal('reconcile_followup'), followupUserMessageId: z.string().min(1).max(300),
+      responseMessageId: z.string().min(1).max(300), responseSha256: z.string().regex(/^[a-f0-9]{64}$/),
+      followupCompleted: z.literal(true) }).strict(),
     z.object({ ...request, requestId, decision: z.literal('prepare_resend'), approvalRef: z.string().trim().min(1).max(300), duplicateRiskAccepted: z.literal(true) }).strict(),
     z.object({ ...request, requestId, decision: z.literal('discover') }).strict(),
     z.object({ ...request, requestId, decision: z.literal('configure'), configurationId: z.string().regex(/^[a-f0-9]{24}$/).describe('Copy the ID of the desired combined configuration from configurationCatalog.options.') }).strict(),

@@ -240,3 +240,54 @@ test('closing the recovery owner during child preparation preserves its saved dr
     f.core.thinkingFailureRecovery.restore(); await delay(100); assert.equal(f.fake.submitCount, 1);
   } finally { await f.close(); }
 });
+
+test('confirmed manual follow-up releases only original tracking and permits new work without borrowing its answer', async () => {
+  const f = await fixture();
+  const { createHash } = await import('node:crypto');
+  const answer = 'Review complete: CHANGES_REQUIRED';
+  const followup = '<div data-message-author-role="user" data-message-id="manual-user">Repeat the missing answer</div>';
+  const final = `<div data-message-author-role="assistant" data-message-id="manual-answer">${answer}</div>`;
+  try {
+    f.fake.surface = users => users + followup + final;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const input = { teamId: f.team.teamId, requestRef, requestId: 'manual-release', decision: 'reconcile_followup',
+      followupUserMessageId: 'manual-user', responseMessageId: 'manual-answer',
+      responseSha256: createHash('sha256').update(answer).digest('hex'), followupCompleted: true };
+    const body = (middle: string) => `<main>${configuration}<div data-message-author-role="user" data-message-id="user-message-1">Original</div>${middle}<textarea>Preserved draft</textarea></main>`;
+    for (const unsafe of [followup + final + '<button data-testid="stop-button">Stop</button>',
+      followup + final.replace(answer, 'Different answer'), followup + final + '<div data-message-author-role="user" data-message-id="newer">Newer question</div>',
+      '<div data-message-author-role="assistant" data-message-id="original-answer" data-end-turn="true">Original recovered</div>' + followup + final]) {
+      await f.fake.page.setContent(body(unsafe));
+      await assert.rejects(f.rpc('decide', input), /not verified/);
+      assert.equal(f.core.teamDirectory.getSession(f.session.sessionId).terminal, false);
+    }
+    await f.fake.page.setContent(body(followup + final));
+    const released = await f.rpc<any>('decide', input);
+    assert.equal(released.reconciliation.disposition, 'tracking-cancelled');
+    assert.equal(released.reconciliation.providerMutation, false);
+    const closed = f.core.teamDirectory.getSession(f.session.sessionId);
+    assert.equal(closed.sessionState, 'cancelled');
+    assert.equal(closed.reason, 'manual-followup-reconciled');
+    assert.equal(closed.responseMessageId, null);
+    assert.equal(closed.answerText, null);
+    assert.equal(closed.submittedUserMessageId, original.submittedUserMessageId);
+    assert.equal(closed.conversationId, original.conversationId);
+    assert.equal(closed.promptSubmitted, true);
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved draft');
+    assert.equal(f.fake.submitCount, 1);
+    await f.rpc('decide', input);
+    assert.equal(f.core.database.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE event_type='generation.manual-followup-reconciled'").get()!.n, 1);
+    await assert.rejects(f.rpc('decide', { ...input, responseMessageId: 'different' }), /different|conflict|reused/);
+    await assert.rejects(f.core.submissionService.send({ clientId: `team:${f.team.teamId}`, sessionId: f.session.sessionId,
+      expectedGeneration: 1, requestId: 'separately-authorized-next-work', prompt: 'New review', model: '5.5 Pro',
+      sessionDeadlineSec: 60 }), /preparation|decision/i);
+    const prepared = f.core.teamDirectory.getSession(f.session.sessionId);
+    assert.equal(prepared.generation, 2);
+    assert.equal(prepared.promptSubmitted, false);
+    assert.equal(f.fake.submitCount, 1);
+    const retained = f.core.database.raw.prepare('SELECT answer_text,response_message_id,submitted_user_message_id FROM generations WHERE session_id=? AND generation=1').get(f.session.sessionId)!;
+    assert.equal(retained.answer_text, null); assert.equal(retained.response_message_id, null);
+    assert.equal(retained.submitted_user_message_id, original.submittedUserMessageId);
+  } finally { await f.close(); }
+});

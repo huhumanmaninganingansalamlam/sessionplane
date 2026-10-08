@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { conversationLoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
 import { ChatGptConfigurationMenu, type ConfigurationCatalog } from '../providers/chatgpt/configuration-catalog.ts';
 import { errors, type ElementHandle, type Page } from 'playwright-core';
@@ -158,6 +159,37 @@ export class SessionUiService {
         } catch (error) { throw typedUiError(error); }
         finally { clearTimeout(timer); }
       });
+  }
+
+  async reconcileFollowup(input: PreparationOwner & { readonly decisionId: string; readonly followupUserMessageId: string;
+    readonly responseMessageId: string; readonly responseSha256: string; readonly followupCompleted: true }) {
+    return await this.#submissions.reconcileFollowup(input, async session => {
+      const page = this.#requirePage(session);
+      const binding = this.#registry.refreshPage(session.pageKey!);
+      const messages = await readChatGptMessages(page);
+      const original = messages.findIndex(m => m.role === 'user' && m.messageId === session.submittedUserMessageId);
+      const user = messages.findIndex(m => m.role === 'user' && m.messageId === input.followupUserMessageId);
+      const answer = messages.at(-1);
+      const controls = await this.#capture(session);
+      const dom = await observeChatGptDom(page, { submittedUserMessageId: input.followupUserMessageId, submittedUserTurnId: null });
+      const activity = await observeChatGptActivity(page, dom);
+      this.#requirePage(session);
+      const after = this.#registry.refreshPage(session.pageKey!);
+      if (original < 0 || user <= original || user !== messages.length - 2 || answer?.role !== 'assistant' ||
+          answer.messageId !== input.responseMessageId || !answer.text.trim() || answer.streamingMarker ||
+          createHash('sha256').update(answer.text).digest('hex') !== input.responseSha256 ||
+          messages.slice(original + 1, user).some(m => m.role === 'assistant') ||
+          messages.some(m => m.streamingMarker) || activity.strength !== 'none' || dom.actionableAlert ||
+          !dom.conversationSurfaceAvailable || !dom.submittedUserFound || dom.laterUserFound ||
+          controls.nodesTruncated || controls.nodes.some(n => ['dialog', 'alertdialog'].includes(n.role)) ||
+          !controls.nodes.some(n => n.role === 'textbox' && n.editable && !n.disabled) ||
+          binding.bindingEpoch !== after.bindingEpoch) {
+        throw new SessionPlaneDomainError('provider.failure-unverified',
+          'Exact idle manual follow-up and unchanged answer are not verified; original tracking remains unchanged');
+      }
+      return { pageKey: session.pageKey!, conversationId: session.conversationId!,
+        bindingEpoch: after.bindingEpoch, observedAt: controls.capturedAt };
+    });
   }
 
   async reconcileFailure(input: PreparationOwner & { readonly decisionId: string }) {

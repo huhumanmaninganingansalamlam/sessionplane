@@ -1018,6 +1018,56 @@ export class SubmissionService {
     }
   }
 
+  async reconcileFollowup(
+    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number;
+      readonly decisionId: string; readonly followupUserMessageId: string; readonly responseMessageId: string;
+      readonly responseSha256: string; readonly followupCompleted: true },
+    observe: (snapshot: SessionSnapshot) => Promise<{ readonly pageKey: string; readonly conversationId: string;
+      readonly bindingEpoch: number; readonly observedAt: string }>,
+  ) {
+    const method = 'session.manual-followup.reconcile';
+    const { clientId, decisionId, ...payload } = input;
+    const receipts = new ReceiptRepository(this.#database);
+    return await this.#scheduler.actorFor(input.sessionId).enqueue(async () => {
+      if (receipts.get(clientId, decisionId) !== null) return receipts.execute({ clientId, requestId: decisionId,
+        method, payload, operation: () => { throw new Error('Existing receipt must replay'); } });
+      const outbox = this.#outbox.getByRequest(clientId, input.requestId);
+      const snapshot = this.#requireSnapshot(input.sessionId);
+      if (!outbox || outbox.sessionId !== input.sessionId || outbox.generation !== input.generation ||
+          snapshot.generation !== input.generation) throw new SessionPlaneDomainError(
+        'session.generation-superseded', 'Follow-up reconciliation requires the exact current request');
+      this.#requireActiveRoleSession(snapshot);
+      if (input.followupCompleted !== true || snapshot.provider !== 'chatgpt' || snapshot.terminal ||
+          snapshot.submissionState !== 'submitted' || !snapshot.promptSubmitted || !snapshot.submittedUserMessageId ||
+          !snapshot.pageKey || !snapshot.conversationId || snapshot.responseMessageId !== null || snapshot.answerText !== null) {
+        throw new SessionPlaneDomainError('provider.failure-unverified', 'Requires an unresolved acknowledged request and explicitly confirmed manual follow-up');
+      }
+      return await this.#pageMutex.runExclusive(snapshot.pageKey, async () => {
+        const evidence = await observe(snapshot);
+        if (evidence.pageKey !== snapshot.pageKey || evidence.conversationId !== snapshot.conversationId) {
+          throw new SessionPlaneDomainError('session.page-identity-unverified', 'Manual follow-up page changed');
+        }
+        const result = receipts.execute({ clientId, requestId: decisionId, method, payload, operation: () => {
+          const timestamp = this.#now().toISOString();
+          if (!this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
+            sessionState: 'cancelled', providerState: 'unknown', observationTransport: 'fresh', nextCheckAt: null,
+            completedAt: timestamp, errorCode: null, reason: 'manual-followup-reconciled',
+          }, timestamp)) throw new SessionPlaneDomainError('session.generation-superseded', 'Request changed during reconciliation');
+          const proof = { ...evidence, originalUserMessageId: snapshot.submittedUserMessageId,
+            followupUserMessageId: input.followupUserMessageId, responseMessageId: input.responseMessageId,
+            responseSha256: input.responseSha256, completionSource: 'explicit-user-confirmation' };
+          this.#events.append({ teamId: snapshot.teamId, roleId: snapshot.roleId, sessionId: snapshot.sessionId,
+            generation: snapshot.generation, eventType: 'generation.manual-followup-reconciled',
+            payload: { requestRef: outbox.outboxId, receiptId: decisionId, evidence: proof }, createdAt: timestamp });
+          return { requestOk: true, requestRef: outbox.outboxId, sessionId: snapshot.sessionId,
+            generation: snapshot.generation, disposition: 'tracking-cancelled', providerMutation: false, evidence: proof };
+        } });
+        this.#scheduler.refreshSession(snapshot.sessionId);
+        return result;
+      });
+    });
+  }
+
   async reconcileFailure(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string },
     observe: (snapshot: SessionSnapshot) => Promise<{
@@ -1450,6 +1500,7 @@ export class SubmissionService {
           payload.authorizedResend === undefined)) throw new SessionPlaneDomainError(
         'session.generation-superseded', 'Authorized resend source is no longer current');
       if (authorizedOriginal === undefined && !['created', 'ready', 'complete'].includes(session.sessionState) &&
+          !(session.sessionState === 'cancelled' && this.#requireSnapshot(sessionId).reason === 'manual-followup-reconciled') &&
           !(session.sessionState === 'failed' &&
             this.#requireSnapshot(sessionId).reason === 'thinking-failed-reconciled' &&
             this.#requireSnapshot(sessionId).errorCode === 'provider.execution-failed')) {
