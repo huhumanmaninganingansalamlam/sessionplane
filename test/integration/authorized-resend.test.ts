@@ -80,12 +80,17 @@ test(`explicit refresh reopens a missing conversation with a stale ${staleState}
     const blankBinding = service.pageRegistry.identifyPage(blank, 'unrelated-existing-blank-target');
     let creations = 0, navigations = 0, reloads = 0;
     let wrongConversation = true;
+    let navigationFailure = false;
     const browser = { createPage: async () => {
       creations++;
       let currentUrl = 'about:blank', pageClosed = false;
       const page = Object.assign(new EventEmitter(), { url: () => currentUrl, isClosed: () => pageClosed,
         close: async () => { pageClosed = true; page.emit('close'); },
-        goto: async (target: string) => { navigations++; currentUrl = wrongConversation ? 'https://chatgpt.com/c/other-conversation' : target; },
+        goto: async (target: string) => {
+          navigations++;
+          if (navigationFailure) throw new Error('page.goto: net::ERR_CONNECTION_RESET at https://secret:credential@chatgpt.com/c/private?token=secret\nCall log: private detail');
+          currentUrl = wrongConversation ? 'https://chatgpt.com/c/other-conversation' : target;
+        },
       }) as unknown as Page;
       return { page, binding: service.pageRegistry.identifyPage(page, `new-target-${creations}`) };
     } } as unknown as BrowserOwner;
@@ -135,6 +140,16 @@ test(`explicit refresh reopens a missing conversation with a stale ${staleState}
       takenClosed = true;
       taken.emit('close');
     }
+    navigationFailure = true;
+    await assert.rejects(callRpc(config.socketPath, 'workflow.decide', refresh), error => {
+      assert.match(String(error), /during navigate: page.goto: net::ERR_CONNECTION_RESET/);
+      assert.doesNotMatch(String(error), /secret|credential|private detail/);
+      return true;
+    });
+    assert.deepEqual(service.teamDirectory.getSession(session.sessionId), failed);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(savedFailure.outbox_id), savedFailure);
+    assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).length, 1, 'Failed navigation closes only its new page');
+    navigationFailure = false;
     await callRpc(config.socketPath, 'workflow.decide', refresh);
     const restored = service.teamDirectory.getSession(session.sessionId);
     binding = service.pageRegistry.getBinding(restored.pageKey!);
@@ -152,7 +167,7 @@ test(`explicit refresh reopens a missing conversation with a stale ${staleState}
     assert.deepEqual(service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(session.sessionId), savedFirst);
     assert.deepEqual(service.pageRegistry.getBinding(blankBinding.pageKey), blankBinding, 'The existing blank page is neither navigated nor assigned to this request');
     await callRpc(config.socketPath, 'workflow.decide', refresh);
-    assert.equal(creations, 2);
+    assert.equal(creations, 3);
     assert.equal(reloads, 1, 'Repeating the recovery action receipt does not reload twice');
     assert.equal(fake.submitCount, 1, 'Page recovery never sends the failed review');
     await assert.rejects(service.submissionService.send(failedSend), /failed before provider submission/);

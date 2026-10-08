@@ -456,7 +456,7 @@ export class RecoveryService {
         }, 'generation.restart-page-rebound');
         return result(updated, { rebound: true });
       } catch (error) {
-        if (explicitFailedPreparation) return result(snapshot, { unavailable: true });
+        if (explicitFailedPreparation) throw explicitPageRecoveryError(error, 'bind-existing-page');
         return await this.#recordUnavailable(snapshot, classifyPageFailure(error));
       }
     }
@@ -505,9 +505,11 @@ export class RecoveryService {
       return result(snapshot, { unavailable: true });
     }
     let createdPage: Page | null = null;
+    let stage = 'create-page';
     try {
       const created = await this.#browserOwner.createPage();
       createdPage = created.page;
+      stage = 'reserve-page';
       this.#pageRegistry.reservePage(created.binding.pageKey, {
         sessionId: snapshot.sessionId,
         generation: snapshot.generation,
@@ -518,7 +520,9 @@ export class RecoveryService {
         redirectId ?? conversationId,
         this.#providerUrls,
       );
+      stage = 'navigate';
       await this.#navigatePage(created.page, target);
+      stage = 'verify-page';
       const navigated = this.#pageRegistry.refreshPage(created.binding.pageKey);
       if (explicitFailedPreparation) {
         const current = this.#sessions.getSnapshot(snapshot.sessionId);
@@ -544,11 +548,13 @@ export class RecoveryService {
         createdPage = null;
         return result(updated, { opened: true });
       }
+      stage = 'bind-page';
       this.#pageRegistry.bindPage(created.binding.pageKey, {
         sessionId: snapshot.sessionId,
         generation: snapshot.generation,
         conversationId,
       });
+      stage = 'record-page';
       const updated = await this.#recordPageState(snapshot, {
         pageKey: created.binding.pageKey,
         observationTransport: 'fresh',
@@ -559,7 +565,14 @@ export class RecoveryService {
       return result(updated, { opened: true, rebound: true });
     } catch (error) {
       await createdPage?.close().catch(() => undefined);
-      if (explicitFailedPreparation) return result(snapshot, { unavailable: true });
+      if (explicitFailedPreparation) {
+        const failure = explicitPageRecoveryError(error, stage);
+        this.#logger?.warn('recovery.explicit-page-failed', {
+          sessionId: snapshot.sessionId, generation: snapshot.generation,
+          ...(failure.details as Record<string, unknown>),
+        });
+        throw failure;
+      }
       return await this.#recordUnavailable(snapshot, classifyPageFailure(error));
     }
   }
@@ -717,6 +730,17 @@ function classifyPageFailure(error: unknown): string {
       : 'restart-page-identity-unverified';
   }
   return 'restart-page-unavailable';
+}
+
+function explicitPageRecoveryError(error: unknown, stage: string): SessionPlaneDomainError {
+  // Navigation exceptions can contain URL credentials/query values and call logs.
+  // Retain the first-line cause, without exporting those values or a stack trace.
+  const causeMessage = (error instanceof Error ? error.message : 'Unknown page recovery failure')
+    .split('\n')[0]!.replace(/https?:\/\/[^\s"']+/g, '[navigation URL]').slice(0, 500);
+  return new SessionPlaneDomainError('browser.unavailable',
+    `Exact request conversation page could not be recovered during ${stage}: ${causeMessage}`, {
+      stage, causeName: error instanceof Error ? error.name : 'UnknownError', causeMessage,
+    });
 }
 
 function result(

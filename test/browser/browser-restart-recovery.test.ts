@@ -11,10 +11,59 @@ import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 
 interface TeamSnapshot {
   readonly teamId: string;
 }
+
+test('explicit failed preparation uses real background creation and default navigation without submitting', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-explicit-navigation-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake], logger: silentLogger() });
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'explicit-navigation-owner' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: team.primaryRoleKey, provider: 'chatgpt' });
+    const clientId = `team:${team.teamId}`;
+    const first = await service.submissionService.send({ clientId, requestId: 'previous-review', sessionId: session.sessionId,
+      prompt: 'Previous fixture review', sessionDeadlineSec: 600 });
+    service.observationService.stop(session.sessionId, 1);
+    await service.actorScheduler.updateGeneration(session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
+      completedAt: new Date().toISOString(), responseMessageId: 'previous-answer', answerText: 'done' });
+    fake.prepareError = new ProviderSubmissionError('browser.unavailable', 'Missing original page');
+    await assert.rejects(service.submissionService.send({ clientId, requestId: 'failed-review', sessionId: session.sessionId,
+      prompt: 'Unsubmitted fixture review', sessionDeadlineSec: 600 }), /Missing original page/);
+    const failed = service.teamDirectory.getSession(session.sessionId);
+    const saved = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId);
+    const blank = service.pageRegistry.listBindings({ includeClosed: false })[0]!;
+    const context = service.pageRegistry.pageForObservation(blank.pageKey).context();
+    const url = `https://chatgpt.com/c/${encodeURIComponent(first.conversationId!)}`;
+    // The production navigation is unchanged; only the isolated browser's transport is mocked.
+    await context.setOffline(true);
+    let fulfilled = 0;
+    await context.route('**/*', async route => {
+      if (route.request().url() !== url) { await route.abort('blockedbyclient'); return; }
+      await route.fulfill({ status: 200, contentType: 'text/html', body: '<main>Exact existing conversation</main>' });
+      fulfilled++;
+    });
+    await service.recoveryService.ensurePage(session.sessionId, 2, { openMissing: true });
+    const restored = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(fulfilled, 1);
+    assert.equal(restored.conversationId, failed.conversationId);
+    assert.equal(restored.generation, 2);
+    assert.equal(restored.submissionState, 'failed_pre_submit');
+    assert.equal(restored.promptSubmitted, false);
+    const binding = service.pageRegistry.getBinding(restored.pageKey!);
+    assert.equal(binding.url, url);
+    assert.equal(binding.sessionId, session.sessionId);
+    assert.equal(binding.generation, 2);
+    assert.equal(await service.pageRegistry.pageForObservation(binding.pageKey).locator('main').innerText(), 'Exact existing conversation');
+    assert.equal(service.pageRegistry.getBinding(blank.pageKey).url, 'about:blank');
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId), saved);
+    assert.equal(fake.submitCount, 1);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('browser disconnect recovers the exact conversation without resending and quarantines duplicates', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-restart-'));
