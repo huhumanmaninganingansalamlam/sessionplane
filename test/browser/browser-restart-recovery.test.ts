@@ -17,6 +17,48 @@ interface TeamSnapshot {
   readonly teamId: string;
 }
 
+test('startup leaves missing prepared pages closed; explicit concurrent recovery reuses one page', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-prepared-fanout-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    recoveryNavigatePage: navigateFixture, logger: silentLogger() });
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'prepared-fanout' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: team.primaryRoleKey, provider: 'chatgpt' });
+    const clientId = `team:${team.teamId}`;
+    await service.submissionService.send({ clientId, requestId: 'prior-turn', sessionId: session.sessionId,
+      prompt: 'Previous fixture turn', sessionDeadlineSec: 600 });
+    service.observationService.stop(session.sessionId, 1);
+    await service.actorScheduler.updateGeneration(session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
+      completedAt: new Date().toISOString(), responseMessageId: 'prior-answer', answerText: 'done' });
+    fake.prepareError = new ProviderSubmissionError('provider.preparation-required', 'Choose the model before submitting');
+    await assert.rejects(service.submissionService.send({ clientId, requestId: 'pending-turn', sessionId: session.sessionId,
+      prompt: 'Unsubmitted draft', sessionDeadlineSec: 600 }), { errorCode: 'provider.preparation-required' });
+    const prepared = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(prepared.submissionState, 'prepared');
+    assert.equal(prepared.promptSubmitted, false);
+    const saved = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId);
+    const before = service.pageRegistry.listBindings({ includeClosed: false }).length;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const report = await service.recoveryService.restore({ forceObservers: true });
+      assert.equal(report.opened, 0, 'startup must not fan out unopened, unsubmitted preparations');
+      assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).length, before);
+    }
+    await Promise.all([0, 1].map(() => service.recoveryService.ensurePage(session.sessionId, 2, { openMissing: true })));
+    const restored = service.teamDirectory.getSession(session.sessionId);
+    const page = service.pageRegistry.pageForObservation(restored.pageKey!);
+    await page.evaluate(() => { const input = document.createElement('textarea'); input.value = 'User draft retained'; document.body.append(input); });
+    const report = await service.recoveryService.restore({ forceObservers: true });
+    assert.equal(report.opened, 0);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).pageKey, restored.pageKey);
+    assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).length, before + 1);
+    assert.equal(await page.locator('textarea').inputValue(), 'User draft retained');
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId), saved);
+    assert.equal(fake.submitCount, 1, 'recovery never dispatches the pending question');
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('explicit failed preparation uses real background creation and default navigation without submitting', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-explicit-navigation-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
@@ -704,6 +746,7 @@ test('failed restart navigation closes the newly reserved recovery Page', async 
     await rpc(config.socketPath, 'system.defer_account_cooldown', {
       requestId: 'isolated-recovery-cooldown', observedAt: new Date().toISOString(),
       until: new Date(Date.now() + 60_000).toISOString(), evidenceRef: 'isolated-fixture-429',
+      scope: 'chatgpt:default',
     });
     await assert.rejects(service.recoveryService.ensurePage(submitted.sessionId, submitted.generation, { openMissing: true }),
       { errorCode: 'provider.observation-deferred' });

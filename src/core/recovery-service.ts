@@ -233,7 +233,10 @@ export class RecoveryService {
         (shouldRecoverPage(snapshot) || isPendingPreparation(snapshot) ||
           snapshot.submissionState === 'failed_pre_submit')
       ) {
-        const reconciled = await this.#reconcilePage(snapshot);
+        // Startup reattaches retained preparation pages, but only attempted
+        // submissions need a missing page reopened for answer recovery.
+        // Unsubmitted work can reopen its exact conversation explicitly.
+        const reconciled = await this.#reconcilePage(snapshot, shouldRecoverPage(snapshot));
         snapshot = reconciled.snapshot;
         rebound += reconciled.rebound ? 1 : 0;
         opened += reconciled.opened ? 1 : 0;
