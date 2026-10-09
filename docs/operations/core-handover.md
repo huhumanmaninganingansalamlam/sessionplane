@@ -133,9 +133,12 @@ Re-run the **same preflight command and identity arguments**, appending:
 
 This is the only mutating mode. It creates a private local receipt directory,
 backs up the installed package and makes an integrity-checked SQLite backup,
-installs the pinned package at the existing npm prefix, verifies package bytes
-and the installed MCP catalog, rechecks drain/identity, and replaces only the
-pinned core. It retains the original command/cwd/environment. The database is
+installs and verifies the candidate in a separate same-filesystem staging prefix,
+rechecks drain/identity, and terminates only the pinned core. Only after that core
+is confirmed exited does it move the old package directory into the staging
+rollback location and promote the verified candidate to the original path.
+The global executable symlink and invocation path stay unchanged. These are two
+directory renames during the core outage, not an atomic admission fence. It retains the original command/cwd/environment. The database is
 never overwritten or manually edited.
 
 Do not repeat an issued handover: an existing `local-receipt/` causes the script
@@ -166,9 +169,15 @@ request shape.
 ## Failure and rollback boundaries
 
 - Before installation: original package/core are unchanged. Let active work drain.
-- After installation but before transition: the old core may still run while
-  package files are updated. Inspect `install.log` and health; do not signal it
-  or issue another install blindly.
+- After staging but before transition: the running package is untouched.
+  `staging.json` identifies the candidate and `abort-locks.json` preserves a final
+  lock-guard failure. Keep these records and do not repeat blindly. Read-only
+  SQLite connections, including backup connections, are explicitly closed.
+- After core exit but during promotion: inspect `promotion.json`. A caught
+  candidate-rename failure restores the previous installation path; it does not
+  restart the old core. A process interruption between renames requires checking
+  the recorded paths first. Never overwrite a live installation or start a
+  duplicate core to conceal a partial transition.
 - After transition: inspect `successor.json`, `core.log` and current health. Never
   launch a duplicate core or terminate a live successor to force a result. An
   adoption failure is an outage, not success. Preserve the browser and fix the
@@ -188,6 +197,77 @@ request shape.
   runtime requires resolving the same browser-health risk first. Do not delete
   ownership files, change identifiers, bypass a denied request or restore the DB
   merely to obtain a ready result.
+
+## Diagnose a lock without executing the handover
+
+The old helper rejected every `WRITE` entry for a DB, WAL or SHM inode with a
+single message and did not retain the matching line. That message alone cannot
+prove a data writer, its owner, or its occurrence time. If the old run did not
+save the raw line, leave its historical lock classification unknown.
+
+This separate command reads only filesystem and `/proc` metadata. It opens no
+SQLite connection, calls no core method and sends no signal:
+
+```sh
+python3 scripts/ops/handover.py locks --database "$confirmed_db_path"
+```
+
+Return one timestamped report containing the exact inode/path mapping and each
+matching raw lock row, lock class/mode, holder PID/UID/comm/start ticks, waiting
+flag, and byte range. An unavailable/exited holder stays unknown. No command
+arguments, environment, authentication data or conversation content is read.
+
+For the SQLite Unix WAL layout, SHM byte 120 is the writer lock, 121 checkpoint,
+122 recovery, 123..127 read marks, and 128 shared-memory initialization control.
+An exclusive read-mark or initialization lock is not proof of a data transaction.
+Queued lock requests are also distinguished from held locks. The classification
+is diagnostic: exclusive/unknown lock activity still blocks handover. No offset,
+PID, wait duration, or threshold exception was added. Normal shared `READ` locks
+were already allowed. Isolated real WAL tests distinguish an idle/read transaction
+from `BEGIN IMMEDIATE`, and retain the writer's exact PID and range.
+
+Preflight lock failures emit the report to stderr. Failures in the final guard
+also save `abort-locks.json`. A later sample is current evidence, not a substitute
+for the missing original event. Preserve guard failure evidence and identify the
+actual owner before any further handover attempt.
+
+## Continue a legacy install-before-guard abort
+
+The legacy helper could update global package files and then abort before the
+core signal. That is **partial installation**, not a completed rollout: the
+same process can retain previously loaded modules while disk bytes are newer.
+Do not infer its running source SHA from the on-disk package or version `0.4.2`.
+Do not roll files back underneath that live process.
+
+After collecting the original receipt and lock evidence, the revised helper can
+check this specific case without discarding the old receipt. Add these arguments
+to the same exact-identity **preflight** command:
+
+```sh
+--resume-pre-signal "$handover_bundle/local-receipt" \
+--receipt-dir "$handover_bundle/recovery-attempt-1"
+```
+
+It requires all of the following: the original core PID/start time and browser
+identity still match `before-health.json`; `handover.json`, `successor.json` and
+`promotion.json` are absent; the previous package/DB backups exist; the original
+request and anchor match `before-identity.json`; and the current installed files
+and catalog match the pinned candidate exactly. A mixed installation, changed
+owner, or ambiguous signal history is rejected. These checks do not prove the
+unrecorded historical lock type.
+
+Existing issuers may have resumed after the abort. **Obtain a new coordinated
+quiesce interval** before adding `--issuers-quiesced --apply`. This stages a
+verified candidate without rewriting the current package and uses a distinct
+receipt directory. It references the old receipt; it never deletes or overwrites
+it. The original legacy `previous-install.tgz` remains the pre-upgrade rollback,
+whereas the new attempt's backup reflects the current on-disk installation.
+No DB restoration, budget reset, new generation or resend is part of resumption.
+
+If a newer attempt also aborts, inspect its recorded phase and preserve its
+staging/rollback evidence. Do not select a fresh receipt name just to bypass an
+unresolved failure. Only remove staging after operational verification and the
+required evidence retention have completed.
 
 ## Resume exact answer collection separately
 
