@@ -93,7 +93,12 @@ export class ExactFinalTracker {
     if (candidate.terminalMarker) {
       return complete(candidate.responseMessageId, text, 'dom-terminal-marker');
     }
+    if (evidence.activity === 'weak') {
+      this.#reset();
+      return decision('progress', 'provider-activity-prevents-quiet-final');
+    }
     if (evidence.activity === 'unknown') {
+      this.#reset();
       return decision('unverified', 'activity-observation-unknown');
     }
     if (nowMs - this.#stableSinceMs >= this.#quietWindowMs) {

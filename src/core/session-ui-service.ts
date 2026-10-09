@@ -10,6 +10,8 @@ import { SessionPlaneDomainError } from '../domain/errors.ts';
 import { ProviderSubmissionError, type PreparationPurpose, type PreparationTarget } from '../providers/provider-adapter.ts';
 import { CHATGPT_PREPARATION_SNAPSHOT, CHATGPT_COMPOSER_SELECTOR } from '../providers/chatgpt/selectors.ts';
 import { composerHasExactValue, inspectChatGptSubmissionCandidates, inspectChatGptPageReady, prepareChatGptObservation } from '../providers/chatgpt/submission.ts';
+import { observeChatGptDialog } from '../providers/chatgpt/dialog-observer.ts';
+import { ExactFinalTracker } from '../providers/chatgpt/exact-final.ts';
 import { observeChatGptActivity } from '../providers/chatgpt/activity-observer.ts';
 import { restoreLatestPosition } from '../providers/chatgpt/latest-position-recovery.ts';
 import { readChatGptMessages } from '../providers/chatgpt/message-dom.ts';
@@ -20,6 +22,7 @@ export class SessionUiService {
   readonly #submissions: SubmissionService;
   readonly #registry: PageRegistry;
   readonly #chatgptOrigin: string;
+  readonly #quietWindowMs: number;
   readonly #refs = new BrowserRefSnapshotStore();
   #catalog: ConfigurationCatalog | null = null;
   readonly #discoveryFailures = new Map<string, ConfigurationCatalog>();
@@ -71,10 +74,11 @@ export class SessionUiService {
       }
   }
 
-  constructor(input: { submissions: SubmissionService; registry: PageRegistry; chatgptUrl: string }) {
+  constructor(input: { submissions: SubmissionService; registry: PageRegistry; chatgptUrl: string; quietWindowMs?: number }) {
     this.#submissions = input.submissions;
     this.#registry = input.registry;
     this.#chatgptOrigin = new URL(input.chatgptUrl).origin;
+    this.#quietWindowMs = input.quietWindowMs ?? 1_500;
   }
 
   isSubmissionPageLost(session: SessionSnapshot): boolean {
@@ -500,11 +504,11 @@ export class SessionUiService {
   }
 
   /** Caller holds the current request actor and exact page mutation lock. */
-  async latest(session: SessionSnapshot) {
+  async latest(session: SessionSnapshot, pageOwner = session) {
     const target = latestDisplayTarget(session);
     if (target === null) throw new SessionPlaneDomainError('session.recovery-unavailable',
       'Latest display requires the current exact completed answer or unresolved submitted anchor');
-    const page = this.#requirePage(session);
+    const page = this.#requirePage(pageOwner);
     const mounted = async () => (await readChatGptMessages(page)).some(message =>
       message.role === target.role && [message.messageId, message.turnId].some(id => id !== null && target.ids.includes(id)));
     let outcome: 'already-present' | 'clicked' | 'not-dispatched' = 'already-present';
@@ -517,13 +521,54 @@ export class SessionUiService {
       });
       outcome = clicked ? 'clicked' : 'not-dispatched';
     }
-    this.#requirePage(session);
+    this.#requirePage(pageOwner);
     return { pageKey: session.pageKey, conversationId: session.conversationId,
       responseMessageId: session.responseMessageId, displayOutcome: outcome,
       displayTarget: target.role === 'user' ? 'submitted-anchor' : 'completed-answer',
       ...(target.role === 'user' ? { anchorPresent: await mounted() } : { responseMounted: await mounted() }),
       ...(outcome !== 'not-dispatched' ? {} : { reason: 'display-guard-or-latest-control-unavailable',
         message: 'No click: preserve draft, selection, active generation and alerts; a unique enabled latest-position button must be visible.' }) };
+  }
+
+  /** Read the original turn under the current prepared generation's ownership.
+   * Return separate evidence; never rewrite either generation or its stored answer.
+   */
+  async recoverHistoricalAnswer(original: SessionSnapshot, owner: SessionSnapshot) {
+    const display = await this.latest({ ...original, terminal: false, responseMessageId: null }, owner);
+    const page = this.#requirePage(owner);
+    const binding = this.#registry.refreshPage(owner.pageKey!);
+    const tracker = new ExactFinalTracker(this.#quietWindowMs);
+    const observe = async () => {
+      this.#requirePage(owner);
+      const dom = await observeChatGptDom(page, original);
+      const activity = await observeChatGptActivity(page, dom);
+      const dialog = await observeChatGptDialog(page);
+      this.#requirePage(owner);
+      const after = this.#registry.refreshPage(owner.pageKey!);
+      const idleExact = binding.bindingEpoch === after.bindingEpoch && dom.submittedUserFound &&
+        !dom.laterUserFound && !dom.actionableAlert && activity.strength === 'none';
+      return tracker.evaluate({ provider: 'chatgpt', pageKey: owner.pageKey!, bindingEpoch: after.bindingEpoch,
+        observedAt: new Date().toISOString(), conversationId: original.conversationId,
+        submittedUserFound: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
+        candidate: dom.candidate, activity: activity.strength, dialogKind: dialog.kind, networkActivity: false,
+        observationTransport: idleExact ? 'fresh' : 'unavailable', reason: 'historical-turn-not-idle-exact' }, performance.now());
+    };
+    let recovered = await observe();
+    if (recovered.kind === 'progress' && recovered.reason === 'assistant-candidate-stabilizing') {
+      await page.waitForTimeout(this.#quietWindowMs);
+      recovered = await observe();
+    }
+    if (recovered.kind === 'complete' && recovered.responseMessageId === original.responseMessageId &&
+        recovered.answerText === original.answerText?.trim()) {
+      recovered = { kind: 'unverified', responseMessageId: null, answerText: null,
+        reason: 'historical-answer-unchanged', freshExactProgress: false };
+    }
+    return { ...display, historical: true, bindingGeneration: owner.generation,
+      storedResult: { responseMessageId: original.responseMessageId, answerText: original.answerText, reason: original.reason },
+      answerRecovery: { observedAt: new Date().toISOString(), conversationId: original.conversationId,
+        submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId,
+        responseMessageId: recovered.responseMessageId, answerText: recovered.answerText,
+        terminal: recovered.kind === 'complete', reason: recovered.reason } };
   }
 
   async refresh(input: PreparationOwner & { readonly decisionId: string }): Promise<void> {

@@ -41,6 +41,7 @@ export const CHATGPT_SELECTORS = {
     'button[aria-label="Stop generating"]',
     'button[aria-label="Stop streaming"]',
     'button[aria-label="생성 중지"]',
+    'button[aria-label="중지"]',
   ],
   thinkingIndicators: [
     '[data-testid*="thinking"]',

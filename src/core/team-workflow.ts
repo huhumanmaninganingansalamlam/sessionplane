@@ -201,13 +201,13 @@ export class TeamWorkflow {
     }
     if (input.decision === 'latest') {
       if (this.services.receipts.get(request.clientId, input.requestId) === null) {
-        const current = this.#role({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}` });
-        if (latestDisplayTarget(current) === null) {
+        const { current, original } = this.#latestRequest(request);
+        if (latestDisplayTarget(original ?? current) === null) {
           throw new SessionPlaneDomainError('session.recovery-unavailable', 'Latest display requires the current exact completed answer or unresolved submitted anchor');
         }
         // Completed generations are not rebound during startup. Recover only
         // the retained conversation page, without opening or navigating one.
-        await this.services.ensurePage(request.sessionId, request.generation, { openMissing: false });
+        await this.services.ensurePage(request.sessionId, current.generation, { openMissing: false });
       }
       return await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
         const method = 'workflow.latest';
@@ -220,14 +220,15 @@ export class TeamWorkflow {
           if (prior.status === 'complete') return JSON.parse(prior.resultJson) as Record<string, unknown>;
           throw new SessionPlaneDomainError('provider.action-unknown', 'Latest display was attempted; inspect this request without repeating the action');
         }
-        const session = this.#role({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}` });
+        const { current: session } = this.#latestRequest(request);
         if (session.pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'No connected request page');
         return await this.services.pageMutex.runExclusive(session.pageKey, async () => {
-          const current = this.#role({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}` });
+          const { current, original } = this.#latestRequest(request);
           this.services.receipts.record({ ...receipt, status: 'attempted', result: { requestRef: input.requestRef } });
-          const displayed = await this.services.ui.latest(current);
+          const displayed = original === null ? await this.services.ui.latest(current)
+            : await this.services.ui.recoverHistoricalAnswer(original, current);
           const result = { requestOk: true, requestRef: input.requestRef, sessionId: current.sessionId,
-            generation: current.generation, ...displayed };
+            generation: request.generation, ...displayed };
           this.services.receipts.record({ ...receipt, status: 'complete', result });
           return result;
         });
@@ -363,6 +364,26 @@ export class TeamWorkflow {
     if (session.conversationId === null) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'No bound provider conversation exists');
     return await this.services.cleanup.delete({ ...ownerOf(request), requestId: input.requestId,
       conversationId: session.conversationId, outputsRetrieved: input.outputsRetrieved });
+  }
+
+  #latestRequest(request: OutboxRecord): { current: SessionSnapshot; original: SessionSnapshot | null } {
+    const snapshot = this.services.directory.getSession(request.sessionId);
+    const current = this.#role({ teamId: request.teamId, roleRef: `${request.sessionId}:${snapshot.generation}` });
+    if (current.generation === request.generation) return { current, original: null };
+    const previous = this.#sessions.getGenerationResult(request.sessionId, request.generation);
+    const ack = JSON.parse(request.resultJson ?? '{}');
+    // Only the immediately following, never-submitted preparation may own this
+    // historical page. An ACK and the immutable result must agree on identity.
+    if (current.generation !== request.generation + 1 || !needsDecision(current) || current.promptSubmitted ||
+        current.submittedUserMessageId !== null || current.submittedUserTurnId !== null || current.responseMessageId !== null ||
+        previous?.reason !== 'dom-quiet-stable-final' || previous.completedAt === null || previous.errorCode !== null ||
+        !previous.promptSubmitted || previous.submissionState !== 'submitted' || previous.submittedUserMessageId === null ||
+        ack.sessionId !== request.sessionId || ack.generation !== request.generation ||
+        ack.conversationId == null || ack.conversationId !== current.conversationId ||
+        ack.submittedUserMessageId !== previous.submittedUserMessageId || ack.submittedUserTurnId !== previous.submittedUserTurnId) {
+      throw new SessionPlaneDomainError('session.generation-superseded', 'Historical answer recovery requires the exact original ACK and its immediately following unsubmitted preparation');
+    }
+    return { current, original: { ...current, ...previous, sessionState: 'complete', providerState: 'complete', terminal: true } };
   }
 
   #request(input: Identity) {

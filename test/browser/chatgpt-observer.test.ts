@@ -564,6 +564,12 @@ test('background ChatGPT Page yields exact DOM, dialog, and network evidence wit
       });
       assert.equal(await wakeForFinal, 'dom');
 
+      // Current Korean Stop has no legacy test ID. It must still prevent
+      // quiet finalization while exact terminal markers remain authoritative.
+      await target.page.locator('[data-testid="stop-button"]').evaluate(button => {
+        button.removeAttribute('data-testid');
+        button.setAttribute('aria-label', '중지');
+      });
       const finished = await source.observe();
       assert.equal(finished.dialogKind, null);
       assert.equal(finished.activity, 'weak', 'the leftover stop control is not exact strong activity');
@@ -585,7 +591,7 @@ test('background ChatGPT Page yields exact DOM, dialog, and network evidence wit
       await target.page.evaluate(() => {
         document.querySelector('[role="dialog"]')?.remove();
         document.querySelector('#assistant-message')?.remove();
-        document.querySelector('[data-testid="stop-button"]')?.remove();
+        document.querySelector('button[aria-label="중지"]')?.remove();
       });
       await source.observe();
       const networkWake = source.waitForWake(1_000);

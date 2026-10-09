@@ -23,27 +23,19 @@ test('exact final accepts a terminal assistant only after the exact submitted us
   assert.equal(result.answerText, 'Final answer');
 });
 
-test('quiet stability can finish despite an unverified stale stop control', () => {
+test('Stop or thinking cannot quiet-finalize an announcement; idle stability starts after activity ends', () => {
   const tracker = new ExactFinalTracker(1_000);
-  const candidate = {
-    responseMessageId: 'assistant-stable',
-    answerText: 'Stable answer',
-    terminalMarker: false,
-    streamingMarker: false,
-  } as const;
-
-  assert.equal(
-    tracker.evaluate(evidence({ candidate, activity: 'weak' }), 0).kind,
-    'progress',
-  );
-  assert.equal(
-    tracker.evaluate(evidence({ candidate, activity: 'weak' }), 999).kind,
-    'progress',
-  );
-  assert.equal(
-    tracker.evaluate(evidence({ candidate, activity: 'weak' }), 1_000).kind,
-    'complete',
-  );
+  const candidate = { responseMessageId: 'announcement', answerText: 'I will inspect the evidence.',
+    terminalMarker: false, streamingMarker: false };
+  for (const now of [0, 999, 10_000]) {
+    const result = tracker.evaluate(evidence({ candidate, activity: 'weak' }), now);
+    assert.equal(result.kind, 'progress');
+    assert.equal(result.answerText, null);
+  }
+  assert.equal(tracker.evaluate(evidence({ candidate }), 10_001).kind, 'progress');
+  assert.equal(tracker.evaluate(evidence({ candidate }), 11_001).kind, 'complete');
+  assert.equal(new ExactFinalTracker(1_000).evaluate(evidence({ candidate: {
+    ...candidate, terminalMarker: true }, activity: 'weak' }), 0).kind, 'complete');
 });
 
 test('next user turn requires an original terminal candidate; network activity alone is not final', () => {

@@ -343,6 +343,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     submissions: submissionService,
     registry: pageRegistry,
     chatgptUrl: config.chatgptUrl,
+    quietWindowMs: config.observationQuietWindowMs,
   });
   thinkingFailureRecovery = new ThinkingFailureRecovery({ database, submissions: submissionService, ui });
   registerSessionUiMethods(router, ui);
