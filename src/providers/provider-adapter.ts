@@ -78,6 +78,7 @@ export interface ProviderSubmission {
   readonly provider: string;
   readonly pageKey: string;
   prepareForObservation?(): Promise<void>;
+  readonly preparationStage?: string;
   prepare(choices?: PreparationChoices): Promise<void>;
   abandon(): void;
   submitOnce(): Promise<void>;

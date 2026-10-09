@@ -638,7 +638,7 @@ export class SubmissionService {
     }
 
     this.#persistPageKey(actor, prepared.outbox, submission.pageKey);
-    return await this.#pageMutex.runExclusive(submission.pageKey, async () => {
+    return await this.#pageMutex.runExclusive(submission.pageKey, async retainUntil => {
       const stageTimeoutMs = Math.min(PROVIDER_STAGE_TIMEOUT_MS, input.sessionDeadlineSec * 1_000);
       const verifyContinuation = async () => {
         if (input.failureContinuation === undefined) return;
@@ -650,10 +650,17 @@ export class SubmissionService {
         await verifyContinuation();
         await this.#verifyAuthorizedResend(this.#requireSnapshot(prepared.outbox.sessionId), input.authorizedResend, false);
         this.#requireAccountReady(this.#requireSnapshot(prepared.outbox.sessionId));
+        const preparation = submission.prepare(choices);
         await withProviderStageTimeout(
-          submission.prepare(choices),
+          preparation,
           stageTimeoutMs,
-          () => submission.abandon(),
+          () => {
+            retainUntil(preparation);
+            submission.abandon();
+            throw new ProviderSubmissionError('browser.unavailable',
+              `Provider browser operation timed out during ${submission.preparationStage ?? 'prepare'}`,
+              { details: { preparationStage: submission.preparationStage ?? 'prepare' } });
+          },
         );
         this.#requireActiveRoleSession(this.#requireSnapshot(prepared.outbox.sessionId));
         await verifyContinuation();
@@ -1823,6 +1830,8 @@ export class SubmissionService {
         payload: {
           errorCode: classified.errorCode,
           promptSubmitted: false,
+          ...(typeof preSubmitDetails(classified.details).preparationStage === 'string'
+            ? { preparationStage: preSubmitDetails(classified.details).preparationStage } : {}),
         },
         createdAt: timestamp,
       });

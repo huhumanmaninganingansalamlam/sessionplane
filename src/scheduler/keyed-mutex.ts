@@ -5,7 +5,7 @@ export class KeyedMutex {
     return this.#tails.has(key);
   }
 
-  async runExclusive<Result>(key: string, operation: () => Promise<Result>): Promise<Result> {
+  async runExclusive<Result>(key: string, operation: (retainUntil: (pending: Promise<unknown>) => void) => Promise<Result>): Promise<Result> {
     const previous = this.#tails.get(key) ?? Promise.resolve();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
@@ -15,13 +15,19 @@ export class KeyedMutex {
     this.#tails.set(key, tail);
 
     await previous;
-    try {
-      return await operation();
-    } finally {
+    let drain: Promise<unknown> | undefined;
+    const finish = () => {
       release();
-      if (this.#tails.get(key) === tail) {
-        this.#tails.delete(key);
-      }
+      if (this.#tails.get(key) === tail) this.#tails.delete(key);
+    };
+    try {
+      return await operation(pending => {
+        // A caller timeout does not cancel a browser command already in flight.
+        drain = Promise.allSettled([drain, pending]);
+      });
+    } finally {
+      if (drain === undefined) finish();
+      else void drain.then(finish);
     }
   }
 }

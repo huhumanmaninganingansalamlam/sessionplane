@@ -52,6 +52,17 @@ export class ChatGptSubmission implements ProviderSubmission {
   readonly #initialUrl: string | null;
   readonly #preparationRefs = new BrowserRefSnapshotStore();
   #sendButton: PreparationElement | null = null;
+  #abandoned = false;
+  #preparationStage = 'not-started';
+
+  get preparationStage(): string { return this.#preparationStage; }
+
+  #checkpoint = (stage: string): void => {
+    if (this.#abandoned) throw new ProviderSubmissionError('browser.unavailable',
+      'Preparation was abandoned; preserve this page and inspect the same request before continuing',
+      { promptSubmitted: false, details: { preparationStage: this.#preparationStage } });
+    this.#preparationStage = stage;
+  };
   #baselineConversationId: string | null = null;
   #baselineUserIds = new Set<string>();
   readonly #preparedPromptHashes = new Set<string>();
@@ -122,12 +133,16 @@ export class ChatGptSubmission implements ProviderSubmission {
   }
 
   async prepareForObservation(): Promise<void> {
+    this.#checkpoint('page-ready');
     if (this.#initialUrl !== null) {
       await navigateProviderPage({ page: this.#page, provider: this.provider, pageKey: this.pageKey, url: this.#initialUrl, timeoutMs: 30_000 });
       this.#registry.refreshPage(this.pageKey);
     }
     this.#requireExactPage();
-    await prepareChatGptObservation(this.#page, this.pageKey);
+    await inspectChatGptPageReady(this.#page, this.pageKey);
+    this.#checkpoint('authentication-observe');
+    await assertChatGptAuthenticated(this.#page);
+    this.#checkpoint('page-ready');
   }
 
   async #resolvePreparationTarget(
@@ -203,7 +218,9 @@ export class ChatGptSubmission implements ProviderSubmission {
   }
 
   async prepare(choices?: PreparationChoices): Promise<void> {
+    this.#checkpoint('page-ready');
     await this.prepareForObservation();
+    this.#checkpoint('composer-resolve');
     const surface = normalizeLabel(this.#request.surface ?? '');
     if (surface === 'work') {
       throw new ProviderSubmissionError(
@@ -222,14 +239,16 @@ export class ChatGptSubmission implements ProviderSubmission {
       throw new ProviderSubmissionError('provider.preparation-required', 'The chosen composer is no longer available');
     }
     if (!(await writeExactComposerValue(this.#page, composer, this.#request.prompt,
-      () => this.#resolvePreparationTarget(choices.composer!, 0)))) {
+      () => this.#resolvePreparationTarget(choices.composer!, 0), this.#checkpoint))) {
       throw new ProviderSubmissionError(
         'provider.preparation-required',
         'The composer did not retain the exact prompt. Inspect the current editor and choose the composer again on this request.',
       );
     }
 
+    this.#checkpoint('configuration-verify');
     await this.#verifyConfiguration(choices);
+    this.#checkpoint('submit-resolve');
 
     if (choices.submit === undefined) {
       throw new ProviderSubmissionError('provider.preparation-required', 'Prompt is prepared; inspect and choose the current submit control');
@@ -245,10 +264,12 @@ export class ChatGptSubmission implements ProviderSubmission {
     if (attachments.length > 0) {
       const currentComposer = await this.#resolvePreparationTarget(choices.composer, 0);
       if (currentComposer === null) throw new ProviderSubmissionError('provider.preparation-required', 'The chosen composer is no longer available');
-      try { await uploadAttachments(this.#page, attachments, currentComposer); }
+      this.#checkpoint('attachments');
+      try { await uploadAttachments(this.#page, attachments, currentComposer, this.#checkpoint); }
       finally { await currentComposer.dispose(); }
     }
 
+    this.#checkpoint('submit-ready');
     const sendButton = await this.#waitForEnabledPreparationTarget(choices.submit, 60_000);
     if (sendButton === null) {
       throw new ProviderSubmissionError('provider.preparation-required', 'The chosen send control is unavailable. Inspect the current page and choose the submit control again on this request.');
@@ -256,6 +277,7 @@ export class ChatGptSubmission implements ProviderSubmission {
     try {
       await this.#verifyConfiguration(choices);
       this.#requireExactPage();
+      this.#checkpoint('prepared');
       this.#sendButton = sendButton;
     } catch (error) {
       await sendButton.dispose();
@@ -264,13 +286,17 @@ export class ChatGptSubmission implements ProviderSubmission {
   }
 
   abandon(): void {
+    this.#abandoned = true;
+    this.#sendButton = null;
     this.#page.off('request', this.#captureSentIdentity);
     this.#page.off('response', this.#captureAcceptance);
     this.#page.off('requestfailed', this.#captureFailedRequest);
-    void this.#page.close().catch(() => undefined);
+    // This page already belongs to the session. Preserve its draft and binding.
+    // Checkpoints stop late preparation continuations; an issued browser command may still settle.
   }
 
   async submitOnce(): Promise<void> {
+    this.#checkpoint('submit');
     if (this.#sendButton === null) {
       throw new ProviderSubmissionError(
         'internal.invariant-violation',
@@ -286,6 +312,7 @@ export class ChatGptSubmission implements ProviderSubmission {
         for (const value of values) this.#preparedPromptHashes.add(createHash('sha256').update(normalizeLineEndings(value)).digest('hex'));
       }
     }
+    this.#checkpoint('submit');
     this.#page.on('request', this.#captureSentIdentity);
     this.#page.on('response', this.#captureAcceptance);
     this.#page.on('requestfailed', this.#captureFailedRequest);
@@ -493,7 +520,7 @@ export async function prepareChatGptObservation(page: Page, pageKey: string): Pr
 async function assertChatGptAuthenticated(page: Page): Promise<void> {
   const state = await page
     .evaluate(async () => {
-      const response = await fetch('/api/auth/session', { credentials: 'include' }).catch(
+      const response = await fetch('/api/auth/session', { credentials: 'include', signal: AbortSignal.timeout(5_000) }).catch(
         () => null,
       );
       if (response === null || !response.ok) return 'unknown';
@@ -572,10 +599,12 @@ async function uploadAttachments(
   page: Page,
   attachments: readonly ProviderAttachment[],
   composer: PreparationElement,
+  checkpoint: (stage: string) => void,
 ): Promise<void> {
   const paths = attachments.map((attachment) => attachment.path);
   const directInput = await firstExisting(page, CHATGPT_SELECTORS.fileInputs);
   if (directInput !== null) {
+    checkpoint('attachments-input');
     await directInput.setInputFiles(paths);
   } else {
     const trigger = await firstVisible(page, CHATGPT_SELECTORS.uploadTriggers);
@@ -586,17 +615,20 @@ async function uploadAttachments(
       );
     }
     const chooserPromise = page.waitForEvent('filechooser', { timeout: 5_000 }).catch(() => null);
+    checkpoint('attachments-open');
     await trigger.click({ timeout: 5_000 });
     let chooser = await chooserPromise;
     if (chooser === null) {
       const menuItem = await firstVisible(page, CHATGPT_SELECTORS.uploadMenuItems);
       if (menuItem !== null) {
         const secondChooser = page.waitForEvent('filechooser', { timeout: 5_000 }).catch(() => null);
+        checkpoint('attachments-menu');
         await menuItem.click({ timeout: 5_000 });
         chooser = await secondChooser;
       }
     }
     if (chooser !== null) {
+      checkpoint('attachments-chooser');
       await chooser.setFiles(paths);
     } else {
       const lateInput = await firstExisting(page, CHATGPT_SELECTORS.fileInputs);
@@ -606,6 +638,7 @@ async function uploadAttachments(
           'ChatGPT upload control did not expose a file chooser',
         );
       }
+      checkpoint('attachments-input');
       await lateInput.setInputFiles(paths);
     }
   }
@@ -780,19 +813,27 @@ async function writeExactComposerValue(
   composer: PreparationElement,
   expected: string,
   resolveComposer: () => Promise<ElementHandle<Element> | null>,
+  checkpoint: (stage: string) => void,
 ): Promise<boolean> {
+  checkpoint('composer-stability');
   await waitForComposerStability(page, composer, COMPOSER_HYDRATION_TIMEOUT_MS);
   for (let attempt = 0; attempt < COMPOSER_WRITE_ATTEMPTS; attempt += 1) {
+    checkpoint('composer-read');
     if (await composerHasExactValue(composer, expected)) {
+      checkpoint('composer-confirmed');
       return true;
     }
-    if (!(await clearComposerValue(page, composer))) {
+    if (!(await clearComposerValue(page, composer, checkpoint))) {
       continue;
     }
+    checkpoint('composer-focus');
     await composer.focus().catch(() => undefined);
+    checkpoint('composer-insert');
     await page.keyboard.insertText(expected).catch(async () => {
+      checkpoint('composer-fill');
       await composer.fill(expected);
     });
+    checkpoint('composer-revalidate');
     const current = await resolveComposer();
     if (current === null) return false;
     if ('dispose' in composer) await composer.dispose();
@@ -804,15 +845,20 @@ async function writeExactComposerValue(
   return await waitForComposerValue(page, composer, expected);
 }
 
-async function clearComposerValue(page: Page, composer: PreparationElement): Promise<boolean> {
+async function clearComposerValue(page: Page, composer: PreparationElement, checkpoint: (stage: string) => void): Promise<boolean> {
+  checkpoint('composer-clear-click');
   await composer.click({ timeout: 5_000 }).catch(() => undefined);
+  checkpoint('composer-clear-focus');
   await composer.focus().catch(() => undefined);
   const selectAll = process.platform === 'darwin' ? 'Meta+A' : 'Control+A';
+  checkpoint('composer-select-all');
   await page.keyboard.press(selectAll).catch(() => undefined);
+  checkpoint('composer-clear');
   await page.keyboard.press('Backspace').catch(() => undefined);
   if (await waitForComposerValue(page, composer, '')) {
     return true;
   }
+  checkpoint('composer-clear-fill');
   await composer.fill('').catch(() => undefined);
   return await waitForComposerValue(page, composer, '');
 }

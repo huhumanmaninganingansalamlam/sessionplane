@@ -497,8 +497,18 @@ test('session.send submits once, persists exact acknowledgement, and never resen
         prompt: 'Preparation must release the actor if the browser does not respond.',
         sessionDeadlineSec: 1,
       }),
-      hasRpcError('browser.unavailable', false),
+      (error: unknown) => {
+        assert.ok(hasRpcError('browser.unavailable', false)(error));
+        assert.ok(error instanceof RpcClientError);
+        const data = error.data as { details: { preparationStage: string } };
+        assert.equal(data.details.preparationStage, 'prepare');
+        return true;
+      },
     );
+    const failure = service.database.raw.prepare(
+      "SELECT payload_json AS payload FROM events WHERE session_id=? AND event_type='generation.pre-submit-failed'",
+    ).get(stalled.sessionId) as { payload: string };
+    assert.equal(JSON.parse(failure.payload).preparationStage, 'prepare');
     const stalledSnapshot = await rpc<SessionSnapshot>(config.socketPath, 'session.get', {
       clientId: 'client-send',
       sessionId: stalled.sessionId,
