@@ -7,6 +7,7 @@ import test from 'node:test';
 import type { Page } from 'playwright-core';
 
 import { callRpc, RpcClientError } from '../../src/cli/client.ts';
+import { ConversationLoadRecoveryRepository } from '../../src/storage/conversation-load-recovery-repository.ts';
 import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
@@ -45,6 +46,8 @@ test('startup leaves missing prepared pages closed; explicit concurrent recovery
       assert.equal(report.opened, 0, 'startup must not fan out unopened, unsubmitted preparations');
       assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).length, before);
     }
+    // Another conversation's Retry spacing must not starve explicit page recovery.
+    new ConversationLoadRecoveryRepository(service.database).defer(new Date(Date.now() + 60_000).toISOString(), new Date().toISOString());
     await Promise.all([0, 1].map(() => service.recoveryService.ensurePage(session.sessionId, 2, { openMissing: true })));
     const restored = service.teamDirectory.getSession(session.sessionId);
     const page = service.pageRegistry.pageForObservation(restored.pageKey!);

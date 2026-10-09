@@ -124,7 +124,9 @@ export class RecoveryService {
         }
       }
       if (options.openMissing === true && snapshot.provider === 'chatgpt') {
-        const nextAllowedAt = this.#loadRecovery.effectiveNextAllowedAt(snapshot.conversationId ?? undefined);
+        // Opening a missing exact page is not a Retry click. Preserve server limits,
+        // without inheriting unrelated conversation-load UI spacing.
+        const nextAllowedAt = this.#loadRecovery.serviceNextAllowedAt(snapshot.conversationId ?? undefined);
         if (nextAllowedAt !== null && Date.parse(nextAllowedAt) > this.#now().getTime()) {
           throw new SessionPlaneDomainError('provider.observation-deferred',
             `Missing-page recovery was not dispatched: shared ChatGPT pacing requires waiting until ${nextAllowedAt}`);
