@@ -516,3 +516,42 @@ function browserCommandLines(profileDir: string): string {
     });
   }
 }
+
+for (const failure of ['unverified-endpoint', 'attach-failure'] as const) {
+  test(`handover ${failure} preserves the original browser, tab, draft and selection`, async t => {
+    const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-preserved-adoption-'));
+    const first = new BrowserOwner({ profileDir: root, pageRegistry: new PageRegistry(), headless: true });
+    const registry = new PageRegistry();
+    const successor = new BrowserOwner({ profileDir: root, pageRegistry: registry, headless: true, pid: 99_999_999 });
+    try {
+      await first.start();
+      const { page, binding } = await first.createPage();
+      await page.setContent('<textarea>Preserve this draft</textarea><p>Preserve this selection</p>');
+      await page.evaluate(() => {
+        const r = document.createRange(); r.selectNodeContents(document.querySelector('p')!);
+        getSelection()!.removeAllRanges(); getSelection()!.addRange(r);
+      });
+      const browserPid = first.status.browserPid!;
+      const lockPath = path.join(root, '.sessionplane-profile.lock');
+      const original = JSON.parse(readFileSync(lockPath, 'utf8'));
+      const stale = { ...original, pid: 99_999_999 };
+      writeFileSync(lockPath, JSON.stringify(failure === 'unverified-endpoint' ? { ...stale, debuggingPort: 1 } : stale));
+      const attach = failure === 'attach-failure'
+        ? t.mock.method(registry, 'attach', () => { throw new Error('Fixture attach failure'); }) : null;
+      await assert.rejects(successor.start(), failure === 'unverified-endpoint' ? /preserved without restart/ : /Failed to launch and attach/);
+      await successor.close();
+      assert.doesNotThrow(() => process.kill(browserPid, 0));
+      assert.equal(await page.locator('textarea').inputValue(), 'Preserve this draft');
+      assert.equal(await page.evaluate(() => getSelection()!.toString()), 'Preserve this selection');
+      assert.equal(JSON.parse(readFileSync(lockPath, 'utf8')).browserPid, browserPid);
+      attach?.mock.restore();
+      if (failure === 'unverified-endpoint') writeFileSync(lockPath, JSON.stringify(stale));
+      await successor.start();
+      assert.equal(successor.status.browserPid, browserPid);
+      assert.equal(successor.status.ownership, 'adopted');
+      assert.ok(registry.listBindings().some(b => b.targetId === binding.targetId));
+    } finally {
+      await successor.close(); await first.close(); rmSync(root, { recursive: true, force: true });
+    }
+  });
+}

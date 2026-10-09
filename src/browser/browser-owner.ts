@@ -156,9 +156,11 @@ export class BrowserOwner {
 
     this.#state = 'starting';
     this.#lastError = null;
+    let adopting = false;
     try {
       const selectedBrowser = this.#resolveBrowserProfile();
       const adopted = await this.#acquireProfileLock();
+      adopting = adopted !== null;
       ensureProfileBrowserIdentity(this.#profileDir, selectedBrowser, this.#now);
 
       if (adopted?.mode === 'manual') {
@@ -182,6 +184,7 @@ export class BrowserOwner {
       const browser = await chromium.connectOverCDP(`http://127.0.0.1:${debuggingPort}`, {
         timeout: this.#launchTimeoutMs,
       });
+      this.#browser = browser;
       const context = browser.contexts()[0];
       if (context === undefined) {
         throw new BrowserOwnerError(
@@ -191,7 +194,6 @@ export class BrowserOwner {
       }
       await verifyExpectedAutomationSurface(context, this.#headless);
       this.#context = context;
-      this.#browser = browser;
       this.#pageRegistry.attach(context);
       for (const page of context.pages()) {
         try {
@@ -204,7 +206,21 @@ export class BrowserOwner {
       browser.once('disconnected', () => this.#handleDisconnect('Browser disconnected'));
       this.#state = 'ready';
     } catch (error) {
-      await this.#shutdownBrowser().catch(() => undefined);
+      if (adopting) {
+        // A failed successor must not destroy the predecessor's live browser.
+        // For connectOverCDP, close disconnects this controller only.
+        this.#pageRegistry.detach();
+        await this.#browser?.close().catch(() => undefined);
+        this.#context = null;
+        this.#browser = null;
+        this.#browserPid = null;
+        this.#debuggingPort = null;
+        this.#ownership = null;
+        // Retain the browser identity in the lock for adoption after this core exits.
+        this.#lockToken = null;
+      } else {
+        await this.#shutdownBrowser().catch(() => undefined);
+      }
       const details = this.#browserStderrTail.trim();
       this.#lastError = [error instanceof Error ? error.message : String(error), details]
         .filter(Boolean)
@@ -791,8 +807,8 @@ export class BrowserOwner {
               debuggingPort: existing.debuggingPort,
             };
           } else {
-            await terminateProcessGroup(existing.browserPid);
-            adopted = null;
+            throw new BrowserOwnerError('browser.unavailable',
+              'Existing profile browser is alive but its CDP endpoint cannot be verified; preserved without restart');
           }
         }
         unlinkSync(this.#lockPath);
