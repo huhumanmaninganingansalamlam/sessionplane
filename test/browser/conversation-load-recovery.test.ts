@@ -22,6 +22,19 @@ test('exact error-surface Retry is isolated from generation retries, drafts, bar
     const error = '<div><p>이 ChatGPT 대화를 불러올 수 없습니다</p><div><button onclick="window.clicks=(window.clicks||0)+1">다시 시도</button></div></div>';
     const inspect = (click = false, expiresAt = Date.now() + 5000) => page.evaluate(conversationLoadSurface,
       { origin, conversationId: 'fixture-conversation', submittedUserMessageId: 'original-anchor', click, expiresAt });
+    await t.test('Market English load card is detected without accepting quoted text or a draft', async () => {
+      const card = '<div>Could not load this ChatGPT conversation<button style="display:block" onclick="window.marketClicks=(window.marketClicks||0)+1">Retry</button></div>';
+      await page.setContent('<main>' + card + '</main>');
+      assert.deepEqual(await inspect(), { kind: 'retry', reason: 'conversation-load-retry', clicked: false, loadError: true });
+      assert.equal((await inspect(true)).clicked, true);
+      assert.equal(await page.evaluate(() => (window as unknown as { marketClicks: number }).marketClicks), 1);
+      await page.setContent('<main>' + card + '<textarea>preserved draft</textarea></main>');
+      assert.equal((await inspect(true)).reason, 'manual-draft');
+      assert.equal(await page.locator('textarea').inputValue(), 'preserved draft');
+      await page.setContent('<main><div data-message-author-role="assistant">' + card + '</div><textarea></textarea></main>');
+      assert.equal((await inspect(true)).loadError, false);
+      assert.equal((await inspect(true)).clicked, false);
+    });
     await t.test('observed Korean load error clicks only its below-notice button', async () => {
       await page.setContent('<main>' + error + '</main>');
       assert.equal((await inspect()).kind, 'retry');

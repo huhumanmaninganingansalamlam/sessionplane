@@ -74,6 +74,26 @@ test('one coalesced global round-robin loop spaces simultaneous tab failures and
   } finally { await f.dispose(service); }
 });
 
+test('prepared unsubmitted load failure enters the queue and normal recovery preserves the request', async () => {
+  const f = fixture(1), service = f.make();
+  const control = f.controls[0]!;
+  f.database.raw.prepare(`UPDATE generations SET submission_state='prepared', prompt_submitted=0,
+    submitted_user_message_id=NULL, answer_text=NULL WHERE session_id=?`).run(control.sessionId);
+  const before = f.database.raw.prepare('SELECT * FROM generations').all();
+  try {
+    assert.deepEqual(service.status().conversations, []);
+    await service.sweep();
+    assert.equal(service.status().conversations[0]!.state, 'waiting');
+    assert.equal(service.status().conversations[0]!.attempts, 1);
+    assert.deepEqual(f.clicks, [control.id]);
+    control.surface = { kind: 'normal', reason: 'conversation-rendered', clicked: false, loadError: false };
+    f.advance(); await service.sweep();
+    assert.equal(service.status().conversations[0]!.state, 'recovered');
+    assert.deepEqual(f.clicks, [control.id]);
+    assert.deepEqual(f.database.raw.prepare('SELECT * FROM generations').all(), before);
+  } finally { await f.dispose(service); }
+});
+
 test('99 to100 never clicks101, exhaustion notice is durable and emitted once', async () => {
   const f = fixture(1), service = f.make();
   try {

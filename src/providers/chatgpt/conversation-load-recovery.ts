@@ -9,7 +9,7 @@ export function conversationLoadSurface(input: { origin: string; conversationId:
   const main = document.querySelector('main');
   if (!main) return result('other', 'main-unavailable');
   const messages = '[data-message-author-role], [data-chatgpt-search-message-ids], [data-testid^="conversation-turn"], .markdown, [class^="MarkdownRoot-"], [class*=" MarkdownRoot-"]';
-  const noticePattern = /^(이 ChatGPT 대화를 불러올 수 없습니다|대화를 불러올 수 없습니다|Unable to load conversation(?:\s+[a-f0-9-]+)?|This conversation could not be loaded|Cannot load conversation)[.!]?$/i;
+  const noticePattern = /^(이 ChatGPT 대화를 불러올 수 없습니다|대화를 불러올 수 없습니다|Unable to load conversation(?:\s+[a-f0-9-]+)?|This conversation could not be loaded|Cannot load conversation|Could not load this ChatGPT conversation)[.!]?$/i;
   // The live error card has a direct text node followed by its button, not a leaf notice.
   const ownText = (e: Element) => [...e.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent ?? '').join('').trim();
   const notices = [...main.querySelectorAll('div,p,h1,h2,span')].filter(e => visible(e) && !e.closest(`${messages},pre,code,blockquote`) && noticePattern.test(ownText(e)));
