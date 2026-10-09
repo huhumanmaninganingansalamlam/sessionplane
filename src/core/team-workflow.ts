@@ -12,7 +12,7 @@ import { ConversationLoadRecoveryRepository } from '../storage/conversation-load
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import type { ArtifactService } from './artifact-service.ts';
 import type { ConversationCleanupService } from './conversation-cleanup-service.ts';
-import type { SessionUiService } from './session-ui-service.ts';
+import { latestDisplayTarget, type SessionUiService } from './session-ui-service.ts';
 import type { StopService } from './stop-service.ts';
 import type { SubmissionService } from './submission-service.ts';
 import type { TeamDirectory } from './team-directory.ts';
@@ -202,9 +202,8 @@ export class TeamWorkflow {
     if (input.decision === 'latest') {
       if (this.services.receipts.get(request.clientId, input.requestId) === null) {
         const current = this.#role({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}` });
-        if (current.provider !== 'chatgpt' || !current.terminal || current.sessionState !== 'complete' ||
-            current.conversationId === null || current.responseMessageId === null) {
-          throw new SessionPlaneDomainError('session.recovery-unavailable', 'Latest display requires the current completed ChatGPT answer');
+        if (latestDisplayTarget(current) === null) {
+          throw new SessionPlaneDomainError('session.recovery-unavailable', 'Latest display requires the current exact completed answer or unresolved submitted anchor');
         }
         // Completed generations are not rebound during startup. Recover only
         // the retained conversation page, without opening or navigating one.

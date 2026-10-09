@@ -501,25 +501,27 @@ export class SessionUiService {
 
   /** Caller holds the current request actor and exact page mutation lock. */
   async latest(session: SessionSnapshot) {
-    if (session.provider !== 'chatgpt' || !session.terminal || session.sessionState !== 'complete' ||
-        session.errorCode !== null || !session.promptSubmitted || session.responseMessageId === null ||
-        session.conversationId === null) {
-      throw new SessionPlaneDomainError('session.recovery-unavailable', 'Latest display requires the current exact completed ChatGPT answer');
-    }
+    const target = latestDisplayTarget(session);
+    if (target === null) throw new SessionPlaneDomainError('session.recovery-unavailable',
+      'Latest display requires the current exact completed answer or unresolved submitted anchor');
     const page = this.#requirePage(session);
     const mounted = async () => (await readChatGptMessages(page)).some(message =>
-      message.role === 'assistant' && message.messageId === session.responseMessageId);
+      message.role === target.role && [message.messageId, message.turnId].some(id => id !== null && target.ids.includes(id)));
     let outcome: 'already-present' | 'clicked' | 'not-dispatched' = 'already-present';
     if (!await mounted()) {
-      const clicked = await page.evaluate(restoreLatestPosition, {
-        origin: this.#chatgptOrigin, conversationId: session.conversationId,
-        anchorIds: [session.responseMessageId], expiresAt: Date.now() + 5_000, explicit: true,
+      const dom = await observeChatGptDom(page, session);
+      const activity = await observeChatGptActivity(page, dom);
+      const clicked = activity.strength === 'none' && !dom.actionableAlert && await page.evaluate(restoreLatestPosition, {
+        origin: this.#chatgptOrigin, conversationId: session.conversationId!,
+        anchorIds: target.ids, expiresAt: Date.now() + 5_000, explicit: true,
       });
       outcome = clicked ? 'clicked' : 'not-dispatched';
     }
     this.#requirePage(session);
     return { pageKey: session.pageKey, conversationId: session.conversationId,
-      responseMessageId: session.responseMessageId, displayOutcome: outcome, responseMounted: await mounted(),
+      responseMessageId: session.responseMessageId, displayOutcome: outcome,
+      displayTarget: target.role === 'user' ? 'submitted-anchor' : 'completed-answer',
+      ...(target.role === 'user' ? { anchorPresent: await mounted() } : { responseMounted: await mounted() }),
       ...(outcome !== 'not-dispatched' ? {} : { reason: 'display-guard-or-latest-control-unavailable',
         message: 'No click: preserve draft, selection, active generation and alerts; a unique enabled latest-position button must be visible.' }) };
   }
@@ -629,4 +631,14 @@ function typedUiError(error: unknown): SessionPlaneDomainError {
     return new SessionPlaneDomainError(error.errorCode, error.message);
   }
   return new SessionPlaneDomainError('browser.unavailable', error instanceof Error ? error.message : 'Exact preparation page is unavailable');
+}
+
+/** Display identity only: this never infers an ACK or completes a generation. */
+export function latestDisplayTarget(session: SessionSnapshot): { role: 'user' | 'assistant'; ids: string[] } | null {
+  if (session.provider !== 'chatgpt' || session.errorCode !== null || !session.promptSubmitted || session.conversationId === null) return null;
+  if (session.terminal && session.sessionState === 'complete' && session.responseMessageId !== null)
+    return { role: 'assistant', ids: [session.responseMessageId] };
+  const ids = [session.submittedUserMessageId, session.submittedUserTurnId].filter((id): id is string => id !== null);
+  return !session.terminal && session.submissionState === 'submitted' && session.responseMessageId === null && ids.length > 0
+    ? { role: 'user', ids } : null;
 }
