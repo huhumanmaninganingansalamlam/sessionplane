@@ -95,7 +95,9 @@ export class SessionUiService {
         // A service deferral can precede openSubmission's same-session reservation.
         // withPendingPreparation holds the exact current request's actor/page locks.
         if (session.pageKey !== null) {
-          const binding = this.#registry.refreshPage(session.pageKey);
+          let binding;
+          try { binding = this.#registry.refreshPage(session.pageKey); }
+          catch (error) { throw typedUiError(error); }
           if (binding.state === 'owned' && binding.sessionId === session.sessionId &&
               binding.generation !== null && binding.generation < session.generation) {
             this.#requirePage({ ...session, generation: binding.generation });

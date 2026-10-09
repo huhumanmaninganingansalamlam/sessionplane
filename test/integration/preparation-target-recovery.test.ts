@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { PageRegistryError } from '../../src/browser/page-registry.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
@@ -120,7 +121,7 @@ test('explicit completed display and deferred preparation preserve exact ownersh
   } finally { await service.close(); await closeFirst(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test('core restart reconnects prepared request to its exact live target, not an identical draft', async () => {
+test('core restart reconnects prepared request to its exact live target, not an identical draft', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-prepared-target-'));
   const config = { ...resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), chatgptUrl: 'https://chatgpt.com/' };
   const start = () => startCore({ config, browserHeadless: true, logger: { debug() {}, info() {}, warn() {}, error() {} } });
@@ -186,6 +187,22 @@ test('core restart reconnects prepared request to its exact live target, not an 
     assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).length, pageCount);
     assert.equal(await service.pageRegistry.pageForObservation(after.pageKey).locator('textarea').inputValue(), draft);
     assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).find(item => item.targetId === decoy.binding.targetId)?.sessionId, null);
+    // A reboot can retain a prepared page key without a live registry entry.
+    const storedBefore = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(after.sessionId);
+    service.pageRegistry.detach();
+    t.mock.method(service.pageRegistry, 'refreshPage', () => {
+      throw new PageRegistryError('browser.unavailable', `Unknown pageKey: ${after.pageKey}`);
+    });
+    const missing = await inspect();
+    assert.equal(missing.inspectionError.errorCode, 'browser.unavailable');
+    assert.equal(missing.evidence, null);
+    assert.equal(missing.submissionState, 'prepared');
+    assert.equal(missing.promptSubmitted, false);
+    assert.equal(missing.generation, after.generation);
+    assert.equal(missing.requestRef, after.requestRef);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(after.sessionId), storedBefore);
+    assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).length, 0);
+
     assert.equal(service.database.raw.prepare('SELECT COUNT(*) AS count FROM outbox').get()!.count, 1);
   } finally {
     await service.close();
