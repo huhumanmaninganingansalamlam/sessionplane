@@ -352,6 +352,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     scheduler: actorScheduler, artifacts: artifactService, stops: stopService, cleanup,
     pageMutex: pageMutationMutex,
     enabledProviders: config.enabledProviders,
+    retireObservation: sessionId => recovery.forgetSession(sessionId),
     ensurePage: (sessionId, generation, options) => recovery.ensurePage(sessionId, generation, options),
   }));
   registerSendMethods(router, submissionService);

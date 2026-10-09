@@ -403,6 +403,8 @@ export class SessionRepository {
       WHERE session_state IN ('superseded', 'cancelled') AND provider IN (${enabledProviders.map(() => '?').join(',')})
         AND team_id IN (SELECT team_id FROM teams WHERE team_state != 'archived')
         AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = sessions.session_id AND e.event_type = 'session.replaced')
+        AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = sessions.session_id
+          AND e.generation = sessions.current_generation AND e.event_type = 'generation.observation-retired')
         AND NOT EXISTS (SELECT 1 FROM request_receipts receipt WHERE receipt.method = 'session.delete'
           AND json_extract(receipt.result_json, '$.sessionId') = sessions.session_id
           AND json_extract(receipt.result_json, '$.deleted') = 1)
@@ -413,6 +415,14 @@ export class SessionRepository {
           AND g.submission_state IN ('submitted', 'submission_unknown') AND g.completed_at IS NULL)
     `).run(new Date().toISOString(), ...enabledProviders);
     return Number(result.changes);
+  }
+
+  retireObservation(sessionId: string, generation: number, updatedAt: string): boolean {
+    // This is local tracking retirement, not provider completion or cancellation.
+    return this.#database.prepare(`UPDATE sessions SET session_state = 'cancelled',
+      next_check_at = NULL, updated_at = ? WHERE session_id = ? AND current_generation = ?
+      AND session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
+    `).run(updatedAt, sessionId, generation).changes === 1;
   }
 
   retireUnsubmittedSession(sessionId: string, state: 'superseded' | 'cancelled', updatedAt: string): void {

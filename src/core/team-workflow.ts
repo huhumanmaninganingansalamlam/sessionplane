@@ -29,6 +29,7 @@ export class TeamWorkflow {
     database: SessionPlaneDatabase; directory: TeamDirectory; receipts: ReceiptRepository;
     submissions: SubmissionService; ui: SessionUiService; scheduler: ActorScheduler;
     pageMutex: PageMutationMutex;
+    retireObservation: (sessionId: string) => void;
     artifacts: ArtifactService; stops: StopService; cleanup: ConversationCleanupService;
     enabledProviders: readonly ProviderName[];
     ensurePage: (sessionId: string, generation: number, options?: { openMissing?: boolean }) => Promise<void>;
@@ -148,9 +149,51 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure' } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
+    if (input.decision === 'retire_observation') {
+      return await this.services.scheduler.actorFor(request.sessionId).enqueue(() => {
+        const result = this.services.receipts.execute({ clientId: request.clientId, requestId: input.requestId,
+          method: 'workflow.retire_observation', payload: input, operation: () => {
+            const current = this.services.directory.getSession(request.sessionId);
+            if (current.generation !== request.generation) throw new SessionPlaneDomainError(
+              'session.generation-superseded', 'Tracking retirement must not affect a newer generation');
+            const role = this.services.directory.getTeam(input.teamId).roles.find(r => r.roleId === current.roleId)!;
+            const successor = input.successorRequestRef === undefined ? null
+              : this.#request({ teamId: input.teamId, requestRef: input.successorRequestRef });
+            const successorResult = successor === null ? null
+              : this.#sessions.getGenerationResult(successor.sessionId, successor.generation);
+            const completedSuccessor = successor !== null && successor.sessionId !== request.sessionId &&
+              successor.createdAt > request.createdAt && successorResult?.completedAt != null &&
+              successorResult.responseMessageId !== null && successorResult.answerText !== null;
+            if (input.workComplete !== true || (role.currentSessionId === request.sessionId &&
+                role.roleState !== 'retired' && !completedSuccessor)) throw new SessionPlaneDomainError(
+              'session.recovery-unavailable', 'Requires explicit work completion and a displaced/retired session or a completed same-team successor request');
+            if (current.terminal || !current.promptSubmitted ||
+                !['submitted', 'submission_unknown'].includes(current.submissionState ?? '')) throw new SessionPlaneDomainError(
+              'session.recovery-unavailable', 'Only unresolved submitted observation can be retired');
+            const timestamp = new Date().toISOString();
+            if (!this.#sessions.retireObservation(request.sessionId, request.generation, timestamp)) throw new SessionPlaneDomainError(
+              'session.generation-superseded', 'Tracking changed before retirement');
+            new EventRepository(this.services.database.raw).append({ teamId: input.teamId, roleId: current.roleId,
+              sessionId: request.sessionId, generation: request.generation, eventType: 'generation.observation-retired',
+              payload: { requestRef: request.outboxId, evidenceRef: input.evidenceRef,
+                successorRequestRef: input.successorRequestRef ?? null, completionSource: 'explicit-user-confirmation',
+                providerMutation: false, originalSubmissionState: current.submissionState }, createdAt: timestamp });
+            return { requestOk: true, requestRef: request.outboxId, sessionId: request.sessionId, generation: request.generation,
+              disposition: 'observation-retired', providerMutation: false, originalSubmissionState: current.submissionState,
+              originalAnswerPreserved: true };
+          } });
+        // Receipt replay must not stop a newer generation started after retirement.
+        if (this.services.directory.getSession(request.sessionId).generation === request.generation) {
+          this.services.retireObservation(request.sessionId);
+          this.services.scheduler.refreshSession(request.sessionId);
+        }
+        return result;
+      });
+    }
+
     if (input.decision === 'prepare_resend') {
       const prepared = await this.services.submissions.prepareAuthorizedResend({ ...owner,
         decisionId: input.requestId, approvalRef: input.approvalRef, duplicateRiskAccepted: input.duplicateRiskAccepted });
