@@ -85,24 +85,29 @@ rechecks DB submission state, profile ownership, exact request, PID/start ticks,
 Chrome lifetime and all DB/WAL/SHM locks without calling a blocked health RPC.
 A writer caught by the freeze is rejected, not ignored or killed.
 
-After staging, the legacy branch allows **two 5-second validation passes,
-separated by at most one 5-second natural-writer drain**. Both complete live
-guards remain in each pass; the checked budget is at most 15 seconds. Health
-subprocesses receive the remaining pass budget. Synchronous filesystem/SQLite
-checks are not forcibly interrupted; an overrun refuses handover at the next
-deadline check, so 15 seconds is not a hard process-exit guarantee.
-If a full guard observes the pinned old core's WAL writer, it reads `/proc/locks`
-at 100ms intervals until that writer naturally releases. Polling issues no health
-RPC or SQLite query. Quiet evidence restarts both complete live guards within the
-fresh validation budget; it never grants permission to skip them. A writer
-recurring in revalidation stops immediately; there is no further retry. Foreign/unknown owners,
-other lock kinds, PID/Chrome changes, active submissions and other guard failures
-still stop immediately. Expiry stops before freeze with the original install live.
-The frozen guard never waits for a writer and there is no repeat-freeze loop.
+After staging, the legacy branch completes two live health/actor/submission/
+ownership/request checks within one 5-second validation budget. Live lock samples
+may defer only the exact pinned core's WAL writer (SHM byte 120 alone); foreign,
+unknown, checkpoint, recovery and other exclusive locks stop immediately.
+Then a single passive drain reads `/proc/locks` at 100ms intervals for at most
+5 seconds. Quiet proceeds directly to the single bounded freeze, without another
+health RPC or SQLite read. Synchronous filesystem/SQLite checks are not forcibly
+interrupted; an overrun refuses handover at the next deadline check.
+
+This ordering avoids spending a quiet window on another slow CLI validation. It
+does not prove that health causes writes, identify an observed writer as a
+particular observer, or guarantee a quiet/SIGSTOP race cannot occur. All threads
+of the pinned core must stop before frozen checks re-read submission/recovery,
+profile ownership, DB integrity, original request/anchor and all prior request
+hashes/bindings, with strict no-writer checks before and after. A writer caught
+frozen causes SIGCONT and abort, never kill or a second freeze. Foreign writers
+are not frozen or atomically excluded by this protocol. Initial preflight still
+requires quiet, and any observed external lock prevents transition.
+
 `writer-drain.json` records observed locks, quiet samples and monotonic
-health/guard/request-identity durations; `transition-phase.json`
-distinguishes live guard 1/2, final writer, freeze request and frozen guard. Older
-receipts lacking these fields cannot retroactively identify their exact guard site.
+health/guard-state/request-identity durations; `transition-phase.json` identifies
+the live checks, final writer drain and frozen checks. The maintenance-capable
+runtime path and guardian deadline/rollback contract are unchanged.
 
 The guardian has a 10-second deadline and is the only process allowed to decide
 SIGKILL versus SIGCONT. It resumes on guard failure, helper disconnect/death or

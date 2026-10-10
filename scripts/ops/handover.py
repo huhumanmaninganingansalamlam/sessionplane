@@ -131,8 +131,9 @@ def no_writer(dbpath):
     if any(row['blocksHandover'] for row in report['locks']):
         raise LockActivityError(report)
 
-def guard(h, expected):
+def guard_state(h, expected):
     assert h['requestOk'] and h['browser']['state']=='ready' and h['database']['integrity']=='ok'
+    assert h['database']['path'] == expected['database']['path'], 'Database path changed'
     for key in ['pid','startedAt']: assert h['process'][key]==expected['process'][key], 'Core owner changed'
     for key in ['browserPid','profileDir','debuggingPort']: assert h['browser'][key]==expected['browser'][key], 'Browser identity changed'
     assert h['metrics']['session_actor_queue_depth']==0, 'Actor running or queued; natural drain required'
@@ -141,15 +142,26 @@ def guard(h, expected):
         assert db.execute("SELECT count(*) FROM outbox o JOIN generations g ON g.session_id=o.session_id AND g.generation=o.generation WHERE json_extract(o.payload_json,'$.thinkingFailureRecovery')=1 AND g.completed_at IS NULL").fetchone()[0]==0, 'Opted-in recovery still active'
     lock=json.loads((pathlib.Path(h['browser']['profileDir'])/'.sessionplane-profile.lock').read_text())
     assert lock['pid']==h['process']['pid'] and lock['browserPid']==h['browser']['browserPid']
+
+
+def guard(h, expected):
+    guard_state(h, expected)
     no_writer(h['database']['path'])
 
+def drainable_writer(report, pid, ticks):
+    blocking = [row for row in report['locks'] if row['blocksHandover']]
+    if not all(row['classification'] == 'wal-writer' and row['start'] == row['end'] == '120' and
+               row['holder']['pid'] == pid and row['holder']['startTicks'] == ticks
+               for row in blocking):
+        raise LockActivityError(report)
+    return bool(blocking)
+
 def prefreeze_drain(h, ticks, chrome_ticks, target, identity, receipt, timeout=5):
-    """Two bounded validation passes with one independent natural-writer drain."""
+    """Finish live RPC checks before quiet; frozen_guard revalidates before commit."""
     started = time.monotonic()
     deadline = started + timeout
     samples = []
     timings = []
-    drained = False
     phase = 'live-guard-1'
     def pinned():
         assert procstat(h['process']['pid'])[19] == ticks, 'Core PID reused'
@@ -169,55 +181,58 @@ def prefreeze_drain(h, ticks, chrome_ticks, target, identity, receipt, timeout=5
                             'startSeconds': begin - started,
                             'elapsedSeconds': time.monotonic() - begin})
     try:
+        for index in range(2):
+            phase = f'live-guard-{index+1}'
+            save(receipt/'transition-phase.json', {'phase': phase})
+            pinned()
+            with measured('health'):
+                current = health(timeout=remaining())
+            with measured('guard-state'):
+                guard_state(current, h)
+                report = lock_report(h['database']['path'])
+                samples.append({'phase': phase, **report})
+                drainable_writer(report, h['process']['pid'], ticks)
+            pinned()
+            with measured('request-identity'):
+                assert request_identity(current, target)['request'] == identity['request']
+            remaining()
+        # A live lock sample is not an atomic transition check. Drain only after
+        # all slow RPC/DB work; any writer racing the freeze is rejected frozen.
+        phase = 'live-final-writer'
+        save(receipt/'transition-phase.json', {'phase': phase})
+        deadline = time.monotonic() + timeout
         while True:
-            deadline = time.monotonic() + timeout
-            try:
-                for index in range(2):
-                    phase = f'live-guard-{index+1}'
-                    save(receipt/'transition-phase.json', {'phase': phase})
-                    pinned()
-                    with measured('health'):
-                        current = health(timeout=remaining())
-                    with measured('guard'):
-                        guard(current, h)
-                    pinned()
-                    with measured('request-identity'):
-                        assert request_identity(current, target)['request'] == identity['request']
-                    remaining()
-                phase = 'live-final-writer'
-                save(receipt/'transition-phase.json', {'phase': phase})
-                no_writer(h['database']['path'])
+            pinned()
+            report = lock_report(h['database']['path'])
+            waiting = drainable_writer(report, h['process']['pid'], ticks)
+            samples.append({'phase': phase if waiting else 'quiet-observed', **report})
+            if not waiting:
                 remaining()
-                return current
-            except LockActivityError as error:
-                remaining()  # Slow validation cannot claim a fresh drain allowance.
-                if drained:
-                    raise  # One revalidation only; no repeated health/drain cycle.
-                drained = True
-                deadline = time.monotonic() + timeout
-                report = error.report
-                while True:
-                    pinned()
-                    samples.append({'phase': phase, **report})
-                    blocking = [row for row in report['locks'] if row['blocksHandover']]
-                    # Other/unknown owners and lock kinds retain immediate refusal.
-                    if not all(row['classification'] == 'wal-writer' and
-                               row['holder']['pid'] == h['process']['pid'] and
-                               row['holder']['startTicks'] == ticks for row in blocking):
-                        raise LockActivityError(report)
-                    if time.monotonic() >= deadline: raise LockActivityError(report)
-                    time.sleep(min(.1, remaining()))
-                    pinned()
-                    report = lock_report(h['database']['path'])  # No RPC/SQLite while polling.
-                    if not any(row['blocksHandover'] for row in report['locks']):
-                        samples.append({'phase': 'quiet-observed', **report})
-                        remaining()
-                        break  # Both full guards receive a fresh bounded validation budget.
+                return current  # No health/SQLite work between quiet and freeze.
+            if time.monotonic() >= deadline: raise LockActivityError(report)
+            time.sleep(min(.1, remaining()))
     finally:
         save(receipt/'writer-drain.json', {'phase': phase, 'timeoutSeconds': timeout,
-                                         'maxValidationPasses': 2, 'maxTotalSeconds': 3 * timeout,
+                                         'maxValidationPasses': 1, 'maxTotalSeconds': 2 * timeout,
                                          'elapsedSeconds': time.monotonic() - started,
                                          'timings': timings, 'samples': samples})
+
+
+def frozen_guard(current, expected, ticks, chrome_ticks, target, identity):
+    """Called only under the bounded guardian; never issue health to a frozen core."""
+    pid = expected['process']['pid']
+    chrome = expected['browser']['browserPid']
+    assert procstat(pid)[19] == ticks and procstat(chrome)[19] == chrome_ticks, 'PID reused'
+    assert live(chrome), 'Chrome exited'
+    no_writer(expected['database']['path'])
+    guard(current, expected)  # Includes fresh submission/recovery/profile/lock checks.
+    with read_db(expected) as db:
+        assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok', 'DB not healthy'
+    post = request_identity(expected, target)
+    assert post['request'] == identity['request'] and post['anchor'] == identity['anchor']
+    assert all(post['requests'].get(k) == v for k, v in identity['requests'].items()), 'Durable request changed'
+    assert all(row in post['bindings'] for row in identity['bindings']), 'Binding identity changed'
+    no_writer(expected['database']['path'])
 
 
 def verify_package(installed, pkg, manifest):
@@ -519,12 +534,7 @@ def main():
             with frozen_core(fd, pid, ticks) as commit:
                 save(receipt/'transition-phase.json', {'phase': 'frozen-guard'})
                 # Frozen core cannot race this DB/lock check. Do not issue health RPC.
-                assert procstat(pid)[19] == ticks and procstat(args.chrome_pid)[19] == chrome_ticks
-                assert live(args.chrome_pid), 'Chrome exited'
-                no_writer(h['database']['path'])
-                guard(current, h)
-                assert request_identity(h, args)['request'] == identity['request']
-                no_writer(h['database']['path'])
+                frozen_guard(current, h, ticks, chrome_ticks, args, identity)
                 save(receipt/'handover.json', transition)
                 commit()
     except LockActivityError as error:

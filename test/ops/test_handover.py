@@ -39,7 +39,8 @@ class HandoverTests(unittest.TestCase):
                 handover.guard(before, before)
                 for part, key, value in [('metrics', 'session_actor_queue_depth', 1),
                                          ('process', 'pid', 33), ('process', 'startedAt', 'replacement'),
-                                         ('browser', 'browserPid', 44), ('database', 'integrity', 'error')]:
+                                         ('browser', 'browserPid', 44), ('database', 'integrity', 'error'),
+                                         ('database', 'path', 'different.sqlite')]:
                     with self.subTest(part=part, key=key):
                         current = copy.deepcopy(before)
                         current[part][key] = value
@@ -392,101 +393,131 @@ class HandoverTests(unittest.TestCase):
                 successor.wait(timeout=2)
                 browser.terminate(); browser.wait(timeout=2)
 
-    def test_prefreeze_transient_writer_drains_then_revalidates_full_guards(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root=pathlib.Path(directory); dbpath=root/'fixture.sqlite'
-            writer=subprocess.Popen([sys.executable,'-u','-c',
-                "import sqlite3,sys,time; d=sqlite3.connect(sys.argv[1]); d.execute('PRAGMA journal_mode=WAL'); d.execute('CREATE TABLE x(v)'); d.commit(); d.execute('BEGIN IMMEDIATE'); print('ready',flush=True); sys.stdin.readline(); d.commit(); print('drained',flush=True); time.sleep(30)",str(dbpath)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
-            try:
-                self.assertEqual(writer.stdout.readline().strip(),'ready')
-                h={'process':{'pid':writer.pid},'browser':{'browserPid':os.getpid()},'database':{'path':str(dbpath)}}
-                ticks=handover.procstat(writer.pid)[19]; chrome_ticks=handover.procstat(os.getpid())[19]
-                identity={'request':['original']}; calls=[]
-                def full_guard(*args):
-                    calls.append('guard'); handover.no_writer(str(dbpath))
-                def drain(_):
-                    self.assertEqual(calls,['guard'])
-                    writer.stdin.write('complete transaction\n'); writer.stdin.flush()
-                    self.assertEqual(writer.stdout.readline().strip(),'drained')
-                with patch.object(handover,'health',return_value=h) as health, patch.object(handover,'guard',side_effect=full_guard), patch.object(handover,'request_identity',return_value=identity), patch.object(handover.time,'sleep',side_effect=drain), patch.object(handover.signal,'pidfd_send_signal') as signal_call:
-                    self.assertEqual(handover.prefreeze_drain(h,ticks,chrome_ticks,None,identity,root),h)
-                    self.assertEqual(health.call_count,3)  # One rejected + two fresh full checks.
-                    signal_call.assert_not_called()
-                evidence=json.loads((root/'writer-drain.json').read_text())
-                self.assertEqual([s['phase'] for s in evidence['samples']],['live-guard-1','quiet-observed'])
-                self.assertIsNone(writer.poll())
-            finally:
-                writer.terminate(); writer.wait(timeout=2); writer.stdin.close(); writer.stdout.close()
+    def test_recurring_writer_drains_after_live_checks_and_frozen_guards_decide(self):
+        # Deterministic interleaving of a background observer's short WAL writes
+        # with slow live health. Health does not cause production DB writes.
+        for mode in ['success', 'raced-writer', 'submit', 'request', 'owner', 'chrome', 'exception', 'expiry', 'parent-loss']:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root=pathlib.Path(directory); dbpath=root/'fixture.sqlite'
+                with closing(sqlite3.connect(dbpath)) as db:
+                    db.executescript("""
+                        PRAGMA journal_mode=WAL;
+                        CREATE TABLE outbox(outbox_id,session_id,generation,request_hash,prompt_submitted,submission_state,payload_json);
+                        CREATE TABLE generations(session_id,generation,submitted_user_message_id,submitted_user_turn_id,prompt_hash,completed_at);
+                        CREATE TABLE page_bindings(page_key,session_id,generation,conversation_id,target_id);
+                        CREATE TABLE probe_budget(scope,next_allowed_at,blocked_until,backoff_level,consecutive_failures);
+                        CREATE TABLE observer_tick(n);
+                        INSERT INTO observer_tick VALUES(0);
+                        INSERT INTO generations VALUES('fixture-session',7,'fixture-user','fixture-turn','fixture-prompt-hash',NULL);
+                        INSERT INTO page_bindings VALUES('fixture-page','fixture-session',7,'fixture-conversation','fixture-target');
+                    """)
+                    db.executemany('INSERT INTO outbox VALUES(?,?,?,?,?,?,?)',
+                        [(f'request-{i}','fixture-session',7,f'hash-{i}',1,'submission_unknown' if i<4 else 'submitted','{}') for i in range(878)])
+                    db.commit()
+                worker=subprocess.Popen([sys.executable,'-u','-c',
+                    "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); print('ready',flush=True)\nfor line in sys.stdin:\n d.commit()\n if line.strip()=='write':\n  d.execute('BEGIN IMMEDIATE'); d.execute('UPDATE observer_tick SET n=n+1')\n print('ack',flush=True)",str(dbpath)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+                browser=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])
+                fd=os.pidfd_open(worker.pid)
+                def command(text):
+                    worker.stdin.write(text+'\n');worker.stdin.flush()
+                    self.assertEqual(worker.stdout.readline().strip(),'ack')
+                try:
+                    self.assertEqual(worker.stdout.readline().strip(),'ready')
+                    ticks=handover.procstat(worker.pid)[19]; chrome_ticks=handover.procstat(browser.pid)[19]
+                    profile=root/'.sessionplane-profile.lock'
+                    profile.write_text(json.dumps({'pid':worker.pid,'browserPid':browser.pid}))
+                    h={'requestOk':True,'process':{'pid':worker.pid,'startedAt':'fixture'},
+                       'browser':{'state':'ready','browserPid':browser.pid,'profileDir':str(root),'debuggingPort':4444},
+                       'database':{'path':str(dbpath),'integrity':'ok'},'metrics':{'session_actor_queue_depth':0}}
+                    target=types.SimpleNamespace(request_ref='request-0',session_id='fixture-session',generation=7,user_anchor='fixture-user')
+                    identity=handover.request_identity(h,target); calls=[]
+                    real_sleep=time.sleep
+                    def health(timeout):
+                        real_sleep(.02)
+                        command('write'); calls.append('health-with-writer')
+                        return h
+                    def drain(seconds):
+                        command('quiet'); calls.append('quiet')
+                    with patch.object(handover,'health',side_effect=health), patch.object(handover.time,'sleep',side_effect=drain):
+                        current=handover.prefreeze_drain(h,ticks,chrome_ticks,target,identity,root)
+                    self.assertEqual(calls,['health-with-writer']*2+['quiet'])
+                    samples=json.loads((root/'writer-drain.json').read_text())['samples']
+                    for sample in samples[:2]:
+                        self.assertTrue(any(row['classification']=='wal-writer' for row in sample['locks']))
+                    self.assertEqual(samples[-1]['phase'],'quiet-observed')
+                    if mode=='raced-writer': command('write')
+                    if mode in ['submit','request']:
+                        with closing(sqlite3.connect(dbpath)) as db:
+                            db.execute("UPDATE outbox SET "+("submission_state='submit_attempted'" if mode=='submit' else "request_hash='changed'")+" WHERE outbox_id='request-0'");db.commit()
+                    if mode=='owner': profile.write_text(json.dumps({'pid':0,'browserPid':browser.pid}))
+                    if mode=='chrome': chrome_ticks='wrong-lifetime'
+                    with patch.object(handover,'health',side_effect=AssertionError('No health after quiet')):
+                        if mode=='parent-loss':
+                            controller=os.fork()
+                            if controller==0:
+                                with handover.frozen_core(fd,worker.pid,ticks,timeout=1): os._exit(0)
+                            os.waitpid(controller,0)
+                            deadline=time.monotonic()+2
+                            while handover.procstat(worker.pid)[0] in ('T','t') and time.monotonic()<deadline: time.sleep(.01)
+                            self.assertIsNone(worker.poll())
+                            self.assertNotIn(handover.procstat(worker.pid)[0],('T','t'))
+                        elif mode=='success':
+                            with handover.frozen_core(fd,worker.pid,ticks) as commit:
+                                handover.frozen_guard(current,h,ticks,chrome_ticks,target,identity)
+                                commit()
+                            self.assertEqual(worker.wait(timeout=2),-signal.SIGKILL)
+                        else:
+                            with self.assertRaises(AssertionError):
+                                with handover.frozen_core(fd,worker.pid,ticks,timeout=.2 if mode=='expiry' else 10) as commit:
+                                    handover.frozen_guard(current,h,ticks,chrome_ticks,target,identity)
+                                    if mode=='exception': raise AssertionError('injected parent failure')
+                                    if mode=='expiry': time.sleep(.3)
+                                    commit()
+                            self.assertIsNone(worker.poll())
+                            self.assertNotIn(handover.procstat(worker.pid)[0],('T','t'))
+                            if mode=='raced-writer': command('quiet')
+                    self.assertIsNone(browser.poll())
+                    with closing(sqlite3.connect(dbpath)) as db:
+                        self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0],'ok')
+                        self.assertEqual(db.execute('SELECT count(*) FROM outbox').fetchone()[0],878)
+                        if mode not in ['submit','request']:
+                            self.assertEqual(db.execute("SELECT count(*) FROM outbox WHERE submission_state='submission_unknown'").fetchone()[0],4)
+                            post=handover.request_identity(h,target)
+                            for key in ['requests','bindings','request','anchor']: self.assertEqual(post[key],identity[key])
+                finally:
+                    os.close(fd)
+                    if worker.poll() is None: worker.terminate()
+                    worker.wait(timeout=2);worker.stdin.close();worker.stdout.close()
+                    browser.terminate();browser.wait(timeout=2)
 
-    def test_prefreeze_persistent_or_foreign_writer_stops_without_signal(self):
+    def test_prefreeze_rejects_non_drainable_locks_and_changed_live_invariants(self):
         with tempfile.TemporaryDirectory() as directory:
             root=pathlib.Path(directory)
             h={'process':{'pid':11},'browser':{'browserPid':22},'database':{'path':'fixture'}}
-            report={'locks':[{'blocksHandover':True,'classification':'wal-writer','holder':{'pid':11,'startTicks':'ticks'}}]}
-            for mode in ['persistent','foreign','identity-changed']:
+            identity={'request':['original']}
+            for mode in ['foreign','unknown','checkpoint','recovery','exclusive','range','actor','submit','request','pid','chrome','persistent','slow-health']:
                 with self.subTest(mode=mode):
-                    sample=copy.deepcopy(report)
-                    if mode=='foreign': sample['locks'][0]['holder']['pid']=99
+                    row={'blocksHandover':True,'classification':'wal-writer','start':'120','end':'120','holder':{'pid':11,'startTicks':'ticks'}}
+                    if mode=='range': row['end']='121'
+                    if mode=='foreign': row['holder']['pid']=99
+                    if mode=='unknown': row['holder']['startTicks']=None
+                    if mode in ['checkpoint','recovery','exclusive']: row['classification']='wal-'+mode
                     clock=[0.0]
                     def sleep(seconds): clock[0]+=seconds
-                    def stat(pid): return ['S']*19+['changed' if mode=='identity-changed' else 'ticks']
-                    with patch.object(handover.time,'monotonic',side_effect=lambda:clock[0]), patch.object(handover.time,'sleep',side_effect=sleep), patch.object(handover,'procstat',side_effect=stat), patch.object(handover,'live',return_value=True), patch.object(handover,'health',return_value=h) as health, patch.object(handover,'guard',side_effect=handover.LockActivityError(sample)), patch.object(handover,'lock_report',return_value=sample), patch.object(handover.signal,'pidfd_send_signal') as signal_call:
-                        with self.assertRaises(AssertionError): handover.prefreeze_drain(h,'ticks','ticks',None,{},root,timeout=.25)
-                        signal_call.assert_not_called()
-                        self.assertLessEqual(clock[0],.25)
-                        self.assertEqual(health.call_count,0 if mode=='identity-changed' else 1)
-                        if mode!='persistent': self.assertEqual(clock[0],0)
-
-    def test_prefreeze_quiet_does_not_reset_deadline_or_bypass_new_activity(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root=pathlib.Path(directory)
-            h={'process':{'pid':11},'browser':{'browserPid':22},'database':{'path':'fixture'}}
-            locked={'locks':[{'blocksHandover':True,'classification':'wal-writer','holder':{'pid':11,'startTicks':'ticks'}}]}
-            for mode in ['recurring-writer','new-submit']:
-                with self.subTest(mode=mode):
-                    clock=[0.0]; calls=[0]
-                    def check(*unused):
-                        calls[0]+=1
-                        if mode=='new-submit' and calls[0]>1: raise AssertionError('Active submission')
-                        raise handover.LockActivityError(locked)
-                    def sleep(seconds): clock[0]+=seconds
-                    with patch.object(handover.time,'monotonic',side_effect=lambda:clock[0]), patch.object(handover.time,'sleep',side_effect=sleep), patch.object(handover,'procstat',return_value=['S']*19+['ticks']), patch.object(handover,'live',return_value=True), patch.object(handover,'health',return_value=h), patch.object(handover,'guard',side_effect=check), patch.object(handover,'lock_report',return_value={'locks':[]}), patch.object(handover.signal,'pidfd_send_signal') as signal_call:
-                        with self.assertRaises((TimeoutError,AssertionError)): handover.prefreeze_drain(h,'ticks','ticks',None,{},root,timeout=.25)
-                        self.assertLessEqual(clock[0],.25)
-                        self.assertEqual(calls[0],2)
-                        signal_call.assert_not_called()
-
-    def test_prefreeze_health_budget_is_not_consumed_by_prior_validation(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root=pathlib.Path(directory)
-            h={'process':{'pid':11},'browser':{'browserPid':22},'database':{'path':'fixture'}}
-            locked={'locks':[{'blocksHandover':True,'classification':'wal-writer','holder':{'pid':11,'startTicks':'ticks'}}]}
-            for slow in [False, True]:
-                with self.subTest(slow=slow):
-                    clock=[0.0]; guards=[0]; timeouts=[]
+                    def stat(pid): return ['S']*19+['changed' if (mode=='pid' and pid==11) or (mode=='chrome' and pid==22) else 'ticks']
+                    def check(*args):
+                        if mode in ['actor','submit']: raise AssertionError('Active work')
                     def health(timeout):
-                        timeouts.append(timeout)
-                        duration=6 if slow else 1.5
-                        clock[0]+=min(timeout,duration)
-                        if duration>timeout: raise subprocess.TimeoutExpired('health',timeout)
+                        if mode=='slow-health':
+                            clock[0]+=timeout
+                            raise subprocess.TimeoutExpired('health',timeout)
                         return h
-                    def guard(*args):
-                        guards[0]+=1
-                        if guards[0]==2: raise handover.LockActivityError(locked)
-                    def sleep(seconds): clock[0]+=seconds
-                    with patch.object(handover.time,'monotonic',side_effect=lambda:clock[0]), patch.object(handover.time,'sleep',side_effect=sleep), patch.object(handover,'procstat',return_value=['S']*19+['ticks']), patch.object(handover,'live',return_value=True), patch.object(handover,'health',side_effect=health), patch.object(handover,'guard',side_effect=guard), patch.object(handover,'request_identity',return_value={'request':['original']}), patch.object(handover,'lock_report',return_value={'locks':[]}), patch.object(handover.signal,'pidfd_send_signal') as signal_call:
-                        if slow:
-                            with self.assertRaises(subprocess.TimeoutExpired):
-                                handover.prefreeze_drain(h,'ticks','ticks',None,{'request':['original']},root)
-                            self.assertEqual(clock[0],5)
-                        else:
-                            handover.prefreeze_drain(h,'ticks','ticks',None,{'request':['original']},root)
-                            self.assertEqual(timeouts,[5,3.5,5,3.5])
-                            self.assertAlmostEqual(clock[0],6.1)
-                            self.assertEqual(guards[0],4)
+                    with patch.object(handover.time,'monotonic',side_effect=lambda:clock[0]), patch.object(handover.time,'sleep',side_effect=sleep), patch.object(handover,'procstat',side_effect=stat), patch.object(handover,'live',return_value=True), patch.object(handover,'health',side_effect=health), patch.object(handover,'guard_state',side_effect=check), patch.object(handover,'request_identity',return_value={'request':['changed']} if mode=='request' else identity), patch.object(handover,'lock_report',return_value={'locks':[row]}), patch.object(handover.signal,'pidfd_send_signal') as signal_call:
+                        with self.assertRaises((AssertionError,subprocess.TimeoutExpired)):
+                            handover.prefreeze_drain(h,'ticks','ticks',None,identity,root,timeout=.25)
                         signal_call.assert_not_called()
-                    evidence=json.loads((root/'writer-drain.json').read_text())
-                    self.assertEqual(len([t for t in evidence['timings'] if t['operation']=='health']),len(timeouts))
+                        self.assertLessEqual(clock[0],.25)
+                        if mode not in ['persistent','slow-health']: self.assertEqual(clock[0],0)
 
 
 if __name__ == '__main__':
