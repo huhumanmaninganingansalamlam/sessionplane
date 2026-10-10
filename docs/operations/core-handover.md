@@ -13,7 +13,7 @@ shutdown API. Its ordinary SIGINT/SIGTERM path calls `service.close()` and
 `browserOwner.close()`, which also closes Chrome. Do not use ordinary shutdown,
 process-group termination, or a browser restart for this handover.
 
-The established alternative is a naturally drained **exact-core-only SIGKILL**,
+The bootstrap alternative is a naturally drained **exact-core-only bounded freeze and SIGKILL**,
 followed by the same command, working directory and environment. The successor
 adopts the still-running Chrome through the existing profile ownership record.
 `handover.py` pins the process lifetime with a Linux pidfd and checks the core
@@ -21,7 +21,7 @@ start time/ticks, UID, profile lock, browser identity, actor queue, submission
 state and DB/WAL/SHM writer locks immediately before the transition. It never
 signals Chrome or a process group. Nonzero actor *count* is not queue activity.
 
-**These sampled checks are not an atomic admission fence.** All original call
+**The initial sampled checks are not an admission fence.** All original call
 issuers must actually stop issuing new mutations during the short handover,
 while existing calls drain naturally. `--issuers-quiesced` records that operator
 assertion; it does not suspend callers. Internal callbacks can also enter an
@@ -34,8 +34,8 @@ remains; the owner resumes that same request afterward. Browser-side generation
 is not stopped or resent. The script reuses the existing DB, profile and runtime
 environment. Environment values stay in memory and are not printed or saved.
 
-The candidate below includes `3e6ec80`'s explicit unresolved-anchor display and
-`e38df5b`'s preservation of an existing browser when endpoint verification or
+The candidate below includes the B20 load-notice fix and bounded maintenance,
+as well as `e38df5b`'s preservation of an existing browser when endpoint verification or
 browser attachment fails. Before that fix, those failure paths could replace or
 close Chrome. The fix does not make ordinary shutdown browser-preserving or
 promise that every later runtime failure is a lossless handover.
@@ -67,16 +67,65 @@ gone, with Chrome alive, before promotion/startup. Ordinary SIGTERM still closes
 Chrome and is not used here. External DB writers still fail the existing lock
 checks; the core gate does not control another process.
 
-Older running cores do not gain this capability from a staged package. Their
-existing exact-core-only guarded path remains unchanged and still needs fresh
-issuer coordination; this is a bootstrap limitation, not evidence of deployment.
+Older running cores do not gain this capability from a staged package. The legacy branch now uses the bounded pidfd freeze below after all existing guards; it still needs fresh issuer coordination. Staging does not activate maintenance in the old process.
 No operational update is performed by building or testing this implementation.
 
 `--resume-pre-signal` is only for the historical already-installed-candidate abort.
 It explicitly rejects a receipt containing `staging.json`. Preserve a staging-only
 abort's candidate, backup and receipts; do not relabel it as installed or erase its
-receipt to repeat an attempt. Any next attempt needs separately reviewed reentry
-and a new supervisor-coordinated issuer window.
+receipt to repeat an attempt. Use the separate `--resume-staged` contract below with a new supervisor-coordinated issuer window.
+
+## One-time legacy bootstrap and staged reentry
+
+On a runtime without `maintenance`, the helper first runs the same live health,
+actor, submit, owner and writer checks. A short-lived guardian pins the same
+pidfd, sends SIGSTOP to **only that core**, and waits for every core thread to be
+stopped. Chrome, workers and other processes continue. While frozen, the helper
+rechecks DB submission state, profile ownership, exact request, PID/start ticks,
+Chrome lifetime and all DB/WAL/SHM locks without calling a blocked health RPC.
+A writer caught by the freeze is rejected, not ignored or killed.
+
+The guardian has a 10-second deadline and is the only process allowed to decide
+SIGKILL versus SIGCONT. It resumes on guard failure, helper disconnect/death or
+expiry. A late commit cannot kill a resumed core. Successful commit ends only
+the pinned old core. The original submission/unknown records are not terminalized.
+This closes the old core's internal writer re-entry gap; it does not control a
+foreign DB writer. The unchanged lock checks still reject foreign activity.
+No SIGTERM, process-group signal or Chrome signal is used. Host failure or killing
+the guardian itself is outside this bounded helper-loss guarantee.
+
+For the preserved staging-only abort, use the new exact runtime bundle and add:
+
+```text
+--resume-staged /absolute/path/to/prior/local-receipt
+--receipt-dir /absolute/path/to/new-bootstrap-receipt
+```
+
+This works in read-only preflight; `--apply --issuers-quiesced` still requires a
+fresh supervisor window. The prior receipt must contain staging, original backups,
+health and request identity and **no handover/promotion/successor record**. The same
+old process/start time, Chrome and submitted sentinel must remain. Every regular
+file in the original install backup must still match the live installation. Old
+candidate/receipts are retained; a different target revision is staged separately.
+A prior 5c9c8ee staging is not relabelled as 8f9b971. A new receipt name alone cannot
+replace these checks. Ambiguous transition history requires inspection.
+
+Caught promotion, spawn or exited-successor startup failures can restore the
+original installation and start it once with the captured original command/cwd/
+environment. Before transition, the original BrowserOwner bytes must match the
+manifest's reviewed preserving implementation. Before rollback, both old core and
+successor must be gone, the same Chrome must remain, ownership must not have moved
+to a third process, DB integrity/schema and request identities must match, and
+writer checks must pass. Rollback retains the **current DB**, verifies adoption
+and request/binding preservation, and records `rollback-health.json`. It still
+returns failure so issuers can be released without treating deployment as success.
+
+A live but unhealthy successor is preserved, not killed or overwritten. Changed
+Chrome/schema/foreign ownership also blocks automatic rollback. Receipt or helper
+loss after old-core exit is not an automatic restart instruction: inspect the
+recorded process/path phases first. Browser identity does not prove DOM drafts;
+the original owner still checks draft, selection and foreground through supported
+observation. Existing staging/rollback evidence is retained throughout.
 
 ## Build the exact reviewed package without accessing a running service
 
@@ -95,7 +144,7 @@ operations commit:
 python3 test/ops/test_handover.py
 handover_bundle=$(mktemp -d /tmp/sessionplane-handover.XXXXXX)
 mkdir "$handover_bundle/source"
-git archive e38df5b6f6cbd9b12ce9cc558c7c73fd5b29bf61 | tar -xf - -C "$handover_bundle/source"
+git archive 8f9b971ceef4ae50a49c4192e7614157247d9429 | tar -xf - -C "$handover_bundle/source"
 (
   cd "$handover_bundle/source"
   npm ci --ignore-scripts --no-audit --no-fund
@@ -114,13 +163,13 @@ print(json.dumps({'sourceCommit': manifest['sourceCommit'], 'packageSha256': act
 PY
 ```
 
-Expected runtime SHA: `e38df5b6f6cbd9b12ce9cc558c7c73fd5b29bf61`.
-Exact runtime CI: [37898217135](https://github.com/huhumanmaninganingansalamlam/sessionplane/actions/runs/37898217135), success.
+Expected runtime SHA: `8f9b971ceef4ae50a49c4192e7614157247d9429`.
+Exact runtime CI: [38024361219](https://github.com/huhumanmaninganingansalamlam/sessionplane/actions/runs/38024361219), success.
 Package version remains `0.4.2`; version alone does not establish installed code.
 Expected package SHA256:
 
 ```text
-52fc305f510439905ad33e61fcaf9b11f08f78baaca72b8a11a5a140857eb278
+9055ad3762677b916cf42ffe05dd182b375a4e94fcbb637bd7be0c7dae7d45ed
 ```
 
 The committed manifest also pins the installed catalog and browser implementation
@@ -213,12 +262,12 @@ request shape.
   SQLite connections, including backup connections, are explicitly closed.
 - After core exit but during promotion: inspect `promotion.json`. A caught
   candidate-rename failure restores the previous installation path; it does not
-  restart the old core. A process interruption between renames requires checking
+  restart the old core by itself; the guarded rollback wrapper performs the restart. A process interruption between renames requires checking
   the recorded paths first. Never overwrite a live installation or start a
   duplicate core to conceal a partial transition.
 - After transition: inspect `successor.json`, `core.log` and current health. Never
   launch a duplicate core or terminate a live successor to force a result. An
-  adoption failure is an outage, not success. Preserve the browser and fix the
+  adoption failure is not success; an exited successor can enter the guarded rollback above. Preserve the browser and fix the
   demonstrated cause. Do not automatically start old code against an unhealthy
   endpoint: its old fallback may close the browser.
 - `previous-install.tgz` is the local package rollback; `predeploy.sqlite` is a

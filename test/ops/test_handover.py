@@ -3,6 +3,9 @@ import copy
 import importlib.util
 import json
 import os
+import signal
+import time
+import tarfile
 from contextlib import closing
 import pathlib
 import sqlite3
@@ -53,7 +56,7 @@ class HandoverTests(unittest.TestCase):
     def test_target_identity_is_exact_and_read_only(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory, 'fixture.sqlite')
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db:
                 db.executescript('''
                     CREATE TABLE outbox(outbox_id,session_id,generation,request_hash,prompt_submitted);
                     CREATE TABLE generations(session_id,generation,submitted_user_message_id,submitted_user_turn_id,prompt_hash);
@@ -235,6 +238,159 @@ class HandoverTests(unittest.TestCase):
             channel.recv.return_value = b'{"error":{"message":"readiness changed"}}\n'
             with self.assertRaisesRegex(RuntimeError, 'Maintenance refused'):
                 handover.maintenance_rpc(h, 'system.maintenance.commit', {}, True)
+
+    def test_legacy_freeze_commit_abort_expiry_and_parent_loss(self):
+        # Only fixture children are signalled. An unrelated browser sentinel survives.
+        browser = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        try:
+            for mode in ['commit', 'abort', 'expiry', 'parent-loss', 'wrong-lifetime']:
+                with self.subTest(mode=mode):
+                    core = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+                    fd = os.pidfd_open(core.pid)
+                    ticks = handover.procstat(core.pid)[19]
+                    try:
+                        if mode == 'wrong-lifetime':
+                            with self.assertRaisesRegex(AssertionError, 'freeze failed'):
+                                with handover.frozen_core(fd, core.pid, 'not-the-start-ticks'): pass
+                        elif mode == 'parent-loss':
+                            controller = os.fork()
+                            if controller == 0:
+                                with handover.frozen_core(fd, core.pid, ticks, timeout=1):
+                                    os._exit(0)  # Guardian gets EOF, even without finally.
+                            os.waitpid(controller, 0)
+                            deadline = time.monotonic() + 2
+                            while handover.procstat(core.pid)[0] in ('T', 't') and time.monotonic() < deadline:
+                                time.sleep(.01)
+                        else:
+                            with handover.frozen_core(fd, core.pid, ticks, timeout=.3) as commit:
+                                self.assertEqual(handover.procstat(core.pid)[0], 'T')
+                                self.assertIsNone(browser.poll())
+                                if mode == 'commit': commit()
+                                if mode == 'expiry':
+                                    time.sleep(.4)
+                                    with self.assertRaises((AssertionError, OSError)): commit()
+                        if mode == 'commit':
+                            self.assertEqual(core.wait(timeout=2), -signal.SIGKILL)
+                        else:
+                            self.assertIsNone(core.poll())
+                            self.assertNotIn(handover.procstat(core.pid)[0], ('T', 't'))
+                        self.assertIsNone(browser.poll())
+                    finally:
+                        os.close(fd)
+                        if core.poll() is None: core.terminate()
+                        core.wait(timeout=2)
+        finally:
+            browser.terminate(); browser.wait(timeout=2)
+
+    def test_freeze_rejects_writer_and_resumes_same_core_without_db_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dbpath = pathlib.Path(directory)/'fixture.sqlite'
+            worker = subprocess.Popen([sys.executable, '-u', '-c',
+                "import sqlite3,sys,time; d=sqlite3.connect(sys.argv[1]); d.execute('PRAGMA journal_mode=WAL'); d.execute('CREATE TABLE x(v)'); d.commit(); d.execute('BEGIN IMMEDIATE'); print('ready',flush=True); time.sleep(30)", str(dbpath)], stdout=subprocess.PIPE, text=True)
+            try:
+                self.assertEqual(worker.stdout.readline().strip(), 'ready')
+                fd = os.pidfd_open(worker.pid)
+                try:
+                    with self.assertRaises(handover.LockActivityError):
+                        with handover.frozen_core(fd, worker.pid, handover.procstat(worker.pid)[19]):
+                            handover.no_writer(str(dbpath))
+                    self.assertIsNone(worker.poll())
+                    self.assertNotIn(handover.procstat(worker.pid)[0], ('T', 't'))
+                finally: os.close(fd)
+            finally:
+                worker.terminate(); worker.wait(timeout=2); worker.stdout.close()
+            with closing(sqlite3.connect(dbpath)) as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM x').fetchone()[0], 0)
+                self.assertEqual(db.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
+
+    def test_staged_reentry_preserves_prior_receipt_and_rejects_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            installed, prior, candidate = (root/n for n in ['sessionplane', 'prior', 'candidate'])
+            for p in [installed, prior, candidate]: p.mkdir()
+            (installed/'marker').write_text('old')
+            with tarfile.open(prior/'previous-install.tgz', 'w:gz') as archive:
+                archive.add(installed, arcname='sessionplane')
+            h = {'process': {'pid': 11, 'startedAt': 'original'}, 'browser': {'browserPid': 22, 'profileDir': 'p', 'debuggingPort': 44}}
+            identity = {'request': ['same'], 'anchor': ['original']}
+            for name, value in [('before-health', h), ('before-identity', identity), ('staging', {'installed': str(installed), 'candidate': str(candidate)})]:
+                (prior/(name+'.json')).write_text(json.dumps(value))
+            (prior/'predeploy.sqlite').touch()
+            before = {p.name:p.read_bytes() for p in prior.iterdir()}
+            with patch.object(handover, 'request_identity', return_value=identity):
+                handover.verify_staged_resume(prior, h, installed, None)
+                self.assertEqual(before, {p.name:p.read_bytes() for p in prior.iterdir()})
+                (installed/'marker').write_text('mixed')
+                with self.assertRaisesRegex(AssertionError, 'installation changed'):
+                    handover.verify_staged_resume(prior, h, installed, None)
+                (installed/'marker').write_text('old')
+                (prior/'handover.json').write_text('{}')
+                with self.assertRaisesRegex(AssertionError, 'ambiguous'):
+                    handover.verify_staged_resume(prior, h, installed, None)
+
+    def test_post_exit_rollback_preserves_db_and_refuses_live_successor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            installed, stage, receipt, profile = (root/n for n in ['live', 'stage', 'receipt', 'profile'])
+            for p in [installed, stage, receipt, profile]: p.mkdir()
+            previous = stage/'previous-install'; previous.mkdir()
+            (previous/'marker').write_text('old'); (installed/'marker').write_text('candidate')
+            dbpath = root/'db'
+            with closing(sqlite3.connect(dbpath)) as db:
+                db.executescript("""
+                    CREATE TABLE outbox(outbox_id,session_id,generation,request_hash,prompt_submitted);
+                    CREATE TABLE generations(session_id,generation,submitted_user_message_id,submitted_user_turn_id,prompt_hash);
+                    CREATE TABLE page_bindings(page_key,session_id,generation,conversation_id,target_id);
+                    CREATE TABLE probe_budget(scope,next_allowed_at,blocked_until,backoff_level,consecutive_failures);
+                    CREATE TABLE schema_migrations(version);
+                    INSERT INTO schema_migrations VALUES(1);
+                    INSERT INTO outbox VALUES('r','s',7,'hash',1);
+                    INSERT INTO outbox VALUES('unknown','s',8,'unknown-hash',0);
+                    INSERT INTO generations VALUES('s',7,'a','turn','prompt-hash');
+                    INSERT INTO page_bindings VALUES('page','s',7,'chat','target');
+                """)
+            dbbytes = dbpath.read_bytes()
+            browser = subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])
+            old = subprocess.Popen([sys.executable,'-c','pass']); old.wait()
+            successor = subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])
+            restored_pid = None
+            restored_process = None
+            try:
+                (profile/'.sessionplane-profile.lock').write_text(json.dumps({'pid':old.pid, 'browserPid':browser.pid}))
+                h = {'database': {'path':str(dbpath), 'integrity':'ok', 'schemaVersion':1},
+                     'browser': {'browserPid':browser.pid, 'profileDir':str(profile), 'debuggingPort':44, 'ownership':'adopted'}}
+                target = types.SimpleNamespace(request_ref='r',session_id='s',generation=7,user_anchor='a')
+                identity = handover.request_identity(h,target)
+                def healthy_fixture():
+                    result = copy.deepcopy(h)
+                    result['requestOk'] = True; result['browser']['state'] = 'ready'
+                    result['process'] = {'pid':json.loads((receipt/'rollback-core.json').read_text())['pid']}
+                    return result
+                with patch.object(handover, 'health', side_effect=healthy_fixture):
+                    args=(h,old.pid,successor,handover.procstat(browser.pid)[19],installed,stage,receipt,
+                          [sys.executable,'-c','import time; time.sleep(30)'],directory,dict(os.environ),target,identity)
+                    with self.assertRaisesRegex(AssertionError,'Live successor'): handover.rollback_exited(*args)
+                    self.assertFalse((receipt/'rollback-core.json').exists())
+                    self.assertEqual((installed/'marker').read_text(),'candidate')
+                    successor.terminate(); successor.wait(timeout=2)
+                    restored_process = handover.rollback_exited(*args)
+                    restored_pid = json.loads((receipt/'rollback-core.json').read_text())['pid']
+                    self.assertTrue(handover.live(restored_pid))
+                    self.assertEqual((installed/'marker').read_text(),'old')
+                    self.assertEqual((stage/'failed-candidate/marker').read_text(),'candidate')
+                    self.assertEqual(dbpath.read_bytes(),dbbytes)
+                    self.assertEqual(handover.request_identity(h,target),identity)
+                    self.assertIsNone(browser.poll())
+                    self.assertEqual(json.loads((receipt/'rollback.json').read_text())['phase'],'original-core-restored')
+            finally:
+                if (receipt/'rollback-core.json').exists():
+                    restored_pid = json.loads((receipt/'rollback-core.json').read_text())['pid']
+                    if handover.live(restored_pid): os.kill(restored_pid,signal.SIGTERM)
+                    if restored_process is not None: restored_process.wait(timeout=2)
+                    else: os.waitpid(restored_pid,0)
+                if successor.poll() is None: successor.terminate()
+                successor.wait(timeout=2)
+                browser.terminate(); browser.wait(timeout=2)
 
 
 if __name__ == '__main__':

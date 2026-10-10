@@ -4,7 +4,7 @@ Run only after original owners have paused issuing new mutations for this short 
 The old core has no atomic admission fence: sampled health is not a substitute for that coordination.
 """
 import argparse, datetime, hashlib, json, os, pathlib, pwd, signal, socket, sqlite3, subprocess, sys, tarfile, tempfile, time
-from contextlib import closing
+from contextlib import closing, contextmanager
 
 if not __debug__:
     raise SystemExit('Optimized Python disables safety assertions; run without -O or PYTHONOPTIMIZE')
@@ -180,6 +180,154 @@ def promote_package(installed, candidate, stage, receipt):
     save(receipt/'promotion.json', {'phase': 'promoted', 'previous': str(previous), 'installed': str(installed)})
 
 
+@contextmanager
+def frozen_core(fd, pid, ticks, timeout=10):
+    """One-shot legacy fence. Guardian alone decides kill vs resume before deadline.
+
+    The parent never kills after a sampled timeout check. EOF (including parent
+    death), guard failure or expiry resumes the exact pidfd, never a reused PID.
+    No RPC may run while frozen. Chrome and external writers are not suspended.
+    """
+    parent, child = socket.socketpair()
+    guardian = os.fork()
+    if guardian == 0:
+        parent.close()
+        os.setsid()
+        committed = False
+        stopped = False
+        deadline = time.monotonic() + timeout
+        try:
+            assert procstat(pid)[19] == ticks, 'Core lifetime changed before freeze'
+            assert procstat(pid)[0] not in ('T', 't', 'Z'), 'Core already stopped or exited'
+            signal.pidfd_send_signal(fd, signal.SIGSTOP)
+            stopped = True
+            while time.monotonic() < deadline:
+                threads = list(pathlib.Path(f'/proc/{pid}/task').glob('*/stat'))
+                if threads and all(p.read_text().rsplit(')', 1)[1].split()[0] in ('T', 't') for p in threads):
+                    break
+                time.sleep(.005)
+            else:
+                raise TimeoutError('Core did not reach a bounded frozen state')
+            child.sendall(b'F')
+            child.settimeout(max(.001, deadline-time.monotonic()))
+            command = child.recv(1)
+            if command == b'K' and time.monotonic() < deadline and procstat(pid)[0] in ('T', 't'):
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+                committed = True
+                child.sendall(b'K')
+        except (OSError, AssertionError, TimeoutError):
+            pass
+        finally:
+            if stopped and not committed:
+                try: signal.pidfd_send_signal(fd, signal.SIGCONT)
+                except ProcessLookupError: pass
+            child.close()
+            os._exit(0)
+    child.close()
+    parent.settimeout(timeout + 2)
+    try:
+        assert parent.recv(1) == b'F', 'Legacy freeze failed; core preserved'
+        def commit():
+            try:
+                parent.sendall(b'K')
+                reply = parent.recv(1)
+            except OSError:
+                reply = b''
+            assert reply == b'K' or not live(pid), 'Freeze expired; core resumed, do not promote'
+        yield commit
+    finally:
+        parent.close()  # EOF releases the exact stopped core on any exception.
+        os.waitpid(guardian, 0)
+
+
+def verify_staged_resume(prior, h, installed, target):
+    assert (prior/'staging.json').is_file(), 'Not a staging-only abort'
+    assert all(not (prior/n).exists() for n in ['handover.json', 'successor.json', 'promotion.json']), 'Transition history ambiguous; do not reenter'
+    before = json.loads((prior/'before-health.json').read_text())
+    for key in ['pid', 'startedAt']:
+        assert before['process'][key] == h['process'][key], 'Original core lifetime changed'
+    for key in ['browserPid', 'profileDir', 'debuggingPort']:
+        assert before['browser'][key] == h['browser'][key], 'Browser identity changed'
+    saved = json.loads((prior/'before-identity.json').read_text())
+    current = request_identity(h, target)
+    for key in ['request', 'anchor']:
+        assert list(current[key]) == saved[key], 'Original request changed'
+    assert (prior/'predeploy.sqlite').is_file(), 'Missing backup'
+    # A failed staging attempt must not have rewritten the live installation.
+    with tarfile.open(prior/'previous-install.tgz') as archive:
+        for member in archive.getmembers():
+            if member.isfile():
+                assert (installed.parent/member.name).read_bytes() == archive.extractfile(member).read(), 'Live installation changed after abort'
+    stage = json.loads((prior/'staging.json').read_text())
+    assert pathlib.Path(stage['installed']).resolve() == installed.resolve(), 'Different installation'
+    assert pathlib.Path(stage['candidate']).is_dir(), 'Prior candidate missing; inspect evidence'
+
+
+def restore_install(installed, stage, receipt):
+    """Files only, after caller proves no core is live. Never restore the DB."""
+    previous = stage/'previous-install'
+    if previous.exists():
+        failed = stage/'failed-candidate'
+        assert not failed.exists(), 'Recovery already attempted'
+        installed.rename(failed)
+        previous.rename(installed)
+    save(receipt/'rollback.json', {'phase': 'original-files-restored', 'databaseRestored': False})
+
+
+def launch_core(cmd, cwd, env, receipt, name):
+    with (receipt/('core.log' if name == 'successor' else name + '.log')).open('ab') as log:
+        process = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                   stdout=log, stderr=log, start_new_session=True)
+    return process
+
+
+def await_ready(process, timeout=60):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and process.poll() is None:
+        try:
+            result = health()
+            if result['requestOk'] and result['process']['pid'] == process.pid and result['browser']['state'] == 'ready':
+                return result
+        except (subprocess.SubprocessError, ValueError):
+            pass
+        time.sleep(1)
+    raise RuntimeError('Core not ready; live successors must not be killed or replaced')
+
+
+def rollback_exited(h, old_pid, successor, chrome_ticks, installed, stage, receipt, cmd, cwd, env, target, identity):
+    # Never kill a live successor or restore a database snapshot. This route is
+    # only for a caught promotion/spawn failure or an already exited successor.
+    assert not live(old_pid), 'Original core still live'
+    assert successor is None or successor.poll() is not None, 'Live successor: preserve it and inspect'
+    chrome = h['browser']['browserPid']
+    assert live(chrome) and procstat(chrome)[19] == chrome_ticks, 'Browser identity changed; no automatic restart'
+    lock = json.loads((pathlib.Path(h['browser']['profileDir'])/'.sessionplane-profile.lock').read_text())
+    assert lock['browserPid'] == chrome and lock['pid'] in [old_pid, successor.pid if successor else old_pid], 'Foreign owner; no rollback'
+    no_writer(h['database']['path'])
+    with read_db(h) as db:
+        assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok', 'DB not healthy; no rollback'
+        assert db.execute('SELECT COALESCE(MAX(version), 0) FROM schema_migrations').fetchone()[0] == h['database']['schemaVersion'], 'Schema changed; no old-code restart'
+    current = request_identity(h, target)
+    assert current['request'] == identity['request'] and current['anchor'] == identity['anchor']
+    assert all(current['requests'].get(k) == v for k, v in identity['requests'].items())
+    restore_install(installed, stage, receipt)
+    restored = launch_core(cmd, cwd, env, receipt, 'rollback-core')
+    save(receipt/'rollback-core.json', {'pid': restored.pid, 'startedAtUnix': time.time()})
+    after = await_ready(restored)
+    assert after['database']['path'] == h['database']['path'] and after['database']['integrity'] == 'ok'
+    assert after['database']['schemaVersion'] == h['database']['schemaVersion']
+    for key in ['browserPid', 'profileDir', 'debuggingPort']:
+        assert after['browser'][key] == h['browser'][key]
+    assert after['browser']['ownership'] == 'adopted' and procstat(chrome)[19] == chrome_ticks
+    post = request_identity(after, target)
+    assert post['request'] == identity['request'] and post['anchor'] == identity['anchor']
+    assert all(post['requests'].get(k) == v for k, v in identity['requests'].items())
+    assert all(row in post['bindings'] for row in identity['bindings'])
+    save(receipt/'rollback-health.json', after)
+    save(receipt/'rollback.json', {'phase': 'original-core-restored', 'pid': restored.pid, 'databaseRestored': False})
+    return restored
+
+
 def verify_pre_signal_resume(prior, h, installed, pkg, manifest, target):
     # An old receipt is never erased, overwritten or treated as a fresh attempt.
     assert prior.is_dir(), 'Missing previous receipt'
@@ -214,8 +362,10 @@ def main():
     parser.add_argument('--generation', type=int, required=True)
     parser.add_argument('--user-anchor', required=True)
     parser.add_argument('--resume-pre-signal', type=pathlib.Path)
+    parser.add_argument('--resume-staged', type=pathlib.Path)
     parser.add_argument('--receipt-dir', type=pathlib.Path)
     args=parser.parse_args()
+    assert not (args.resume_staged and args.resume_pre_signal), 'Choose exactly one reentry contract'
     if args.apply and not args.issuers_quiesced:
         parser.error('--apply requires supervisor-coordinated --issuers-quiesced')
     assert hasattr(os, 'pidfd_open') and hasattr(signal, 'pidfd_send_signal'), 'Linux pidfd support is required'
@@ -227,7 +377,8 @@ def main():
     assert hashlib.sha256(pkg.read_bytes()).hexdigest()==manifest['packageSha256'], 'Package checksum mismatch'
     assert manifest['ciConclusion']=='success', 'Candidate CI not successful'
     if args.apply and (root/'local-receipt').exists():
-        assert args.resume_pre_signal is not None, 'Existing attempt: inspect and explicitly resume a proven pre-signal abort'
+        assert args.resume_pre_signal is not None or args.resume_staged is not None, 'Existing attempt: inspect and explicitly resume a proven pre-signal abort'
+        assert (args.resume_staged or args.resume_pre_signal).resolve() == (root/'local-receipt').resolve(), 'Existing bundle receipt must be the inspected prior attempt'
     h=health(); assert h['process']['pid']==args.core_pid and h['browser']['browserPid']==args.chrome_pid, 'PID differs from supplied live receipt'
     pid=args.core_pid; proc=pathlib.Path(f'/proc/{pid}')
     assert proc.stat().st_uid==os.getuid() and pathlib.Path(f'/proc/{args.chrome_pid}').stat().st_uid==os.getuid()
@@ -242,6 +393,11 @@ def main():
         assert args.receipt_dir is not None, 'Resume requires a distinct --receipt-dir'
         assert args.receipt_dir.resolve() != args.resume_pre_signal.resolve(), 'Preserve prior receipt'
         verify_pre_signal_resume(args.resume_pre_signal.resolve(), h, installed, pkg, manifest, args)
+    if args.resume_staged is not None:
+        assert args.receipt_dir is not None and args.receipt_dir.resolve() != args.resume_staged.resolve(), 'Staged reentry needs a new receipt; preserve prior evidence'
+        verify_staged_resume(args.resume_staged.resolve(), h, installed, args)
+    # Rollback may restart only the reviewed browser-preserving adoption implementation.
+    assert hashlib.sha256((installed/'dist/browser/browser-owner.js').read_bytes()).hexdigest() == manifest['runtimeBrowserOwnerSha256'], 'Unreviewed original browser adoption; no automatic rollback path'
     identity=request_identity(h, args)
     guard(h,h)
     print(json.dumps({'phase':'preflight','corePid':pid,'chromePid':args.chrome_pid,'sourceCommit':manifest['sourceCommit'],'packageVerified':True,'actorDepth':0,'activeSubmitCount':0,'dbWriterLocks':0,'next':'apply only during coordinated issuer pause'},indent=2),flush=True)
@@ -251,6 +407,8 @@ def main():
     save(receipt/'before-health.json',h); save(receipt/'before-identity.json',identity)
     if args.resume_pre_signal is not None:
         save(receipt/'resumes.json', {'priorReceipt': str(args.resume_pre_signal.resolve()), 'meaning': 'same original live core; pinned candidate already on disk; runtime SHA not inferred from disk'})
+    if args.resume_staged is not None:
+        save(receipt/'resumes.json', {'priorReceipt': str(args.resume_staged.resolve()), 'meaning': 'verified staging-only abort; live installation unchanged'})
     runtime_env=dict(item.split('=',1) for item in proc.joinpath('environ').read_text().split('\0') if '=' in item)
     subprocess.run(['tar','-czf',str(receipt/'previous-install.tgz'),'-C',str(installed.parent),'sessionplane'],check=True)
     with read_db(h) as db, closing(sqlite3.connect(receipt/'predeploy.sqlite')) as backup:
@@ -270,13 +428,23 @@ def main():
             assert procstat(pid)[19]==ticks and procstat(args.chrome_pid)[19]==chrome_ticks, 'PID reused'
             assert request_identity(current, args)['request']==identity['request']
         no_writer(h['database']['path'])
-        save(receipt/'handover.json',{'phase':'drained-core-only-transition','oldPid':pid,'oldStartTicks':ticks,'chromePid':args.chrome_pid,'atUnix':time.time(),'sourceCommit':manifest['sourceCommit']})
+        transition = {'phase':'drained-core-only-transition','oldPid':pid,'oldStartTicks':ticks,'chromePid':args.chrome_pid,'atUnix':time.time(),'sourceCommit':manifest['sourceCommit']}
         if lease is not None:
             # The core rechecks the lease synchronously and exits without closing Chrome.
             # EOF is not success until the pinned process is independently gone below.
+            save(receipt/'handover.json', transition)
             maintenance_rpc(h, 'system.maintenance.commit', {**lease_owner(h), 'token': lease['token']}, True)
         else:
-            signal.pidfd_send_signal(fd,signal.SIGKILL)
+            with frozen_core(fd, pid, ticks) as commit:
+                # Frozen core cannot race this DB/lock check. Do not issue health RPC.
+                assert procstat(pid)[19] == ticks and procstat(args.chrome_pid)[19] == chrome_ticks
+                assert live(args.chrome_pid), 'Chrome exited'
+                no_writer(h['database']['path'])
+                guard(current, h)
+                assert request_identity(h, args)['request'] == identity['request']
+                no_writer(h['database']['path'])
+                save(receipt/'handover.json', transition)
+                commit()
     except LockActivityError as error:
         save(receipt/'abort-locks.json', error.report)
         raise
@@ -293,18 +461,21 @@ def main():
     while live(pid) and time.monotonic()<deadline: time.sleep(.1)
     assert not live(pid), 'Old core still live: do not launch duplicate'
     assert live(args.chrome_pid) and procstat(args.chrome_pid)[19]==chrome_ticks, 'Browser no longer preserved: stop'
-    promote_package(installed, candidate, stage, receipt)
-    with (receipt/'core.log').open('ab') as log:
-        successor=subprocess.Popen(cmd,cwd=cwd,env=runtime_env,stdin=subprocess.DEVNULL,stdout=log,stderr=log,start_new_session=True)
-    save(receipt/'successor.json',{'pid':successor.pid,'startedAtUnix':time.time()})
-    after=None; deadline=time.monotonic()+60
-    while time.monotonic()<deadline and successor.poll() is None:
+    successor = None
+    try:
+        promote_package(installed, candidate, stage, receipt)
+        successor = launch_core(cmd, cwd, runtime_env, receipt, 'successor')
+        save(receipt/'successor.json', {'pid': successor.pid, 'startedAtUnix': time.time()})
+        after = await_ready(successor)
+    except Exception as error:
+        save(receipt/'startup-failure.json', {'error': str(error), 'rollback': 'pending'})
         try:
-            candidate=health()
-            if candidate['requestOk'] and candidate['process']['pid']==successor.pid and candidate['browser']['state']=='ready': after=candidate; break
-        except (subprocess.SubprocessError, ValueError): pass
-        time.sleep(1)
-    assert after is not None, 'Successor not ready: preserve Chrome and inspect local-receipt/core.log; do not repeat handover or auto-start old code'
+            rollback_exited(h, pid, successor, chrome_ticks, installed, stage, receipt,
+                           cmd, cwd, runtime_env, args, identity)
+        except Exception as recovery_error:
+            save(receipt/'rollback-blocked.json', {'error': str(recovery_error), 'action': 'preserve browser/DB and inspect; do not retry'})
+            raise RuntimeError('Handover failed; recovery not confirmed; inspect receipts') from recovery_error
+        raise RuntimeError('Handover failed; original core restored; release issuer hold, do not repeat') from error
     assert after['database']['integrity']=='ok' and after['database']['path']==h['database']['path']
     assert after['database']['schemaVersion']==h['database']['schemaVersion']
     assert after['providers']['enabled']==h['providers']['enabled']
