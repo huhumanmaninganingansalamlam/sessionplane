@@ -532,14 +532,19 @@ export class TeamWorkflow {
         message: evidence.preparationAvailability.available ? preparation.message
           : 'The exact provider page has no usable composer. This request remains prepared and was not submitted. Read the same request after the provider page becomes usable; do not treat Retry or another ordinary button as submit.' };
     }
-    if ((!snapshot.terminal && snapshot.submissionState === 'submission_unknown' && snapshot.provider === 'chatgpt') ||
+    // A reconciled execution failure is still inspectable on its original turn.
+    // Never reopen a missing tab or change its stored terminal result for a read.
+    const inspectFailed = inspectCurrent && snapshot.terminal && snapshot.sessionState === 'failed' &&
+      latestDisplayTarget(snapshot)?.role === 'user';
+    if (inspectFailed || (!snapshot.terminal && snapshot.submissionState === 'submission_unknown' && snapshot.provider === 'chatgpt') ||
         (snapshot.provider === 'chatgpt' && !snapshot.terminal && snapshot.submissionState === 'submitted' &&
           (inspectCurrent || snapshot.reason === 'provider-actionable-alert' || snapshot.reason === 'dom-user-anchor-missing' ||
             snapshot.reason === 'backend-user-anchor-absent-from-mapping' || snapshot.reason === 'backend-user-anchor-not-on-current-branch' ||
             /^(backend-user-anchor-absent-from-mapping|backend-user-anchor-not-on-current-branch)$/.test(
               String(new EventRepository(this.services.database.raw).latestAnchorRecovery(snapshot.sessionId, snapshot.generation)?.recoveryReason))))) {
       try {
-        if (snapshot.conversationId !== null) await this.services.ensurePage(snapshot.sessionId, snapshot.generation);
+        if (snapshot.conversationId !== null) await this.services.ensurePage(snapshot.sessionId, snapshot.generation,
+          inspectFailed ? { openMissing: false } : undefined);
         const inspected = await this.services.ui.inspectSubmission({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });
         return { ...inspected.snapshot, requestRef: request.outboxId, roleRef: roleRef(inspected.snapshot),
           ...((inspected.evidence?.submissionCandidates?.length ?? 0) > 0 ? { status: 'needs_decision' } : {}),

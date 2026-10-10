@@ -680,10 +680,12 @@ function typedUiError(error: unknown): SessionPlaneDomainError {
 
 /** Display identity only: this never infers an ACK or completes a generation. */
 export function latestDisplayTarget(session: SessionSnapshot): { role: 'user' | 'assistant'; ids: string[] } | null {
-  if (session.provider !== 'chatgpt' || session.errorCode !== null || !session.promptSubmitted || session.conversationId === null) return null;
+  const reconciledFailure = session.terminal && session.sessionState === 'failed' &&
+    session.reason === 'thinking-failed-reconciled' && session.errorCode === 'provider.execution-failed';
+  if (session.provider !== 'chatgpt' || (session.errorCode !== null && !reconciledFailure) || !session.promptSubmitted || session.conversationId === null) return null;
   if (session.terminal && session.sessionState === 'complete' && session.responseMessageId !== null)
     return { role: 'assistant', ids: [session.responseMessageId] };
   const ids = [session.submittedUserMessageId, session.submittedUserTurnId].filter((id): id is string => id !== null);
-  return !session.terminal && session.submissionState === 'submitted' && session.responseMessageId === null && ids.length > 0
+  return (!session.terminal || reconciledFailure) && session.submissionState === 'submitted' && session.responseMessageId === null && ids.length > 0
     ? { role: 'user', ids } : null;
 }
