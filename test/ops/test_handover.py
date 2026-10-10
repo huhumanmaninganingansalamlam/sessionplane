@@ -392,6 +392,70 @@ class HandoverTests(unittest.TestCase):
                 successor.wait(timeout=2)
                 browser.terminate(); browser.wait(timeout=2)
 
+    def test_prefreeze_transient_writer_drains_then_revalidates_full_guards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=pathlib.Path(directory); dbpath=root/'fixture.sqlite'
+            writer=subprocess.Popen([sys.executable,'-u','-c',
+                "import sqlite3,sys,time; d=sqlite3.connect(sys.argv[1]); d.execute('PRAGMA journal_mode=WAL'); d.execute('CREATE TABLE x(v)'); d.commit(); d.execute('BEGIN IMMEDIATE'); print('ready',flush=True); sys.stdin.readline(); d.commit(); print('drained',flush=True); time.sleep(30)",str(dbpath)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True)
+            try:
+                self.assertEqual(writer.stdout.readline().strip(),'ready')
+                h={'process':{'pid':writer.pid},'browser':{'browserPid':os.getpid()},'database':{'path':str(dbpath)}}
+                ticks=handover.procstat(writer.pid)[19]; chrome_ticks=handover.procstat(os.getpid())[19]
+                identity={'request':['original']}; calls=[]
+                def full_guard(*args):
+                    calls.append('guard'); handover.no_writer(str(dbpath))
+                def drain(_):
+                    self.assertEqual(calls,['guard'])
+                    writer.stdin.write('complete transaction\n'); writer.stdin.flush()
+                    self.assertEqual(writer.stdout.readline().strip(),'drained')
+                with patch.object(handover,'health',return_value=h) as health, patch.object(handover,'guard',side_effect=full_guard), patch.object(handover,'request_identity',return_value=identity), patch.object(handover.time,'sleep',side_effect=drain), patch.object(handover.signal,'pidfd_send_signal') as signal_call:
+                    self.assertEqual(handover.prefreeze_drain(h,ticks,chrome_ticks,None,identity,root),h)
+                    self.assertEqual(health.call_count,3)  # One rejected + two fresh full checks.
+                    signal_call.assert_not_called()
+                evidence=json.loads((root/'writer-drain.json').read_text())
+                self.assertEqual([s['phase'] for s in evidence['samples']],['live-guard-1','quiet-observed'])
+                self.assertIsNone(writer.poll())
+            finally:
+                writer.terminate(); writer.wait(timeout=2); writer.stdin.close(); writer.stdout.close()
+
+    def test_prefreeze_persistent_or_foreign_writer_stops_without_signal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=pathlib.Path(directory)
+            h={'process':{'pid':11},'browser':{'browserPid':22},'database':{'path':'fixture'}}
+            report={'locks':[{'blocksHandover':True,'classification':'wal-writer','holder':{'pid':11,'startTicks':'ticks'}}]}
+            for mode in ['persistent','foreign','identity-changed']:
+                with self.subTest(mode=mode):
+                    sample=copy.deepcopy(report)
+                    if mode=='foreign': sample['locks'][0]['holder']['pid']=99
+                    clock=[0.0]
+                    def sleep(seconds): clock[0]+=seconds
+                    def stat(pid): return ['S']*19+['changed' if mode=='identity-changed' else 'ticks']
+                    with patch.object(handover.time,'monotonic',side_effect=lambda:clock[0]), patch.object(handover.time,'sleep',side_effect=sleep), patch.object(handover,'procstat',side_effect=stat), patch.object(handover,'live',return_value=True), patch.object(handover,'health',return_value=h) as health, patch.object(handover,'guard',side_effect=handover.LockActivityError(sample)), patch.object(handover,'lock_report',return_value=sample), patch.object(handover.signal,'pidfd_send_signal') as signal_call:
+                        with self.assertRaises(AssertionError): handover.prefreeze_drain(h,'ticks','ticks',None,{},root,timeout=.25)
+                        signal_call.assert_not_called()
+                        self.assertLessEqual(clock[0],.25)
+                        self.assertEqual(health.call_count,0 if mode=='identity-changed' else 1)
+                        if mode!='persistent': self.assertEqual(clock[0],0)
+
+    def test_prefreeze_quiet_does_not_reset_deadline_or_bypass_new_activity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=pathlib.Path(directory)
+            h={'process':{'pid':11},'browser':{'browserPid':22},'database':{'path':'fixture'}}
+            locked={'locks':[{'blocksHandover':True,'classification':'wal-writer','holder':{'pid':11,'startTicks':'ticks'}}]}
+            for mode in ['recurring-writer','new-submit']:
+                with self.subTest(mode=mode):
+                    clock=[0.0]; calls=[0]
+                    def check(*unused):
+                        calls[0]+=1
+                        if mode=='new-submit' and calls[0]>1: raise AssertionError('Active submission')
+                        raise handover.LockActivityError(locked)
+                    def sleep(seconds): clock[0]+=seconds
+                    with patch.object(handover.time,'monotonic',side_effect=lambda:clock[0]), patch.object(handover.time,'sleep',side_effect=sleep), patch.object(handover,'procstat',return_value=['S']*19+['ticks']), patch.object(handover,'live',return_value=True), patch.object(handover,'health',return_value=h), patch.object(handover,'guard',side_effect=check), patch.object(handover,'lock_report',return_value={'locks':[]}), patch.object(handover.signal,'pidfd_send_signal') as signal_call:
+                        with self.assertRaises((TimeoutError,AssertionError)): handover.prefreeze_drain(h,'ticks','ticks',None,{},root,timeout=.25)
+                        self.assertLessEqual(clock[0],.25)
+                        self.assertEqual(calls[0],2 if mode=='new-submit' else 3)
+                        signal_call.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

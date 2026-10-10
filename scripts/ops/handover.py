@@ -12,8 +12,8 @@ if not __debug__:
 def save(path, value):
     path.write_text(json.dumps(value, indent=2)); path.chmod(0o600)
 
-def health():
-    return json.loads(subprocess.check_output(['sessplane', 'health', '--json'], text=True, timeout=15))
+def health(timeout=15):
+    return json.loads(subprocess.check_output(['sessplane', 'health', '--json'], text=True, timeout=timeout))
 
 def maintenance_rpc(h, method, params, allow_commit_eof=False):
     """Existing Unix socket only; no alternate transport or credentials."""
@@ -142,6 +142,58 @@ def guard(h, expected):
     lock=json.loads((pathlib.Path(h['browser']['profileDir'])/'.sessionplane-profile.lock').read_text())
     assert lock['pid']==h['process']['pid'] and lock['browserPid']==h['browser']['browserPid']
     no_writer(h['database']['path'])
+
+def prefreeze_drain(h, ticks, chrome_ticks, target, identity, receipt, timeout=5):
+    """One deadline across staging's final guards; never freeze to drain a writer."""
+    deadline = time.monotonic() + timeout
+    samples = []
+    phase = 'live-guard-1'
+    def pinned():
+        assert procstat(h['process']['pid'])[19] == ticks, 'Core PID reused'
+        chrome = h['browser']['browserPid']
+        assert live(chrome) and procstat(chrome)[19] == chrome_ticks, 'Chrome lifetime changed'
+    def remaining():
+        left = deadline - time.monotonic()
+        if left <= 0: raise TimeoutError('Pre-freeze drain deadline expired; preserve original core')
+        return left
+    try:
+        while True:
+            try:
+                for index in range(2):
+                    phase = f'live-guard-{index+1}'
+                    save(receipt/'transition-phase.json', {'phase': phase})
+                    pinned()
+                    current = health(timeout=remaining())
+                    guard(current, h)
+                    pinned()
+                    assert request_identity(current, target)['request'] == identity['request']
+                phase = 'live-final-writer'
+                save(receipt/'transition-phase.json', {'phase': phase})
+                no_writer(h['database']['path'])
+                remaining()
+                return current
+            except LockActivityError as error:
+                report = error.report
+                while True:
+                    pinned()
+                    samples.append({'phase': phase, **report})
+                    blocking = [row for row in report['locks'] if row['blocksHandover']]
+                    # Other/unknown owners and lock kinds retain immediate refusal.
+                    if not all(row['classification'] == 'wal-writer' and
+                               row['holder']['pid'] == h['process']['pid'] and
+                               row['holder']['startTicks'] == ticks for row in blocking):
+                        raise LockActivityError(report)
+                    if time.monotonic() >= deadline: raise LockActivityError(report)
+                    time.sleep(min(.1, remaining()))
+                    pinned()
+                    report = lock_report(h['database']['path'])  # No RPC/SQLite while polling.
+                    if not any(row['blocksHandover'] for row in report['locks']):
+                        samples.append({'phase': 'quiet-observed', **report})
+                        break  # Revalidate both full guards, within the same deadline.
+    finally:
+        save(receipt/'writer-drain.json', {'phase': phase, 'timeoutSeconds': timeout,
+                                         'samples': samples})
+
 
 def verify_package(installed, pkg, manifest):
     with tarfile.open(pkg) as archive:
@@ -423,11 +475,14 @@ def main():
                 **lease_owner(h), 'drainTimeoutMs': 5000, 'leaseMs': 30000})
             assert lease['phase'] == 'ready', 'Core has not drained'
             save(receipt/'maintenance.json', lease)
-        for _ in range(2):
-            current=health(); guard(current,h)
-            assert procstat(pid)[19]==ticks and procstat(args.chrome_pid)[19]==chrome_ticks, 'PID reused'
-            assert request_identity(current, args)['request']==identity['request']
-        no_writer(h['database']['path'])
+        if lease is None:
+            current = prefreeze_drain(h, ticks, chrome_ticks, args, identity, receipt)
+        else:
+            for _ in range(2):
+                current=health(); guard(current,h)
+                assert procstat(pid)[19]==ticks and procstat(args.chrome_pid)[19]==chrome_ticks, 'PID reused'
+                assert request_identity(current, args)['request']==identity['request']
+            no_writer(h['database']['path'])
         transition = {'phase':'drained-core-only-transition','oldPid':pid,'oldStartTicks':ticks,'chromePid':args.chrome_pid,'atUnix':time.time(),'sourceCommit':manifest['sourceCommit']}
         if lease is not None:
             # The core rechecks the lease synchronously and exits without closing Chrome.
@@ -435,7 +490,9 @@ def main():
             save(receipt/'handover.json', transition)
             maintenance_rpc(h, 'system.maintenance.commit', {**lease_owner(h), 'token': lease['token']}, True)
         else:
+            save(receipt/'transition-phase.json', {'phase': 'freeze-requested'})
             with frozen_core(fd, pid, ticks) as commit:
+                save(receipt/'transition-phase.json', {'phase': 'frozen-guard'})
                 # Frozen core cannot race this DB/lock check. Do not issue health RPC.
                 assert procstat(pid)[19] == ticks and procstat(args.chrome_pid)[19] == chrome_ticks
                 assert live(args.chrome_pid), 'Chrome exited'

@@ -85,6 +85,18 @@ rechecks DB submission state, profile ownership, exact request, PID/start ticks,
 Chrome lifetime and all DB/WAL/SHM locks without calling a blocked health RPC.
 A writer caught by the freeze is rejected, not ignored or killed.
 
+After staging, the legacy branch has one **5-second pre-freeze drain deadline**.
+If a full guard observes the pinned old core's WAL writer, it reads `/proc/locks`
+at 100ms intervals until that writer naturally releases. Polling issues no health
+RPC or SQLite query. Quiet evidence restarts both complete live guards within the
+same deadline; it never grants permission to skip them. Foreign/unknown owners,
+other lock kinds, PID/Chrome changes, active submissions and other guard failures
+still stop immediately. Expiry stops before freeze with the original install live.
+The frozen guard never waits for a writer and there is no repeat-freeze loop.
+`writer-drain.json` records observed locks and quiet samples; `transition-phase.json`
+distinguishes live guard 1/2, final writer, freeze request and frozen guard. Older
+receipts lacking these fields cannot retroactively identify their exact guard site.
+
 The guardian has a 10-second deadline and is the only process allowed to decide
 SIGKILL versus SIGCONT. It resumes on guard failure, helper disconnect/death or
 expiry. A late commit cannot kill a resumed core. Successful commit ends only
