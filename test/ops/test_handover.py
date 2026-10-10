@@ -453,8 +453,40 @@ class HandoverTests(unittest.TestCase):
                     with patch.object(handover.time,'monotonic',side_effect=lambda:clock[0]), patch.object(handover.time,'sleep',side_effect=sleep), patch.object(handover,'procstat',return_value=['S']*19+['ticks']), patch.object(handover,'live',return_value=True), patch.object(handover,'health',return_value=h), patch.object(handover,'guard',side_effect=check), patch.object(handover,'lock_report',return_value={'locks':[]}), patch.object(handover.signal,'pidfd_send_signal') as signal_call:
                         with self.assertRaises((TimeoutError,AssertionError)): handover.prefreeze_drain(h,'ticks','ticks',None,{},root,timeout=.25)
                         self.assertLessEqual(clock[0],.25)
-                        self.assertEqual(calls[0],2 if mode=='new-submit' else 3)
+                        self.assertEqual(calls[0],2)
                         signal_call.assert_not_called()
+
+    def test_prefreeze_health_budget_is_not_consumed_by_prior_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=pathlib.Path(directory)
+            h={'process':{'pid':11},'browser':{'browserPid':22},'database':{'path':'fixture'}}
+            locked={'locks':[{'blocksHandover':True,'classification':'wal-writer','holder':{'pid':11,'startTicks':'ticks'}}]}
+            for slow in [False, True]:
+                with self.subTest(slow=slow):
+                    clock=[0.0]; guards=[0]; timeouts=[]
+                    def health(timeout):
+                        timeouts.append(timeout)
+                        duration=6 if slow else 1.5
+                        clock[0]+=min(timeout,duration)
+                        if duration>timeout: raise subprocess.TimeoutExpired('health',timeout)
+                        return h
+                    def guard(*args):
+                        guards[0]+=1
+                        if guards[0]==2: raise handover.LockActivityError(locked)
+                    def sleep(seconds): clock[0]+=seconds
+                    with patch.object(handover.time,'monotonic',side_effect=lambda:clock[0]), patch.object(handover.time,'sleep',side_effect=sleep), patch.object(handover,'procstat',return_value=['S']*19+['ticks']), patch.object(handover,'live',return_value=True), patch.object(handover,'health',side_effect=health), patch.object(handover,'guard',side_effect=guard), patch.object(handover,'request_identity',return_value={'request':['original']}), patch.object(handover,'lock_report',return_value={'locks':[]}), patch.object(handover.signal,'pidfd_send_signal') as signal_call:
+                        if slow:
+                            with self.assertRaises(subprocess.TimeoutExpired):
+                                handover.prefreeze_drain(h,'ticks','ticks',None,{'request':['original']},root)
+                            self.assertEqual(clock[0],5)
+                        else:
+                            handover.prefreeze_drain(h,'ticks','ticks',None,{'request':['original']},root)
+                            self.assertEqual(timeouts,[5,3.5,5,3.5])
+                            self.assertAlmostEqual(clock[0],6.1)
+                            self.assertEqual(guards[0],4)
+                        signal_call.assert_not_called()
+                    evidence=json.loads((root/'writer-drain.json').read_text())
+                    self.assertEqual(len([t for t in evidence['timings'] if t['operation']=='health']),len(timeouts))
 
 
 if __name__ == '__main__':

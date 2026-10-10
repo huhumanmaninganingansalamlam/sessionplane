@@ -144,9 +144,12 @@ def guard(h, expected):
     no_writer(h['database']['path'])
 
 def prefreeze_drain(h, ticks, chrome_ticks, target, identity, receipt, timeout=5):
-    """One deadline across staging's final guards; never freeze to drain a writer."""
-    deadline = time.monotonic() + timeout
+    """Two bounded validation passes with one independent natural-writer drain."""
+    started = time.monotonic()
+    deadline = started + timeout
     samples = []
+    timings = []
+    drained = False
     phase = 'live-guard-1'
     def pinned():
         assert procstat(h['process']['pid'])[19] == ticks, 'Core PID reused'
@@ -156,23 +159,42 @@ def prefreeze_drain(h, ticks, chrome_ticks, target, identity, receipt, timeout=5
         left = deadline - time.monotonic()
         if left <= 0: raise TimeoutError('Pre-freeze drain deadline expired; preserve original core')
         return left
+    @contextmanager
+    def measured(operation):
+        begin = time.monotonic()
+        try:
+            yield
+        finally:
+            timings.append({'phase': phase, 'operation': operation,
+                            'startSeconds': begin - started,
+                            'elapsedSeconds': time.monotonic() - begin})
     try:
         while True:
+            deadline = time.monotonic() + timeout
             try:
                 for index in range(2):
                     phase = f'live-guard-{index+1}'
                     save(receipt/'transition-phase.json', {'phase': phase})
                     pinned()
-                    current = health(timeout=remaining())
-                    guard(current, h)
+                    with measured('health'):
+                        current = health(timeout=remaining())
+                    with measured('guard'):
+                        guard(current, h)
                     pinned()
-                    assert request_identity(current, target)['request'] == identity['request']
+                    with measured('request-identity'):
+                        assert request_identity(current, target)['request'] == identity['request']
+                    remaining()
                 phase = 'live-final-writer'
                 save(receipt/'transition-phase.json', {'phase': phase})
                 no_writer(h['database']['path'])
                 remaining()
                 return current
             except LockActivityError as error:
+                remaining()  # Slow validation cannot claim a fresh drain allowance.
+                if drained:
+                    raise  # One revalidation only; no repeated health/drain cycle.
+                drained = True
+                deadline = time.monotonic() + timeout
                 report = error.report
                 while True:
                     pinned()
@@ -189,10 +211,13 @@ def prefreeze_drain(h, ticks, chrome_ticks, target, identity, receipt, timeout=5
                     report = lock_report(h['database']['path'])  # No RPC/SQLite while polling.
                     if not any(row['blocksHandover'] for row in report['locks']):
                         samples.append({'phase': 'quiet-observed', **report})
-                        break  # Revalidate both full guards, within the same deadline.
+                        remaining()
+                        break  # Both full guards receive a fresh bounded validation budget.
     finally:
         save(receipt/'writer-drain.json', {'phase': phase, 'timeoutSeconds': timeout,
-                                         'samples': samples})
+                                         'maxValidationPasses': 2, 'maxTotalSeconds': 3 * timeout,
+                                         'elapsedSeconds': time.monotonic() - started,
+                                         'timings': timings, 'samples': samples})
 
 
 def verify_package(installed, pkg, manifest):
