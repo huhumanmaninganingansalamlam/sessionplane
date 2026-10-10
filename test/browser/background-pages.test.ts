@@ -23,6 +23,8 @@ test('headed chat creation and interaction preserve the human foreground tab', {
     const human = await owner.createPage();
     await human.page.setContent('<title>Human foreground</title><textarea></textarea>');
     await human.page.bringToFront();
+    // Activation acknowledgement precedes the renderer visibility event.
+    await human.page.waitForFunction(() => document.visibilityState === 'visible', undefined, { timeout: 2_000 });
     const visible = () => human.page.evaluate(() => document.visibilityState);
     assert.equal(await visible(), 'visible');
     const created = await Promise.all([owner.createPage(), owner.createPage()]);

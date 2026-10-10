@@ -68,7 +68,13 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
       await route.fulfill({
         status: 200,
         contentType: 'text/html',
-        body: advancedFixture().replace('<section id="messages"></section>',
+        body: advancedFixture()
+          .replace('window.sendCount += 1;', `window.sendCount += 1;
+            void fetch('/backend-api/conversation', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ messages: [{ id: 'advanced-user-message-1', author: { role: 'user' } }] }) });`)
+          .replace("document.querySelector('#messages').appendChild(message);",
+            "document.querySelector('#messages').appendChild(message); document.querySelector('#prompt-textarea').textContent = '';")
+          .replace('<section id="messages"></section>',
           '<section id="messages"><article data-message-author-role="user"><span data-testid="attachment-pill">context-one.txt context-two.md</span></article></section>')
           .replace('<div id="attachments"></div>', '<form><span data-testid="attachment-pill">context-one.txt</span><span data-testid="attachment-pill">context-two.md</span></form><div id="attachments"></div>')
           .replace("host.appendChild(pill);", "pill.textContent = 'old-' + file.name; host.appendChild(pill); setTimeout(() => { pill.textContent = file.name; }, 400);"),
@@ -121,6 +127,7 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
       conversationId: 'advanced-conversation-123456',
       submittedUserMessageId: 'advanced-user-message-1',
       submittedUserTurnId: 'advanced-user-turn-1',
+      evidence: 'accepted-request-stable-anchor-cleared-composer',
     });
     if (acknowledgement === null) throw new Error('missing acknowledgement');
     submission.bindAcknowledgement(acknowledgement);

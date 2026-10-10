@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 
 import { callRpc, RpcClientError } from '../../src/cli/client.ts';
 import { runCli } from '../../src/cli/main.ts';
@@ -223,7 +223,7 @@ test('production core omits generic browser RPC methods', async () => {
   }
 });
 
-test('MCP team decisions continue the same generation across restart, UI drift and attachment changes', async () => {
+test('MCP team decisions continue the same generation across restart, UI drift and attachment changes', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-session-ui-'));
   const attachmentPath = path.join(root, 'review.md');
   const acceptedAttachment = 'Review the originally accepted content.';
@@ -231,7 +231,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
   const fixture = `<!doctype html><html><body>
     <form id="composer"><button id="models-button" type="button" aria-label="Submit settings" aria-haspopup="menu" aria-expanded="false">Submit settings</button>
       <button id="effort-button" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="effort-options">Effort</button>
-      <button data-testid="send-button" type="submit" hidden>전송</button><textarea aria-label="Prompt">Provider-restored unrelated draft</textarea>
+      <button data-testid="send-button" type="submit" hidden>전송</button><textarea id="prompt-textarea" aria-label="Prompt">Provider-restored unrelated draft</textarea>
       <input type="file"><span id="uploaded-name"></span></form>
     <div role="menu" id="models" hidden><div role="menuitem">Model family</div></div>
     <div role="menu" id="effort-options" hidden>
@@ -291,6 +291,8 @@ test('MCP team decisions continue the same generation across restart, UI drift a
       document.querySelector('#composer').onsubmit = (event) => {
         event.preventDefault();
         window.submitCount += 1;
+        void fetch('/backend-api/conversation', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: [{ id: 'fixture-user-message', author: { role: 'user' } }] }) });
         history.pushState({}, '', '/c/conversation-123456');
         const user = document.createElement('div');
         user.setAttribute('data-message-author-role', 'user');
@@ -298,6 +300,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
         user.setAttribute('data-turn-id', 'fixture-user-turn');
         user.textContent = document.querySelector('textarea').value;
         document.querySelector('#messages').appendChild(user);
+        document.querySelector('textarea').value = '';
         const assistant = document.createElement('div');
         assistant.setAttribute('data-message-author-role', 'assistant');
         assistant.setAttribute('data-message-id', 'fixture-assistant-message');
@@ -312,7 +315,9 @@ test('MCP team decisions continue the same generation across restart, UI drift a
   const config = { ...base, uploadsEnabled: true, chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 250 };
   const start = async () => await startCore({ config, browserHeadless: true, logger: silentLogger() });
   let service: CoreService = await start();
-  installPreparationFixtureRoute(service, fixture);
+  const firstOwner = service.browserOwner!;
+  const closeFirst = firstOwner.close.bind(firstOwner);
+  installPreparationFixtureRoute(service, fixture, t);
   const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({
     name,
     arguments: args,
@@ -335,20 +340,35 @@ test('MCP team decisions continue the same generation across restart, UI drift a
     assert.equal(pending.structuredContent.status, 'needs_decision');
     assert.equal(pending.structuredContent.promptSubmitted, false);
     const identity = { teamId: team.teamId, requestRef: pending.structuredContent.requestRef };
+    // This is a core restart with the exact unsent page retained, not browser loss.
+    // Match the isolated adoption fixture in preparation-target-recovery.test.ts.
+    const oldRegistry = service.pageRegistry;
+    const originalTarget = oldRegistry.getBinding(service.teamDirectory.getSession(session.sessionId).pageKey!).targetId;
+    const browserPid = firstOwner.status.browserPid;
+    firstOwner.close = async () => oldRegistry.detach();
     await service.close();
+    const lockPath = path.join(firstOwner.status.profileDir, '.sessionplane-profile.lock');
+    const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+    writeFileSync(lockPath, JSON.stringify({ ...lock, pid: 99_999_999 }));
     service = await start();
-    installPreparationFixtureRoute(service, fixture);
+    assert.equal(service.browserOwner!.status.browserPid, browserPid);
+    assert.equal(service.pageRegistry.getBinding(service.teamDirectory.getSession(session.sessionId).pageKey!).targetId, originalTarget);
+    installPreparationFixtureRoute(service, fixture, t);
     writeFileSync(attachmentPath, 'Caller edited the original after acceptance.');
 
     const inspect = async () => {
       const result = await invoke('sessionplane_team_get', identity);
       assert.equal(result.isError, false, JSON.stringify(result));
       const request = result.structuredContent.request as { pageKey: string; evidence: { snapshotId: string; pageKey: string; nodes: Array<{ ref: string; role: string; name: string; actions: { choose: string[]; reveal: string[] } }> } };
+      assert.ok(request.evidence, JSON.stringify(result.structuredContent));
       assert.equal(request.pageKey, request.evidence.pageKey);
       return request.evidence;
     };
     const ready = await inspect();
     const evidencePage = service.pageRegistry.pageForObservation(ready.pageKey);
+    t.mock.method(evidencePage.context().request, 'get', async () => ({
+      status: () => 404, headers: () => ({}), json: async () => null, dispose: async () => {},
+    }));
     await evidencePage.evaluate(() => {
       const clutter = document.createElement('div');
       clutter.innerHTML = '<div style="width:1px;height:1px"><svg width="1" height="1"><path d="M0 0L1 1" /></svg></div>'.repeat(1200);
@@ -439,12 +459,14 @@ test('MCP team decisions continue the same generation across restart, UI drift a
     const finalConfiguration = finalEvidence.nodes.find(node => node.role === 'menuitem' && node.name === 'Model selection')!;
     last = { ...identity, requestId: 'confirm-after-upload', decision: 'choose', purpose: 'model',
       snapshotId: finalEvidence.snapshotId, ref: finalConfiguration.ref };
-    assert.equal((await invoke('sessionplane_decide', last)).isError, false);
+    const finalDecision = await invoke('sessionplane_decide', last);
+    assert.equal(finalDecision.isError, false, JSON.stringify(finalDecision));
     const submitted = service.teamDirectory.getSession(session.sessionId);
     assert.equal(submitted.generation, pending.structuredContent.generation);
     assert.equal(submitted.promptSubmitted, true);
     assert.equal(await page.locator('input[type=file]').evaluate(async (el) => await (el as HTMLInputElement).files![0]!.text()), acceptedAttachment);
-    assert.equal((await invoke('sessionplane_decide', last)).isError, false);
+    const replayedDecision = await invoke('sessionplane_decide', last);
+    assert.equal(replayedDecision.isError, false, JSON.stringify(replayedDecision));
     let final: { terminal: boolean; answerText: string } | undefined;
     for (let i = 0; i < 20; i++) {
       const waited = await invoke('sessionplane_wait', { teamId: team.teamId, requestRefs: [identity.requestRef], waitMs: 500 });
@@ -487,21 +509,24 @@ test('MCP team decisions continue the same generation across restart, UI drift a
 
   } finally {
     await service.close();
+    await closeFirst();
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('MCP inspects an ambiguous caller-directed submission without resend and recovers a later exact acknowledgement', async () => {
+test('MCP inspects an ambiguous caller-directed submission without resend and recovers a later exact acknowledgement', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-ambiguous-inspection-'));
   const config = { ...resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 100 };
   const service = await startCore({ config, browserHeadless: true, logger: silentLogger() });
   installPreparationFixtureRoute(service, `<!doctype html><form>
     <textarea id="prompt-textarea"></textarea><button type="submit">Send</button></form>
     <main><div id="messages"></div></main><script>
+      window.submitCount = 0;
       document.querySelector('form').onsubmit = (event) => {
+        window.submitCount += 1;
         event.preventDefault(); history.pushState({}, '', '/c/conversation-123456');
       };
-    </script>`);
+    </script>`, t);
   try {
     const team = service.teamDirectory.createTeam({ clientId: 'inspection-owner' });
     const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
@@ -542,15 +567,36 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
     assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft');
     assert.equal(await page.locator('[data-message-author-role]').count(), 0);
 
-    // A delayed provider acknowledgement arrives; inspection must bind it, never submit again.
+    // A DOM echo alone with the original draft still present must remain ambiguous.
+    // The provider later commits the message and clears its composer; no resend.
     await page.locator('#messages').evaluate((messages) => {
       messages.innerHTML = '<div data-message-author-role="user" data-message-id="delayed-user">Exact pending draft</div>' +
         '<div data-message-author-role="assistant" data-message-id="delayed-answer" data-message-status="completed">Recovered final</div>' +
         '<aside role="alert">Stream interrupted<button>Retry</button></aside>';
     });
-    const recovered = await inspect();
+    const optimistic = await inspect();
+    assert.equal((optimistic.structuredContent.request as { submittedUserMessageId: string | null }).submittedUserMessageId, null);
+    // Canonical provider acceptance is required for automatic UNKNOWN recovery.
+    t.mock.method(page.context().request, 'get', async (url: string) => ({
+      status: () => 200, headers: () => ({}), dispose: async () => {},
+      json: async () => url.endsWith('/api/auth/session') ? { accessToken: 'isolated-fixture-token' } : {
+        id: 'conversation-123456', current_node: 'delayed-user', mapping: {
+          'delayed-user': { parent: null, message: { id: 'delayed-user', author: { role: 'user' }, content: { content_type: 'text', parts: ['Exact pending draft'] } } },
+        },
+      },
+    }));
+    await page.locator('textarea').evaluate(element => { element.value = ''; });
+    let recovered = await inspect();
+    const recoveryDeadline = Date.now() + 7_000;
+    while ((recovered.structuredContent.request as { submittedUserMessageId: string | null }).submittedUserMessageId === null && Date.now() < recoveryDeadline) {
+      // Respect the real backend probe interval; observation never resubmits.
+      await new Promise(resolve => setTimeout(resolve, 250));
+      recovered = await inspect();
+    }
     assert.equal(recovered.isError, false);
     assert.equal((recovered.structuredContent.request as { submittedUserMessageId: string }).submittedUserMessageId, 'delayed-user');
+    assert.equal((recovered.structuredContent.request as { generation: number }).generation, sent.generation);
+    assert.equal(await page.evaluate(() => (window as Window & { submitCount: number }).submitCount), 1);
     let alerted: { reason: string; terminal: boolean; evidence?: { nodes: Array<{ role: string }> } } | undefined;
     for (let attempt = 0; attempt < 20; attempt += 1) {
       const waited = await invokeMcpTool({ name: 'sessionplane_wait', arguments: { teamId: identity.teamId, requestRefs: [identity.requestRef], waitMs: 100 },
@@ -714,13 +760,17 @@ async function startFixtureServer(html?: string): Promise<{ readonly server: Ser
   return { server, url: `http://127.0.0.1:${address.port}/` };
 }
 
-function installPreparationFixtureRoute(service: CoreService, html: string): void {
+function installPreparationFixtureRoute(service: CoreService, html: string, t?: TestContext): void {
   const owner = service.browserOwner;
   assert.notEqual(owner, null);
   if (owner === null) assert.fail('Expected the core-owned browser');
   const createPage = owner.createPage.bind(owner);
   owner.createPage = async () => {
     const created = await createPage();
+    // APIRequestContext bypasses page.route; keep backend probes local too.
+    t?.mock.method(created.page.context().request, 'get', async () => ({
+      status: () => 404, headers: () => ({}), json: async () => null, dispose: async () => {},
+    }));
     await created.page.route('https://chatgpt.com/**', async (route) => {
       await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: html });
     });
