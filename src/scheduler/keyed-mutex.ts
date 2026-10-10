@@ -1,6 +1,8 @@
 export class KeyedMutex {
   readonly #tails = new Map<string, Promise<void>>();
 
+  get activeCount(): number { return this.#tails.size; }
+
   isBusy(key: string): boolean {
     return this.#tails.has(key);
   }

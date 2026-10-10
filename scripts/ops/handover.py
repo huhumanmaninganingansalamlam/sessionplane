@@ -15,6 +15,36 @@ def save(path, value):
 def health():
     return json.loads(subprocess.check_output(['sessplane', 'health', '--json'], text=True, timeout=15))
 
+def maintenance_rpc(h, method, params, allow_commit_eof=False):
+    """Existing Unix socket only; no alternate transport or credentials."""
+    request = {'jsonrpc': '2.0', 'id': 'core-handover', 'method': method, 'params': params}
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
+        channel.settimeout(12)
+        channel.connect(h['socket']['path'])
+        channel.sendall((json.dumps(request) + '\n').encode())
+        response = b''
+        while b'\n' not in response:
+            try:
+                chunk = channel.recv(65536)
+            except ConnectionResetError:
+                if allow_commit_eof and not response:
+                    return None
+                raise
+            if not chunk:
+                if allow_commit_eof and not response:
+                    return None  # caller must still prove the pinned old process exited
+                raise RuntimeError('Maintenance response missing; do not repeat the operation')
+            response += chunk
+        result = json.loads(response.split(b'\n', 1)[0])
+        if 'error' in result:
+            raise RuntimeError('Maintenance refused: ' + json.dumps(result['error']))
+        return result['result']
+
+
+def lease_owner(h):
+    return {'expectedPid': h['process']['pid'], 'expectedStartedAt': h['process']['startedAt']}
+
+
 def procstat(pid):
     return pathlib.Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
 
@@ -153,6 +183,7 @@ def promote_package(installed, candidate, stage, receipt):
 def verify_pre_signal_resume(prior, h, installed, pkg, manifest, target):
     # An old receipt is never erased, overwritten or treated as a fresh attempt.
     assert prior.is_dir(), 'Missing previous receipt'
+    assert not (prior/'staging.json').exists(), 'Staging-only abort is not a legacy installed-candidate resume; preserve it and inspect'
     assert not (prior/'handover.json').exists() and not (prior/'successor.json').exists() and not (prior/'promotion.json').exists(), 'Prior signal/promotion may have occurred: inspect instead of retrying'
     before = json.loads((prior/'before-health.json').read_text())
     assert before['process']['pid'] == h['process']['pid'] and before['process']['startedAt'] == h['process']['startedAt'], 'Original core lifetime is not preserved'
@@ -227,18 +258,37 @@ def main():
     stage, candidate, catalog_hash = stage_package(installed, pkg, manifest, receipt)
     # Pin the exact process lifetime. No process groups, killall, SIGTERM, or browser signals.
     fd=os.pidfd_open(pid)
+    lease = None
     try:
+        if 'maintenance' in h:
+            lease = maintenance_rpc(h, 'system.maintenance.prepare', {
+                **lease_owner(h), 'drainTimeoutMs': 5000, 'leaseMs': 30000})
+            assert lease['phase'] == 'ready', 'Core has not drained'
+            save(receipt/'maintenance.json', lease)
         for _ in range(2):
             current=health(); guard(current,h)
             assert procstat(pid)[19]==ticks and procstat(args.chrome_pid)[19]==chrome_ticks, 'PID reused'
             assert request_identity(current, args)['request']==identity['request']
         no_writer(h['database']['path'])
         save(receipt/'handover.json',{'phase':'drained-core-only-transition','oldPid':pid,'oldStartTicks':ticks,'chromePid':args.chrome_pid,'atUnix':time.time(),'sourceCommit':manifest['sourceCommit']})
-        signal.pidfd_send_signal(fd,signal.SIGKILL)
+        if lease is not None:
+            # The core rechecks the lease synchronously and exits without closing Chrome.
+            # EOF is not success until the pinned process is independently gone below.
+            maintenance_rpc(h, 'system.maintenance.commit', {**lease_owner(h), 'token': lease['token']}, True)
+        else:
+            signal.pidfd_send_signal(fd,signal.SIGKILL)
     except LockActivityError as error:
         save(receipt/'abort-locks.json', error.report)
         raise
-    finally: os.close(fd)
+    finally:
+        os.close(fd)
+        if lease is not None and live(pid):
+            try:
+                maintenance_rpc(h, 'system.maintenance.resume', {**lease_owner(h), 'token': lease['token']})
+            except (OSError, RuntimeError) as error:
+                # Lost/expired/revoked lease: the bounded core timer still resumes operation.
+                save(receipt/'maintenance-resume.json', {'result': 'not-confirmed', 'error': str(error),
+                    'expiresAt': lease['expiresAt']})
     deadline=time.monotonic()+5
     while live(pid) and time.monotonic()<deadline: time.sleep(.1)
     assert not live(pid), 'Old core still live: do not launch duplicate'

@@ -1,3 +1,4 @@
+import { CoreMaintenance } from './core/maintenance.ts';
 import { ThinkingFailureRecovery } from './core/thinking-failure-recovery.ts';
 import { ConversationLoadRecovery } from './core/conversation-load-recovery.ts';
 import { TeamWorkflow } from './core/team-workflow.ts';
@@ -52,6 +53,7 @@ import {
 import { z } from 'zod';
 
 export interface CoreService {
+  readonly maintenance: CoreMaintenance;
   readonly config: SessionPlaneConfig;
   readonly database: SessionPlaneDatabase;
   readonly rpcServer: RpcServer;
@@ -79,6 +81,7 @@ export interface CoreService {
 }
 
 export interface StartCoreOptions {
+  readonly handoverExit?: () => never;
   readonly config?: SessionPlaneConfig;
   readonly logger?: Logger;
   readonly startBrowser?: boolean;
@@ -94,12 +97,13 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   const logger = options.logger ?? createLogger({ level: config.logLevel });
   const database = SessionPlaneDatabase.open(config.databasePath);
   const startedAt = new Date();
-  const router = new RpcRouter();
+  const maintenance = new CoreMaintenance();
+  const router = new RpcRouter(maintenance);
   const metrics = new RuntimeMetrics();
   const pageRegistry = new PageRegistry({ metrics });
   const pageBindings = new PageBindingRepository(database.raw);
   const unsubscribePageBindings = pageRegistry.subscribe((binding) => {
-    pageBindings.upsert(binding);
+    maintenance.callback(() => pageBindings.upsert(binding));
   });
   const pageMutationMutex = new PageMutationMutex();
   const actorScheduler = new ActorScheduler(database);
@@ -141,11 +145,11 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       : [
           new ChatGptAdapter({
             onBackendRateLimit: ({ session, generation }, evidence) => {
-              new EventRepository(database.raw).append({ teamId: session.teamId, roleId: session.roleId,
+              maintenance.callback(() => new EventRepository(database.raw).append({ teamId: session.teamId, roleId: session.roleId,
                 sessionId: session.sessionId, generation, eventType: 'provider.backend-rate-limit-observed',
                 createdAt: evidence.receivedAt, payload: { ...evidence,
                   policyScope: `chatgpt:conversation-detail:${session.conversationId}`,
-                  serverScope: evidence.headers['ratelimit-scope'] ?? evidence.headers['x-ratelimit-scope'] ?? 'unverified' } });
+                  serverScope: evidence.headers['ratelimit-scope'] ?? evidence.headers['x-ratelimit-scope'] ?? 'unverified' } }));
             },
             pageMutex: pageMutationMutex,
             canRestoreLatestPosition: ({ session, generation }) => {
@@ -193,6 +197,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   });
   let thinkingFailureRecovery: ThinkingFailureRecovery | null = null;
   const observationService = new ObservationService({
+    maintenance,
     onActionableAlert: async (snapshot, signal) => { await thinkingFailureRecovery?.observe(snapshot, signal); },
     database,
     scheduler: actorScheduler,
@@ -237,6 +242,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     adapters: providerAdapters,
   });
   const recovery = new RecoveryService({
+    maintenance,
     database,
     browserOwner,
     pageRegistry,
@@ -295,7 +301,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     throw error;
   }
 
-  const conversationLoadRecovery = new ConversationLoadRecovery({ database, registry: pageRegistry,
+  const conversationLoadRecovery = new ConversationLoadRecovery({ maintenance, database, registry: pageRegistry,
     pageMutex: pageMutationMutex, scheduler: actorScheduler, probes: probeCoordinator,
     chatgptUrl: config.chatgptUrl });
   router.register('system.defer_account_cooldown', z.object({
@@ -321,8 +327,26 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       actorScheduler,
       observationService,
       metrics,
-    }), conversationLoadRecovery: conversationLoadRecovery.status() }),
+    }), conversationLoadRecovery: conversationLoadRecovery.status(), maintenance: maintenance.status() }),
   );
+  const handoverIdle = () => (browserOwner === null || browserOwner.status.state === 'ready') && actorScheduler.totalQueueDepth === 0 && pageMutationMutex.activeCount === 0 &&
+    Number(database.raw.prepare("SELECT count(*) AS n FROM outbox WHERE submission_state IN ('submit_attempted','composer_filled')").get()!.n) === 0 &&
+    Number(database.raw.prepare("SELECT count(*) AS n FROM outbox o JOIN generations g ON g.session_id=o.session_id AND g.generation=o.generation WHERE json_extract(o.payload_json,'$.thinkingFailureRecovery')=1 AND g.completed_at IS NULL").get()!.n) === 0;
+  const ownerSchema = { expectedPid: z.literal(process.pid), expectedStartedAt: z.literal(startedAt.toISOString()) };
+  router.register('system.maintenance.prepare', z.object({ ...ownerSchema,
+    drainTimeoutMs: z.number().int().min(1).max(10_000).default(5_000),
+    leaseMs: z.number().int().min(100).max(60_000).default(30_000),
+  }).strict(), input => maintenance.prepare(input.drainTimeoutMs, input.leaseMs, handoverIdle));
+  router.register('system.maintenance.resume', z.object({ ...ownerSchema, token: z.string().uuid() }).strict(), input => {
+    maintenance.resume(input.token); return maintenance.status();
+  });
+  router.register('system.maintenance.commit', z.object({ ...ownerSchema, token: z.string().uuid() }).strict(), input =>
+    maintenance.commit(input.token, handoverIdle, options.handoverExit ?? (() => {
+      // Synchronous commit: no callback can write between the lease check and exit.
+      // Do not call service.close(): it closes the still-generating Chrome.
+      database.close();
+      process.exit(0);
+    })));
   registerBrowserMethods(router, {
     browserOwner,
     pageRegistry,
@@ -345,7 +369,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     chatgptUrl: config.chatgptUrl,
     quietWindowMs: config.observationQuietWindowMs,
   });
-  thinkingFailureRecovery = new ThinkingFailureRecovery({ database, submissions: submissionService, ui });
+  thinkingFailureRecovery = new ThinkingFailureRecovery({ maintenance, database, submissions: submissionService, ui });
   registerSessionUiMethods(router, ui);
   registerTeamMethods(router, teamDirectory, receipts, cleanup, stopService);
   registerWorkflowMethods(router, new TeamWorkflow({
@@ -398,9 +422,11 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     return browserRecovery;
   };
   const browserRecoveryTimer = browserOwner === null ? null : setInterval(() => {
-    if (closed || browserRecovery !== null) return;
+    if (closed || browserRecovery !== null || maintenance.paused) return;
     const state = browserOwner.status.state;
     if (state !== 'disconnected' && state !== 'error') return;
+    const release = maintenance.enter();
+    if (!release) return;
     logger.warn('browser.disconnected', { state });
     void restartBrowser()
       .then(({ recovery }) => logger.info('browser.recovered', { recovery }))
@@ -408,10 +434,11 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
         logger.error('browser.recovery-failed', {
           error: error instanceof Error ? error.message : String(error),
         }),
-      );
+      ).finally(release);
   }, 5_000);
   browserRecoveryTimer?.unref();
   return {
+    maintenance,
     config,
     database,
     rpcServer,
@@ -442,6 +469,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
         return;
       }
       closed = true;
+      maintenance.resume();
       if (browserRecoveryTimer !== null) clearInterval(browserRecoveryTimer);
       await browserRecovery?.catch(() => undefined);
       await rpcServer.close();

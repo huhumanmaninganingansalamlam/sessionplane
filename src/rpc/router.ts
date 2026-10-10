@@ -1,3 +1,4 @@
+import type { CoreMaintenance } from '../core/maintenance.ts';
 import type { ZodType } from 'zod';
 
 import { SessionPlaneDomainError } from '../domain/errors.ts';
@@ -35,6 +36,8 @@ export class RpcMethodError extends Error {
 }
 
 export class RpcRouter {
+  readonly maintenance: CoreMaintenance | undefined;
+  constructor(maintenance?: CoreMaintenance) { this.maintenance = maintenance; }
   readonly #methods = new Map<string, RegisteredMethod>();
 
   register<Params>(method: string, paramsSchema: ZodType<Params>, handler: RpcHandler<Params>): void {
@@ -78,7 +81,9 @@ export class RpcRouter {
     }
 
     try {
-      const result = await method.handler(paramsResult.data);
+      const operation = () => method.handler(paramsResult.data);
+      const exempt = ['system.health', 'system.maintenance.prepare', 'system.maintenance.resume', 'system.maintenance.commit'].includes(request.method);
+      const result = await (this.maintenance && !exempt ? this.maintenance.rpc(operation) : operation());
       return request.id === undefined ? null : rpcSuccess(request.id, result);
     } catch (error) {
       if (request.id === undefined) {

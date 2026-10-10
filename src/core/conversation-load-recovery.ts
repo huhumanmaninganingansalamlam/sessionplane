@@ -1,3 +1,4 @@
+import type { CoreMaintenance } from './maintenance.ts';
 import type { Page } from 'playwright-core';
 import { limitationHeaders } from '../providers/chatgpt/rate-limit-evidence.ts';
 import type { PageRegistry } from '../browser/page-registry.ts';
@@ -20,7 +21,7 @@ function endpointCategory(path: string): string {
   if (/telemetry|metrics|analytics|events/.test(path)) return 'telemetry-or-events';
   return path.startsWith('/backend-api/') ? 'other-backend' : 'other-chatgpt';
 }
-type Services = { database: SessionPlaneDatabase; registry: PageRegistry; pageMutex: PageMutationMutex;
+type Services = { maintenance?: CoreMaintenance; database: SessionPlaneDatabase; registry: PageRegistry; pageMutex: PageMutationMutex;
   scheduler: ActorScheduler; probes: ProbeCoordinator; chatgptUrl: string; minimumIntervalMs?: number };
 
 /** One owner-wide UI queue; backend probe cadence is separate from proven service holds. */
@@ -61,7 +62,9 @@ export class ConversationLoadRecovery {
   sweep(): Promise<void> {
     if (this.#closed) return Promise.resolve();
     if (this.#pending) return this.#pending;
-    this.#pending = this.#sweep().finally(() => { this.#pending = null; });
+    const release = this.services.maintenance?.enter();
+    if (this.services.maintenance && !release) return Promise.resolve();
+    this.#pending = this.#sweep().finally(() => { this.#pending = null; release?.(); });
     return this.#pending;
   }
   async #surface(page: Page, session: SessionSnapshot, click: boolean): Promise<LoadSurface> {
@@ -71,7 +74,7 @@ export class ConversationLoadRecovery {
       click, expiresAt: this.now() + 5_000 });
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return await Promise.race([operation, new Promise<LoadSurface>((_, reject) => {
+      return await Promise.race([this.services.maintenance?.track(operation) ?? operation, new Promise<LoadSurface>((_, reject) => {
         timer = setTimeout(() => reject(new Error('bounded-surface-timeout')), 5_000);
       })]);
     } finally { clearTimeout(timer); }
@@ -81,38 +84,42 @@ export class ConversationLoadRecovery {
     this.#attached.add(page);
     page.on('response', response => {
       if (this.#closed || response.status() !== 429 || new URL(response.url()).origin !== this.#origin) return;
-      const received = this.now(), headers = response.headers(), header = headers['retry-after'];
-      const specified = header && /^\d+(?:\.\d+)?$/.test(header) ? received + Number(header) * 1000 : Date.parse(header ?? '');
-      const valid = Number.isFinite(specified);
-      const until = new Date(Math.max(received + this.intervalMs, valid ? specified : received + 15 * 60_000)).toISOString();
-      const safeHeaders = limitationHeaders(headers);
-      const serverScope = safeHeaders['ratelimit-scope'] ?? safeHeaders['x-ratelimit-scope'] ?? 'unverified';
-      const category = endpointCategory(new URL(response.url()).pathname);
-      const broad = ['ratelimit-scope', 'x-ratelimit-scope'].some(name =>
-        ['account', 'user', 'ip', 'global'].includes(safeHeaders[name] ?? ''));
-      const binding = this.services.registry.getBinding(pageKey);
-      const detailId = new URL(response.url()).pathname.match(/^\/backend-api\/(?:f\/)?conversation\/([^/]+)$/)?.[1];
-      const policyScope = broad ? 'chatgpt:default' : category === 'conversation-detail' && (detailId || binding.conversationId)
-        ? conversationLimitScope(detailId || binding.conversationId!) : `chatgpt:${category}`;
-      this.services.probes.defer(policyScope, until);
-      // Passive evidence only: no body read, probe, raw URL/query or arbitrary header values.
-      try {
-        const session = binding.sessionId && this.#sessions.getSnapshot(binding.sessionId);
-        if (binding.state !== 'owned' || !session || session.pageKey !== pageKey ||
-          session.generation !== binding.generation || session.conversationId !== binding.conversationId) return;
-        if (valid) safeHeaders['retry-after'] = /^\d+(?:\.\d+)?$/.test(header!) ? String(Number(header)) : new Date(specified).toUTCString();
-        const method = response.request().method();
-        this.#events.append({ teamId: session.teamId, roleId: session.roleId, sessionId: session.sessionId,
-          generation: session.generation, eventType: 'provider.rate-limit-observed', createdAt: new Date(received).toISOString(),
-          payload: { status: 429, method: /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(method) ? method : 'unknown',
-            endpointCategory: category, headers: safeHeaders,
-            pageKey, bindingEpoch: binding.bindingEpoch, association: 'owned-page-at-response',
-            retryAfterSource: valid ? 'valid-header' : header === undefined ? 'header-absent-fallback' : 'header-invalid-fallback',
-            retryAfterDurationMs: valid ? Math.max(0, specified - received) : null,
-            minimumIntervalMs: this.intervalMs, fallbackMs: valid ? null : 900_000,
-            policyScope, serverScope, policyUntil: until,
-            effectiveUntil: this.repository.effectiveNextAllowedAt() } });
-      } catch { /* Evidence failure cannot weaken or retry the existing cooldown operation. */ }
+      const recordResponse = () => {
+        const received = this.now(), headers = response.headers(), header = headers['retry-after'];
+        const specified = header && /^\d+(?:\.\d+)?$/.test(header) ? received + Number(header) * 1000 : Date.parse(header ?? '');
+        const valid = Number.isFinite(specified);
+        const until = new Date(Math.max(received + this.intervalMs, valid ? specified : received + 15 * 60_000)).toISOString();
+        const safeHeaders = limitationHeaders(headers);
+        const serverScope = safeHeaders['ratelimit-scope'] ?? safeHeaders['x-ratelimit-scope'] ?? 'unverified';
+        const category = endpointCategory(new URL(response.url()).pathname);
+        const broad = ['ratelimit-scope', 'x-ratelimit-scope'].some(name =>
+          ['account', 'user', 'ip', 'global'].includes(safeHeaders[name] ?? ''));
+        const binding = this.services.registry.getBinding(pageKey);
+        const detailId = new URL(response.url()).pathname.match(/^\/backend-api\/(?:f\/)?conversation\/([^/]+)$/)?.[1];
+        const policyScope = broad ? 'chatgpt:default' : category === 'conversation-detail' && (detailId || binding.conversationId)
+          ? conversationLimitScope(detailId || binding.conversationId!) : `chatgpt:${category}`;
+        this.services.probes.defer(policyScope, until);
+        // Passive evidence only: no body read, probe, raw URL/query or arbitrary header values.
+        try {
+          const session = binding.sessionId && this.#sessions.getSnapshot(binding.sessionId);
+          if (binding.state !== 'owned' || !session || session.pageKey !== pageKey ||
+            session.generation !== binding.generation || session.conversationId !== binding.conversationId) return;
+          if (valid) safeHeaders['retry-after'] = /^\d+(?:\.\d+)?$/.test(header!) ? String(Number(header)) : new Date(specified).toUTCString();
+          const method = response.request().method();
+          this.#events.append({ teamId: session.teamId, roleId: session.roleId, sessionId: session.sessionId,
+            generation: session.generation, eventType: 'provider.rate-limit-observed', createdAt: new Date(received).toISOString(),
+            payload: { status: 429, method: /^(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(method) ? method : 'unknown',
+              endpointCategory: category, headers: safeHeaders,
+              pageKey, bindingEpoch: binding.bindingEpoch, association: 'owned-page-at-response',
+              retryAfterSource: valid ? 'valid-header' : header === undefined ? 'header-absent-fallback' : 'header-invalid-fallback',
+              retryAfterDurationMs: valid ? Math.max(0, specified - received) : null,
+              minimumIntervalMs: this.intervalMs, fallbackMs: valid ? null : 900_000,
+              policyScope, serverScope, policyUntil: until,
+              effectiveUntil: this.repository.effectiveNextAllowedAt() } });
+        } catch { /* Evidence failure cannot weaken or retry the existing cooldown operation. */ }
+      };
+      if (this.services.maintenance) this.services.maintenance.callback(recordResponse);
+      else recordResponse();
     });
   }
   async #sweep(): Promise<void> {

@@ -1,3 +1,4 @@
+import type { CoreMaintenance } from './maintenance.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Page } from 'playwright-core';
 
@@ -31,6 +32,7 @@ export interface RestartRecoveryReport {
 }
 
 export interface RecoveryServiceOptions {
+  readonly maintenance?: CoreMaintenance;
   readonly database: SessionPlaneDatabase;
   readonly browserOwner: BrowserOwner | null;
   readonly pageRegistry: PageRegistry;
@@ -73,7 +75,9 @@ export class RecoveryService {
   #closed = false;
   #tail: Promise<RestartRecoveryReport> = Promise.resolve(emptyReport());
 
+  readonly maintenance: CoreMaintenance | undefined;
   constructor(options: RecoveryServiceOptions) {
+    this.maintenance = options.maintenance;
     this.#browserOwner = options.browserOwner;
     this.#pageRegistry = options.pageRegistry;
     this.#scheduler = options.scheduler;
@@ -319,32 +323,38 @@ export class RecoveryService {
         if (this.#now().getTime() >= retryUntilMs) return;
       }
 
-      const snapshot = this.#sessions.getSnapshot(initial.sessionId);
-      if (
-        snapshot === null ||
-        snapshot.generation !== initial.generation ||
-        !needsAcknowledgementRecovery(snapshot)
-      ) {
-        return;
-      }
+      await this.maintenance?.wait(signal);
+      if (signal.aborted) return;
+      const release = this.maintenance?.enter();
+      if (this.maintenance && !release) continue;
+      try {
+        const snapshot = this.#sessions.getSnapshot(initial.sessionId);
+        if (
+          snapshot === null ||
+          snapshot.generation !== initial.generation ||
+          !needsAcknowledgementRecovery(snapshot)
+        ) {
+          return;
+        }
 
-      let identified = await this.#recoverConversationIdentity(snapshot);
-      if (
-        this.#browserOwner !== null &&
-        identified.conversationId !== null &&
-        !pageRecoveryAttempted
-      ) {
-        pageRecoveryAttempted = true;
-        identified = (await this.#reconcilePage(identified, false)).snapshot;
-      }
-      if (identified.pageKey !== null && identified.conversationId !== null) {
-        const recovered = await this.#submissions.recoverAcknowledgement(identified);
-        if (!needsAcknowledgementRecovery(recovered)) return;
-      }
+        let identified = await this.#recoverConversationIdentity(snapshot);
+        if (
+          this.#browserOwner !== null &&
+          identified.conversationId !== null &&
+          !pageRecoveryAttempted
+        ) {
+          pageRecoveryAttempted = true;
+          identified = (await this.#reconcilePage(identified, false)).snapshot;
+        }
+        if (identified.pageKey !== null && identified.conversationId !== null) {
+          const recovered = await this.#submissions.recoverAcknowledgement(identified);
+          if (!needsAcknowledgementRecovery(recovered)) return;
+        }
 
-      const remainingMs = retryUntilMs - this.#now().getTime();
-      if (remainingMs <= 0) return;
-      delayMs = Math.min(this.#acknowledgementRetryMs, remainingMs);
+        const remainingMs = retryUntilMs - this.#now().getTime();
+        if (remainingMs <= 0) return;
+        delayMs = Math.min(this.#acknowledgementRetryMs, remainingMs);
+      } finally { release?.(); }
     }
   }
 

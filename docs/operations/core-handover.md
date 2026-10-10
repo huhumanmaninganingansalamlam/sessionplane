@@ -40,6 +40,44 @@ browser attachment fails. Before that fix, those failure paths could replace or
 close Chrome. The fix does not make ordinary shutdown browser-preserving or
 promise that every later runtime failure is a lossless handover.
 
+## Bounded maintenance on supporting cores
+
+A supporting runtime advertises `maintenance` in health. After candidate staging,
+this helper asks that same Unix-socket core to prepare a 30-second lease, allowing
+up to 5 seconds for existing operations to drain. The lease is pinned to the core
+PID/start time. New ordinary RPCs receive `core.maintenance` before request receipt
+creation; owners resume the same request afterward, without resending it.
+Observer and acknowledgement-recovery iterations, load-recovery sweeps, automatic
+continuation and browser-recovery work stop admitting new cycles. Existing work
+settles naturally; retained browser operations and page mutexes must also drain.
+
+Page-binding events and passive rate-limit callbacks are still preserved. A late
+callback revokes a ready lease before its write and resumes normal operation.
+This makes a stale commit fail instead of dropping evidence. Drain timeout,
+explicit release and lease expiry also resume the core; maintenance is never an
+unbounded mode. A failed helper attempts release, and expiry covers a lost helper.
+
+The existing actor/submit/writer, pidfd, core start time, Chrome identity and
+request checks remain. For supporting cores only, the final action is
+`system.maintenance.commit`: the core rechecks its current lease and drain on its
+own event loop, closes SQLite and exits without calling browser shutdown. There
+is no awaited gap between that decision and exit. The helper treats EOF only as
+an uncertain transport outcome and still requires the pinned old process to be
+gone, with Chrome alive, before promotion/startup. Ordinary SIGTERM still closes
+Chrome and is not used here. External DB writers still fail the existing lock
+checks; the core gate does not control another process.
+
+Older running cores do not gain this capability from a staged package. Their
+existing exact-core-only guarded path remains unchanged and still needs fresh
+issuer coordination; this is a bootstrap limitation, not evidence of deployment.
+No operational update is performed by building or testing this implementation.
+
+`--resume-pre-signal` is only for the historical already-installed-candidate abort.
+It explicitly rejects a receipt containing `staging.json`. Preserve a staging-only
+abort's candidate, backup and receipts; do not relabel it as installed or erase its
+receipt to repeat an attempt. Any next attempt needs separately reviewed reentry
+and a new supervisor-coordinated issuer window.
+
 ## Build the exact reviewed package without accessing a running service
 
 Prerequisites: the repository available through your existing authorized Git

@@ -1,3 +1,4 @@
+import type { CoreMaintenance } from './maintenance.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ProviderSubmissionError, type PreparationTarget } from '../providers/provider-adapter.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
@@ -18,7 +19,7 @@ export class ThinkingFailureRecovery {
   readonly #mutex = new KeyedMutex();
   readonly #controller = new AbortController();
   readonly #pending = new Set<Promise<void>>();
-  readonly services: { database: SessionPlaneDatabase; submissions: SubmissionService; ui: SessionUiService };
+  readonly services: { maintenance?: CoreMaintenance; database: SessionPlaneDatabase; submissions: SubmissionService; ui: SessionUiService };
   readonly now: () => number;
   constructor(services: ThinkingFailureRecovery['services'], now: () => number = Date.now) {
     this.services = services; this.now = now;
@@ -29,6 +30,8 @@ export class ThinkingFailureRecovery {
 
   observe(snapshot: SessionSnapshot, signal?: AbortSignal): Promise<void> {
     if (this.#controller.signal.aborted || this.#mutex.isBusy(snapshot.sessionId)) return Promise.resolve();
+    const release = this.services.maintenance?.enter();
+    if (this.services.maintenance && !release) return Promise.resolve();
     const operation = this.#mutex.runExclusive(snapshot.sessionId, async () => {
       try { await this.#continue(snapshot, AbortSignal.any([this.#controller.signal, ...(signal ? [signal] : [])])); }
       catch (error) {
@@ -47,7 +50,7 @@ export class ThinkingFailureRecovery {
       }
     });
     this.#pending.add(operation);
-    void operation.finally(() => this.#pending.delete(operation)).catch(() => undefined);
+    void operation.finally(() => { this.#pending.delete(operation); release?.(); }).catch(() => undefined);
     return operation;
   }
 

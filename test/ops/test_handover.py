@@ -211,6 +211,31 @@ class HandoverTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, 'may have occurred'):
                     handover.verify_pre_signal_resume(prior, health, prior/'installed', prior/'package', {}, None)
 
+    def test_staged_only_abort_cannot_use_legacy_installed_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prior = pathlib.Path(directory)
+            (prior/'staging.json').write_text('{}')
+            with patch.object(handover, 'verify_package') as verify:
+                with self.assertRaisesRegex(AssertionError, 'Staging-only abort'):
+                    handover.verify_pre_signal_resume(prior, {}, prior/'live', prior/'pkg', {}, None)
+                verify.assert_not_called()
+
+    def test_maintenance_transport_accepts_eof_only_for_commit_and_never_masks_refusal(self):
+        h = {'socket': {'path': '/fixture/socket'}}
+        channel = MagicMock()
+        channel.__enter__.return_value = channel
+        with patch.object(handover.socket, 'socket', return_value=channel):
+            channel.recv.return_value = b''
+            with self.assertRaisesRegex(RuntimeError, 'response missing'):
+                handover.maintenance_rpc(h, 'system.maintenance.prepare', {})
+            self.assertIsNone(handover.maintenance_rpc(h, 'system.maintenance.commit', {}, True))
+            channel.recv.side_effect = ConnectionResetError('core exited')
+            self.assertIsNone(handover.maintenance_rpc(h, 'system.maintenance.commit', {}, True))
+            channel.recv.side_effect = None
+            channel.recv.return_value = b'{"error":{"message":"readiness changed"}}\n'
+            with self.assertRaisesRegex(RuntimeError, 'Maintenance refused'):
+                handover.maintenance_rpc(h, 'system.maintenance.commit', {}, True)
+
 
 if __name__ == '__main__':
     unittest.main()
