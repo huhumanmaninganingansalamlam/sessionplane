@@ -32,6 +32,7 @@ export interface ReplacementCleanup {
   deletionReceipt: { clientId: string; requestId: string; status: string } | null;
   outcome: 'confirmed' | 'refused' | 'uncertain' | 'not-attempted' | 'unknown' | 'preserved';
   errorCode: string | null;
+  pageCleanup?: { closedPages: number; pageErrors: string[] };
 }
 
 type ReplacementResult = SessionSnapshot & { cleanup: ReplacementCleanup };
@@ -135,6 +136,15 @@ export class ConversationCleanupService {
         if (receipt.status === 'complete') {
           const result = JSON.parse(receipt.resultJson) as SessionSnapshot & { cleanup?: ReplacementCleanup };
           // Historical receipts do not establish cleanup, and must never retry it.
+          if (result.cleanup?.outcome === 'confirmed' && result.cleanup.predecessorSessionId !== null) {
+            const previous = sessions.getSnapshot(result.cleanup.predecessorSessionId);
+            if (previous !== null && previous.generation === result.cleanup.predecessorGeneration &&
+                previous.conversationId === result.cleanup.conversationId) {
+              const pages = await this.#closeSessionPages(previous);
+              result.cleanup.pageCleanup = { closedPages: (result.cleanup.pageCleanup?.closedPages ?? 0) + pages.closedPages, pageErrors: pages.pageErrors };
+              receipts.record({ clientId: input.clientId, requestId: input.requestId, method: input.method, requestHash, status: 'complete', result });
+            }
+          }
           return { ...result, cleanup: result.cleanup ?? {
             predecessorSessionId: result.predecessorSessionId, predecessorGeneration: null,
             conversationId: null, deletionRequestId: null, deletionReceipt: null,
@@ -231,6 +241,7 @@ export class ConversationCleanupService {
               deletion.deleted && deletion.errorCode === null ? 'confirmed'
             : cleanup.deletionReceipt?.status === 'complete' && deletion.errorCode === 'provider.deletion-rejected'
               ? 'refused' : 'uncertain';
+          if (deletion.pageCleanup !== undefined) cleanup.pageCleanup = deletion.pageCleanup;
           cleanup.errorCode = deletion.errorCode ?? (cleanup.outcome === 'uncertain' ? 'provider.deletion-unknown' : null);
         }
       }
@@ -253,7 +264,11 @@ export class ConversationCleanupService {
         const successor = create();
         scheduler.refreshSession(previous.sessionId);
         this.#options.onDeleted(previous.sessionId);
-        await this.#closeSessionPages(previous);
+        if ((cleanup.outcome === 'confirmed' || previous.conversationId === null) && cleanup.pageCleanup === undefined) {
+          const pages = await this.#closeSessionPages(previous);
+          cleanup.pageCleanup = pages;
+        }
+        receipts.record({ clientId: input.clientId, requestId: input.requestId, method: input.method, requestHash, status: 'complete', result: successor });
         return successor;
       });
     });
@@ -277,12 +292,33 @@ export class ConversationCleanupService {
                 generation: session.generation, conversationId: session.conversationId })
             : isUnboundConversation(current) ? registry.pageForObservation(binding.pageKey, current.bindingEpoch) : null;
           if (page === null) return;
+          await this.#requireIdlePage(page);
           await page.close();
           result.closedPages += 1;
         });
       } catch (error) { result.pageErrors.push(cleanupErrorCode(error)); }
     }
     return result;
+  }
+
+  async #requireIdlePage(page: import('playwright-core').Page) {
+    const unsafe = await page.locator('textarea, [contenteditable="true"]:not(article *, [data-message-author-role] *, [data-chatgpt-search-message-ids] *), input[type="file"], button').evaluateAll(elements =>
+      elements.some(element => {
+        if (element instanceof HTMLInputElement && element.type === 'file') return (element.files?.length ?? 0) > 0;
+        if (element instanceof HTMLButtonElement) return element.getClientRects().length > 0 && (
+          /^(?:stop generating|stop streaming|stop response|응답 중지|생성 중지|중지)$/i.test(element.getAttribute('aria-label') ?? '') ||
+          element.getAttribute('data-testid') === 'stop-button');
+        return ((element as HTMLTextAreaElement).value ?? (element as HTMLElement).innerText ?? '').trim().length > 0;
+      }));
+    if (unsafe) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve the page draft or active generation before cleanup');
+  }
+
+  async #finishDeletedPages(result: DeletionResult): Promise<DeletionResult> {
+    if (!result.deleted || !result.requestOk) return result;
+    const session = new SessionRepository(this.#options.database.raw).getSnapshot(result.sessionId);
+    if (session === null || session.generation !== result.generation || session.conversationId !== result.conversationId) return result;
+    const pages = await this.#closeSessionPages(session);
+    return { ...result, pageCleanup: { closedPages: (result.pageCleanup?.closedPages ?? 0) + pages.closedPages, pageErrors: pages.pageErrors } };
   }
 
   async delete(input: ConversationDeleteInput, options: { replacement?: boolean } = {}) {
@@ -302,7 +338,11 @@ export class ConversationCleanupService {
           if (receipt.method !== 'session.delete' || receipt.requestHash !== requestHash) {
             throw new SessionPlaneDomainError('input.idempotency-conflict', 'Deletion request payload changed');
           }
-          if (receipt.status === 'complete') return JSON.parse(receipt.resultJson) as DeletionResult;
+          if (receipt.status === 'complete') {
+            const result = await this.#finishDeletedPages(JSON.parse(receipt.resultJson) as DeletionResult);
+            receipts.record({ clientId: input.clientId, requestId: input.requestId, method: 'session.delete', requestHash, status: 'complete', result });
+            return result;
+          }
         }
         const session = sessions.getSnapshot(input.sessionId);
         if (session === null || session.generation !== input.generation ||
@@ -315,11 +355,18 @@ export class ConversationCleanupService {
           if (previous.sessionId !== input.sessionId || previous.generation !== input.generation) {
             throw new SessionPlaneDomainError('session.conversation-mismatch', 'Deletion receipt belongs to another exact generation');
           }
-          if (prior.status === 'complete') return previous;
+          if (prior.status === 'complete') return await this.#finishDeletedPages(previous);
         }
         if (!input.outputsRetrieved || (!options.replacement && !session.terminal) ||
             sessions.conversationCleanupBlocker(input.sessionId, input.conversationId, options.replacement === true)) {
           throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Conversation has active, unresolved or shared work; retrieve completed outputs before deletion');
+        }
+        for (const binding of registry.listBindings({ includeClosed: false })) {
+          if (binding.sessionId === session.sessionId || (binding.sessionId === null && binding.conversationId === session.conversationId && isProviderUrl(session.provider, binding.url))) {
+            await pageMutex.runExclusive(binding.pageKey, async () => {
+              await this.#requireIdlePage(registry.pageForObservation(binding.pageKey, binding.bindingEpoch));
+            });
+          }
         }
         const adapter = adapters.require(session.provider);
         if (adapter.openDeletion === undefined) {
@@ -363,7 +410,8 @@ export class ConversationCleanupService {
           this.#options.onDeleted(input.sessionId);
           actor.publish(sessions.getSnapshot(input.sessionId)!,
             new EventRepository(database.raw).latestSequenceForSession(input.sessionId));
-          await this.#closeSessionPages(session);
+          result.pageCleanup = await this.#closeSessionPages(session);
+          record('complete');
           return result;
         } finally {
           // Closing a temporary Page cannot change the durable provider outcome.
@@ -380,6 +428,7 @@ interface DeletionResult {
   conversationId: string;
   deleted: boolean;
   errorCode: string | null;
+  pageCleanup?: { closedPages: number; pageErrors: string[] };
 }
 
 interface TeamDeletionResult {

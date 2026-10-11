@@ -196,7 +196,7 @@ out prompts, infer consensus, or inject answers into other roles.
   conversation once, closes its tab and ends observation, then creates its successor.
   Retrieve required outputs and write the handoff first. Local stored answers/files
   remain. Deletion failure or unknown conversation identity does not block replacement;
-  there is no automatic cleanup retry. Old observation stays stopped across restarts.
+  provider deletion is never blindly retried. A confirmed deletion can resume only tab closure on an explicit replay. Old observation stays stopped across restarts.
   It never replays unresolved work.
   Routing success is separate from `replacement.cleanup`: inspect its exact
   predecessor session/generation/conversation, deletion request ID and actual
@@ -223,6 +223,12 @@ out prompts, infer consensus, or inject answers into other roles.
 - `sessionplane_role_retire` ends a non-primary role without deleting provider history.
 - `sessionplane_session_delete` permanently removes a completed provider conversation
   after retrieving required outputs. Pass its exact requestRef and outputsRetrieved:true.
+  Verify both `deleted:true` and `pageCleanup.pageErrors:[]`; provider deletion alone
+  does not prove the tabs closed. Replaying the same request resumes failed tab closure
+  without repeating confirmed provider deletion. Preserve draft/streaming pages.
+  After an authorized handoff to a new custom role is complete and all old outputs
+  are saved, explicitly delete the old completed conversation by its exact requestRef.
+  A token/length limit warning, role retirement, or a newly created role is not cleanup.
   Never delete active, ambiguous or shared work.
 - ChatGPT is enabled by default. Gemini/Grok require explicit operator enablement.
   Human verification must be completed by a human; never solve or bypass it.

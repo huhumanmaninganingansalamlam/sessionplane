@@ -173,3 +173,46 @@ test('conversation deletion protects unresolved work, retains answers and persis
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('confirmed deletion resumes failed tab closure without another provider delete and protects drafts', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-cleanup-tabs-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', observationActiveSweepMs: 5, observationQuietSweepMs: 5 });
+  const fake = new FakeProviderAdapter();
+  fake.autoFinalText = 'Saved handoff and final answer';
+  let deletes = 0;
+  t.mock.method(fake, 'openDeletion', async () => ({ alreadyDeleted: false,
+    deleteOnce: async () => { deletes++; return true; }, close: async () => {} }));
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const rpc = <T>(method: string, params: object) => callRpc<T>({ socketPath: config.socketPath,
+    method, params: { clientId: 'tabs', ...params }, timeoutMs: 10000 });
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'tabs' });
+    const session = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    await rpc('session.send', { sessionId: session.sessionId, requestId: 'send', prompt: 'Local fixture' });
+    const complete = await rpc<SessionSnapshot>('session.wait', { sessionId: session.sessionId, generation: 1, waitMs: 3000 });
+    assert.equal(complete.terminal, true);
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main><textarea>human draft</textarea></main>' }));
+    await page.goto('https://chatgpt.com/c/' + complete.conversationId);
+    const unrelated = await core.browserOwner!.createPage();
+    const input = { sessionId: complete.sessionId, generation: 1, conversationId: complete.conversationId, outputsRetrieved: true, requestId: 'cleanup' };
+    await assert.rejects(rpc('session.delete', input), e => JSON.stringify(e).includes('session.cleanup-not-ready'));
+    assert.equal(deletes, 0);
+    assert.equal(await page.locator('textarea').inputValue(), 'human draft');
+    await page.locator('textarea').fill('');
+    const close = t.mock.method(page, 'close', async () => { throw new Error('Transient close failure'); });
+    const first = await rpc<{ deleted: boolean; pageCleanup: { closedPages: number; pageErrors: string[] } }>('session.delete', input);
+    assert.equal(first.deleted, true);
+    assert.deepEqual(first.pageCleanup, { closedPages: 0, pageErrors: ['browser.unavailable'] });
+    assert.equal(page.isClosed(), false);
+    close.mock.restore();
+    const replay = await rpc<typeof first>('session.delete', input);
+    assert.deepEqual(replay.pageCleanup, { closedPages: 1, pageErrors: [] });
+    assert.equal(page.isClosed(), true);
+    assert.equal(unrelated.page.isClosed(), false);
+    assert.equal(deletes, 1);
+    assert.deepEqual(await rpc('session.delete', input), replay);
+    assert.equal((await rpc<SessionSnapshot>('session.get', { sessionId: session.sessionId })).answerText, complete.answerText);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
