@@ -234,7 +234,7 @@ export class BrowserOwner {
       }
       throw new BrowserOwnerError(
         'browser.unavailable',
-        'Failed to launch and attach to the selected host browser',
+        `Failed to launch and attach to the selected host browser: ${this.#lastError}`,
         { cause: error },
       );
     }
