@@ -135,6 +135,33 @@ export class ConversationCleanupService {
         }
         if (receipt.status === 'complete') {
           const result = JSON.parse(receipt.resultJson) as SessionSnapshot & { cleanup?: ReplacementCleanup };
+          // Resume only confirmation of this exact attempted deletion. delete()
+          // never sends again when its durable attempted receipt exists.
+          const pending = result.cleanup;
+          if (pending?.outcome === 'uncertain' && pending.predecessorSessionId !== null &&
+              pending.predecessorGeneration !== null && pending.conversationId !== null &&
+              pending.deletionRequestId !== null && pending.deletionReceipt?.clientId === input.clientId &&
+              pending.deletionReceipt.requestId === pending.deletionRequestId && pending.deletionReceipt.status === 'attempted') {
+            const deletionReceipt = receipts.get(input.clientId, pending.deletionRequestId);
+            const recorded = deletionReceipt?.method === 'session.delete'
+              ? JSON.parse(deletionReceipt.resultJson) as DeletionResult : null;
+            if (recorded?.sessionId === pending.predecessorSessionId &&
+                recorded.generation === pending.predecessorGeneration && recorded.conversationId === pending.conversationId) {
+              try {
+                const deletion = await this.delete({ clientId: input.clientId, requestId: pending.deletionRequestId,
+                  sessionId: pending.predecessorSessionId, generation: pending.predecessorGeneration,
+                  conversationId: pending.conversationId, outputsRetrieved: true }, { replacement: true });
+                if (deletion.requestOk && deletion.deleted) {
+                  pending.outcome = 'confirmed';
+                  pending.errorCode = null;
+                  pending.deletionReceipt.status = 'complete';
+                  if (deletion.pageCleanup !== undefined) pending.pageCleanup = deletion.pageCleanup;
+                }
+              } catch (error) { pending.errorCode = cleanupErrorCode(error); }
+              receipts.record({ clientId: input.clientId, requestId: input.requestId, method: input.method, requestHash, status: 'complete', result });
+              return { ...result, cleanup: pending };
+            }
+          }
           // Historical receipts do not establish cleanup, and must never retry it.
           if (result.cleanup?.outcome === 'confirmed' && result.cleanup.predecessorSessionId !== null) {
             const previous = sessions.getSnapshot(result.cleanup.predecessorSessionId);

@@ -183,6 +183,13 @@ test('replacement attempts deletion once, continues on failure, and never resurr
     });
     const replay = await rpc<typeof replaced>('workflow.session_replace', replace);
     assert.deepEqual(replay.replacement, replaced.replacement);
+    adapter.confirmDeletion = true;
+    const confirmed = await rpc<typeof replaced>('workflow.session_replace', replace);
+    assert.equal(confirmed.replacement.sessionId, successor);
+    assert.equal(confirmed.replacement.cleanup.outcome, 'confirmed');
+    assert.equal(confirmed.replacement.cleanup.deletionReceipt?.status, 'complete');
+    assert.equal(core.teamDirectory.getSession(old.sessionId).answerText, submitted.answerText);
+    assert.equal(core.teamDirectory.getSession(old.sessionId).submittedUserMessageId, submitted.submittedUserMessageId);
     assert.equal(core.teamDirectory.getCurrentSession(team.teamId, 'main').sessionId, successor);
     assert.equal(adapter.deleteCount, 1);
     await core.close();
@@ -296,7 +303,7 @@ test('best-effort replacement survives deletion failure and persistent recovery'
           : { clientId: 'boundary', requestId: 'replacement-delete:' + mode, status: mode === 'unknown-ack' ? 'attempted' : 'complete' });
       assert.deepEqual(JSON.parse(receipts.get('boundary', mode)!.resultJson).cleanup, next.cleanup);
       assert.deepEqual(await cleanup.replace(input), next);
-      assert.equal(attempts, mode === 'no-identity' || mode === 'wrong-receipt' ? 0 : 1);
+      assert.equal(attempts, mode === 'no-identity' || mode === 'wrong-receipt' ? 0 : mode === 'unknown-ack' ? 2 : 1);
       if (mode === 'open-failure') {
         historicalInput = input;
         const { cleanup: ignored, ...historical } = next;
