@@ -106,6 +106,7 @@ export class BrowserOwner {
   #lockToken: string | null = null;
   #context: BrowserContext | null = null;
   #browser: Browser | null = null;
+  readonly #recoveryControllers = new Map<string, Browser>();
   #browserProcess: ChildProcess | null = null;
   #browserPid: number | null = null;
   #debuggingPort: number | null = null;
@@ -291,6 +292,92 @@ export class BrowserOwner {
       throw new BrowserOwnerError('browser.unavailable', 'Background page did not attach to its exact browser target');
     } finally {
       await session.detach();
+    }
+  }
+
+  /** The caller holds the exact request actor/page lock and authorizes one refresh. */
+  async recoverCrashedPage(pageKey: string, expected: PageBindingSnapshot): Promise<void> {
+    this.#requireContext();
+    const page = this.#pageRegistry.pageForObservation(pageKey);
+    const current = this.#pageRegistry.getBinding(pageKey);
+    const sameOwner = () => {
+      const binding = this.#pageRegistry.getBinding(pageKey);
+      return binding.bindingEpoch === expected.bindingEpoch && binding.targetId === expected.targetId &&
+        binding.sessionId === expected.sessionId && binding.generation === expected.generation &&
+        binding.url === expected.url && binding.conversationId === expected.conversationId &&
+        binding.expectedConversationId === expected.expectedConversationId && (binding.state === 'owned' || binding.state === 'reserved');
+    };
+    if (!sameOwner() || !this.#pageRegistry.observedCrash(pageKey) || current.targetId == null ||
+        this.#debuggingPort === null || this.#browserPid === null) {
+      throw new BrowserOwnerError('browser.unavailable', 'Exact crashed target is not available for controller recovery');
+    }
+    const browserPid = this.#browserPid;
+    const debuggingPort = this.#debuggingPort;
+    const timeout = Math.min(this.#launchTimeoutMs, 10_000);
+    const deadline = Date.now() + timeout;
+    const remaining = () => {
+      const ms = deadline - Date.now();
+      if (ms <= 0) throw new BrowserOwnerError('browser.unavailable', 'Same-target controller recovery deadline expired');
+      return ms;
+    };
+    const attach = async (target: Page) => {
+      const budget = remaining();
+      const pending = target.context().newCDPSession(target);
+      const attached = await settleWithin(pending, budget);
+      if (attached === undefined) {
+        // A late attachment must not outlive the failed recovery attempt.
+        void pending.then(session => session.detach()).catch(() => undefined);
+        throw new BrowserOwnerError('browser.unavailable', 'Recovery target attachment unavailable');
+      }
+      return attached;
+    };
+    const session = await attach(page);
+    let replacement: Browser | null = null;
+    try {
+      const identity = await settleWithin(session.send('Target.getTargetInfo'), remaining());
+      if (identity?.targetInfo.targetId !== current.targetId || identity.targetInfo.type !== 'page' ||
+          identity.targetInfo.url !== expected.url || !sameOwner()) {
+        throw new BrowserOwnerError('browser.unavailable', 'Crashed target identity could not be verified');
+      }
+      // Page.reload() rejects a permanently crashed Playwright Page. A fresh
+      // public CDP session reloads the same Chrome target; never patch private state.
+      const reloadBudget = remaining();
+      if (!sameOwner()) throw new BrowserOwnerError('browser.unavailable', 'Crashed target changed before reload');
+      if (await settleWithin(session.send('Page.reload'), reloadBudget) === undefined) {
+        throw new BrowserOwnerError('browser.unavailable', 'Same-target reload acknowledgement unavailable; do not repeat automatically');
+      }
+      replacement = await chromium.connectOverCDP(`http://127.0.0.1:${debuggingPort}`, { timeout: remaining() });
+      let recovered: Page | undefined;
+      for (const candidate of replacement.contexts()[0]?.pages() ?? []) {
+        const probe = await attach(candidate);
+        try {
+          const found = await settleWithin(probe.send('Target.getTargetInfo'), remaining());
+          if (found?.targetInfo.targetId === current.targetId) { recovered = candidate; break; }
+        } finally { await settleWithin(probe.detach(), 1_000); }
+      }
+      if (!recovered || this.#browserPid !== browserPid || this.#debuggingPort !== debuggingPort || !sameOwner()) {
+        throw new BrowserOwnerError('browser.unavailable', 'The same crashed target did not reattach; original binding retained');
+      }
+      await recovered.waitForLoadState('domcontentloaded', { timeout: remaining() });
+      remaining();
+      if (this.#browserPid !== browserPid || this.#debuggingPort !== debuggingPort || !sameOwner()) {
+        throw new BrowserOwnerError('browser.unavailable', 'Crashed target ownership changed before controller reassociation');
+      }
+      this.#pageRegistry.reconnectCrashedPage(pageKey, expected, recovered, current.targetId);
+      const previous = this.#recoveryControllers.get(pageKey);
+      const controller = replacement;
+      this.#recoveryControllers.set(pageKey, controller);
+      recovered.once('close', () => {
+        if (this.#recoveryControllers.get(pageKey) !== controller) return;
+        this.#recoveryControllers.delete(pageKey);
+        void controller.close().catch(() => undefined);
+      });
+      replacement = null;
+      // connectOverCDP Browser.close disconnects only this auxiliary controller.
+      if (previous) await settleWithin(previous.close(), 1_000);
+    } finally {
+      await settleWithin(session.detach(), 1_000);
+      if (replacement) await settleWithin(replacement.close(), 1_000);
     }
   }
 
@@ -635,6 +722,8 @@ export class BrowserOwner {
   }
 
   async #shutdownBrowser(): Promise<void> {
+    await Promise.all([...this.#recoveryControllers.values()].map(controller => controller.close().catch(() => undefined)));
+    this.#recoveryControllers.clear();
     const browser = this.#browser;
     const child = this.#browserProcess;
     const browserPid = this.#browserPid;

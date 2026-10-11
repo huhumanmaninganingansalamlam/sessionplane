@@ -1134,7 +1134,7 @@ export class SubmissionService {
   async refreshPage(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string },
     reload: (snapshot: SessionSnapshot) => Promise<void>,
-    verifyPage?: (snapshot: SessionSnapshot) => Promise<boolean | void>,
+    verifyPage?: (snapshot: SessionSnapshot) => Promise<boolean | void | { loadError: boolean; rendererCrash: { observedAt: string; targetId: string | null; bindingEpoch: number; draftPreservation: 'provider-persisted-only' } }>,
   ): Promise<void> {
     const method = 'session.page.refresh';
     const requestHash = hashCanonical({ method, requestId: input.requestId, sessionId: input.sessionId, generation: input.generation });
@@ -1168,13 +1168,15 @@ export class SubmissionService {
           }
         };
         requireReady();
-        loadError = await verifyPage?.(snapshot) === true;
+        const verification = await verifyPage?.(snapshot);
+        loadError = verification === true || (typeof verification === 'object' && verification.loadError);
         requireReady();
         const record = (status: 'attempted' | 'complete') => receipts.record({
           clientId: input.clientId, requestId: input.decisionId, method, requestHash, status,
           result: { requestId: input.requestId, sessionId: input.sessionId, generation: input.generation,
             pageKey: snapshot.pageKey, conversationId: snapshot.conversationId,
             dispatch: status === 'complete' ? 'reload-returned' : 'attempted-outcome-unknown',
+            ...(typeof verification === 'object' ? { rendererCrash: verification.rendererCrash } : {}),
             conversationRecovered: null },
         });
         this.#database.transaction(() => {

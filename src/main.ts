@@ -364,6 +364,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   });
   registerSessionMethods(router, teamDirectory, receipts, cleanup);
   const ui = new SessionUiService({
+    browserOwner,
     submissions: submissionService,
     registry: pageRegistry,
     chatgptUrl: config.chatgptUrl,

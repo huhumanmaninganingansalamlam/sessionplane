@@ -3,6 +3,8 @@ import { conversationLoadSurface } from '../providers/chatgpt/conversation-load-
 import { ChatGptConfigurationMenu, type ConfigurationCatalog } from '../providers/chatgpt/configuration-catalog.ts';
 import { errors, type ElementHandle, type Page } from 'playwright-core';
 
+import type { BrowserOwner } from '../browser/browser-owner.ts';
+import type { PageBindingSnapshot } from '../browser/page-binding.ts';
 import { PageRegistry, PageRegistryError } from '../browser/page-registry.ts';
 import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionEvidence, isPreparationSummary, matchesPreparationTarget, sameSnapshotSemantics, type BrowserSnapshot, type BrowserSnapshotNode } from '../browser/ref-snapshot.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
@@ -21,6 +23,7 @@ import type { SubmissionService } from './submission-service.ts';
 export class SessionUiService {
   readonly #submissions: SubmissionService;
   readonly #registry: PageRegistry;
+  readonly #browserOwner: BrowserOwner | null;
   readonly #chatgptOrigin: string;
   readonly #quietWindowMs: number;
   readonly #refs = new BrowserRefSnapshotStore();
@@ -74,9 +77,10 @@ export class SessionUiService {
       }
   }
 
-  constructor(input: { submissions: SubmissionService; registry: PageRegistry; chatgptUrl: string; quietWindowMs?: number }) {
+  constructor(input: { submissions: SubmissionService; registry: PageRegistry; chatgptUrl: string; quietWindowMs?: number; browserOwner?: BrowserOwner | null }) {
     this.#submissions = input.submissions;
     this.#registry = input.registry;
+    this.#browserOwner = input.browserOwner ?? null;
     this.#chatgptOrigin = new URL(input.chatgptUrl).origin;
     this.#quietWindowMs = input.quietWindowMs ?? 1_500;
   }
@@ -575,15 +579,46 @@ export class SessionUiService {
         terminal: recovered.kind === 'complete', reason: recovered.reason } };
   }
 
+  /** Passive registry evidence only; no renderer access or recovery side effects. */
+  pageHealth(session: SessionSnapshot) {
+    if (session.pageKey === null) return null;
+    try {
+      const binding = this.#registry.getBinding(session.pageKey);
+      const identityMatches = binding.sessionId === session.sessionId && binding.generation === session.generation &&
+        binding.conversationId === session.conversationId;
+      return { pageKey: session.pageKey, targetId: binding.targetId ?? null, bindingEpoch: binding.bindingEpoch,
+        bindingState: binding.state, identityMatches,
+        crashObservedAt: identityMatches ? this.#registry.observedCrash(session.pageKey) : null,
+        scope: 'core-observed-page-events' as const };
+    } catch { return null; }
+  }
+
   async refresh(input: PreparationOwner & { readonly decisionId: string }): Promise<void> {
+    let crashedBinding: PageBindingSnapshot | null = null;
     try {
       await this.#submissions.refreshPage(input, async (session) => {
         const page = this.#requirePage(session);
-        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+        if (crashedBinding !== null) {
+          await this.#browserOwner!.recoverCrashedPage(session.pageKey!, crashedBinding);
+          await prepareChatGptObservation(this.#requirePage(session), session.pageKey!);
+        } else await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
         this.#requirePage(session);
         this.#refs.clear(session.pageKey!);
       }, async (session) => {
         const page = this.#requirePage(session);
+        const crashObservedAt = this.#registry.observedCrash(session.pageKey!);
+        if (crashObservedAt !== null) {
+          if (this.#browserOwner === null || !session.terminal || session.submissionState !== 'failed_pre_submit' ||
+              session.promptSubmitted || session.errorCode !== 'browser.unavailable' || session.conversationId === null ||
+              session.submittedUserMessageId !== null || session.submittedUserTurnId !== null || session.responseMessageId !== null) {
+            throw new SessionPlaneDomainError('browser.page-crashed',
+              'Crashed-page refresh requires the exact unsubmitted failure; preserve active or uncertain requests',
+              { ...this.pageHealth(session), dispatch: 'not-dispatched', automaticRetry: false });
+          }
+          crashedBinding = this.#registry.getBinding(session.pageKey!);
+          return { loadError: false, rendererCrash: { observedAt: crashObservedAt, targetId: crashedBinding.targetId ?? null,
+            bindingEpoch: crashedBinding.bindingEpoch, draftPreservation: 'provider-persisted-only' as const } };
+        }
         const surface = session.conversationId ? await page.evaluate(conversationLoadSurface, {
           origin: this.#chatgptOrigin, conversationId: session.conversationId, click: false }) : null;
         await prepareChatGptObservation(page, session.pageKey!);

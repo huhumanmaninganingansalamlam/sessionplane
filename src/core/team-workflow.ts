@@ -445,8 +445,10 @@ export class TeamWorkflow {
     const refresh = this.services.receipts.latestPageRefresh(request.clientId, request.sessionId, request.generation);
     const verification = this.#submissionVerification(request, result);
     return { ...result, ...verification,
+      ...(current.generation === request.generation ? { pageHealth: this.services.ui.pageHealth(current) } : {}),
       ...(refresh ? { pageRefresh: { receiptId: refresh.requestId, status: refresh.status,
         createdAt: refresh.createdAt, updatedAt: refresh.updatedAt,
+        ...(JSON.parse(refresh.resultJson).rendererCrash ? { rendererCrash: JSON.parse(refresh.resultJson).rendererCrash } : {}),
         dispatch: refresh.status === 'complete' ? 'reload-returned' : 'attempted-outcome-unknown',
         conversationRecovered: null } } : {}),
       ...(loadRecovery ? { conversationLoadRecovery: { ...loadRecovery, nextAllowedAt: this.#loadRecovery.effectiveNextAllowedAt(),

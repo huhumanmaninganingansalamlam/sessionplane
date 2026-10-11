@@ -14,7 +14,7 @@ import {
 
 interface PageRecord {
   readonly pageKey: string;
-  readonly page: Page;
+  page: Page;
   readonly registrationOrder: number;
   targetId: string | null;
   bindingEpoch: number;
@@ -29,6 +29,8 @@ interface PageRecord {
   duplicatePageKeys: string[];
   readonly onFrameNavigated: (frame: Frame) => void;
   readonly onClose: () => void;
+  readonly onCrash: () => void;
+  crashObservedAt: string | null;
 }
 
 export class PageRegistryError extends Error {
@@ -102,6 +104,7 @@ export class PageRegistry {
       }
       record.page.off('framenavigated', record.onFrameNavigated);
       record.page.off('close', record.onClose);
+      record.page.off('crash', record.onCrash);
       this.#markClosed(record);
     }
     this.#context = null;
@@ -131,8 +134,10 @@ export class PageRegistry {
       lastSeenAt: now,
       conflictOwnerPageKey: null,
       duplicatePageKeys: [],
+      crashObservedAt: null,
+      onCrash: () => { record.crashObservedAt = this.#now().toISOString(); },
       onFrameNavigated: (frame: Frame) => {
-        if (frame === page.mainFrame()) {
+        if (frame === record.page.mainFrame()) {
           this.refreshPage(pageKey);
         }
       },
@@ -149,9 +154,41 @@ export class PageRegistry {
     this.#keysByPage.set(page, pageKey);
     page.on('framenavigated', record.onFrameNavigated);
     page.on('close', record.onClose);
+    page.on('crash', record.onCrash);
     this.#reconcileConflicts();
     this.#emit(record);
     return this.#snapshot(record);
+  }
+
+  /** Only a native event on this retained Page proves crash; error text does not. */
+  observedCrash(pageKey: string): string | null {
+    const record = this.#requireRecord(pageKey);
+    return record.state === 'closed' || record.page.isClosed() ? null : record.crashObservedAt;
+  }
+
+  /** Reassociate only the exact retained crashed target; never create or close a tab. */
+  reconnectCrashedPage(pageKey: string, expected: PageBindingSnapshot, page: Page, targetId: string): void {
+    const record = this.#requireRecord(pageKey);
+    if (record.crashObservedAt === null || (record.state !== 'owned' && record.state !== 'reserved') || record.page.isClosed() || page.isClosed() ||
+        record.targetId !== targetId || expected.targetId !== targetId || record.bindingEpoch !== expected.bindingEpoch ||
+        record.sessionId !== expected.sessionId || record.generation !== expected.generation ||
+        record.conversationId !== expected.conversationId || record.expectedConversationId !== expected.expectedConversationId ||
+        record.url !== expected.url || page.url() !== expected.url || this.#keysByPage.has(page)) {
+      throw new PageRegistryError('session.page-identity-unverified', 'Crashed target changed during controller recovery');
+    }
+    record.page.off('framenavigated', record.onFrameNavigated);
+    record.page.off('close', record.onClose);
+    record.page.off('crash', record.onCrash);
+    this.#keysByPage.delete(record.page);
+    record.page = page;
+    this.#keysByPage.set(page, pageKey);
+    record.crashObservedAt = null;
+    record.bindingEpoch++;
+    record.lastSeenAt = this.#now().toISOString();
+    page.on('framenavigated', record.onFrameNavigated);
+    page.on('close', record.onClose);
+    page.on('crash', record.onCrash);
+    this.#emit(record);
   }
 
   identifyPage(page: Page, targetId: string): PageBindingSnapshot {
