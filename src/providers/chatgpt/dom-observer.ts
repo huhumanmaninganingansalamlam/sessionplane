@@ -28,7 +28,14 @@ export async function observeChatGptDom(
   let submittedUserFound = false;
   let laterUserFound = false;
   let candidate: ProviderAssistantCandidate | null = null;
+  const anchors = messages.filter(message => message.role === 'user' &&
+    ((identity.submittedUserMessageId !== null && message.messageId === identity.submittedUserMessageId) ||
+      (identity.submittedUserTurnId !== null && message.turnId === identity.submittedUserTurnId)));
+  // Roots have no common message order. Never splice an answer from another root,
+  // or choose among duplicate exact anchors in different mounted transcripts.
+  const anchor = anchors.length === 1 ? anchors[0] : undefined;
   for (const message of messages) {
+    if (anchor === undefined || message.rootIndex !== anchor.rootIndex) continue;
     if (!submittedUserFound) {
       if (message.role === 'user' &&
         ((identity.submittedUserMessageId !== null && message.messageId === identity.submittedUserMessageId) ||
@@ -66,28 +73,30 @@ export async function observeChatGptDom(
 }
 
 export async function observeChatGptAlerts(page: Page, identity: SubmittedUserIdentity, thinkingFailuresOnly = false): Promise<string[]> {
-  return await page.evaluate(({ identity, messagesSelector, userSelector, thinkingFailuresOnly }) => {
+  return await page.locator('[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids], [role=alert], [role=alertdialog], .text-token-text-error, .text-danger, [class~="group/activity-header"]').evaluateAll((elements, { identity, messagesSelector, userSelector, thinkingFailuresOnly }) => {
+    const roots = [...new Set<Document | ShadowRoot>([document, ...elements.map(element => element.getRootNode() as Document | ShadowRoot)])];
+    const query = (selector: string) => roots.flatMap(root => [...root.querySelectorAll<HTMLElement>(selector)]);
     const ids = [identity.submittedUserMessageId, identity.submittedUserTurnId].filter(Boolean);
-    const anchor = [...document.querySelectorAll('[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')]
+    const anchor = query('[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')
       .find(node => [node.getAttribute('data-message-id'), node.getAttribute('data-turn-id'),
         ...(node.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/)]
         .some(id => id !== null && ids.includes(id)));
-    const nextUser = anchor === undefined ? undefined : [...document.querySelectorAll(userSelector)]
-      .find(user => !anchor.contains(user) &&
+    const nextUser = anchor === undefined ? undefined : query(userSelector)
+      .find(user => !anchor.contains(user) && anchor.getRootNode() === user.getRootNode() &&
         Boolean(anchor.compareDocumentPosition(user) & Node.DOCUMENT_POSITION_FOLLOWING));
-    const hasMessages = document.querySelector(messagesSelector) !== null;
+    const hasMessages = query(messagesSelector).length > 0;
     // Current reasoning failures use an activity disclosure, not an alert role.
     // Only its labelled provider header counts, never words quoted in a message.
     const thinkingFailures = anchor === undefined ? [] :
-      [...document.querySelectorAll<HTMLElement>('[class~="group/activity-header"]')].filter(header => {
+      query('[class~="group/activity-header"]').filter(header => {
         if (header.closest('[data-message-author-role="user"], [data-user-message-bubble], [data-chatgpt-selection-message-id], [data-message-content], .markdown') !== null) return false;
         const labelId = header.querySelector('button[aria-labelledby]')?.getAttribute('aria-labelledby');
-        const label = labelId ? document.getElementById(labelId) : null;
+        const label = labelId ? (header.getRootNode() as Document | ShadowRoot).getElementById(labelId) : null;
         return label !== null && header.contains(label) &&
           label.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
           /^(생각 실패|Thinking failed)$/i.test(label.innerText.trim());
       });
-    return [...(thinkingFailuresOnly ? [] : document.querySelectorAll<HTMLElement>('[role="alert"], [role="alertdialog"], .text-token-text-error, .text-danger')), ...thinkingFailures]
+    return [...(thinkingFailuresOnly ? [] : query('[role="alert"], [role="alertdialog"], .text-token-text-error, .text-danger')), ...thinkingFailures]
       .filter(alert => {
         if (alert.closest('nav, [role="navigation"], #app-shell-sidebar, [aria-hidden="true"], [inert]') !== null ||
             !alert.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || !alert.innerText.trim()) return false;
@@ -95,7 +104,7 @@ export async function observeChatGptAlerts(page: Page, identity: SubmittedUserId
         // belong only between the exact submitted user and the next user.
         if (!alert.closest('main, article, [data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')) return !thinkingFailuresOnly;
         if (!hasMessages) return !thinkingFailuresOnly;
-        return anchor !== undefined &&
+        return anchor !== undefined && anchor.getRootNode() === alert.getRootNode() &&
           !alert.closest('[data-message-author-role="user"], [data-user-message-bubble]') &&
           Boolean(anchor.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING) &&
           (nextUser === undefined || Boolean(alert.compareDocumentPosition(nextUser) & Node.DOCUMENT_POSITION_FOLLOWING));

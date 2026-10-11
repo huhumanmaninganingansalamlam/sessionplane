@@ -310,6 +310,70 @@ test('missing DOM user binds only the exact backend prompt and retrieves its fin
   }
 });
 
+test('native observation recovers an exact open-shadow anchor without crossing roots or resending', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-shadow-anchor-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  const identity = { submittedUserMessageId: '7b4be6af-732c-4c69-a2cb-1bc1461e9d86', submittedUserTurnId: null };
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    let networkRequests = 0;
+    await page.route('https://chatgpt.com/**', route => { networkRequests++; return route.fulfill({ body: '<main></main>' }); });
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 10, conversationId: CONVERSATION_ID });
+    const session = { ...sessionSnapshot(binding.pageKey), ...identity, generation: 10, nextCheckAt: '2099-01-01T00:00:00.000Z' };
+    const original = { ...session };
+    const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/', acknowledgementTimeoutMs: 500 });
+    const source = await adapter.openObservation({ session, generation: 10 });
+    await page.setContent('<main><textarea>Retained human draft</textarea><div id="transcript"></div></main>');
+    await page.locator('#transcript').evaluate((host, anchor) => {
+      host.attachShadow({ mode: 'open' }).innerHTML = `<main>
+        <div data-message-author-role="user" data-message-id="${anchor}">Original local fixture question</div>
+        <div data-message-author-role="assistant" data-message-id="local-exact-answer" data-end-turn="true">Local exact final</div>
+      </main>`;
+    }, identity.submittedUserMessageId);
+    const recovered = await observeChatGptDom(page, identity);
+    assert.equal(recovered.submittedUserFound, true);
+    assert.equal(recovered.candidate?.responseMessageId, 'local-exact-answer');
+    assert.equal(recovered.candidate?.answerText, 'Local exact final');
+    assert.equal((await observeChatGptDom(page, { ...identity, submittedUserMessageId: 'wrong-anchor' })).candidate, null);
+    const tracker = new ExactFinalTracker(1);
+    tracker.evaluate(await source.observe(), Date.now());
+    assert.equal(tracker.evaluate(await source.observe(), Date.now() + 1).kind, 'complete');
+    await page.locator('#transcript').evaluate(host => {
+      host.shadowRoot!.querySelector('[data-message-author-role="assistant"]')!.setAttribute('data-is-streaming', 'true');
+    });
+    assert.equal(new ExactFinalTracker(1).evaluate(await source.observe(), Date.now()).kind, 'progress');
+    await page.locator('#transcript').evaluate(host => {
+      host.shadowRoot!.querySelector('[data-message-author-role="assistant"]')!.removeAttribute('data-is-streaming');
+    });
+    await page.locator('#transcript').evaluate(host => {
+      host.shadowRoot!.querySelector('main')!.insertAdjacentHTML('beforeend', '<aside role="alert">network error</aside>');
+    });
+    assert.deepEqual((await observeChatGptDom(page, identity)).providerAlerts, ['network error']);
+    await page.locator('#transcript').evaluate(host => {
+      host.shadowRoot!.querySelector('aside')!.remove();
+      host.shadowRoot!.querySelector('[data-message-author-role="assistant"]')!.remove();
+    });
+    await page.locator('main').first().evaluate(main => {
+      main.insertAdjacentHTML('beforeend', '<div data-message-author-role="assistant" data-message-id="unrelated-answer" data-end-turn="true">Do not attach</div>');
+    });
+    assert.equal((await observeChatGptDom(page, identity)).candidate, null);
+    await page.locator('main').first().evaluate((main, anchor) => {
+      main.insertAdjacentHTML('beforeend', `<div data-message-author-role="user" data-message-id="${anchor}">Duplicate anchor</div>`);
+    }, identity.submittedUserMessageId);
+    const duplicate = await observeChatGptDom(page, identity);
+    assert.equal(duplicate.submittedUserFound, false);
+    assert.equal(duplicate.candidate, null);
+    assert.equal(await page.locator('textarea').inputValue(), 'Retained human draft');
+    assert.equal(networkRequests, 1, 'Only the isolated initial navigation; no recovery send or refresh');
+    assert.deepEqual(session, original);
+    assert.equal(registry.getBinding(binding.pageKey).generation, 10);
+    source.close();
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('current ChatGPT message units recover the exact submitted turn and answer', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-message-units-'));
   const owner = new BrowserOwner({

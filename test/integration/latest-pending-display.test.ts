@@ -56,6 +56,18 @@ test('explicit pending-anchor latest display preserves guards and recovers only 
     const dom=await observeChatGptDom(page,{submittedUserMessageId:'user-message-1',submittedUserTurnId:'user-turn-1'});
     assert.equal(dom.candidate?.responseMessageId,'exact-answer');
     assert.equal(dom.candidate?.answerText,'Exact answer');
+    await page.locator('#history').evaluate(host=>{
+      const html=host.innerHTML;host.innerHTML='';
+      host.attachShadow({mode:'open'}).innerHTML=html+'<button data-testid="stop-button">Stop generating</button>';
+    });
+    await page.locator('textarea').fill('Preserved shadow-read draft');
+    const shadow=await latest('shadow-read-only');
+    assert.equal(shadow.isError,false,JSON.stringify(shadow));
+    assert.equal(shadow.structuredContent.displayOutcome,'already-present');
+    assert.equal(shadow.structuredContent.anchorPresent,true);
+    assert.equal(await page.locator('textarea').inputValue(),'Preserved shadow-read draft');
+    assert.equal(await page.locator('button[aria-label="Scroll to bottom"]').getAttribute('data-clicks'),'1');
+    assert.equal(await page.locator('[data-testid="stop-button"]').count(),1);
     assert.deepEqual(core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(session.sessionId),row);
     assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').get(session.sessionId),generation);
     assert.equal(fake.submitCount,1);

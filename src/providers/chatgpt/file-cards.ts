@@ -19,6 +19,7 @@ async function exactRoot(page: Page, request: ProviderArtifactRequest, requireAn
     ((request.session.submittedUserMessageId !== null && m.messageId === request.session.submittedUserMessageId) ||
      (request.session.submittedUserTurnId !== null && m.turnId === request.session.submittedUserTurnId)));
   if (requireAnchor && anchors.length !== 1) unavailable('Exact artifact user anchor is not unique');
+  if (requireAnchor && anchors[0]!.rootIndex !== answer.rootIndex) unavailable('Artifact answer belongs to another DOM root');
   const start = messages.indexOf(anchors[0]!);
   const end = messages.indexOf(answer);
   if (requireAnchor && (end <= start || messages.slice(start + 1, end).some(m => m.role === 'user'))) unavailable('Artifact answer ancestry changed');

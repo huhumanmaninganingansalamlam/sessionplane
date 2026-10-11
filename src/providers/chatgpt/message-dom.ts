@@ -4,6 +4,7 @@ import { CHATGPT_SELECTORS } from './selectors.ts';
 
 export interface ChatGptMessage {
   readonly elementIndex?: number;
+  readonly rootIndex: number;
   readonly role: 'user' | 'assistant';
   readonly messageId: string | null;
   readonly turnId: string | null;
@@ -19,10 +20,12 @@ export async function readChatGptMessages(page: Page, includeArtifacts = false):
 
 /** Diagnostics and parsed messages come from one renderer task, never a second DOM sample. */
 export async function readChatGptMessageObservation(page: Page, includeArtifacts = false, anchorIds: readonly string[] = []) {
-  return await page.evaluate(({ selector, artifactSelector, includeArtifacts, anchorIds }) => {
+  const identitySelector = '[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids], [data-chatgpt-selection-message-id]';
+  return await page.locator(`${CHATGPT_SELECTORS.messages}, ${identitySelector}`).evaluateAll((elements, { selector, artifactSelector, includeArtifacts, anchorIds }) => {
     const messages: ChatGptMessage[] = [];
     const seen = new Set<Element>();
-    const nodes = document.querySelectorAll<HTMLElement>(selector);
+    const nodes = elements.filter(element => element.matches(selector)) as HTMLElement[];
+    const roots: Node[] = [];
     for (const [elementIndex, node] of nodes.entries()) {
       const identityNode = node.closest<HTMLElement>('[data-message-id], [data-turn-id]') ?? node;
       const legacyRole = node.getAttribute('data-message-author-role');
@@ -57,7 +60,10 @@ export async function readChatGptMessageObservation(page: Page, includeArtifacts
         : assistantContent ?? identityNode.querySelector<HTMLElement>(
           '[data-message-content], [data-testid="message-content"], .markdown',
         ) ?? node;
+      const root = node.getRootNode();
+      if (!roots.includes(root)) roots.push(root);
       messages.push({
+        rootIndex: roots.indexOf(root),
         ...(includeArtifacts ? { elementIndex } : {}),
         ...(includeArtifacts ? { artifacts: [...identityNode.querySelectorAll(artifactSelector)].map((element) => ({
           source: element instanceof HTMLAnchorElement ? element.href : element instanceof HTMLImageElement ? element.src : '',
@@ -82,7 +88,7 @@ export async function readChatGptMessageObservation(page: Page, includeArtifacts
       ['data-chatgpt-selection-message-id', 'selectionMessageId'],
     ] as const;
     if (anchorIds.length > 0) {
-      for (const node of document.querySelectorAll(attributes.map(([attribute]) => `[${attribute}]`).join(','))) {
+      for (const node of elements) {
         let matched = false;
         for (const [attribute, key] of attributes) {
           const value = node.getAttribute(attribute);
@@ -98,7 +104,7 @@ export async function readChatGptMessageObservation(page: Page, includeArtifacts
       }
     }
     return { messages, diagnostics: {
-      observedAt: new Date().toISOString(), scope: 'document-light-dom' as const,
+      observedAt: new Date().toISOString(), scope: 'document-and-open-shadow-dom' as const,
       selectorMatchCount: nodes.length, parsedMessageCount: messages.length,
       // No text, URLs, titles, DOM HTML, composer contents or network data.
       parsedMessages: messages.slice(0, 100).map(({ role, messageId, turnId }) => ({ role, messageId, turnId })),
