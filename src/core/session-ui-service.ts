@@ -141,14 +141,18 @@ export class SessionUiService {
               ...await this.#capture(session, input.maxNodes),
               providerAlerts: await observeChatGptAlerts(this.#requirePage(session), session),
               ...(session.submissionState !== 'submitted' ? {} : {
-                submissionVerification: {
-                  observedAt: new Date().toISOString(), pageKey: session.pageKey,
-                  conversationId: session.conversationId,
-                  submittedUserMessageId: session.submittedUserMessageId,
-                  submittedUserTurnId: session.submittedUserTurnId,
-                  anchorPresent: (await observeChatGptDom(this.#requirePage(session), session)).submittedUserFound,
-                  scope: 'mounted-dom' as const,
-                },
+                submissionVerification: await (async () => {
+                  const dom = await observeChatGptDom(this.#requirePage(session), session);
+                  return {
+                    observedAt: dom.messageDiagnostics.observedAt, pageKey: session.pageKey,
+                    conversationId: session.conversationId,
+                    submittedUserMessageId: session.submittedUserMessageId,
+                    submittedUserTurnId: session.submittedUserTurnId,
+                    anchorPresent: dom.submittedUserFound,
+                    messageDiagnostics: dom.messageDiagnostics,
+                    scope: 'mounted-dom' as const,
+                  };
+                })(),
               }),
               ...(session.submissionState !== 'submission_unknown' || session.conversationId === null ? {} : {
                 submissionCandidates: (await inspectChatGptSubmissionCandidates(this.#requirePage(session), session.conversationId))

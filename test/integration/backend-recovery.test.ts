@@ -84,6 +84,15 @@ test('legacy submitted reads revalidate missing original anchor without adopting
     assert.equal(missing.submittedUserMessageId, original.submittedUserMessageId);
     assert.equal(missing.submissionVerification.backend.currentIdentityMatches, true);
     assert.equal(missing.submissionVerification.backend.recoveryReason, 'backend-user-anchor-absent-from-mapping');
+    const metadata = missing.submissionVerification.dom.messageDiagnostics;
+    assert.equal(metadata.selectorMatchCount, 2);
+    assert.deepEqual(metadata.parsedMessages, [
+      { role: 'user', messageId: 'old-user', turnId: 'old-user' },
+      { role: 'assistant', messageId: 'old-answer', turnId: 'old-answer' },
+    ]);
+    assert.equal(metadata.anchorAttributeMatches.messageId, 0);
+    assert.equal(JSON.stringify(metadata).includes(draft), false);
+    assert.equal(JSON.stringify(metadata).includes('Old answer'), false);
     const waited = await rpc<{ results: Record<string, any>[] }>(config.socketPath, 'workflow.wait', { teamId, requestRefs: [requestRef], waitMs: 5 });
     assert.equal(waited.results[0]!.submissionVerification.dom.anchorPresent, false);
     assert.equal(await page.page.locator('textarea').inputValue(), draft);
@@ -98,8 +107,42 @@ test('legacy submitted reads revalidate missing original anchor without adopting
       status: 'complete', result: { sessionId: session.sessionId, generation: 1 } });
     const receipt = (await read()).pageRefresh;
     assert.equal(receipt.receiptId, 'old-refresh'); assert.equal(receipt.dispatch, 'reload-returned'); assert.equal(receipt.conversationRecovered, null);
+    // Replay the native LightSession symptom without inventing a response or resending.
+    await page.page.setContent(`<main><div role="status" id="lightsession-status-bar">LightSession · waiting for messages…</div><textarea>${draft}</textarea></main>`);
+    const unmounted = (await read()).submissionVerification.dom;
+    assert.equal(unmounted.anchorPresent, false);
+    assert.equal(unmounted.messageDiagnostics.selectorMatchCount, 0);
+    assert.equal(unmounted.messageDiagnostics.parsedMessageCount, 0);
+    assert.deepEqual(unmounted.messageDiagnostics.anchorAttributeMatches,
+      { messageId: 0, turnId: 0, searchMessageIds: 0, selectionMessageId: 0 });
+    // Attribute present outside supported message markup: diagnostic, not accepted anchor.
+    await page.page.locator('main').evaluate((main, id) => {
+      const element = document.createElement('div');
+      element.setAttribute('data-message-id', id!);
+      element.textContent = 'private-body-not-for-diagnostics';
+      main.appendChild(element);
+    }, original.submittedUserMessageId);
+    const unmatched = (await read()).submissionVerification.dom;
+    assert.equal(unmatched.anchorPresent, false);
+    assert.equal(unmatched.messageDiagnostics.selectorMatchCount, 0);
+    assert.equal(unmatched.messageDiagnostics.anchorAttributeMatches.messageId, 1);
+    assert.equal(unmatched.messageDiagnostics.anchorOutsideSelectorCount, 1);
+    assert.equal(JSON.stringify(unmatched.messageDiagnostics).includes('private-body'), false);
+    // Selector hit with unknown role remains unaccepted; distinguish it from no DOM match.
+    await page.page.locator('[data-message-id]').evaluate((element, id) => {
+      element.setAttribute('data-chatgpt-search-message-ids', id!);
+    }, original.submittedUserMessageId);
+    const unreadRole = (await read()).submissionVerification.dom;
+    assert.equal(unreadRole.anchorPresent, false);
+    assert.equal(unreadRole.messageDiagnostics.selectorMatchCount, 1);
+    assert.equal(unreadRole.messageDiagnostics.parsedMessageCount, 0);
+    assert.equal(unreadRole.messageDiagnostics.anchorAttributeMatches.searchMessageIds, 1);
     await page.page.setContent(`<main><div data-message-author-role="user" data-message-id="${original.submittedUserMessageId}">Original</div><textarea>${draft}</textarea></main>`);
-    assert.equal((await read()).submissionVerification.state, 'anchor-observed');
+    const observed = (await read()).submissionVerification;
+    assert.equal(observed.state, 'anchor-observed');
+    assert.equal(observed.dom.observedAt, observed.dom.messageDiagnostics.observedAt);
+    assert.equal(observed.dom.messageDiagnostics.parsedMessages[0].messageId, original.submittedUserMessageId);
+    assert.equal(observed.dom.messageDiagnostics.anchorAttributeMatches.messageId, 1);
     fake.emitObservation(session.sessionId, { submittedUserFound: true, activity: 'none',
       candidate: { responseMessageId: 'original-final', answerText: 'Original answer', terminalMarker: true, streamingMarker: false } });
     const final = await waitForSnapshot(config.socketPath, session.sessionId, s => s.terminal);

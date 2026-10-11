@@ -1,10 +1,11 @@
 import type { Page } from 'playwright-core';
 
 import type { ProviderAssistantCandidate, ProviderWakeReason } from '../provider-adapter.ts';
-import { readChatGptMessages } from './message-dom.ts';
+import { readChatGptMessageObservation } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
 export interface ChatGptDomObservation {
+  readonly messageDiagnostics: Awaited<ReturnType<typeof readChatGptMessageObservation>>['diagnostics'];
   readonly actionableAlert: boolean;
   readonly providerAlerts: readonly string[];
   readonly conversationSurfaceAvailable: boolean;
@@ -22,7 +23,8 @@ export async function observeChatGptDom(
   page: Page,
   identity: SubmittedUserIdentity,
 ): Promise<ChatGptDomObservation> {
-  const messages = await readChatGptMessages(page);
+  const { messages, diagnostics: messageDiagnostics } = await readChatGptMessageObservation(page, false,
+    [identity.submittedUserMessageId, identity.submittedUserTurnId].filter((id): id is string => id !== null));
   let submittedUserFound = false;
   let laterUserFound = false;
   let candidate: ProviderAssistantCandidate | null = null;
@@ -59,7 +61,7 @@ export async function observeChatGptDom(
         element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
   });
   const providerAlerts = await observeChatGptAlerts(page, identity);
-  return { submittedUserFound, laterUserFound, candidate, conversationSurfaceAvailable,
+  return { messageDiagnostics, submittedUserFound, laterUserFound, candidate, conversationSurfaceAvailable,
     actionableAlert: providerAlerts.length > 0, providerAlerts };
 }
 
