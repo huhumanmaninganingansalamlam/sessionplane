@@ -4,7 +4,7 @@ import type { TeamDirectory } from './team-directory.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { PageMutationMutex } from '../browser/page-mutex.ts';
 import type { PageRegistry } from '../browser/page-registry.ts';
-import type { ProviderAdapterRegistry } from '../providers/provider-adapter.ts';
+import { ProviderSubmissionError, type ProviderAdapterRegistry } from '../providers/provider-adapter.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { EventRepository } from '../storage/event-repository.ts';
@@ -372,7 +372,17 @@ export class ConversationCleanupService {
         if (adapter.openDeletion === undefined) {
           throw new SessionPlaneDomainError('capability.unsupported', 'Provider conversation deletion is unavailable');
         }
-        const operation = await adapter.openDeletion({ session, generation: input.generation });
+        let operation;
+        try {
+          operation = await adapter.openDeletion({ session, generation: input.generation });
+        } catch (error) {
+          // Preparation has not attempted a delete; retain the typed provider
+          // failure so the caller can resume the same request after deferral.
+          if (error instanceof ProviderSubmissionError) {
+            throw new SessionPlaneDomainError(error.errorCode, error.message, error.details);
+          }
+          throw error;
+        }
         const result: DeletionResult = {
           requestOk: false, sessionId: input.sessionId, generation: input.generation,
           conversationId: input.conversationId, deleted: false, errorCode: 'provider.deletion-unknown',

@@ -289,6 +289,7 @@ export class ChatGptAdapter implements ProviderAdapter {
           throw new ProviderSubmissionError(
             auth.status() === 401 ? 'provider.authentication-required' : 'provider.unavailable',
             'Deletion authentication request failed',
+            { details: deletionHttpDetails('authentication', auth) },
           );
         }
         const body: unknown = await auth.json();
@@ -305,12 +306,16 @@ export class ChatGptAdapter implements ProviderAdapter {
       let alreadyDeleted = false;
       try {
         if (!existing.ok()) {
-          const body: unknown = await existing.json();
+          const body: unknown = await existing.json().catch(() => null);
           const detail = body !== null && typeof body === 'object' && 'detail' in body ? body.detail : null;
           alreadyDeleted = existing.status() === 404 && detail !== null && typeof detail === 'object' &&
             'code' in detail && detail.code === 'conversation_deleted' &&
             'conversation_id' in detail && detail.conversation_id === conversationId;
-          if (!alreadyDeleted) throw new ProviderSubmissionError('provider.unavailable', 'Exact conversation could not be verified for deletion');
+          if (!alreadyDeleted) throw new ProviderSubmissionError(
+            existing.status() === 401 ? 'provider.authentication-required' : 'provider.unavailable',
+            'Exact conversation could not be verified for deletion',
+            { details: deletionHttpDetails('conversation-verification', existing) },
+          );
         }
       } finally { await existing.dispose(); }
       return {
@@ -335,7 +340,7 @@ export class ChatGptAdapter implements ProviderAdapter {
         close: async () => { await page.close(); },
       };
     } catch (error) {
-      await page.close();
+      await page.close().catch(() => {});
       throw error;
     }
   }
@@ -889,4 +894,12 @@ function backendClient(page: Page): BackendJsonClient {
         }
       },
   };
+}
+
+// Only allowlisted transport metadata: never include auth headers or provider bodies.
+function deletionHttpDetails(stage: string, response: { status(): number; headers(): Record<string, string> }) {
+  const value = response.headers()['retry-after'];
+  const seconds = value !== undefined && /^\d+$/.test(value) ? Number(value) : null;
+  return { stage, httpStatus: response.status(), retryAfterMs:
+    seconds !== null && Number.isSafeInteger(seconds * 1000) ? seconds * 1000 : null };
 }

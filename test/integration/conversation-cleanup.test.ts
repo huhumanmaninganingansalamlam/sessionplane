@@ -8,7 +8,7 @@ import { callRpc } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
-import type { ProviderRecoveryRequest, ProviderSubmissionRequest } from '../../src/providers/provider-adapter.ts';
+import { ProviderSubmissionError, type ProviderRecoveryRequest, type ProviderSubmissionRequest } from '../../src/providers/provider-adapter.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 test('conversation deletion protects unresolved work, retains answers and persists uncertain outcomes', async () => {
@@ -16,6 +16,7 @@ test('conversation deletion protects unresolved work, retains answers and persis
     deleted = new Set<string>();
     loseAcknowledgement = false;
     confirmDeletion = false;
+    preparationFailure = false;
     duringPrepare: (() => Promise<void>) | null = null;
     override async openSubmission(request: ProviderSubmissionRequest) {
       const operation = await super.openSubmission(request);
@@ -25,6 +26,9 @@ test('conversation deletion protects unresolved work, retains answers and persis
       } };
     }
     async openDeletion({ session }: ProviderRecoveryRequest) {
+      if (this.preparationFailure) throw new ProviderSubmissionError('provider.unavailable',
+        'Exact conversation could not be verified for deletion',
+        { details: { stage: 'conversation-verification', httpStatus: 429, retryAfterMs: 9000 } });
       return {
         alreadyDeleted: this.confirmDeletion && this.deleted.has(session.conversationId!),
         deleteOnce: async () => {
@@ -124,6 +128,17 @@ test('conversation deletion protects unresolved work, retains answers and persis
     const complete = await create();
     assert.equal(complete.answerText, 'Retrieved answer');
     const input = deletion(complete, 'complete');
+    fake.preparationFailure = true;
+    await assert.rejects(rpc('session.delete', input), (error: unknown) => {
+      const encoded = JSON.stringify(error);
+      assert.match(encoded, /provider.unavailable/);
+      assert.match(encoded, /conversation-verification/);
+      assert.match(encoded, /9000/);
+      assert.doesNotMatch(encoded, /internal.invariant-violation/);
+      return true;
+    });
+    assert.equal(fake.deleted.has(complete.conversationId!), false);
+    fake.preparationFailure = false; // Retry the same ID after read-only deferral.
     const result = await rpc<{ deleted: boolean }>('session.delete', input);
     assert.equal(result.deleted, true);
     assert.ok(fake.deleted.has(complete.conversationId!));
