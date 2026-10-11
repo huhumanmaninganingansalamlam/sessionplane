@@ -137,7 +137,11 @@ test('an interrupted team deletion stays retired on restart and resumes without 
     const sent = (await invoke('send', { teamId: team.teamId,
       roleRef: (team.roles as Array<{ roleRef: string }>)[0]!.roleRef, requestId: 'send', prompt: 'Work' })).structuredContent;
     const original = service.pageRegistry.listBindings.bind(service.pageRegistry);
-    const mock = t.mock.method(service.pageRegistry, 'listBindings', () => { throw new Error('Interrupted cleanup'); });
+    const mock = t.mock.method(service.pageRegistry, 'listBindings', options => {
+      // Interrupt tab cleanup after the provider attempt, not the new draft preflight.
+      if (attempts > 0) throw new Error('Interrupted cleanup');
+      return original(options);
+    });
     const input = { teamId: team.teamId, requestId: 'delete' };
     assert.equal((await invoke('team_delete', input)).isError, true);
     mock.mock.restore();

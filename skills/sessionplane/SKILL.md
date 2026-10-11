@@ -193,7 +193,8 @@ out prompts, infer consensus, or inject answers into other roles.
   automatic recovery; do not duplicate or migrate an active continuation without
   its current coordinator's routing decision.
 - By default, `sessionplane_session_replace` attempts to permanently delete the previous provider
-  conversation once, closes its tab and ends observation, then creates its successor.
+  conversation once and ends observation, then creates its successor. Tabs close only
+  after confirmed deletion; refused or uncertain deletion keeps them available.
   Retrieve required outputs and write the handoff first. Local stored answers/files
   remain. Deletion failure or unknown conversation identity does not block replacement;
   provider deletion is never blindly retried. A confirmed deletion can resume only tab closure on an explicit replay. Old observation stays stopped across restarts.
