@@ -4,6 +4,9 @@ import type { ProviderAssistantCandidate, ProviderWakeReason } from '../provider
 import { readChatGptMessageObservation } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
+// Capacity blocks a new turn, not read-only collection of an existing exact answer.
+const CONVERSATION_CAPACITY_NOTICE = /^You['’]ve reached the maximum length for this conversation, but you can keep talking by starting a new chat\.(?: Start new chat)?$/i;
+
 export interface ChatGptDomObservation {
   readonly messageDiagnostics: Awaited<ReturnType<typeof readChatGptMessageObservation>>['diagnostics'];
   readonly actionableAlert: boolean;
@@ -68,8 +71,15 @@ export async function observeChatGptDom(
         element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
   });
   const providerAlerts = await observeChatGptAlerts(page, identity);
+  const canCollectExistingAnswer = submittedUserFound && !laterUserFound && candidate !== null &&
+    !candidate.streamingMarker && candidate.answerText.trim().length > 0 &&
+    !CONVERSATION_CAPACITY_NOTICE.test(candidate.answerText.replace(/\s+/g, ' ').trim());
+  const actionableAlert = providerAlerts.some(alert => !canCollectExistingAnswer ||
+    !CONVERSATION_CAPACITY_NOTICE.test(alert.replace(/\s+/g, ' ').trim()));
+  // Retain all notices for diagnostics. Quiet/Stop/streaming and modal guards still
+  // decide completion; this exception never permits another submission.
   return { messageDiagnostics, submittedUserFound, laterUserFound, candidate, conversationSurfaceAvailable,
-    actionableAlert: providerAlerts.length > 0, providerAlerts };
+    actionableAlert, providerAlerts };
 }
 
 export async function observeChatGptAlerts(page: Page, identity: SubmittedUserIdentity, thinkingFailuresOnly = false): Promise<string[]> {

@@ -820,3 +820,48 @@ function observerFixture(): string {
       </body>
     </html>`;
 }
+
+
+test('conversation capacity notice permits only exact idle answer collection, retaining all other guards', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-capacity-answer-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  await owner.start();
+  try {
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main></main>' }));
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
+    const banner = "You've reached the maximum length for this conversation, but you can keep talking by starting a new chat. Start new chat";
+    const body = `<aside role="alert">${banner}</aside><main><article data-message-author-role="user" data-message-id="user-message-1">Original</article><article data-message-author-role="assistant" data-message-id="capacity-final"><div class="markdown">Saved final verdict</div></article></main>`;
+    await page.setContent(body);
+    const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/', acknowledgementTimeoutMs: 500 });
+    const source = await adapter.openObservation({ session: sessionSnapshot(binding.pageKey), generation: 1 });
+    try {
+      const observed = await source.observe();
+      assert.equal(observed.observationTransport, 'fresh');
+      assert.equal(observed.errorCode, undefined);
+      assert.deepEqual((await observeChatGptDom(page, { submittedUserMessageId: 'user-message-1', submittedUserTurnId: null })).providerAlerts, [banner]);
+      const tracker = new ExactFinalTracker(1000);
+      assert.equal(tracker.evaluate(observed, 0).kind, 'progress');
+      const final = tracker.evaluate(await source.observe(), 1001);
+      assert.equal(final.kind, 'complete');
+      assert.equal(final.responseMessageId, 'capacity-final');
+      assert.equal(final.answerText, 'Saved final verdict');
+      await page.locator('main').evaluate(main => main.insertAdjacentHTML('beforeend', '<button aria-label="Stop generating">Stop</button>'));
+      const withStop = new ExactFinalTracker(1);
+      withStop.evaluate(await source.observe(), 0);
+      assert.notEqual(withStop.evaluate(await source.observe(), 5000).kind, 'complete');
+      await page.setContent(body + '<aside role="alert">Sign in to continue</aside>');
+      assert.equal((await source.observe()).errorCode, 'provider.actionable-alert');
+      await page.setContent(body.replace('capacity-final"', 'capacity-final" data-is-streaming="true"'));
+      assert.notEqual(new ExactFinalTracker(1).evaluate(await source.observe(), 5000).kind, 'complete');
+      await page.setContent(body.replace('Saved final verdict', ''));
+      assert.equal((await source.observe()).errorCode, 'provider.actionable-alert');
+      await page.setContent(body.replace('user-message-1', 'another-user'));
+      assert.equal((await source.observe()).errorCode, 'provider.actionable-alert');
+      await page.setContent(body.replace('</main>', '<article data-message-author-role="user" data-message-id="later-user">Later</article></main>'));
+      assert.equal((await source.observe()).errorCode, 'provider.actionable-alert');
+    } finally { await source.close(); }
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
