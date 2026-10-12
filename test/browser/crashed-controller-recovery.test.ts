@@ -39,10 +39,14 @@ test('same-target controller recovery preserves Chrome, request binding, saved d
     const before = await inventory();
     const expected = registry.getBinding(original.binding.pageKey);
     const crash = async (page: typeof original.page) => {
+      // Keep a real protocol callback pending when Inspector.targetCrashed
+      // rejects callbacks. A late error response must not terminate the core.
+      const pending = page.evaluate(() => new Promise<void>(() => {})).catch(error => error);
       const control = await page.context().newCDPSession(page);
       const event = page.waitForEvent('crash', { timeout: 5000 });
       void control.send('Page.crash').catch(() => {});
       await event;
+      assert.match(String(await pending), /crash|closed/i);
       // The crash command can leave this diagnostic session pending; owner shutdown disposes it.
     };
     await crash(original.page);
