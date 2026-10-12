@@ -52,8 +52,18 @@ export class ChatGptConfigurationMenu {
     if (node.disabled) throw new SessionPlaneDomainError('provider.model-unavailable', `Configuration is disabled: ${node.text || node.name}`);
     const element = await this.#refs.resolve({ page: this.#page, pageKey: this.#pageKey,
       bindingEpoch: 1, snapshotId: this.#snapshot.snapshotId, ref: node.ref });
-    // Menus are verified by their following DOM state, not navigation completion.
-    try { await element.click({ timeout: 5000, noWaitAfter: true }); } finally { await element.dispose(); }
+    // noWaitAfter only skips navigation after this action; a previous scheduled
+    // navigation still blocks native clicks. Activate the exact resolved menu
+    // control and verify its resulting DOM state in the caller instead.
+    try {
+      await element.evaluate(control => {
+        if (!(control instanceof HTMLElement) || !control.isConnected ||
+            !control.checkVisibility({ visibilityProperty: true }) || control.matches(':disabled, [aria-disabled="true"]')) {
+          throw new Error('Configuration control is no longer available');
+        }
+        control.click();
+      });
+    } finally { await element.dispose(); }
   }
 
   #opener(nodes: readonly BrowserSnapshotNode[]) {
@@ -102,7 +112,7 @@ export class ChatGptConfigurationMenu {
       // Radix resets the submenu when its closing animation unmounts. Reopening
       // at aria-expanded=false alone can reopen the old version submenu.
       for (const id of controls) {
-        await this.#page.locator(`[id=${JSON.stringify(id)}]`).waitFor({ state: 'hidden', timeout: 5000 });
+        await this.#wait(() => this.#page.evaluate(id => !document.getElementById(id)?.checkVisibility({ visibilityProperty: true }), id));
       }
       nodes = await this.#capture();
       opener = this.#opener(nodes)!;
@@ -194,7 +204,7 @@ export class ChatGptConfigurationMenu {
     // evidence only after the closing menu has finished unmounting.
     await this.#wait(ns => this.#opener(ns)?.expanded === false);
     for (const id of opener.controls) {
-      await this.#page.locator(`[id=${JSON.stringify(id)}]`).waitFor({ state: 'hidden', timeout: 5000 });
+      await this.#wait(() => this.#page.evaluate(id => !document.getElementById(id)?.checkVisibility({ visibilityProperty: true }), id));
     }
     nodes = await this.#capture();
     return this.#opener(nodes)!;
