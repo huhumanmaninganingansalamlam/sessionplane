@@ -159,14 +159,17 @@ export class ConversationCleanupService {
                 }
               } catch (error) { pending.errorCode = cleanupErrorCode(error); }
               receipts.record({ clientId: input.clientId, requestId: input.requestId, method: input.method, requestHash, status: 'complete', result });
-              return { ...result, cleanup: pending };
             }
           }
-          // Historical receipts do not establish cleanup, and must never retry it.
-          if (result.cleanup?.outcome === 'confirmed' && result.cleanup.predecessorSessionId !== null) {
+          // A recorded destructive replacement also owns local tab cleanup when
+          // provider deletion failed. Never infer this for preserved/history-only receipts.
+          if (result.cleanup?.deletionRequestId != null && result.cleanup.outcome !== 'preserved' &&
+              result.cleanup.outcome !== 'unknown' && result.cleanup.predecessorSessionId !== null) {
             const previous = sessions.getSnapshot(result.cleanup.predecessorSessionId);
             if (previous !== null && previous.generation === result.cleanup.predecessorGeneration &&
-                previous.conversationId === result.cleanup.conversationId) {
+                previous.conversationId === result.cleanup.conversationId &&
+                (result.cleanup.outcome === 'confirmed' || previous.conversationId === null ||
+                  !sessions.conversationCleanupBlocker(previous.sessionId, previous.conversationId))) {
               const pages = await this.#closeSessionPages(previous);
               result.cleanup.pageCleanup = { closedPages: (result.cleanup.pageCleanup?.closedPages ?? 0) + pages.closedPages, pageErrors: pages.pageErrors };
               receipts.record({ clientId: input.clientId, requestId: input.requestId, method: input.method, requestHash, status: 'complete', result });
@@ -291,7 +294,8 @@ export class ConversationCleanupService {
         const successor = create();
         scheduler.refreshSession(previous.sessionId);
         this.#options.onDeleted(previous.sessionId);
-        if ((cleanup.outcome === 'confirmed' || previous.conversationId === null) && cleanup.pageCleanup === undefined) {
+        if (cleanup.pageCleanup === undefined && (cleanup.outcome === 'confirmed' || previous.conversationId === null ||
+            !sessions.conversationCleanupBlocker(previous.sessionId, previous.conversationId))) {
           const pages = await this.#closeSessionPages(previous);
           cleanup.pageCleanup = pages;
         }
