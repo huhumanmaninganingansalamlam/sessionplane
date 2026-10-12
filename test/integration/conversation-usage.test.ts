@@ -55,6 +55,17 @@ test('ten confirmed turns recommend handoff; failures, replays, restart and repl
     assert.equal(replaced.roles[0].conversationUsage.handoffRecommended, false);
     const historical = await rpc('team_get', { teamId, requestRef: lastRequest });
     assert.equal(historical.request.conversationUsage.confirmedTurnCount, 10);
+    assert.deepEqual(historical.requests, [], 'exact recovery does not repeat old request lists');
+    assert.equal(Object.keys(historical)[1], 'request', 'the requested state precedes team context');
+    assert.equal(historical.objective, undefined);
+    const history = await rpc('team_get', { teamId, requestRef: lastRequest, history: true });
+    assert.equal(history.requests.length, 11, 'explicit history still includes the failed and confirmed turns');
+    const otherRole = await rpc('role_create', { teamId, requestId: 'unrelated-role', roleKey: 'expert.other', roleType: 'expert' });
+    assert.equal(otherRole.roles.length, 2);
+    const focused = await rpc('team_get', { teamId, requestRef: lastRequest });
+    assert.equal(focused.roles.length, 1, 'unrelated role recovery notices cannot bury the selected request');
+    const otherTeam = await rpc('team_create', { requestId: 'other-team' });
+    await assert.rejects(rpc('team_get', { teamId: otherTeam.teamId, requestRef: lastRequest }), /request/i);
     fake.acknowledgementMode = 'missing';
     await assert.rejects(rpc('send', { teamId, roleRef: replaced.roles[0].roleRef,
       requestId: 'unknown-turn', prompt: 'Unacknowledged attempt' }), /acknowledgement was not proven/);

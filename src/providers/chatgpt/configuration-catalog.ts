@@ -38,14 +38,15 @@ export class ChatGptConfigurationMenu {
     return this.#snapshot.nodes;
   }
 
-  async #wait(predicate: (nodes: readonly BrowserSnapshotNode[]) => boolean | Promise<boolean>, timeoutMs = 5000) {
+  async #wait(predicate: (nodes: readonly BrowserSnapshotNode[]) => boolean | Promise<boolean>, timeoutMs = 5000, stage = 'configuration-state') {
     const deadline = Date.now() + timeoutMs;
     do {
       const nodes = await this.#capture();
       if (await predicate(nodes)) return nodes;
       await this.#page.waitForTimeout(50);
     } while (Date.now() < deadline);
-    throw new SessionPlaneDomainError('provider.configuration-unavailable', 'Provider configuration controls did not expose a verifiable state');
+    throw new SessionPlaneDomainError('provider.configuration-unavailable',
+      `Provider configuration controls did not expose a verifiable state (${stage})`, { configurationStage: stage });
   }
 
   async #click(node: BrowserSnapshotNode) {
@@ -79,7 +80,7 @@ export class ChatGptConfigurationMenu {
 
   async #readyMainMenu() {
     return await this.#wait(async nodes => this.#summary(nodes) !== undefined &&
-      (nodes.some(n => n.role === 'slider') || await this.#page.locator('[role="menu"] [role="slider"]').count() === 0));
+      (nodes.some(n => n.role === 'slider') || await this.#page.locator('[role="menu"] [role="slider"]').count() === 0), 5000, 'main-menu-ready');
   }
 
   async #mainMenu() {
@@ -93,7 +94,9 @@ export class ChatGptConfigurationMenu {
       await this.#page.locator('#pending-home-input').waitFor({ state: 'hidden', timeout: 30000 });
       nodes = await this.#wait(ns => this.#opener(ns) !== undefined, 30000);
     }
-    if (this.#summary(nodes)) return await this.#readyMainMenu();
+    // An exiting popup still contributes visible summary/slider nodes. Its
+    // closed trigger is authoritative: wait for exit before opening it again.
+    if (this.#opener(nodes)?.expanded === true && this.#summary(nodes)) return await this.#readyMainMenu();
     let opener = this.#opener(nodes);
     if (!opener) {
       const composer = nodes.find(n => n.role === 'textbox' && n.editable);
@@ -105,18 +108,20 @@ export class ChatGptConfigurationMenu {
       nodes = await this.#wait(ns => this.#opener(ns) !== undefined, 30000);
       opener = this.#opener(nodes)!;
     }
+    const summary = this.#summary(nodes);
+    const controls = [...new Set([...opener.controls,
+      ...nodes.filter(n => n.role === 'menu' && n.id !== '' && summary?.ancestorIds.includes(n.id)).map(n => n.id)])];
     if (opener.expanded) {
-      const controls = opener.controls;
       await this.#page.keyboard.press('Escape');
       nodes = await this.#wait(ns => this.#opener(ns)?.expanded === false);
-      // Radix resets the submenu when its closing animation unmounts. Reopening
-      // at aria-expanded=false alone can reopen the old version submenu.
-      for (const id of controls) {
-        await this.#wait(() => this.#page.evaluate(id => !document.getElementById(id)?.checkVisibility({ visibilityProperty: true }), id));
-      }
-      nodes = await this.#capture();
-      opener = this.#opener(nodes)!;
     }
+    // Radix resets the submenu when its closing animation unmounts. Reopening
+    // at aria-expanded=false alone can reopen the old version submenu.
+    for (const id of controls) {
+      await this.#wait(() => this.#page.evaluate(id => !document.getElementById(id)?.checkVisibility({ visibilityProperty: true }), id), 5000, 'menu-exit');
+    }
+    nodes = await this.#capture();
+    opener = this.#opener(nodes)!;
     await this.#click(opener);
     return await this.#readyMainMenu();
   }
@@ -126,7 +131,7 @@ export class ChatGptConfigurationMenu {
     if (current.some(n => n.role === 'menuitemradio')) return current;
     const nodes = await this.#mainMenu();
     await this.#click(this.#summary(nodes)!);
-    return await this.#wait(ns => ns.some(n => n.role === 'menuitemradio'));
+    return await this.#wait(ns => ns.some(n => n.role === 'menuitemradio'), 5000, 'version-options');
   }
 
   async #version(label: string) {
@@ -151,7 +156,7 @@ export class ChatGptConfigurationMenu {
       await element.focus();
       for (let i = 0; i < Math.abs(delta); i++) await element.press(delta < 0 ? 'ArrowLeft' : 'ArrowRight');
     } finally { await element.dispose(); }
-    return await this.#wait(ns => ns.some(n => n.role === 'slider' && Number(n.ariaValueNow) === value));
+    return await this.#wait(ns => ns.some(n => n.role === 'slider' && Number(n.ariaValueNow) === value), 5000, 'power-value');
   }
 
   async discover(): Promise<ConfigurationCatalog> {

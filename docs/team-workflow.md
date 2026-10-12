@@ -62,7 +62,7 @@ and confirm the final active controls; unavailable intent requires a user decisi
   inspect and reconfirm the original model/effort intent. Historical generations
   cannot refresh a page now owned by a newer request.
 - `team_get` with `requestRef` inspects that exact request, including read-only
-  acknowledgement recovery. Ordinary team reads return compact current-request summaries. With `history:true`,
+  acknowledgement recovery. The selected request appears first with only its role; unrelated request lists and the team objective are omitted. Explicit history remains available. Ordinary team reads return compact current-request summaries. With `history:true`,
   team_get lists all generations newest first in pages of 50 requests; pass the
   returned `nextRequestRef` as `beforeRequestRef` to continue until it is null.
   Historical references can therefore be rediscovered using only teamId.

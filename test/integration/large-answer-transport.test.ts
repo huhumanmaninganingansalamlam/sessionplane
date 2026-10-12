@@ -125,6 +125,14 @@ test('500KB+ answer hash is identical in SQLite, RPC, CLI, and MCP structuredCon
     const content = mcpResult.content as Array<{ type: string; text: string }>;
     assert.equal(mcpResult.isError, false);
     assert.equal(JSON.parse(content[0]?.text ?? '{}').truncatedInText, true);
+    const textSummary = JSON.parse(content[0]!.text).request;
+    assert.equal(textSummary.requestRef, view.requests[0]!.requestRef);
+    assert.equal(textSummary.sessionId, session.sessionId);
+    assert.equal(textSummary.generation, 1);
+    assert.equal(textSummary.terminal, true);
+    assert.equal(textSummary.promptSubmitted, true);
+    assert.equal(textSummary.errorCode, null);
+    assert.equal(textSummary.answerText, undefined, 'large answer remains exclusively in structuredContent');
 
     const expectedHash = sha256(answer);
     assert.equal(sha256(databaseRow.answerText), expectedHash);

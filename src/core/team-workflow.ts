@@ -56,18 +56,22 @@ export class TeamWorkflow {
 
   async getTeam(input: { teamId: string; requestRef?: string | undefined; maxNodes?: number | undefined; history?: boolean | undefined; beforeRequestRef?: string | undefined }) {
     const team = this.services.directory.getTeam(input.teamId);
+    const selected = input.requestRef === undefined ? undefined : this.#request({ teamId: input.teamId, requestRef: input.requestRef });
     const before = input.beforeRequestRef === undefined ? undefined : this.#request({ teamId: input.teamId, requestRef: input.beforeRequestRef });
     const history = input.history === true || before !== undefined
       ? this.#outbox.historyForTeam(team.teamId, before)
-      : { requests: this.#outbox.listForTeam(team.teamId), nextRequestRef: null };
+      : { requests: selected === undefined ? this.#outbox.listForTeam(team.teamId) : [], nextRequestRef: null };
     return {
-      ...team,
+      ...(selected === undefined ? team : {
+        requestOk: true,
+        request: await this.#observe(selected, input.maxNodes, true),
+        teamId: team.teamId, name: team.name, teamState: team.teamState,
+      }),
       capabilities: { uploadsEnabled: this.services.submissions.uploadsEnabled, downloadsEnabled: true },
-      roles: team.roles.map((r) => ({ ...r, roleRef: r.currentSessionId === null ? null : `${r.currentSessionId}:${r.generation}`,
+      roles: team.roles.filter(r => selected === undefined || r.roleId === selected.roleId).map((r) => ({ ...r, roleRef: r.currentSessionId === null ? null : `${r.currentSessionId}:${r.generation}`,
         conversationUsage: this.#conversationUsage(r.currentSessionId),
         ...(r.currentSessionId === null ? {} : this.#loadRecoveryRequired(this.services.directory.getSession(r.currentSessionId)) ?? {}) })),
       ...history,
-      ...(input.requestRef === undefined ? {} : { request: await this.#observe(this.#request({ teamId: input.teamId, requestRef: input.requestRef }), input.maxNodes, true) }),
     };
   }
 

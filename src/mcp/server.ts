@@ -273,6 +273,7 @@ function callToolResult(
   isError: boolean,
 ): Readonly<Record<string, unknown>> {
   const serialized = JSON.stringify(structuredContent);
+  const request = structuredContent.request;
   const required = [structuredContent, structuredContent.request,
     ...(Array.isArray(structuredContent.results) ? structuredContent.results : []),
     ...(Array.isArray(structuredContent.roles) ? structuredContent.roles : [])]
@@ -284,6 +285,12 @@ function callToolResult(
       ? serialized
       : JSON.stringify({
           requestOk: structuredContent.requestOk ?? !isError,
+          ...(isRecord(request) ? { request: Object.fromEntries(
+            ['requestRef', 'teamId', 'roleId', 'roleKey', 'sessionId', 'generation', 'conversationId',
+              'submittedUserMessageId', 'submittedUserTurnId', 'submissionState', 'sessionState', 'providerState',
+              'promptSubmitted', 'terminal', 'status', 'errorCode', 'reason', 'nextCheckAt', 'userActionRequired']
+              .filter(key => key in request)
+              .map(key => [key, request[key]])) } : {}),
           truncatedInText: true,
           byteLength: Buffer.byteLength(serialized, 'utf8'),
           note: 'The exact full result is available in structuredContent.',
