@@ -96,7 +96,7 @@ export class ChatGptConfigurationMenu {
     }
     // An exiting popup still contributes visible summary/slider nodes. Its
     // closed trigger is authoritative: wait for exit before opening it again.
-    if (this.#opener(nodes)?.expanded === true && this.#summary(nodes)) return await this.#readyMainMenu();
+    if (this.#opener(nodes)?.expanded !== false && this.#summary(nodes)) return await this.#readyMainMenu();
     let opener = this.#opener(nodes);
     if (!opener) {
       const composer = nodes.find(n => n.role === 'textbox' && n.editable);

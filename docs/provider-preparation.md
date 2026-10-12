@@ -20,7 +20,7 @@ choose/model/ref schema, so connected clients can select without restarting thei
 transport for the new configure schema. Both forms call the same selection implementation.
 Read-only team_get exposes the available catalog and never traverses menus itself.
 Discovery failure is explicit and does not claim that a model is unavailable.
-Configuration menu reuse requires an expanded chooser; a still-visible exiting
+An explicitly collapsed chooser prevents menu reuse; a still-visible exiting
 popup is allowed to unmount before reopening, even if its trigger has already
 dropped aria-controls. State-wait failures identify the configuration stage;
 a failed selection is not submission evidence and never authorizes a resend.
