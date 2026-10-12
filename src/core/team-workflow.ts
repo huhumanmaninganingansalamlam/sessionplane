@@ -358,12 +358,13 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async deleteSession(input: Identity & { requestId: string; outputsRetrieved: true }) {
+  async deleteSession(input: Identity & { requestId: string; outputsRetrieved: true; discardRetiredObservation?: { conversationId: string; evidenceRef: string } | undefined }) {
     const request = this.#request(input);
     const session = this.services.directory.getSession(request.sessionId);
     if (session.conversationId === null) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'No bound provider conversation exists');
     return await this.services.cleanup.delete({ ...ownerOf(request), requestId: input.requestId,
-      conversationId: session.conversationId, outputsRetrieved: input.outputsRetrieved });
+      conversationId: session.conversationId, outputsRetrieved: input.outputsRetrieved,
+      discardRetiredObservation: input.discardRetiredObservation });
   }
 
   #latestRequest(request: OutboxRecord): { current: SessionSnapshot; original: SessionSnapshot | null } {
@@ -503,8 +504,15 @@ export class TeamWorkflow {
     const failureMessage = request.submissionState === 'failed_pre_submit'
       ? JSON.parse(request.resultJson ?? '{}').message as string | undefined : undefined;
     if (snapshot.generation !== request.generation) {
+      const original = this.#sessions.getGenerationResult(request.sessionId, request.generation);
+      const ack = JSON.parse(request.resultJson ?? '{}');
+      const conversationId = original?.submittedUserMessageId != null &&
+        ack.sessionId === request.sessionId && ack.generation === request.generation &&
+        ack.submittedUserMessageId === original.submittedUserMessageId &&
+        ack.submittedUserTurnId === original.submittedUserTurnId && typeof ack.conversationId === 'string'
+        ? ack.conversationId : null;
       return { requestOk: true, requestRef: request.outboxId, sessionId: request.sessionId, generation: request.generation,
-        ...this.#sessions.getGenerationResult(request.sessionId, request.generation), historical: true, terminal: true, waitExpired: false,
+        ...original, conversationId, historical: true, terminal: true, waitExpired: false,
         ...(failureMessage === undefined ? {} : { message: failureMessage }) };
     }
     const recovery = this.#lostSubmission(snapshot);

@@ -183,16 +183,24 @@ export class SessionRepository {
     return new Map(rows.map((row) => [row.sessionId, row]));
   }
 
-  conversationCleanupBlocker(sessionId: string, conversationId: string, discard = false): boolean {
+  conversationCleanupBlocker(sessionId: string, conversationId: string, discard = false, retiredGeneration: number | null = null): boolean {
     return (!discard && this.#database.prepare(`
       SELECT 1 FROM generations WHERE session_id = ? AND (
         submission_state = 'failed_pre_submit' OR
         (submission_state = 'submitted' AND completed_at IS NOT NULL AND response_message_id IS NOT NULL
           AND answer_text IS NOT NULL AND error_code IS NULL)
-      ) IS NOT TRUE LIMIT 1
-    `).get(sessionId) !== undefined) || this.#database.prepare(`
+      ) IS NOT TRUE AND generation IS NOT ? LIMIT 1
+    `).get(sessionId, retiredGeneration) !== undefined) || this.#database.prepare(`
       SELECT 1 FROM sessions WHERE conversation_id = ? AND session_id != ? LIMIT 1
     `).get(conversationId, sessionId) !== undefined;
+  }
+
+  canDiscardRetiredObservation(sessionId: string, generation: number): boolean {
+    return this.#database.prepare(`SELECT 1 FROM sessions s JOIN team_roles r ON r.role_id=s.role_id
+      WHERE s.session_id=? AND s.current_generation=? AND s.session_state='cancelled'
+        AND (r.role_state='retired' OR r.current_session_id IS NOT s.session_id)
+        AND EXISTS (SELECT 1 FROM events e WHERE e.session_id=s.session_id AND e.generation=s.current_generation
+          AND e.event_type='generation.observation-retired')`).get(sessionId, generation) !== undefined;
   }
 
   retireDeletedConversation(sessionId: string, timestamp: string, keepRole = false): void {

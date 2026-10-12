@@ -22,6 +22,7 @@ export interface ConversationDeleteInput {
   readonly generation: number;
   readonly conversationId: string;
   readonly outputsRetrieved: true;
+  readonly discardRetiredObservation?: { conversationId: string; evidenceRef: string } | undefined;
 }
 
 export interface ReplacementCleanup {
@@ -360,6 +361,7 @@ export class ConversationCleanupService {
       sessionId: input.sessionId, generation: input.generation,
       conversationId: input.conversationId, outputsRetrieved: input.outputsRetrieved,
       ...(options.replacement ? { replacement: true } : {}),
+      ...(input.discardRetiredObservation ? { discardRetiredObservation: input.discardRetiredObservation } : {}),
     } });
     const actor = scheduler.actorFor(input.sessionId);
     return await actor.enqueue(async () =>
@@ -388,8 +390,15 @@ export class ConversationCleanupService {
           }
           if (prior.status === 'complete') return await this.#finishDeletedPages(previous);
         }
+        const disposal = input.discardRetiredObservation;
+        if (disposal && (disposal.conversationId !== session.conversationId ||
+            !disposal.evidenceRef.trim() || !sessions.canDiscardRetiredObservation(session.sessionId, session.generation))) {
+          throw new SessionPlaneDomainError('session.cleanup-not-ready',
+            'Explicit disposal requires the exact conversation, evidence and a retired observation on a displaced or retired role');
+        }
         if (!input.outputsRetrieved || (!options.replacement && !session.terminal) ||
-            sessions.conversationCleanupBlocker(input.sessionId, input.conversationId, options.replacement === true)) {
+            sessions.conversationCleanupBlocker(input.sessionId, input.conversationId, options.replacement === true,
+              disposal ? session.generation : null)) {
           throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Conversation has active, unresolved or shared work; retrieve completed outputs before deletion');
         }
         for (const binding of registry.listBindings({ includeClosed: false })) {
@@ -444,7 +453,8 @@ export class ConversationCleanupService {
             new EventRepository(database.raw).append({
               teamId: session.teamId, roleId: session.roleId, sessionId: session.sessionId,
               generation: session.generation, eventType: 'session.provider-deleted',
-              payload: { conversationId: input.conversationId }, createdAt: timestamp,
+              payload: { conversationId: input.conversationId,
+                ...(disposal ? { discardedRetiredObservation: disposal, originalGenerationPreserved: true } : {}) }, createdAt: timestamp,
             });
             record('complete');
           });
