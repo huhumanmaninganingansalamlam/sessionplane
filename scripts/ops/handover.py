@@ -50,7 +50,7 @@ def procstat(pid):
 
 def live(pid):
     try: return procstat(pid)[0] != 'Z'
-    except FileNotFoundError: return False
+    except (FileNotFoundError, ProcessLookupError): return False
 
 def read_db(h):
     return closing(sqlite3.connect(pathlib.Path(h['database']['path']).resolve().as_uri() + '?mode=ro', uri=True))
