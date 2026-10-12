@@ -25,6 +25,15 @@ spec.loader.exec_module(handover)
 
 
 class HandoverTests(unittest.TestCase):
+    def test_exit_during_proc_stat_read_is_not_a_live_core(self):
+        # Linux can open /proc/PID/stat before exit, then return ESRCH on read.
+        for error in [FileNotFoundError(2, 'No such file'), ProcessLookupError(3, 'No such process')]:
+            with self.subTest(error=type(error).__name__), patch.object(handover, 'procstat', side_effect=error):
+                self.assertFalse(handover.live(11))
+        with patch.object(handover, 'procstat', side_effect=PermissionError(1, 'Operation not permitted')):
+            with self.assertRaises(PermissionError):
+                handover.live(11)
+
     def test_drain_rejects_new_activity_and_identity_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             pathlib.Path(directory, '.sessionplane-profile.lock').write_text(json.dumps({'pid': 11, 'browserPid': 22}))
