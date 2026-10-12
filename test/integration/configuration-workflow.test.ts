@@ -483,6 +483,44 @@ test('timeout recovery validates fresh summaries, rejects closed-menu evidence a
   }
 });
 
+test('configuration selection waits for a closing version menu and preserves the draft without submitting', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-menu-closing-'));
+  const service = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }),
+    browserHeadless: true, logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await service.browserOwner!.createPage();
+    await page.setContent(fixture);
+    await page.evaluate(() => {
+      for (const option of document.querySelectorAll('#versions [role="menuitemradio"]')) {
+        option.addEventListener('click', () => {
+          // The provider closes its popup after choosing a version, but the
+          // outgoing menu remains visible during its exit animation.
+          document.querySelector('#chooser')!.setAttribute('aria-expanded', 'false');
+          document.querySelector('#chooser')!.removeAttribute('aria-controls');
+          setTimeout(() => { (document.querySelector('#configuration') as HTMLElement).hidden = true; }, 120);
+        });
+      }
+    });
+    const selected = await new ChatGptConfigurationMenu(page, 'closing-menu').select({
+      id: 'fixture', version: 'Aurora-8', power: 2, label: 'Aurora-8 / Deep',
+    });
+    assert.equal(selected.text, 'Aurora-8 / Deep');
+    const again = await new ChatGptConfigurationMenu(page, 'closing-menu').select({
+      id: 'fixture', version: 'Aurora-8', power: 2, label: 'Aurora-8 / Deep',
+    });
+    assert.equal(again.text, selected.text, 'already selected configuration also survives popup closure');
+    await page.locator('#configuration').waitFor({ state: 'hidden' });
+    const opens = await page.evaluate(() => (window as any).opens);
+    await page.evaluate(() => { (document.querySelector('#configuration') as HTMLElement).hidden = false; });
+    await assert.rejects(new ChatGptConfigurationMenu(page, 'closing-menu').select({
+      id: 'fixture', version: 'Aurora-8', power: 2, label: 'Aurora-8 / Deep',
+    }), (error: any) => error.errorCode === 'provider.configuration-unavailable' && error.details.configurationStage === 'menu-exit');
+    assert.equal(await page.evaluate(() => (window as any).opens), opens, 'a popup that never exits is not clicked through');
+    assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('configuration selection verifies menu state without waiting for scheduled navigation', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-menu-navigation-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
