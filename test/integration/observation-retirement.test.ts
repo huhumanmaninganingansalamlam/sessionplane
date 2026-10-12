@@ -73,3 +73,66 @@ test('explicit obsolete observation retirement preserves submissions, rejects ac
 
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test('explicit retired disposal preserves both generations and protects drafts and generation', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-retired-disposal-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', observationActiveSweepMs: 5, observationQuietSweepMs: 5 });
+  const fake = new FakeProviderAdapter(); fake.autoFinalText = 'Collected original answer';
+  let deletes = 0;
+  t.mock.method(fake, 'openDeletion', async () => ({ alreadyDeleted: false,
+    deleteOnce: async () => { deletes++; return true; }, close: async () => {} }));
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const rpc = (method: string, params: Record<string, unknown>) => callRpc<any>({ socketPath: config.socketPath,
+    method, params: { clientId: 'owner', ...params }, timeoutMs: 10000 });
+  const workflow = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_' + name,
+    arguments: args, socketPath: config.socketPath, timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'owner' });
+    core.teamDirectory.createRole({ teamId: team.teamId, roleKey: 'director.main', roleType: 'custom' });
+    const session = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'director.main', provider: 'chatgpt' });
+    await rpc('session.send', { sessionId: session.sessionId, requestId: 'completed', prompt: 'Original completed request' });
+    const first = await rpc('session.wait', { sessionId: session.sessionId, generation: 1, waitMs: 3000 });
+    assert.equal(first.answerText, 'Collected original answer');
+    fake.autoFinalText = null;
+    await rpc('session.send', { sessionId: session.sessionId, requestId: 'unresolved', prompt: 'Original unresolved request' });
+    const requests = core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? ORDER BY generation').all(session.sessionId);
+    const generations = () => core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(session.sessionId);
+    const before = generations();
+    const historical = (await workflow('team_get', { teamId: team.teamId, requestRef: requests[0]!.outbox_id })).structuredContent;
+    assert.equal((historical.request as Record<string, unknown>).conversationId, first.conversationId);
+    const input = { teamId: team.teamId, requestRef: requests[1]!.outbox_id, requestId: 'dispose', outputsRetrieved: true,
+      discardRetiredObservation: { conversationId: first.conversationId, evidenceRef: 'User explicitly discards obsolete conversation; unresolved original retained' } };
+    assert.equal((await workflow('session_delete', input)).structuredContent.errorCode, 'session.cleanup-not-ready');
+    await rpc('team.role.retire', { teamId: team.teamId, roleKey: 'director.main', requestId: 'retire-role' });
+    assert.equal((await workflow('session_delete', input)).structuredContent.errorCode, 'session.cleanup-not-ready');
+    assert.equal((await workflow('decide', { teamId: team.teamId, requestRef: requests[1]!.outbox_id,
+      requestId: 'retire-observation', decision: 'retire_observation', workComplete: true,
+      evidenceRef: 'Obsolete work ended; preserve missing original result' })).isError, false);
+    const { discardRetiredObservation: _disposal, ...ordinary } = input;
+    assert.equal((await workflow('session_delete', ordinary)).structuredContent.errorCode, 'session.cleanup-not-ready');
+    assert.equal((await workflow('session_delete', { ...input, requestRef: requests[0]!.outbox_id })).structuredContent.errorCode,
+      'session.conversation-mismatch');
+    assert.equal((await workflow('session_delete', { ...input, discardRetiredObservation: { ...input.discardRetiredObservation,
+      conversationId: 'different-conversation' } })).structuredContent.errorCode, 'session.cleanup-not-ready');
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<textarea>Human draft</textarea>' }));
+    await page.goto('https://chatgpt.com/c/' + first.conversationId);
+    assert.equal((await workflow('session_delete', input)).structuredContent.errorCode, 'session.cleanup-not-ready');
+    assert.equal(await page.locator('textarea').inputValue(), 'Human draft');
+    await page.setContent('<button data-testid="stop-button">Stop</button>');
+    assert.equal((await workflow('session_delete', input)).structuredContent.errorCode, 'session.cleanup-not-ready');
+    assert.equal(deletes, 0);
+    await page.setContent('<main>Obsolete conversation, idle</main>');
+    const deleted = (await workflow('session_delete', input)).structuredContent;
+    assert.equal(deleted.deleted, true, JSON.stringify(deleted));
+    assert.deepEqual(deleted.pageCleanup, { closedPages: 1, pageErrors: [] });
+    assert.equal(page.isClosed(), true);
+    assert.deepEqual(generations(), before);
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? ORDER BY generation').all(session.sessionId), requests);
+    assert.deepEqual((await workflow('session_delete', input)).structuredContent, deleted);
+    assert.equal(deletes, 1);
+    assert.equal(fake.submitCount, 2);
+    assert.equal(fake.stopCount, 0);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
