@@ -1,3 +1,4 @@
+import { attachmentsAcknowledged } from './attachment-evidence.ts';
 import { createHash } from 'node:crypto';
 
 import type { Locator, Page, Request, Response, WebSocket } from 'playwright-core';
@@ -198,21 +199,12 @@ export class DomProviderAdapter implements ProviderAdapter {
   async discoverArtifacts(
     request: ProviderArtifactRequest,
   ): Promise<readonly ProviderArtifactCandidate[]> {
-    const page = this.#requireOwnedPage(request.session, request.generation);
+    const page = this.#requireOwnedPage(request.session, request.bindingGeneration ?? request.generation);
     const selector = this.#selectors.artifactLinks.join(', ');
     if (selector.length === 0) return [];
-    const rows = await page.locator(selector).evaluateAll((elements) =>
-      elements.map((element, index) => {
-        const anchor = element as HTMLAnchorElement;
-        const href = anchor.href || anchor.getAttribute('href') || '';
-        const name =
-          anchor.getAttribute('download') ||
-          anchor.getAttribute('aria-label') ||
-          anchor.textContent?.trim() ||
-          `artifact-${index + 1}`;
-        return { href, name, mediaType: anchor.getAttribute('type') };
-      }),
-    );
+    const turn = (await readTurns(page, this.#selectors, 'assistant', true)).find((turn) => turn.messageId === request.session.responseMessageId);
+    if (turn === undefined) throw new ProviderSubmissionError('provider.artifacts-unavailable', 'Exact answer is not present for file discovery');
+    const rows = turn.artifacts ?? [];
     const candidates = new Map<string, ProviderArtifactCandidate>();
     for (const row of rows) {
       if (row.href.length === 0) continue;
@@ -233,7 +225,7 @@ export class DomProviderAdapter implements ProviderAdapter {
     request: ProviderArtifactRequest,
     candidate: ProviderArtifactCandidate,
   ): Promise<ProviderArtifactDownload> {
-    const page = this.#requireOwnedPage(request.session, request.generation);
+    const page = this.#requireOwnedPage(request.session, request.bindingGeneration ?? request.generation);
     const expectedId = createHash('sha256')
       .update(`${this.provider}\u0000${candidate.sourceUrl}\u0000${candidate.name}`)
       .digest('hex');
@@ -421,7 +413,7 @@ class DomProviderSubmission implements ProviderSubmission {
     );
     const attachments = this.#request.attachments ?? [];
     if (attachments.length > 0) {
-      await uploadAttachments(this.#page, this.#selectors, attachments);
+      await uploadAttachments(this.#page, this.#selectors, attachments, composer);
     }
     await composer.fill(this.#request.prompt);
     if (!(await waitForComposerValue(composer, this.#request.prompt, 2_000))) {
@@ -671,7 +663,7 @@ class DomProviderStopOperation implements ProviderStopOperation {
     return this.#control !== null && (await this.#control.isEnabled().catch(() => false));
   }
 
-  async stopOnce(): Promise<void> {
+  async stopOnce(): Promise<'stopped' | 'unknown'> {
     if (this.#control === null) {
       throw new ProviderSubmissionError(
         'internal.invariant-violation',
@@ -681,6 +673,7 @@ class DomProviderStopOperation implements ProviderStopOperation {
     }
     this.#requireExactPage();
     await this.#control.click({ timeout: 10_000 });
+    return 'unknown';
   }
 
   #requireExactPage(): void {
@@ -699,6 +692,7 @@ interface DomTurn {
   readonly messageId: string;
   readonly turnId: string;
   readonly identityKey: string;
+  readonly artifacts?: readonly { href: string; name: string; mediaType: string | null }[];
   readonly terminalAttribute: boolean;
   readonly streamingAttribute: boolean;
 }
@@ -707,9 +701,10 @@ async function readTurns(
   page: Page,
   selectors: ProviderDomSelectors,
   role?: 'user' | 'assistant',
+  includeArtifacts = false,
 ): Promise<readonly DomTurn[]> {
   const raw = await page.evaluate(
-    ({ userSelectors, userTextLineSelectors, assistantSelectors, textSelectors }) => {
+    ({ userSelectors, userTextLineSelectors, assistantSelectors, textSelectors, artifactSelector, includeArtifacts }) => {
       const normalize = (value: string | null | undefined): string =>
         (value ?? '').replaceAll(/\s+/g, ' ').trim();
       const userSelector = userSelectors.join(', ');
@@ -725,7 +720,7 @@ async function readTurns(
       let assistantIndex = 0;
       return elements.map((element) => {
         const isUser = roleOf(element) === 'user';
-        const roleValue = isUser ? 'user' : 'assistant';
+        const roleValue: 'user' | 'assistant' = isUser ? 'user' : 'assistant';
         const index = isUser ? userIndex++ : assistantIndex++;
         const messageId =
           element.getAttribute('data-message-id') ??
@@ -760,6 +755,11 @@ async function readTurns(
         const status = (element.getAttribute('data-status') ?? '').toLowerCase();
         const state = (element.getAttribute('data-state') ?? '').toLowerCase();
         return {
+          ...(includeArtifacts && artifactSelector.length > 0 ? { artifacts: [...element.querySelectorAll<HTMLAnchorElement>(artifactSelector)].map((anchor, index) => ({
+            href: anchor.href || anchor.getAttribute('href') || '',
+            name: anchor.getAttribute('download') || anchor.getAttribute('aria-label') || anchor.textContent?.trim() || `artifact-${index + 1}`,
+            mediaType: anchor.getAttribute('type'),
+          })) } : {}),
           role: roleValue,
           index,
           text,
@@ -781,18 +781,11 @@ async function readTurns(
     {
       userSelectors: [...selectors.userMessages],
       userTextLineSelectors: [...(selectors.userTextLines ?? [])],
+      artifactSelector: selectors.artifactLinks.join(', '), includeArtifacts,
       assistantSelectors: [...selectors.assistantMessages],
       textSelectors: [...selectors.assistantText],
     },
-  ) as Array<{
-    role: 'user' | 'assistant';
-    index: number;
-    text: string;
-    messageId: string | null;
-    turnId: string | null;
-    terminalAttribute: boolean;
-    streamingAttribute: boolean;
-  }>;
+  );
   const counters: Record<'user' | 'assistant', number> = { user: 0, assistant: 0 };
   const turns: DomTurn[] = raw.map((turn) => {
     const ordinal = counters[turn.role]++;
@@ -806,6 +799,7 @@ async function readTurns(
       text: turn.text,
       messageId,
       turnId,
+      ...(turn.artifacts === undefined ? {} : { artifacts: turn.artifacts }),
       identityKey: `${messageId}\u0000${turnId}`,
       terminalAttribute: turn.terminalAttribute,
       streamingAttribute: turn.streamingAttribute,
@@ -835,8 +829,8 @@ async function observeProviderDom(
     (anchor.submittedUserTurnId !== null && turn.turnId === anchor.submittedUserTurnId),
   );
   const afterAnchor = anchorIndex < 0 ? [] : turns.slice(anchorIndex + 1);
-  const laterUserIndex = afterAnchor.findIndex((turn) => turn.role === 'user');
-  const candidateTurns = (laterUserIndex < 0 ? afterAnchor : afterAnchor.slice(0, laterUserIndex))
+  const laterUserIndex = afterAnchor.findLastIndex((turn) => turn.role === 'user');
+  const candidateTurns = afterAnchor.slice(laterUserIndex + 1)
     .filter((turn) => turn.role === 'assistant' && turn.text.length > 0);
   const candidateTurn = candidateTurns.at(-1) ?? null;
   const stopVisible = await anyVisible(page, selectors.stopControls);
@@ -888,6 +882,7 @@ async function uploadAttachments(
   page: Page,
   selectors: ProviderDomSelectors,
   attachments: readonly ProviderAttachment[],
+  composer: Locator,
 ): Promise<void> {
   const paths = attachments.map((attachment) => attachment.path);
   const input = await firstExisting(page, selectors.fileInputs);
@@ -928,28 +923,8 @@ async function uploadAttachments(
 
   const deadline = Date.now() + 20_000;
   do {
-    const expected = attachments.map((attachment) => normalizeLabel(attachment.name));
-    const body = normalizeLabel((await page.locator('body').innerText().catch(() => '')) ?? '');
-    if (expected.every((name) => body.includes(name))) return;
-
-    const evidence: string[] = [];
-    for (const selector of selectors.attachmentEvidence) {
-      const values = await page
-        .locator(selector)
-        .evaluateAll((elements) =>
-          elements.map((element) =>
-            [
-              element.textContent ?? '',
-              element.getAttribute('aria-label') ?? '',
-              element.getAttribute('title') ?? '',
-            ].join(' '),
-          ),
-        )
-        .catch(() => [] as string[]);
-      evidence.push(...values);
-    }
-    const normalizedEvidence = normalizeLabel(evidence.join(' '));
-    if (expected.every((name) => normalizedEvidence.includes(name))) return;
+    if (await attachmentsAcknowledged(composer, attachments, selectors.attachmentEvidence,
+      [...selectors.userMessages, ...selectors.assistantMessages])) return;
     await page.waitForTimeout(100);
   } while (Date.now() < deadline);
   throw new ProviderSubmissionError(

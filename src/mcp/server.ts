@@ -4,6 +4,7 @@ import { pathToFileURL } from 'node:url';
 import { resolveConfig, type SessionPlaneConfig } from '../config.ts';
 import {
   MCP_LEGACY_PROTOCOL_VERSION,
+  MCP_LEGACY_PROTOCOL_VERSIONS,
   MCP_MODERN_PROTOCOL_VERSION,
   MCP_SERVER_INFO,
   McpProtocolError,
@@ -174,15 +175,12 @@ class SessionPlaneMcpServer {
       throw new McpProtocolError(-32602, 'Invalid initialize params');
     }
     const requested = params.protocolVersion;
-    if (requested !== MCP_LEGACY_PROTOCOL_VERSION) {
-      throw new McpProtocolError(-32602, 'Unsupported legacy MCP protocol version', {
-        requested,
-        supported: [MCP_LEGACY_PROTOCOL_VERSION],
-      });
+    if (typeof requested !== 'string' || requested.length === 0) {
+      throw new McpProtocolError(-32602, 'Invalid initialize protocol version');
     }
     this.#legacyInitialized = true;
     return {
-      protocolVersion: MCP_LEGACY_PROTOCOL_VERSION,
+      protocolVersion: MCP_LEGACY_PROTOCOL_VERSIONS.includes(requested) ? requested : MCP_LEGACY_PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: false } },
       serverInfo: MCP_SERVER_INFO,
       instructions: serverInstructions(),
@@ -213,8 +211,6 @@ class SessionPlaneMcpServer {
         arguments: toolArguments,
         socketPath: this.#config.socketPath,
         timeoutMs: resolveMcpToolTimeoutMs({
-          name,
-          arguments: toolArguments,
           rpcRequestTimeoutMs: this.#config.rpcRequestTimeoutMs,
           submissionAckTimeoutMs: this.#config.submissionAckTimeoutMs,
         }),
@@ -245,14 +241,9 @@ class SessionPlaneMcpServer {
   }
 
   #requestMode(params: unknown): ProtocolMode {
-    if (isRecord(params) && isRecord(params._meta)) {
-      requireModernMetadata(params);
-      return 'modern';
-    }
-    if (this.#legacyInitialized) {
-      return 'legacy';
-    }
-    throw new McpProtocolError(-32602, 'MCP request metadata is required before tool use');
+    if (this.#legacyInitialized) return 'legacy';
+    requireModernMetadata(params);
+    return 'modern';
   }
 
   async #handleNotification(request: McpRequest): Promise<void> {
@@ -282,6 +273,12 @@ function callToolResult(
   isError: boolean,
 ): Readonly<Record<string, unknown>> {
   const serialized = JSON.stringify(structuredContent);
+  const required = [structuredContent, structuredContent.request,
+    ...(Array.isArray(structuredContent.results) ? structuredContent.results : []),
+    ...(Array.isArray(structuredContent.roles) ? structuredContent.roles : [])]
+    .filter(value => isRecord(value) && value.userActionRequired === true);
+  const recoveryRequired = [...new Map(required.map(value => [value.requestRef,
+    { requestRef: value.requestRef, status: value.status, userActionRequired: true, message: value.message, recovery: value.recovery }])).values()];
   const text =
     Buffer.byteLength(serialized, 'utf8') <= 64 * 1024
       ? serialized
@@ -290,6 +287,7 @@ function callToolResult(
           truncatedInText: true,
           byteLength: Buffer.byteLength(serialized, 'utf8'),
           note: 'The exact full result is available in structuredContent.',
+          ...(recoveryRequired.length === 0 ? {} : { recoveryRequired }),
         });
   return {
     content: [{ type: 'text', text }],
@@ -300,11 +298,18 @@ function callToolResult(
 
 function serverInstructions(): string {
   return [
-    'Use teamId as the durable aggregate handle.',
-    'Call sessionplane_team_get when starting or resuming work.',
-    'Address mutations with teamId + roleKey or an exact sessionId.',
-    'Preserve the returned sessionId and generation for waits.',
-    'waitExpired and backend observation deferral are successful nonterminal states.',
+    'Keep teamId and start or resume with sessionplane_team_get.',
+    'Copy roleRef for sends and requestRef for decisions, waits, stop and cleanup.',
+    'Use stable unique requestId values for mutations; reuse only identical requests.',
+    'needs_decision is a normal handoff: reason from fresh observed evidence and call decide. It continues the same request automatically.',
+    'Preparation nodes advertise supported purposes in actions.choose and actions.reveal, derived from the same rules that validate decisions. Choose the control whose observed meaning matches the intent; supported purposes are not recommendations. evidence.interactive only describes snapshot filtering, not permission or page capability.',
+    'The first send discovers configurationCatalog.options from the provider UI. Each option contains a verified combined label and configurationId (the option id). Copy the matching option.selection into decide with teamId, requestRef and a new requestId, or use decision configure and configurationId; do not reconstruct model and power from raw menus. Later requests reuse the catalog and revalidate the selected configuration on their own page.',
+    'If configurationCatalog is null or unavailable, call decide decision discover on the same requestRef. A failed or incomplete discovery does not prove a model unavailable. Configure never submits. Choose the composer and submit controls from fresh evidence afterward. Raw choose/reveal remain diagnostic controls, not the normal model-selection flow.',
+    'Preserve requested model/mode across replacements and honor explicit user corrections. Select an exact matching observed configuration; do not substitute a different version or treat account badges as configuration.',
+    'Never automatically resend uncertain submissions. Use team_get with requestRef for read-only recovery. Only after explicit user duplicate-risk acceptance, decide prepare_resend with the original requestRef, a stable requestId, approvalRef and duplicateRiskAccepted:true prepares one same-chat successor without sending. Keep its new requestRef; only its original coordinator selects fresh configuration and submits. Original uncertainty is retained; progress, answer, draft or provider restrictions pause dispatch.',
+    'wait returns exact answers and files. waitExpired, backend-http-429 and probe pacing alone do not establish generation failure. Continue active work with bounded wait calls on the same requestRef and positive waitMs, including before nextCheckAt. nextCheckAt schedules core backend probes only, not result collection. Do not sleep until it: DOM observation continues and wait can return completion earlier. The core enforces probe cooldowns; do not bypass them with refresh or resend.',
+    'When the user wants to view or control a request in the browser, use decide decision focus with its teamId, requestRef and a fresh requestId. It activates only the exact connected tab; it never reloads, submits or opens another tab. Do not focus automatically during background work.',
+    'For provider-actionable-alert, inspect evidence and report the visible error. decide refresh reloads the exact request page without resending when requested or warranted by visible recovery failure. Reinspect the same requestRef afterward. Await user action for human verification or persisting failures; do not poll indefinitely.',
   ].join(' ');
 }
 
@@ -358,4 +363,3 @@ if (isDirectExecution()) {
     process.exitCode = 1;
   });
 }
-

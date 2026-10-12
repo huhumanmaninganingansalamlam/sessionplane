@@ -4,6 +4,7 @@ import type { SessionSnapshot } from '../domain/session.ts';
 import type { ProviderAdapterRegistry } from '../providers/provider-adapter.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import type { SessionActor } from '../scheduler/session-actor.ts';
+import { KeyedMutex } from '../scheduler/keyed-mutex.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { EventRepository } from '../storage/event-repository.ts';
 import { hashCanonical } from '../storage/receipt-repository.ts';
@@ -13,6 +14,7 @@ import type { TeamDirectory } from './team-directory.ts';
 export interface SessionStopInput {
   readonly clientId: string;
   readonly requestId: string;
+  readonly expectedGeneration?: number;
   readonly sessionId?: string;
   readonly teamId?: string;
   readonly roleKey?: string;
@@ -46,7 +48,7 @@ export class StopService {
   readonly #sessions: SessionRepository;
   readonly #events: EventRepository;
   readonly #now: () => Date;
-  readonly #requestTails = new Map<string, Promise<void>>();
+  readonly #requestMutex = new KeyedMutex();
 
   constructor(options: {
     readonly database: SessionPlaneDatabase;
@@ -68,6 +70,7 @@ export class StopService {
 
   async stop(input: SessionStopInput): Promise<SessionSnapshot> {
     const payload = {
+      ...(input.expectedGeneration === undefined ? {} : { expectedGeneration: input.expectedGeneration }),
       selector:
         input.sessionId === undefined
           ? { teamId: input.teamId, roleKey: input.roleKey }
@@ -75,7 +78,7 @@ export class StopService {
     };
     const requestHash = hashCanonical({ method: 'session.stop', payload });
     const requestKey = JSON.stringify([input.clientId, input.requestId]);
-    return await this.#runRequestExclusive(requestKey, async () => {
+    return await this.#requestMutex.runExclusive(requestKey, async () => {
       const existing = this.#getReceipt(input.clientId, input.requestId);
       if (existing !== null) {
         this.#assertReceipt(existing, input.clientId, input.requestId, requestHash);
@@ -92,6 +95,15 @@ export class StopService {
     });
   }
 
+  hasUnconfirmedStop(sessionId: string, generation: number): boolean {
+    return this.#database.raw.prepare(`
+      SELECT 1 FROM request_receipts
+      WHERE method = 'session.stop' AND status = 'attempted'
+        AND json_extract(result_json, '$.sessionId') = ?
+        AND json_extract(result_json, '$.generation') = ? LIMIT 1
+    `).get(sessionId, generation) !== undefined;
+  }
+
   async #stopLocked(
     actor: SessionActor,
     sessionId: string,
@@ -99,6 +111,9 @@ export class StopService {
     requestHash: string,
   ): Promise<SessionSnapshot> {
     const current = this.#requireSnapshot(sessionId);
+    if (input.expectedGeneration !== undefined && current.generation !== input.expectedGeneration) {
+      throw new SessionPlaneDomainError('session.generation-superseded', 'Stop request belongs to an older generation');
+    }
     if (current.terminal) {
       this.#storeCompleteReceipt(input, requestHash, current);
       return current;
@@ -110,6 +125,8 @@ export class StopService {
       );
     }
 
+    if (this.hasUnconfirmedStop(current.sessionId, current.generation)) throw this.#unknownStop(current);
+
     const adapter = this.#adapters.require(current.provider);
     const operation = await adapter.openStop({
       session: current,
@@ -119,25 +136,20 @@ export class StopService {
       const available = await operation.prepare();
       if (!available) {
         const refreshed = this.#requireSnapshot(sessionId);
-        this.#storeCompleteReceipt(input, requestHash, refreshed);
-        return refreshed;
+        if (refreshed.terminal) {
+          this.#storeCompleteReceipt(input, requestHash, refreshed);
+          return refreshed;
+        }
+        throw new SessionPlaneDomainError('provider.stop-unavailable',
+          'No exact stop control is available; no stop mutation was attempted',
+          { mutation: 'session.stop', outcome: 'not_attempted', snapshot: refreshed });
       }
 
       this.#storeAttemptedReceipt(input, requestHash, current);
       try {
-        await operation.stopOnce();
-      } catch (error) {
-        throw new SessionPlaneDomainError(
-          'internal.invariant-violation',
-          'Stop mutation outcome is unknown and automatic retry is forbidden',
-          {
-            mutation: 'session.stop',
-            outcome: 'unknown',
-            automaticRetry: false,
-            snapshot: current,
-            causeType: error instanceof Error ? error.name : typeof error,
-          },
-        );
+        if (await operation.stopOnce() !== 'stopped') throw this.#unknownStop(current);
+      } catch {
+        throw this.#unknownStop(current);
       }
 
       return this.#completeStop(actor, current, input);
@@ -212,16 +224,14 @@ export class StopService {
     if (receipt.status === 'complete') {
       return snapshot;
     }
-    throw new SessionPlaneDomainError(
-      'internal.invariant-violation',
-      'The original stop request has an ambiguous outcome and will not be repeated',
-      {
-        mutation: 'session.stop',
-        outcome: 'unknown',
-        automaticRetry: false,
-        snapshot,
-      },
-    );
+    const current = this.#requireSnapshot(snapshot.sessionId);
+    throw this.#unknownStop(current.generation === snapshot.generation ? current : snapshot);
+  }
+
+  #unknownStop(snapshot: SessionSnapshot): SessionPlaneDomainError {
+    return new SessionPlaneDomainError('provider.stop-unknown',
+      'Stop was attempted without a provider acknowledgement; observe the exact request without repeating the mutation',
+      { mutation: 'session.stop', outcome: 'unknown', automaticRetry: false, snapshot });
   }
 
   #resolveSession(input: SessionStopInput): SessionSnapshot {
@@ -314,27 +324,5 @@ export class StopService {
       throw new SessionPlaneDomainError('input.session-not-found', `Unknown session: ${sessionId}`);
     }
     return snapshot;
-  }
-
-  async #runRequestExclusive<Result>(
-    requestKey: string,
-    operation: () => Promise<Result>,
-  ): Promise<Result> {
-    const previous = this.#requestTails.get(requestKey) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.then(() => gate);
-    this.#requestTails.set(requestKey, tail);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.#requestTails.get(requestKey) === tail) {
-        this.#requestTails.delete(requestKey);
-      }
-    }
   }
 }

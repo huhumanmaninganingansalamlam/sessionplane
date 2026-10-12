@@ -106,6 +106,7 @@ export class BrowserOwner {
   #lockToken: string | null = null;
   #context: BrowserContext | null = null;
   #browser: Browser | null = null;
+  readonly #recoveryControllers = new Map<string, Browser>();
   #browserProcess: ChildProcess | null = null;
   #browserPid: number | null = null;
   #debuggingPort: number | null = null;
@@ -156,9 +157,11 @@ export class BrowserOwner {
 
     this.#state = 'starting';
     this.#lastError = null;
+    let adopting = false;
     try {
       const selectedBrowser = this.#resolveBrowserProfile();
       const adopted = await this.#acquireProfileLock();
+      adopting = adopted !== null;
       ensureProfileBrowserIdentity(this.#profileDir, selectedBrowser, this.#now);
 
       if (adopted?.mode === 'manual') {
@@ -182,6 +185,7 @@ export class BrowserOwner {
       const browser = await chromium.connectOverCDP(`http://127.0.0.1:${debuggingPort}`, {
         timeout: this.#launchTimeoutMs,
       });
+      this.#browser = browser;
       const context = browser.contexts()[0];
       if (context === undefined) {
         throw new BrowserOwnerError(
@@ -191,13 +195,33 @@ export class BrowserOwner {
       }
       await verifyExpectedAutomationSurface(context, this.#headless);
       this.#context = context;
-      this.#browser = browser;
       this.#pageRegistry.attach(context);
+      for (const page of context.pages()) {
+        try {
+          await this.#identifyPage(page);
+        } catch (error) {
+          if (!page.isClosed()) throw error;
+        }
+      }
       context.once('close', () => this.#handleDisconnect('BrowserContext closed'));
       browser.once('disconnected', () => this.#handleDisconnect('Browser disconnected'));
       this.#state = 'ready';
     } catch (error) {
-      await this.#shutdownBrowser().catch(() => undefined);
+      if (adopting) {
+        // A failed successor must not destroy the predecessor's live browser.
+        // For connectOverCDP, close disconnects this controller only.
+        this.#pageRegistry.detach();
+        await this.#browser?.close().catch(() => undefined);
+        this.#context = null;
+        this.#browser = null;
+        this.#browserPid = null;
+        this.#debuggingPort = null;
+        this.#ownership = null;
+        // Retain the browser identity in the lock for adoption after this core exits.
+        this.#lockToken = null;
+      } else {
+        await this.#shutdownBrowser().catch(() => undefined);
+      }
       const details = this.#browserStderrTail.trim();
       this.#lastError = [error instanceof Error ? error.message : String(error), details]
         .filter(Boolean)
@@ -210,7 +234,7 @@ export class BrowserOwner {
       }
       throw new BrowserOwnerError(
         'browser.unavailable',
-        'Failed to launch and attach to the selected host browser',
+        `Failed to launch and attach to the selected host browser: ${this.#lastError}`,
         { cause: error },
       );
     }
@@ -252,8 +276,119 @@ export class BrowserOwner {
 
   async createPage(): Promise<{ readonly page: Page; readonly binding: PageBindingSnapshot }> {
     const context = this.#requireContext();
-    const page = await context.newPage();
-    return { page, binding: this.#pageRegistry.registerPage(page) };
+    const session = await context.browser()!.newBrowserCDPSession();
+    const existing = new Set(context.pages());
+    try {
+      const { targetId } = await session.send('Target.createTarget', { url: 'about:blank', background: true });
+      const deadline = Date.now() + 10_000;
+      do {
+        for (const page of context.pages()) {
+          if (existing.has(page)) continue;
+          const binding = await this.#identifyPage(page);
+          if (binding.targetId === targetId) return { page, binding };
+        }
+        await new Promise(resolve => setTimeout(resolve, 20));
+      } while (Date.now() < deadline);
+      throw new BrowserOwnerError('browser.unavailable', 'Background page did not attach to its exact browser target');
+    } finally {
+      await session.detach();
+    }
+  }
+
+  /** The caller holds the exact request actor/page lock and authorizes one refresh. */
+  async recoverCrashedPage(pageKey: string, expected: PageBindingSnapshot): Promise<void> {
+    this.#requireContext();
+    const page = this.#pageRegistry.pageForObservation(pageKey);
+    const current = this.#pageRegistry.getBinding(pageKey);
+    const sameOwner = () => {
+      const binding = this.#pageRegistry.getBinding(pageKey);
+      return binding.bindingEpoch === expected.bindingEpoch && binding.targetId === expected.targetId &&
+        binding.sessionId === expected.sessionId && binding.generation === expected.generation &&
+        binding.url === expected.url && binding.conversationId === expected.conversationId &&
+        binding.expectedConversationId === expected.expectedConversationId && (binding.state === 'owned' || binding.state === 'reserved');
+    };
+    if (!sameOwner() || !this.#pageRegistry.observedCrash(pageKey) || current.targetId == null ||
+        this.#debuggingPort === null || this.#browserPid === null) {
+      throw new BrowserOwnerError('browser.unavailable', 'Exact crashed target is not available for controller recovery');
+    }
+    const browserPid = this.#browserPid;
+    const debuggingPort = this.#debuggingPort;
+    const timeout = Math.min(this.#launchTimeoutMs, 10_000);
+    const deadline = Date.now() + timeout;
+    const remaining = () => {
+      const ms = deadline - Date.now();
+      if (ms <= 0) throw new BrowserOwnerError('browser.unavailable', 'Same-target controller recovery deadline expired');
+      return ms;
+    };
+    const attach = async (target: Page) => {
+      const budget = remaining();
+      const pending = target.context().newCDPSession(target);
+      const attached = await settleWithin(pending, budget);
+      if (attached === undefined) {
+        // A late attachment must not outlive the failed recovery attempt.
+        void pending.then(session => session.detach()).catch(() => undefined);
+        throw new BrowserOwnerError('browser.unavailable', 'Recovery target attachment unavailable');
+      }
+      return attached;
+    };
+    const session = await attach(page);
+    let replacement: Browser | null = null;
+    try {
+      const identity = await settleWithin(session.send('Target.getTargetInfo'), remaining());
+      if (identity?.targetInfo.targetId !== current.targetId || identity.targetInfo.type !== 'page' ||
+          identity.targetInfo.url !== expected.url || !sameOwner()) {
+        throw new BrowserOwnerError('browser.unavailable', 'Crashed target identity could not be verified');
+      }
+      // Page.reload() rejects a permanently crashed Playwright Page. A fresh
+      // public CDP session reloads the same Chrome target; never patch private state.
+      const reloadBudget = remaining();
+      if (!sameOwner()) throw new BrowserOwnerError('browser.unavailable', 'Crashed target changed before reload');
+      if (await settleWithin(session.send('Page.reload'), reloadBudget) === undefined) {
+        throw new BrowserOwnerError('browser.unavailable', 'Same-target reload acknowledgement unavailable; do not repeat automatically');
+      }
+      replacement = await chromium.connectOverCDP(`http://127.0.0.1:${debuggingPort}`, { timeout: remaining() });
+      let recovered: Page | undefined;
+      for (const candidate of replacement.contexts()[0]?.pages() ?? []) {
+        const probe = await attach(candidate);
+        try {
+          const found = await settleWithin(probe.send('Target.getTargetInfo'), remaining());
+          if (found?.targetInfo.targetId === current.targetId) { recovered = candidate; break; }
+        } finally { await settleWithin(probe.detach(), 1_000); }
+      }
+      if (!recovered || this.#browserPid !== browserPid || this.#debuggingPort !== debuggingPort || !sameOwner()) {
+        throw new BrowserOwnerError('browser.unavailable', 'The same crashed target did not reattach; original binding retained');
+      }
+      await recovered.waitForLoadState('domcontentloaded', { timeout: remaining() });
+      remaining();
+      if (this.#browserPid !== browserPid || this.#debuggingPort !== debuggingPort || !sameOwner()) {
+        throw new BrowserOwnerError('browser.unavailable', 'Crashed target ownership changed before controller reassociation');
+      }
+      this.#pageRegistry.reconnectCrashedPage(pageKey, expected, recovered, current.targetId);
+      const previous = this.#recoveryControllers.get(pageKey);
+      const controller = replacement;
+      this.#recoveryControllers.set(pageKey, controller);
+      recovered.once('close', () => {
+        if (this.#recoveryControllers.get(pageKey) !== controller) return;
+        this.#recoveryControllers.delete(pageKey);
+        void controller.close().catch(() => undefined);
+      });
+      replacement = null;
+      // connectOverCDP Browser.close disconnects only this auxiliary controller.
+      if (previous) await settleWithin(previous.close(), 1_000);
+    } finally {
+      await settleWithin(session.detach(), 1_000);
+      if (replacement) await settleWithin(replacement.close(), 1_000);
+    }
+  }
+
+  async #identifyPage(page: Page): Promise<PageBindingSnapshot> {
+    const session = await page.context().newCDPSession(page);
+    try {
+      const { targetInfo } = await session.send('Target.getTargetInfo');
+      return this.#pageRegistry.identifyPage(page, targetInfo.targetId);
+    } finally {
+      await session.detach();
+    }
   }
 
   async openLoginPage(loginUrl: string): Promise<PageBindingSnapshot> {
@@ -587,6 +722,8 @@ export class BrowserOwner {
   }
 
   async #shutdownBrowser(): Promise<void> {
+    await Promise.all([...this.#recoveryControllers.values()].map(controller => controller.close().catch(() => undefined)));
+    this.#recoveryControllers.clear();
     const browser = this.#browser;
     const child = this.#browserProcess;
     const browserPid = this.#browserPid;
@@ -759,8 +896,8 @@ export class BrowserOwner {
               debuggingPort: existing.debuggingPort,
             };
           } else {
-            await terminateProcessGroup(existing.browserPid);
-            adopted = null;
+            throw new BrowserOwnerError('browser.unavailable',
+              'Existing profile browser is alive but its CDP endpoint cannot be verified; preserved without restart');
           }
         }
         unlinkSync(this.#lockPath);
@@ -1089,6 +1226,16 @@ function readProfileLock(lockPath: string): ProfileLockPayload {
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
+    if (process.platform === 'linux') {
+      try {
+        const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+        const state = stat.slice(stat.lastIndexOf(')') + 2).split(' ', 1)[0];
+        if (state === 'Z' || state === 'X') return false;
+      } catch (error) {
+        if (isErrno(error, 'ENOENT')) return false;
+        // An unreadable state is not evidence that a live owner has exited.
+      }
+    }
     return true;
   } catch (error) {
     return isErrno(error, 'EPERM');

@@ -29,6 +29,7 @@ export interface BrowserSnapshotNode {
   readonly describedBy: readonly string[];
   readonly labelledBy: readonly string[];
   readonly editable: boolean;
+  readonly submitControl?: boolean;
   readonly expanded: boolean | null;
   readonly hasPopup: string | null;
   readonly box: {
@@ -58,6 +59,7 @@ export interface BrowserSnapshot {
 
 interface SnapshotRecord {
   readonly snapshotId: string;
+  readonly scope: string;
   readonly bindingEpoch: number;
   readonly tokens: ReadonlyMap<string, string>;
   readonly refsByToken: ReadonlyMap<string, string>;
@@ -84,12 +86,16 @@ export class BrowserRefSnapshotStore {
     readonly interactive?: boolean;
     readonly maxNodes?: number;
     readonly rootSelector?: string;
+    readonly excludeSelector?: string;
+    readonly controlScope?: boolean;
+    readonly compact?: boolean;
+    readonly submitSelector?: string;
   }): Promise<BrowserSnapshot> {
-    const snapshotId = randomUUID();
+    let snapshotId: string = randomUUID();
     const interactive = options.interactive ?? true;
     const maxNodes = Math.max(1, Math.min(5_000, options.maxNodes ?? 250));
-    const result = await options.page.evaluate(
-      ({ snapshotId: browserSnapshotId, interactive: interactiveOnly, maxNodes: limit, refProperty, rootSelector }) => {
+    const evaluation = options.page.evaluate(
+      ({ snapshotId: browserSnapshotId, interactive: interactiveOnly, maxNodes: limit, refProperty, rootSelector, excludeSelector, controlScope, compact, submitSelector }) => {
         type MutableSnapshotNode = {
           ref: string;
           token: string;
@@ -115,6 +121,7 @@ export class BrowserRefSnapshotStore {
           describedBy: string[];
           labelledBy: string[];
           editable: boolean;
+          submitControl: boolean;
           expanded: boolean | null;
           hasPopup: string | null;
           box: { x: number; y: number; width: number; height: number } | null;
@@ -147,6 +154,34 @@ export class BrowserRefSnapshotStore {
           return 'generic';
         };
 
+        const visibleTextCache = new WeakMap<Element, string>();
+        const visibleText = (element: Element): string => {
+          const cached = visibleTextCache.get(element);
+          if (cached !== undefined) return cached;
+          const style = getComputedStyle(element);
+          if (element.matches('[aria-hidden="true"], [inert], script, style, noscript, template') ||
+              style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return '';
+          const text = [...element.childNodes].map(child => {
+            if (child.nodeType === Node.TEXT_NODE) return child.textContent ?? '';
+            if (!(child instanceof Element)) return '';
+            const content = visibleText(child);
+            return child.tagName === 'BR' || !getComputedStyle(child).display.startsWith('inline')
+              ? `\n${content}\n` : content;
+          }).join('');
+          visibleTextCache.set(element, text);
+          return text;
+        };
+
+        const evidenceText = (element: Element | null, rendered = false): string => {
+          if (element === null) return '';
+          if (controlScope && (element.matches('textarea, [contenteditable="true"], [role="textbox"]') ||
+              element.querySelector('textarea, [contenteditable="true"], [role="textbox"]') !== null ||
+              (excludeSelector !== null && (element.querySelector(excludeSelector) !== null ||
+                (element.closest(excludeSelector) !== null && element.closest('[role="alert"], [role="alertdialog"]') === null))))) return '';
+          if (rendered && controlScope) return visibleText(element);
+          return rendered && element instanceof HTMLElement ? element.innerText : element.textContent ?? '';
+        };
+
         const accessibleName = (element: Element): string => {
           const ariaLabel = element.getAttribute('aria-label');
           if (ariaLabel !== null && ariaLabel.trim() !== '') return normalize(ariaLabel);
@@ -154,7 +189,7 @@ export class BrowserRefSnapshotStore {
           if (labelledBy !== null) {
             const label = labelledBy
               .split(/\s+/)
-              .map((id) => document.getElementById(id)?.textContent ?? '')
+              .map((id) => evidenceText(document.getElementById(id)))
               .join(' ');
             if (label.trim() !== '') return normalize(label);
           }
@@ -162,13 +197,13 @@ export class BrowserRefSnapshotStore {
           if (htmlElement.id !== '') {
             try {
               const label = document.querySelector(`label[for="${CSS.escape(htmlElement.id)}"]`);
-              if (label?.textContent?.trim()) return normalize(label.textContent);
+              if (evidenceText(label).trim()) return normalize(evidenceText(label));
             } catch {
               // Ignore malformed ids and continue through the name fallback chain.
             }
           }
           const wrappingLabel = element.closest('label');
-          if (wrappingLabel?.textContent?.trim()) return normalize(wrappingLabel.textContent);
+          if (evidenceText(wrappingLabel).trim()) return normalize(evidenceText(wrappingLabel));
           const alt = element.getAttribute('alt');
           if (alt !== null && alt.trim() !== '') return normalize(alt);
           const title = element.getAttribute('title');
@@ -183,11 +218,12 @@ export class BrowserRefSnapshotStore {
               ? element.value
               : null;
           if (value !== null && value.trim() !== '') return normalize(value);
-          return normalize(element.textContent);
+          return normalize(evidenceText(element, true));
         };
 
         const isVisible = (element: Element): boolean => {
           if (!(element instanceof HTMLElement || element instanceof SVGElement)) return false;
+          if (element.closest('[aria-hidden="true"], [inert]') !== null) return false;
           const style = getComputedStyle(element);
           if (
             style.display === 'none' ||
@@ -229,32 +265,55 @@ export class BrowserRefSnapshotStore {
           );
         };
 
+        const editable = (element: Element): boolean => !element.matches(':disabled, [aria-disabled="true"]') &&
+          !('readOnly' in element && Boolean(element.readOnly)) &&
+          (element instanceof HTMLTextAreaElement ||
+            (element instanceof HTMLInputElement && !['button', 'submit', 'reset', 'checkbox', 'radio', 'file'].includes(element.type)) ||
+            (element instanceof HTMLElement && element.isContentEditable));
+        const hasComposer = (root: ParentNode): boolean =>
+          [...root.querySelectorAll('textarea, [role="textbox"], [contenteditable]')].some(element =>
+            editable(element) && isVisible(element) && element.closest('[aria-hidden="true"], [inert]') === null &&
+            (excludeSelector === null || element.closest(excludeSelector) === null));
         const nodes: MutableSnapshotNode[] = [];
         let truncated = false;
         let sequence = 0;
 
         const visit = (element: Element, depth: number, ancestorIds: readonly string[]): void => {
+          if (element.closest('[aria-hidden="true"], [inert]') !== null) return;
           if (nodes.length >= limit) {
             truncated = true;
             return;
           }
+          if (excludeSelector !== null && element.matches(excludeSelector) &&
+              !element.matches('[role="alert"], [role="alertdialog"]')) return;
+          if (['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE'].includes(element.tagName) || (compact && element instanceof SVGElement)) return;
           const style = getComputedStyle(element);
           if (style.display === 'none' || Number(style.opacity) === 0) return;
           const visible = isVisible(element);
-          const role = inferredRole(element);
-          const include = visible && (!interactiveOnly || isInteractive(element, role));
+          const keys = new Set((element.getAttribute('aria-keyshortcuts') ?? '').split(/\s+/));
+          const ranges = keys.has('ArrowLeft') && keys.has('ArrowRight')
+            ? [...element.querySelectorAll('[role="slider"][aria-valuemin][aria-valuemax][aria-valuenow]')]
+              .filter(range => range.closest('[aria-keyshortcuts]') === element)
+            : [];
+          // Composite controls expose their range on a hidden thumb, but keyboard
+          // input belongs to the visible receiver. Keep the ref on that receiver.
+          const range = ranges.length === 1 ? ranges[0]! : element;
+          const role = range === element ? inferredRole(element) : 'slider';
+          const actionable = isInteractive(element, role);
+          const ownText = [...element.childNodes].some((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim());
+          const meaningful = actionable || ownText || ['dialog', 'alert', 'status', 'heading', 'menu', 'group', 'radiogroup'].includes(role);
+          const control = actionable || ['dialog', 'alert', 'menu', 'group', 'radiogroup'].includes(role);
+          const include = visible && (!interactiveOnly || actionable || (compact && control)) && (!compact || meaningful) &&
+            (excludeSelector === null || element.querySelector(excludeSelector) === null);
           if (include) {
             sequence += 1;
             const ref = `@e${sequence}`;
-            const token = `${browserSnapshotId}:${sequence}`;
-            try {
-              Object.defineProperty(element, refProperty, {
-                value: token,
-                configurable: true,
-                writable: true,
-              });
-            } catch {
-              (element as Element & Record<string, unknown>)[refProperty] = token;
+            const existingToken = (element as Element & Record<string, unknown>)[refProperty];
+            // Element identity survives independent inspections; snapshot freshness
+            // and current control semantics are checked separately before actions.
+            const token = typeof existingToken === 'string' ? existingToken : `${browserSnapshotId}:${sequence}`;
+            if (token !== existingToken) {
+              Object.defineProperty(element, refProperty, { value: token, configurable: true });
             }
             const rect = element.getBoundingClientRect();
             const input = element as HTMLInputElement;
@@ -269,7 +328,7 @@ export class BrowserRefSnapshotStore {
               const ids = (element.getAttribute(name) ?? '').trim().split(/\s+/).filter(Boolean);
               return {
                 ids,
-                text: ids.map((id) => document.getElementById(id)?.textContent?.trim() || '').join(' ').slice(0, 500),
+                text: ids.map((id) => evidenceText(document.getElementById(id)).trim()).join(' ').slice(0, 500),
               };
             };
             const describedBy = relationship('aria-describedby');
@@ -280,7 +339,7 @@ export class BrowserRefSnapshotStore {
               role,
               name: accessibleName(element),
               tag: element.tagName.toLowerCase(),
-              text: normalize(element.textContent, 500),
+              text: compact && role === 'textbox' ? '' : normalize(evidenceText(element, true), 500),
               depth,
               ancestorIds: [...ancestorIds],
               disabled:
@@ -301,19 +360,19 @@ export class BrowserRefSnapshotStore {
                     : element.getAttribute('aria-selected') === 'true' || element.getAttribute('aria-pressed') === 'true',
               href: element instanceof HTMLAnchorElement ? element.href : null,
               placeholder: element.getAttribute('placeholder'),
-              value,
-              ariaValueText: element.getAttribute('aria-valuetext'),
-              ariaValueNow: element.getAttribute('aria-valuenow'),
-              ariaValueMin: element.getAttribute('aria-valuemin') ?? (input instanceof HTMLInputElement && input.type === 'range' ? input.min || '0' : null),
-              ariaValueMax: element.getAttribute('aria-valuemax') ?? (input instanceof HTMLInputElement && input.type === 'range' ? input.max || '100' : null),
+              value: compact && role === 'textbox' ? null : value,
+              ariaValueText: range.getAttribute('aria-valuetext'),
+              ariaValueNow: range.getAttribute('aria-valuenow'),
+              ariaValueMin: range.getAttribute('aria-valuemin') ?? (input instanceof HTMLInputElement && input.type === 'range' ? input.min || '0' : null),
+              ariaValueMax: range.getAttribute('aria-valuemax') ?? (input instanceof HTMLInputElement && input.type === 'range' ? input.max || '100' : null),
               description: describedBy.text,
               controls: relationship('aria-controls').ids,
               describedBy: describedBy.ids,
               labelledBy: relationship('aria-labelledby').ids,
-              editable:
-                element instanceof HTMLTextAreaElement ||
-                (element instanceof HTMLInputElement && !['button', 'submit', 'reset', 'checkbox', 'radio', 'file'].includes(element.type)) ||
-                (element instanceof HTMLElement && element.isContentEditable),
+              editable: editable(element),
+              submitControl: (element instanceof HTMLButtonElement || element instanceof HTMLInputElement) &&
+                (((element.type === 'submit' || element.type === 'image') && element.form !== null && hasComposer(element.form)) ||
+                  (submitSelector !== null && element.matches(submitSelector) && hasComposer(element.form ?? document))),
               expanded: element.getAttribute('aria-expanded') === null
                 ? null
                 : element.getAttribute('aria-expanded') === 'true',
@@ -327,6 +386,7 @@ export class BrowserRefSnapshotStore {
             });
           }
 
+          if (compact && role === 'textbox') return;
           for (const child of element.children) {
             visit(child, depth + 1, element.id === '' ? ancestorIds : [...ancestorIds, element.id]);
             if (truncated) return;
@@ -340,9 +400,31 @@ export class BrowserRefSnapshotStore {
           }
         };
 
-        const roots = rootSelector === null
+        let roots = rootSelector === null
           ? [document.body ?? document.documentElement]
           : [...document.querySelectorAll(rootSelector)];
+        if (controlScope) {
+          const excluded = (element: Element): boolean => !element.matches('[role="alert"], [role="alertdialog"]') &&
+            excludeSelector !== null && element.closest(excludeSelector) !== null;
+          roots = [...document.querySelectorAll('[role="menu"], [role="listbox"], [role="dialog"], [role="alertdialog"], [role="alert"], [role="status"], [role="radiogroup"]')]
+            .filter(element => !excluded(element));
+          const editors = [...document.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')].filter(element => !excluded(element) && isVisible(element));
+          if (editors.length === 0) roots.push(...document.querySelectorAll('main, [role="main"]'));
+          for (const editor of editors) {
+            let region = editor.closest('form') ?? editor.parentElement ?? editor;
+            while (region.parentElement && !region.querySelector('button, [role="button"], input[type="submit"]')) {
+              if (excluded(region.parentElement)) break;
+              region = region.parentElement;
+            }
+            if (region === document.body || region.matches('main, [role="main"]')) {
+              roots.push(...region.querySelectorAll('button, input, textarea, [role="textbox"], [contenteditable="true"], [role="combobox"]'));
+            } else {
+              roots.push(region);
+            }
+          }
+          roots = [...new Set(roots)].filter(element => !excluded(element));
+          roots = roots.filter(element => !roots.some(parent => parent !== element && parent.contains(element)));
+        }
         for (const root of roots) {
           if (root !== null) visit(root, 0, []);
           if (truncated) break;
@@ -360,8 +442,21 @@ export class BrowserRefSnapshotStore {
         maxNodes,
         refProperty: REF_PROPERTY,
         rootSelector: options.rootSelector ?? null,
+        excludeSelector: options.excludeSelector ?? null,
+        controlScope: options.controlScope ?? false,
+        compact: options.compact ?? false,
+        submitSelector: options.submitSelector ?? null,
       },
     );
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      evaluation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new BrowserSnapshotError('browser.snapshot-timeout',
+          'The provider page did not respond to inspection. The request was not resent; inspect provider health or explicitly refresh this exact request.')), 5_000);
+      }),
+    ]).finally(() => clearTimeout(timer));
 
     const tokens = new Map<string, string>();
     const refsByToken = new Map<string, string>();
@@ -373,8 +468,21 @@ export class BrowserRefSnapshotStore {
       snapshotNodes.set(node.ref, value);
       return value;
     });
+    const scope = JSON.stringify([result.url, result.title, interactive, maxNodes,
+      options.rootSelector ?? null, options.excludeSelector ?? null,
+      options.controlScope ?? false, options.compact ?? false, options.submitSelector ?? null, result.truncated]);
+    const previous = this.#latestByPage.get(options.pageKey);
+    if (previous?.bindingEpoch === options.bindingEpoch && previous.scope === scope &&
+        previous.nodes.size === snapshotNodes.size && nodes.every(node => {
+          const prior = previous.nodes.get(node.ref);
+          return prior !== undefined && previous.tokens.get(node.ref) === tokens.get(node.ref) &&
+            sameSnapshotSemantics(prior, node);
+        })) {
+      snapshotId = previous.snapshotId;
+    }
     this.#latestByPage.set(options.pageKey, {
       snapshotId,
+      scope,
       bindingEpoch: options.bindingEpoch,
       tokens,
       refsByToken,
@@ -517,6 +625,11 @@ export function matchesPreparationTarget(
     (target.placeholder === null || node.placeholder === target.placeholder);
 }
 
+export function isPreparationSummary(node: BrowserSnapshotNode, insideMenu: boolean): boolean {
+  return node.role === 'menuitem' && node.name.trim() !== '' && node.text.trim() !== '' &&
+    node.text.trim() !== node.name.trim() && insideMenu;
+}
+
 export function hasPreparationSelectionEvidence(
   nodes: readonly BrowserSnapshotNode[],
   target: PreparationTarget,
@@ -526,8 +639,11 @@ export function hasPreparationSelectionEvidence(
     return nodes.some((node) => matchesPreparationTarget(node, target) &&
       Number(node.ariaValueNow ?? node.value) === target.selectedValue);
   }
+  if (target.role === 'menuitem') return nodes.some((node) => matchesPreparationTarget(node, target) &&
+    isPreparationSummary(node, nodes.some((parent) =>
+      parent.role === 'menu' && parent.id !== '' && node.ancestorIds.includes(parent.id))));
   if (target.role === 'button') return nodes.some((node) => matchesPreparationTarget(node, target) &&
-    node.expanded === false && node.hasPopup !== null);
+    node.hasPopup !== null);
   if (nodes.some((node) => matchesPreparationTarget(node, target) &&
       (node.selected === true || node.checked === true))) return true;
   const choice = normalize(target.name || target.text);

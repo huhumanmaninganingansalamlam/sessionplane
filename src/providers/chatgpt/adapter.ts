@@ -1,3 +1,5 @@
+import { PageMutationMutex } from '../../browser/page-mutex.ts';
+import { discoverFileCards, downloadFileCard } from './file-cards.ts';
 import { createHash } from 'node:crypto';
 import type { Page } from 'playwright-core';
 import path from 'node:path';
@@ -12,9 +14,6 @@ import {
   type ProviderArtifactCandidate,
   type ProviderArtifactDownload,
   type ProviderArtifactRequest,
-  type ProviderCodeArtifactCandidate,
-  type ProviderCodeArtifactDownload,
-  type ProviderCodeArtifactRequest,
   type ProviderObservationEvidence,
   type ProviderObservationRequest,
   type ProviderObservationSource,
@@ -29,20 +28,22 @@ import {
 } from '../provider-adapter.ts';
 import { observeChatGptActivity } from './activity-observer.ts';
 import {
-  discoverChatGptCodeArtifacts,
-  downloadChatGptCodeArtifact,
-} from './code-artifacts.ts';
-import {
   ChatGptBackendRecovery,
+  type ChatGptBackendRecoveryOptions,
   type BackendJsonClient,
 } from './backend-recovery.ts';
 import { observeChatGptDialog } from './dialog-observer.ts';
 import { observeChatGptDom, waitForChatGptDomMutation } from './dom-observer.ts';
 import { ChatGptNetworkObserver } from './network-observer.ts';
+import { readChatGptMessages } from './message-dom.ts';
+import { restoreLatestPosition } from './latest-position-recovery.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 import { ChatGptSubmission, recoverChatGptAcknowledgement } from './submission.ts';
 
 export interface ChatGptAdapterOptions {
+  readonly onBackendRateLimit?: ChatGptBackendRecoveryOptions['onRateLimit'];
+  readonly pageMutex?: PageMutationMutex;
+  readonly canRestoreLatestPosition?: (request: ProviderObservationRequest) => boolean;
   readonly browserOwner: BrowserOwner;
   readonly pageRegistry: PageRegistry;
   readonly loginUrl: string;
@@ -53,6 +54,8 @@ export interface ChatGptAdapterOptions {
 
 export class ChatGptAdapter implements ProviderAdapter {
   readonly provider = 'chatgpt';
+  readonly #pageMutex: PageMutationMutex;
+  readonly #canRestoreLatestPosition: (request: ProviderObservationRequest) => boolean;
   readonly #browserOwner: BrowserOwner;
   readonly #pageRegistry: PageRegistry;
   readonly #loginUrl: string;
@@ -60,11 +63,14 @@ export class ChatGptAdapter implements ProviderAdapter {
   readonly #backendRecovery: ChatGptBackendRecovery;
 
   constructor(options: ChatGptAdapterOptions) {
+    this.#pageMutex = options.pageMutex ?? new PageMutationMutex();
+    this.#canRestoreLatestPosition = options.canRestoreLatestPosition ?? (() => true);
     this.#browserOwner = options.browserOwner;
     this.#pageRegistry = options.pageRegistry;
     this.#loginUrl = options.loginUrl;
     this.#acknowledgementTimeoutMs = options.acknowledgementTimeoutMs;
     this.#backendRecovery = new ChatGptBackendRecovery({
+      ...(options.onBackendRateLimit === undefined ? {} : { onRateLimit: options.onBackendRateLimit }),
       requestTimeoutMs: options.backendRequestTimeoutMs ?? 15_000,
       tokenCacheTtlMs: options.tokenCacheTtlMs ?? 60_000,
     });
@@ -173,10 +179,12 @@ export class ChatGptAdapter implements ProviderAdapter {
       const binding = this.#pageRegistry.refreshPage(pageKey);
       if (isWebRedirect(binding, request.session.sessionId, request.generation, conversationId)) {
         const page = this.#pageRegistry.pageForObservation(pageKey);
-        const acknowledgement = await recoverChatGptAcknowledgement(
+        const acknowledgement = await this.#recoverAcknowledgement(
           page,
           request.prompt,
           binding.conversationId,
+          request.selection,
+          request.attempts,
         );
         if (acknowledgement === null ||
           this.#pageRegistry.refreshPage(pageKey).bindingEpoch !== binding.bindingEpoch) {
@@ -195,10 +203,26 @@ export class ChatGptAdapter implements ProviderAdapter {
         generation: request.generation,
         conversationId,
       });
-      return await recoverChatGptAcknowledgement(page, request.prompt, conversationId);
+      const acknowledgement = await this.#recoverAcknowledgement(page, request.prompt, conversationId, request.selection, request.attempts);
+      return this.#pageRegistry.refreshPage(pageKey).bindingEpoch === binding.bindingEpoch ? acknowledgement : null;
     } catch {
       return null;
     }
+  }
+
+  async #recoverAcknowledgement(page: Page, prompt: string, conversationId: string,
+    selection?: { readonly messageId: string; readonly evidenceHash: string },
+    attempts?: ProviderAcknowledgementRecoveryRequest['attempts']) {
+    if (selection !== undefined) return await recoverChatGptAcknowledgement(page, prompt, conversationId, selection);
+    // Durable dispatch evidence identifies the exact user even when only an
+    // older duplicate is mounted. Canonical identity/parent/hash stay mandatory.
+    const dom = attempts?.length ? null : await recoverChatGptAcknowledgement(page, prompt, conversationId);
+    // An optimistic user node and cleared composer prove no server acceptance.
+    // Automatic UNKNOWN recovery needs canonical evidence for that exact user.
+    const server = await this.#backendRecovery.recoverAcknowledgement(
+      conversationId, prompt, backendClient(page), new URL(page.url()).origin, attempts);
+    if (dom !== null && dom.submittedUserMessageId !== server?.submittedUserMessageId) return null;
+    return server === null ? null : { ...server, evidence: 'backend-exact-user' as const };
   }
 
   async openObservation(request: ProviderObservationRequest): Promise<ProviderObservationSource> {
@@ -232,6 +256,8 @@ export class ChatGptAdapter implements ProviderAdapter {
             conversationId,
           });
       return new ChatGptObservationSource({
+        pageMutex: this.#pageMutex,
+        canRestoreLatestPosition: this.#canRestoreLatestPosition,
         pageKey,
         page,
         pageRegistry: this.#pageRegistry,
@@ -244,6 +270,77 @@ export class ChatGptAdapter implements ProviderAdapter {
           cause: error,
         });
       }
+      throw error;
+    }
+  }
+
+  async openDeletion(request: ProviderRecoveryRequest) {
+    const conversationId = request.session.conversationId;
+    if (conversationId === null || conversationId.startsWith('WEB:')) {
+      throw new ProviderSubmissionError('session.conversation-mismatch', 'Deletion requires a durable ChatGPT conversation');
+    }
+    const { page } = await this.#browserOwner.createPage();
+    const origin = new URL(this.#loginUrl).origin;
+    try {
+      const auth = await page.context().request.get(origin + '/api/auth/session', { timeout: 15_000 });
+      let token: unknown;
+      try {
+        if (!auth.ok()) {
+          throw new ProviderSubmissionError(
+            auth.status() === 401 ? 'provider.authentication-required' : 'provider.unavailable',
+            'Deletion authentication request failed',
+            { details: deletionHttpDetails('authentication', auth) },
+          );
+        }
+        const body: unknown = await auth.json();
+        token = body !== null && typeof body === 'object' && 'accessToken' in body ? body.accessToken : null;
+      } finally { await auth.dispose(); }
+      if (typeof token !== 'string' || token.length < 8) {
+        throw new ProviderSubmissionError('provider.authentication-required', 'Deletion requires the dedicated authenticated profile');
+      }
+      const accessToken = token;
+      const endpoint = origin + '/backend-api/conversation/' + encodeURIComponent(conversationId);
+      const existing = await page.context().request.get(endpoint, {
+        headers: { authorization: 'Bearer ' + accessToken }, timeout: 15_000,
+      });
+      let alreadyDeleted = false;
+      try {
+        if (!existing.ok()) {
+          const body: unknown = await existing.json().catch(() => null);
+          const detail = body !== null && typeof body === 'object' && 'detail' in body ? body.detail : null;
+          alreadyDeleted = existing.status() === 404 && detail !== null && typeof detail === 'object' &&
+            'code' in detail && detail.code === 'conversation_deleted' &&
+            'conversation_id' in detail && detail.conversation_id === conversationId;
+          if (!alreadyDeleted) throw new ProviderSubmissionError(
+            existing.status() === 401 ? 'provider.authentication-required' : 'provider.unavailable',
+            'Exact conversation could not be verified for deletion',
+            { details: deletionHttpDetails('conversation-verification', existing) },
+          );
+        }
+      } finally { await existing.dispose(); }
+      return {
+        alreadyDeleted,
+        deleteOnce: async (): Promise<boolean> => {
+          if (alreadyDeleted) return true;
+          const response = await page.context().request.patch(
+            origin + '/backend-api/conversation/' + encodeURIComponent(conversationId), {
+              headers: { authorization: 'Bearer ' + accessToken },
+              data: { is_visible: false }, timeout: 15_000,
+            });
+          try {
+            if (response.status() >= 500 || response.status() === 408) {
+              throw new Error('Conversation deletion outcome is unknown');
+            }
+            if (!response.ok()) return false;
+            const body: unknown = await response.json();
+            if (body !== null && typeof body === 'object' && 'success' in body && body.success === true) return true;
+            throw new Error('Conversation deletion acknowledgement is unverified');
+          } finally { await response.dispose(); }
+        },
+        close: async () => { await page.close(); },
+      };
+    } catch (error) {
+      await page.close().catch(() => {});
       throw error;
     }
   }
@@ -270,52 +367,41 @@ export class ChatGptAdapter implements ProviderAdapter {
       );
     }
 
-    const client: BackendJsonClient = {
-      async get(url, options) {
-        const response = await page.context().request.get(url, {
-          failOnStatusCode: false,
-          ...(options.headers === undefined ? {} : { headers: { ...options.headers } }),
-          timeout: options.timeoutMs,
-        });
-        try {
-          return {
-            status: response.status(),
-            headers: response.headers(),
-            body: await response.json().catch(() => null),
-          };
-        } finally {
-          await response.dispose();
-        }
-      },
-    };
-    return await this.#backendRecovery.recover(request, client, new URL(page.url()).origin);
+    return await this.#backendRecovery.recover(request, backendClient(page), new URL(page.url()).origin);
   }
 
   async discoverArtifacts(
     request: ProviderArtifactRequest,
   ): Promise<readonly ProviderArtifactCandidate[]> {
     const page = this.#requireExactArtifactPage(request);
-    const rows = await page.locator(CHATGPT_SELECTORS.artifactLinks.join(', ')).evaluateAll((elements) =>
-      elements.map((element) => {
-        const source =
-          element instanceof HTMLAnchorElement
-            ? element.href
-            : element instanceof HTMLImageElement
-              ? element.src
-              : '';
-        const explicitName =
-          element instanceof HTMLAnchorElement
-            ? element.download
-            : element instanceof HTMLImageElement
-              ? element.alt
-              : '';
-        return {
-          source,
-          name: explicitName || element.textContent?.trim() || '',
-          mediaType: element instanceof HTMLImageElement ? 'image/*' : null,
-        };
-      }),
-    );
+    const deadline = Date.now() + 10_000;
+    let restoreAttempted = false;
+    let message;
+    do {
+      this.#requireExactArtifactPage(request);
+      message = (await readChatGptMessages(page, true)).find((message) =>
+        message.role === 'assistant' && message.messageId !== null && message.messageId === request.session.responseMessageId);
+      if (message !== undefined || Date.now() >= deadline) break;
+      if (!restoreAttempted && request.session.terminal && request.session.responseMessageId !== null) {
+        restoreAttempted = true;
+        await this.#pageMutex.runExclusive(request.session.pageKey!, async () => {
+          this.#requireExactArtifactPage(request);
+          if ((request.bindingGeneration ?? request.generation) !== request.generation ||
+              !this.#canRestoreLatestPosition(request)) return;
+          await page.evaluate(restoreLatestPosition, {
+            origin: new URL(page.url()).origin, conversationId: request.session.conversationId!,
+            anchorIds: [request.session.responseMessageId!], expiresAt: Date.now() + 5_000,
+          });
+        });
+      }
+      await waitForChatGptDomMutation(page, Math.min(500, deadline - Date.now()));
+    } while (Date.now() < deadline);
+    if (message === undefined) throw new ProviderSubmissionError('provider.artifacts-unavailable', 'Exact answer is not present for file discovery');
+    const cards = await this.#pageMutex.runExclusive(request.session.pageKey!, async () => {
+      this.#requireExactArtifactPage(request);
+      return await discoverFileCards(page, request, () => { this.#requireExactArtifactPage(request); });
+    });
+    const rows = [...(message.artifacts ?? []), ...cards];
     const seen = new Set<string>();
     const candidates: ProviderArtifactCandidate[] = [];
     for (const row of rows) {
@@ -341,6 +427,12 @@ export class ChatGptAdapter implements ProviderAdapter {
     candidate: ProviderArtifactCandidate,
   ): Promise<ProviderArtifactDownload> {
     const page = this.#requireExactArtifactPage(request);
+    if (candidate.sourceUrl.startsWith('sessionplane-file-card:')) {
+      return await this.#pageMutex.runExclusive(request.session.pageKey!, async () => {
+        this.#requireExactArtifactPage(request);
+        return await downloadFileCard(page, request, candidate, () => { this.#requireExactArtifactPage(request); });
+      });
+    }
     const result = await page.evaluate(async (sourceUrl) => {
       const response = await fetch(sourceUrl, { credentials: 'include' }).catch(() => null);
       if (response === null || !response.ok) {
@@ -367,26 +459,6 @@ export class ChatGptAdapter implements ProviderAdapter {
     };
   }
 
-  async discoverCodeArtifacts(
-    request: ProviderCodeArtifactRequest,
-  ): Promise<readonly ProviderCodeArtifactCandidate[]> {
-    const page = this.#requireExactArtifactPage(request);
-    return await discoverChatGptCodeArtifacts(page, request.conversationId);
-  }
-
-  async downloadCodeArtifact(
-    request: ProviderCodeArtifactRequest,
-    candidate: ProviderCodeArtifactCandidate,
-  ): Promise<ProviderCodeArtifactDownload> {
-    const page = this.#requireExactArtifactPage(request);
-    return await downloadChatGptCodeArtifact(
-      page,
-      request.conversationId,
-      candidate,
-      request.maxBytes,
-    );
-  }
-
   async openStop(request: ProviderStopRequest): Promise<ProviderStopOperation> {
     const pageKey = request.session.pageKey;
     const conversationId = request.session.conversationId;
@@ -411,7 +483,7 @@ export class ChatGptAdapter implements ProviderAdapter {
   }
 
   #requireExactArtifactPage(
-    request: ProviderArtifactRequest | ProviderCodeArtifactRequest,
+    request: ProviderArtifactRequest,
   ): ReturnType<PageRegistry['requireOwnedPage']> {
     const pageKey = request.session.pageKey;
     const conversationId = request.session.conversationId;
@@ -422,18 +494,16 @@ export class ChatGptAdapter implements ProviderAdapter {
         { promptSubmitted: request.session.promptSubmitted },
       );
     }
-    if ('conversationId' in request && request.conversationId !== conversationId) {
-      throw new ProviderSubmissionError(
-        'session.conversation-mismatch',
-        `Requested conversation ${request.conversationId} does not match session ${conversationId}`,
-        { promptSubmitted: request.session.promptSubmitted },
-      );
+    try {
+      return this.#pageRegistry.requireOwnedPage(pageKey, {
+        sessionId: request.session.sessionId,
+        generation: request.bindingGeneration ?? request.generation,
+        conversationId,
+      });
+    } catch (error) {
+      if (error instanceof PageRegistryError) throw new ProviderSubmissionError(error.errorCode, error.message, { cause: error });
+      throw error;
     }
-    return this.#pageRegistry.requireOwnedPage(pageKey, {
-      sessionId: request.session.sessionId,
-      generation: request.generation,
-      conversationId,
-    });
   }
 }
 
@@ -549,7 +619,7 @@ class ChatGptStopOperation implements ProviderStopOperation {
     return false;
   }
 
-  async stopOnce(): Promise<void> {
+  async stopOnce(): Promise<'stopped' | 'unknown'> {
     if (this.#selector === null) {
       throw new ProviderSubmissionError(
         'internal.invariant-violation',
@@ -568,7 +638,8 @@ class ChatGptStopOperation implements ProviderStopOperation {
         !(await control.isDisabled().catch(() => true))
       ) {
         await control.click({ timeout: 5_000 });
-        return;
+        // A successful browser click is not a provider cancellation acknowledgement.
+        return 'unknown';
       }
     }
     throw new ProviderSubmissionError(
@@ -588,6 +659,8 @@ class ChatGptStopOperation implements ProviderStopOperation {
 }
 
 interface ChatGptObservationSourceOptions {
+  readonly pageMutex: PageMutationMutex;
+  readonly canRestoreLatestPosition: (request: ProviderObservationRequest) => boolean;
   readonly pageKey: string;
   readonly page: ReturnType<PageRegistry['requireOwnedPage']>;
   readonly pageRegistry: PageRegistry;
@@ -603,10 +676,15 @@ class ChatGptObservationSource implements ProviderObservationSource {
   #conversationId: string;
   readonly #network: ChatGptNetworkObserver;
   #lastNetworkRevision = 0;
+  readonly #pageMutex: PageMutationMutex;
+  readonly #canRestoreLatestPosition: (request: ProviderObservationRequest) => boolean;
+  #latestPositionAttempted = false;
   #closed = false;
 
   constructor(options: ChatGptObservationSourceOptions) {
     this.pageKey = options.pageKey;
+    this.#pageMutex = options.pageMutex;
+    this.#canRestoreLatestPosition = options.canRestoreLatestPosition;
     this.#page = options.page;
     this.#pageRegistry = options.pageRegistry;
     this.#request = options.request;
@@ -651,13 +729,44 @@ class ChatGptObservationSource implements ProviderObservationSource {
         conversationId: this.#conversationId,
       });
       const before = this.#pageRegistry.getBinding(this.pageKey);
-      const [dom, dialog] = await Promise.all([
+      let [dom, dialog] = await Promise.all([
         observeChatGptDom(this.#page, {
           submittedUserMessageId: this.#request.session.submittedUserMessageId,
           submittedUserTurnId: this.#request.session.submittedUserTurnId,
         }),
         observeChatGptDialog(this.#page),
       ]);
+      if (!dom.submittedUserFound && dom.conversationSurfaceAvailable && !dom.actionableAlert &&
+          dialog.kind === null && !this.#latestPositionAttempted) {
+        const restored = await this.#pageMutex.runExclusive(this.pageKey, async () => {
+          if (this.#closed || !this.#request.session.promptSubmitted ||
+              this.#request.session.terminal || !this.#canRestoreLatestPosition(this.#request)) return false;
+          const binding = this.#pageRegistry.refreshPage(this.pageKey);
+          this.#pageRegistry.requireOwnedPage(this.pageKey, {
+            sessionId: this.#request.session.sessionId, generation: this.#request.generation,
+            conversationId: this.#conversationId,
+          });
+          if (binding.bindingEpoch !== before.bindingEpoch) return false;
+          try {
+            const clicked = await this.#page.evaluate(restoreLatestPosition, {
+              origin: new URL(binding.url).origin, conversationId: this.#conversationId,
+              anchorIds: [this.#request.session.submittedUserMessageId,
+                this.#request.session.submittedUserTurnId].filter((id): id is string => id !== null),
+              expiresAt: Date.now() + 5_000,
+            });
+            this.#latestPositionAttempted = clicked;
+            return clicked;
+          } catch (error) {
+            // An ambiguous dispatch never repeats within this observation source.
+            this.#latestPositionAttempted = true;
+            throw error;
+          }
+        });
+        if (restored) dom = await observeChatGptDom(this.#page, {
+          submittedUserMessageId: this.#request.session.submittedUserMessageId,
+          submittedUserTurnId: this.#request.session.submittedUserTurnId,
+        });
+      }
       const activity = await observeChatGptActivity(this.#page, dom);
       const after = this.#pageRegistry.refreshPage(this.pageKey);
       if (
@@ -696,8 +805,11 @@ class ChatGptObservationSource implements ProviderObservationSource {
         activity: activity.strength,
         dialogKind: dialog.kind,
         networkActivity: network.activity,
-        observationTransport: 'fresh',
-        reason: dialog.reason ?? activity.reason,
+        observationTransport: !dom.conversationSurfaceAvailable || dom.actionableAlert ? 'unavailable' : 'fresh',
+        ...(dom.actionableAlert ? { errorCode: 'provider.actionable-alert' }
+          : !dom.conversationSurfaceAvailable ? { errorCode: 'provider.conversation-unavailable' } : {}),
+        reason: dialog.reason ?? (dom.actionableAlert ? 'provider-actionable-alert'
+          : !dom.conversationSurfaceAvailable ? 'conversation-surface-unavailable' : activity.reason),
       };
     } catch (error) {
       const binding = this.#pageRegistry.getBinding(this.pageKey);
@@ -761,4 +873,33 @@ class ChatGptObservationSource implements ProviderObservationSource {
       reason,
     };
   }
+}
+
+function backendClient(page: Page): BackendJsonClient {
+  return {
+      async get(url, options) {
+        const response = await page.context().request.get(url, {
+          failOnStatusCode: false,
+          ...(options.headers === undefined ? {} : { headers: { ...options.headers } }),
+          timeout: options.timeoutMs,
+        });
+        try {
+          return {
+            status: response.status(),
+            headers: response.headers(),
+            body: await response.json().catch(() => null),
+          };
+        } finally {
+          await response.dispose();
+        }
+      },
+  };
+}
+
+// Only allowlisted transport metadata: never include auth headers or provider bodies.
+function deletionHttpDetails(stage: string, response: { status(): number; headers(): Record<string, string> }) {
+  const value = response.headers()['retry-after'];
+  const seconds = value !== undefined && /^\d+$/.test(value) ? Number(value) : null;
+  return { stage, httpStatus: response.status(), retryAfterMs:
+    seconds !== null && Number.isSafeInteger(seconds * 1000) ? seconds * 1000 : null };
 }

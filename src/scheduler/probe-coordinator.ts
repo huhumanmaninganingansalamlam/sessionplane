@@ -1,3 +1,4 @@
+import { KeyedMutex } from './keyed-mutex.ts';
 import type { ProviderRecoveryResult } from '../providers/provider-adapter.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { ProbeBudgetRepository } from '../storage/probe-budget-repository.ts';
@@ -24,7 +25,8 @@ export class ProbeCoordinator {
   readonly #now: () => Date;
   readonly #random: () => number;
   readonly #metrics: RuntimeMetrics | null;
-  readonly #tails = new Map<string, Promise<void>>();
+  readonly #mutex = new KeyedMutex();
+  readonly #waiting = new Map<string, Set<symbol>>();
 
   constructor(options: ProbeCoordinatorOptions) {
     if (options.min429BackoffMs > options.max429BackoffMs) {
@@ -44,50 +46,54 @@ export class ProbeCoordinator {
   run(
     scope: string,
     operation: () => Promise<ProviderRecoveryResult>,
+    caller?: symbol,
+    minimumIntervalMs = 0,
   ): Promise<ProviderRecoveryResult> {
     const normalizedScope = scope.trim();
     if (normalizedScope.length === 0) {
       return Promise.reject(new Error('Probe scope must not be empty'));
     }
-    const previous = this.#tails.get(normalizedScope) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.catch(() => undefined).then(() => gate);
-    this.#tails.set(normalizedScope, tail);
+    return this.#mutex.runExclusive(normalizedScope, () => this.#run(normalizedScope, operation, caller, minimumIntervalMs));
+  }
 
-    return previous
-      .catch(() => undefined)
-      .then(() => this.#run(normalizedScope, operation))
-      .finally(() => {
-        release();
-        if (this.#tails.get(normalizedScope) === tail) {
-          this.#tails.delete(normalizedScope);
-        }
-      });
+  withdraw(scope: string, caller: symbol): void {
+    const waiting = this.#waiting.get(scope);
+    waiting?.delete(caller);
+    if (waiting?.size === 0) this.#waiting.delete(scope);
   }
 
   #run(
     scope: string,
     operation: () => Promise<ProviderRecoveryResult>,
+    caller?: symbol,
+    minimumIntervalMs = 0,
   ): Promise<ProviderRecoveryResult> {
     const now = this.#now();
     const budget = this.#budgets.get(scope);
-    const earliest = latestTimestamp(budget?.nextAllowedAt ?? null, budget?.blockedUntil ?? null);
-    if (earliest !== null && Date.parse(earliest) > now.getTime()) {
+    const earliest = latestTimestamp(latestTimestamp(budget?.nextAllowedAt ?? null, budget?.blockedUntil ?? null),
+      scope.startsWith('chatgpt:conversation-detail:') ? this.#budgets.get('chatgpt:default')?.blockedUntil ?? null : null);
+    if (caller !== undefined) {
+      const waiting = this.#waiting.get(scope) ?? new Set<symbol>();
+      waiting.add(caller);
+      this.#waiting.set(scope, waiting);
+    }
+    const coolingDown = earliest !== null && Date.parse(earliest) > now.getTime();
+    const waitingForTurn = caller !== undefined && this.#waiting.get(scope)?.values().next().value !== caller;
+    if (coolingDown || waitingForTurn) {
+      const nextCheckAt = coolingDown ? earliest! : new Date(now.getTime() + Math.max(1, this.#successIntervalMs)).toISOString();
       this.#metrics?.increment('backend_probe_deferred_total');
       return Promise.resolve({
         kind: 'deferred',
         observationTransport: 'deferred',
         responseMessageId: null,
         answerText: null,
-        reason: 'probe-paced',
-        retryAfterMs: Math.max(0, Date.parse(earliest) - now.getTime()),
-        nextCheckAt: earliest,
+        reason: waitingForTurn && !coolingDown ? 'probe-queued' : 'probe-paced',
+        retryAfterMs: Math.max(0, Date.parse(nextCheckAt) - now.getTime()),
+        nextCheckAt,
       });
     }
-    return this.#execute(scope, budget?.backoffLevel ?? 0, budget?.consecutiveFailures ?? 0, operation);
+    return this.#execute(scope, budget?.backoffLevel ?? 0, budget?.consecutiveFailures ?? 0, operation, minimumIntervalMs)
+      .finally(() => { if (caller !== undefined) this.withdraw(scope, caller); });
   }
 
   async #execute(
@@ -95,7 +101,13 @@ export class ProbeCoordinator {
     backoffLevel: number,
     consecutiveFailures: number,
     operation: () => Promise<ProviderRecoveryResult>,
+    minimumIntervalMs = 0,
   ): Promise<ProviderRecoveryResult> {
+    // Reserve UI load-recovery spacing before its side effect, including across an owner restart.
+    if (minimumIntervalMs > 0) {
+      const now = this.#now();
+      this.#save(scope, new Date(now.getTime() + minimumIntervalMs).toISOString(), null, backoffLevel, consecutiveFailures, now);
+    }
     this.#metrics?.increment('backend_probe_total');
     let result: ProviderRecoveryResult;
     try {
@@ -120,7 +132,7 @@ export class ProbeCoordinator {
         result.retryAfterMs ?? 0,
         Math.min(this.#max429BackoffMs, this.#min429BackoffMs * 2 ** backoffLevel),
       );
-      const backoffMs = this.#jitter(rawBackoff);
+      const backoffMs = Math.max(result.retryAfterMs ?? 0, this.#jitter(rawBackoff));
       const nextCheckAt = new Date(now.getTime() + backoffMs).toISOString();
       this.#save(scope, nextCheckAt, nextCheckAt, backoffLevel + 1, consecutiveFailures + 1, now);
       return { ...result, retryAfterMs: backoffMs, nextCheckAt };
@@ -145,7 +157,7 @@ export class ProbeCoordinator {
       this.#metrics?.increment('backend_probe_deferred_total');
     }
 
-    const nextAllowedAt = new Date(now.getTime() + this.#successIntervalMs).toISOString();
+    const nextAllowedAt = new Date(now.getTime() + Math.max(this.#successIntervalMs, minimumIntervalMs)).toISOString();
     this.#save(scope, nextAllowedAt, null, 0, 0, now);
     return { ...result, nextCheckAt: result.nextCheckAt ?? nextAllowedAt };
   }
@@ -159,15 +171,21 @@ export class ProbeCoordinator {
     now: Date,
   ): void {
     this.#database.transaction(() => {
+      const existing = this.#budgets.get(scope);
       this.#budgets.save({
         scope,
-        nextAllowedAt,
-        blockedUntil,
+        nextAllowedAt: latestTimestamp(nextAllowedAt, existing?.nextAllowedAt ?? null),
+        blockedUntil: latestTimestamp(blockedUntil, existing?.blockedUntil ?? null),
         backoffLevel,
         consecutiveFailures,
         updatedAt: now.toISOString(),
       });
     });
+  }
+
+  defer(scope: string, until: string): void {
+    const prior = this.#budgets.get(scope);
+    this.#save(scope, until, until, prior?.backoffLevel ?? 0, prior?.consecutiveFailures ?? 0, this.#now());
   }
 
   #jitter(valueMs: number): number {

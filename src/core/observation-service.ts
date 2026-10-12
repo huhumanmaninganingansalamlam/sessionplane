@@ -1,3 +1,5 @@
+import type { CoreMaintenance } from './maintenance.ts';
+import { conversationLimitScope } from '../storage/conversation-load-recovery-repository.ts';
 import type { CurrentGenerationUpdate } from '../domain/generation.ts';
 import { isTerminalSessionState, type SessionSnapshot } from '../domain/session.ts';
 import type { Logger } from '../logging.ts';
@@ -21,6 +23,8 @@ interface ObserverRuntime {
 }
 
 export interface ObservationServiceOptions {
+  readonly maintenance?: CoreMaintenance;
+  readonly onActionableAlert?: (snapshot: SessionSnapshot, signal: AbortSignal) => Promise<void>;
   readonly database: SessionPlaneDatabase;
   readonly scheduler: ActorScheduler;
   readonly adapters: ProviderAdapterRegistry;
@@ -28,6 +32,7 @@ export interface ObservationServiceOptions {
   readonly quietSweepMs: number;
   readonly quietWindowMs: number;
   readonly backendRecoveryAfterMs: number;
+  readonly observationTimeoutMs?: number;
   readonly probeCoordinator: ProbeCoordinator;
   readonly logger?: Logger;
   readonly now?: () => Date;
@@ -42,14 +47,19 @@ export class ObservationService {
   readonly #quietSweepMs: number;
   readonly #quietWindowMs: number;
   readonly #backendRecoveryAfterMs: number;
+  readonly #observationTimeoutMs: number;
   readonly #probeCoordinator: ProbeCoordinator;
   readonly #logger: Logger | null;
   readonly #now: () => Date;
   readonly #metrics: RuntimeMetrics | null;
   readonly #runtimes = new Map<string, ObserverRuntime>();
   #closed = false;
+  readonly #onActionableAlert: ObservationServiceOptions['onActionableAlert'];
 
+  readonly maintenance: CoreMaintenance | undefined;
   constructor(options: ObservationServiceOptions) {
+    this.maintenance = options.maintenance;
+    this.#onActionableAlert = options.onActionableAlert;
     this.#scheduler = options.scheduler;
     this.#adapters = options.adapters;
     this.#sessions = new SessionRepository(options.database.raw);
@@ -57,6 +67,7 @@ export class ObservationService {
     this.#quietSweepMs = options.quietSweepMs;
     this.#quietWindowMs = options.quietWindowMs;
     this.#backendRecoveryAfterMs = options.backendRecoveryAfterMs;
+    this.#observationTimeoutMs = options.observationTimeoutMs ?? 15_000;
     this.#probeCoordinator = options.probeCoordinator;
     this.#logger = options.logger ?? null;
     this.#now = options.now ?? (() => new Date());
@@ -126,105 +137,116 @@ export class ObservationService {
   }
 
   async #run(initial: SessionSnapshot, signal: AbortSignal): Promise<void> {
+    const probeCaller = Symbol();
+    const withdrawProbe = () => this.#probeCoordinator.withdraw(initial.provider === 'chatgpt' && initial.conversationId
+      ? conversationLimitScope(initial.conversationId) : `${initial.provider}:default`, probeCaller);
     const tracker = new ExactFinalTracker(this.#quietWindowMs);
     const observationStartedAtMs = this.#now().getTime();
     let lastExactProgressAtMs = this.#now().getTime();
     const deadlineAt = this.#sessions.getSession(initial.sessionId)?.deadlineAt;
     const deadlineMs = deadlineAt === null || deadlineAt === undefined ? Infinity : Date.parse(deadlineAt);
     let source: ProviderObservationSource | null = null;
+    let pendingObservation: Promise<ProviderObservationEvidence> | null = null;
     try {
       while (!signal.aborted) {
-        const current = this.#sessions.getSnapshot(initial.sessionId);
-        if (
-          current === null ||
-          current.generation !== initial.generation ||
-          isTerminalSessionState(current.sessionState)
-        ) {
-          return;
-        }
+        await this.maintenance?.wait(signal);
+        if (signal.aborted) return;
+        const release = this.maintenance?.enter();
+        if (this.maintenance && !release) continue;
+        try {
+          const current = this.#sessions.getSnapshot(initial.sessionId);
+          if (
+            current === null ||
+            current.generation !== initial.generation ||
+            isTerminalSessionState(current.sessionState)
+          ) {
+            return;
+          }
 
-        if (source === null) {
+          if (source === null) {
+            try {
+              const adapter = this.#adapters.require(current.provider);
+              source = await adapter.openObservation({
+                session: current,
+                generation: current.generation,
+              });
+            } catch {
+              withdrawProbe();
+              await this.#recordUnavailable(current, 'dom-observer-open-failed');
+              await waitForDelay(this.#quietSweepMs, signal);
+              continue;
+            }
+          }
+
+          let evidence: ProviderObservationEvidence;
           try {
-            const adapter = this.#adapters.require(current.provider);
-            source = await adapter.openObservation({
-              session: current,
-              generation: current.generation,
-            });
+            if (pendingObservation === null) {
+              const operation = source.observe();
+              pendingObservation = (this.maintenance?.track(operation) ?? operation).finally(() => { pendingObservation = null; });
+            }
+            const timeout = new AbortController();
+            const abort = () => timeout.abort();
+            signal.addEventListener('abort', abort, { once: true });
+            try {
+              evidence = await Promise.race([
+                pendingObservation,
+                waitForDelay(this.#observationTimeoutMs, timeout.signal).then(() => ({
+                  provider: current.provider, pageKey: source!.pageKey, bindingEpoch: -1,
+                  observedAt: this.#now().toISOString(), conversationId: current.conversationId,
+                  submittedUserFound: false, laterUserFound: false, candidate: null,
+                  activity: 'unknown' as const, dialogKind: null, networkActivity: false,
+                  observationTransport: 'unavailable' as const,
+                  reason: 'dom-observation-timeout', errorCode: 'provider.observation-unavailable',
+                })),
+              ]);
+            } finally {
+              timeout.abort();
+              signal.removeEventListener('abort', abort);
+            }
           } catch {
-            await this.#recordUnavailable(current, 'dom-observer-open-failed');
+            withdrawProbe();
+            source.close();
+            source = null;
+            await this.#recordUnavailable(current, 'dom-observation-failed');
             await waitForDelay(this.#quietSweepMs, signal);
             continue;
           }
-        }
-
-        let evidence: ProviderObservationEvidence;
-        try {
-          evidence = await source.observe();
-        } catch {
-          source.close();
-          source = null;
-          await this.#recordUnavailable(current, 'dom-observation-failed');
-          await waitForDelay(this.#quietSweepMs, signal);
-          continue;
-        }
-        if (signal.aborted) {
-          return;
-        }
-
-        const nowMs = this.#now().getTime();
-        const observed = tracker.evaluate(evidence, nowMs);
-        const deadlineExpired = nowMs >= deadlineMs && !observed.freshExactProgress;
-        const decision: ExactFinalDecision =
-          deadlineExpired && (observed.kind === 'progress' || observed.kind === 'pending')
-            ? { ...observed, kind: 'unverified', reason: 'session-deadline-unverified' }
-            : observed;
-        const verifiedRedirect = isVerifiedChatGptRedirect(current, evidence);
-        const preserveBackendDeferral =
-          current.observationTransport === 'deferred' &&
-          current.nextCheckAt !== null &&
-          Date.parse(current.nextCheckAt) > nowMs &&
-          !decision.freshExactProgress &&
-          !verifiedRedirect &&
-          decision.kind !== 'complete' &&
-          decision.kind !== 'blocked' &&
-          decision.kind !== 'interstitial';
-        const persisted = preserveBackendDeferral
-          ? current
-          : await this.#persistDecision(current, evidence, decision);
-        if (persisted.terminal || decision.kind === 'complete') {
-          if (decision.kind === 'complete') {
-            this.#metrics?.observe(
-              'final_detection_latency_ms',
-              Math.max(0, this.#now().getTime() - observationStartedAtMs),
-            );
-          }
-          return;
-        }
-        if (decision.freshExactProgress) {
-          lastExactProgressAtMs = this.#now().getTime();
-        }
-
-        const backendRecoveryPaced =
-          persisted.nextCheckAt !== null &&
-          Number.isFinite(Date.parse(persisted.nextCheckAt)) &&
-          Date.parse(persisted.nextCheckAt) > this.#now().getTime();
-        if (
-          decision.kind !== 'blocked' &&
-          decision.kind !== 'interstitial' &&
-          !backendRecoveryPaced &&
-          this.#now().getTime() - lastExactProgressAtMs >= this.#backendRecoveryAfterMs
-        ) {
-          const recoveredResult = await this.#recover(persisted);
-          const recovery: ProviderRecoveryResult =
-            this.#now().getTime() >= deadlineMs && recoveredResult.kind === 'pending'
-              ? { ...recoveredResult, kind: 'unverified', reason: 'session-deadline-unverified' }
-              : recoveredResult;
           if (signal.aborted) {
             return;
           }
-          const recovered = await this.#persistRecovery(persisted, recovery);
-          if (recovered.terminal || recovery.kind === 'complete') {
-            if (recovery.kind === 'complete') {
+
+          const nowMs = this.#now().getTime();
+          const observed = tracker.evaluate(evidence, nowMs);
+          const deadlineExpired = nowMs >= deadlineMs && !observed.freshExactProgress;
+          const decision: ExactFinalDecision =
+            deadlineExpired && (observed.kind === 'progress' || observed.kind === 'pending')
+              ? { ...observed, kind: 'unverified', reason: 'session-deadline-unverified' }
+              : observed;
+          const verifiedRedirect = isVerifiedChatGptRedirect(current, evidence);
+          if (decision.freshExactProgress || decision.kind === 'blocked' || decision.kind === 'interstitial') withdrawProbe();
+          const preserveBackendDeferral =
+            current.observationTransport === 'deferred' &&
+            current.nextCheckAt !== null &&
+            Date.parse(current.nextCheckAt) > nowMs &&
+            evidence.errorCode === undefined &&
+            current.errorCode !== 'provider.conversation-unavailable' &&
+            current.errorCode !== 'provider.observation-unavailable' &&
+            current.errorCode !== 'provider.actionable-alert' &&
+            !decision.freshExactProgress &&
+            !verifiedRedirect &&
+            decision.kind !== 'complete' &&
+            decision.kind !== 'blocked' &&
+            decision.kind !== 'interstitial';
+          const persisted = preserveBackendDeferral
+            ? current
+            : await this.#persistDecision(current, evidence, decision);
+          if (persisted.errorCode === 'provider.actionable-alert' && this.#onActionableAlert) {
+            await this.#onActionableAlert(persisted, signal);
+            const latest = this.#sessions.getSnapshot(initial.sessionId);
+            if (signal.aborted || latest?.terminal || latest?.generation !== initial.generation) return;
+          }
+          if (persisted.terminal || decision.kind === 'complete') {
+            if (decision.kind === 'complete') {
               this.#metrics?.observe(
                 'final_detection_latency_ms',
                 Math.max(0, this.#now().getTime() - observationStartedAtMs),
@@ -232,14 +254,50 @@ export class ObservationService {
             }
             return;
           }
-        }
+          if (decision.freshExactProgress) {
+            lastExactProgressAtMs = this.#now().getTime();
+          }
 
-        const sweepMs = decision.freshExactProgress
-          ? this.#activeSweepMs
-          : Math.min(this.#quietSweepMs, this.#quietWindowMs);
-        await waitForWakeOrAbort(source, sweepMs, signal);
+          const backendRecoveryPaced =
+            persisted.nextCheckAt !== null &&
+            Number.isFinite(Date.parse(persisted.nextCheckAt)) &&
+            Date.parse(persisted.nextCheckAt) > this.#now().getTime();
+          if (
+            decision.kind !== 'blocked' &&
+            decision.kind !== 'interstitial' &&
+            !backendRecoveryPaced &&
+            this.#now().getTime() - lastExactProgressAtMs >= this.#backendRecoveryAfterMs
+          ) {
+            const recoveredResult = await this.#recover(persisted, probeCaller);
+            const recovery: ProviderRecoveryResult =
+              this.#now().getTime() >= deadlineMs && recoveredResult.kind === 'pending'
+                ? { ...recoveredResult, kind: 'unverified', reason: 'session-deadline-unverified' }
+                : recoveredResult;
+            if (signal.aborted) {
+              return;
+            }
+            const recovered = await this.#persistRecovery(persisted, recovery);
+            if (recovered.terminal || recovery.kind === 'complete') {
+              if (recovery.kind === 'complete') {
+                this.#metrics?.observe(
+                  'final_detection_latency_ms',
+                  Math.max(0, this.#now().getTime() - observationStartedAtMs),
+                );
+              }
+              return;
+            }
+          }
+
+          const sweepMs = decision.freshExactProgress
+            ? this.#activeSweepMs
+            : Math.min(this.#quietSweepMs, this.#quietWindowMs);
+          release?.();
+          if (pendingObservation !== null) await waitForDelay(sweepMs, signal);
+          else await waitForWakeOrAbort(source, sweepMs, signal);
+        } finally { release?.(); }
       }
     } finally {
+      withdrawProbe();
       source?.close();
     }
   }
@@ -271,8 +329,8 @@ export class ObservationService {
       sessionState: 'observing',
       providerState: 'unknown',
       observationTransport: 'unavailable',
-      reason,
-      errorCode: null,
+      reason: snapshot.errorCode === 'provider.actionable-alert' ? snapshot.reason : reason,
+      errorCode: snapshot.errorCode === 'provider.actionable-alert' ? snapshot.errorCode : 'provider.observation-unavailable',
     };
     if (!hasMeaningfulChange(snapshot, update)) {
       return;
@@ -285,10 +343,12 @@ export class ObservationService {
     );
   }
 
-  async #recover(snapshot: SessionSnapshot): Promise<ProviderRecoveryResult> {
+  async #recover(snapshot: SessionSnapshot, caller: symbol): Promise<ProviderRecoveryResult> {
     const adapter = this.#adapters.require(snapshot.provider);
-    return await this.#probeCoordinator.run(`${snapshot.provider}:default`, async () =>
+    return await this.#probeCoordinator.run(snapshot.provider === 'chatgpt' && snapshot.conversationId
+      ? conversationLimitScope(snapshot.conversationId) : `${snapshot.provider}:default`, async () =>
       await adapter.recover({ session: snapshot, generation: snapshot.generation }),
+      caller,
     );
   }
 
@@ -296,15 +356,24 @@ export class ObservationService {
     previous: SessionSnapshot,
     recovery: ProviderRecoveryResult,
   ): Promise<SessionSnapshot> {
-    const update = updateForRecovery(recovery, this.#now().toISOString());
-    if (!hasMeaningfulChange(previous, update)) {
-      return previous;
-    }
+    // A backend retry/cooldown cannot erase an independently observed page
+    // failure. Fresh DOM evidence or an exact recovered final clears it.
+    const update = {
+      ...updateForRecovery(recovery, this.#now().toISOString()),
+      ...((previous.errorCode === 'provider.conversation-unavailable' ||
+          previous.errorCode === 'provider.observation-unavailable' ||
+          previous.errorCode === 'provider.actionable-alert') && recovery.kind !== 'complete'
+        ? { errorCode: previous.errorCode, reason: previous.reason } : {}),
+    };
+    // Retain the paced recovery result even when the visible page error is unchanged.
     return await this.#scheduler.updateGeneration(
       previous.sessionId,
       previous.generation,
       update,
       eventTypeForRecovery(recovery),
+      recovery.reason,
+      { conversationId: previous.conversationId, pageKey: previous.pageKey,
+        submittedUserMessageId: previous.submittedUserMessageId, submittedUserTurnId: previous.submittedUserTurnId },
     );
   }
 }
@@ -375,7 +444,7 @@ function updateForDecision(
         providerState: 'unknown',
         observationTransport: evidence.observationTransport,
         reason: decision.reason,
-        errorCode: null,
+        errorCode: evidence.errorCode ?? null,
       };
   }
 }

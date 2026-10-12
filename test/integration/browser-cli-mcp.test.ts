@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
 
 import { callRpc, RpcClientError } from '../../src/cli/client.ts';
 import { runCli } from '../../src/cli/main.ts';
@@ -223,39 +223,76 @@ test('production core omits generic browser RPC methods', async () => {
   }
 });
 
-test('MCP preparation decisions inspect, reveal, select, and resume the original generation once', async () => {
+test('MCP team decisions continue the same generation across restart, UI drift and attachment changes', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-session-ui-'));
+  const attachmentPath = path.join(root, 'review.md');
+  const acceptedAttachment = 'Review the originally accepted content.';
+  writeFileSync(attachmentPath, acceptedAttachment);
   const fixture = `<!doctype html><html><body>
-    <form id="composer"><button id="models-button" type="button" aria-label="Submit settings" aria-haspopup="menu">Submit settings</button>
+    <form id="composer"><button id="models-button" type="button" aria-label="Submit settings" aria-haspopup="menu" aria-expanded="false">Submit settings</button>
       <button id="effort-button" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="effort-options">Effort</button>
-      <button data-testid="send-button" type="submit" hidden>전송</button><textarea aria-label="Prompt"></textarea></form>
-    <div role="menu" id="models" hidden><div role="menuitemradio" aria-checked="false">Pro</div></div>
+      <button data-testid="send-button" type="submit" hidden>전송</button><textarea id="prompt-textarea" aria-label="Prompt">Provider-restored unrelated draft</textarea>
+      <input type="file"><span id="uploaded-name"></span></form>
+    <div role="menu" id="models" hidden><div role="menuitem">Model family</div></div>
     <div role="menu" id="effort-options" hidden>
-      <input id="effort" aria-label="Reasoning effort" type="range" min="1" max="4" value="1">
+      <div aria-hidden="true" inert><div role="menuitem">Inactive submenu marker</div></div>
+      <span style="opacity:0">Invisible access hint</span>
+      <div id="effort" role="menuitem" aria-label="Reasoning effort" aria-keyshortcuts="ArrowLeft ArrowRight" tabindex="0">Power<span role="slider" aria-hidden="true" aria-valuemin="1" aria-valuemax="4" aria-valuenow="1"></span></div>
       <span id="effort-help">High reasoning effort</span>
     </div>
-    <div id="messages"></div>
+    <div role="menu" id="selection-summary" hidden><div role="menuitem" aria-label="Model selection">5.6 Pro</div></div>
+    <a download="old.txt" href="data:text/plain,OLD">Old unrelated file</a><div id="messages"></div>
     <script>
       window.submitCount = 0;
+      document.querySelector('[type=file]').onchange = (event) => {
+        document.querySelector('#uploaded-name').textContent = event.target.files[0].name;
+        document.querySelector('#selection-summary [role=menuitem]').textContent = 'Updated configuration';
+      };
       document.querySelector('textarea').addEventListener('input', () => { document.querySelector('[type=submit]').hidden = false; });
-      document.querySelector('#models-button').onclick = (event) => { event.currentTarget.setAttribute('aria-controls', 'models'); document.querySelector('#models').hidden = false; };
+      document.querySelector('#models-button').onclick = (event) => {
+        event.currentTarget.setAttribute('aria-controls', 'models');
+        if (event.currentTarget.getAttribute('aria-expanded') === 'true') {
+          event.currentTarget.setAttribute('aria-expanded', 'false');
+          document.querySelector('#models').hidden = true;
+          return;
+        }
+        event.currentTarget.setAttribute('aria-expanded', 'true');
+        setTimeout(() => { document.querySelector('#models').hidden = false; }, 350);
+        const busyUntil = performance.now() + 5_500;
+        while (performance.now() < busyUntil) { /* Model menu responds after click acknowledgement times out. */ }
+      };
       document.querySelector('#effort-button').onclick = (event) => { event.currentTarget.setAttribute('aria-expanded', 'true'); document.querySelector('#effort-options').hidden = false; };
-      document.querySelector('[role=menuitemradio]').onclick = (event) => {
-        event.currentTarget.setAttribute('aria-checked', 'true');
-        document.querySelector('#models-button').textContent = 'Pro';
-        document.querySelector('#models').hidden = true;
+      document.querySelector('[role=menuitem]').onclick = () => {
+        document.querySelector('#models').innerHTML = '<div role="menuitemradio" aria-checked="false">GPT-5.6 Sol</div>';
+      };
+      document.querySelector('#models').onclick = (event) => {
+        if (event.target.getAttribute('role') !== 'menuitemradio') return;
+        document.querySelector('#models-button').textContent = 'Configuration';
+        document.querySelector('#models').innerHTML = '<div role="menuitem" aria-label="Intermediate configuration">Family configured</div>';
       };
       document.querySelector('#effort').addEventListener('keydown', (event) => {
+        const thumb = event.currentTarget.querySelector('[role=slider]');
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          thumb.setAttribute('aria-valuenow', String(Math.max(1, Math.min(4, Number(thumb.getAttribute('aria-valuenow')) + (event.key === 'ArrowRight' ? 1 : -1)))));
+          return;
+        }
         if (event.key !== 'Escape') return;
         document.querySelector('#effort-options').hidden = true;
         const button = document.querySelector('#effort-button');
         button.setAttribute('aria-expanded', 'false');
         button.removeAttribute('aria-controls');
-        button.textContent = event.currentTarget.value === '4' ? 'High' : 'Standard';
+        button.textContent = thumb.getAttribute('aria-valuenow') === '4' ? 'High' : 'Standard';
+        document.querySelector('#models-button').textContent = '5.6 Pro';
+        document.querySelector('#selection-summary').hidden = false;
       });
+      document.querySelector('#selection-summary').onclick = () => {
+        document.querySelector('#selection-summary [role=menuitem]').textContent = 'Unintended selection';
+      };
       document.querySelector('#composer').onsubmit = (event) => {
         event.preventDefault();
         window.submitCount += 1;
+        void fetch('/backend-api/conversation', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ messages: [{ id: 'fixture-user-message', author: { role: 'user' } }] }) });
         history.pushState({}, '', '/c/conversation-123456');
         const user = document.createElement('div');
         user.setAttribute('data-message-author-role', 'user');
@@ -263,26 +300,29 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
         user.setAttribute('data-turn-id', 'fixture-user-turn');
         user.textContent = document.querySelector('textarea').value;
         document.querySelector('#messages').appendChild(user);
+        document.querySelector('textarea').value = '';
         const assistant = document.createElement('div');
         assistant.setAttribute('data-message-author-role', 'assistant');
         assistant.setAttribute('data-message-id', 'fixture-assistant-message');
         assistant.setAttribute('data-turn-id', 'fixture-assistant-turn');
         assistant.setAttribute('data-message-status', 'completed');
-        assistant.innerHTML = '<div data-testid="message-content">Fixture exact final answer</div>';
+        assistant.innerHTML = '<div data-testid="message-content">Fixture exact final answer</div><a download="result.txt" href="data:text/plain,EXACT_FILE">File</a>';
         document.querySelector('#messages').appendChild(assistant);
       };
     </script>
   </body></html>`;
   const base = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
-  const config = { ...base, chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 250 };
+  const config = { ...base, uploadsEnabled: true, chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 250 };
   const start = async () => await startCore({ config, browserHeadless: true, logger: silentLogger() });
   let service: CoreService = await start();
-  installPreparationFixtureRoute(service, fixture);
+  const firstOwner = service.browserOwner!;
+  const closeFirst = firstOwner.close.bind(firstOwner);
+  installPreparationFixtureRoute(service, fixture, t);
   const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({
     name,
-    arguments: { clientId: 'mcp-ui-test', ...args },
+    arguments: args,
     socketPath: config.socketPath,
-    timeoutMs: 10_000,
+    timeoutMs: name === 'sessionplane_send' ? 45_000 : 10_000,
     maxLineBytes: config.rpcMaxLineBytes,
   });
   try {
@@ -292,190 +332,201 @@ test('MCP preparation decisions inspect, reveal, select, and resume the original
       roleKey: team.primaryRoleKey,
       provider: 'chatgpt',
     });
-    let handoffDetails: Record<string, unknown> | undefined;
-    await assert.rejects(callRpc({
-      socketPath: config.socketPath,
-      method: 'session.send',
-      params: {
-        clientId: 'mcp-ui-test', requestId: 'assisted-send', sessionId: session.sessionId,
-        prompt: 'test', model: 'Pro', effort: 'High', sessionDeadlineSec: 30,
-      },
-      timeoutMs: 30_000,
-      maxLineBytes: config.rpcMaxLineBytes,
-    }), (error: unknown) => {
-      if (!(error instanceof RpcClientError)) return false;
-      const data = error.data as { errorCode?: string; details?: Record<string, unknown> };
-      handoffDetails = data.details;
-      return data.errorCode === 'provider.preparation-required';
-    });
-
-    const pending = service.teamDirectory.getSession(session.sessionId);
-    assert.equal(handoffDetails?.requestId, 'assisted-send');
-    assert.equal(handoffDetails?.sessionId, session.sessionId);
-    assert.equal(handoffDetails?.generation, pending.generation);
-    assert.equal((handoffDetails?.snapshot as { promptSubmitted?: boolean } | undefined)?.promptSubmitted, false);
-    assert.equal(pending.promptSubmitted, false);
-    assert.equal(pending.submissionState, 'prepared');
-
-    // A restarted core must discard prior choices and make the caller inspect the reopened page.
+    const initialView = await invoke('sessionplane_team_get', { teamId: team.teamId });
+    const send = { teamId: team.teamId, roleRef: (initialView.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef,
+      requestId: 'assisted-send', prompt: 'test', model: 'Pro', effort: 'High', files: [attachmentPath], sessionDeadlineSec: 60 };
+    const pending = await invoke('sessionplane_send', send);
+    assert.equal(pending.isError, false, JSON.stringify(pending));
+    assert.equal(pending.structuredContent.status, 'needs_decision');
+    assert.equal(pending.structuredContent.promptSubmitted, false);
+    const identity = { teamId: team.teamId, requestRef: pending.structuredContent.requestRef };
+    // This is a core restart with the exact unsent page retained, not browser loss.
+    // Match the isolated adoption fixture in preparation-target-recovery.test.ts.
+    const oldRegistry = service.pageRegistry;
+    const originalTarget = oldRegistry.getBinding(service.teamDirectory.getSession(session.sessionId).pageKey!).targetId;
+    const browserPid = firstOwner.status.browserPid;
+    firstOwner.close = async () => oldRegistry.detach();
     await service.close();
+    const lockPath = path.join(firstOwner.status.profileDir, '.sessionplane-profile.lock');
+    const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+    writeFileSync(lockPath, JSON.stringify({ ...lock, pid: 99_999_999 }));
     service = await start();
-    installPreparationFixtureRoute(service, fixture);
-    const prematureResume = await invoke('sessionplane_preparation_resume', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    assert.equal(prematureResume.structuredContent.errorCode, 'provider.preparation-required');
+    assert.equal(service.browserOwner!.status.browserPid, browserPid);
+    assert.equal(service.pageRegistry.getBinding(service.teamDirectory.getSession(session.sessionId).pageKey!).targetId, originalTarget);
+    installPreparationFixtureRoute(service, fixture, t);
+    writeFileSync(attachmentPath, 'Caller edited the original after acceptance.');
 
-    await assert.rejects(callRpc({
-      socketPath: config.socketPath,
-      method: 'session.send',
-      params: {
-        clientId: 'mcp-ui-test', requestId: 'assisted-send', sessionId: session.sessionId,
-        prompt: 'test', model: 'Pro', effort: 'High', sessionDeadlineSec: 30,
-      },
-      timeoutMs: 30_000,
-      maxLineBytes: config.rpcMaxLineBytes,
-    }), (error: unknown) => error instanceof RpcClientError &&
-      (error.data as { errorCode?: string }).errorCode === 'provider.preparation-required');
-    const competingClient = await invoke('sessionplane_preparation_inspect', {
-      clientId: 'other-client', requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    assert.equal(competingClient.structuredContent.errorCode, 'session.generation-superseded');
-    const wrong = await invoke('sessionplane_preparation_inspect', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation + 1,
-    });
-    assert.equal(wrong.structuredContent.errorCode, 'session.generation-superseded');
-
-    const initial = await invoke('sessionplane_preparation_inspect', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    assert.equal(initial.isError, false);
-    const initialNodes = initial.structuredContent.nodes as Array<{ ref: string; role: string; name: string }>;
-    const opener = initialNodes.find((node) => node.role === 'button' && node.name === 'Submit settings');
-    assert.notEqual(opener, undefined);
-    assert.equal(initialNodes.some((node) => node.role === 'menuitemradio'), false);
-    const page = service.pageRegistry.pageForObservation(initial.structuredContent.pageKey as string);
-    await page.evaluate(() => { document.querySelector('#models-button')!.textContent = 'Changed'; });
-    const changedControl = await invoke('sessionplane_preparation_decide', {
-      requestId: 'assisted-send', decisionId: 'changed-opener', decision: 'reveal', purpose: 'model',
-      sessionId: session.sessionId, generation: pending.generation,
-      snapshotId: initial.structuredContent.snapshotId, ref: opener?.ref,
-    });
-    assert.equal(changedControl.structuredContent.errorCode, 'browser.snapshot-stale');
-    assert.equal(await page.locator('#models').isVisible(), false);
-    await page.evaluate(() => { document.querySelector('#models-button')!.textContent = 'Submit settings'; });
-    const currentInitial = await invoke('sessionplane_preparation_inspect', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    const currentOpener = (currentInitial.structuredContent.nodes as Array<{ ref: string; role: string; name: string }>)
-      .find((node) => node.role === 'button' && node.name === 'Submit settings');
-    assert.notEqual(currentOpener, undefined);
-    const revealed = await invoke('sessionplane_preparation_decide', {
-      requestId: 'assisted-send', decisionId: 'reveal-model-menu', decision: 'reveal', purpose: 'model',
-      sessionId: session.sessionId, generation: pending.generation,
-      snapshotId: currentInitial.structuredContent.snapshotId, ref: currentOpener?.ref,
-    });
-    assert.equal(revealed.isError, false, JSON.stringify(revealed.structuredContent));
-    const stale = await invoke('sessionplane_preparation_decide', {
-      requestId: 'assisted-send', decisionId: 'stale-choice', decision: 'choose', purpose: 'model',
-      sessionId: session.sessionId, generation: pending.generation,
-      snapshotId: currentInitial.structuredContent.snapshotId, ref: currentOpener?.ref,
-    });
-    assert.equal(stale.structuredContent.errorCode, 'browser.snapshot-stale', JSON.stringify(stale.structuredContent));
-    const observed = await invoke('sessionplane_preparation_inspect', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    const inspectedPage = service.pageRegistry.pageForObservation(observed.structuredContent.pageKey as string);
-    const observedModel = (observed.structuredContent.nodes as Array<{ ref: string; role: string; name: string }>)
-      .find((node) => node.role === 'menuitemradio' && node.name === 'Pro');
-    assert.notEqual(observedModel, undefined);
-    await inspectedPage.evaluate(() => { document.querySelector('[role=menuitemradio]')!.textContent = 'Changed'; });
-    const changedChoice = await invoke('sessionplane_preparation_decide', {
-      requestId: 'assisted-send', decisionId: 'changed-model-label', decision: 'choose', purpose: 'model',
-      sessionId: session.sessionId, generation: pending.generation,
-      snapshotId: observed.structuredContent.snapshotId, ref: observedModel?.ref,
-    });
-    assert.equal(changedChoice.structuredContent.errorCode, 'browser.snapshot-stale');
-    assert.equal(await inspectedPage.locator('[role=menuitemradio]').getAttribute('aria-checked'), 'false');
-    await inspectedPage.evaluate(() => { document.querySelector('[role=menuitemradio]')!.textContent = 'Pro'; });
-
-    const decideFromFreshInspection = async (
-      decisionId: string,
-      purpose: string,
-      role: string,
-      name: string,
-      decision: 'choose' | 'reveal' = 'choose',
-      value?: number,
-    ) => {
-      const fresh = await invoke('sessionplane_preparation_inspect', {
-        requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-      });
-      const target = (fresh.structuredContent.nodes as Array<{ ref: string; role: string; name: string }>)
-        .find((node) => node.role === role && node.name === name);
-      assert.notEqual(target, undefined, `${purpose} control missing from fresh inspection`);
-      return await invoke('sessionplane_preparation_decide', {
-        requestId: 'assisted-send', decisionId, decision, purpose,
-        sessionId: session.sessionId, generation: pending.generation,
-        snapshotId: fresh.structuredContent.snapshotId, ref: target?.ref,
-        ...(value === undefined ? {} : { value }),
-      });
+    const inspect = async () => {
+      const result = await invoke('sessionplane_team_get', identity);
+      assert.equal(result.isError, false, JSON.stringify(result));
+      const request = result.structuredContent.request as { pageKey: string; evidence: { snapshotId: string; pageKey: string; nodes: Array<{ ref: string; role: string; name: string; actions: { choose: string[]; reveal: string[] } }> } };
+      assert.ok(request.evidence, JSON.stringify(result.structuredContent));
+      assert.equal(request.pageKey, request.evidence.pageKey);
+      return request.evidence;
     };
-    assert.equal((await decideFromFreshInspection('choose-model', 'model', 'menuitemradio', 'Pro')).isError, false);
-    assert.equal((await decideFromFreshInspection('reveal-effort', 'effort', 'button', 'Effort', 'reveal')).isError, false);
-    assert.equal((await decideFromFreshInspection('choose-effort', 'effort', 'slider', 'Reasoning effort', 'choose', 4)).isError, false);
-    assert.equal((await decideFromFreshInspection('choose-composer', 'composer', 'textbox', 'Prompt')).isError, false);
-    const filled = await invoke('sessionplane_preparation_resume', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
+    const ready = await inspect();
+    const evidencePage = service.pageRegistry.pageForObservation(ready.pageKey);
+    t.mock.method(evidencePage.context().request, 'get', async () => ({
+      status: () => 404, headers: () => ({}), json: async () => null, dispose: async () => {},
+    }));
+    await evidencePage.evaluate(() => {
+      const clutter = document.createElement('div');
+      clutter.innerHTML = '<div style="width:1px;height:1px"><svg width="1" height="1"><path d="M0 0L1 1" /></svg></div>'.repeat(1200);
+      document.body.prepend(clutter);
     });
-    assert.equal(filled.structuredContent.errorCode, 'provider.preparation-required');
-    assert.equal(service.teamDirectory.getSession(session.sessionId).promptSubmitted, false);
-    assert.notEqual(await inspectedPage.locator('textarea').inputValue(), '');
-    assert.equal((await decideFromFreshInspection('choose-send', 'submit', 'button', '전송')).isError, false);
-    const resumed = await invoke('sessionplane_preparation_resume', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    assert.equal(resumed.isError, false);
-    const completedAttempt = service.teamDirectory.getSession(session.sessionId);
-    assert.equal(completedAttempt.generation, pending.generation);
-    assert.equal(completedAttempt.promptSubmitted, true);
-    assert.equal(completedAttempt.submissionState, 'submitted');
-    const submittedPage = service.pageRegistry.pageForObservation(completedAttempt.pageKey!);
-    assert.equal(await submittedPage.evaluate(() => (window as Window & { submitCount: number }).submitCount), 1);
-    const replayResume = await invoke('sessionplane_preparation_resume', {
-      requestId: 'assisted-send', sessionId: session.sessionId, generation: pending.generation,
-    });
-    assert.deepEqual(replayResume.structuredContent, resumed.structuredContent);
-    let final: { readonly terminal: boolean; readonly latestEventSequence: number; readonly answerText: string | null; readonly responseMessageId: string | null } | null = null;
-    let cursor = 0;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const waited = await invoke('sessionplane_wait', {
-        sessionId: session.sessionId, generation: pending.generation, afterEventSequence: cursor, waitMs: 500,
+    const initial = await inspect();
+    assert.ok(Buffer.byteLength(JSON.stringify(initial)) < 64 * 1024, 'Semantic evidence must retain controls without decorative DOM expansion');
+    assert.ok(initial.nodes.some((node) => node.actions.choose.includes('composer')));
+    const opener = initial.nodes.find((n) => n.role === 'button' && n.name === 'Submit settings')!;
+    const page = service.pageRegistry.pageForObservation(initial.pageKey);
+    await page.locator('#models-button').evaluate((node) => { node.textContent = 'Changed'; });
+    const stale = await invoke('sessionplane_decide', { ...identity, requestId: 'stale', decision: 'reveal', purpose: 'model', snapshotId: initial.snapshotId, ref: opener.ref });
+    assert.equal(stale.structuredContent.errorCode, 'browser.snapshot-stale');
+    assert.equal(await page.locator('#models').isVisible(), false);
+    await page.locator('#models-button').evaluate((node) => { node.textContent = 'Submit settings'; });
+    await page.locator('textarea').evaluate(element => {
+      element.setAttribute('data-reject-input', 'true');
+      element.addEventListener('input', () => {
+        if (element.hasAttribute('data-reject-input')) element.value = '';
       });
-      final = waited.structuredContent as typeof final;
-      cursor = Math.max(cursor, final.latestEventSequence);
-      if (final.terminal) break;
+    });
+    const rejectedInput = await inspect();
+    const rejectedComposer = rejectedInput.nodes.find(node => node.role === 'textbox')!;
+    const stillPreparing = await invokeMcpTool({ name: 'sessionplane_decide',
+      arguments: { ...identity, requestId: 'composer-not-retained', decision: 'choose', purpose: 'composer',
+        snapshotId: rejectedInput.snapshotId, ref: rejectedComposer.ref },
+      socketPath: config.socketPath, timeoutMs: 20_000, maxLineBytes: config.rpcMaxLineBytes });
+    assert.equal(stillPreparing.isError, false, JSON.stringify(stillPreparing));
+    assert.equal(stillPreparing.structuredContent.status, 'needs_decision');
+    assert.equal(stillPreparing.structuredContent.requestRef, identity.requestRef);
+    assert.equal(stillPreparing.structuredContent.promptSubmitted, false);
+    await page.locator('textarea').evaluate(element => element.removeAttribute('data-reject-input'));
+    let last: Record<string, unknown> = {};
+    for (const [purpose, role, name, decision, value] of [
+      ['composer', 'textbox', 'Prompt', 'choose'],
+      ['model', 'button', 'Submit settings', 'choose'],
+      ['model', 'button', 'Submit settings', 'reveal'],
+      ['model', 'menuitem', 'Model family', 'reveal'],
+      ['model', 'menuitemradio', 'GPT-5.6 Sol', 'reveal'],
+      ['effort', 'button', 'Effort', 'reveal'],
+      ['effort', 'slider', 'Reasoning effort', 'reveal', 4],
+      ['effort', 'button', 'High', 'choose'],
+      ['submit', 'button', '전송', 'choose'],
+      ['model', 'menuitem', 'Model selection', 'choose'],
+    ] as const) {
+      if (purpose === 'effort' && role === 'button' && decision === 'choose') {
+        await page.locator('#effort-button').evaluate((node) => node.setAttribute('aria-expanded', 'true'));
+      }
+      const evidence = await inspect();
+      assert.ok(evidence.nodes.every(node => !/Inactive submenu marker|Invisible access hint/.test(node.text)));
+      const target = evidence.nodes.find((n) => n.role === role && n.name === name);
+      assert.ok(target, 'Expected semantic control in fresh evidence');
+      assert.ok(target.actions[decision].includes(purpose));
+      const args = { ...identity, requestId: purpose + decision + role, decision, purpose,
+        snapshotId: evidence.snapshotId, ref: target.ref, ...(value === undefined ? {} : { value }) };
+      if (purpose === 'submit') {
+        await page.locator('#effort-button').evaluate(node => { node.textContent = 'High (updated)'; });
+      }
+      const result = await invoke('sessionplane_decide', args);
+      assert.equal(result.isError, false, JSON.stringify(result));
+      if (decision === 'reveal') {
+        assert.equal(result.structuredContent.promptSubmitted, false);
+        assert.equal(result.structuredContent.choices.model, undefined);
+        assert.equal(result.structuredContent.choices.effort, undefined);
+        if (name === 'Submit settings') {
+          for (const direction of ['close', 'reopen']) {
+            const current = await inspect();
+            const toggle = current.nodes.find(node => node.name === name)!;
+            const navigated = await invoke('sessionplane_decide', { ...identity,
+              requestId: 'navigate-' + direction, decision: 'reveal', purpose: 'model',
+              snapshotId: current.snapshotId, ref: toggle.ref });
+            assert.equal(navigated.isError, false, JSON.stringify(navigated));
+            assert.equal(await page.locator('#models').isVisible(), direction === 'reopen');
+            assert.equal(navigated.structuredContent.promptSubmitted, false);
+            assert.equal(navigated.structuredContent.choices.model, undefined);
+          }
+        }
+      }
+      if (purpose === 'submit') {
+        assert.equal(result.structuredContent.status, 'needs_decision');
+        assert.equal(result.structuredContent.promptSubmitted, false);
+      }
+      if (purpose === 'composer') assert.equal(await page.locator('textarea').inputValue(), send.prompt);
+      last = args;
     }
-    assert.equal(final?.terminal, true);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).promptSubmitted, false);
+    const finalEvidence = await inspect();
+    const finalConfiguration = finalEvidence.nodes.find(node => node.role === 'menuitem' && node.name === 'Model selection')!;
+    last = { ...identity, requestId: 'confirm-after-upload', decision: 'choose', purpose: 'model',
+      snapshotId: finalEvidence.snapshotId, ref: finalConfiguration.ref };
+    const finalDecision = await invoke('sessionplane_decide', last);
+    assert.equal(finalDecision.isError, false, JSON.stringify(finalDecision));
+    const submitted = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(submitted.generation, pending.structuredContent.generation);
+    assert.equal(submitted.promptSubmitted, true);
+    assert.equal(await page.locator('input[type=file]').evaluate(async (el) => await (el as HTMLInputElement).files![0]!.text()), acceptedAttachment);
+    const replayedDecision = await invoke('sessionplane_decide', last);
+    assert.equal(replayedDecision.isError, false, JSON.stringify(replayedDecision));
+    let final: { terminal: boolean; answerText: string } | undefined;
+    for (let i = 0; i < 20; i++) {
+      const waited = await invoke('sessionplane_wait', { teamId: team.teamId, requestRefs: [identity.requestRef], waitMs: 500 });
+      final = (waited.structuredContent.results as Array<typeof final>)[0];
+      if (final?.terminal) break;
+    }
     assert.equal(final?.answerText, 'Fixture exact final answer');
-    assert.equal(final?.responseMessageId, 'fixture-assistant-message');
-    assert.equal(await submittedPage.evaluate(() => (window as Window & { submitCount: number }).submitCount), 1);
+    const fileWait = await invoke('sessionplane_wait', { teamId: team.teamId, requestRefs: [identity.requestRef], waitMs: 0 });
+    const files = ((fileWait.structuredContent.results as Array<{ files: { artifacts: Array<{ name: string }> } }>)[0]!).files;
+    assert.deepEqual(files.artifacts.map((file) => file.name), ['result.txt']);
+    assert.equal(await page.evaluate(() => (window as Window & { submitCount: number }).submitCount), 1);
+
+    const view = await invoke('sessionplane_team_get', { teamId: team.teamId });
+    const next = await invoke('sessionplane_send', { teamId: team.teamId,
+      roleRef: (view.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef,
+      requestId: 'missing-upload', prompt: 'Next review', files: [attachmentPath] });
+    rmSync(path.join(config.stateDir, 'submission-inputs'), { recursive: true, force: true });
+    const nextEvidence = next.structuredContent.evidence as typeof initial;
+    const composer = nextEvidence.nodes.find((n) => n.role === 'textbox')!;
+    const rejected = await invoke('sessionplane_decide', { teamId: team.teamId, requestRef: next.structuredContent.requestRef,
+      requestId: 'missing-upload-choice', decision: 'choose', purpose: 'composer', snapshotId: nextEvidence.snapshotId, ref: composer.ref });
+    assert.equal(rejected.structuredContent.errorCode, 'input.invalid');
+    const failed = await invoke('sessionplane_wait', { teamId: team.teamId, requestRefs: [next.structuredContent.requestRef], waitMs: 0 });
+    const result = (failed.structuredContent.results as Array<Record<string, unknown>>)[0]!;
+    assert.equal(result.terminal, true);
+    assert.equal(result.submissionState, 'failed_pre_submit');
+    assert.equal(result.promptSubmitted, false);
+    const freshTeam = await invoke('sessionplane_team_get', { teamId: team.teamId });
+    const replacement = await invoke('sessionplane_session_replace', { teamId: team.teamId, requestId: 'replace',
+      roleRef: (freshTeam.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef });
+    const cancellable = await invoke('sessionplane_send', { teamId: team.teamId, requestId: 'cancel-send', prompt: 'Cancel this preparation',
+      roleRef: (replacement.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef });
+    const cancelArgs = { teamId: team.teamId, requestId: 'cancel-request', requestRef: cancellable.structuredContent.requestRef };
+    const cancelled = await invoke('sessionplane_stop', cancelArgs);
+    assert.equal(cancelled.isError, false);
+    assert.equal(cancelled.structuredContent.promptSubmitted, false);
+    assert.equal(cancelled.structuredContent.terminal, true);
+    assert.equal((await invoke('sessionplane_stop', cancelArgs)).isError, false);
+
+
   } finally {
     await service.close();
+    await closeFirst();
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('MCP inspects an ambiguous caller-directed submission without resend and recovers a later exact acknowledgement', async () => {
+test('MCP inspects an ambiguous caller-directed submission without resend and recovers a later exact acknowledgement', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-ambiguous-inspection-'));
   const config = { ...resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 100 };
   const service = await startCore({ config, browserHeadless: true, logger: silentLogger() });
   installPreparationFixtureRoute(service, `<!doctype html><form>
     <textarea id="prompt-textarea"></textarea><button type="submit">Send</button></form>
-    <div id="messages"></div><script>
+    <main><div id="messages"></div></main><script>
+      window.submitCount = 0;
       document.querySelector('form').onsubmit = (event) => {
+        window.submitCount += 1;
         event.preventDefault(); history.pushState({}, '', '/c/conversation-123456');
       };
-    </script>`);
+    </script>`, t);
   try {
     const team = service.teamDirectory.createTeam({ clientId: 'inspection-owner' });
     const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
@@ -503,41 +554,149 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
     // Exercise explicit inspection with the background recovery service stopped.
     await service.recoveryService.close();
     const page = service.pageRegistry.pageForObservation(sent.pageKey!);
-    const identity = { clientId: 'inspection-owner', requestId: 'original', sessionId: session.sessionId, generation: sent.generation };
-    const inspect = (override: Record<string, unknown> = {}) => invokeMcpTool({
-      name: 'sessionplane_submission_inspect', arguments: { ...identity, ...override },
-      socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes,
-    });
-    for (const override of [{ clientId: 'other-owner' }, { generation: sent.generation + 1 }]) {
-      const rejected = await inspect(override);
-      assert.equal(rejected.structuredContent.errorCode, 'session.generation-superseded');
-    }
+    const view = await callRpc<{ requests: Array<{ requestRef: string }> }>({ socketPath: config.socketPath, method: 'workflow.team_get', params: { teamId: team.teamId } });
+    const identity = { teamId: team.teamId, requestRef: view.requests[0]!.requestRef };
+    const inspect = () => invokeMcpTool({ name: 'sessionplane_team_get', arguments: identity,
+      socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
     const pending = await inspect();
     assert.equal(pending.isError, false);
-    const snapshot = pending.structuredContent.snapshot as { submissionState: string; generation: number };
+    const snapshot = pending.structuredContent.request as { submissionState: string; generation: number; evidence: { nodes: Array<{ editable: boolean; value: string | null }> } };
     assert.equal(snapshot.submissionState, 'submission_unknown');
     assert.equal(snapshot.generation, sent.generation);
-    const evidence = pending.structuredContent.evidence as { nodes: Array<{ editable: boolean; value: string }> };
-    assert.ok(evidence.nodes.some((node) => node.editable && node.value === 'Exact pending draft'));
+    assert.ok(snapshot.evidence.nodes.some((node) => node.editable && node.value === null));
     assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft');
     assert.equal(await page.locator('[data-message-author-role]').count(), 0);
 
-    // A delayed provider acknowledgement arrives; inspection must bind it, never submit again.
+    // A DOM echo alone with the original draft still present must remain ambiguous.
+    // The provider later commits the message and clears its composer; no resend.
     await page.locator('#messages').evaluate((messages) => {
       messages.innerHTML = '<div data-message-author-role="user" data-message-id="delayed-user">Exact pending draft</div>' +
-        '<div data-message-author-role="assistant" data-message-id="delayed-answer" data-message-status="completed">Recovered final</div>';
+        '<div data-message-author-role="assistant" data-message-id="delayed-answer" data-message-status="completed">Recovered final</div>' +
+        '<aside role="alert">Stream interrupted<button>Retry</button></aside>';
     });
-    const recovered = await inspect();
+    const optimistic = await inspect();
+    assert.equal((optimistic.structuredContent.request as { submittedUserMessageId: string | null }).submittedUserMessageId, null);
+    // Canonical provider acceptance is required for automatic UNKNOWN recovery.
+    t.mock.method(page.context().request, 'get', async (url: string) => ({
+      status: () => 200, headers: () => ({}), dispose: async () => {},
+      json: async () => url.endsWith('/api/auth/session') ? { accessToken: 'isolated-fixture-token' } : {
+        id: 'conversation-123456', current_node: 'delayed-user', mapping: {
+          'delayed-user': { parent: null, message: { id: 'delayed-user', author: { role: 'user' }, content: { content_type: 'text', parts: ['Exact pending draft'] } } },
+        },
+      },
+    }));
+    await page.locator('textarea').evaluate(element => { element.value = ''; });
+    let recovered = await inspect();
+    const recoveryDeadline = Date.now() + 7_000;
+    while ((recovered.structuredContent.request as { submittedUserMessageId: string | null }).submittedUserMessageId === null && Date.now() < recoveryDeadline) {
+      // Respect the real backend probe interval; observation never resubmits.
+      await new Promise(resolve => setTimeout(resolve, 250));
+      recovered = await inspect();
+    }
     assert.equal(recovered.isError, false);
-    assert.equal((recovered.structuredContent.snapshot as { submittedUserMessageId: string }).submittedUserMessageId, 'delayed-user');
+    assert.equal((recovered.structuredContent.request as { submittedUserMessageId: string }).submittedUserMessageId, 'delayed-user');
+    assert.equal((recovered.structuredContent.request as { generation: number }).generation, sent.generation);
+    assert.equal(await page.evaluate(() => (window as Window & { submitCount: number }).submitCount), 1);
+    let alerted: { reason: string; terminal: boolean; evidence?: { nodes: Array<{ role: string }> } } | undefined;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const waited = await invokeMcpTool({ name: 'sessionplane_wait', arguments: { teamId: identity.teamId, requestRefs: [identity.requestRef], waitMs: 100 },
+        socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+      assert.equal(waited.isError, false);
+      alerted = (waited.structuredContent.results as Array<NonNullable<typeof alerted>>)[0];
+      if (alerted?.reason === 'provider-actionable-alert') break;
+    }
+    assert.equal(alerted?.reason, 'provider-actionable-alert');
+    assert.equal(alerted?.terminal, false);
+    assert.ok(alerted?.evidence?.nodes.some((node) => node.role === 'alert'));
+    const current = await inspect();
+    assert.ok((current.structuredContent.request as NonNullable<typeof alerted>).evidence?.nodes.some((node) => node.role === 'alert'));
+    // A stalled renderer must not hold the session actor and block later recovery.
+    const debuggerSession = await page.context().newCDPSession(page);
+    await debuggerSession.send('Debugger.enable');
+    await debuggerSession.send('Debugger.pause');
+    try {
+      const stalled = await inspect();
+      assert.equal((stalled.structuredContent.request as { inspectionError: { errorCode: string } }).inspectionError.errorCode, 'browser.snapshot-timeout');
+    } finally {
+      await debuggerSession.send('Debugger.resume');
+      await debuggerSession.detach();
+    }
+    // Provider history becomes readable after a reload; no prompt is submitted again.
+    installPreparationFixtureRoute(service, `<!doctype html>
+        <textarea>Exact pending draft</textarea>
+        <div data-message-author-role="user" data-message-id="delayed-user">Exact pending draft</div>
+        <div data-message-author-role="assistant" data-message-id="delayed-answer" data-message-status="completed">Recovered final</div>
+        <script>sessionStorage.setItem('refreshes', String(Number(sessionStorage.getItem('refreshes') || 0) + 1));</script>`);
+    await page.close();
+    const refreshArgs = { ...identity, requestId: 'refresh-provider-history', decision: 'refresh' };
+    const refresh = (args = refreshArgs) => invokeMcpTool({ name: 'sessionplane_decide', arguments: args,
+      socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    const otherTeam = service.teamDirectory.createTeam({ clientId: 'another-owner' });
+    assert.equal((await refresh({ ...refreshArgs, teamId: otherTeam.teamId })).structuredContent.errorCode, 'input.invalid');
+    assert.equal((await refresh()).isError, false);
+    const recoveredPage = service.pageRegistry.pageForObservation(service.teamDirectory.getSession(session.sessionId).pageKey!);
+    const refreshes = await recoveredPage.evaluate(() => sessionStorage.getItem('refreshes'));
+    assert.equal((await refresh()).isError, false);
+    assert.equal(await recoveredPage.evaluate(() => sessionStorage.getItem('refreshes')), refreshes);
     let final = service.teamDirectory.getSession(session.sessionId);
     for (let attempt = 0; attempt < 20 && !final.terminal; attempt += 1) {
-      final = await callRpc<typeof final>({ socketPath: config.socketPath, method: 'session.wait', params: { clientId: identity.clientId, sessionId: session.sessionId, generation: sent.generation, waitMs: 500 } });
+      final = await callRpc<typeof final>({ socketPath: config.socketPath, method: 'session.wait', params: { clientId: 'inspection-owner', sessionId: session.sessionId, generation: sent.generation, waitMs: 500 } });
     }
     assert.equal(final.generation, sent.generation);
     assert.equal(final.answerText, 'Recovered final');
-    assert.equal(await page.locator('[data-message-author-role="user"]').count(), 1);
-    assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft');
+    assert.equal(await recoveredPage.locator('[data-message-author-role="user"]').count(), 1);
+    assert.equal(await recoveredPage.locator('textarea').inputValue(), 'Exact pending draft');
+    await assert.rejects(callRpc({ socketPath: config.socketPath, method: 'session.send', params: {
+      clientId: 'inspection-owner', requestId: 'newer', sessionId: session.sessionId,
+      prompt: 'Next request', sessionDeadlineSec: 30,
+    } }), (error: unknown) => error instanceof RpcClientError &&
+      (error.data as { errorCode?: string }).errorCode === 'provider.preparation-required');
+    assert.equal((await refresh({ ...refreshArgs, requestId: 'stale-refresh' })).structuredContent.errorCode, 'session.generation-superseded');
+    assert.equal(await recoveredPage.evaluate(() => sessionStorage.getItem('refreshes')), refreshes);
+  } finally {
+    await service.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('MCP preserves a lost ambiguous request after replacement without a conversation identity', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-lost-page-'));
+  const config = { ...resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 100 };
+  const service = await startCore({ config, browserHeadless: true, logger: silentLogger() });
+  installPreparationFixtureRoute(service, `<form onsubmit="event.preventDefault()"><textarea id="prompt-textarea"></textarea><button type="submit">Send</button></form>`);
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_' + name, arguments: args,
+    socketPath: config.socketPath, timeoutMs: name === 'send' ? 45_000 : 15_000, maxLineBytes: config.rpcMaxLineBytes });
+  try {
+    const created = (await invoke('team_create', { requestId: 'lost-team' })).structuredContent;
+    const teamId = created.teamId;
+    const role = (created.roles as Array<{ roleRef: string }>)[0]!;
+    const sent = await invoke('send', { teamId, roleRef: role.roleRef, requestId: 'lost-send', prompt: 'Uncertain request' });
+    const identity = { teamId, requestRef: sent.structuredContent.requestRef };
+    const inspect = async () => (await invoke('team_get', identity)).structuredContent.request as Record<string, unknown>;
+    for (const purpose of ['composer', 'submit']) {
+      const evidence = (await inspect()).evidence as { snapshotId: string; nodes: Array<{ ref: string; role: string; editable: boolean }> };
+      const target = evidence.nodes.find((n) => purpose === 'composer' ? n.editable && n.role === 'textbox' : n.role === 'button')!;
+      await invoke('decide', { ...identity, requestId: purpose, decision: 'choose', purpose, snapshotId: evidence.snapshotId, ref: target.ref });
+    }
+    const before = await inspect();
+    assert.equal(before.submissionState, 'submission_unknown');
+    assert.equal(before.conversationId, null);
+    assert.notEqual(before.status, 'recovery_required');
+    await service.pageRegistry.pageForObservation(before.pageKey as string).close();
+    const lost = await inspect();
+    assert.equal(lost.status, 'recovery_required');
+    assert.equal(lost.submissionState, 'submission_unknown');
+    assert.equal(lost.generation, before.generation);
+    const waited = await invoke('wait', { teamId, requestRefs: [identity.requestRef], waitMs: 30_000 });
+    assert.equal(waited.isError, false);
+    assert.equal((waited.structuredContent.results as Array<Record<string, unknown>>)[0]!.status, 'recovery_required');
+    assert.equal((await invoke('decide', { ...identity, requestId: 'refresh-lost', decision: 'refresh' })).structuredContent.errorCode, 'session.recovery-unavailable');
+    const replaced = await invoke('session_replace', { teamId, roleRef: lost.roleRef, requestId: 'replace-lost' });
+    assert.equal(replaced.isError, false);
+    assert.notEqual(service.teamDirectory.getCurrentSession(identity.teamId as string, 'main').sessionId, before.sessionId);
+    const retained = await inspect();
+    assert.equal(retained.submissionState, 'submission_unknown');
+    assert.equal(retained.sessionId, before.sessionId);
   } finally {
     await service.close();
     rmSync(root, { recursive: true, force: true });
@@ -601,13 +760,17 @@ async function startFixtureServer(html?: string): Promise<{ readonly server: Ser
   return { server, url: `http://127.0.0.1:${address.port}/` };
 }
 
-function installPreparationFixtureRoute(service: CoreService, html: string): void {
+function installPreparationFixtureRoute(service: CoreService, html: string, t?: TestContext): void {
   const owner = service.browserOwner;
   assert.notEqual(owner, null);
   if (owner === null) assert.fail('Expected the core-owned browser');
   const createPage = owner.createPage.bind(owner);
   owner.createPage = async () => {
     const created = await createPage();
+    // APIRequestContext bypasses page.route; keep backend probes local too.
+    t?.mock.method(created.page.context().request, 'get', async () => ({
+      status: () => 404, headers: () => ({}), json: async () => null, dispose: async () => {},
+    }));
     await created.page.route('https://chatgpt.com/**', async (route) => {
       await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: html });
     });

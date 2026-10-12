@@ -48,12 +48,12 @@ export class ExactFinalTracker {
       this.#reset();
       return decision('unverified', evidence.reason ?? 'dom-user-anchor-missing');
     }
-    if (evidence.laterUserFound) {
-      this.#reset();
-      return decision('unverified', 'dom-later-user-turn');
-    }
-
+    // Adapters must select only the answer before the next user turn.
     const candidate = evidence.candidate;
+    if (evidence.laterUserFound && (!candidate?.terminalMarker || candidate.streamingMarker)) {
+      this.#reset();
+      return decision('unverified', 'dom-next-user-turn-before-final');
+    }
     if (candidate === null) {
       this.#reset();
       if (evidence.activity === 'strong') {
@@ -93,7 +93,12 @@ export class ExactFinalTracker {
     if (candidate.terminalMarker) {
       return complete(candidate.responseMessageId, text, 'dom-terminal-marker');
     }
+    if (evidence.activity === 'weak') {
+      this.#reset();
+      return decision('progress', 'provider-activity-prevents-quiet-final');
+    }
     if (evidence.activity === 'unknown') {
+      this.#reset();
       return decision('unverified', 'activity-observation-unknown');
     }
     if (nowMs - this.#stableSinceMs >= this.#quietWindowMs) {

@@ -183,11 +183,31 @@ export class SessionRepository {
     return new Map(rows.map((row) => [row.sessionId, row]));
   }
 
+  conversationCleanupBlocker(sessionId: string, conversationId: string, discard = false): boolean {
+    return (!discard && this.#database.prepare(`
+      SELECT 1 FROM generations WHERE session_id = ? AND (
+        submission_state = 'failed_pre_submit' OR
+        (submission_state = 'submitted' AND completed_at IS NOT NULL AND response_message_id IS NOT NULL
+          AND answer_text IS NOT NULL AND error_code IS NULL)
+      ) IS NOT TRUE LIMIT 1
+    `).get(sessionId) !== undefined) || this.#database.prepare(`
+      SELECT 1 FROM sessions WHERE conversation_id = ? AND session_id != ? LIMIT 1
+    `).get(conversationId, sessionId) !== undefined;
+  }
+
+  retireDeletedConversation(sessionId: string, timestamp: string, keepRole = false): void {
+    this.#database.prepare("UPDATE sessions SET session_state = 'superseded', next_check_at = NULL, updated_at = ? WHERE session_id = ?")
+      .run(timestamp, sessionId);
+    if (!keepRole) this.#database.prepare('UPDATE team_roles SET current_session_id = NULL WHERE current_session_id = ?')
+      .run(sessionId);
+  }
+
   listNonterminalSnapshots(): readonly SessionSnapshot[] {
     const rows = this.#database
       .prepare(`
         ${SNAPSHOT_SELECT}
         WHERE s.session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
+          AND s.team_id IN (SELECT team_id FROM teams WHERE team_state != 'archived')
           AND g.submission_state IS NOT 'failed_pre_submit'
         ORDER BY s.created_at, s.session_id
       `)
@@ -207,13 +227,19 @@ export class SessionRepository {
     return rows.map(toSnapshot);
   }
 
+  listSnapshotsForTeam(teamId: string): readonly SessionSnapshot[] {
+    const rows = this.#database.prepare(`${SNAPSHOT_SELECT} WHERE s.team_id = ? ORDER BY s.created_at, s.session_id`)
+      .all(teamId) as unknown as SnapshotRow[];
+    return rows.map(toSnapshot);
+  }
+
   listRecoverableSnapshots(): readonly SessionSnapshot[] {
     const rows = this.#database
       .prepare(`
         ${SNAPSHOT_SELECT}
         WHERE s.session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
+          AND s.team_id IN (SELECT team_id FROM teams WHERE team_state != 'archived')
           AND s.current_generation > 0
-          AND g.submission_state IS NOT 'failed_pre_submit'
         ORDER BY s.created_at, s.session_id
       `)
       .all() as unknown as SnapshotRow[];
@@ -266,7 +292,15 @@ export class SessionRepository {
           updated_at = ?
         WHERE session_id = ?
           AND current_generation = ?
-          AND session_state NOT IN ('cancelled', 'superseded', 'failed')
+          AND (session_state NOT IN ('cancelled', 'superseded', 'failed') OR
+            (session_state = 'failed' AND EXISTS (SELECT 1 FROM generations g
+              WHERE g.session_id = sessions.session_id AND g.generation = sessions.current_generation
+                AND g.submission_state = 'submitted' AND g.prompt_submitted = 1
+                AND g.error_code = 'provider.execution-failed' AND g.reason = 'thinking-failed-reconciled'))
+            OR (session_state = 'cancelled' AND EXISTS (SELECT 1 FROM generations g
+              WHERE g.session_id = sessions.session_id AND g.generation = sessions.current_generation
+                AND g.submission_state = 'submitted' AND g.prompt_submitted = 1
+                AND g.reason = 'manual-followup-reconciled' AND g.response_message_id IS NULL AND g.answer_text IS NULL)))
       `)
       .run(
         input.nextGeneration,
@@ -362,32 +396,68 @@ export class SessionRepository {
     return true;
   }
 
-  transitionToSuperseded(sessionId: string, updatedAt: string): void {
-    const session = this.getSession(sessionId);
-    if (session === null || isTerminalSessionState(session.sessionState)) {
-      return;
-    }
-    this.#database
-      .prepare(`
-        UPDATE sessions
-        SET session_state = 'superseded', updated_at = ?
-        WHERE session_id = ?
-      `)
-      .run(updatedAt, sessionId);
+  restorePendingRetiredSessions(enabledProviders: readonly string[]): number {
+    if (enabledProviders.length === 0) return 0;
+    const result = this.#database.prepare(`
+      UPDATE sessions SET session_state = 'observing', updated_at = ?
+      WHERE session_state IN ('superseded', 'cancelled') AND provider IN (${enabledProviders.map(() => '?').join(',')})
+        AND team_id IN (SELECT team_id FROM teams WHERE team_state != 'archived')
+        AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = sessions.session_id AND e.event_type = 'session.replaced')
+        AND NOT EXISTS (SELECT 1 FROM events e WHERE e.session_id = sessions.session_id
+          AND e.generation = sessions.current_generation AND e.event_type = 'generation.observation-retired')
+        AND NOT EXISTS (SELECT 1 FROM request_receipts receipt WHERE receipt.method = 'session.delete'
+          AND json_extract(receipt.result_json, '$.sessionId') = sessions.session_id
+          AND json_extract(receipt.result_json, '$.deleted') = 1)
+        AND (EXISTS (SELECT 1 FROM sessions successor WHERE successor.predecessor_session_id = sessions.session_id)
+          OR EXISTS (SELECT 1 FROM team_roles role WHERE role.role_id = sessions.role_id AND role.role_state = 'retired'))
+        AND EXISTS (SELECT 1 FROM generations g WHERE g.session_id = sessions.session_id
+          AND g.generation = sessions.current_generation AND g.prompt_submitted = 1
+          AND g.submission_state IN ('submitted', 'submission_unknown') AND g.completed_at IS NULL)
+    `).run(new Date().toISOString(), ...enabledProviders);
+    return Number(result.changes);
   }
 
-  transitionToCancelled(sessionId: string, updatedAt: string): void {
-    const session = this.getSession(sessionId);
-    if (session === null || isTerminalSessionState(session.sessionState)) {
-      return;
-    }
-    this.#database
-      .prepare(`
-        UPDATE sessions
-        SET session_state = 'cancelled', provider_state = 'stopped', updated_at = ?
-        WHERE session_id = ?
-      `)
-      .run(updatedAt, sessionId);
+  retireObservation(sessionId: string, generation: number, updatedAt: string): boolean {
+    // This is local tracking retirement, not provider completion or cancellation.
+    return this.#database.prepare(`UPDATE sessions SET session_state = 'cancelled',
+      next_check_at = NULL, updated_at = ? WHERE session_id = ? AND current_generation = ?
+      AND session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
+    `).run(updatedAt, sessionId, generation).changes === 1;
+  }
+
+  retireUnsubmittedSession(sessionId: string, state: 'superseded' | 'cancelled', updatedAt: string): void {
+    const session = this.getSnapshot(sessionId);
+    // Routing retirement cannot cancel an already submitted provider request.
+    if (session === null || isTerminalSessionState(session.sessionState) || session.promptSubmitted) return;
+    this.#database.prepare(`
+      UPDATE sessions SET session_state = ?, provider_state = ?, updated_at = ? WHERE session_id = ?
+    `).run(state, state === 'cancelled' ? 'stopped' : session.providerState, updatedAt, sessionId);
+  }
+
+  submittedMessageIds(sessionId: string): Set<string> {
+    const rows = this.#database.prepare('SELECT submitted_user_message_id AS id FROM generations WHERE session_id = ? AND submitted_user_message_id IS NOT NULL').all(sessionId) as { id: string }[];
+    return new Set(rows.map((row) => row.id));
+  }
+
+  confirmedConversationTurns(sessionId: string): number {
+    const row = this.#database.prepare(`
+      SELECT COUNT(DISTINCT COALESCE(g.submitted_user_message_id, g.submitted_user_turn_id)) AS turns
+      FROM sessions current
+      JOIN sessions s ON s.provider = current.provider AND
+        (s.session_id = current.session_id OR s.conversation_id = current.conversation_id)
+      JOIN generations g ON g.session_id = s.session_id
+      WHERE current.session_id = ? AND g.submission_state = 'submitted'
+    `).get(sessionId) as { turns: number };
+    return Number(row.turns);
+  }
+
+  getGenerationResult(sessionId: string, generation: number): Omit<GenerationRecord, 'sessionId' | 'teamBriefVersion' | 'promptHash'> | null {
+    const row = this.#database.prepare(`SELECT generation, submission_state AS submissionState,
+      submitted_user_message_id AS submittedUserMessageId, submitted_user_turn_id AS submittedUserTurnId,
+      response_message_id AS responseMessageId, answer_text AS answerText, completed_at AS completedAt,
+      reason, error_code AS errorCode, prompt_submitted AS promptSubmitted
+      FROM generations WHERE session_id = ? AND generation = ?`).get(sessionId, generation) as (Omit<NonNullable<ReturnType<SessionRepository['getGenerationResult']>>, 'promptSubmitted'> & { promptSubmitted: number }) | undefined;
+    return row === undefined ? null : { ...row, promptSubmitted: Number(row.promptSubmitted) === 1 };
   }
 
   getSnapshot(sessionId: string): SessionSnapshot | null {

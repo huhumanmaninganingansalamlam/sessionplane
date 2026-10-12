@@ -70,6 +70,50 @@ export class ReceiptRepository {
     });
   }
 
+  record(input: { clientId: string; requestId: string; method: string; requestHash: string;
+    status: 'attempted' | 'complete'; result: unknown }): void {
+    const timestamp = this.#now().toISOString();
+    const written = this.#database.raw.prepare(`
+      INSERT INTO request_receipts(client_id, request_id, method, request_hash, status, result_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(client_id, request_id) DO UPDATE SET
+        status = excluded.status, result_json = excluded.result_json, updated_at = excluded.updated_at
+      WHERE request_receipts.method = excluded.method AND request_receipts.request_hash = excluded.request_hash
+    `).run(input.clientId, input.requestId, input.method, input.requestHash, input.status,
+      serializeResult(input.result), timestamp, timestamp);
+    if (Number(written.changes) !== 1) {
+      throw new SessionPlaneDomainError('input.idempotency-conflict', 'Request identity already belongs to another operation');
+    }
+  }
+
+  findConversationDeletion(conversationId: string): ReceiptRow | null {
+    const row = this.#database.raw.prepare(`
+      SELECT client_id AS clientId, request_id AS requestId FROM request_receipts
+      WHERE method = 'session.delete' AND json_extract(result_json, '$.conversationId') = ?
+        AND (status = 'attempted' OR json_extract(result_json, '$.deleted') = 1)
+      ORDER BY updated_at DESC LIMIT 1
+    `).get(conversationId) as { clientId: string; requestId: string } | undefined;
+    return row === undefined ? null : this.get(row.clientId, row.requestId);
+  }
+
+  latestPageRefresh(clientId: string, sessionId: string, generation: number): ReceiptRow | null {
+    const row = this.#database.raw.prepare(`SELECT request_id AS requestId FROM request_receipts
+      WHERE client_id=? AND method='session.page.refresh'
+        AND json_extract(result_json, '$.sessionId')=? AND json_extract(result_json, '$.generation')=?
+      ORDER BY updated_at DESC LIMIT 1`).get(clientId, sessionId, generation) as { requestId: string } | undefined;
+    return row ? this.get(clientId, row.requestId) : null;
+  }
+
+  /** Explicit native focus reserves this generation's display for human observation. */
+  hasFocusedGeneration(sessionId: string, generation: number): boolean {
+    return this.#database.raw.prepare(`
+      SELECT 1 FROM request_receipts WHERE method = 'workflow.focus' AND status = 'complete'
+        AND json_extract(result_json, '$.activated') = 1
+        AND json_extract(result_json, '$.sessionId') = ?
+        AND json_extract(result_json, '$.generation') = ? LIMIT 1
+    `).get(sessionId, generation) !== undefined;
+  }
+
   get(clientId: string, requestId: string): ReceiptRow | null {
     const row = this.#database.raw
       .prepare(`
@@ -166,4 +210,3 @@ function requireIdentity(value: string, name: string): string {
   }
   return normalized;
 }
-

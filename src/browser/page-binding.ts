@@ -8,6 +8,7 @@ export type PageBindingState =
 
 export interface PageBindingSnapshot {
   readonly pageKey: string;
+  readonly targetId?: string | null;
   readonly bindingEpoch: number;
   readonly sessionId: string | null;
   readonly generation: number | null;

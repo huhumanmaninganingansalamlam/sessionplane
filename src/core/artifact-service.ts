@@ -14,11 +14,16 @@ import path from 'node:path';
 
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
-import type {
-  ProviderAdapterRegistry,
-  ProviderArtifactCandidate,
+import {
+  ProviderSubmissionError,
+  type ProviderAdapter,
+  type ProviderArtifactRequest,
+  type ProviderAdapterRegistry,
+  type ProviderArtifactCandidate,
 } from '../providers/provider-adapter.ts';
+import { KeyedMutex } from '../scheduler/keyed-mutex.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
+import { SessionRepository } from '../storage/session-repository.ts';
 import { EventRepository } from '../storage/event-repository.ts';
 import {
   ArtifactRepository,
@@ -42,7 +47,8 @@ export class ArtifactService {
   readonly #artifactDir: string;
   readonly #maxArtifactFileBytes: number;
   readonly #now: () => Date;
-  readonly #captureTails = new Map<string, Promise<void>>();
+  readonly #ensurePage: ((sessionId: string, generation: number) => Promise<void>) | undefined;
+  readonly #captureMutex = new KeyedMutex();
 
   constructor(options: {
     readonly database: SessionPlaneDatabase;
@@ -51,6 +57,7 @@ export class ArtifactService {
     readonly artifactDir: string;
     readonly maxArtifactFileBytes: number;
     readonly now?: () => Date;
+    readonly ensurePage?: (sessionId: string, generation: number) => Promise<void>;
   }) {
     this.#database = options.database;
     this.#directory = options.directory;
@@ -60,31 +67,42 @@ export class ArtifactService {
     this.#artifactDir = path.resolve(options.artifactDir);
     this.#maxArtifactFileBytes = options.maxArtifactFileBytes;
     this.#now = options.now ?? (() => new Date());
+    this.#ensurePage = options.ensurePage;
   }
 
   async discover(selector: ArtifactSelector): Promise<Readonly<Record<string, unknown>>> {
-    const snapshot = this.#resolveCurrent(selector);
-    const adapter = this.#adapters.require(snapshot.provider);
-    if (adapter.discoverArtifacts === undefined) {
-      throw new SessionPlaneDomainError(
-        'provider.artifacts-unavailable',
-        `Provider ${snapshot.provider} does not expose artifact discovery`,
-      );
-    }
-    const candidates = await adapter.discoverArtifacts({
-      session: snapshot,
-      generation: snapshot.generation,
+    const initial = this.#resolveAnswer(selector).snapshot;
+    return await this.#captureMutex.runExclusive(initial.sessionId, async () => {
+      const { snapshot, bindingGeneration } = await this.#resolveSource({ sessionId: initial.sessionId, generation: initial.generation });
+      const adapter = this.#adapters.require(snapshot.provider);
+      if (adapter.discoverArtifacts === undefined) {
+        throw new SessionPlaneDomainError(
+          'provider.artifacts-unavailable',
+          `Provider ${snapshot.provider} does not expose artifact discovery`,
+        );
+      }
+      const candidates = await this.#discoverArtifacts(adapter, {
+        session: snapshot,
+        generation: snapshot.generation, bindingGeneration,
+      });
+      const artifacts = this.#persistCandidates(snapshot, candidates);
+      return artifactListResult(snapshot, artifacts);
     });
-    const artifacts = this.#persistCandidates(snapshot, candidates);
-    return artifactListResult(snapshot, artifacts);
   }
 
   async capture(
     selector: ArtifactSelector & { readonly artifactIds?: readonly string[] },
   ): Promise<Readonly<Record<string, unknown>>> {
-    const snapshot = this.#resolveCurrent(selector);
-    const captureKey = `${snapshot.sessionId}:${snapshot.generation}`;
-    return await this.#runExclusive(captureKey, async () => {
+    const initial = this.#resolveAnswer(selector).snapshot;
+    return await this.#captureMutex.runExclusive(initial.sessionId, async () => {
+      let { snapshot, bindingGeneration } = this.#resolveAnswer({ sessionId: initial.sessionId, generation: initial.generation });
+      const stored = this.#artifacts.list(snapshot.sessionId, snapshot.generation);
+      if (snapshot.terminal && stored.length > 0 && stored.every((artifact) => this.#reuseDownloaded(artifact) !== null)) {
+        const artifacts = selectArtifacts(stored, selector.artifactIds);
+        return { ...artifactListResult(snapshot, artifacts), discoveredCount: stored.length, capturedCount: artifacts.length, failures: [] };
+      }
+
+      ({ snapshot, bindingGeneration } = await this.#resolveSource({ sessionId: initial.sessionId, generation: initial.generation }));
       const adapter = this.#adapters.require(snapshot.provider);
       if (adapter.discoverArtifacts === undefined || adapter.downloadArtifact === undefined) {
         throw new SessionPlaneDomainError(
@@ -93,9 +111,8 @@ export class ArtifactService {
         );
       }
 
-      const candidates = await adapter.discoverArtifacts({
-        session: snapshot,
-        generation: snapshot.generation,
+      const candidates = await this.#discoverArtifacts(adapter, {
+        session: snapshot, generation: snapshot.generation, bindingGeneration,
       });
       const discovered = this.#persistCandidates(snapshot, candidates);
       const selected = selectArtifacts(discovered, selector.artifactIds);
@@ -111,7 +128,7 @@ export class ArtifactService {
           }
           const candidate = candidateFromRecord(artifact);
           const downloaded = await adapter.downloadArtifact(
-            { session: snapshot, generation: snapshot.generation },
+            { session: snapshot, generation: snapshot.generation, bindingGeneration },
             candidate,
           );
           if (downloaded.candidate.providerArtifactId !== artifact.providerArtifactId) {
@@ -167,7 +184,7 @@ export class ArtifactService {
             artifactId: artifact.artifactId,
             name: artifact.name,
             errorCode:
-              error instanceof SessionPlaneDomainError
+              error instanceof SessionPlaneDomainError || error instanceof ProviderSubmissionError
                 ? error.errorCode
                 : 'provider.artifact-download-failed',
             message: error instanceof Error ? error.message : String(error),
@@ -187,7 +204,7 @@ export class ArtifactService {
     });
   }
 
-  list(selector: ArtifactSelector): Readonly<Record<string, unknown>> {
+  list(selector: ArtifactSelector) {
     const snapshot = this.#resolveSession(selector);
     const generation = selector.generation ?? snapshot.generation;
     return artifactListResult(
@@ -197,67 +214,21 @@ export class ArtifactService {
     );
   }
 
+  async #discoverArtifacts(adapter: ProviderAdapter, request: ProviderArtifactRequest) {
+    try {
+      return await adapter.discoverArtifacts!(request);
+    } catch (error) {
+      if (error instanceof ProviderSubmissionError) {
+        throw new SessionPlaneDomainError(error.errorCode, error.message, error.details);
+      }
+      throw error;
+    }
+  }
+
   get(artifactId: string): Readonly<Record<string, unknown>> {
     const artifact = this.#requireArtifact(artifactId);
     this.#directory.getSession(artifact.sessionId);
     return { requestOk: true, artifact };
-  }
-
-  storeBytes(
-    selector: ArtifactSelector,
-    candidate: ProviderArtifactCandidate,
-    value: Uint8Array,
-  ): ArtifactRecord {
-    const snapshot = this.#resolveCurrent(selector);
-    const bytes = Buffer.from(value);
-    if (bytes.length === 0) {
-      throw new SessionPlaneDomainError(
-        'provider.artifact-empty',
-        `Provider artifact is empty: ${candidate.name}`,
-      );
-    }
-    if (bytes.length > this.#maxArtifactFileBytes) {
-      throw new SessionPlaneDomainError(
-        'provider.artifact-too-large',
-        `Provider artifact exceeds ${this.#maxArtifactFileBytes} bytes: ${candidate.name}`,
-        { sizeBytes: bytes.length, limitBytes: this.#maxArtifactFileBytes },
-      );
-    }
-    const sha256 = createHash('sha256').update(bytes).digest('hex');
-    const relativePath = this.#storeContent(sha256, bytes);
-    const timestamp = this.#now().toISOString();
-    return this.#database.transaction(() => {
-      const discovered = this.#artifacts.upsertCandidate({
-        sessionId: snapshot.sessionId,
-        generation: snapshot.generation,
-        provider: snapshot.provider,
-        candidate,
-        timestamp,
-      });
-      const artifact = this.#artifacts.markDownloaded({
-        artifactId: discovered.artifactId,
-        sizeBytes: bytes.length,
-        sha256,
-        relativePath,
-        timestamp,
-      });
-      this.#events.append({
-        teamId: snapshot.teamId,
-        roleId: snapshot.roleId,
-        sessionId: snapshot.sessionId,
-        generation: snapshot.generation,
-        eventType: 'artifact.downloaded',
-        payload: {
-          artifactId: artifact.artifactId,
-          artifactKind: artifact.artifactKind,
-          sizeBytes: artifact.sizeBytes,
-          sha256: artifact.sha256,
-          source: 'code-artifact',
-        },
-        createdAt: timestamp,
-      });
-      return artifact;
-    });
   }
 
   export(input: {
@@ -404,7 +375,13 @@ export class ArtifactService {
     return resolved;
   }
 
-  #resolveCurrent(selector: ArtifactSelector): SessionSnapshot {
+  async #resolveSource(selector: ArtifactSelector) {
+    const { snapshot, bindingGeneration } = this.#resolveAnswer(selector);
+    await this.#ensurePage?.(snapshot.sessionId, bindingGeneration);
+    return this.#resolveAnswer(selector);
+  }
+
+  #resolveAnswer(selector: ArtifactSelector): { snapshot: SessionSnapshot; bindingGeneration: number } {
     const snapshot = this.#resolveSession(selector);
     if (snapshot.generation <= 0) {
       throw new SessionPlaneDomainError(
@@ -412,13 +389,19 @@ export class ArtifactService {
         `Session ${snapshot.sessionId} has no submitted generation`,
       );
     }
-    if (selector.generation !== undefined && selector.generation !== snapshot.generation) {
-      throw new SessionPlaneDomainError(
-        'session.generation-superseded',
-        `Artifact discovery requires current generation ${snapshot.generation}`,
-      );
+    if (selector.generation !== undefined && selector.generation > snapshot.generation) {
+      throw new SessionPlaneDomainError('session.generation-superseded', 'Requested generation has not been created');
     }
-    return snapshot;
+    if (selector.generation !== undefined && selector.generation !== snapshot.generation) {
+      const previous = new SessionRepository(this.#database.raw).getGenerationResult(snapshot.sessionId, selector.generation);
+      if (previous === null || previous.completedAt === null || previous.responseMessageId === null || previous.errorCode !== null) {
+        throw new SessionPlaneDomainError('provider.artifacts-unavailable', 'No completed exact answer exists for this generation');
+      }
+      return { bindingGeneration: snapshot.generation, snapshot: {
+        ...snapshot, ...previous, sessionState: 'complete', providerState: 'complete', terminal: true, nextCheckAt: null,
+      } };
+    }
+    return { snapshot, bindingGeneration: snapshot.generation };
   }
 
   #resolveSession(selector: ArtifactSelector): SessionSnapshot {
@@ -443,25 +426,6 @@ export class ArtifactService {
       );
     }
     return artifact;
-  }
-
-  async #runExclusive<Result>(key: string, operation: () => Promise<Result>): Promise<Result> {
-    const previous = this.#captureTails.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.then(() => gate);
-    this.#captureTails.set(key, tail);
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-      if (this.#captureTails.get(key) === tail) {
-        this.#captureTails.delete(key);
-      }
-    }
   }
 }
 
@@ -504,7 +468,7 @@ function artifactListResult(
   snapshot: SessionSnapshot,
   artifacts: readonly ArtifactRecord[],
   generation = snapshot.generation,
-): Readonly<Record<string, unknown>> {
+) {
   return {
     requestOk: true,
     teamId: snapshot.teamId,
@@ -531,4 +495,3 @@ function exportResult(
     reused,
   };
 }
-

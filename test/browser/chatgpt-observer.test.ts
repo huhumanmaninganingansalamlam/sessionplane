@@ -8,11 +8,371 @@ import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
-import { observeChatGptDom } from '../../src/providers/chatgpt/dom-observer.ts';
+import { observeChatGptAlerts, observeChatGptDom } from '../../src/providers/chatgpt/dom-observer.ts';
 import { ExactFinalTracker } from '../../src/providers/chatgpt/exact-final.ts';
 import { recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submission.ts';
 
 const CONVERSATION_ID = 'conversation-observer-123456';
+
+test('completed exact artifact discovery restores a virtualized answer through the existing latest-position button', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-virtualized-artifact-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    let networkRequests = 0;
+    await page.route('https://chatgpt.com/**', route => {
+      networkRequests++;
+      return route.fulfill({ status: 200, contentType: 'text/html', body: '<main></main>' });
+    });
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
+    await page.setContent(`<main><div id="turns"><article data-message-author-role="user" data-message-id="old">Old turn</article></div>
+      <textarea></textarea><button aria-label="맨 아래로 스크롤">↓</button></main>`);
+    await page.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      document.querySelector('button')!.onclick = () => {
+        const button = document.querySelector('button')!;
+        button.dataset.clicks = String(Number(button.dataset.clicks ?? 0) + 1);
+        document.querySelector('#turns')!.innerHTML = `<article data-message-author-role="user" data-message-id="user-message-1">Original question</article>
+          <article data-message-author-role="assistant" data-message-id="original-final"><div class="markdown">Original final</div>
+            <a download="original.md" href="data:text/plain,EXACT-FIXTURE-BYTES">Original file</a></article>`;
+      };
+    });
+    const session = { ...sessionSnapshot(binding.pageKey), terminal: true, sessionState: 'complete' as const,
+      providerState: 'complete' as const, responseMessageId: 'original-final' };
+    const original = { ...session };
+    const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/', acknowledgementTimeoutMs: 500 });
+    const request = { session, generation: 1, bindingGeneration: 1 };
+    const [file] = await adapter.discoverArtifacts(request);
+    assert.equal(file?.name, 'original.md');
+    assert.equal(Buffer.from((await adapter.downloadArtifact(request, file!)).bytes).toString(), 'EXACT-FIXTURE-BYTES');
+    await adapter.discoverArtifacts(request);
+    assert.equal(await page.locator('button').getAttribute('data-clicks'), '1');
+    assert.equal(networkRequests, 1, 'Only the isolated initial navigation reaches a route');
+    assert.equal(await page.locator('textarea').inputValue(), '');
+    assert.deepEqual(session, original);
+    assert.equal(registry.getBinding(binding.pageKey).sessionId, original.sessionId);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('virtualized submitted anchor/final is restored once through same-chat display UI, preserving human holds and identity', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-virtualized-final-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  let held = true;
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    let networkRequests = 0;
+    await page.route('https://chatgpt.com/**', route => {
+      networkRequests++;
+      return route.fulfill({ status: 200, contentType: 'text/html', body: '<main></main>' });
+    });
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
+    const session = { ...sessionSnapshot(binding.pageKey), nextCheckAt: '2099-01-01T00:00:00.000Z' };
+    const original = { ...session };
+    const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/',
+      acknowledgementTimeoutMs: 500, canRestoreLatestPosition: () => !held });
+    const source = await adapter.openObservation({ session, generation: 1 });
+    await page.setContent(`<main><div id="turns"><article data-message-author-role="user" data-message-id="old">Old generation</article></div>
+      <textarea></textarea><button aria-label="맨 아래로 스크롤">↓</button><span role="status">Response complete</span></main>`);
+    await page.evaluate(() => {
+      // Headless fixtures do not model a user's foreground tab.
+      Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+      document.querySelector('button')!.onclick = () => {
+        document.querySelector('button')!.dataset.clicks = String(Number(document.querySelector('button')!.dataset.clicks ?? 0) + 1);
+        document.querySelector('#turns')!.innerHTML = `<article data-message-author-role="user" data-message-id="user-message-1">Exact submitted turn</article>
+          <article data-message-author-role="assistant" data-message-id="original-final"><div class="markdown">Original generation final</div></article>`;
+      };
+    });
+    try {
+      assert.equal((await source.observe()).candidate, null, 'Human hold does not infer a final from generic completion');
+      held = false;
+      await page.locator('textarea').fill('Retained manual draft');
+      assert.equal((await source.observe()).submittedUserFound, false, 'Draft is never disturbed');
+      await page.locator('textarea').fill('');
+      await page.evaluate(() => Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }));
+      assert.equal((await source.observe()).submittedUserFound, false, 'Visible user tab is preserved');
+      await page.evaluate(() => Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' }));
+      const observed = await source.observe();
+      assert.equal(observed.submittedUserFound, true);
+      assert.equal(observed.candidate?.responseMessageId, 'original-final');
+      assert.equal(observed.candidate?.answerText, 'Original generation final');
+      const tracker = new ExactFinalTracker(1);
+      tracker.evaluate(observed, Date.now());
+      assert.equal(tracker.evaluate(await source.observe(), Date.now() + 1).kind, 'complete');
+      assert.equal(await page.locator('button').getAttribute('data-clicks'), '1');
+      assert.equal(networkRequests, 1, 'Display recovery does not use a synthetic backend probe during cooldown');
+      assert.deepEqual(session, original, 'No request/anchor/draft/submission state rewriting');
+      const stale = await adapter.openObservation({ session, generation: 1 });
+      registry.unbindPage(binding.pageKey);
+      registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 2, conversationId: CONVERSATION_ID });
+      assert.equal((await stale.observe()).observationTransport, 'stale');
+      assert.equal(await page.locator('button').getAttribute('data-clicks'), '1', 'Changed generation cannot recover display or attribute answer');
+      stale.close();
+    } finally { source.close(); }
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('turn-local alerts stay between exact user and next user while global errors remain visible', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-alert-turn-boundary-'));
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: new PageRegistry(), headless: true });
+  const user = (id: string) => `<div data-chatgpt-search-message-ids="${id}"><div data-user-message-bubble>Question</div></div>`;
+  const failed = `<div class="group/activity-header"><button aria-labelledby="error-label"></button><span id="error-label">Thinking failed</span></div>`;
+  const identity = { submittedUserMessageId: 'user-A', submittedUserTurnId: null };
+  try {
+    await owner.start();
+    const { page } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<main></main>' }));
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    await page.setContent(`<main>${user('user-A')}<div data-message-author-role="assistant" data-message-id="answer-A" data-end-turn="true">Answer A</div>
+      ${user('user-B')}<aside role="alert">B error</aside>${failed}</main>`);
+    const normalA = await observeChatGptDom(page, identity);
+    assert.equal(normalA.candidate?.responseMessageId, 'answer-A');
+    assert.equal(normalA.actionableAlert, false, 'B error must not block normal A');
+    assert.deepEqual(await observeChatGptAlerts(page, identity, true), []);
+    await page.setContent(`<main>${user('user-A')}<aside role="alert">A error</aside>${failed}${user('user-B')}<aside role="alert">B error</aside></main>`);
+    assert.deepEqual(await observeChatGptAlerts(page, identity), ['A error', 'Thinking failed']);
+    assert.deepEqual(await observeChatGptAlerts(page, identity, true), ['Thinking failed']);
+    await page.setContent(`<aside role="alertdialog">Conversation unavailable</aside><main>${user('user-A')}${user('user-B')}<aside role="alert">B error</aside></main>`);
+    assert.deepEqual(await observeChatGptAlerts(page, identity), ['Conversation unavailable']);
+    await page.setContent('<main><aside role="alert">Unable to load conversation</aside></main>');
+    assert.deepEqual(await observeChatGptAlerts(page, identity), ['Unable to load conversation']);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('thinking-failed activity headers report an exact nonterminal provider error, never an answer', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-thinking-failed-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  const user = (id: string, text = 'Question') => `<div data-chatgpt-search-message-ids="${id}"><div data-user-message-bubble>${text}</div></div>`;
+  const header = (text: string) => `<div class="group/activity-header">
+    <button aria-labelledby="failure-label" aria-expanded="false"></button>
+    <span id="failure-label"><span class="text-text/60">${text}</span></span>
+  </div>`;
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<main></main>' }));
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
+    const session = sessionSnapshot(binding.pageKey);
+    const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/' });
+    const source = await adapter.openObservation({ session, generation: 1 });
+    const identity = { submittedUserMessageId: 'user-message-1', submittedUserTurnId: null };
+    try {
+      for (const label of ['생각 실패', 'Thinking failed']) {
+        await page.setContent(`<main>${user('user-message-1')}${header(label)}<span role="status">Response complete</span><textarea></textarea></main>`);
+        const dom = await observeChatGptDom(page, identity);
+        assert.equal(dom.submittedUserFound, true);
+        assert.equal(dom.candidate, null);
+        assert.deepEqual(dom.providerAlerts, [label]);
+        assert.deepEqual(await observeChatGptAlerts(page, identity, true), [label]);
+        const observed = await source.observe();
+        assert.equal(observed.errorCode, 'provider.actionable-alert');
+        assert.equal(observed.reason, 'provider-actionable-alert');
+        assert.equal(observed.submittedUserFound, true);
+        assert.equal(observed.candidate, null);
+        assert.equal(new ExactFinalTracker(1_000).evaluate(observed, Date.now()).kind, 'unverified');
+        assert.equal(session.promptSubmitted, true);
+        assert.equal(session.submittedUserMessageId, 'user-message-1');
+      }
+      const ordinaryAnswer = `<div data-message-author-role="assistant" data-message-id="answer"><div class="markdown">Thinking failed / 생각 실패</div></div>`;
+      for (const [name, html] of [
+        ['ordinary user/assistant words', `${user('user-message-1', 'Thinking failed / 생각 실패')}${ordinaryAnswer}`],
+        ['quoted provider markup in user', user('user-message-1', header('Thinking failed'))],
+        ['quoted provider markup in assistant', `${user('user-message-1')}<div data-chatgpt-selection-message-id="answer"><div class="markdown">${header('생각 실패')}</div></div>`],
+        ['historical error', `${header('Thinking failed')}${user('user-message-1')}`],
+        ['next-turn error after human follow-up', `${user('user-message-1')}${user('human-followup')}${header('생각 실패')}`],
+        ['missing exact anchor', `${user('unrelated')}${header('Thinking failed')}`],
+        ['no message anchor', header('Thinking failed')],
+        ['ordinary activity completion', `${user('user-message-1')}${header('분석 완료')}`],
+        ['hidden error', `${user('user-message-1')}<div hidden>${header('생각 실패')}</div>`],
+        ['hidden disclosure label', `${user('user-message-1')}${header('생각 실패').replace('<span id=', '<span hidden id=')}`],
+        ['sidebar error', `${user('user-message-1')}<nav>${header('Thinking failed')}</nav>`],
+      ]) {
+        await page.setContent(`<main>${html}<textarea></textarea></main>`);
+        assert.deepEqual((await observeChatGptDom(page, identity)).providerAlerts, [], name);
+        assert.deepEqual(await observeChatGptAlerts(page, identity, true), [], name);
+      }
+    } finally {
+      source.close();
+    }
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('automatic UNKNOWN recovery never confirms an optimistic DOM anchor without the same canonical user', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-optimistic-ack-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    let pageRequests = 0;
+    await page.route('https://chatgpt.com/**', route => {
+      pageRequests++;
+      return route.fulfill({ status: 200, contentType: 'text/html', body: '<main><div data-message-author-role="user" data-message-id="optimistic-user">Question</div><textarea id="prompt-textarea"></textarea></main>' });
+    });
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
+    let status = 200;
+    let userId: string | null = null;
+    let probes = 0;
+    t.mock.method(page.context().request, 'get', async (url: string) => {
+      probes++;
+      return { status: () => url.endsWith('/api/auth/session') ? 200 : status,
+        headers: () => ({ 'retry-after': '120' }), dispose: async () => {},
+        json: async () => url.endsWith('/api/auth/session') ? { accessToken: 'fixture-only-token' } : {
+          id: CONVERSATION_ID, current_node: userId === null ? 'root' : 'user', mapping: {
+            root: { parent: null, message: null },
+            ...(userId === null ? {} : { user: { parent: 'root', message: { id: userId, author: { role: 'user' }, content: { parts: ['Question'] } } } }),
+          },
+        },
+      };
+    });
+    const session = { ...sessionSnapshot(binding.pageKey), submissionState: 'submission_unknown' as const,
+      submittedUserMessageId: null, submittedUserTurnId: null };
+    const original = { ...session };
+    for (const scenario of [
+      { status: 200, userId: null },
+      { status: 429, userId: 'optimistic-user' },
+      { status: 200, userId: 'different-user' },
+      { status: 200, userId: 'optimistic-user' },
+    ]) {
+      status = scenario.status; userId = scenario.userId;
+      const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/', acknowledgementTimeoutMs: 500 });
+      const acknowledgement = await adapter.recoverAcknowledgement({ session, generation: 1, prompt: 'Question' });
+      if (status === 200 && userId === 'optimistic-user') {
+        assert.equal(acknowledgement?.submittedUserMessageId, userId);
+        assert.equal(acknowledgement?.evidence, 'backend-exact-user');
+      } else {
+        assert.equal(acknowledgement, null, JSON.stringify(scenario));
+      }
+      if (status === 429) {
+        const before = probes;
+        assert.equal(await adapter.recoverAcknowledgement({ session, generation: 1, prompt: 'Question' }), null);
+        assert.equal(probes, before, 'Retry-After prevents another backend probe');
+      }
+    }
+    assert.equal(pageRequests, 1, 'No submit or navigation after the isolated fixture load');
+    assert.equal(await page.locator('textarea').inputValue(), '');
+    assert.deepEqual(session, original);
+    assert.equal(registry.getBinding(binding.pageKey).generation, 1);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('missing DOM user binds only the exact backend prompt and retrieves its final without submission', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-backend-binding-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<main>Old completed response</main>' }));
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
+    const urls: string[] = [];
+    t.mock.method(page.context().request, 'get', async (url: string) => {
+      urls.push(url);
+      const body = url.endsWith('/api/auth/session') ? { accessToken: 'fixture-only-token' } : {
+        id: CONVERSATION_ID, current_node: 'answer', mapping: {
+          root: { parent: null, message: null },
+          user: { parent: 'root', message: { id: 'backend-user', author: { role: 'user' }, content: { parts: ['Question'] } } },
+          answer: { parent: 'user', message: { id: 'backend-answer', author: { role: 'assistant' }, channel: 'final', status: 'finished_successfully', end_turn: true, content: { parts: ['Exact recovered result'] } } },
+        },
+      };
+      return { status: () => 200, headers: () => ({}), json: async () => body, dispose: async () => {} };
+    });
+    const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/', acknowledgementTimeoutMs: 500 });
+    const session = { ...sessionSnapshot(binding.pageKey), submittedUserMessageId: null, submittedUserTurnId: null };
+    assert.equal(await adapter.recoverAcknowledgement({ session, generation: 1, prompt: 'Question', selection: { messageId: 'invented', evidenceHash: '0'.repeat(64) } }), null);
+    assert.equal(urls.length, 0, 'Explicit selections never bypass original evidence');
+    const acknowledgement = await adapter.recoverAcknowledgement({ session, generation: 1, prompt: 'Question' });
+    assert.equal(acknowledgement?.submittedUserMessageId, 'backend-user');
+    const result = await adapter.recover({ session: { ...session, ...acknowledgement }, generation: 1 });
+    assert.equal(result.kind, 'complete');
+    assert.equal(result.responseMessageId, 'backend-answer');
+    assert.equal(result.answerText, 'Exact recovered result');
+    assert.ok(urls.every(url => url.endsWith('/api/auth/session') || url.endsWith(`/backend-api/conversation/${CONVERSATION_ID}`)));
+    assert.equal(registry.getBinding(binding.pageKey).generation, 1);
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('native observation recovers an exact open-shadow anchor without crossing roots or resending', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-shadow-anchor-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  const identity = { submittedUserMessageId: '7b4be6af-732c-4c69-a2cb-1bc1461e9d86', submittedUserTurnId: null };
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    let networkRequests = 0;
+    await page.route('https://chatgpt.com/**', route => { networkRequests++; return route.fulfill({ body: '<main></main>' }); });
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 10, conversationId: CONVERSATION_ID });
+    const session = { ...sessionSnapshot(binding.pageKey), ...identity, generation: 10, nextCheckAt: '2099-01-01T00:00:00.000Z' };
+    const original = { ...session };
+    const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/', acknowledgementTimeoutMs: 500 });
+    const source = await adapter.openObservation({ session, generation: 10 });
+    await page.setContent('<main><textarea>Retained human draft</textarea><div id="transcript"></div></main>');
+    await page.locator('#transcript').evaluate((host, anchor) => {
+      host.attachShadow({ mode: 'open' }).innerHTML = `<main>
+        <div data-message-author-role="user" data-message-id="${anchor}">Original local fixture question</div>
+        <div data-message-author-role="assistant" data-message-id="local-exact-answer" data-end-turn="true">Local exact final</div>
+      </main>`;
+    }, identity.submittedUserMessageId);
+    const recovered = await observeChatGptDom(page, identity);
+    assert.equal(recovered.submittedUserFound, true);
+    assert.equal(recovered.candidate?.responseMessageId, 'local-exact-answer');
+    assert.equal(recovered.candidate?.answerText, 'Local exact final');
+    assert.equal((await observeChatGptDom(page, { ...identity, submittedUserMessageId: 'wrong-anchor' })).candidate, null);
+    const tracker = new ExactFinalTracker(1);
+    tracker.evaluate(await source.observe(), Date.now());
+    assert.equal(tracker.evaluate(await source.observe(), Date.now() + 1).kind, 'complete');
+    await page.locator('#transcript').evaluate(host => {
+      host.shadowRoot!.querySelector('[data-message-author-role="assistant"]')!.setAttribute('data-is-streaming', 'true');
+    });
+    assert.equal(new ExactFinalTracker(1).evaluate(await source.observe(), Date.now()).kind, 'progress');
+    await page.locator('#transcript').evaluate(host => {
+      host.shadowRoot!.querySelector('[data-message-author-role="assistant"]')!.removeAttribute('data-is-streaming');
+    });
+    await page.locator('#transcript').evaluate(host => {
+      host.shadowRoot!.querySelector('main')!.insertAdjacentHTML('beforeend', '<aside role="alert">network error</aside>');
+    });
+    assert.deepEqual((await observeChatGptDom(page, identity)).providerAlerts, ['network error']);
+    await page.locator('#transcript').evaluate(host => {
+      host.shadowRoot!.querySelector('aside')!.remove();
+      host.shadowRoot!.querySelector('[data-message-author-role="assistant"]')!.remove();
+    });
+    await page.locator('main').first().evaluate(main => {
+      main.insertAdjacentHTML('beforeend', '<div data-message-author-role="assistant" data-message-id="unrelated-answer" data-end-turn="true">Do not attach</div>');
+    });
+    assert.equal((await observeChatGptDom(page, identity)).candidate, null);
+    await page.locator('main').first().evaluate((main, anchor) => {
+      main.insertAdjacentHTML('beforeend', `<div data-message-author-role="user" data-message-id="${anchor}">Duplicate anchor</div>`);
+    }, identity.submittedUserMessageId);
+    const duplicate = await observeChatGptDom(page, identity);
+    assert.equal(duplicate.submittedUserFound, false);
+    assert.equal(duplicate.candidate, null);
+    assert.equal(await page.locator('textarea').inputValue(), 'Retained human draft');
+    assert.equal(networkRequests, 1, 'Only the isolated initial navigation; no recovery send or refresh');
+    assert.deepEqual(session, original);
+    assert.equal(registry.getBinding(binding.pageKey).generation, 10);
+    source.close();
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('current ChatGPT message units recover the exact submitted turn and answer', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-message-units-'));
@@ -33,6 +393,7 @@ test('current ChatGPT message units recover the exact submitted turn and answer'
           <h4 data-conversation-role="assistant">Answer</h4>
           <div data-chatgpt-selection-message-id="answer-exact"><div class="markdown">Result</div></div>
         </div>
+        <main><textarea id="prompt-textarea"></textarea></main>
       ` });
     });
     await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
@@ -45,13 +406,81 @@ test('current ChatGPT message units recover the exact submitted turn and answer'
     assert.equal(observation.submittedUserFound, true);
     assert.equal(observation.candidate?.responseMessageId, 'answer-exact');
     assert.equal(observation.candidate?.answerText, 'Result');
+    await page.setContent(`<main>
+      <aside role="alert"><button>Earlier notice</button></aside>
+      <div data-message-author-role="user" data-message-id="user-exact">Question</div>
+    </main>`);
+    const identity = { submittedUserMessageId: 'user-exact', submittedUserTurnId: null };
+    assert.equal((await observeChatGptDom(page, identity)).actionableAlert, false);
+    await page.locator('main').evaluate((main) => {
+      const alert = document.createElement('aside');
+      alert.setAttribute('role', 'alert');
+      alert.innerHTML = '<span>Provider notice</span><button>Action</button>';
+      main.append(alert);
+    });
+    assert.equal((await observeChatGptDom(page, identity)).actionableAlert, true);
+    await page.locator('main > aside').last().evaluate(alert => {
+      alert.innerHTML = 'network error';
+    });
+    assert.deepEqual((await observeChatGptDom(page, identity)).providerAlerts, ['network error']);
+    await page.locator('main').evaluate((main) => {
+      const response = document.createElement('div');
+      response.setAttribute('data-message-author-role', 'assistant');
+      response.setAttribute('data-message-id', 'partial-answer');
+      response.textContent = 'Partial response';
+      main.insertBefore(response, main.lastElementChild);
+    });
+    const interrupted = await observeChatGptDom(page, identity);
+    assert.equal(interrupted.actionableAlert, true);
+    assert.equal(interrupted.candidate?.responseMessageId, 'partial-answer');
+    assert.equal((await observeChatGptDom(page, { ...identity, submittedUserMessageId: 'other-turn' })).actionableAlert, false);
+    await page.locator('main').evaluate(main => {
+      main.insertAdjacentHTML('beforeend', '<div data-message-author-role="user" data-message-id="human-followup">Please finish the analysis with the corrected evidence.</div>');
+    });
+    const humanPending = await observeChatGptDom(page, identity);
+    assert.equal(humanPending.submittedUserFound, true);
+    assert.equal(humanPending.laterUserFound, true);
+    assert.equal(humanPending.candidate, null, 'The earlier partial answer must be discarded');
+    assert.equal(humanPending.actionableAlert, true, 'A own error must stay attached to A after a follow-up');
+    await page.locator('main').evaluate(main => {
+      main.insertAdjacentHTML('beforeend', '<div data-message-author-role="assistant" data-message-id="continued-final" data-end-turn="true">Completed review</div>');
+    });
+    const continued = await observeChatGptDom(page, identity);
+    assert.equal(continued.candidate, null, 'Follow-up final must never complete the original partial');
+    await page.setContent(`<main>
+      <div data-message-author-role="user" data-message-id="user-exact">Question A</div>
+      <div data-message-author-role="assistant" data-message-id="original-final" data-end-turn="true">Answer A</div>
+      <div data-message-author-role="user" data-message-id="human-followup">Question B</div>
+      <div data-message-author-role="assistant" data-message-id="continued-final" data-end-turn="true">Answer B</div>
+    </main>`);
+    const originalFinal = await observeChatGptDom(page, identity);
+    assert.equal(originalFinal.laterUserFound, true);
+    assert.equal(originalFinal.candidate?.responseMessageId, 'original-final');
+    assert.equal(originalFinal.candidate?.answerText, 'Answer A');
+    assert.equal(originalFinal.candidate?.terminalMarker, true);
+    assert.equal((await observeChatGptDom(page, { ...identity, submittedUserMessageId: 'unrelated' })).candidate, null);
+
+    await page.setContent('<aside role="alert">hostspan-desktop connection expired; reconnect before processing</aside><main><textarea></textarea></main>');
+    const global = await observeChatGptDom(page, identity);
+    assert.equal(global.submittedUserFound, false);
+    assert.equal(global.actionableAlert, true);
+    assert.match(global.providerAlerts[0]!, /connection expired/);
+    await page.setContent('<main><aside role="alert">Unable to load conversation</aside></main>');
+    const failedSurface = await observeChatGptDom(page, identity);
+    assert.equal(failedSurface.conversationSurfaceAvailable, false);
+    assert.deepEqual(failedSurface.providerAlerts, ['Unable to load conversation']);
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="user-exact">Question</div><div class="text-token-text-error">network error</div></main>');
+    assert.deepEqual((await observeChatGptDom(page, identity)).providerAlerts, ['network error']);
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="user-exact"><span class="text-token-text-error">quoted network error</span></div><aside role="alert" hidden>Hidden</aside></main><nav><aside role="alert">Sidebar notice</aside></nav>');
+    assert.equal((await observeChatGptDom(page, identity)).actionableAlert, false);
+
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('ChatGPT WEB redirect follows only the exact submitted user turn', async () => {
+test('ChatGPT WEB redirect follows only the exact submitted user turn', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-redirect-'));
   const registry = new PageRegistry();
   const owner = new BrowserOwner({
@@ -80,6 +509,14 @@ test('ChatGPT WEB redirect follows only the exact submitted user turn', async ()
       generation: 1,
       conversationId: webId,
     });
+    t.mock.method(created.page.context().request, 'get', async (url: string) => ({
+      status: () => 200, headers: () => ({}), dispose: async () => {},
+      json: async () => url.endsWith('/api/auth/session') ? { accessToken: 'fixture-only-token' } : {
+        id: CONVERSATION_ID, current_node: 'user', mapping: {
+          user: { parent: null, message: { id: 'user-message-1', author: { role: 'user' }, content: { parts: ['Question'] } } },
+        },
+      },
+    }));
     const adapter = new ChatGptAdapter({
       browserOwner: owner,
       pageRegistry: registry,
@@ -191,6 +628,12 @@ test('background ChatGPT Page yields exact DOM, dialog, and network evidence wit
       });
       assert.equal(await wakeForFinal, 'dom');
 
+      // Current Korean Stop has no legacy test ID. It must still prevent
+      // quiet finalization while exact terminal markers remain authoritative.
+      await target.page.locator('[data-testid="stop-button"]').evaluate(button => {
+        button.removeAttribute('data-testid');
+        button.setAttribute('aria-label', '중지');
+      });
       const finished = await source.observe();
       assert.equal(finished.dialogKind, null);
       assert.equal(finished.activity, 'weak', 'the leftover stop control is not exact strong activity');
@@ -212,7 +655,7 @@ test('background ChatGPT Page yields exact DOM, dialog, and network evidence wit
       await target.page.evaluate(() => {
         document.querySelector('[role="dialog"]')?.remove();
         document.querySelector('#assistant-message')?.remove();
-        document.querySelector('[data-testid="stop-button"]')?.remove();
+        document.querySelector('button[aria-label="중지"]')?.remove();
       });
       await source.observe();
       const networkWake = source.waitForWake(1_000);
@@ -234,6 +677,36 @@ test('background ChatGPT Page yields exact DOM, dialog, and network evidence wit
       });
       const laterUser = await source.observe();
       assert.equal(laterUser.laterUserFound, true);
+
+      await target.page.setContent('<main><h1>Conversation cannot be displayed</h1><textarea hidden></textarea></main>');
+      const absent = await source.observe();
+      assert.equal(absent.errorCode, 'provider.conversation-unavailable');
+      assert.equal(absent.reason, 'conversation-surface-unavailable');
+      assert.equal(new ExactFinalTracker(1_000).evaluate(absent, Date.now()).kind, 'unverified');
+      await target.page.route('**/backend-api/conversations/**', (route) =>
+        route.fulfill({ status: 429, contentType: 'application/json', body: '{}' }));
+      await target.page.evaluate(async () => { await fetch('/backend-api/conversations/unrelated'); });
+      assert.equal((await source.observe()).reason, 'conversation-surface-unavailable');
+      await target.page.evaluate(async (id) => { await (await fetch('/backend-api/conversations/' + id)).text(); }, CONVERSATION_ID);
+      const unreadable = await source.observe();
+      assert.equal(unreadable.errorCode, 'provider.conversation-unavailable');
+      await target.page.setContent('<aside role="alert">network error</aside><main><textarea></textarea></main>');
+      const alert = await source.observe();
+      assert.equal(alert.errorCode, 'provider.actionable-alert');
+      assert.equal(alert.reason, 'provider-actionable-alert');
+      assert.equal(new ExactFinalTracker(1_000).evaluate(alert, Date.now()).kind, 'unverified');
+      assert.equal(unreadable.observationTransport, 'unavailable');
+      assert.equal(new ExactFinalTracker(1_000).evaluate(unreadable, Date.now()).kind, 'unverified');
+      await target.page.locator('[role="alert"]').evaluate(element => element.remove());
+      await target.page.locator('textarea').evaluate(element => { element.hidden = false; });
+      const readable = await source.observe();
+      assert.equal(readable.errorCode, undefined);
+      assert.equal(readable.observationTransport, 'fresh');
+      assert.equal(readable.submittedUserFound, false);
+      await target.page.setContent(observerFixture());
+      const restored = await source.observe();
+      assert.equal(restored.errorCode, undefined);
+      assert.equal(restored.submittedUserFound, true);
 
       assert.equal(foreground.page.url(), 'https://chatgpt.com/');
       assert.equal(target.page.url(), `https://chatgpt.com/c/${CONVERSATION_ID}`);
@@ -347,3 +820,48 @@ function observerFixture(): string {
       </body>
     </html>`;
 }
+
+
+test('conversation capacity notice permits only exact idle answer collection, retaining all other guards', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-capacity-answer-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  await owner.start();
+  try {
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main></main>' }));
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
+    const banner = "You've reached the maximum length for this conversation, but you can keep talking by starting a new chat. Start new chat";
+    const body = `<aside role="alert">${banner}</aside><main><article data-message-author-role="user" data-message-id="user-message-1">Original</article><article data-message-author-role="assistant" data-message-id="capacity-final"><div class="markdown">Saved final verdict</div></article></main>`;
+    await page.setContent(body);
+    const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/', acknowledgementTimeoutMs: 500 });
+    const source = await adapter.openObservation({ session: sessionSnapshot(binding.pageKey), generation: 1 });
+    try {
+      const observed = await source.observe();
+      assert.equal(observed.observationTransport, 'fresh');
+      assert.equal(observed.errorCode, undefined);
+      assert.deepEqual((await observeChatGptDom(page, { submittedUserMessageId: 'user-message-1', submittedUserTurnId: null })).providerAlerts, [banner]);
+      const tracker = new ExactFinalTracker(1000);
+      assert.equal(tracker.evaluate(observed, 0).kind, 'progress');
+      const final = tracker.evaluate(await source.observe(), 1001);
+      assert.equal(final.kind, 'complete');
+      assert.equal(final.responseMessageId, 'capacity-final');
+      assert.equal(final.answerText, 'Saved final verdict');
+      await page.locator('main').evaluate(main => main.insertAdjacentHTML('beforeend', '<button aria-label="Stop generating">Stop</button>'));
+      const withStop = new ExactFinalTracker(1);
+      withStop.evaluate(await source.observe(), 0);
+      assert.notEqual(withStop.evaluate(await source.observe(), 5000).kind, 'complete');
+      await page.setContent(body + '<aside role="alert">Sign in to continue</aside>');
+      assert.equal((await source.observe()).errorCode, 'provider.actionable-alert');
+      await page.setContent(body.replace('capacity-final"', 'capacity-final" data-is-streaming="true"'));
+      assert.notEqual(new ExactFinalTracker(1).evaluate(await source.observe(), 5000).kind, 'complete');
+      await page.setContent(body.replace('Saved final verdict', ''));
+      assert.equal((await source.observe()).errorCode, 'provider.actionable-alert');
+      await page.setContent(body.replace('user-message-1', 'another-user'));
+      assert.equal((await source.observe()).errorCode, 'provider.actionable-alert');
+      await page.setContent(body.replace('</main>', '<article data-message-author-role="user" data-message-id="later-user">Later</article></main>'));
+      assert.equal((await source.observe()).errorCode, 'provider.actionable-alert');
+    } finally { await source.close(); }
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});

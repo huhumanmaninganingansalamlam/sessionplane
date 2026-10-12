@@ -7,14 +7,108 @@ import test from 'node:test';
 import type { Page } from 'playwright-core';
 
 import { callRpc, RpcClientError } from '../../src/cli/client.ts';
+import { ConversationLoadRecoveryRepository } from '../../src/storage/conversation-load-recovery-repository.ts';
 import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 
 interface TeamSnapshot {
   readonly teamId: string;
 }
+
+test('startup leaves missing prepared pages closed; explicit concurrent recovery reuses one page', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-prepared-fanout-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    recoveryNavigatePage: navigateFixture, logger: silentLogger() });
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'prepared-fanout' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: team.primaryRoleKey, provider: 'chatgpt' });
+    const clientId = `team:${team.teamId}`;
+    await service.submissionService.send({ clientId, requestId: 'prior-turn', sessionId: session.sessionId,
+      prompt: 'Previous fixture turn', sessionDeadlineSec: 600 });
+    service.observationService.stop(session.sessionId, 1);
+    await service.actorScheduler.updateGeneration(session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
+      completedAt: new Date().toISOString(), responseMessageId: 'prior-answer', answerText: 'done' });
+    fake.prepareError = new ProviderSubmissionError('provider.preparation-required', 'Choose the model before submitting');
+    await assert.rejects(service.submissionService.send({ clientId, requestId: 'pending-turn', sessionId: session.sessionId,
+      prompt: 'Unsubmitted draft', sessionDeadlineSec: 600 }), { errorCode: 'provider.preparation-required' });
+    const prepared = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(prepared.submissionState, 'prepared');
+    assert.equal(prepared.promptSubmitted, false);
+    const saved = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId);
+    const before = service.pageRegistry.listBindings({ includeClosed: false }).length;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const report = await service.recoveryService.restore({ forceObservers: true });
+      assert.equal(report.opened, 0, 'startup must not fan out unopened, unsubmitted preparations');
+      assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).length, before);
+    }
+    // Another conversation's Retry spacing must not starve explicit page recovery.
+    new ConversationLoadRecoveryRepository(service.database).defer(new Date(Date.now() + 60_000).toISOString(), new Date().toISOString());
+    await Promise.all([0, 1].map(() => service.recoveryService.ensurePage(session.sessionId, 2, { openMissing: true })));
+    const restored = service.teamDirectory.getSession(session.sessionId);
+    const page = service.pageRegistry.pageForObservation(restored.pageKey!);
+    await page.evaluate(() => { const input = document.createElement('textarea'); input.value = 'User draft retained'; document.body.append(input); });
+    const report = await service.recoveryService.restore({ forceObservers: true });
+    assert.equal(report.opened, 0);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).pageKey, restored.pageKey);
+    assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).length, before + 1);
+    assert.equal(await page.locator('textarea').inputValue(), 'User draft retained');
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId), saved);
+    assert.equal(fake.submitCount, 1, 'recovery never dispatches the pending question');
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('explicit failed preparation uses real background creation and default navigation without submitting', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-explicit-navigation-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake], logger: silentLogger() });
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'explicit-navigation-owner' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: team.primaryRoleKey, provider: 'chatgpt' });
+    const clientId = `team:${team.teamId}`;
+    const first = await service.submissionService.send({ clientId, requestId: 'previous-review', sessionId: session.sessionId,
+      prompt: 'Previous fixture review', sessionDeadlineSec: 600 });
+    service.observationService.stop(session.sessionId, 1);
+    await service.actorScheduler.updateGeneration(session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
+      completedAt: new Date().toISOString(), responseMessageId: 'previous-answer', answerText: 'done' });
+    fake.prepareError = new ProviderSubmissionError('browser.unavailable', 'Missing original page');
+    await assert.rejects(service.submissionService.send({ clientId, requestId: 'failed-review', sessionId: session.sessionId,
+      prompt: 'Unsubmitted fixture review', sessionDeadlineSec: 600 }), /Missing original page/);
+    const failed = service.teamDirectory.getSession(session.sessionId);
+    const saved = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId);
+    const blank = service.pageRegistry.listBindings({ includeClosed: false })[0]!;
+    const context = service.pageRegistry.pageForObservation(blank.pageKey).context();
+    const url = `https://chatgpt.com/c/${encodeURIComponent(first.conversationId!)}`;
+    // The production navigation is unchanged; only the isolated browser's transport is mocked.
+    await context.setOffline(true);
+    let fulfilled = 0;
+    await context.route('**/*', async route => {
+      if (route.request().url() !== url) { await route.abort('blockedbyclient'); return; }
+      await route.fulfill({ status: 200, contentType: 'text/html', body: '<main>Exact existing conversation</main>' });
+      fulfilled++;
+    });
+    await service.recoveryService.ensurePage(session.sessionId, 2, { openMissing: true });
+    const restored = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(fulfilled, 1);
+    assert.equal(restored.conversationId, failed.conversationId);
+    assert.equal(restored.generation, 2);
+    assert.equal(restored.submissionState, 'failed_pre_submit');
+    assert.equal(restored.promptSubmitted, false);
+    const binding = service.pageRegistry.getBinding(restored.pageKey!);
+    assert.equal(binding.url, url);
+    assert.equal(binding.sessionId, session.sessionId);
+    assert.equal(binding.generation, 2);
+    assert.equal(await service.pageRegistry.pageForObservation(binding.pageKey).locator('main').innerText(), 'Exact existing conversation');
+    assert.equal(service.pageRegistry.getBinding(blank.pageKey).url, 'about:blank');
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId), saved);
+    assert.equal(fake.submitCount, 1);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('browser disconnect recovers the exact conversation without resending and quarantines duplicates', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-restart-'));
@@ -374,6 +468,29 @@ test('restart recovers a unique ambiguous follow-up acknowledgement without rese
       'generation.followup-recovery-first-complete',
     );
 
+    const pageCount = service.pageRegistry.listBindings().length;
+    await assert.rejects(service.artifactService.capture({ sessionId: first.sessionId, generation: first.generation }),
+      { errorCode: 'browser.unavailable' });
+    assert.equal(service.pageRegistry.listBindings().length, pageCount, 'an artifact read never creates a missing page');
+    // Fake submission has no physical page. Prepare the exact page explicitly before testing read/restart recovery.
+    const exactPage = await service.browserOwner!.createPage();
+    await navigateFixture(exactPage.page, `https://chatgpt.com/c/${encodeURIComponent(first.conversationId!)}`);
+    service.pageRegistry.bindPage(exactPage.binding.pageKey, {
+      sessionId: first.sessionId, generation: first.generation, conversationId: first.conversationId!,
+    });
+    await service.actorScheduler.updateGeneration(first.sessionId, first.generation,
+      { pageKey: exactPage.binding.pageKey }, 'generation.fixture-page-prepared');
+    const recoveredFiles = await service.artifactService.capture({ sessionId: first.sessionId, generation: first.generation });
+    assert.equal(recoveredFiles.requestOk, true);
+    const completed = service.teamDirectory.getSession(first.sessionId);
+    assert.equal(completed.reason, 'test-complete');
+    assert.equal(completed.answerText, 'done');
+    assert.equal(completed.responseMessageId, 'followup-first-response');
+    assert.equal(completed.sessionState, 'complete');
+    assert.equal(completed.generation, first.generation);
+    assert.equal(completed.errorCode, null);
+    assert.equal(service.pageRegistry.getBinding(completed.pageKey!).conversationId, first.conversationId);
+
     beforeRestart.acknowledgementMode = 'missing';
     await assert.rejects(
       rpc(config.socketPath, 'session.send', {
@@ -624,6 +741,19 @@ test('failed restart navigation closes the newly reserved recovery Page', async 
     assert.equal(ambiguous.pageKey, null);
 
     const before = service.pageRegistry.listBindings({ includeClosed: false }).length;
+    await assert.rejects(service.recoveryService.ensurePage(submitted.sessionId, submitted.generation),
+      { errorCode: 'browser.unavailable' });
+    assert.equal(service.pageRegistry.listBindings().length, before, 'a missing page read must not create or navigate a tab');
+    assert.deepEqual(service.teamDirectory.getSession(submitted.sessionId), ambiguous,
+      'a read preserves the original submission evidence and identity');
+    await rpc(config.socketPath, 'system.defer_account_cooldown', {
+      requestId: 'isolated-recovery-cooldown', observedAt: new Date().toISOString(),
+      until: new Date(Date.now() + 60_000).toISOString(), evidenceRef: 'isolated-fixture-429',
+      scope: 'chatgpt:default',
+    });
+    await assert.rejects(service.recoveryService.ensurePage(submitted.sessionId, submitted.generation, { openMissing: true }),
+      { errorCode: 'provider.observation-deferred' });
+    assert.equal(service.pageRegistry.listBindings().length, before, 'paced explicit recovery must not navigate first');
     const recovery = await service.recoveryService.restore({ forceObservers: true });
     const after = service.pageRegistry.listBindings({ includeClosed: false }).length;
     assert.equal(recovery.unavailable, 1);
@@ -645,14 +775,26 @@ test('failed restart navigation closes the newly reserved recovery Page', async 
 });
 
 async function navigateFixture(page: Page, url: string): Promise<void> {
-  await page.route('https://chatgpt.com/**', async (route) => {
+  // Fail closed even if CDP interception fails: fixture navigation must never reach the provider.
+  await page.context().setOffline(true);
+  let intercepted = 0;
+  let fulfilled = 0;
+  await page.route('**/*', async (route) => {
+    intercepted++;
+    if (route.request().url() !== url) { await route.abort('blockedbyclient'); return; }
     await route.fulfill({
       status: 200,
       contentType: 'text/html',
       body: '<!doctype html><html><body><main>restart fixture</main></body></html>',
     });
+    fulfilled++;
   });
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10_000 });
+  } catch (error) {
+    throw new Error(`Isolated navigation failed; local mock requests intercepted: ${intercepted}, fulfilled: ${fulfilled}`, { cause: error });
+  }
+  assert.ok(fulfilled > 0, 'navigation is fulfilled locally; every other request is aborted');
 }
 
 async function rpc<Result>(socketPath: string, method: string, params: unknown): Promise<Result> {

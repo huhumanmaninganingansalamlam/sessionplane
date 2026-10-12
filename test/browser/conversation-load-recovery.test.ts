@@ -1,0 +1,129 @@
+import { createServer } from 'node:http';
+import { once } from 'node:events';
+import type { AddressInfo } from 'node:net';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+import { BrowserOwner } from '../../src/browser/browser-owner.ts';
+import { PageRegistry } from '../../src/browser/page-registry.ts';
+import { conversationLoadSurface } from '../../src/providers/chatgpt/conversation-load-recovery.ts';
+
+test('exact error-surface Retry is isolated from generation retries, drafts, barriers and stale state', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-load-surface-'));
+  const server = createServer((_request, response) => { response.setHeader('content-type', 'text/html'); response.end('<main></main>'); });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: new PageRegistry(), headless: true });
+  try {
+    await owner.start(); const { page } = await owner.createPage();
+    await page.goto(origin + '/c/fixture-conversation');
+    const error = '<div><p>이 ChatGPT 대화를 불러올 수 없습니다</p><div><button onclick="window.clicks=(window.clicks||0)+1">다시 시도</button></div></div>';
+    const inspect = (click = false, expiresAt = Date.now() + 5000) => page.evaluate(conversationLoadSurface,
+      { origin, conversationId: 'fixture-conversation', submittedUserMessageId: 'original-anchor', click, expiresAt });
+    await t.test('Market English load card is detected without accepting quoted text or a draft', async () => {
+      const card = '<div>Could not load this ChatGPT conversation<button style="display:block" onclick="window.marketClicks=(window.marketClicks||0)+1">Retry</button></div>';
+      await page.setContent('<main>' + card + '</main>');
+      assert.deepEqual(await inspect(), { kind: 'retry', reason: 'conversation-load-retry', clicked: false, loadError: true });
+      assert.equal((await inspect(true)).clicked, true);
+      assert.equal(await page.evaluate(() => (window as unknown as { marketClicks: number }).marketClicks), 1);
+      await page.setContent('<main>' + card + '<textarea>preserved draft</textarea></main>');
+      assert.equal((await inspect(true)).reason, 'manual-draft');
+      assert.equal(await page.locator('textarea').inputValue(), 'preserved draft');
+      await page.setContent('<main><div data-message-author-role="assistant">' + card + '</div><textarea></textarea></main>');
+      assert.equal((await inspect(true)).loadError, false);
+      assert.equal((await inspect(true)).clicked, false);
+    });
+    await t.test('observed Korean load error clicks only its below-notice button', async () => {
+      await page.setContent('<main>' + error + '</main>');
+      assert.equal((await inspect()).kind, 'retry');
+      assert.equal((await inspect(true)).clicked, true);
+      assert.equal(await page.evaluate(() => (window as unknown as { clicks: number }).clicks), 1);
+    });
+    await t.test('live error-card direct text and child button are detected without matching transcript content', async () => {
+      const card = '<div>이 ChatGPT 대화를 불러올 수 없습니다<button style="display:flex" onclick="window.cardClicks=(window.cardClicks||0)+1">다시 시도</button></div>';
+      await page.setContent('<main>' + card + '</main>');
+      assert.equal((await inspect(true)).clicked, true);
+      assert.equal(await page.evaluate(() => (window as unknown as { cardClicks: number }).cardClicks), 1);
+      await page.setContent('<main><div data-message-author-role="assistant">' + card + '</div><textarea></textarea></main>');
+      assert.equal((await inspect(true)).clicked, false);
+    });
+    await t.test('Burncore standalone alert after retained history is detected and uses only its same-row Retry', async () => {
+      const history = '<div data-chatgpt-search-message-ids="original-anchor">Retained original user turn</div>';
+      const alert = '<aside role="alert"><div><div style="display:flex;align-items:center;gap:20px"><div><div><div>대화를 불러올 수 없습니다</div></div></div><div><button onclick="window.alertClicks=(window.alertClicks||0)+1">다시 시도</button></div></div></div></aside>';
+      await page.setContent('<main>' + history + alert + '<textarea>\n</textarea></main>');
+      const detected = await inspect(); assert.equal(detected.loadError, true); assert.equal(detected.kind, 'retry');
+      assert.equal((await inspect(true)).clicked, true);
+      assert.equal(await page.evaluate(() => (window as unknown as { alertClicks: number }).alertClicks), 1);
+      assert.equal(await page.locator('[data-chatgpt-search-message-ids]').getAttribute('data-chatgpt-search-message-ids'), 'original-anchor');
+      await page.setContent('<main>' + history.replace('original-anchor', 'older-anchor') + alert + '<textarea></textarea></main>');
+      assert.equal((await inspect(true)).reason, 'mixed-or-ambiguous-surface');
+      await page.setContent('<main>' + history + '<div data-message-author-role="assistant">Uncollected answer</div>' + alert + '<textarea></textarea></main>');
+      assert.equal((await inspect(true)).reason, 'mixed-or-ambiguous-surface');
+      // An old alert before a later turn, a quoted alert or an offscreen control cannot authorize a click.
+      await page.setContent('<main>' + alert + history + '<textarea></textarea></main>');
+      assert.equal((await inspect(true)).reason, 'mixed-or-ambiguous-surface');
+      await page.setContent('<main><div data-message-author-role="assistant">' + alert + '</div><textarea></textarea></main>');
+      assert.equal((await inspect(true)).loadError, false);
+      await page.setContent('<main>' + history + '<div style="margin-top:2000px">' + alert + '</div><textarea></textarea></main>');
+      const offscreen = await inspect(true); assert.equal(offscreen.loadError, true); assert.equal(offscreen.clicked, false);
+      assert.equal(offscreen.kind, 'held');
+    });
+    await t.test('quoted code/new transcript wrappers and bare words never become a provider load error', async () => {
+      for (const quote of [
+        '<code><span>이 ChatGPT 대화를 불러올 수 없습니다</span></code>',
+        '<div class="MarkdownRoot-rZKhxa">' + error + '</div>',
+        '<article data-testid="conversation-turn-102">' + error + '</article>',
+        '<blockquote>' + error + '</blockquote>',
+        '<p>이 ChatGPT 대화를 불러올 수 없습니다</p>',
+      ]) {
+        await page.setContent('<main>' + quote + '<textarea></textarea></main>');
+        const result = await inspect(true);
+        assert.equal(result.loadError, false, quote);
+        assert.equal(result.clicked, false, quote);
+      }
+    });
+    for (const [name, extra, expected] of [
+      ['draft', '<textarea>retained draft</textarea>', 'manual-draft'],
+      ['active generation', '<button aria-label="중지">Stop</button>', 'generation-active'],
+      ['challenge', '<div role="dialog">Verify you are human</div>', 'verification-or-permission'],
+      ['login', '<div role="dialog">Sign in</div>', 'verification-or-permission'],
+      ['overlay', '<div style="position:fixed;inset:0;z-index:999;background:gray"></div>', 'load-retry-button-obscured'],
+      ['service limitation', '<p>Too many requests</p>', 'service-limited'],
+      ['mixed old answer', '<div data-message-author-role="assistant">Retained answer</div>', 'mixed-or-ambiguous-surface'],
+    ]) {
+      await t.test(name!, async () => {
+        await page.setContent('<main>' + error + extra + '</main>');
+        const surface = await inspect(true); assert.equal(surface.clicked, false); assert.equal(surface.reason, expected);
+        if (name === 'draft') assert.equal(await page.locator('textarea').inputValue(), 'retained draft');
+      });
+    }
+    await t.test('ordinary user/assistant words or a generation-error Retry never authorize load recovery', async () => {
+      for (const role of ['user', 'assistant']) {
+        await page.setContent(`<main><div data-message-author-role="${role}">${error}</div><textarea></textarea></main>`);
+        assert.equal((await inspect(true)).clicked, false);
+      }
+      await page.setContent(`<main><div data-chatgpt-search-message-ids="old-turn"><div data-user-message-bubble>${error}</div></div><textarea></textarea></main>`);
+      assert.equal((await inspect(true)).clicked, false);
+      await page.setContent('<main><p>생각 실패</p><button>다시 시도</button><textarea></textarea></main>');
+      assert.equal((await inspect(true)).clicked, false);
+    });
+    await t.test('missing/disabled/wrong-location buttons and expired leases do not click', async () => {
+      for (const body of [error.replace(/<button.*?<\/button>/, ''), error.replace('<button ', '<button disabled '),
+        '<button>다시 시도</button><p>이 ChatGPT 대화를 불러올 수 없습니다</p>']) {
+        await page.setContent('<main>' + body + '</main>'); assert.equal((await inspect(true)).clicked, false);
+      }
+      await page.setContent('<main>' + error + '</main>');
+      assert.equal((await inspect(true, Date.now() - 1)).reason, 'click-lease-expired');
+    });
+    await t.test('manual recovery or changed state between read and dispatch wins', async () => {
+      await page.setContent('<main>' + error + '</main>'); assert.equal((await inspect()).kind, 'retry');
+      await page.setContent('<main><div data-message-author-role="assistant">Retained final</div><textarea>new manual draft</textarea></main>');
+      const recovered = await inspect(true); assert.equal(recovered.kind, 'normal'); assert.equal(recovered.clicked, false);
+      assert.equal(await page.locator('textarea').inputValue(), 'new manual draft');
+      await page.goto(origin + '/c/another-conversation'); await page.setContent('<main>' + error + '</main>');
+      assert.equal((await inspect(true)).reason, 'binding-url-changed');
+    });
+  } finally { await owner.close(); server.close(); rmSync(root, { recursive: true, force: true }); }
+});

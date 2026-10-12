@@ -1,0 +1,12 @@
+{
+  "sourceCommit": "8f9b971ceef4ae50a49c4192e7614157247d9429",
+  "includes": "5c9c8ee3daa1d4087b72a6345303c7d6d1315729",
+  "version": "0.4.2",
+  "package": "sessionplane-0.4.2.tgz",
+  "packageSha256": "9055ad3762677b916cf42ffe05dd182b375a4e94fcbb637bd7be0c7dae7d45ed",
+  "ciRunId": 38024361219,
+  "ciConclusion": "success",
+  "ciUrl": "https://github.com/huhumanmaninganingansalamlam/sessionplane/actions/runs/38024361219",
+  "runtimeBrowserOwnerSha256": "205e6472c3ec1c0f44484b6fa919a5a8f63454bc19e8f0e4c1320f37c4e2cb93",
+  "installedCatalogSha256": "fe481c10b2f867bdf87418cf06aadc9b399f98a7885aa0029da420a16de536cc"
+}

@@ -5,6 +5,8 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { BrowserOwner } from '../../src/browser/browser-owner.ts';
+import { CHATGPT_PREPARATION_SNAPSHOT } from '../../src/providers/chatgpt/selectors.ts';
+import { BrowserRefSnapshotStore } from '../../src/browser/ref-snapshot.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 import {
   BrowserControlError,
@@ -23,6 +25,7 @@ test('generic browser control exposes snapshot-bound refs without focus identity
     browserOwner: owner,
     pageRegistry: registry,
     genericMutationsEnabled: true,
+    uploadsEnabled: true,
   });
 
   try {
@@ -63,6 +66,13 @@ test('generic browser control exposes snapshot-bound refs without focus identity
     assert.notEqual(select, undefined);
     assert.notEqual(upload, undefined);
 
+    await new BrowserRefSnapshotStore().capture({
+      pageKey: created.binding.pageKey,
+      bindingEpoch: registry.refreshPage(created.binding.pageKey).bindingEpoch,
+      page: created.page,
+    });
+    await Promise.all([browser.snapshot({ maxNodes: 50 }), browser.snapshot({ maxNodes: 50 })]);
+
     await browser.type({
       ref: input?.ref ?? '',
       snapshotId: snapshot.snapshotId,
@@ -79,6 +89,9 @@ test('generic browser control exposes snapshot-bound refs without focus identity
       snapshotId: snapshot.snapshotId,
       values: ['b'],
     });
+    const disabledUploads = new BrowserControlService({ browserOwner: owner, pageRegistry: registry, genericMutationsEnabled: true });
+    await assert.rejects(disabledUploads.upload({ ref: upload!.ref, files: ['/does-not-exist'] }),
+      (error: BrowserControlError) => error.errorCode === 'capability.unsupported');
     const uploadPath = path.join(root, 'attachment.txt');
     writeFileSync(uploadPath, 'attachment', 'utf8');
     await browser.upload({
@@ -115,6 +128,17 @@ test('generic browser control exposes snapshot-bound refs without focus identity
     const bundle = await browser.observationBundle({ maxTextChars: 100 });
     assert.equal(bundle.schemaVersion, 'observation-bundle-v1');
     assert.equal(bundle.pageKey, created.binding.pageKey);
+
+    const beforeReplacement = await browser.snapshot({ maxNodes: 50 });
+    const replacedButton = beforeReplacement.nodes.find(node => node.name === 'Increment')!;
+    await created.page.getByRole('button', { name: 'Increment', exact: true }).evaluate(element => {
+      element.replaceWith(element.cloneNode(true));
+    });
+    await browser.snapshot({ maxNodes: 50 });
+    await assert.rejects(
+      browser.click({ ref: replacedButton.ref, snapshotId: beforeReplacement.snapshotId }),
+      (error: unknown) => error instanceof BrowserControlError && error.errorCode === 'browser.snapshot-stale',
+    );
 
     await browser.navigate({ url: 'https://browser.test/next' });
     await assert.rejects(
@@ -281,3 +305,36 @@ function fixtureHtml(): string {
       </body>
     </html>`;
 }
+
+test('preparation evidence omits transcript and draft text while retaining controls and alerts', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-evidence-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.setContent('<nav>History navigation</nav><main><section role=group><article>' + '<p>Earlier conversation text</p><button>Message action</button>'.repeat(1200) + '</article></section>' +
+      '<form><div role="group"><button aria-haspopup="menu" aria-describedby="old-message">Selected tier</button><div role="menu"><label>Reasoning <input type="range" min="1" max="4" value="4"></label></div><div role="alert">Provider recovery needed</div><div role="textbox" contenteditable="true" aria-label="Prompt">Private draft</div></div></form><article id="old-message">Earlier conversation</article></main>');
+    const refs = new BrowserRefSnapshotStore();
+    const capture = { page, pageKey: binding.pageKey, bindingEpoch: binding.bindingEpoch, ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: 20 };
+    const snapshot = await refs.capture({ ...capture, interactive: false });
+    assert.equal(snapshot.nodesTruncated, false);
+    assert.ok(snapshot.nodes.some(node => node.role === 'alert'));
+    assert.equal(snapshot.nodes.some(node => /Earlier conversation|Message action|History navigation|Private draft/.test(node.name + node.text + node.value + node.description)), false);
+    for (const role of ['button', 'slider', 'textbox']) assert.ok(snapshot.nodes.some(node => node.role === role));
+    const slider = snapshot.nodes.find(node => node.role === 'slider')!;
+    assert.equal(Number(slider.ariaValueNow ?? slider.value), 4);
+    const element = await refs.resolve({ ...capture, ref: slider.ref, snapshotId: snapshot.snapshotId });
+    assert.equal(await element.getAttribute('type'), 'range');
+    await element.dispose();
+    const controls = await refs.capture({ ...capture, interactive: true });
+    assert.equal(controls.nodesTruncated, false);
+    await page.setContent('<form hidden><textarea></textarea></form><main><h1>Conversation unavailable</h1><button>Retry</button></main>');
+    const unavailable = await refs.capture(capture);
+    assert.ok(unavailable.nodes.some(node => node.text === 'Conversation unavailable'));
+    assert.ok(unavailable.nodes.some(node => node.role === 'button'));
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

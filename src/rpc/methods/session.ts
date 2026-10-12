@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { ConversationCleanupService } from '../../core/conversation-cleanup-service.ts';
 
 import type { TeamDirectory } from '../../core/team-directory.ts';
 import type { ReceiptRepository } from '../../storage/receipt-repository.ts';
@@ -15,7 +16,13 @@ export function registerSessionMethods(
   router: RpcRouter,
   directory: TeamDirectory,
   receipts: ReceiptRepository,
+  cleanup: ConversationCleanupService,
 ): void {
+  router.register('session.delete', z.object({
+    clientId: ClientId, requestId: RequestId, sessionId: SessionId,
+    generation: z.number().int().positive(), conversationId: z.string().min(1).max(300),
+    outputsRetrieved: z.literal(true),
+  }).strict(), (input) => cleanup.delete(input));
   router.register(
     'session.create',
     z
@@ -33,12 +40,9 @@ export function registerSessionMethods(
         roleKey: params.roleKey,
         provider: params.provider,
       };
-      return receipts.execute({
-        clientId: params.clientId,
-        requestId: params.requestId,
-        method: 'session.create',
-        payload: command,
-        operation: () => directory.createSession(command),
+      return cleanup.replace({
+        clientId: params.clientId, requestId: params.requestId, method: 'session.create',
+        payload: command, ...command,
       });
     },
   );

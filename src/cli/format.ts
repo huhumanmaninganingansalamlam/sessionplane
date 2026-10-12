@@ -1,4 +1,5 @@
 import { RpcClientError } from './client.ts';
+import { BrowserOwnerError } from '../browser/browser-owner.ts';
 
 export interface CliIo {
   readonly stdin: NodeJS.ReadableStream;
@@ -32,6 +33,9 @@ export function writeCliError(io: CliIo, json: boolean, error: unknown): CliErro
 }
 
 export function normalizeCliError(error: unknown): CliErrorShape {
+  if (error instanceof BrowserOwnerError) {
+    return { requestOk: false, errorCode: error.errorCode, message: error.message };
+  }
   if (error instanceof RpcClientError) {
     const data = isRecord(error.data) ? error.data : {};
     return {

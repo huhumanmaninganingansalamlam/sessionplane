@@ -117,9 +117,11 @@ test('500KB+ answer hash is identical in SQLite, RPC, CLI, and MCP structuredCon
     assert.equal(cli.code, 0, cli.stderr);
     const cliSnapshot = JSON.parse(cli.stdout) as SessionSnapshot;
 
-    const mcpResponse = await callMcpStatus(config.stateDir, session.sessionId);
+    const view = await callRpc<{ requests: Array<{ requestRef: string }> }>({ socketPath: config.socketPath,
+      method: 'workflow.team_get', params: { teamId: team.teamId } });
+    const mcpResponse = await callMcpStatus(config.stateDir, team.teamId, view.requests[0]!.requestRef);
     const mcpResult = mcpResponse.result as Readonly<Record<string, unknown>>;
-    const mcpSnapshot = mcpResult.structuredContent as unknown as SessionSnapshot;
+    const mcpSnapshot = (mcpResult.structuredContent as { request: SessionSnapshot }).request;
     const content = mcpResult.content as Array<{ type: string; text: string }>;
     assert.equal(mcpResult.isError, false);
     assert.equal(JSON.parse(content[0]?.text ?? '{}').truncatedInText, true);
@@ -184,7 +186,8 @@ async function runCliJson(argv: readonly string[]) {
 
 async function callMcpStatus(
   stateDir: string,
-  sessionId: string,
+  teamId: string,
+  requestRef: string,
 ): Promise<Readonly<Record<string, unknown>>> {
   const child = spawn(
     process.execPath,
@@ -236,8 +239,8 @@ async function callMcpStatus(
         id: 'large-answer',
         method: 'tools/call',
         params: {
-          name: 'sessionplane_status',
-          arguments: { clientId: 'large-answer-client', sessionId },
+          name: 'sessionplane_team_get',
+          arguments: { teamId, requestRef },
           _meta: {
             'io.modelcontextprotocol/protocolVersion': MCP_MODERN_PROTOCOL_VERSION,
             'io.modelcontextprotocol/clientCapabilities': {},

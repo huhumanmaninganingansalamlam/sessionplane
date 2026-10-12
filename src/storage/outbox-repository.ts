@@ -1,17 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { SQLInputValue } from 'node:sqlite';
 
+import type { SubmissionState } from '../domain/generation.ts';
 import type { SessionPlaneDatabase } from './database.ts';
 
-export const OUTBOX_STATES = [
-  'prepared',
-  'composer_filled',
-  'submit_attempted',
-  'submitted',
-  'submission_unknown',
-  'failed_pre_submit',
-] as const;
-export type OutboxState = (typeof OUTBOX_STATES)[number];
+export { SUBMISSION_STATES as OUTBOX_STATES } from '../domain/generation.ts';
+export type OutboxState = SubmissionState;
 
 export interface OutboxRecord {
   readonly outboxId: string;
@@ -92,6 +86,34 @@ export class OutboxRepository {
       .prepare(`SELECT ${OUTBOX_COLUMNS} FROM outbox WHERE session_id = ? AND generation = ?`)
       .get(sessionId, generation) as OutboxRow | undefined;
     return row === undefined ? null : mapRow(row);
+  }
+
+  getById(outboxId: string): OutboxRecord | null {
+    const row = this.#database.raw.prepare(`SELECT ${OUTBOX_COLUMNS} FROM outbox WHERE outbox_id = ?`)
+      .get(outboxId) as OutboxRow | undefined;
+    return row === undefined ? null : mapRow(row);
+  }
+
+  listForTeam(teamId: string) {
+    // One compact row per conversation, including replaced conversations needing cleanup.
+    return this.#database.raw.prepare(`SELECT o.outbox_id AS requestRef, o.request_id AS requestId,
+      o.session_id AS sessionId, o.generation, o.role_id AS roleId, o.submission_state AS submissionState,
+      s.session_state AS sessionState, s.provider_state AS providerState, o.error_code AS errorCode
+      FROM outbox o JOIN sessions s ON s.session_id = o.session_id AND s.current_generation = o.generation
+      WHERE o.team_id = ? ORDER BY o.created_at, o.outbox_id`).all(teamId);
+  }
+
+  historyForTeam(teamId: string, before?: OutboxRecord) {
+    const rows = this.#database.raw.prepare(`SELECT o.outbox_id AS requestRef, o.request_id AS requestId,
+      o.session_id AS sessionId, o.generation, o.role_id AS roleId,
+      o.submission_state AS submissionState, g.error_code AS errorCode, g.completed_at AS completedAt,
+      g.response_message_id AS responseMessageId
+      FROM outbox o JOIN generations g ON g.session_id = o.session_id AND g.generation = o.generation
+      WHERE o.team_id = ? AND (? IS NULL OR (o.created_at, o.outbox_id) < (?, ?))
+      ORDER BY o.created_at DESC, o.outbox_id DESC LIMIT 51`)
+      .all(teamId, before?.createdAt ?? null, before?.createdAt ?? null, before?.outboxId ?? null);
+    const requests = rows.slice(0, 50);
+    return { requests, nextRequestRef: rows.length > 50 ? requests.at(-1)!.requestRef : null };
   }
 
   requireById(outboxId: string): OutboxRecord {

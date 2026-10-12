@@ -75,6 +75,23 @@ export class EventRepository {
     return Number(row.sequence);
   }
 
+  latestAnchorRecovery(sessionId: string, generation: number): (Readonly<Record<string, unknown>> & { sequence: number; observedAt: string }) | null {
+    const row = this.#database.prepare(`SELECT sequence, payload_json AS payloadJson, created_at AS createdAt
+      FROM events WHERE session_id=? AND generation=? AND event_type LIKE 'generation.backend-%'
+        AND json_extract(payload_json, '$.recoveryReason') IN (
+          'backend-user-anchor-absent-from-mapping', 'backend-user-anchor-not-on-current-branch', 'backend-exact-final')
+      ORDER BY sequence DESC LIMIT 1`).get(sessionId, generation) as
+      { sequence: number; payloadJson: string; createdAt: string } | undefined;
+    return row ? { sequence: Number(row.sequence), observedAt: row.createdAt, ...parsePayload(row.payloadJson) } : null;
+  }
+
+  submissionAttempts(sessionId: string, generation: number): readonly Readonly<Record<string, unknown>>[] {
+    return (this.#database.prepare(`SELECT payload_json AS payloadJson FROM events
+      WHERE session_id=? AND generation=? AND event_type='generation.submission-attempt-evidence'
+      ORDER BY sequence`).all(sessionId, generation) as Array<{ payloadJson: string }>)
+      .map(row => parsePayload(row.payloadJson));
+  }
+
   latestSequencesForSessions(sessionIds: readonly string[]): ReadonlyMap<string, number> {
     const sequences = new Map<string, number>();
     const batchSize = 900;

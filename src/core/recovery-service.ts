@@ -1,3 +1,4 @@
+import type { CoreMaintenance } from './maintenance.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Page } from 'playwright-core';
 
@@ -5,12 +6,14 @@ import type { BrowserOwner } from '../browser/browser-owner.ts';
 import { isProviderUrl } from '../browser/page-binding.ts';
 import { PageRegistryError, type PageRegistry } from '../browser/page-registry.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
+import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { Logger } from '../logging.ts';
 import type { ProviderAdapterRegistry } from '../providers/provider-adapter.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { PageBindingRepository } from '../storage/page-binding-repository.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
+import { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
 import type { RuntimeMetrics } from '../telemetry/metrics.ts';
 import type { ObservationService } from './observation-service.ts';
 import type { SubmissionService } from './submission-service.ts';
@@ -29,6 +32,7 @@ export interface RestartRecoveryReport {
 }
 
 export interface RecoveryServiceOptions {
+  readonly maintenance?: CoreMaintenance;
   readonly database: SessionPlaneDatabase;
   readonly browserOwner: BrowserOwner | null;
   readonly pageRegistry: PageRegistry;
@@ -59,6 +63,7 @@ export class RecoveryService {
   readonly #adapters: ProviderAdapterRegistry;
   readonly #submissions: SubmissionService;
   readonly #sessions: SessionRepository;
+  readonly #loadRecovery: ConversationLoadRecoveryRepository;
   readonly #pageBindings: PageBindingRepository;
   readonly #providerUrls: RecoveryProviderUrls;
   readonly #metrics: RuntimeMetrics | null;
@@ -70,7 +75,9 @@ export class RecoveryService {
   #closed = false;
   #tail: Promise<RestartRecoveryReport> = Promise.resolve(emptyReport());
 
+  readonly maintenance: CoreMaintenance | undefined;
   constructor(options: RecoveryServiceOptions) {
+    this.maintenance = options.maintenance;
     this.#browserOwner = options.browserOwner;
     this.#pageRegistry = options.pageRegistry;
     this.#scheduler = options.scheduler;
@@ -78,6 +85,7 @@ export class RecoveryService {
     this.#adapters = options.adapters;
     this.#submissions = options.submissions;
     this.#sessions = new SessionRepository(options.database.raw);
+    this.#loadRecovery = new ConversationLoadRecoveryRepository(options.database);
     this.#pageBindings = new PageBindingRepository(options.database.raw);
     this.#providerUrls = {
       chatgptUrl: options.chatgptUrl,
@@ -99,6 +107,44 @@ export class RecoveryService {
     const operation = this.#tail.then(async () => await this.#restore(options));
     this.#tail = operation.catch(() => emptyReport());
     return operation;
+  }
+
+  async ensurePage(sessionId: string, generation: number, options: { openMissing?: boolean } = {}): Promise<void> {
+    const operation = this.#tail.then(async () => {
+      const snapshot = this.#sessions.getSnapshot(sessionId);
+      if (snapshot === null || snapshot.generation !== generation) {
+        throw new SessionPlaneDomainError('session.generation-superseded', 'Exact request page ownership changed');
+      }
+      this.#adapters.require(snapshot.provider);
+      if (snapshot.pageKey !== null) {
+        try {
+          this.#pageRegistry.requireSessionPage(snapshot.pageKey, {
+            sessionId, generation, conversationId: snapshot.conversationId,
+          });
+          if (isObservationReady(snapshot)) this.#observations.start(snapshot);
+          return;
+        } catch (error) {
+          if (!(error instanceof PageRegistryError) || error.errorCode !== 'browser.unavailable') throw error;
+        }
+      }
+      if (options.openMissing === true && snapshot.provider === 'chatgpt') {
+        // Opening a missing exact page is not a Retry click. Preserve server limits,
+        // without inheriting unrelated conversation-load UI spacing.
+        const nextAllowedAt = this.#loadRecovery.serviceNextAllowedAt(snapshot.conversationId ?? undefined);
+        if (nextAllowedAt !== null && Date.parse(nextAllowedAt) > this.#now().getTime()) {
+          throw new SessionPlaneDomainError('provider.observation-deferred',
+            `Missing-page recovery was not dispatched: shared ChatGPT pacing requires waiting until ${nextAllowedAt}`);
+        }
+      }
+      const recovered = await this.#reconcilePage(snapshot, options.openMissing === true, options.openMissing === true);
+      if (recovered.unavailable || recovered.conflict || recovered.snapshot.pageKey === null) {
+        throw new SessionPlaneDomainError('browser.unavailable', 'Exact request conversation page could not be recovered');
+      }
+      if (isObservationReady(recovered.snapshot)) this.#observations.start(recovered.snapshot, { force: true });
+      if (needsAcknowledgementRecovery(recovered.snapshot)) this.watchAcknowledgementRecovery(recovered.snapshot);
+    });
+    this.#tail = operation.then(() => emptyReport(), () => emptyReport());
+    await operation;
   }
 
   watchAcknowledgementRecovery(
@@ -142,6 +188,13 @@ export class RecoveryService {
       });
   }
 
+  forgetSession(sessionId: string): void {
+    this.#observations.stop(sessionId);
+    for (const [key, watcher] of this.#acknowledgementWatchers) {
+      if (key.startsWith(sessionId + ':')) watcher.controller.abort();
+    }
+  }
+
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
@@ -183,10 +236,13 @@ export class RecoveryService {
 
       if (
         this.#browserOwner !== null &&
-        shouldRecoverPage(snapshot) &&
-        snapshot.conversationId !== null
+        (shouldRecoverPage(snapshot) || isPendingPreparation(snapshot) ||
+          snapshot.submissionState === 'failed_pre_submit')
       ) {
-        const reconciled = await this.#reconcilePage(snapshot);
+        // Startup reattaches retained preparation pages, but only attempted
+        // submissions need a missing page reopened for answer recovery.
+        // Unsubmitted work can reopen its exact conversation explicitly.
+        const reconciled = await this.#reconcilePage(snapshot, shouldRecoverPage(snapshot));
         snapshot = reconciled.snapshot;
         rebound += reconciled.rebound ? 1 : 0;
         opened += reconciled.opened ? 1 : 0;
@@ -267,32 +323,38 @@ export class RecoveryService {
         if (this.#now().getTime() >= retryUntilMs) return;
       }
 
-      const snapshot = this.#sessions.getSnapshot(initial.sessionId);
-      if (
-        snapshot === null ||
-        snapshot.generation !== initial.generation ||
-        !needsAcknowledgementRecovery(snapshot)
-      ) {
-        return;
-      }
+      await this.maintenance?.wait(signal);
+      if (signal.aborted) return;
+      const release = this.maintenance?.enter();
+      if (this.maintenance && !release) continue;
+      try {
+        const snapshot = this.#sessions.getSnapshot(initial.sessionId);
+        if (
+          snapshot === null ||
+          snapshot.generation !== initial.generation ||
+          !needsAcknowledgementRecovery(snapshot)
+        ) {
+          return;
+        }
 
-      let identified = await this.#recoverConversationIdentity(snapshot);
-      if (
-        this.#browserOwner !== null &&
-        identified.conversationId !== null &&
-        !pageRecoveryAttempted
-      ) {
-        pageRecoveryAttempted = true;
-        identified = (await this.#reconcilePage(identified)).snapshot;
-      }
-      if (identified.pageKey !== null && identified.conversationId !== null) {
-        const recovered = await this.#submissions.recoverAcknowledgement(identified);
-        if (!needsAcknowledgementRecovery(recovered)) return;
-      }
+        let identified = await this.#recoverConversationIdentity(snapshot);
+        if (
+          this.#browserOwner !== null &&
+          identified.conversationId !== null &&
+          !pageRecoveryAttempted
+        ) {
+          pageRecoveryAttempted = true;
+          identified = (await this.#reconcilePage(identified, false)).snapshot;
+        }
+        if (identified.pageKey !== null && identified.conversationId !== null) {
+          const recovered = await this.#submissions.recoverAcknowledgement(identified);
+          if (!needsAcknowledgementRecovery(recovered)) return;
+        }
 
-      const remainingMs = retryUntilMs - this.#now().getTime();
-      if (remainingMs <= 0) return;
-      delayMs = Math.min(this.#acknowledgementRetryMs, remainingMs);
+        const remainingMs = retryUntilMs - this.#now().getTime();
+        if (remainingMs <= 0) return;
+        delayMs = Math.min(this.#acknowledgementRetryMs, remainingMs);
+      } finally { release?.(); }
     }
   }
 
@@ -328,21 +390,59 @@ export class RecoveryService {
     );
   }
 
-  async #reconcilePage(snapshot: SessionSnapshot): Promise<{
+  async #reconcilePage(snapshot: SessionSnapshot, openMissing = true, reopenFailedPreparation = false): Promise<{
     readonly snapshot: SessionSnapshot;
     readonly rebound: boolean;
     readonly opened: boolean;
     readonly conflict: boolean;
     readonly unavailable: boolean;
   }> {
+    const explicitFailedPreparation = reopenFailedPreparation && openMissing && snapshot.submissionState === 'failed_pre_submit';
+    if (explicitFailedPreparation && (snapshot.promptSubmitted || snapshot.conversationId === null ||
+        snapshot.submittedUserMessageId !== null || snapshot.submittedUserTurnId !== null ||
+        snapshot.responseMessageId !== null || snapshot.answerText !== null || snapshot.sessionState !== 'ready')) {
+      return result(snapshot, { unavailable: true });
+    }
+    // Reads/startup may only reattach the exact retained target. An explicit
+    // missing-page recovery may reopen the stored conversation, never the submit.
+    if (snapshot.submissionState === 'failed_pre_submit' && !explicitFailedPreparation) {
+      const stored = snapshot.pageKey === null ? null : this.#pageBindings.get(snapshot.pageKey);
+      if (snapshot.promptSubmitted || stored?.targetId == null ||
+          stored.sessionId !== snapshot.sessionId || stored.generation !== snapshot.generation ||
+          stored.conversationId !== snapshot.conversationId) return result(snapshot, { unavailable: true });
+      const matches = this.#pageRegistry.listBindings({ includeClosed: false })
+        .filter(binding => binding.targetId === stored.targetId);
+      const match = matches.length === 1 ? matches[0] : undefined;
+      if (match === undefined || !isProviderUrl(snapshot.provider, match.url) ||
+          match.conversationId !== snapshot.conversationId ||
+          (match.sessionId !== null && (match.sessionId !== snapshot.sessionId ||
+            match.generation !== snapshot.generation))) return result(snapshot, { unavailable: true });
+      try {
+        const identity = { sessionId: snapshot.sessionId, generation: snapshot.generation,
+          conversationId: snapshot.conversationId };
+        if (snapshot.conversationId === null) this.#pageRegistry.reservePage(match.pageKey, identity);
+        else this.#pageRegistry.bindPage(match.pageKey, { ...identity, conversationId: snapshot.conversationId });
+        const updated = await this.#recordPageState(snapshot, {
+          pageKey: match.pageKey, observationTransport: 'fresh',
+          reason: 'restart-failed-preparation-rebound', errorCode: null,
+        }, 'generation.restart-failed-preparation-rebound');
+        return result(updated, { rebound: true });
+      } catch (error) {
+        this.#logger?.warn('recovery.failed-preparation-page-unavailable', {
+          sessionId: snapshot.sessionId, generation: snapshot.generation, reason: classifyPageFailure(error),
+        });
+        return result(snapshot, { unavailable: true });
+      }
+    }
     const conversationId = snapshot.conversationId;
     if (conversationId === null) {
-      return result(snapshot);
+      return await this.#reconcilePreparation(snapshot);
     }
     const matches = this.#pageRegistry
       .findByConversation(conversationId)
       .filter((page) => isProviderUrl(snapshot.provider, page.url));
     if (matches.length > 1) {
+      if (explicitFailedPreparation) return result(snapshot, { conflict: true });
       const updated = await this.#recordPageState(snapshot, {
         pageKey: null,
         observationTransport: 'stale',
@@ -371,6 +471,7 @@ export class RecoveryService {
         }, 'generation.restart-page-rebound');
         return result(updated, { rebound: true });
       } catch (error) {
+        if (explicitFailedPreparation) throw explicitPageRecoveryError(error, 'bind-existing-page');
         return await this.#recordUnavailable(snapshot, classifyPageFailure(error));
       }
     }
@@ -414,13 +515,16 @@ export class RecoveryService {
       }
     }
 
-    if (this.#browserOwner === null) {
+    // Reads may reattach an existing exact page, but never open/navigate a replacement.
+    if (this.#browserOwner === null || !openMissing) {
       return result(snapshot, { unavailable: true });
     }
     let createdPage: Page | null = null;
+    let stage = 'create-page';
     try {
       const created = await this.#browserOwner.createPage();
       createdPage = created.page;
+      stage = 'reserve-page';
       this.#pageRegistry.reservePage(created.binding.pageKey, {
         sessionId: snapshot.sessionId,
         generation: snapshot.generation,
@@ -431,8 +535,18 @@ export class RecoveryService {
         redirectId ?? conversationId,
         this.#providerUrls,
       );
+      stage = 'navigate';
       await this.#navigatePage(created.page, target);
+      stage = 'verify-page';
       const navigated = this.#pageRegistry.refreshPage(created.binding.pageKey);
+      if (explicitFailedPreparation) {
+        const current = this.#sessions.getSnapshot(snapshot.sessionId);
+        if (current === null || current.generation !== snapshot.generation ||
+            current.conversationId !== snapshot.conversationId || current.pageKey !== snapshot.pageKey ||
+            current.submissionState !== 'failed_pre_submit' || current.promptSubmitted || current.sessionState !== 'ready') {
+          throw new SessionPlaneDomainError('session.generation-superseded', 'Request changed during explicit page recovery');
+        }
+      }
       if (
         snapshot.provider === 'chatgpt' &&
         conversationId.startsWith('WEB:') &&
@@ -449,11 +563,13 @@ export class RecoveryService {
         createdPage = null;
         return result(updated, { opened: true });
       }
+      stage = 'bind-page';
       this.#pageRegistry.bindPage(created.binding.pageKey, {
         sessionId: snapshot.sessionId,
         generation: snapshot.generation,
         conversationId,
       });
+      stage = 'record-page';
       const updated = await this.#recordPageState(snapshot, {
         pageKey: created.binding.pageKey,
         observationTransport: 'fresh',
@@ -464,8 +580,49 @@ export class RecoveryService {
       return result(updated, { opened: true, rebound: true });
     } catch (error) {
       await createdPage?.close().catch(() => undefined);
+      if (explicitFailedPreparation) {
+        const failure = explicitPageRecoveryError(error, stage);
+        this.#logger?.warn('recovery.explicit-page-failed', {
+          sessionId: snapshot.sessionId, generation: snapshot.generation,
+          ...(failure.details as Record<string, unknown>),
+        });
+        throw failure;
+      }
       return await this.#recordUnavailable(snapshot, classifyPageFailure(error));
     }
+  }
+
+  async #reconcilePreparation(snapshot: SessionSnapshot) {
+    if (!isPendingPreparation(snapshot) || snapshot.pageKey === null) return result(snapshot);
+    const stored = this.#pageBindings.get(snapshot.pageKey);
+    if (
+      stored?.targetId == null ||
+      stored.sessionId !== snapshot.sessionId ||
+      stored.generation !== snapshot.generation
+    ) return result(snapshot);
+
+    const match = this.#pageRegistry.listBindings({ includeClosed: false }).find(
+      (binding) => binding.targetId === stored.targetId,
+    );
+    if (match === undefined) return result(snapshot);
+    if (
+      !isProviderUrl(snapshot.provider, match.url) ||
+      match.conversationId !== null ||
+      (match.sessionId !== null &&
+        (match.sessionId !== snapshot.sessionId || match.generation !== snapshot.generation))
+    ) return await this.#recordUnavailable(snapshot, 'restart-preparation-target-mismatch');
+
+    this.#pageRegistry.reservePage(match.pageKey, {
+      sessionId: snapshot.sessionId,
+      generation: snapshot.generation,
+    });
+    const updated = await this.#recordPageState(snapshot, {
+      pageKey: match.pageKey,
+      observationTransport: 'fresh',
+      reason: 'restart-preparation-rebound',
+      errorCode: null,
+    }, 'generation.restart-preparation-rebound');
+    return result(updated, { rebound: true });
   }
 
   async #recordUnavailable(
@@ -500,11 +657,11 @@ export class RecoveryService {
     const preserveGenerationDiagnostic =
       snapshot.submissionState === 'submission_unknown' ||
       (!snapshot.promptSubmitted && snapshot.errorCode !== null);
-    const effectiveUpdate: typeof update =
-      preserveGenerationDiagnostic && update.errorCode === null
+    const effectiveUpdate =
+      snapshot.terminal || (preserveGenerationDiagnostic && update.errorCode === null)
         ? {
             ...update,
-            reason: snapshot.reason ?? update.reason,
+            reason: snapshot.reason,
             errorCode: snapshot.errorCode,
           }
         : update;
@@ -569,6 +726,10 @@ function needsAcknowledgementRecovery(snapshot: SessionSnapshot): boolean {
   );
 }
 
+function isPendingPreparation(snapshot: SessionSnapshot): boolean {
+  return !snapshot.terminal && !snapshot.promptSubmitted && snapshot.submissionState === 'prepared';
+}
+
 function shouldRecoverPage(snapshot: SessionSnapshot): boolean {
   return (
     snapshot.promptSubmitted ||
@@ -584,6 +745,17 @@ function classifyPageFailure(error: unknown): string {
       : 'restart-page-identity-unverified';
   }
   return 'restart-page-unavailable';
+}
+
+function explicitPageRecoveryError(error: unknown, stage: string): SessionPlaneDomainError {
+  // Navigation exceptions can contain URL credentials/query values and call logs.
+  // Retain the first-line cause, without exporting those values or a stack trace.
+  const causeMessage = (error instanceof Error ? error.message : 'Unknown page recovery failure')
+    .split('\n')[0]!.replace(/https?:\/\/[^\s"']+/g, '[navigation URL]').slice(0, 500);
+  return new SessionPlaneDomainError('browser.unavailable',
+    `Exact request conversation page could not be recovered during ${stage}: ${causeMessage}`, {
+      stage, causeName: error instanceof Error ? error.name : 'UnknownError', causeMessage,
+    });
 }
 
 function result(

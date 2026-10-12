@@ -19,6 +19,16 @@ export interface ProviderSubmissionRequest {
   readonly effort?: string | null;
   readonly surface?: string | null;
   readonly attachments?: readonly ProviderAttachment[];
+  readonly onSubmissionAttempt?: (attempt: ProviderSubmissionAttempt) => void;
+}
+
+/** Correlation evidence for an attempt, never proof of provider acceptance. */
+export interface ProviderSubmissionAttempt {
+  readonly conversationId: string;
+  readonly messageId: string;
+  readonly parentMessageId: string;
+  readonly textHash: string;
+  readonly observedAt: string;
 }
 
 export type PreparationPurpose = 'model' | 'effort' | 'composer' | 'submit';
@@ -50,6 +60,7 @@ export interface PreparationTarget {
 export type PreparationChoices = Readonly<Partial<Record<PreparationPurpose, PreparationTarget>>>;
 
 export interface ProviderSubmissionAcknowledgement {
+  readonly evidence?: 'stable-anchor-cleared-composer' | 'accepted-request-stable-anchor-cleared-composer' | 'backend-exact-user';
   readonly conversationId: string;
   readonly submittedUserMessageId: string;
   readonly submittedUserTurnId: string;
@@ -59,12 +70,15 @@ export interface ProviderAcknowledgementRecoveryRequest {
   readonly session: SessionSnapshot;
   readonly generation: number;
   readonly prompt: string;
+  readonly selection?: { readonly messageId: string; readonly evidenceHash: string };
+  readonly attempts?: readonly ProviderSubmissionAttempt[];
 }
 
 export interface ProviderSubmission {
   readonly provider: string;
   readonly pageKey: string;
   prepareForObservation?(): Promise<void>;
+  readonly preparationStage?: string;
   prepare(choices?: PreparationChoices): Promise<void>;
   abandon(): void;
   submitOnce(): Promise<void>;
@@ -84,6 +98,7 @@ export interface ProviderAssistantCandidate {
 }
 
 export interface ProviderObservationEvidence {
+  readonly errorCode?: string | undefined;
   readonly provider: string;
   readonly pageKey: string;
   readonly bindingEpoch: number;
@@ -91,6 +106,8 @@ export interface ProviderObservationEvidence {
   readonly conversationId: string | null;
   readonly submittedUserFound: boolean;
   readonly laterUserFound: boolean;
+  // Only the response after the latest user turn, with the original submitted
+  // anchor present. A human follow-up with no answer must clear the candidate.
   readonly candidate: ProviderAssistantCandidate | null;
   readonly activity: ProviderActivityStrength;
   readonly dialogKind: ProviderDialogKind | null;
@@ -142,6 +159,8 @@ export interface ProviderArtifactCandidate {
 }
 
 export interface ProviderArtifactRequest {
+  /** Current page owner revision; the requested answer may belong to an older generation. */
+  readonly bindingGeneration?: number;
   readonly session: SessionSnapshot;
   readonly generation: number;
 }
@@ -149,33 +168,6 @@ export interface ProviderArtifactRequest {
 export interface ProviderArtifactDownload {
   readonly candidate: ProviderArtifactCandidate;
   readonly bytes: Uint8Array;
-}
-
-export interface ProviderCodeArtifactCandidate {
-  readonly providerArtifactId: string;
-  readonly name: string;
-  readonly sandboxPath: string;
-  readonly candidateMessageIds: readonly string[];
-  readonly mediaType: 'application/zip';
-}
-
-export interface ProviderCodeArtifactRequest {
-  readonly session: SessionSnapshot;
-  readonly generation: number;
-  readonly conversationId: string;
-  readonly maxBytes: number;
-}
-
-export interface ProviderCodeArtifactDownload {
-  readonly candidate: ProviderCodeArtifactCandidate;
-  readonly bytes: Uint8Array;
-  readonly mintedMessageId: string;
-}
-
-export interface ProviderProjectSource {
-  readonly providerSourceId: string;
-  readonly name: string;
-  readonly mediaType: string | null;
 }
 
 export interface ProviderStopRequest {
@@ -187,12 +179,18 @@ export interface ProviderStopOperation {
   readonly provider: string;
   readonly pageKey: string;
   prepare(): Promise<boolean>;
-  stopOnce(): Promise<void>;
+  /** Return stopped only for a provider acknowledgement, not just a browser click. */
+  stopOnce(): Promise<'stopped' | 'unknown'>;
 }
 
 export interface ProviderAdapter {
   readonly provider: string;
   openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission>;
+  openDeletion?(request: ProviderRecoveryRequest): Promise<{
+    readonly alreadyDeleted: boolean;
+    deleteOnce(): Promise<boolean>;
+    close(): Promise<void>;
+  }>;
   recoverAcknowledgement?(
     request: ProviderAcknowledgementRecoveryRequest,
   ): Promise<ProviderSubmissionAcknowledgement | null>;
@@ -204,13 +202,7 @@ export interface ProviderAdapter {
     request: ProviderArtifactRequest,
     candidate: ProviderArtifactCandidate,
   ): Promise<ProviderArtifactDownload>;
-  discoverCodeArtifacts?(
-    request: ProviderCodeArtifactRequest,
-  ): Promise<readonly ProviderCodeArtifactCandidate[]>;
-  downloadCodeArtifact?(
-    request: ProviderCodeArtifactRequest,
-    candidate: ProviderCodeArtifactCandidate,
-  ): Promise<ProviderCodeArtifactDownload>;
+
 }
 
 export class ProviderSubmissionError extends Error {

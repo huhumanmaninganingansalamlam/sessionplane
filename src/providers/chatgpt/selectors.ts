@@ -27,20 +27,9 @@ export const CHATGPT_SELECTORS = {
     'img[src^="blob:"]',
     'img[src^="data:image/"]',
   ],
-  projectSourceRows: [
-    '[data-project-file-id]',
-    '[data-testid*="project-source"]',
-    '[data-testid*="source-file"]',
-    '[data-testid*="file-item"]',
-  ],
-  projectSourceInputs: ['input[type="file"][multiple]', 'input[type="file"]'],
-  projectSourceTriggers: [
-    '[data-testid*="add-source"]',
-    'button[aria-label*="add files" i]',
-    'button[aria-label*="project files" i]',
-  ],
   userMessages: '[data-message-author-role="user"], [data-chatgpt-search-message-ids]:has([data-user-message-bubble])',
   userMessageContent: [
+    '[data-user-message-bubble]',
     '[data-testid="collapsible-user-message-content"]',
     '.whitespace-pre-wrap',
     '[data-testid*="user-message-content"]',
@@ -52,6 +41,7 @@ export const CHATGPT_SELECTORS = {
     'button[aria-label="Stop generating"]',
     'button[aria-label="Stop streaming"]',
     'button[aria-label="생성 중지"]',
+    'button[aria-label="중지"]',
   ],
   thinkingIndicators: [
     '[data-testid*="thinking"]',
@@ -64,4 +54,17 @@ export const CHATGPT_SELECTORS = {
     '[data-testid*="interstitial"]',
     '[data-testid*="modal"]',
   ],
+} as const;
+
+
+// Response code editors are editable textboxes too, but never the chat draft.
+export const CHATGPT_COMPOSER_SELECTOR =
+  `:is(#prompt-textarea, [data-testid="prompt-textarea"], main [role="textbox"][contenteditable="true"]):not(:is(${CHATGPT_SELECTORS.messages}, article, nav, aside, [data-editor-search-surface]) *)`;
+
+export const CHATGPT_PREPARATION_SNAPSHOT = {
+  submitSelector: '[data-testid="send-button"], #composer-submit-button',
+  interactive: false,
+  compact: true,
+  controlScope: true,
+  excludeSelector: `${CHATGPT_SELECTORS.messages}, article, nav, aside, [role="navigation"], #app-shell-sidebar`,
 } as const;

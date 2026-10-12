@@ -58,6 +58,7 @@ export class BrowserControlService {
   readonly #pageRegistry: PageRegistry;
   readonly #onStarted: (() => Promise<unknown>) | null;
   readonly #genericMutationsEnabled: boolean;
+  readonly #uploadsEnabled: boolean;
   readonly #refs = new BrowserRefSnapshotStore();
   readonly #diagnostics = new Map<string, DiagnosticBuffer>();
   readonly #attachedPages = new WeakSet<Page>();
@@ -68,11 +69,13 @@ export class BrowserControlService {
     readonly pageRegistry: PageRegistry;
     readonly onStarted?: (() => Promise<unknown>) | undefined;
     readonly genericMutationsEnabled?: boolean | undefined;
+    readonly uploadsEnabled?: boolean;
   }) {
     this.#browserOwner = options.browserOwner;
     this.#pageRegistry = options.pageRegistry;
     this.#onStarted = options.onStarted ?? null;
     this.#genericMutationsEnabled = options.genericMutationsEnabled ?? false;
+    this.#uploadsEnabled = options.uploadsEnabled ?? false;
   }
 
   runtimeStatus(): Readonly<Record<string, unknown>> {
@@ -408,6 +411,9 @@ export class BrowserControlService {
     readonly files: readonly string[];
   }): Promise<Readonly<Record<string, unknown>>> {
     this.#requireGenericMutation('upload');
+    if (!this.#uploadsEnabled) {
+      throw new BrowserControlError('capability.unsupported', 'Attachment uploads are disabled. Downloads remain available.');
+    }
     const files = input.files.map((file) => path.resolve(file));
     for (const file of files) {
       if (!existsSync(file)) {

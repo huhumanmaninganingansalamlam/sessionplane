@@ -34,6 +34,11 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
     socket.setEncoding('utf8');
     let buffer = '';
     let settled = false;
+    let requestDispatched = false;
+    const transportError = (errorCode: string, message: string, causeCode?: string) =>
+      new RpcClientError(-32000, message, {
+        errorCode, details: { requestDispatched, ...(causeCode === undefined ? {} : { causeCode }) },
+      });
 
     const finish = (operation: () => void): void => {
       if (settled) {
@@ -51,7 +56,8 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
     };
 
     const timer = setTimeout(() => {
-      finish(() => reject(new Error(`RPC request timed out after ${timeoutMs}ms`)));
+      finish(() => reject(transportError('core.timeout',
+        `Core response timed out after ${timeoutMs}ms; a dispatched request may still be running. Recover the same request identity before another mutation.`)));
     }, timeoutMs);
     timer.unref?.();
     options.signal?.addEventListener('abort', onAbort, { once: true });
@@ -61,6 +67,7 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
     }
 
     socket.once('connect', () => {
+      requestDispatched = true;
       socket.write(`${JSON.stringify({
         jsonrpc: '2.0',
         id,
@@ -100,8 +107,10 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
       finish(() => resolve(response.result as Result));
     });
 
-    socket.once('error', (error) => finish(() => reject(error)));
-    socket.once('end', () => finish(() => reject(new Error('RPC server closed before responding'))));
+    socket.once('error', (error: NodeJS.ErrnoException) => finish(() => reject(transportError(
+      requestDispatched ? 'core.connection-lost' : 'core.unavailable', error.message, error.code,
+    ))));
+    socket.once('end', () => finish(() => reject(transportError('core.connection-lost',
+      'Core connection closed before responding; recover the same request identity before another mutation.'))));
   });
 }
-

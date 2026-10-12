@@ -1,4 +1,5 @@
-import type { ElementHandle, Locator, Page } from 'playwright-core';
+import { createHash } from 'node:crypto';
+import type { ElementHandle, Locator, Page, Request, Response } from 'playwright-core';
 
 import type { PageRegistry } from '../../browser/page-registry.ts';
 import { parseChatGptConversationId } from '../../browser/page-binding.ts';
@@ -17,7 +18,8 @@ import {
   navigateProviderPage,
   waitForProviderPageReady,
 } from '../human-verification.ts';
-import { CHATGPT_SELECTORS } from './selectors.ts';
+import { attachmentsAcknowledged } from '../attachment-evidence.ts';
+import { CHATGPT_SELECTORS, CHATGPT_PREPARATION_SNAPSHOT, CHATGPT_COMPOSER_SELECTOR } from './selectors.ts';
 import { readChatGptMessages, type ChatGptMessage } from './message-dom.ts';
 
 const COMPOSER_HYDRATION_TIMEOUT_MS = 3_000;
@@ -50,8 +52,76 @@ export class ChatGptSubmission implements ProviderSubmission {
   readonly #initialUrl: string | null;
   readonly #preparationRefs = new BrowserRefSnapshotStore();
   #sendButton: PreparationElement | null = null;
+  #abandoned = false;
+  #preparationStage = 'not-started';
+
+  get preparationStage(): string { return this.#preparationStage; }
+
+  #checkpoint = (stage: string): void => {
+    if (this.#abandoned) throw new ProviderSubmissionError('browser.unavailable',
+      'Preparation was abandoned; preserve this page and inspect the same request before continuing',
+      { promptSubmitted: false, details: { preparationStage: this.#preparationStage } });
+    this.#preparationStage = stage;
+  };
   #baselineConversationId: string | null = null;
   #baselineUserIds = new Set<string>();
+  readonly #preparedPromptHashes = new Set<string>();
+  readonly #sentMessageIds = new Set<string>();
+  readonly #sentRequests = new Map<Request, Set<string>>();
+  readonly #acceptedMessageIds = new Set<string>();
+  readonly #captureSentIdentity = (request: Request): void => {
+    if (request.method() !== 'POST' || new URL(request.url()).origin !== new URL(this.#page.url()).origin) return;
+    try {
+      const body: unknown = request.postDataJSON();
+      if (body === null || typeof body !== 'object' || !('messages' in body) || !Array.isArray(body.messages)) return;
+      if (this.#baselineConversationId !== null && 'conversation_id' in body && body.conversation_id != null && body.conversation_id !== this.#baselineConversationId) return;
+      // Preserve exact dispatch correlation before the DOM ACK deadline expires.
+      // Only the real continuation POST on this prepared page can supply it.
+      const users = body.messages.filter((m: unknown) => m !== null && typeof m === 'object' &&
+        'author' in m && m.author !== null && typeof m.author === 'object' &&
+        'role' in m.author && m.author.role === 'user');
+      if (/^\/backend-api\/(?:f\/)?conversation$/.test(new URL(request.url()).pathname) &&
+          'action' in body && body.action === 'next' && users.length === 1 &&
+          'conversation_id' in body && body.conversation_id === this.#baselineConversationId &&
+          typeof body.conversation_id === 'string' && 'parent_message_id' in body &&
+          typeof body.parent_message_id === 'string' && body.parent_message_id !== '') {
+        const message = users[0] as Record<string, unknown>;
+        const content = message.content as { content_type?: unknown; parts?: unknown } | undefined;
+        if (typeof message.id === 'string' && message.id !== '' &&
+            ![...this.#baselineUserIds].some(id => id.startsWith(`${message.id}\u0000`)) &&
+            content?.content_type === 'text' && Array.isArray(content.parts) &&
+            content.parts.every((part: unknown) => typeof part === 'string')) {
+          const textHash = createHash('sha256').update(content.parts.join('\n').replaceAll('\r\n', '\n')).digest('hex');
+          if (this.#preparedPromptHashes.has(textHash)) {
+            this.#request.onSubmissionAttempt?.({ conversationId: body.conversation_id,
+              messageId: message.id, parentMessageId: body.parent_message_id,
+              textHash, observedAt: new Date().toISOString() });
+          }
+        }
+      }
+      for (const message of body.messages as unknown[]) {
+        if (message === null || typeof message !== 'object' || !('id' in message) ||
+            typeof message.id !== 'string' || message.id === '' || !('author' in message)) continue;
+        const author = message.author;
+        if (author !== null && typeof author === 'object' && 'role' in author && author.role === 'user') {
+          this.#sentMessageIds.add(message.id);
+          const ids = this.#sentRequests.get(request) ?? new Set<string>();
+          ids.add(message.id);
+          this.#sentRequests.set(request, ids);
+        }
+      }
+    } catch { /* Unrelated non-JSON browser requests do not carry message identities. */ }
+  };
+
+  readonly #captureAcceptance = (response: Response): void => {
+    // Outgoing IDs prove an attempt only. Also observe the provider accepting
+    // that exact request; optimistic DOM alone must never confirm submission.
+    if (!response.ok()) return;
+    for (const id of this.#sentRequests.get(response.request()) ?? []) this.#acceptedMessageIds.add(id);
+  };
+  readonly #captureFailedRequest = (request: Request): void => {
+    for (const id of this.#sentRequests.get(request) ?? []) this.#acceptedMessageIds.delete(id);
+  };
 
   constructor(options: ChatGptSubmissionOptions) {
     this.#page = options.page;
@@ -63,16 +133,16 @@ export class ChatGptSubmission implements ProviderSubmission {
   }
 
   async prepareForObservation(): Promise<void> {
+    this.#checkpoint('page-ready');
     if (this.#initialUrl !== null) {
       await navigateProviderPage({ page: this.#page, provider: this.provider, pageKey: this.pageKey, url: this.#initialUrl, timeoutMs: 30_000 });
       this.#registry.refreshPage(this.pageKey);
-    } else {
-      await waitForProviderPageReady({ page: this.#page, provider: this.provider, pageKey: this.pageKey });
     }
     this.#requireExactPage();
-    await assertNoHumanVerification({ page: this.#page, provider: this.provider, pageKey: this.pageKey });
+    await inspectChatGptPageReady(this.#page, this.pageKey);
+    this.#checkpoint('authentication-observe');
     await assertChatGptAuthenticated(this.#page);
-    await assertChatOnlySurface(this.#page);
+    this.#checkpoint('page-ready');
   }
 
   async #resolvePreparationTarget(
@@ -86,10 +156,11 @@ export class ChatGptSubmission implements ProviderSubmission {
         pageKey: this.pageKey,
         bindingEpoch: binding.bindingEpoch,
         page: this.#page,
-        interactive: false,
+        ...CHATGPT_PREPARATION_SNAPSHOT,
         maxNodes: 5_000,
       });
-      const matches = snapshot.nodes.filter((node) => matchesPreparationTarget(node, target));
+      const matches = snapshot.nodes.filter((node) => matchesPreparationTarget(node, target) &&
+        (target.purpose !== 'submit' || node.submitControl === true));
       if (snapshot.nodesTruncated || matches.length > 1) return null;
       const match = matches[0];
       if (match !== undefined) {
@@ -126,20 +197,30 @@ export class ChatGptSubmission implements ProviderSubmission {
     return null;
   }
 
-  async #hasSelectedPreparationTarget(target: PreparationTarget): Promise<boolean> {
-    const binding = this.#registry.refreshPage(this.pageKey);
-    const snapshot = await this.#preparationRefs.capture({
-      pageKey: this.pageKey,
-      bindingEpoch: binding.bindingEpoch,
-      page: this.#page,
-      interactive: false,
-      maxNodes: 5_000,
-    });
-    return !snapshot.nodesTruncated && hasPreparationSelectionEvidence(snapshot.nodes, target);
+  async #verifyConfiguration(choices?: PreparationChoices): Promise<void> {
+    const configuration = choices?.model ?? choices?.effort;
+    if (configuration !== undefined || this.#request.model != null || this.#request.effort != null) {
+      const snapshot = await this.#preparationRefs.capture({
+        pageKey: this.pageKey,
+        bindingEpoch: this.#registry.refreshPage(this.pageKey).bindingEpoch,
+        page: this.#page,
+        ...CHATGPT_PREPARATION_SNAPSHOT,
+        maxNodes: 5_000,
+      });
+      if (configuration === undefined || snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, configuration)) {
+        throw new ProviderSubmissionError('provider.preparation-required',
+          'Configuration must be verified before submission. Choose a matching configurationCatalog option with decide configure and configurationId. ' +
+          'After a click timeout, the original Coordinator must first team_get this same requestRef and check promptSubmitted, submissionState, terminal and saved choices. ' +
+          'Only while still prepared/unsubmitted, native choose/model can verify a fresh current combined model/version/effort summary matching the user intent; otherwise discover or report the evidence gap. ' +
+          'Reinspect after menu/composer changes. A saved Submit choice may resume on a later raw choose.');
+      }
+    }
   }
 
   async prepare(choices?: PreparationChoices): Promise<void> {
+    this.#checkpoint('page-ready');
     await this.prepareForObservation();
+    this.#checkpoint('composer-resolve');
     const surface = normalizeLabel(this.#request.surface ?? '');
     if (surface === 'work') {
       throw new ProviderSubmissionError(
@@ -151,26 +232,23 @@ export class ChatGptSubmission implements ProviderSubmission {
       throw new ProviderSubmissionError('capability.unsupported', 'Named-mode automatic selection is not supported');
     }
     if (choices?.composer === undefined) {
-      throw new ProviderSubmissionError('provider.preparation-required', 'Choose the observed composer before continuation');
-    }
-    for (const purpose of ['model', 'effort'] as const) {
-      const intent = this.#request[purpose];
-      const choice = choices[purpose];
-      if (intent != null && (choice === undefined || !(await this.#hasSelectedPreparationTarget(choice)))) {
-        throw new ProviderSubmissionError('provider.preparation-required', 'The requested ' + purpose + ' needs a verified caller selection');
-      }
+      throw new ProviderSubmissionError('provider.preparation-required', 'Choose the composer on this exact owned page to replace any provider-restored draft with this request prompt; select the requested configuration from configurationCatalog before submitting');
     }
     const composer = await this.#resolvePreparationTarget(choices.composer, COMPOSER_READY_TIMEOUT_MS);
     if (composer === null) {
       throw new ProviderSubmissionError('provider.preparation-required', 'The chosen composer is no longer available');
     }
     if (!(await writeExactComposerValue(this.#page, composer, this.#request.prompt,
-      () => this.#resolvePreparationTarget(choices.composer!, 0)))) {
+      () => this.#resolvePreparationTarget(choices.composer!, 0), this.#checkpoint))) {
       throw new ProviderSubmissionError(
-        'provider.composer-unavailable',
-        'ChatGPT composer value did not match the requested prompt',
+        'provider.preparation-required',
+        'The composer did not retain the exact prompt. Inspect the current editor and choose the composer again on this request.',
       );
     }
+
+    this.#checkpoint('configuration-verify');
+    await this.#verifyConfiguration(choices);
+    this.#checkpoint('submit-resolve');
 
     if (choices.submit === undefined) {
       throw new ProviderSubmissionError('provider.preparation-required', 'Prompt is prepared; inspect and choose the current submit control');
@@ -183,21 +261,42 @@ export class ChatGptSubmission implements ProviderSubmission {
     this.#baselineConversationId = parseChatGptConversationId(this.#page.url());
     this.#baselineUserIds = await captureUserIdentitySet(this.#page);
     const attachments = this.#request.attachments ?? [];
-    if (attachments.length > 0) await uploadAttachments(this.#page, attachments);
+    if (attachments.length > 0) {
+      const currentComposer = await this.#resolvePreparationTarget(choices.composer, 0);
+      if (currentComposer === null) throw new ProviderSubmissionError('provider.preparation-required', 'The chosen composer is no longer available');
+      this.#checkpoint('attachments');
+      try { await uploadAttachments(this.#page, attachments, currentComposer, this.#checkpoint); }
+      finally { await currentComposer.dispose(); }
+    }
 
+    this.#checkpoint('submit-ready');
     const sendButton = await this.#waitForEnabledPreparationTarget(choices.submit, 60_000);
     if (sendButton === null) {
-      throw new ProviderSubmissionError('provider.composer-unavailable', 'The chosen send control is unavailable after composer preparation');
+      throw new ProviderSubmissionError('provider.preparation-required', 'The chosen send control is unavailable. Inspect the current page and choose the submit control again on this request.');
     }
-    this.#sendButton = sendButton;
-    this.#requireExactPage();
+    try {
+      await this.#verifyConfiguration(choices);
+      this.#requireExactPage();
+      this.#checkpoint('prepared');
+      this.#sendButton = sendButton;
+    } catch (error) {
+      await sendButton.dispose();
+      throw error;
+    }
   }
 
   abandon(): void {
-    void this.#page.close().catch(() => undefined);
+    this.#abandoned = true;
+    this.#sendButton = null;
+    this.#page.off('request', this.#captureSentIdentity);
+    this.#page.off('response', this.#captureAcceptance);
+    this.#page.off('requestfailed', this.#captureFailedRequest);
+    // This page already belongs to the session. Preserve its draft and binding.
+    // Checkpoints stop late preparation continuations; an issued browser command may still settle.
   }
 
   async submitOnce(): Promise<void> {
+    this.#checkpoint('submit');
     if (this.#sendButton === null) {
       throw new ProviderSubmissionError(
         'internal.invariant-violation',
@@ -206,50 +305,90 @@ export class ChatGptSubmission implements ProviderSubmission {
       );
     }
     this.#requireExactPage();
+    const composers = this.#page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
+    if (await composers.count() === 1) {
+      const values = await readExactTextCandidates(composers.first());
+      if (values.some(value => normalizeLineEndings(value) === normalizeLineEndings(this.#request.prompt))) {
+        for (const value of values) this.#preparedPromptHashes.add(createHash('sha256').update(normalizeLineEndings(value)).digest('hex'));
+      }
+    }
+    this.#checkpoint('submit');
+    this.#page.on('request', this.#captureSentIdentity);
+    this.#page.on('response', this.#captureAcceptance);
+    this.#page.on('requestfailed', this.#captureFailedRequest);
     await this.#sendButton.click({ timeout: 5_000 });
   }
 
   async captureAcknowledgement(): Promise<ProviderSubmissionAcknowledgement | null> {
-    let deadline = Date.now() + this.#acknowledgementTimeoutMs;
-    let hydrationGraceApplied = false;
-    const hydrationGraceMs = acknowledgementHydrationGraceMs(this.#acknowledgementTimeoutMs);
-    while (Date.now() < deadline) {
-      const conversationId = parseChatGptConversationId(this.#page.url());
-      if (
-        hydrationGraceApplied === false &&
-        conversationId !== null &&
-        conversationId !== this.#baselineConversationId
-      ) {
-        deadline = Math.max(deadline, Date.now() + hydrationGraceMs);
-        hydrationGraceApplied = true;
-      }
-      const messages = (await readChatGptMessages(this.#page)).filter((message) => message.role === 'user');
-      for (let index = Math.max(0, messages.length - 8); index < messages.length; index += 1) {
-        const message = messages[index]!;
-        if (normalizeLineEndings(message.text) !== normalizeLineEndings(this.#request.prompt) &&
-          !(await messageHasExactPrompt(this.#page.locator(CHATGPT_SELECTORS.userMessages).nth(index), this.#request.prompt))) {
-          continue;
+    try {
+      let deadline = Date.now() + this.#acknowledgementTimeoutMs;
+      let hydrationGraceApplied = false;
+      const hydrationGraceMs = acknowledgementHydrationGraceMs(this.#acknowledgementTimeoutMs);
+      let candidateKey: string | null = null;
+      let candidateSince = 0;
+      let confirmationGraceApplied = false;
+      while (Date.now() < deadline) {
+        const conversationId = parseChatGptConversationId(this.#page.url());
+        if (
+          hydrationGraceApplied === false &&
+          conversationId !== null &&
+          conversationId !== this.#baselineConversationId
+        ) {
+          deadline = Math.max(deadline, Date.now() + hydrationGraceMs);
+          hydrationGraceApplied = true;
         }
-        const identity = userIdentity(message);
-        if (identity !== null && this.#baselineUserIds.has(identity.identityKey)) {
-          continue;
-        }
-        if (identity === null || conversationId === null) {
-          if (hydrationGraceApplied === false) {
-            deadline = Math.max(deadline, Date.now() + hydrationGraceMs);
-            hydrationGraceApplied = true;
+        const messages = (await readChatGptMessages(this.#page)).filter((message) => message.role === 'user');
+        let candidate: ProviderSubmissionAcknowledgement | null = null;
+        for (let index = Math.max(0, messages.length - 8); index < messages.length; index += 1) {
+          const message = messages[index]!;
+          if (!(message.messageId !== null && this.#sentMessageIds.has(message.messageId)) &&
+            normalizeLineEndings(message.text) !== normalizeLineEndings(this.#request.prompt) &&
+            !(await messageHasExactPrompt(this.#page, message, this.#request.prompt))) {
+            continue;
           }
-          continue;
+          const identity = userIdentity(message);
+          if (identity !== null && this.#baselineUserIds.has(identity.identityKey)) {
+            continue;
+          }
+          if (identity === null || conversationId === null || !this.#acceptedMessageIds.has(identity.messageId)) {
+            if (hydrationGraceApplied === false) {
+              deadline = Math.max(deadline, Date.now() + hydrationGraceMs);
+              hydrationGraceApplied = true;
+            }
+            continue;
+          }
+          if (this.#baselineConversationId !== null && conversationId !== this.#baselineConversationId) continue;
+          candidate = {
+            conversationId,
+            submittedUserMessageId: identity.messageId,
+            submittedUserTurnId: identity.turnId,
+          };
+          break;
         }
-        return {
-          conversationId,
-          submittedUserMessageId: identity.messageId,
-          submittedUserTurnId: identity.turnId,
-        };
+        if ([...this.#sentMessageIds].filter(id =>
+          ![...this.#baselineUserIds].some(baseline => baseline.startsWith(`${id}\u0000`))).length !== 1) candidate = null;
+        // A single optimistic user node is not acknowledgement. Require the same
+        // exact anchor AND an observed empty composer across the commit window.
+        const key = candidate !== null && await hasClearedComposer(this.#page)
+          ? JSON.stringify(candidate) : null;
+        if (key === null || key !== candidateKey) {
+          candidateKey = key;
+          candidateSince = Date.now();
+        } else if (Date.now() - candidateSince >= COMPOSER_STABLE_WINDOW_MS) {
+          return { ...candidate!, evidence: 'accepted-request-stable-anchor-cleared-composer' };
+        }
+        if (key !== null && !confirmationGraceApplied) {
+          deadline = Math.max(deadline, Date.now() + COMPOSER_STABLE_WINDOW_MS + 200);
+          confirmationGraceApplied = true;
+        }
+        await this.#page.waitForTimeout(100);
       }
-      await this.#page.waitForTimeout(100);
+      return null;
+    } finally {
+      this.#page.off('request', this.#captureSentIdentity);
+      this.#page.off('response', this.#captureAcceptance);
+      this.#page.off('requestfailed', this.#captureFailedRequest);
     }
-    return null;
   }
 
   bindAcknowledgement(acknowledgement: ProviderSubmissionAcknowledgement): void {
@@ -277,15 +416,56 @@ export class ChatGptSubmission implements ProviderSubmission {
 
 }
 
+// Read-only confirmation: a failed/rolled-back submit may leave its full draft
+// alongside an optimistic user node. Missing/ambiguous composers fail closed.
+async function hasClearedComposer(page: Page): Promise<boolean> {
+  const editors = page.locator(CHATGPT_COMPOSER_SELECTOR);
+  let visible = 0;
+  for (let index = 0; index < await editors.count(); index += 1) {
+    const editor = editors.nth(index);
+    if (!(await editor.isVisible())) continue;
+    visible += 1;
+    const cleared = await editor.evaluate((element) => {
+      // textarea textContent is its default value, not the current draft.
+      if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) return element.value.trim() === '';
+      return element instanceof HTMLElement && element.innerText.trim() === '' && (element.textContent ?? '').trim() === '';
+    }, undefined, { timeout: COMPOSER_READ_TIMEOUT_MS }).catch(() => false);
+    if (!cleared) return false;
+  }
+  return visible === 1;
+}
+
 export async function recoverChatGptAcknowledgement(
   page: Page,
   prompt: string,
   expectedConversationId: string,
+  selection?: { readonly messageId: string; readonly evidenceHash: string },
+): Promise<ProviderSubmissionAcknowledgement | null> {
+  const first = await readChatGptAcknowledgement(page, prompt, expectedConversationId, selection);
+  if (first === null || !(await hasClearedComposer(page))) return null;
+  await page.waitForTimeout(COMPOSER_STABLE_WINDOW_MS);
+  const second = await readChatGptAcknowledgement(page, prompt, expectedConversationId, selection);
+  if (second === null || JSON.stringify(first) !== JSON.stringify(second) || !(await hasClearedComposer(page))) return null;
+  return { ...second, evidence: 'stable-anchor-cleared-composer' };
+}
+
+async function readChatGptAcknowledgement(
+  page: Page,
+  prompt: string,
+  expectedConversationId: string,
+  selection?: { readonly messageId: string; readonly evidenceHash: string },
 ): Promise<ProviderSubmissionAcknowledgement | null> {
   const conversationId = parseChatGptConversationId(page.url());
   if (conversationId !== expectedConversationId) return null;
 
   const messages = (await readChatGptMessages(page)).filter((message) => message.role === 'user');
+  if (selection !== undefined) {
+    const candidates = messages.filter((message) => userIdentity(message)?.messageId === selection.messageId &&
+      submissionEvidenceHash(conversationId, message) === selection.evidenceHash);
+    if (candidates.length !== 1) return null;
+    const identity = userIdentity(candidates[0]!);
+    return identity === null ? null : { conversationId, submittedUserMessageId: identity.messageId, submittedUserTurnId: identity.turnId };
+  }
   const matches = new Map<
     string,
     { readonly messageId: string; readonly turnId: string }
@@ -293,7 +473,7 @@ export async function recoverChatGptAcknowledgement(
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index]!;
     if (normalizeLineEndings(message.text) !== normalizeLineEndings(prompt) &&
-      !(await messageHasExactPrompt(page.locator(CHATGPT_SELECTORS.userMessages).nth(index), prompt))) continue;
+      !(await messageHasExactPrompt(page, message, prompt))) continue;
     const identity = userIdentity(message);
     if (identity === null) continue;
     matches.set(identity.identityKey, {
@@ -311,10 +491,36 @@ export async function recoverChatGptAcknowledgement(
   };
 }
 
+export async function inspectChatGptSubmissionCandidates(page: Page, conversationId: string) {
+  if (parseChatGptConversationId(page.url()) !== conversationId) return [];
+  return (await readChatGptMessages(page)).filter((message) => message.role === 'user').flatMap((message) => {
+    const identity = userIdentity(message);
+    return identity === null ? [] : [{ messageId: identity.messageId,
+      evidenceHash: submissionEvidenceHash(conversationId, message),
+      text: message.text, textTruncated: false }];
+  });
+}
+
+function submissionEvidenceHash(conversationId: string, message: ChatGptMessage): string {
+  return createHash('sha256').update(JSON.stringify([conversationId, message.messageId, message.turnId, message.text])).digest('hex');
+}
+
+/** Passive readiness/security checks on an existing page; no authentication request. */
+export async function inspectChatGptPageReady(page: Page, pageKey: string): Promise<void> {
+  await waitForProviderPageReady({ page, provider: 'chatgpt', pageKey });
+  await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey });
+  await assertChatOnlySurface(page);
+}
+
+export async function prepareChatGptObservation(page: Page, pageKey: string): Promise<void> {
+  await inspectChatGptPageReady(page, pageKey);
+  await assertChatGptAuthenticated(page);
+}
+
 async function assertChatGptAuthenticated(page: Page): Promise<void> {
   const state = await page
     .evaluate(async () => {
-      const response = await fetch('/api/auth/session', { credentials: 'include' }).catch(
+      const response = await fetch('/api/auth/session', { credentials: 'include', signal: AbortSignal.timeout(5_000) }).catch(
         () => null,
       );
       if (response === null || !response.ok) return 'unknown';
@@ -392,10 +598,13 @@ async function assertChatOnlySurface(page: Page): Promise<void> {
 async function uploadAttachments(
   page: Page,
   attachments: readonly ProviderAttachment[],
+  composer: PreparationElement,
+  checkpoint: (stage: string) => void,
 ): Promise<void> {
   const paths = attachments.map((attachment) => attachment.path);
   const directInput = await firstExisting(page, CHATGPT_SELECTORS.fileInputs);
   if (directInput !== null) {
+    checkpoint('attachments-input');
     await directInput.setInputFiles(paths);
   } else {
     const trigger = await firstVisible(page, CHATGPT_SELECTORS.uploadTriggers);
@@ -406,17 +615,20 @@ async function uploadAttachments(
       );
     }
     const chooserPromise = page.waitForEvent('filechooser', { timeout: 5_000 }).catch(() => null);
+    checkpoint('attachments-open');
     await trigger.click({ timeout: 5_000 });
     let chooser = await chooserPromise;
     if (chooser === null) {
       const menuItem = await firstVisible(page, CHATGPT_SELECTORS.uploadMenuItems);
       if (menuItem !== null) {
         const secondChooser = page.waitForEvent('filechooser', { timeout: 5_000 }).catch(() => null);
+        checkpoint('attachments-menu');
         await menuItem.click({ timeout: 5_000 });
         chooser = await secondChooser;
       }
     }
     if (chooser !== null) {
+      checkpoint('attachments-chooser');
       await chooser.setFiles(paths);
     } else {
       const lateInput = await firstExisting(page, CHATGPT_SELECTORS.fileInputs);
@@ -426,13 +638,14 @@ async function uploadAttachments(
           'ChatGPT upload control did not expose a file chooser',
         );
       }
+      checkpoint('attachments-input');
       await lateInput.setInputFiles(paths);
     }
   }
 
   const deadline = Date.now() + 20_000;
   do {
-    if (await attachmentsAcknowledged(page, attachments)) return;
+    if (await attachmentsAcknowledged(composer, attachments, CHATGPT_SELECTORS.attachmentEvidence, [CHATGPT_SELECTORS.messages])) return;
     await page.waitForTimeout(100);
   } while (Date.now() < deadline);
   throw new ProviderSubmissionError(
@@ -447,34 +660,6 @@ async function firstExisting(page: Page, selectors: readonly string[]): Promise<
     if ((await candidate.count().catch(() => 0)) > 0) return candidate;
   }
   return null;
-}
-
-async function attachmentsAcknowledged(
-  page: Page,
-  attachments: readonly ProviderAttachment[],
-): Promise<boolean> {
-  const expected = attachments.map((attachment) => normalizeLabel(attachment.name));
-  const body = normalizeLabel((await page.locator('body').innerText().catch(() => '')) ?? '');
-  if (expected.every((name) => body.includes(name))) return true;
-
-  const evidence: string[] = [];
-  for (const selector of CHATGPT_SELECTORS.attachmentEvidence) {
-    const values = await page
-      .locator(selector)
-      .evaluateAll((elements) =>
-        elements.map((element) =>
-          [
-            element.textContent ?? '',
-            element.getAttribute('aria-label') ?? '',
-            element.getAttribute('title') ?? '',
-          ].join(' '),
-        ),
-      )
-      .catch(() => [] as string[]);
-    evidence.push(...values);
-  }
-  const normalizedEvidence = normalizeLabel(evidence.join(' '));
-  return expected.every((name) => normalizedEvidence.includes(name));
 }
 
 async function firstVisible(
@@ -497,10 +682,10 @@ async function firstVisible(
   return null;
 }
 
-async function readExactTextCandidates(locator: PreparationElement): Promise<readonly string[]> {
+async function readExactTextCandidates(locator: PreparationElement, messageContent = false): Promise<readonly string[]> {
   return await (locator as Locator)
     .evaluate(
-      (element: Element) => {
+      (element: Element, messageContent: boolean) => {
         const values: string[] = [];
         if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
           values.push(element.value);
@@ -542,7 +727,21 @@ async function readExactTextCandidates(locator: PreparationElement): Promise<rea
               values.push(markdownText);
             }
           }
-          const blockChildren = Array.from(element.childNodes);
+          // Provider controls are not authored message content. Detached DOM text
+          // also avoids layout-only line breaks inside inline links.
+          let blockRoot = element;
+          if (messageContent) {
+            blockRoot = element.cloneNode(true) as HTMLElement;
+            blockRoot.querySelectorAll('button, [role="button"], svg, [data-thread-find-skip]').forEach((control) => control.remove());
+            blockRoot.querySelectorAll('br').forEach((br) => br.replaceWith('\n'));
+            values.push(blockRoot.textContent ?? '');
+            while (blockRoot.children.length === 1 &&
+                Array.from(blockRoot.childNodes).every((node) => node.nodeType !== Node.TEXT_NODE || (node.textContent ?? '').trim() === '') &&
+                blockRoot.firstElementChild instanceof HTMLElement && blockRoot.firstElementChild.tagName === 'DIV') {
+              blockRoot = blockRoot.firstElementChild;
+            }
+          }
+          const blockChildren = Array.from(blockRoot.childNodes);
           if (
             blockChildren.length > 0 &&
             blockChildren.every(
@@ -552,23 +751,22 @@ async function readExactTextCandidates(locator: PreparationElement): Promise<rea
                   (node.tagName === 'P' || node.tagName === 'DIV')),
             )
           ) {
-            values.push(
-              blockChildren
-                .filter((node): node is HTMLElement => node instanceof HTMLElement)
-                .map((node) => node.textContent ?? '')
-                .join('\n'),
-            );
+            const blocks = blockChildren.filter((node): node is HTMLElement => node instanceof HTMLElement)
+              .map((node) => node.textContent ?? '');
+            values.push(blocks.join('\n'));
+            if (messageContent) values.push(blocks.join('\n\n'));
+
           }
         }
         return values;
       },
-      undefined,
+      messageContent,
       { timeout: COMPOSER_READ_TIMEOUT_MS },
     )
     .catch(() => [] as string[]);
 }
 
-async function composerHasExactValue(
+export async function composerHasExactValue(
   composer: PreparationElement,
   expected: string,
 ): Promise<boolean> {
@@ -577,18 +775,26 @@ async function composerHasExactValue(
   return values.some((value) => normalizeLineEndings(value) === normalizedExpected);
 }
 
-async function messageHasExactPrompt(message: Locator, expected: string): Promise<boolean> {
+async function messageHasExactPrompt(page: Page, identity: ChatGptMessage, expected: string): Promise<boolean> {
+  const id = identity.messageId ?? identity.turnId;
+  if (id === null) return false;
+  const escaped = await page.evaluate((value) => CSS.escape(value), id);
+  const identitySelector = identity.messageId !== null
+    ? `[data-message-id="${escaped}"], [data-chatgpt-search-message-ids~="${escaped}"]`
+    : `[data-turn-id="${escaped}"]`;
+  const message = page.locator(`:is(${identitySelector}):is(${CHATGPT_SELECTORS.userMessages}), :is(${identitySelector}) :is(${CHATGPT_SELECTORS.userMessages})`).first();
+  if (await message.count() === 0) return false;
   const normalizedExpected = normalizeLineEndings(expected);
   const matchesExactPrompt = async (): Promise<boolean> => {
     for (const selector of CHATGPT_SELECTORS.userMessageContent) {
       const content = message.locator(selector).first();
       if ((await content.count().catch(() => 0)) === 0) continue;
-      const values = await readExactTextCandidates(content);
+      const values = await readExactTextCandidates(content, true);
       if (values.some((value) => normalizeLineEndings(value) === normalizedExpected)) {
         return true;
       }
     }
-    const fallbackValues = await readExactTextCandidates(message);
+    const fallbackValues = await readExactTextCandidates(message, true);
     return fallbackValues.some(
       (value) => normalizeLineEndings(value) === normalizedExpected,
     );
@@ -607,19 +813,27 @@ async function writeExactComposerValue(
   composer: PreparationElement,
   expected: string,
   resolveComposer: () => Promise<ElementHandle<Element> | null>,
+  checkpoint: (stage: string) => void,
 ): Promise<boolean> {
+  checkpoint('composer-stability');
   await waitForComposerStability(page, composer, COMPOSER_HYDRATION_TIMEOUT_MS);
   for (let attempt = 0; attempt < COMPOSER_WRITE_ATTEMPTS; attempt += 1) {
+    checkpoint('composer-read');
     if (await composerHasExactValue(composer, expected)) {
+      checkpoint('composer-confirmed');
       return true;
     }
-    if (!(await clearComposerValue(page, composer))) {
+    if (!(await clearComposerValue(page, composer, checkpoint))) {
       continue;
     }
+    checkpoint('composer-focus');
     await composer.focus().catch(() => undefined);
+    checkpoint('composer-insert');
     await page.keyboard.insertText(expected).catch(async () => {
+      checkpoint('composer-fill');
       await composer.fill(expected);
     });
+    checkpoint('composer-revalidate');
     const current = await resolveComposer();
     if (current === null) return false;
     if ('dispose' in composer) await composer.dispose();
@@ -631,15 +845,20 @@ async function writeExactComposerValue(
   return await waitForComposerValue(page, composer, expected);
 }
 
-async function clearComposerValue(page: Page, composer: PreparationElement): Promise<boolean> {
+async function clearComposerValue(page: Page, composer: PreparationElement, checkpoint: (stage: string) => void): Promise<boolean> {
+  checkpoint('composer-clear-click');
   await composer.click({ timeout: 5_000 }).catch(() => undefined);
+  checkpoint('composer-clear-focus');
   await composer.focus().catch(() => undefined);
   const selectAll = process.platform === 'darwin' ? 'Meta+A' : 'Control+A';
+  checkpoint('composer-select-all');
   await page.keyboard.press(selectAll).catch(() => undefined);
+  checkpoint('composer-clear');
   await page.keyboard.press('Backspace').catch(() => undefined);
   if (await waitForComposerValue(page, composer, '')) {
     return true;
   }
+  checkpoint('composer-clear-fill');
   await composer.fill('').catch(() => undefined);
   return await waitForComposerValue(page, composer, '');
 }

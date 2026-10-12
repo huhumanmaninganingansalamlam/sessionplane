@@ -9,6 +9,23 @@ import { ProbeCoordinator } from '../../src/scheduler/probe-coordinator.ts';
 import { SessionPlaneDatabase } from '../../src/storage/database.ts';
 import { ProbeBudgetRepository } from '../../src/storage/probe-budget-repository.ts';
 
+test('UI recovery reserves a longer shared interval before dispatch and retains late429 cooldown', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-probe-ui-'));
+  const database = SessionPlaneDatabase.open(path.join(root, 'state.sqlite'));
+  let nowMs = Date.parse('2026-10-06T00:00:00Z');
+  const coordinator = createCoordinator(database, () => new Date(nowMs));
+  try {
+    await coordinator.run('chatgpt:default', async () => {
+      assert.equal(new ProbeBudgetRepository(database.raw).get('chatgpt:default')!.nextAllowedAt, '2026-10-06T00:01:00.000Z');
+      coordinator.defer('chatgpt:default', '2026-10-06T00:10:00.000Z');
+      return pending();
+    }, undefined, 60_000);
+    nowMs += 60_000;
+    const result = await createCoordinator(database, () => new Date(nowMs)).run('chatgpt:default', async () => { assert.fail('must not bypass limit'); });
+    assert.equal(result.nextCheckAt, '2026-10-06T00:10:00.000Z');
+  } finally { database.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('ProbeCoordinator serializes account probes and preserves caller isolation', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-probe-'));
   const database = SessionPlaneDatabase.open(path.join(root, 'sessionplane.sqlite'));
@@ -108,6 +125,55 @@ test('ProbeCoordinator honors Retry-After, applies exponential 429 backoff, and 
     const budget = new ProbeBudgetRepository(database.raw).get('chatgpt:default');
     assert.equal(budget?.backoffLevel, 2);
     assert.equal(budget?.consecutiveFailures, 2);
+  } finally {
+    database.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('repeating observers cannot overtake queued exact requests, and stopped observers release their turn', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-probe-turns-'));
+  const database = SessionPlaneDatabase.open(path.join(root, 'sessionplane.sqlite'));
+  let nowMs = 0;
+  const coordinator = createCoordinator(database, () => new Date(nowMs));
+  const older = Symbol('older'), current = Symbol('current'), stopped = Symbol('stopped');
+  const calls: string[] = [];
+  const run = (caller: symbol, name: string) => coordinator.run('chatgpt:default', async () => {
+    calls.push(name);
+    return pending();
+  }, caller);
+  try {
+    await run(older, 'older');
+    await run(current, 'current');
+    await run(stopped, 'stopped');
+    nowMs += 30_000;
+    assert.equal((await run(older, 'older')).reason, 'probe-queued');
+    assert.equal((await run(current, 'current')).kind, 'pending');
+    coordinator.withdraw('chatgpt:default', stopped);
+    nowMs += 30_000;
+    assert.equal((await run(current, 'current')).reason, 'probe-queued');
+    assert.equal((await run(older, 'older')).kind, 'pending');
+    nowMs += 30_000;
+    assert.equal((await run(current, 'current')).kind, 'pending');
+    assert.deepEqual(calls, ['older', 'current', 'older', 'current']);
+  } finally {
+    database.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('negative jitter never schedules a probe before provider Retry-After', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-probe-retry-after-'));
+  const database = SessionPlaneDatabase.open(path.join(root, 'sessionplane.sqlite'));
+  const coordinator = new ProbeCoordinator({ database, successIntervalMs: 30_000,
+    min429BackoffMs: 60_000, max429BackoffMs: 900_000, jitterRatio: 0.1,
+    random: () => 0, now: () => new Date(0) });
+  try {
+    const result = await coordinator.run('chatgpt:default', async () => ({
+      ...pending(), kind: 'deferred', observationTransport: 'deferred',
+      reason: 'backend-http-429', retryAfterMs: 120_000,
+    }));
+    assert.equal(result.retryAfterMs, 120_000);
   } finally {
     database.close();
     rmSync(root, { recursive: true, force: true });

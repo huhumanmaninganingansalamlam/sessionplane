@@ -21,6 +21,7 @@ export interface TeamDirectoryOptions {
   readonly now?: () => Date;
   readonly uuid?: () => string;
   readonly enabledProviders?: readonly ProviderName[];
+  readonly onSessionChanged?: (sessionId: string) => void;
 }
 
 export class TeamDirectory {
@@ -31,6 +32,7 @@ export class TeamDirectory {
   readonly #now: () => Date;
   readonly #uuid: () => string;
   readonly #enabledProviders: ReadonlySet<ProviderName>;
+  readonly #onSessionChanged: ((sessionId: string) => void) | undefined;
 
   constructor(database: SessionPlaneDatabase, options: TeamDirectoryOptions = {}) {
     this.#database = database;
@@ -40,6 +42,7 @@ export class TeamDirectory {
     this.#now = options.now ?? (() => new Date());
     this.#uuid = options.uuid ?? randomUUID;
     this.#enabledProviders = new Set(options.enabledProviders ?? PROVIDERS);
+    this.#onSessionChanged = options.onSessionChanged;
   }
 
   createTeam(input: {
@@ -243,7 +246,7 @@ export class TeamDirectory {
     const timestamp = this.#now().toISOString();
     this.#database.transaction(() => {
       if (role.currentSessionId !== null) {
-        this.#sessions.transitionToCancelled(role.currentSessionId, timestamp);
+        this.#sessions.retireUnsubmittedSession(role.currentSessionId, 'cancelled', timestamp);
       }
       this.#teams.retireRole(role.roleId, timestamp);
       this.#events.append({
@@ -255,6 +258,7 @@ export class TeamDirectory {
         createdAt: timestamp,
       });
     });
+    if (role.currentSessionId !== null) this.#onSessionChanged?.(role.currentSessionId);
     return this.getTeam(teamId);
   }
 
@@ -285,6 +289,21 @@ export class TeamDirectory {
     return this.getTeam(team.teamId);
   }
 
+  requireEnabledProvider(value: string): ProviderName {
+    assertDomain(
+      PROVIDERS.includes(value as (typeof PROVIDERS)[number]),
+      'input.invalid',
+      `Unsupported provider: ${value}`,
+    );
+    const provider = value as ProviderName;
+    assertDomain(
+      this.#enabledProviders.has(provider),
+      'provider.disabled',
+      'Provider is disabled by runtime configuration: ' + provider,
+    );
+    return provider;
+  }
+
   createSession(input: {
     readonly teamId: string;
     readonly roleKey: string;
@@ -293,24 +312,14 @@ export class TeamDirectory {
     const team = this.#requireTeam(input.teamId);
     const role = this.#requireRole(team.teamId, normalizeRoleKey(input.roleKey));
     assertDomain(role.roleState === 'active', 'input.invalid', 'Session can be created only for an active role');
-    assertDomain(
-      PROVIDERS.includes(input.provider as (typeof PROVIDERS)[number]),
-      'input.invalid',
-      `Unsupported provider: ${input.provider}`,
-    );
-    const provider = input.provider as ProviderName;
-    assertDomain(
-      this.#enabledProviders.has(provider),
-      'provider.disabled',
-      'Provider is disabled by runtime configuration: ' + provider,
-    );
+    const provider = this.requireEnabledProvider(input.provider);
 
     const timestamp = this.#now().toISOString();
     const sessionId = this.#uuid();
     const predecessorSessionId = role.currentSessionId;
     this.#database.transaction(() => {
       if (predecessorSessionId !== null) {
-        this.#sessions.transitionToSuperseded(predecessorSessionId, timestamp);
+        this.#sessions.retireUnsubmittedSession(predecessorSessionId, 'superseded', timestamp);
       }
       this.#sessions.insertSession({
         sessionId,
@@ -340,6 +349,7 @@ export class TeamDirectory {
         createdAt: timestamp,
       });
     });
+    if (predecessorSessionId !== null) this.#onSessionChanged?.(predecessorSessionId);
     return this.getSession(sessionId);
   }
 
