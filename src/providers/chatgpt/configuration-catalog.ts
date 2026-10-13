@@ -93,8 +93,19 @@ export class ChatGptConfigurationMenu {
     // Selecting the checked version navigates out of its submenu without
     // substituting a model. Closing/reopening can retain that submenu route.
     const selectedVersion = nodes.find(n => n.role === 'menuitemradio' && (n.checked === true || n.selected === true));
-    if (selectedVersion) {
+    const versionMenus = nodes.filter(n => n.role === 'menu' && n.id !== '' &&
+      selectedVersion?.ancestorIds.includes(n.id)).map(n => n.id);
+    if (selectedVersion && this.#opener(nodes)?.expanded !== false) {
       await this.#click(selectedVersion);
+      nodes = await this.#wait(ns => this.#opener(ns)?.expanded === false ||
+        this.#summary(ns) !== undefined, 5000, 'version-menu-return');
+    }
+    // A closing trigger can already have dropped aria-controls. Retain the
+    // observed submenu identity until it exits before reopening the chooser.
+    if (this.#opener(nodes)?.expanded === false) {
+      for (const id of versionMenus) {
+        await this.#wait(() => this.#page.evaluate(id => !document.getElementById(id)?.checkVisibility({ visibilityProperty: true }), id), 5000, 'version-menu-exit');
+      }
       nodes = await this.#capture();
     }
     // ChatGPT's lightweight home editor mounts the chooser only after focus.

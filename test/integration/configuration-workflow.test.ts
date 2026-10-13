@@ -542,6 +542,12 @@ test('configuration selection verifies menu state without waiting for scheduled 
         window.location.href = 'https://chatgpt.com/pending-menu-frame';
       }, { once: true });
     });
+    // Popup entrance animations can move the controls while an unrelated
+    // navigation remains pending. Selection must reach the actual control.
+    await page.addStyleTag({ content: `
+      @keyframes enter { from { transform: translateY(100px) scale(.9); } to { transform: none; } }
+      #configuration:not([hidden]), #versions:not([hidden]) { animation: enter 240ms linear; }
+    ` });
     const menu = new ChatGptConfigurationMenu(page, 'navigation-check');
     const selected = await menu.select({ id: 'fixture', version: 'Aurora-9', power: 2, label: 'Aurora-9 / Deep' });
     assert.equal(selected.text, 'Deep');
@@ -585,6 +591,18 @@ test('discovery exits a persistent version submenu and rejects an unconfirmed ve
         versions.hidden = true; menu.hidden = true;
       }, true);
       for (const option of versions.children) {
+        const select = (option as HTMLElement).onclick!;
+        (option as HTMLElement).onclick = event => {
+          if (option.getAttribute('aria-checked') !== 'true') return select.call(option, event);
+          // A selected radio dismisses the version popup. Its trigger drops
+          // aria-controls before the popup's exit animation unmounts it.
+          chooser.setAttribute('aria-expanded', 'false');
+          chooser.removeAttribute('aria-controls');
+          setTimeout(() => {
+            versions.hidden = true;
+            chooser.setAttribute('aria-controls', 'configuration');
+          }, 180);
+        };
         if (option.getAttribute('aria-disabled') === 'true') {
           option.removeAttribute('aria-disabled');
           // A provider access option can be clickable without selecting it.
