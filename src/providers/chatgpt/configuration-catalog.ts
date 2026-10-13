@@ -90,6 +90,13 @@ export class ChatGptConfigurationMenu {
 
   async #mainMenu() {
     let nodes = await this.#capture();
+    // Selecting the checked version navigates out of its submenu without
+    // substituting a model. Closing/reopening can retain that submenu route.
+    const selectedVersion = nodes.find(n => n.role === 'menuitemradio' && (n.checked === true || n.selected === true));
+    if (selectedVersion) {
+      await this.#click(selectedVersion);
+      nodes = await this.#capture();
+    }
     // ChatGPT's lightweight home editor mounts the chooser only after focus.
     // Focusing hydrates the editor without replacing its draft.
     if (nodes.some(n => n.id === 'pending-home-input')) {

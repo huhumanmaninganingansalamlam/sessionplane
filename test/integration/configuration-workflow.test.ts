@@ -567,11 +567,11 @@ test('discovery exits a persistent version submenu and rejects an unconfirmed ve
       const toggle = (chooser as HTMLElement).onclick!;
       (chooser as HTMLElement).onclick = null;
       chooser.addEventListener('pointerdown', event => {
-        // Current provider returns directly to the main menu from the version
-        // submenu, keeping the chooser expanded instead of closing it.
+        // Closing the chooser does not reset the selected submenu route.
+        // Selecting the already checked version returns to the main controls.
         if (!versions.hidden) {
-          versions.hidden = true; menu.hidden = false;
-          chooser.setAttribute('aria-controls', 'configuration');
+          versions.hidden = true; menu.hidden = true;
+          chooser.setAttribute('aria-expanded', 'false');
           return;
         }
         toggle.call(chooser, event as MouseEvent);
@@ -585,12 +585,6 @@ test('discovery exits a persistent version submenu and rejects an unconfirmed ve
         versions.hidden = true; menu.hidden = true;
       }, true);
       for (const option of versions.children) {
-        if (option.getAttribute('aria-checked') === 'true') {
-          const original = (option as HTMLElement).onclick!;
-          (option as HTMLElement).onclick = event => {
-            if (option.getAttribute('aria-checked') !== 'true') original.call(option, event);
-          };
-        }
         if (option.getAttribute('aria-disabled') === 'true') {
           option.removeAttribute('aria-disabled');
           // A provider access option can be clickable without selecting it.
