@@ -453,6 +453,14 @@ def validate_candidate(manifest, local_validation):
     assert report['passed'] > 0 and f'ℹ tests {report["passed"]}\n' in result
     assert f'ℹ pass {report["passed"]}\n' in result and 'ℹ fail 0\n' in result
     assert 'ℹ cancelled 0\n' in result and 'ℹ skipped 0\n' in result, 'Local suite incomplete'
+    if report.get('fullTestSourceCommit', report['sourceCommit']) != report['sourceCommit']:
+        assert report.get('focusedTestSourceCommit') == report['sourceCommit'], 'Changed source needs current focused evidence'
+        focused = pathlib.Path(report['focusedTestLog']).read_bytes()
+        assert hashlib.sha256(focused).hexdigest() == report['focusedTestLogSha256'], 'Focused log changed'
+        focused = focused.decode()
+        count = report['focusedPassed']
+        assert count > 0 and all(line in focused for line in [f'ℹ tests {count}\n', f'ℹ pass {count}\n',
+            'ℹ fail 0\n', 'ℹ cancelled 0\n', 'ℹ skipped 0\n']), 'Focused suite incomplete'
 
 
 def require_admission_fence(h, required):

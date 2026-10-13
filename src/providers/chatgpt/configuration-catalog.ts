@@ -54,16 +54,21 @@ export class ChatGptConfigurationMenu {
     const element = await this.#refs.resolve({ page: this.#page, pageKey: this.#pageKey,
       bindingEpoch: 1, snapshotId: this.#snapshot.snapshotId, ref: node.ref });
     // noWaitAfter only skips navigation after this action; a previous scheduled
-    // navigation still blocks native clicks. Activate the exact resolved menu
-    // control and verify its resulting DOM state in the caller instead.
+    // navigation still blocks ElementHandle.click. Send the native pointer
+    // sequence without that wait; Radix triggers need pointerdown, not DOM click().
     try {
-      await element.evaluate(control => {
+      const point = await element.evaluate(control => {
         if (!(control instanceof HTMLElement) || !control.isConnected ||
             !control.checkVisibility({ visibilityProperty: true }) || control.matches(':disabled, [aria-disabled="true"]')) {
           throw new Error('Configuration control is no longer available');
         }
-        control.click();
+        const box = control.getBoundingClientRect();
+        const x = box.x + box.width / 2, y = box.y + box.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        if (!hit || !control.contains(hit)) throw new Error('Configuration control is obstructed');
+        return { x, y };
       });
+      await this.#page.mouse.click(point.x, point.y);
     } finally { await element.dispose(); }
   }
 

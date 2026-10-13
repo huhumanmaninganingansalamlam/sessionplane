@@ -565,7 +565,8 @@ test('discovery exits a persistent version submenu and rejects an unconfirmed ve
       const versions = document.querySelector('#versions') as HTMLElement;
       const menu = document.querySelector('#configuration') as HTMLElement;
       const toggle = (chooser as HTMLElement).onclick!;
-      (chooser as HTMLElement).onclick = event => {
+      (chooser as HTMLElement).onclick = null;
+      chooser.addEventListener('pointerdown', event => {
         // Current provider returns directly to the main menu from the version
         // submenu, keeping the chooser expanded instead of closing it.
         if (!versions.hidden) {
@@ -573,8 +574,8 @@ test('discovery exits a persistent version submenu and rejects an unconfirmed ve
           chooser.setAttribute('aria-controls', 'configuration');
           return;
         }
-        toggle.call(chooser, event);
-      };
+        toggle.call(chooser, event as MouseEvent);
+      });
       // Escape dismisses the popup but retains its submenu route. The exact
       // chooser's close action resets that route after its exit animation.
       document.addEventListener('keydown', event => {

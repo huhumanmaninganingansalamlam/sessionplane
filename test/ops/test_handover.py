@@ -37,6 +37,13 @@ class HandoverTests(unittest.TestCase):
             receipt = root/'validation.json'
             receipt.write_text(json.dumps(report))
             handover.validate_candidate(manifest, receipt)
+            baseline = {**report, 'fullTestSourceCommit': 'previous'}
+            receipt.write_text(json.dumps(baseline))
+            with self.assertRaises(AssertionError): handover.validate_candidate(manifest, receipt)
+            baseline.update(focusedTestSourceCommit='verified', focusedTestLog=str(log), focusedPassed=267,
+                            focusedTestLogSha256=report['fullTestLogSha256'])
+            receipt.write_text(json.dumps(baseline))
+            handover.validate_candidate(manifest, receipt)
             with self.assertRaises(AssertionError): handover.validate_candidate(manifest, None)
             for key in ['sourceCommit', 'packageSha256', 'build', 'fullTestLogSha256', 'passed']:
                 changed = {**report, key: 268 if key == 'passed' else 'different'}
