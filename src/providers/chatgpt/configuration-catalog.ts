@@ -115,7 +115,9 @@ export class ChatGptConfigurationMenu {
       // Dismissing a submenu with Escape can retain its route. Close through
       // the exact chooser so reopening returns to the main configuration menu.
       await this.#click(opener);
-      nodes = await this.#wait(ns => this.#opener(ns)?.expanded === false);
+      nodes = await this.#wait(ns => this.#opener(ns)?.expanded === false || this.#summary(ns) !== undefined);
+      // Some provider menus navigate back directly instead of collapsing.
+      if (this.#opener(nodes)?.expanded === true && this.#summary(nodes)) return await this.#readyMainMenu();
     }
     // Radix resets the submenu when its closing animation unmounts. Reopening
     // at aria-expanded=false alone can reopen the old version submenu.

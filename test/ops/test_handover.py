@@ -25,6 +25,28 @@ spec.loader.exec_module(handover)
 
 
 class HandoverTests(unittest.TestCase):
+    def test_local_candidate_requires_bound_complete_evidence_and_live_fence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            log = root/'full.log'
+            log.write_text('ℹ tests 267\nℹ pass 267\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\n')
+            manifest = {'sourceCommit': 'verified', 'packageSha256': 'package', 'ciConclusion': None}
+            report = {'sourceCommit': 'verified', 'packageSha256': 'package', 'typecheck': 'success',
+                      'build': 'success', 'passed': 267, 'fullTestLog': str(log),
+                      'fullTestLogSha256': handover.hashlib.sha256(log.read_bytes()).hexdigest()}
+            receipt = root/'validation.json'
+            receipt.write_text(json.dumps(report))
+            handover.validate_candidate(manifest, receipt)
+            with self.assertRaises(AssertionError): handover.validate_candidate(manifest, None)
+            for key in ['sourceCommit', 'packageSha256', 'build', 'fullTestLogSha256', 'passed']:
+                changed = {**report, key: 268 if key == 'passed' else 'different'}
+                receipt.write_text(json.dumps(changed))
+                with self.subTest(key=key), self.assertRaises(AssertionError):
+                    handover.validate_candidate(manifest, receipt)
+            for state in [{}, {'maintenance': {'phase': 'ready'}}, {'maintenance': {'phase': 'draining'}}]:
+                with self.assertRaises(AssertionError): handover.require_admission_fence(state, True)
+            handover.require_admission_fence({'maintenance': {'phase': 'running'}}, True)
+
     def test_exit_during_proc_stat_read_is_not_a_live_core(self):
         # Linux can open /proc/PID/stat before exit, then return ESRCH on read.
         for error in [FileNotFoundError(2, 'No such file'), ProcessLookupError(3, 'No such process')]:
