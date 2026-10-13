@@ -116,7 +116,14 @@ and confirm the final active controls; unavailable intent requires a user decisi
   instead of roleRef and creates its first session (ChatGPT by default). A roleKey
   cannot replace an occupied role; that still requires its fresh roleRef.
   `session_delete` separately requires an exact request and `outputsRetrieved:true`;
-  existing cleanup checks reject unresolved/shared conversations.
+  existing cleanup checks reject unresolved/shared conversations. Provider deletion and
+  owned-tab closure are independent outcomes: inspect `pageCleanup` on the result
+  or on typed error `details` (including verification HTTP 429). Provider errors
+  and Retry-After remain unchanged; closing a verified idle tab does not claim
+  provider deletion. Drafts, active generation controls and changed page ownership
+  prevent closure. Retained local answers and request identities are not deleted.
+  Recover an uncertain deletion acknowledgement with the same request identity;
+  cleanup never automatically repeats a provider DELETE.
 
 For an explicitly authorized recovery of an unreadable bound chat whose current
 request is provably prepared and unsubmitted, use `session_replace` with
