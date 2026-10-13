@@ -548,6 +548,16 @@ test('configuration selection verifies menu state without waiting for scheduled 
       @keyframes enter { from { transform: translateY(100px) scale(.9); } to { transform: none; } }
       #configuration:not([hidden]), #versions:not([hidden]) { animation: enter 240ms linear; }
     ` });
+    await page.evaluate(() => {
+      // While the popup changes layout, its controls are not yet actionable.
+      // Early clicks must not be mistaken for a completed menu transition.
+      document.addEventListener('click', event => {
+        const menu = (event.target as Element).closest('#configuration, #versions');
+        if (menu?.getAnimations().some(animation => animation.playState === 'running')) {
+          event.stopImmediatePropagation();
+        }
+      }, true);
+    });
     const menu = new ChatGptConfigurationMenu(page, 'navigation-check');
     const selected = await menu.select({ id: 'fixture', version: 'Aurora-9', power: 2, label: 'Aurora-9 / Deep' });
     assert.equal(selected.text, 'Deep');
