@@ -64,6 +64,22 @@ export class ChatGptConfigurationMenu {
     // navigation still blocks ElementHandle.click. Send the native pointer
     // sequence without that wait; Radix triggers need pointerdown, not DOM click().
     try {
+      // Sample geometry directly: Playwright's stability helper also waits for
+      // unrelated pending navigation. Never click a moving configuration target.
+      let box = await element.boundingBox();
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        await this.#page.waitForTimeout(50);
+        const next = await element.boundingBox();
+        if (!box || !next) throw new Error('Configuration control has no visible browser geometry');
+        if (Math.abs(box.x - next.x) < 0.25 && Math.abs(box.y - next.y) < 0.25 &&
+            Math.abs(box.width - next.width) < 0.25 && Math.abs(box.height - next.height) < 0.25) {
+          box = next;
+          break;
+        }
+        if (Date.now() >= deadline) throw new Error('Configuration control did not become stable');
+        box = next;
+      }
       const point = await element.evaluate(control => {
         if (!(control instanceof HTMLElement) || !control.isConnected ||
             !control.checkVisibility({ visibilityProperty: true }) || control.matches(':disabled, [aria-disabled="true"]')) {
@@ -75,9 +91,8 @@ export class ChatGptConfigurationMenu {
         if (!hit || !control.contains(hit)) throw new Error('Configuration control is obstructed');
         return { x, y };
       });
-      const box = await element.boundingBox();
       this.#lastClick = { role: node.role, expanded: node.expanded, dom: point, browser: box };
-      await this.#page.mouse.click(point.x, point.y);
+      await this.#page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     } finally { await element.dispose(); }
   }
 
