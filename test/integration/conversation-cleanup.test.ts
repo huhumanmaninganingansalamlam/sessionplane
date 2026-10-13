@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { callRpc } from '../../src/cli/client.ts';
+import { callRpc, RpcClientError } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
@@ -229,5 +229,88 @@ test('confirmed deletion resumes failed tab closure without another provider del
     assert.equal(deletes, 1);
     assert.deepEqual(await rpc('session.delete', input), replay);
     assert.equal((await rpc<SessionSnapshot>('session.get', { sessionId: session.sessionId })).answerText, complete.answerText);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('provider deletion deferral and uncertain acknowledgement independently close only idle owned pages', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-cleanup-deferred-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', observationActiveSweepMs: 5, observationQuietSweepMs: 5 });
+  const fake = new FakeProviderAdapter();
+  fake.autoFinalText = 'Retrieved original reviewer answer';
+  let mode: 'deferred' | 'rejected' | 'unknown' = 'deferred';
+  let duringPrepare: (() => Promise<void>) | undefined;
+  let deletes = 0;
+  t.mock.method(fake, 'openDeletion', async () => {
+    await duringPrepare?.();
+    if (mode === 'deferred') throw new ProviderSubmissionError('provider.unavailable', 'Verification deferred',
+      { details: { stage: 'conversation-verification', httpStatus: 429, retryAfterMs: 9000 } });
+    return { alreadyDeleted: false, deleteOnce: async () => {
+      deletes++;
+      if (mode === 'unknown') throw new Error('Acknowledgement lost');
+      return false;
+    }, close: async () => {} };
+  });
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const rpc = <T>(method: string, params: object) => callRpc<T>({ socketPath: config.socketPath,
+    method, params: { clientId: 'deferred', ...params }, timeoutMs: 10000 });
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'deferred' });
+    const unrelated = await core.browserOwner!.createPage();
+    for (const outcome of ['deferred', 'rejected', 'unknown', 'draft', 'generating', 'navigated'] as const) {
+      mode = outcome === 'rejected' || outcome === 'unknown' ? outcome : 'deferred';
+      core.teamDirectory.createRole({ teamId: team.teamId, roleKey: outcome, roleType: 'expert' });
+      const session = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: outcome, provider: 'chatgpt' });
+      await rpc('session.send', { sessionId: session.sessionId, requestId: 'send-' + outcome, prompt: 'Local fixture' });
+      const complete = await rpc<SessionSnapshot>('session.wait', { sessionId: session.sessionId, generation: 1, waitMs: 3000 });
+      assert.equal(complete.terminal, true);
+      const { page, binding } = await core.browserOwner!.createPage();
+      await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main><textarea></textarea></main>' }));
+      await page.goto('https://chatgpt.com/c/' + complete.conversationId);
+      core.pageRegistry.bindPage(binding.pageKey, { sessionId: session.sessionId, generation: 1, conversationId: complete.conversationId! });
+      duringPrepare = async () => {
+        if (outcome === 'draft') await page.locator('textarea').fill('Preserve human draft');
+        if (outcome === 'generating') await page.evaluate(() => {
+          const stop = document.createElement('button'); stop.setAttribute('aria-label', 'Stop generating');
+          stop.textContent = 'Stop'; document.body.append(stop);
+        });
+        if (outcome === 'navigated') await page.goto('https://chatgpt.com/c/different-conversation');
+      };
+      const input = { sessionId: session.sessionId, generation: 1, conversationId: complete.conversationId,
+        outputsRetrieved: true, requestId: 'cleanup-' + outcome };
+      type Result = { deleted: boolean; errorCode: string; pageCleanup: { closedPages: number; pageErrors: string[] } };
+      if (mode === 'deferred') {
+        await assert.rejects(rpc('session.delete', input), (error: unknown) => {
+          assert.ok(error instanceof RpcClientError);
+          const data = error.data as { errorCode: string; details: { retryAfterMs: number; deletionAttempted: boolean; deleted: boolean; pageCleanup: Result['pageCleanup'] } };
+          const details = data.details;
+          assert.equal(data.errorCode, 'provider.unavailable');
+          assert.equal(details.retryAfterMs, 9000);
+          assert.equal(details.deletionAttempted, false);
+          assert.equal(details.deleted, false);
+          assert.equal(details.pageCleanup.closedPages, outcome === 'deferred' ? 1 : 0);
+          if (outcome !== 'deferred') assert.equal(details.pageCleanup.pageErrors.length, 1);
+          return true;
+        });
+      } else {
+        const first = await rpc<Result>('session.delete', input);
+        assert.equal(first.deleted, false);
+        assert.equal(first.errorCode, mode === 'unknown' ? 'provider.deletion-unknown' : 'provider.deletion-rejected');
+        assert.equal(first.pageCleanup.closedPages, 1);
+        const attempts = deletes;
+        const replay = await rpc<Result>('session.delete', input);
+        assert.equal(replay.pageCleanup.closedPages, 1);
+        assert.equal(deletes, attempts, 'Repeated cleanup must not repeat a provider DELETE');
+      }
+      assert.equal(page.isClosed(), ['deferred', 'rejected', 'unknown'].includes(outcome));
+      assert.equal(core.pageRegistry.getBinding(binding.pageKey).sessionId, session.sessionId);
+      if (outcome === 'draft') assert.equal(await page.locator('textarea').inputValue(), 'Preserve human draft');
+      const after = await rpc<SessionSnapshot>('session.get', { sessionId: session.sessionId });
+      assert.equal(after.answerText, complete.answerText);
+      assert.equal(after.generation, complete.generation);
+      assert.equal(after.conversationId, complete.conversationId);
+      assert.equal(unrelated.page.isClosed(), false);
+    }
+    assert.equal(deletes, 2);
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
