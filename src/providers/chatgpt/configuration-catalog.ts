@@ -112,7 +112,9 @@ export class ChatGptConfigurationMenu {
     const controls = [...new Set([...opener.controls,
       ...nodes.filter(n => n.role === 'menu' && n.id !== '' && summary?.ancestorIds.includes(n.id)).map(n => n.id)])];
     if (opener.expanded) {
-      await this.#page.keyboard.press('Escape');
+      // Dismissing a submenu with Escape can retain its route. Close through
+      // the exact chooser so reopening returns to the main configuration menu.
+      await this.#click(opener);
       nodes = await this.#wait(ns => this.#opener(ns)?.expanded === false);
     }
     // Radix resets the submenu when its closing animation unmounts. Reopening
@@ -138,7 +140,17 @@ export class ChatGptConfigurationMenu {
     const nodes = await this.#versions();
     const option = nodes.find(n => n.role === 'menuitemradio' && n.text === label);
     if (!option) throw new SessionPlaneDomainError('provider.model-unavailable', `Observed version is no longer available: ${label}`);
-    await this.#click(option);
+    if (option.checked !== true && option.selected !== true) {
+      await this.#click(option);
+      await this.#versions();
+      try {
+        await this.#wait(ns => ns.some(n => n.role === 'menuitemradio' && n.text === label &&
+          (n.checked === true || n.selected === true)), 5000, 'version-selected');
+      } catch (error) {
+        if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.configuration-unavailable') throw error;
+        throw new SessionPlaneDomainError('provider.model-unavailable', `Provider did not confirm selection of version: ${label}`);
+      }
+    }
     return await this.#mainMenu();
   }
 
@@ -166,9 +178,16 @@ export class ChatGptConfigurationMenu {
     const initialVersion = versions.find(n => n.checked === true || n.selected === true)?.text;
     if (!initialVersion) throw new SessionPlaneDomainError('provider.configuration-unavailable', 'Current version is not identified; discovery cannot preserve its selection');
     const options: ConfigurationOption[] = [];
+    const unavailableVersions = versions.filter(n => n.disabled).map(n => n.text);
     try {
       for (const version of versions.filter(n => !n.disabled)) {
-        let nodes = await this.#version(version.text);
+        let nodes;
+        try { nodes = await this.#version(version.text); }
+        catch (error) {
+          if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.model-unavailable') throw error;
+          unavailableVersions.push(version.text);
+          continue;
+        }
         const slider = nodes.find(n => n.role === 'slider');
         const min = Number(slider?.ariaValueMin), max = Number(slider?.ariaValueMax);
         if (slider && (slider.ariaValueMin === null || slider.ariaValueMax === null ||
@@ -192,7 +211,7 @@ export class ChatGptConfigurationMenu {
       if (opener?.expanded) await this.#click(opener);
     }
     return { status: 'available', observedAt: new Date().toISOString(), options,
-      unavailableVersions: versions.filter(n => n.disabled).map(n => n.text) };
+      unavailableVersions };
   }
 
   async select(option: ConfigurationOption): Promise<BrowserSnapshotNode> {

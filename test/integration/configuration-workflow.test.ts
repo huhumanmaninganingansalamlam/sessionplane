@@ -552,3 +552,55 @@ test('configuration selection verifies menu state without waiting for scheduled 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('discovery exits a persistent version submenu and rejects an unconfirmed version without losing the original draft', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-persistent-version-menu-'));
+  const service = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }),
+    browserHeadless: true, logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await service.browserOwner!.createPage();
+    await page.setContent(fixture);
+    await page.evaluate(() => {
+      const chooser = document.querySelector('#chooser')!;
+      const versions = document.querySelector('#versions') as HTMLElement;
+      const menu = document.querySelector('#configuration') as HTMLElement;
+      // Escape dismisses the popup but retains its submenu route. The exact
+      // chooser's close action resets that route after its exit animation.
+      document.addEventListener('keydown', event => {
+        if (event.key !== 'Escape') return;
+        event.stopImmediatePropagation();
+        chooser.setAttribute('aria-expanded', 'false');
+        versions.hidden = true; menu.hidden = true;
+      }, true);
+      for (const option of versions.children) {
+        if (option.getAttribute('aria-checked') === 'true') {
+          const original = (option as HTMLElement).onclick!;
+          (option as HTMLElement).onclick = event => {
+            if (option.getAttribute('aria-checked') !== 'true') original.call(option, event);
+          };
+        }
+        if (option.getAttribute('aria-disabled') === 'true') {
+          option.removeAttribute('aria-disabled');
+          // A provider access option can be clickable without selecting it.
+          (option as HTMLElement).onclick = () => {};
+        }
+      }
+    });
+    const menu = new ChatGptConfigurationMenu(page, 'persistent-version-menu');
+    const catalog = await menu.discover();
+    assert.equal(catalog.status, 'available');
+    assert.deepEqual(catalog.unavailableVersions, ['Unavailable-7']);
+    assert.ok(catalog.options.some(o => o.label === 'Aurora-9 / Deep'));
+    assert.ok(catalog.options.every(o => o.version !== 'Unavailable-7'));
+    await page.waitForFunction(() => document.querySelector('#chooser')?.textContent === 'Balanced');
+    assert.equal(await page.locator('#chooser').innerText(), 'Balanced');
+    assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+    const selected = await menu.select(catalog.options.find(o => o.label === 'Aurora-9 / Deep')!);
+    assert.equal(selected.text, 'Deep');
+    await assert.rejects(menu.select({ id: 'unconfirmed', version: 'Unavailable-7', power: 2, label: 'Aurora-9 / Deep' }),
+      (error: any) => error.errorCode === 'provider.model-unavailable');
+    assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
