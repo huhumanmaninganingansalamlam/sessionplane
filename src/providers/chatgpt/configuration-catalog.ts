@@ -26,6 +26,7 @@ export class ChatGptConfigurationMenu {
   readonly #refs = new BrowserRefSnapshotStore();
   readonly #pageKey: string;
   #snapshot!: BrowserSnapshot;
+  #lastClick: object | null = null;
 
   constructor(page: Page, pageKey: string) {
     this.#page = page;
@@ -45,8 +46,14 @@ export class ChatGptConfigurationMenu {
       if (await predicate(nodes)) return nodes;
       await this.#page.waitForTimeout(50);
     } while (Date.now() < deadline);
+    const nodes = this.#snapshot.nodes;
+    const state = { expanded: this.#opener(nodes)?.expanded ?? null,
+      summary: this.#summary(nodes) !== undefined,
+      radios: nodes.filter(n => n.role === 'menuitemradio').length,
+      sliders: nodes.filter(n => n.role === 'slider').length, lastClick: this.#lastClick };
     throw new SessionPlaneDomainError('provider.configuration-unavailable',
-      `Provider configuration controls did not expose a verifiable state (${stage})`, { configurationStage: stage });
+      `Provider configuration controls did not expose a verifiable state (${stage}): ${JSON.stringify(state)}`,
+      { configurationStage: stage });
   }
 
   async #click(node: BrowserSnapshotNode) {
@@ -68,6 +75,8 @@ export class ChatGptConfigurationMenu {
         if (!hit || !control.contains(hit)) throw new Error('Configuration control is obstructed');
         return { x, y };
       });
+      const box = await element.boundingBox();
+      this.#lastClick = { role: node.role, expanded: node.expanded, dom: point, browser: box };
       await this.#page.mouse.click(point.x, point.y);
     } finally { await element.dispose(); }
   }
@@ -204,6 +213,7 @@ export class ChatGptConfigurationMenu {
     if (!initialVersion) throw new SessionPlaneDomainError('provider.configuration-unavailable', 'Current version is not identified; discovery cannot preserve its selection');
     const options: ConfigurationOption[] = [];
     const unavailableVersions = versions.filter(n => n.disabled).map(n => n.text);
+    let discoveryError: unknown;
     try {
       for (const version of versions.filter(n => !n.disabled)) {
         let nodes;
@@ -229,11 +239,20 @@ export class ChatGptConfigurationMenu {
             label: summary.text, version: version.text, power });
         }
       }
+    } catch (error) {
+      discoveryError = error;
+      throw error;
     } finally {
-      await this.#version(initialVersion);
-      if (initialPower != null) await this.#power(Number(initialPower));
-      const opener = this.#opener(await this.#capture());
-      if (opener?.expanded) await this.#click(opener);
+      try {
+        await this.#version(initialVersion);
+        if (initialPower != null) await this.#power(Number(initialPower));
+        const opener = this.#opener(await this.#capture());
+        if (opener?.expanded) await this.#click(opener);
+      } catch (restorationError) {
+        if (!discoveryError) throw restorationError;
+        throw new AggregateError([discoveryError, restorationError],
+          `Discovery failed: ${String(discoveryError)}; restoring original selection failed: ${String(restorationError)}`);
+      }
     }
     return { status: 'available', observedAt: new Date().toISOString(), options,
       unavailableVersions };

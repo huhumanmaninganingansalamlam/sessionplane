@@ -628,3 +628,28 @@ test('discovery exits a persistent version submenu and rejects an unconfirmed ve
     assert.equal(await page.evaluate(() => (window as any).submits), 0);
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test('failed discovery reports the original transition and restoration failure without exposing the draft', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-menu-failure-details-'));
+  const service = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }),
+    browserHeadless: true, logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await service.browserOwner!.createPage();
+    await page.setContent(fixture);
+    await page.evaluate(() => {
+      // The selected version stops responding. Both enumeration and restoring
+      // that selection fail; the second failure must not overwrite the first.
+      (document.querySelector('#versions [aria-checked="true"]') as HTMLElement).onclick = () => {};
+    });
+    await assert.rejects(new ChatGptConfigurationMenu(page, 'failure-details').discover(), (error: any) => {
+      assert.ok(error instanceof AggregateError);
+      assert.equal(error.errors.length, 2);
+      assert.match(error.message, /Discovery failed:.*version-menu-return/);
+      assert.match(error.message, /restoring original selection failed:/);
+      assert.doesNotMatch(error.message, /Untouched draft/);
+      return true;
+    });
+    assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
