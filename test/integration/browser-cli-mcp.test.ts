@@ -169,7 +169,10 @@ test('internal browser diagnostics remain test-only while public browser tooling
 
     const publicHelp = await runCliJson(['--help']);
     assert.equal(publicHelp.code, 0, publicHelp.stderr);
-    assert.doesNotMatch(publicHelp.stdout, /Browser automation:|new-tab|snapshot|mouse-click/);
+    assert.doesNotMatch(publicHelp.stdout, /Browser automation:|new-tab|sessplane snapshot\b|mouse-click/);
+    const publicSnapshot = await runCliJson(['snapshot', '--json']);
+    assert.equal(publicSnapshot.code, 2);
+    assert.match(publicSnapshot.stderr, /Use Playwright for general browser automation/);
     assert.match(publicHelp.stdout, /use Playwright/i);
     assert.doesNotMatch(publicHelp.stdout, /--state-dir/);
 

@@ -17,9 +17,43 @@ Use native MCP with `sessplane mcp`. Keep a teamId and follow
 by the core. UI choices are interpreted by the caller from fresh evidence; core
 executes and validates them and continues the same request automatically.
 
-The [ten-tool contract](docs/team-workflow.md) includes expert creation/retirement,
+The [team workflow contract](docs/team-workflow.md) includes expert creation/retirement,
 explicit stop, conversation replacement and completed-history deletion. The
 [preparation design](docs/provider-preparation.md) explains UI evidence and recovery.
+
+## Use the terminal workflow
+
+Run `sessplane --help` to find preparation, collection, recovery and cleanup actions.
+Default output shows the request stage and the next exact command. `--json` retains
+machine-readable results and diagnostics.
+
+1. Run `sessplane team list`, then `sessplane team show TEAM_ID`. Use the displayed
+   current role reference; create a session only for a role that has none.
+   Lists are caller-scoped. To find existing native MCP work, use
+   `sessplane team list --client-id sessionplane-mcp`; an empty CLI list does not
+   mean those teams are missing or need to be recreated.
+2. Start one request with `sessplane request send TEAM_ID ROLE_REF --prompt-file FILE`.
+   This can submit immediately when the provider is ready, or pause for preparation.
+   Keep its operation reference and read the reported delivery status.
+3. Follow `request show` for that exact request. Select an available combined model
+   using the displayed `request configure` command, then the fresh composer control.
+   Inspect the input before explicitly choosing the submit control. Disabled or stale
+   controls are not a fallback; inspect the same request again.
+4. Use the displayed `request wait` command to collect the answer. Add `--out DIR`
+   to export captured files. A client wait timeout does not cancel generation.
+5. If delivery is unconfirmed, inspect the same request. Never repeat `send` as a
+   retry. If fresh evidence offers a single matching user message, `request acknowledge`
+   binds its message ID and evidence hash without sending. Never choose an ambiguous
+   candidate. `request refresh` reloads only the owned page; it does not resend or
+   recover a missing page with no known conversation. Provider cooldowns and human
+   verification remain in force.
+6. After retrieving outputs, `request delete TEAM_ID REQUEST_REF --outputs-retrieved`
+   deletes the exact completed conversation. `request replace TEAM_ID ROLE_REF`
+   attempts old-chat deletion and starts an empty successor; `--preserve-conversation`
+   uses the supported nondeleting recovery path. Neither operation replays a prompt.
+   `team delete TEAM_ID` permanently removes team history: export needed results first.
+   Read chat deletion, tab closure and errors separately; team deletion success does
+   not mean every provider chat was deleted, and zero closed tabs does not prove absence.
 
 ## Requirements
 
@@ -33,7 +67,7 @@ Tagged releases attach a prebuilt npm package and SHA-256 checksum. Install the
 release package globally, then run the built-in doctor:
 
 ```bash
-VERSION=0.4.7
+VERSION=0.4.8
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz"
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz.sha256"
 sha256sum -c "sessionplane-$VERSION.tgz.sha256"

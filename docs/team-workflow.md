@@ -212,3 +212,13 @@ owned tabs. Provider conversation deletion is attempted once; failure does not
 block local deletion and is reported per session. Retrieve needed outputs first.
 Shared content blobs, exported files and idempotency receipts remain. Retry with
 the same requestId to receive the deletion result without repeating provider actions.
+
+## Human terminal client
+
+The same guarded workflow is available through `sessplane request`: send, show,
+configure, choose/reveal, wait, stop, refresh, focus, latest, delete and replace.
+Run `sessplane --help` for arguments. Default output separates preparation,
+unconfirmed/confirmed delivery, provider observation, collected answer/files and
+cleanup outcomes, and prints commands for the exact request. `--json` preserves
+the machine contract. CLI decisions do not weaken core ownership, generation,
+draft, cooldown or explicit-submission checks. No automatic resend is provided.
