@@ -422,6 +422,7 @@ export class ConversationCleanupService {
           // Preparation has not attempted a delete; retain the typed provider
           // failure and pacing separately from cleanup of the verified idle page.
           if (error instanceof ProviderSubmissionError) {
+            if (options.replacement) throw new SessionPlaneDomainError(error.errorCode, error.message, error.details);
             const pageCleanup = await this.#closeSessionPages(session);
             throw new SessionPlaneDomainError(error.errorCode, error.message, {
               ...(error.details !== null && typeof error.details === 'object' ? error.details : { providerDetails: error.details }),
@@ -475,9 +476,12 @@ export class ConversationCleanupService {
         } finally {
           // Closing a temporary Page cannot change the durable provider outcome.
           await operation.close().catch(() => {});
-          const pages = await this.#closeSessionPages(session);
-          result.pageCleanup = { closedPages: (result.pageCleanup?.closedPages ?? 0) + pages.closedPages, pageErrors: pages.pageErrors };
-          if (recordedStatus !== null) record(recordedStatus);
+          // Replacement/team cleanup owns its separate unresolved-work policy.
+          if (!options.replacement || (result.requestOk && result.deleted)) {
+            const pages = await this.#closeSessionPages(session);
+            result.pageCleanup = { closedPages: (result.pageCleanup?.closedPages ?? 0) + pages.closedPages, pageErrors: pages.pageErrors };
+            if (recordedStatus !== null) record(recordedStatus);
+          }
         }
       }));
   }
