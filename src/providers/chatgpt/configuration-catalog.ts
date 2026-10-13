@@ -26,6 +26,7 @@ export class ChatGptConfigurationMenu {
   readonly #refs = new BrowserRefSnapshotStore();
   readonly #pageKey: string;
   #snapshot!: BrowserSnapshot;
+  #lastClick: object | null = null;
 
   constructor(page: Page, pageKey: string) {
     this.#page = page;
@@ -45,8 +46,14 @@ export class ChatGptConfigurationMenu {
       if (await predicate(nodes)) return nodes;
       await this.#page.waitForTimeout(50);
     } while (Date.now() < deadline);
+    const nodes = this.#snapshot.nodes;
+    const state = { expanded: this.#opener(nodes)?.expanded ?? null,
+      summary: this.#summary(nodes) !== undefined,
+      radios: nodes.filter(n => n.role === 'menuitemradio').length,
+      sliders: nodes.filter(n => n.role === 'slider').length, lastClick: this.#lastClick };
     throw new SessionPlaneDomainError('provider.configuration-unavailable',
-      `Provider configuration controls did not expose a verifiable state (${stage})`, { configurationStage: stage });
+      `Provider configuration controls did not expose a verifiable state (${stage}): ${JSON.stringify(state)}`,
+      { configurationStage: stage });
   }
 
   async #click(node: BrowserSnapshotNode) {
@@ -54,16 +61,38 @@ export class ChatGptConfigurationMenu {
     const element = await this.#refs.resolve({ page: this.#page, pageKey: this.#pageKey,
       bindingEpoch: 1, snapshotId: this.#snapshot.snapshotId, ref: node.ref });
     // noWaitAfter only skips navigation after this action; a previous scheduled
-    // navigation still blocks native clicks. Activate the exact resolved menu
-    // control and verify its resulting DOM state in the caller instead.
+    // navigation still blocks ElementHandle.click. Send the native pointer
+    // sequence without that wait; Radix triggers need pointerdown, not DOM click().
     try {
-      await element.evaluate(control => {
+      // Sample geometry directly: Playwright's stability helper also waits for
+      // unrelated pending navigation. Never click a moving configuration target.
+      let box = await element.boundingBox();
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        await this.#page.waitForTimeout(50);
+        const next = await element.boundingBox();
+        if (!box || !next) throw new Error('Configuration control has no visible browser geometry');
+        if (Math.abs(box.x - next.x) < 0.25 && Math.abs(box.y - next.y) < 0.25 &&
+            Math.abs(box.width - next.width) < 0.25 && Math.abs(box.height - next.height) < 0.25) {
+          box = next;
+          break;
+        }
+        if (Date.now() >= deadline) throw new Error('Configuration control did not become stable');
+        box = next;
+      }
+      const point = await element.evaluate(control => {
         if (!(control instanceof HTMLElement) || !control.isConnected ||
             !control.checkVisibility({ visibilityProperty: true }) || control.matches(':disabled, [aria-disabled="true"]')) {
           throw new Error('Configuration control is no longer available');
         }
-        control.click();
+        const box = control.getBoundingClientRect();
+        const x = box.x + box.width / 2, y = box.y + box.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        if (!hit || !control.contains(hit)) throw new Error('Configuration control is obstructed');
+        return { x, y };
       });
+      this.#lastClick = { role: node.role, expanded: node.expanded, dom: point, browser: box };
+      await this.#page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
     } finally { await element.dispose(); }
   }
 
@@ -85,6 +114,24 @@ export class ChatGptConfigurationMenu {
 
   async #mainMenu() {
     let nodes = await this.#capture();
+    // Selecting the checked version navigates out of its submenu without
+    // substituting a model. Closing/reopening can retain that submenu route.
+    const selectedVersion = nodes.find(n => n.role === 'menuitemradio' && (n.checked === true || n.selected === true));
+    const versionMenus = nodes.filter(n => n.role === 'menu' && n.id !== '' &&
+      selectedVersion?.ancestorIds.includes(n.id)).map(n => n.id);
+    if (selectedVersion && this.#opener(nodes)?.expanded !== false) {
+      await this.#click(selectedVersion);
+      nodes = await this.#wait(ns => this.#opener(ns)?.expanded === false ||
+        this.#summary(ns) !== undefined, 5000, 'version-menu-return');
+    }
+    // A closing trigger can already have dropped aria-controls. Retain the
+    // observed submenu identity until it exits before reopening the chooser.
+    if (this.#opener(nodes)?.expanded === false) {
+      for (const id of versionMenus) {
+        await this.#wait(() => this.#page.evaluate(id => !document.getElementById(id)?.checkVisibility({ visibilityProperty: true }), id), 5000, 'version-menu-exit');
+      }
+      nodes = await this.#capture();
+    }
     // ChatGPT's lightweight home editor mounts the chooser only after focus.
     // Focusing hydrates the editor without replacing its draft.
     if (nodes.some(n => n.id === 'pending-home-input')) {
@@ -112,8 +159,12 @@ export class ChatGptConfigurationMenu {
     const controls = [...new Set([...opener.controls,
       ...nodes.filter(n => n.role === 'menu' && n.id !== '' && summary?.ancestorIds.includes(n.id)).map(n => n.id)])];
     if (opener.expanded) {
-      await this.#page.keyboard.press('Escape');
-      nodes = await this.#wait(ns => this.#opener(ns)?.expanded === false);
+      // Dismissing a submenu with Escape can retain its route. Close through
+      // the exact chooser so reopening returns to the main configuration menu.
+      await this.#click(opener);
+      nodes = await this.#wait(ns => this.#opener(ns)?.expanded === false || this.#summary(ns) !== undefined);
+      // Some provider menus navigate back directly instead of collapsing.
+      if (this.#opener(nodes)?.expanded === true && this.#summary(nodes)) return await this.#readyMainMenu();
     }
     // Radix resets the submenu when its closing animation unmounts. Reopening
     // at aria-expanded=false alone can reopen the old version submenu.
@@ -138,7 +189,17 @@ export class ChatGptConfigurationMenu {
     const nodes = await this.#versions();
     const option = nodes.find(n => n.role === 'menuitemradio' && n.text === label);
     if (!option) throw new SessionPlaneDomainError('provider.model-unavailable', `Observed version is no longer available: ${label}`);
-    await this.#click(option);
+    if (option.checked !== true && option.selected !== true) {
+      await this.#click(option);
+      await this.#versions();
+      try {
+        await this.#wait(ns => ns.some(n => n.role === 'menuitemradio' && n.text === label &&
+          (n.checked === true || n.selected === true)), 5000, 'version-selected');
+      } catch (error) {
+        if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.configuration-unavailable') throw error;
+        throw new SessionPlaneDomainError('provider.model-unavailable', `Provider did not confirm selection of version: ${label}`);
+      }
+    }
     return await this.#mainMenu();
   }
 
@@ -166,9 +227,17 @@ export class ChatGptConfigurationMenu {
     const initialVersion = versions.find(n => n.checked === true || n.selected === true)?.text;
     if (!initialVersion) throw new SessionPlaneDomainError('provider.configuration-unavailable', 'Current version is not identified; discovery cannot preserve its selection');
     const options: ConfigurationOption[] = [];
+    const unavailableVersions = versions.filter(n => n.disabled).map(n => n.text);
+    let discoveryError: unknown;
     try {
       for (const version of versions.filter(n => !n.disabled)) {
-        let nodes = await this.#version(version.text);
+        let nodes;
+        try { nodes = await this.#version(version.text); }
+        catch (error) {
+          if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.model-unavailable') throw error;
+          unavailableVersions.push(version.text);
+          continue;
+        }
         const slider = nodes.find(n => n.role === 'slider');
         const min = Number(slider?.ariaValueMin), max = Number(slider?.ariaValueMax);
         if (slider && (slider.ariaValueMin === null || slider.ariaValueMax === null ||
@@ -185,14 +254,23 @@ export class ChatGptConfigurationMenu {
             label: summary.text, version: version.text, power });
         }
       }
+    } catch (error) {
+      discoveryError = error;
+      throw error;
     } finally {
-      await this.#version(initialVersion);
-      if (initialPower != null) await this.#power(Number(initialPower));
-      const opener = this.#opener(await this.#capture());
-      if (opener?.expanded) await this.#click(opener);
+      try {
+        await this.#version(initialVersion);
+        if (initialPower != null) await this.#power(Number(initialPower));
+        const opener = this.#opener(await this.#capture());
+        if (opener?.expanded) await this.#click(opener);
+      } catch (restorationError) {
+        if (!discoveryError) throw restorationError;
+        throw new AggregateError([discoveryError, restorationError],
+          `Discovery failed: ${String(discoveryError)}; restoring original selection failed: ${String(restorationError)}`);
+      }
     }
     return { status: 'available', observedAt: new Date().toISOString(), options,
-      unavailableVersions: versions.filter(n => n.disabled).map(n => n.text) };
+      unavailableVersions };
   }
 
   async select(option: ConfigurationOption): Promise<BrowserSnapshotNode> {

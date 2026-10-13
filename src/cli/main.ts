@@ -45,6 +45,8 @@ const FLAG_OPTIONS = new Set([
   'manual',
   'resume',
   'no-activate',
+  'outputs-retrieved',
+  'preserve-conversation',
 ]);
 const MULTI_VALUE_OPTIONS = new Set(['file', 'skill']);
 const VALUE_OPTIONS = new Set([
@@ -108,6 +110,8 @@ const VALUE_OPTIONS = new Set([
   'skill',
   'conversation',
   'chatgpt-url',
+  'message-id',
+  'evidence-hash',
 ]);
 
 const INTERNAL_BROWSER_COMMANDS = new Set([
@@ -265,6 +269,8 @@ export async function runCli(
       }
       case 'team':
         return await runTeamCommand(io, parsed, config);
+      case 'request':
+        return await runRequestCommand(io, parsed, config);
       case 'role':
         return await runRoleCommand(io, parsed, config);
       case 'session':
@@ -676,6 +682,56 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   process.exitCode = await runCli(argv);
 }
 
+// Human commands are thin adapters over the same guarded workflow used by MCP.
+async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionPlaneConfig): Promise<number> {
+  const action = parsed.words[1];
+  const teamId = requirePositional(parsed.words, 2, 'teamId');
+  const ref = requirePositional(parsed.words, 3, action === 'send' || action === 'replace' ? 'roleRef' : 'requestRef');
+  const request = { teamId, requestRef: ref };
+  const requestId = parsed.options['request-id'] ?? randomUUID();
+  const mutation = { ...request, requestId };
+  if (action === 'show') return await printRpc(io, parsed, config, 'workflow.team_get', request);
+  if (action === 'wait') {
+    const waitMs = integerOption(parsed, 'wait-ms', 30_000, 0, 120_000);
+    return await printRpc(io, parsed, config, 'workflow.wait', { teamId, requestRefs: [ref], waitMs,
+      ...optionalParam('outputDir', parsed.options.out) }, waitMs + 5_000);
+  }
+  if (action === 'send') {
+    const sources = ['prompt', 'prompt-file', 'prompt-stdin'].filter(key => parsed.options[key] !== undefined);
+    if (sources.length !== 1) throw new Error('Choose exactly one of --prompt, --prompt-file, or --prompt-stdin');
+    const prompt = parsed.options['prompt-file'] !== undefined ? readFileSync(parsed.options['prompt-file'], 'utf8')
+      : parsed.options['prompt-stdin'] === 'true' ? await readInput(io.stdin) : requireOption(parsed, 'prompt');
+    return await printRpc(io, parsed, config, 'workflow.send', { teamId, roleRef: ref, requestId, prompt,
+      ...optionalParam('model', parsed.options.model), ...optionalParam('effort', parsed.options.effort),
+      ...(parsed.files.length ? { files: parsed.files } : {}) }, sessionSendRpcTimeoutMs(config));
+  }
+  if (action === 'replace') return await printRpc(io, parsed, config, 'workflow.session_replace', {
+    teamId, roleRef: ref, requestId,
+    ...(parsed.options['preserve-conversation'] === 'true' ? { preserveConversation: true } : {}),
+  }, sessionSendRpcTimeoutMs(config));
+  if (action === 'delete') {
+    if (parsed.options['outputs-retrieved'] !== 'true') throw new Error('Retrieve the original answer/files first, then pass --outputs-retrieved to authorize conversation deletion.');
+    return await printRpc(io, parsed, config, 'workflow.session_delete', { ...mutation, outputsRetrieved: true }, sessionSendRpcTimeoutMs(config));
+  }
+  if (action === 'stop') return await printRpc(io, parsed, config, 'workflow.stop', mutation, sessionSendRpcTimeoutMs(config));
+  if (action === 'configure') return await printRpc(io, parsed, config, 'workflow.decide', {
+    ...mutation, decision: 'configure', configurationId: requirePositional(parsed.words, 4, 'configurationId'),
+  }, sessionSendRpcTimeoutMs(config));
+  if (action === 'acknowledge') return await printRpc(io, parsed, config, 'workflow.decide', {
+    ...mutation, decision: 'acknowledge', messageId: requireOption(parsed, 'message-id'),
+    evidenceHash: requireOption(parsed, 'evidence-hash'),
+  }, sessionSendRpcTimeoutMs(config));
+  if (action === 'choose' || action === 'reveal') return await printRpc(io, parsed, config, 'workflow.decide', {
+    ...mutation, decision: action, purpose: requirePositional(parsed.words, 4, 'purpose'),
+    ref: requirePositional(parsed.words, 5, 'control ref'), snapshotId: requireOption(parsed, 'snapshot-id'),
+    ...(parsed.options.value === undefined ? {} : { value: Number(parsed.options.value) }),
+  }, sessionSendRpcTimeoutMs(config));
+  if (['discover', 'refresh', 'focus', 'latest', 'reconcile_failure'].includes(action ?? '')) {
+    return await printRpc(io, parsed, config, 'workflow.decide', { ...mutation, decision: action }, sessionSendRpcTimeoutMs(config));
+  }
+  throw new Error(`Unknown request action: ${action}. See sessplane --help.`);
+}
+
 async function runTeamCommand(
   io: CliIo,
   parsed: ParsedArgs,
@@ -698,6 +754,9 @@ async function runTeamCommand(
       });
     case 'show':
     case 'get':
+      if (!parsed.json) return await printRpc(io, parsed, config, 'workflow.team_get', {
+        teamId: requirePositional(rest, 0, 'teamId'),
+      });
       return await printRpc(io, parsed, config, 'team.get', {
         clientId: clientId(parsed),
         teamId: requirePositional(rest, 0, 'teamId'),
@@ -998,6 +1057,9 @@ async function printRpc(
   params: Readonly<Record<string, unknown>>,
   minimumTimeoutMs = 0,
 ): Promise<number> {
+  if (!parsed.json && typeof params.requestId === 'string') {
+    io.stderr.write(`Operation reference: ${params.requestId}. If interrupted, inspect the same request; an identical operation retry must reuse --request-id ${params.requestId}.\n`);
+  }
   const result = await callRpc<unknown>({
     socketPath: config.socketPath,
     method,
@@ -1005,8 +1067,12 @@ async function printRpc(
     timeoutMs: Math.max(config.rpcRequestTimeoutMs, minimumTimeoutMs),
     maxLineBytes: config.rpcMaxLineBytes,
   });
-  writeCliResult(io, parsed.json, result);
-  return 0;
+  const view = !parsed.json && result !== null && typeof result === 'object' && !Array.isArray(result)
+    ? { ...('teamId' in params ? { teamId: params.teamId } : {}), ...result } : result;
+  writeCliResult(io, parsed.json, view);
+  const failed = (value: unknown) => value !== null && typeof value === 'object' && 'requestOk' in value && value.requestOk === false;
+  return failed(result) || (method === 'workflow.wait' && result !== null && typeof result === 'object' &&
+    'results' in result && Array.isArray(result.results) && result.results.some(failed)) ? 1 : 0;
 }
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
@@ -1236,6 +1302,26 @@ Team and role sessions:
   sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID
   sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]
   sessplane stop TEAM_ID ROLE_KEY [--request-id ID]
+
+Exact request flow (same request; no automatic resend):
+  1. Find your team and role: team list, then team show TEAM_ID
+  2. Start: request send TEAM_ID ROLE_REF --prompt-file FILE [--request-id ID]
+     May submit immediately when ready; otherwise pauses for preparation.
+  3. Inspect: request show TEAM_ID REQUEST_REF
+  4. Select model: request configure TEAM_ID REQUEST_REF CONFIGURATION_ID
+  5. Choose fresh controls: request choose TEAM_ID REQUEST_REF PURPOSE REF --snapshot-id ID
+     PURPOSE is model, effort, composer or submit. Submit only after checking the input.
+  6. Collect: request wait TEAM_ID REQUEST_REF [--wait-ms N] [--out DIRECTORY]
+  Recovery: request discover|refresh|focus|latest|reconcile_failure TEAM_ID REQUEST_REF
+  Confirm an observed matching submission without resending:
+    request acknowledge TEAM_ID REQUEST_REF --message-id ID --evidence-hash HASH
+  Cancel: request stop TEAM_ID REQUEST_REF
+  Delete a collected conversation: request delete TEAM_ID REQUEST_REF --outputs-retrieved
+  Replace: request replace TEAM_ID ROLE_REF [--preserve-conversation]
+    Default replacement attempts old-chat deletion. Preserve mode retains the old conversation.
+    Replacement is not a resend. Check chat and tab cleanup separately.
+  For unconfirmed delivery, inspect the same request; never run send again as a retry.
+  All mutations accept --request-id ID; retain it for an identical retry.
 
 Provider artifacts:
   sessplane artifact discover --session SESSION_ID

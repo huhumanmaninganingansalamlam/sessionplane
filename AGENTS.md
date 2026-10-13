@@ -23,8 +23,9 @@ precedence over implementation convenience.
 - Start routine development on `dev` (or a task branch based on `dev`), not on
   `main`. Check the current branch before editing and never discard existing work
   to switch branches.
-- Push development changes to `origin/dev`; CI must pass there. Promote release
-  candidates through a pull request from `dev` to `main`.
+- Publish development changes through `origin/dev` and promote release candidates
+  through a reviewed `dev` to `main` pull request with successful CI. Publication
+  access failures do not block authorized local fixes, installation or runtime checks.
 - `main` is the release line. Run release preflight and create version tags only
   from a clean `main` matching `origin/main`. Never move a published release tag.
 - Runtime: Node.js 24, TypeScript, ESM.
@@ -36,5 +37,8 @@ precedence over implementation convenience.
 - SQLite access stays behind `src/storage/`.
 - Public clients are thin adapters over the Unix-socket JSON-RPC core.
 - Add focused invariant tests with every behavior change.
-- Run `npm run typecheck`, `npm test`, and `npm run build` before completion.
+- Validate the changed behavior with relevant regressions, typecheck/build for code
+  changes, and the full suite when the affected scope requires it. Reuse valid results;
+  documentation-only changes do not require another full browser suite. Local runtime
+  completion requires actual installed behavior, separately from Git publication.
 

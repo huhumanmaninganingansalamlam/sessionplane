@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Established, drained, exact-core-only replacement. No SSH or browser protocol calls.
-Run only after original owners have paused issuing new mutations for this short handover.
-The old core has no atomic admission fence: sampled health is not a substitute for that coordination.
+Require issuer coordination for legacy cores, or explicitly use a live core admission fence.
+Sampled health is never a substitute for either protection.
 """
 import argparse, datetime, hashlib, json, os, pathlib, pwd, signal, socket, sqlite3, subprocess, sys, tarfile, tempfile, time
 from contextlib import closing, contextmanager
@@ -439,10 +439,41 @@ def verify_pre_signal_resume(prior, h, installed, pkg, manifest, target):
     verify_package(installed, pkg, manifest)
 
 
+def validate_candidate(manifest, local_validation):
+    if local_validation is None:
+        assert manifest['ciConclusion'] == 'success', 'Candidate CI not successful'
+        return
+    report = json.loads(local_validation.read_text())
+    assert report['sourceCommit'] == manifest['sourceCommit'], 'Local validation source differs'
+    assert report['packageSha256'] == manifest['packageSha256'], 'Local validation package differs'
+    assert report['typecheck'] == report['build'] == 'success', 'Local build validation incomplete'
+    log = pathlib.Path(report['fullTestLog']).read_bytes()
+    assert hashlib.sha256(log).hexdigest() == report['fullTestLogSha256'], 'Validation log changed'
+    result = log.decode()
+    assert report['passed'] > 0 and f'ℹ tests {report["passed"]}\n' in result
+    assert f'ℹ pass {report["passed"]}\n' in result and 'ℹ fail 0\n' in result
+    assert 'ℹ cancelled 0\n' in result and 'ℹ skipped 0\n' in result, 'Local suite incomplete'
+    if report.get('fullTestSourceCommit', report['sourceCommit']) != report['sourceCommit']:
+        assert report.get('focusedTestSourceCommit') == report['sourceCommit'], 'Changed source needs current focused evidence'
+        focused = pathlib.Path(report['focusedTestLog']).read_bytes()
+        assert hashlib.sha256(focused).hexdigest() == report['focusedTestLogSha256'], 'Focused log changed'
+        focused = focused.decode()
+        count = report['focusedPassed']
+        assert count > 0 and all(line in focused for line in [f'ℹ tests {count}\n', f'ℹ pass {count}\n',
+            'ℹ fail 0\n', 'ℹ cancelled 0\n', 'ℹ skipped 0\n']), 'Focused suite incomplete'
+
+
+def require_admission_fence(h, required):
+    if required:
+        assert h.get('maintenance', {}).get('phase') == 'running', 'Core admission fence unavailable or already leased; no legacy fallback'
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--issuers-quiesced', action='store_true')
+    parser.add_argument('--core-maintenance', action='store_true', help='Require the live core admission fence; never fall back to legacy freeze')
+    parser.add_argument('--local-validation', type=pathlib.Path, help='Explicit local-only validation receipt instead of remote CI')
     parser.add_argument('--core-pid', type=int, required=True)
     parser.add_argument('--chrome-pid', type=int, required=True)
     parser.add_argument('--bundle-dir', type=pathlib.Path, required=True)
@@ -458,7 +489,7 @@ def main():
     parser.add_argument('--receipt-dir', type=pathlib.Path)
     args=parser.parse_args()
     assert not (args.resume_staged and args.resume_pre_signal), 'Choose exactly one reentry contract'
-    if args.apply and not args.issuers_quiesced:
+    if args.apply and not (args.issuers_quiesced or args.core_maintenance):
         parser.error('--apply requires supervisor-coordinated --issuers-quiesced')
     assert hasattr(os, 'pidfd_open') and hasattr(signal, 'pidfd_send_signal'), 'Linux pidfd support is required'
     root=args.bundle_dir.resolve()
@@ -467,11 +498,12 @@ def main():
     manifest=json.loads((root/'manifest.json').read_text())
     pkg=root/manifest['package']
     assert hashlib.sha256(pkg.read_bytes()).hexdigest()==manifest['packageSha256'], 'Package checksum mismatch'
-    assert manifest['ciConclusion']=='success', 'Candidate CI not successful'
+    validate_candidate(manifest, args.local_validation)
     if args.apply and (root/'local-receipt').exists():
         assert args.resume_pre_signal is not None or args.resume_staged is not None, 'Existing attempt: inspect and explicitly resume a proven pre-signal abort'
         assert (args.resume_staged or args.resume_pre_signal).resolve() == (root/'local-receipt').resolve(), 'Existing bundle receipt must be the inspected prior attempt'
     h=health(); assert h['process']['pid']==args.core_pid and h['browser']['browserPid']==args.chrome_pid, 'PID differs from supplied live receipt'
+    require_admission_fence(h, args.core_maintenance)
     pid=args.core_pid; proc=pathlib.Path(f'/proc/{pid}')
     assert proc.stat().st_uid==os.getuid() and pathlib.Path(f'/proc/{args.chrome_pid}').stat().st_uid==os.getuid()
     ticks=procstat(pid)[19]; chrome_ticks=procstat(args.chrome_pid)[19]
@@ -492,10 +524,14 @@ def main():
     assert hashlib.sha256((installed/'dist/browser/browser-owner.js').read_bytes()).hexdigest() == manifest['runtimeBrowserOwnerSha256'], 'Unreviewed original browser adoption; no automatic rollback path'
     identity=request_identity(h, args)
     guard(h,h)
-    print(json.dumps({'phase':'preflight','corePid':pid,'chromePid':args.chrome_pid,'sourceCommit':manifest['sourceCommit'],'packageVerified':True,'actorDepth':0,'activeSubmitCount':0,'dbWriterLocks':0,'next':'apply only during coordinated issuer pause'},indent=2),flush=True)
+    print(json.dumps({'phase':'preflight','corePid':pid,'chromePid':args.chrome_pid,'sourceCommit':manifest['sourceCommit'],'packageVerified':True,'actorDepth':0,'activeSubmitCount':0,'dbWriterLocks':0,'next':'apply through required core admission fence' if args.core_maintenance else 'apply only during coordinated issuer pause'},indent=2),flush=True)
     if not args.apply: return
     receipt=args.receipt_dir.resolve() if args.receipt_dir is not None else root/'local-receipt'
     receipt.mkdir(mode=0o700) # never rerun an issued handover blindly
+    save(receipt/'validation-basis.json', {'mode': 'local' if args.local_validation else 'ci',
+        'sourceCommit': manifest['sourceCommit'], 'packageSha256': manifest['packageSha256'],
+        'localValidation': json.loads(args.local_validation.read_text()) if args.local_validation else None,
+        'admission': 'core-maintenance' if args.core_maintenance else 'issuers-quiesced'})
     save(receipt/'before-health.json',h); save(receipt/'before-identity.json',identity)
     if args.resume_pre_signal is not None:
         save(receipt/'resumes.json', {'priorReceipt': str(args.resume_pre_signal.resolve()), 'meaning': 'same original live core; pinned candidate already on disk; runtime SHA not inferred from disk'})
