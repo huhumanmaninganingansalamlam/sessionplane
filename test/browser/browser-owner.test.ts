@@ -555,3 +555,39 @@ for (const failure of ['unverified-endpoint', 'attach-failure'] as const) {
     }
   });
 }
+
+test('cold browser start restores persisted tabs and provider-saved drafts without submitting', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-cold-restore-'));
+  let submissions = 0;
+  const server = createServer((req, res) => {
+    if (req.method === 'POST') submissions++;
+    res.setHeader('Content-Type', 'text/html');
+    res.end(`<form method="post"><textarea name="draft"></textarea><button>Send</button></form>
+      <script>const draft=document.querySelector('textarea');
+      draft.value=localStorage.getItem('draft')||'';
+      draft.addEventListener('input',()=>localStorage.setItem('draft',draft.value));</script>`);
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address() as { port: number };
+  const url = `http://127.0.0.1:${address.port}/retained`;
+  const first = new BrowserOwner({ profileDir: root, pageRegistry: new PageRegistry(), headless: true });
+  const second = new BrowserOwner({ profileDir: root, pageRegistry: new PageRegistry(), headless: true });
+  try {
+    await first.start();
+    const { page } = await first.createPage();
+    await page.goto(url);
+    await page.locator('textarea').fill('Keep the unsent original draft');
+    await first.close();
+    await second.start();
+    const { page: probe } = await second.createPage();
+    const restored = probe.context().pages().find(p => p.url() === url);
+    assert.ok(restored, 'the original persisted tab must reopen');
+    await restored.waitForFunction(() => document.querySelector('textarea')?.value === 'Keep the unsent original draft', undefined, { timeout: 5000 });
+    assert.equal(await restored.locator('textarea').inputValue(), 'Keep the unsent original draft');
+    assert.equal(submissions, 0);
+  } finally {
+    await second.close(); await first.close();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});

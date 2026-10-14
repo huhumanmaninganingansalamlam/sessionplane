@@ -397,3 +397,28 @@ request, or repeat unchanged get/wait calls to conceal failed recovery.
 
 Report package/core update, browser/request preservation, and actual answer
 recovery as separate results.
+
+## Cold recovery after terminal-scope OOM
+
+A detached process still inherits its terminal's systemd cgroup. `nohup` or
+`start_new_session` does not protect the core from that scope's OOM teardown.
+Check journal evidence and exact core/browser PID identities before restarting;
+a stale socket alone is not evidence that no core exists.
+
+When both owners are dead, retain the original database/WAL and dedicated browser
+profile before the normal `sessplane serve` startup. Cold browser launch restores
+the last persisted session; it does not recover unsaved memory killed by the OS.
+Provider-saved drafts can survive, but generic DOM-only drafts are not guaranteed.
+Do not reset the profile, rewrite submissions or automatically resend UNKNOWN work.
+
+On a systemd desktop, start the original executable/environment in a dedicated
+user service (for example `systemd-run --user --unit=sessionplane-core
+--property=Type=exec --property=Restart=no --property=OOMPolicy=continue ...`).
+Use the original working directory, display and provider allowlist. Check that no
+existing unit/core owns the socket first. This isolates terminal-scope teardown;
+it does not make the service immune to host OOM. `Restart=no` avoids blind retry
+loops; `OOMPolicy=continue` leaves surviving components available for guarded
+recovery after an OOM victim inside the unit. A transient unit is not boot enablement.
+Verify health, exact team/request reads and retained generation/answer identities
+separately from package installation. Never close a still-live browser to fix a
+refused socket.
