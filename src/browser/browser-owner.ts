@@ -938,6 +938,8 @@ export function buildHostBrowserArguments(input: {
     '--window-size=1440,900',
     '--no-first-run',
     '--no-default-browser-check',
+    // Recover persisted tabs and form state when both core and browser have exited.
+    '--restore-last-session',
     ...(input.headless ? ['--headless=new'] : []),
     'about:blank',
   ]);

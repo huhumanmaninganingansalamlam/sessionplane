@@ -72,7 +72,14 @@ export class ChatGptConfigurationMenu {
         await this.#page.waitForTimeout(50);
         const next = await element.boundingBox();
         if (!box || !next) throw new Error('Configuration control has no visible browser geometry');
-        if (Math.abs(box.x - next.x) < 0.25 && Math.abs(box.y - next.y) < 0.25 &&
+        // Equal samples can occur before a pending entrance animation advances.
+        const animating = await element.evaluate(control => {
+          for (let node: Element | null = control; node !== null; node = node.parentElement) {
+            if (node.getAnimations().some(animation => animation.pending || animation.playState === 'running')) return true;
+          }
+          return false;
+        });
+        if (!animating && Math.abs(box.x - next.x) < 0.25 && Math.abs(box.y - next.y) < 0.25 &&
             Math.abs(box.width - next.width) < 0.25 && Math.abs(box.height - next.height) < 0.25) {
           box = next;
           break;

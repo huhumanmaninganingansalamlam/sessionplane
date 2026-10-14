@@ -111,6 +111,12 @@ test('team deletion closes owned browser tabs and leaves unrelated tabs open', a
     assert.equal(owned.page.isClosed(), true);
     assert.equal(other.page.isClosed(), false);
     assert.equal(unbound.page.isClosed(), true);
+    const cleanup = result.structuredContent.sessions as Array<{ closedPages: number }>;
+    assert.equal(cleanup.reduce((sum, session) => sum + session.closedPages, 0), 2,
+      'team totals include pages closed inside session deletion and final cleanup');
+    const replay = await invokeMcpTool({ name: 'sessionplane_team_delete', arguments: { teamId: team.teamId, requestId: 'delete' },
+      socketPath: config.socketPath, timeoutMs: 5000, maxLineBytes: config.rpcMaxLineBytes });
+    assert.deepEqual(replay.structuredContent, result.structuredContent);
     assert.equal(differentProvider.page.isClosed(), false, 'Another provider is not cleanup ownership');
     assert.equal(service.pageRegistry.listBindings().some(b => b.sessionId === session.sessionId), false);
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
