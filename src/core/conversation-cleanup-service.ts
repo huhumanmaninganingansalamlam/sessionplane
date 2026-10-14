@@ -100,9 +100,13 @@ export class ConversationCleanupService {
               conversationId: current.conversationId, outputsRetrieved: true }, { replacement: true });
             cleanup.providerDeleted = deleted.deleted;
             cleanup.providerError = deleted.errorCode;
+            cleanup.closedPages += deleted.pageCleanup?.closedPages ?? 0;
+            cleanup.pageErrors.push(...(deleted.pageCleanup?.pageErrors ?? []));
           } catch (error) { cleanup.providerError = cleanupErrorCode(error); }
         }
-        Object.assign(cleanup, await this.#closeSessionPages(current));
+        const remainingPages = await this.#closeSessionPages(current);
+        cleanup.closedPages += remainingPages.closedPages;
+        cleanup.pageErrors = [...new Set([...cleanup.pageErrors, ...remainingPages.pageErrors])];
         // Remove live ownership even if the provider or browser rejected cleanup.
         for (const binding of registry.listBindings({ includeClosed: true })) {
           if (binding.sessionId === current.sessionId) registry.unbindPage(binding.pageKey);
