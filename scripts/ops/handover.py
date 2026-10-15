@@ -469,6 +469,25 @@ def require_admission_fence(h, required):
         assert h.get('maintenance', {}).get('phase') == 'running', 'Core admission fence unavailable or already leased; no legacy fallback'
 
 
+def prepare_maintenance(h, quiet_timeout=30):
+    # Long read/wait calls are not interrupted by maintenance. Let their current
+    # round finish before starting the short fenced drain; admission stays open.
+    deadline = time.monotonic() + quiet_timeout
+    while True:
+        current = health()
+        guard(current, h, require_idle=False)
+        require_admission_fence(current, True)
+        if current['maintenance']['activeOperations'] == 0 and current['metrics']['session_actor_queue_depth'] == 0:
+            break
+        if time.monotonic() >= deadline:
+            raise TimeoutError('Current calls did not finish; original core remains running')
+        time.sleep(.1)
+    # The quiet sample is only scheduling: the fence and post-fence guards still
+    # decide whether a concurrent caller permits the actual transition.
+    return maintenance_rpc(h, 'system.maintenance.prepare', {
+        **lease_owner(h), 'drainTimeoutMs': 5000, 'leaseMs': 30000})
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
@@ -550,8 +569,7 @@ def main():
     lease = None
     try:
         if 'maintenance' in h:
-            lease = maintenance_rpc(h, 'system.maintenance.prepare', {
-                **lease_owner(h), 'drainTimeoutMs': 5000, 'leaseMs': 30000})
+            lease = prepare_maintenance(h)
             assert lease['phase'] == 'ready', 'Core has not drained'
             save(receipt/'maintenance.json', lease)
         if lease is None:

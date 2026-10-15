@@ -25,6 +25,27 @@ spec.loader.exec_module(handover)
 
 
 class HandoverTests(unittest.TestCase):
+    def test_long_read_finishes_before_fenced_drain_and_busy_or_changed_core_is_preserved(self):
+        idle = {'requestOk': True, 'process': {'pid': 11, 'startedAt': 'original'},
+                'maintenance': {'phase': 'running', 'activeOperations': 0},
+                'metrics': {'session_actor_queue_depth': 0}}
+        busy = copy.deepcopy(idle)
+        busy['maintenance']['activeOperations'] = 1
+        with patch.object(handover, 'guard'), patch.object(handover.time, 'sleep'), \
+                patch.object(handover, 'health', side_effect=[busy, idle]), \
+                patch.object(handover, 'maintenance_rpc', return_value={'phase': 'ready'}) as prepare:
+            self.assertEqual(handover.prepare_maintenance(idle), {'phase': 'ready'})
+            prepare.assert_called_once()
+        with patch.object(handover, 'guard'), patch.object(handover, 'health', return_value=busy), \
+                patch.object(handover, 'maintenance_rpc') as prepare:
+            with self.assertRaises(TimeoutError): handover.prepare_maintenance(idle, quiet_timeout=0)
+            prepare.assert_not_called()
+        with patch.object(handover, 'guard', side_effect=AssertionError('identity changed')), \
+                patch.object(handover, 'health', return_value=idle), \
+                patch.object(handover, 'maintenance_rpc') as prepare:
+            with self.assertRaises(AssertionError): handover.prepare_maintenance(idle)
+            prepare.assert_not_called()
+
     def test_local_candidate_requires_bound_complete_evidence_and_live_fence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
