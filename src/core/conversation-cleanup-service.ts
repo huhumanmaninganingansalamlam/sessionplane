@@ -332,6 +332,10 @@ export class ConversationCleanupService {
             : isUnboundConversation(current) ? registry.pageForObservation(binding.pageKey, current.bindingEpoch) : null;
           if (page === null) return;
           await this.#requireIdlePage(page);
+          const final = registry.refreshPage(binding.pageKey);
+          if (final.bindingEpoch !== current.bindingEpoch || final.state !== current.state || final.url !== current.url) {
+            throw new SessionPlaneDomainError('session.page-identity-unverified', 'Page changed during cleanup inspection; preserve it');
+          }
           await page.close();
           result.closedPages += 1;
         });
@@ -341,8 +345,16 @@ export class ConversationCleanupService {
   }
 
   async #requireIdlePage(page: import('playwright-core').Page) {
-    const unsafe = await page.locator('textarea, [contenteditable="true"]:not(article *, [data-message-author-role] *, [data-chatgpt-search-message-ids] *), input[type="file"], button').evaluateAll(elements =>
+    const unsafe = await page.locator('textarea, [contenteditable="true"]:not(article *, [data-message-author-role] *, [data-chatgpt-search-message-ids] *), input[type="file"], button, [data-testid*="file-pill"], [data-testid*="attachment"]').evaluateAll(elements =>
       elements.some(element => {
+        const testId = element.getAttribute('data-testid') ?? '';
+        if (/file-pill|attachment/.test(testId)) {
+          const form = element.closest('form');
+          return form?.querySelector('textarea, [contenteditable="true"]') != null &&
+            element.closest('article, [data-message-author-role], [data-chatgpt-search-message-ids], button, [role="button"]') === null &&
+            (element.textContent ?? '').trim().length > 0 &&
+            element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden';
+        }
         if (element instanceof HTMLInputElement && element.type === 'file') return (element.files?.length ?? 0) > 0;
         if (element instanceof HTMLButtonElement) return element.getClientRects().length > 0 && (
           /^(?:stop generating|stop streaming|stop response|응답 중지|생성 중지|중지)$/i.test(element.getAttribute('aria-label') ?? '') ||

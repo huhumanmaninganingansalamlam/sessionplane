@@ -257,7 +257,7 @@ test('provider deletion deferral and uncertain acknowledgement independently clo
   try {
     const team = core.teamDirectory.createTeam({ clientId: 'deferred' });
     const unrelated = await core.browserOwner!.createPage();
-    for (const outcome of ['deferred', 'rejected', 'unknown', 'draft', 'generating', 'navigated'] as const) {
+    for (const outcome of ['deferred', 'rejected', 'unknown', 'draft', 'attachment-draft', 'generating', 'navigated', 'late-navigation'] as const) {
       mode = outcome === 'rejected' || outcome === 'unknown' ? outcome : 'deferred';
       core.teamDirectory.createRole({ teamId: team.teamId, roleKey: outcome, roleType: 'expert' });
       const session = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: outcome, provider: 'chatgpt' });
@@ -265,10 +265,30 @@ test('provider deletion deferral and uncertain acknowledgement independently clo
       const complete = await rpc<SessionSnapshot>('session.wait', { sessionId: session.sessionId, generation: 1, waitMs: 3000 });
       assert.equal(complete.terminal, true);
       const { page, binding } = await core.browserOwner!.createPage();
-      await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main><textarea></textarea></main>' }));
+      await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main><article><div data-testid="file-pill">old-response.txt</div></article><form><textarea></textarea><button data-testid="attachment-button">Attach</button></form></main>' }));
       await page.goto('https://chatgpt.com/c/' + complete.conversationId);
       core.pageRegistry.bindPage(binding.pageKey, { sessionId: session.sessionId, generation: 1, conversationId: complete.conversationId! });
+      let prepared = false;
+      const locator = page.locator.bind(page);
+      const locatorMock = t.mock.method(page, 'locator', (...args: Parameters<typeof page.locator>) => {
+        const found = locator(...args);
+        if (outcome === 'late-navigation') {
+          const evaluateAll = found.evaluateAll.bind(found);
+          t.mock.method(found, 'evaluateAll', async (...parameters: Parameters<typeof found.evaluateAll>) => {
+            const value = await evaluateAll(...parameters);
+            if (prepared) {
+              prepared = false;
+              await page.goto('https://chatgpt.com/c/new-human-conversation');
+              await page.locator('textarea').fill('New conversation draft');
+            }
+            return value;
+          });
+        }
+        return found;
+      });
       duringPrepare = async () => {
+        prepared = true;
+        if (outcome === 'attachment-draft') await page.setContent('<form><textarea></textarea><input type="file"><div data-testid="file-pill">unsent-notes.txt</div></form>');
         if (outcome === 'draft') await page.locator('textarea').fill('Preserve human draft');
         if (outcome === 'generating') await page.evaluate(() => {
           const stop = document.createElement('button'); stop.setAttribute('aria-label', 'Stop generating');
@@ -288,7 +308,7 @@ test('provider deletion deferral and uncertain acknowledgement independently clo
           assert.equal(details.retryAfterMs, 9000);
           assert.equal(details.deletionAttempted, false);
           assert.equal(details.deleted, false);
-          assert.equal(details.pageCleanup.closedPages, outcome === 'deferred' ? 1 : 0);
+          assert.equal(details.pageCleanup.closedPages, outcome === 'deferred' ? 1 : 0, outcome);
           if (outcome !== 'deferred') assert.equal(details.pageCleanup.pageErrors.length, 1);
           return true;
         });
@@ -305,6 +325,9 @@ test('provider deletion deferral and uncertain acknowledgement independently clo
       assert.equal(page.isClosed(), ['deferred', 'rejected', 'unknown'].includes(outcome));
       assert.equal(core.pageRegistry.getBinding(binding.pageKey).sessionId, session.sessionId);
       if (outcome === 'draft') assert.equal(await page.locator('textarea').inputValue(), 'Preserve human draft');
+      if (outcome === 'attachment-draft') assert.equal(await page.getByTestId('file-pill').textContent(), 'unsent-notes.txt');
+      if (outcome === 'late-navigation') assert.equal(await page.locator('textarea').inputValue(), 'New conversation draft');
+      locatorMock.mock.restore();
       const after = await rpc<SessionSnapshot>('session.get', { sessionId: session.sessionId });
       assert.equal(after.answerText, complete.answerText);
       assert.equal(after.generation, complete.generation);
