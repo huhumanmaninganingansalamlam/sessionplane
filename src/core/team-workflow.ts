@@ -465,7 +465,7 @@ export class TeamWorkflow {
         ...(JSON.parse(refresh.resultJson).rendererCrash ? { rendererCrash: JSON.parse(refresh.resultJson).rendererCrash } : {}),
         dispatch: refresh.status === 'complete' ? 'reload-returned' : 'attempted-outcome-unknown',
         conversationRecovered: null } } : {}),
-      ...(loadRecovery ? { conversationLoadRecovery: { ...loadRecovery, nextAllowedAt: this.#loadRecovery.effectiveNextAllowedAt(),
+      ...(loadRecovery ? { conversationLoadRecovery: { ...loadRecovery, nextAllowedAt: this.#loadRecovery.effectiveNextAllowedAt(loadRecovery.conversationId),
         pacing: this.#loadRecovery.pacing() } } : {}), ...(optedIn ? { thinkingFailureRecovery: {
       enabled: paused === null && !complete && !stopped, sender: paused || complete || stopped ? 'coordinator' : 'core',
       ...(paused ? JSON.parse(paused.resultJson) : { state: complete ? 'complete' : stopped ? 'stopped' : 'observing' }),
