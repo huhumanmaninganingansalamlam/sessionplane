@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -53,14 +53,12 @@ test('global bin pins one canonical runtime state outside tests', () => {
   );
 });
 
-test('the public sessplane entrypoint installs the stable state default', () => {
-  const entrypoint = 'bin/sessplane.mjs';
-  const source = readFileSync(path.resolve(entrypoint), 'utf8');
-  assert.match(source, /ensureSessionPlaneStateDir\(\)/, entrypoint);
-});
-
-test('direct core execution pins the same canonical runtime state', () => {
-  const source = readFileSync(path.resolve('src/main.ts'), 'utf8');
-  assert.match(source, /path\.join\(homedir\(\), '\.local', 'state', 'sessionplane'\)/);
-  assert.match(source, /serveForever\(config\)/);
+test('the public entrypoint rejects a different state directory before starting a core', () => {
+  const result = spawnSync(process.execPath, ['bin/sessplane.mjs', 'serve', '--state-dir', '/sessionplane-test-other-state'], {
+    encoding: 'utf8',
+    timeout: 5_000,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /one canonical runtime state/);
 });
