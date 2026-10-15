@@ -288,6 +288,38 @@ test('backend acknowledgement preserves uncertainty and Retry-After without repe
   assert.equal(calls, 4);
 });
 
+test('ACK reads give the waiting conversation its turn without retaining a stopped caller', async () => {
+  let now = 0;
+  const reads: string[] = [];
+  const recovery = new ChatGptBackendRecovery({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000, now: () => new Date(now) });
+  const client: BackendJsonClient = { async get(url) {
+    if (url.endsWith('/api/auth/session')) return { status: 200, headers: {}, body: { accessToken: 'memory-only-token' } };
+    reads.push(url.split('/').at(-1)!);
+    return { status: 200, headers: {}, body: { id: reads.at(-1), mapping: {} } };
+  } };
+  const evidence: ProviderAcknowledgementRecoveryEvidence[] = [];
+  const inspect = (id: string) => recovery.recoverAcknowledgement(id, 'Question', client, 'https://chatgpt.com',
+    undefined, value => evidence.push(value));
+  await inspect('no-match');
+  now = 1000; await inspect('waiting');
+  now = 6000; await inspect('no-match');
+  assert.equal(evidence.at(-1)?.reason, 'backend-acknowledgement-probe-queued');
+  assert.deepEqual(reads, ['no-match'], 'the repeat reader cannot consume the waiting request slot');
+  await inspect('waiting');
+  assert.deepEqual(reads, ['no-match', 'waiting']);
+  now = 7000; await inspect('stopped');
+  now = 18001; await inspect('no-match');
+  assert.deepEqual(reads, ['no-match', 'waiting', 'no-match'], 'a caller that stopped renewing cannot block recovery');
+  const restarted = new ChatGptBackendRecovery({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000,
+    now: () => new Date(now), acknowledgementRetryAtMs: 20000 });
+  await restarted.recoverAcknowledgement('waiting', 'Question', client, 'https://chatgpt.com');
+  assert.equal(reads.length, 3, 'restarting a controller must not bypass recorded Retry-After');
+  now = 20001;
+  await restarted.recoverAcknowledgement('waiting', 'Question', client, 'https://chatgpt.com');
+  assert.equal(reads.at(-1), 'waiting');
+  assert.equal(reads.length, 4);
+});
+
 test('canonical ACK evidence separates no match and access rejection from a recovered original answer', async () => {
   let now = 0;
   let status = 200;

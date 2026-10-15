@@ -101,6 +101,15 @@ export class EventRepository {
     return row ? parsePayload(row.payloadJson) : null;
   }
 
+  acknowledgementRetryAtMs(): number {
+    const row = this.#database.prepare(`SELECT MAX(json_extract(payload_json, '$.nextCheckAt')) AS retryAt
+      FROM events WHERE event_type='generation.acknowledgement-recovery'
+        AND json_extract(payload_json, '$.source')='backend'
+        AND json_extract(payload_json, '$.httpStatus')=429`).get() as { retryAt: string | null };
+    const timestamp = row.retryAt === null ? 0 : Date.parse(row.retryAt);
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  }
+
   latestSequencesForSessions(sessionIds: readonly string[]): ReadonlyMap<string, number> {
     const sequences = new Map<string, number>();
     const batchSize = 900;

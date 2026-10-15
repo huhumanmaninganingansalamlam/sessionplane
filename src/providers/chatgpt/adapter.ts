@@ -42,6 +42,7 @@ import { ChatGptSubmission, recoverChatGptAcknowledgement } from './submission.t
 
 export interface ChatGptAdapterOptions {
   readonly onBackendRateLimit?: ChatGptBackendRecoveryOptions['onRateLimit'];
+  readonly acknowledgementRetryAtMs?: number;
   readonly pageMutex?: PageMutationMutex;
   readonly canRestoreLatestPosition?: (request: ProviderObservationRequest) => boolean;
   readonly browserOwner: BrowserOwner;
@@ -71,6 +72,7 @@ export class ChatGptAdapter implements ProviderAdapter {
     this.#acknowledgementTimeoutMs = options.acknowledgementTimeoutMs;
     this.#backendRecovery = new ChatGptBackendRecovery({
       ...(options.onBackendRateLimit === undefined ? {} : { onRateLimit: options.onBackendRateLimit }),
+      ...(options.acknowledgementRetryAtMs === undefined ? {} : { acknowledgementRetryAtMs: options.acknowledgementRetryAtMs }),
       requestTimeoutMs: options.backendRequestTimeoutMs ?? 15_000,
       tokenCacheTtlMs: options.tokenCacheTtlMs ?? 60_000,
     });

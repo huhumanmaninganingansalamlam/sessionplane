@@ -57,6 +57,7 @@ test('UNKNOWN reads expose durable canonical probe evidence without resending ac
     assert.equal(deferred.acknowledgementRecovery.source, 'backend');
     assert.equal(deferred.acknowledgementRecovery.currentIdentityMatches, true);
     assert.equal(deferred.acknowledgementRecovery.automaticResubmit, false);
+    assert.equal(new EventRepository(service.database.raw).acknowledgementRetryAtMs(), Date.parse(probe.nextCheckAt));
     const pacing = { ...probe, source: 'pacing' as const, reason: 'backend-acknowledgement-probe-paced', httpStatus: null };
     fake.recoverAcknowledgement = async input => { input.onRecoveryObservation?.(pacing); return null; };
     await read();

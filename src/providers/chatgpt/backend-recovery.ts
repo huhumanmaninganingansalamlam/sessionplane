@@ -38,6 +38,7 @@ export interface BackendJsonClient {
 export interface ChatGptBackendRecoveryOptions {
   readonly requestTimeoutMs: number;
   readonly tokenCacheTtlMs: number;
+  readonly acknowledgementRetryAtMs?: number;
   readonly now?: () => Date;
   readonly onRateLimit?: (request: ProviderRecoveryRequest, evidence: BackendRateLimitEvidence) => void;
 }
@@ -54,12 +55,14 @@ export class ChatGptBackendRecovery {
   readonly #onRateLimit: ChatGptBackendRecoveryOptions['onRateLimit'];
   #token: CachedToken | null = null;
   #acknowledgementRetryAt = 0;
+  readonly #acknowledgementWaiting = new Map<string, number>();
 
   constructor(options: ChatGptBackendRecoveryOptions) {
     this.#requestTimeoutMs = options.requestTimeoutMs;
     this.#tokenCacheTtlMs = options.tokenCacheTtlMs;
     this.#now = options.now ?? (() => new Date());
     this.#onRateLimit = options.onRateLimit;
+    this.#acknowledgementRetryAt = options.acknowledgementRetryAtMs ?? 0;
   }
 
   async recover(
@@ -91,12 +94,23 @@ export class ChatGptBackendRecovery {
     attempts?: readonly ProviderSubmissionAttempt[],
     observe?: (evidence: ProviderAcknowledgementRecoveryEvidence) => void,
   ): Promise<ProviderSubmissionAcknowledgement | null> {
-    if (this.#now().getTime() < this.#acknowledgementRetryAt) {
-      observe?.({ kind: 'deferred', source: 'pacing', reason: 'backend-acknowledgement-probe-paced',
-        observedAt: this.#now().toISOString(), nextCheckAt: new Date(this.#acknowledgementRetryAt).toISOString(),
+    const now = this.#now().getTime();
+    // A stopped caller must not retain the head of the queue. Live recovery
+    // callers renew while waiting; the grace covers a request timeout and retry.
+    const callerGraceMs = 2 * Math.max(5_000, this.#requestTimeoutMs);
+    for (const [id, seenAt] of this.#acknowledgementWaiting) {
+      if (now - seenAt > callerGraceMs) this.#acknowledgementWaiting.delete(id);
+    }
+    this.#acknowledgementWaiting.set(conversationId, now);
+    const queued = this.#acknowledgementWaiting.keys().next().value !== conversationId;
+    if (now < this.#acknowledgementRetryAt || queued) {
+      observe?.({ kind: 'deferred', source: 'pacing', reason: queued && now >= this.#acknowledgementRetryAt
+          ? 'backend-acknowledgement-probe-queued' : 'backend-acknowledgement-probe-paced',
+        observedAt: this.#now().toISOString(), nextCheckAt: new Date(Math.max(now + 5_000, this.#acknowledgementRetryAt)).toISOString(),
         httpStatus: null, endpointCategory: null });
       return null;
     }
+    this.#acknowledgementWaiting.delete(conversationId);
     // The shared account probe is bounded even when callers repeatedly inspect.
     this.#acknowledgementRetryAt = this.#now().getTime() + 5_000;
     const result = await this.#conversation(conversationId, client, origin);
