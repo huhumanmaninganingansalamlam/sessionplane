@@ -449,7 +449,16 @@ export class TeamWorkflow {
     const loadRecovery = typeof result.conversationId === 'string' ? this.#loadRecovery.get(result.conversationId) : null;
     const refresh = this.services.receipts.latestPageRefresh(request.clientId, request.sessionId, request.generation);
     const verification = this.#submissionVerification(request, result);
+    const acknowledgementEvents = new EventRepository(this.services.database.raw);
+    const acknowledgementRecovery = result.submissionState === 'submission_unknown'
+      ? acknowledgementEvents.latestAcknowledgementRecovery(request.sessionId, request.generation) : null;
     return { ...result, ...verification,
+      ...(acknowledgementRecovery ? { acknowledgementRecovery: { ...acknowledgementRecovery,
+        automaticResubmit: false,
+        currentIdentityMatches: acknowledgementRecovery.requestRef === request.outboxId &&
+          acknowledgementRecovery.conversationId === result.conversationId && acknowledgementRecovery.pageKey === result.pageKey,
+        ...(acknowledgementRecovery.source === 'pacing' ? {
+          lastProbe: acknowledgementEvents.latestAcknowledgementRecovery(request.sessionId, request.generation, true) } : {}) } } : {}),
       ...(current.generation === request.generation ? { pageHealth: this.services.ui.pageHealth(current) } : {}),
       ...(refresh ? { pageRefresh: { receiptId: refresh.requestId, status: refresh.status,
         createdAt: refresh.createdAt, updatedAt: refresh.updatedAt,

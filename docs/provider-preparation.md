@@ -172,6 +172,13 @@ can bind a single exact prompt match in the same verified conversation and curre
 branch. Duplicate matches, missing identity, wrong branches and failed reads preserve
 submission uncertainty; Retry-After 429 is deferred. Explicit candidate selections
 still require their original DOM evidence hash. No submission is repeated.
+UNKNOWN reads also return `acknowledgementRecovery`: the observed time, HTTP status,
+endpoint and outcome of the canonical check. `source: backend` records an actual
+read; `source: pacing` records no HTTP request and retains the last actual probe
+separately as `lastProbe`. `nextCheckAt` preserves the shared Retry-After boundary.
+A successful read with no exact prompt match is distinct from deferred or failed
+access, but does not prove that the provider never accepted a submission. All
+these outcomes preserve UNKNOWN, the original draft and the no-resend rule.
 Prompt text matching is a fallback, not a requirement for an ID-confirmed
 submission. Provider formatting differences do not discard that identity.
 

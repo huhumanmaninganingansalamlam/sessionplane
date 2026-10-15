@@ -14,6 +14,7 @@ import {
   type ProviderSubmission,
   type ProviderSubmissionAcknowledgement,
   type ProviderSubmissionAttempt,
+  type ProviderAcknowledgementRecoveryEvidence,
   type PreparationChoices,
   type PreparationPurpose,
   type PreparationTarget,
@@ -368,13 +369,26 @@ export class SubmissionService {
           .filter(e => e.requestRef === currentOutbox.outboxId && e.conversationId === currentConversationId &&
             e.promptHash === createHash('sha256').update(currentPrompt).digest('hex'))
           .map(e => e.attempt as ProviderSubmissionAttempt);
+        let recoveryEvidence: ProviderAcknowledgementRecoveryEvidence | undefined;
         const acknowledgement = await adapter.recoverAcknowledgement?.({
           session: current,
           generation: current.generation,
           prompt: currentPrompt,
           attempts,
+          onRecoveryObservation: evidence => { recoveryEvidence = evidence; },
           ...(selection === undefined ? {} : { selection }),
         });
+        if (recoveryEvidence !== undefined) {
+          const previous = this.#events.latestAcknowledgementRecovery(current.sessionId, current.generation);
+          // Repeated reads during one shared cooldown are not new provider probes.
+          if (recoveryEvidence.source !== 'pacing' || previous?.source !== 'pacing' ||
+              previous.nextCheckAt !== recoveryEvidence.nextCheckAt) {
+            this.#events.append({ teamId: current.teamId, roleId: current.roleId, sessionId: current.sessionId,
+              generation: current.generation, eventType: 'generation.acknowledgement-recovery',
+              createdAt: this.#now().toISOString(), payload: { ...recoveryEvidence,
+                requestRef: currentOutbox.outboxId, conversationId: currentConversationId, pageKey: current.pageKey } });
+          }
+        }
         if (
           acknowledgement === undefined ||
           acknowledgement === null ||

@@ -72,6 +72,19 @@ export interface ProviderAcknowledgementRecoveryRequest {
   readonly prompt: string;
   readonly selection?: { readonly messageId: string; readonly evidenceHash: string };
   readonly attempts?: readonly ProviderSubmissionAttempt[];
+  readonly onRecoveryObservation?: (evidence: ProviderAcknowledgementRecoveryEvidence) => void;
+}
+
+/** Read evidence only; absence of a match never authorizes another submission. */
+export interface ProviderAcknowledgementRecoveryEvidence {
+  readonly kind: 'deferred' | 'unavailable' | 'unverified';
+  readonly source: 'backend' | 'pacing';
+  readonly reason: string;
+  readonly observedAt: string;
+  readonly nextCheckAt: string | null;
+  readonly httpStatus: number | null;
+  readonly endpointCategory: 'auth-session' | 'conversation-detail' | null;
+  readonly promptMatchCount?: number;
 }
 
 export interface ProviderSubmission {
