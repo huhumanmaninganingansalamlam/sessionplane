@@ -162,6 +162,41 @@ test('repeating observers cannot overtake queued exact requests, and stopped obs
   }
 });
 
+test('valid Retry-After replaces accumulated local backoff while real longer holds survive restart', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-probe-server-delay-'));
+  const database = SessionPlaneDatabase.open(path.join(root, 'state.sqlite'));
+  let nowMs = 0;
+  const scope = 'chatgpt:conversation-detail:original';
+  const options = { database, successIntervalMs: 30_000, min429BackoffMs: 60_000,
+    max429BackoffMs: 900_000, jitterRatio: 0.1, random: () => 1, now: () => new Date(nowMs) };
+  const coordinator = new ProbeCoordinator(options);
+  const limited = (retryAfterMs: number | null): ProviderRecoveryResult => ({ ...pending(),
+    kind: 'deferred', observationTransport: 'deferred', reason: 'backend-http-429', retryAfterMs });
+  let reads = 0;
+  try {
+    for (let n = 0; n < 6; n++) {
+      const fallback = await coordinator.run(scope, async () => { reads++; return limited(null); });
+      nowMs = Date.parse(fallback.nextCheckAt!);
+    }
+    const result = await coordinator.run(scope, async () => { reads++; return limited(52_000); });
+    assert.equal(result.retryAfterMs, 52_000, 'a valid server delay must not become a fifteen-minute local wait');
+    const serverDeadline = nowMs + 52_000;
+    assert.equal(Date.parse(result.nextCheckAt!), serverDeadline);
+    const restarted = new ProbeCoordinator(options);
+    nowMs = serverDeadline - 1;
+    const paced = await restarted.run(scope, async () => { reads++; return pending(); });
+    assert.equal(paced.reason, 'probe-paced'); assert.equal(reads, 7);
+    coordinator.defer('chatgpt:default', new Date(serverDeadline + 120_000).toISOString());
+    nowMs = serverDeadline;
+    const accountHeld = await restarted.run(scope, async () => { reads++; return pending(); });
+    assert.equal(Date.parse(accountHeld.nextCheckAt!), serverDeadline + 120_000);
+    assert.equal(reads, 7, 'a longer actual account hold still prevents the read');
+    nowMs = serverDeadline + 120_000;
+    const recovered = await restarted.run(scope, async () => { reads++; return pending(); });
+    assert.equal(recovered.kind, 'pending'); assert.equal(reads, 8);
+  } finally { database.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('negative jitter never schedules a probe before provider Retry-After', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-probe-retry-after-'));
   const database = SessionPlaneDatabase.open(path.join(root, 'sessionplane.sqlite'));

@@ -128,11 +128,12 @@ export class ProbeCoordinator {
     if (result.kind === 'deferred' && result.reason === 'backend-http-429') {
       this.#metrics?.increment('backend_probe_429_total');
       this.#metrics?.increment('backend_probe_deferred_total');
-      const rawBackoff = Math.max(
-        result.retryAfterMs ?? 0,
-        Math.min(this.#max429BackoffMs, this.#min429BackoffMs * 2 ** backoffLevel),
-      );
-      const backoffMs = Math.max(result.retryAfterMs ?? 0, this.#jitter(rawBackoff));
+      const serverDelay = result.retryAfterMs;
+      const backoffMs = serverDelay !== null && Number.isFinite(serverDelay) && serverDelay >= 0
+        ? Math.max(serverDelay, this.#successIntervalMs, minimumIntervalMs)
+        : Math.max(minimumIntervalMs, this.#jitter(Math.min(
+          this.#max429BackoffMs, this.#min429BackoffMs * 2 ** backoffLevel,
+        )));
       const nextCheckAt = new Date(now.getTime() + backoffMs).toISOString();
       this.#save(scope, nextCheckAt, nextCheckAt, backoffLevel + 1, consecutiveFailures + 1, now);
       return { ...result, retryAfterMs: backoffMs, nextCheckAt };
