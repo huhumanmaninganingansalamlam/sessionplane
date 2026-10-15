@@ -30,6 +30,9 @@ but only when its target and conversation still match the freshly verified page.
 The original failure remains in generation events. Read fresh UI evidence and
 choose configuration, composer and submit explicitly; recovery never resends.
 Submitted or ambiguous generations cannot reopen through this path.
+Before configuration or submission, the core enables background rendering only
+on the exact owned interaction page. This restores animation-frame based controls
+without activating its tab or initializing unrelated sibling pages.
 An explicitly collapsed chooser prevents menu reuse; a still-visible exiting
 popup is allowed to unmount before reopening, even if its trigger has already
 dropped aria-controls. State-wait failures identify the configuration stage;
