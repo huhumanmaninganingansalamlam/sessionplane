@@ -436,7 +436,7 @@ export class RecoveryService {
     }
     const conversationId = snapshot.conversationId;
     if (conversationId === null) {
-      return await this.#reconcilePreparation(snapshot);
+      return await this.#reconcileRetainedTarget(snapshot);
     }
     const matches = this.#pageRegistry
       .findByConversation(conversationId)
@@ -592,13 +592,15 @@ export class RecoveryService {
     }
   }
 
-  async #reconcilePreparation(snapshot: SessionSnapshot) {
-    if (!isPendingPreparation(snapshot) || snapshot.pageKey === null) return result(snapshot);
+  async #reconcileRetainedTarget(snapshot: SessionSnapshot) {
+    if ((!isPendingPreparation(snapshot) && !needsAcknowledgementRecovery(snapshot)) ||
+        snapshot.pageKey === null) return result(snapshot);
     const stored = this.#pageBindings.get(snapshot.pageKey);
     if (
       stored?.targetId == null ||
       stored.sessionId !== snapshot.sessionId ||
-      stored.generation !== snapshot.generation
+      stored.generation !== snapshot.generation ||
+      stored.conversationId !== snapshot.conversationId
     ) return result(snapshot);
 
     const match = this.#pageRegistry.listBindings({ includeClosed: false }).find(
@@ -616,12 +618,13 @@ export class RecoveryService {
       sessionId: snapshot.sessionId,
       generation: snapshot.generation,
     });
+    const reboundReason = isPendingPreparation(snapshot) ? 'restart-preparation-rebound' : 'restart-page-rebound';
     const updated = await this.#recordPageState(snapshot, {
       pageKey: match.pageKey,
       observationTransport: 'fresh',
-      reason: 'restart-preparation-rebound',
+      reason: reboundReason,
       errorCode: null,
-    }, 'generation.restart-preparation-rebound');
+    }, 'generation.' + reboundReason);
     return result(updated, { rebound: true });
   }
 
