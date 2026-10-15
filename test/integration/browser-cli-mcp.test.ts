@@ -517,7 +517,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
   }
 });
 
-test('MCP inspects an ambiguous caller-directed submission without resend and recovers a later exact acknowledgement', async (t) => {
+test('MCP explicitly recovers a retained UNKNOWN conversation without resend and preserves drafts', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-ambiguous-inspection-'));
   const config = { ...resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 100 };
   const service = await startCore({ config, browserHeadless: true, logger: silentLogger() });
@@ -527,7 +527,7 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
       window.submitCount = 0;
       document.querySelector('form').onsubmit = (event) => {
         window.submitCount += 1;
-        event.preventDefault(); history.pushState({}, '', '/c/conversation-123456');
+        event.preventDefault();
       };
     </script>`, t);
   try {
@@ -577,6 +577,11 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
         '<div data-message-author-role="assistant" data-message-id="delayed-answer" data-message-status="completed">Recovered final</div>' +
         '<aside role="alert">Stream interrupted<button>Retry</button></aside>';
     });
+    assert.equal(sent.conversationId, null);
+    await page.evaluate(() => history.pushState({}, '', '/c/conversation-123456'));
+    await service.recoveryService.restore();
+    assert.equal(service.teamDirectory.getSession(session.sessionId).conversationId, null,
+      'restart reconciliation must not promote an unverified history URL');
     const optimistic = await inspect();
     assert.equal((optimistic.structuredContent.request as { submittedUserMessageId: string | null }).submittedUserMessageId, null);
     // Canonical provider acceptance is required for automatic UNKNOWN recovery.
@@ -588,7 +593,19 @@ test('MCP inspects an ambiguous caller-directed submission without resend and re
         },
       },
     }));
-    await page.locator('textarea').evaluate(element => { element.value = ''; });
+    {
+      const candidate = (optimistic.structuredContent.request as { evidence: { submissionCandidates: Array<{ messageId: string; evidenceHash: string }> } }).evidence.submissionCandidates[0]!;
+      const acknowledge = (requestId: string) => invokeMcpTool({ name: 'sessionplane_decide', arguments: {
+        ...identity, requestId, decision: 'acknowledge', messageId: candidate.messageId, evidenceHash: candidate.evidenceHash },
+        socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+      assert.equal((await acknowledge('draft-preserved')).isError, true);
+      assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft');
+      assert.equal(service.teamDirectory.getSession(session.sessionId).conversationId, null);
+      await page.locator('textarea').evaluate(element => { element.value = ''; });
+      assert.equal(((await inspect()).structuredContent.request as { conversationId: string | null }).conversationId, null, 'read does not accept history navigation');
+      const ack = await acknowledge('explicit-history-ack');
+      assert.equal(ack.isError, false, JSON.stringify(ack.structuredContent));
+    }
     let recovered = await inspect();
     const recoveryDeadline = Date.now() + 7_000;
     while ((recovered.structuredContent.request as { submittedUserMessageId: string | null }).submittedUserMessageId === null && Date.now() < recoveryDeadline) {

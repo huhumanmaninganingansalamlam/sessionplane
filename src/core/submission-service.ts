@@ -325,7 +325,7 @@ export class SubmissionService {
       snapshot.submissionState !== 'submission_unknown' ||
       !snapshot.promptSubmitted ||
       snapshot.pageKey === null ||
-      snapshot.conversationId === null ||
+      (snapshot.conversationId === null && selection === undefined) ||
       !this.#adapters.has(snapshot.provider)
     ) {
       return snapshot;
@@ -348,7 +348,7 @@ export class SubmissionService {
         current.submissionState !== 'submission_unknown' ||
         !current.promptSubmitted ||
         current.pageKey === null ||
-        currentConversationId === null
+        (currentConversationId === null && selection === undefined)
       ) {
         return current;
       }
@@ -382,7 +382,7 @@ export class SubmissionService {
           (selection !== undefined && acknowledgement.submittedUserMessageId !== selection.messageId) ||
           (acknowledgement.conversationId !== currentConversationId &&
             !(current.provider === 'chatgpt' &&
-              currentConversationId.startsWith('WEB:') &&
+              (currentConversationId === null && selection !== undefined || currentConversationId?.startsWith('WEB:')) &&
               !acknowledgement.conversationId.startsWith('WEB:')))
         ) {
           return current;

@@ -10,7 +10,63 @@ import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry, PageRegistryError } from '../../src/browser/page-registry.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ProviderSubmissionError, type ProviderSubmissionAttempt } from '../../src/providers/provider-adapter.ts';
+import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { ChatGptSubmission, recoverChatGptAcknowledgement, inspectChatGptSubmissionCandidates } from '../../src/providers/chatgpt/submission.ts';
+
+test('UNKNOWN history acknowledgement requires retained ownership, empty draft and exact canonical prompt', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-history-ack-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body:
+      '<main><textarea id="prompt-textarea"></textarea><div data-message-author-role="user" data-message-id="original-user">Exact original</div></main>' }));
+    await page.goto('https://chatgpt.com/');
+    registry.reservePage(binding.pageKey, { sessionId: 'original', generation: 1 });
+    await page.evaluate(() => history.pushState({}, '', '/c/recovered123456'));
+    const session = { ...sessionSnapshot({ sessionId: 'original', pageKey: binding.pageKey }),
+      submissionState: 'submission_unknown' as const, promptSubmitted: true };
+    let serverPrompt = 'Unrelated';
+    t.mock.method(page.context().request, 'get', async (url: string) => ({
+      status: () => 200, headers: () => ({}), dispose: async () => {},
+      json: async () => url.endsWith('/api/auth/session') ? { accessToken: 'isolated-fixture-token' } : {
+        id: 'recovered123456', current_node: 'original-user', mapping: {
+          'original-user': { parent: null, message: { id: 'original-user', author: { role: 'user' },
+            content: { content_type: 'text', parts: [serverPrompt] } } },
+        },
+      },
+    }));
+    const selection = (await inspectChatGptSubmissionCandidates(page, 'recovered123456'))[0]!;
+    assert.ok(selection);
+    const recover = (selected = true) => new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry,
+      loginUrl: 'https://chatgpt.com/', acknowledgementTimeoutMs: 100 }).recoverAcknowledgement({
+        session, generation: 1, prompt: 'Exact original', ...(selected ? { selection } : {}) });
+    assert.equal(await recover(false), null, 'navigation alone never confirms submission');
+    assert.equal(await recover(), null, 'selected DOM echo cannot override canonical mismatch');
+    assert.equal(registry.getBinding(binding.pageKey).state, 'identity_lost');
+    serverPrompt = 'Exact original';
+    await page.locator('textarea').fill('Human draft');
+    assert.equal(await recover(), null);
+    assert.equal(await page.locator('textarea').inputValue(), 'Human draft');
+    await page.locator('textarea').fill('');
+    assert.throws(() => registry.unknownConversationCandidate(binding.pageKey, { sessionId: 'foreign', generation: 1 }));
+    assert.throws(() => registry.unknownConversationCandidate(binding.pageKey, { sessionId: 'original', generation: 2 }));
+    // Reattachment restores only the exact persisted target reservation, never its ACK.
+    const targetId = registry.getBinding(binding.pageKey).targetId!;
+    const restarted = new PageRegistry();
+    const retained = restarted.identifyPage(page, targetId);
+    assert.throws(() => restarted.reserveUnknownConversationCandidate(retained.pageKey,
+      { sessionId: 'original', generation: 1, targetId: 'wrong-target' }));
+    restarted.reserveUnknownConversationCandidate(retained.pageKey, { sessionId: 'original', generation: 1, targetId });
+    assert.equal(restarted.unknownConversationCandidate(retained.pageKey, session).binding.state, 'identity_lost');
+    assert.ok(await recoverChatGptAcknowledgement(page, 'Exact original', 'recovered123456', selection), 'stable selected DOM evidence');
+    const ack = await recover();
+    assert.equal(ack?.submittedUserMessageId, 'original-user');
+    assert.equal(ack?.conversationId, 'recovered123456');
+    assert.equal(registry.requireSessionPage(binding.pageKey, { ...session, conversationId: 'recovered123456' }), page);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('an accepted dispatch with only the older duplicate mounted preserves attempt identity without ACK', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-dispatch-proof-'));

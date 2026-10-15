@@ -141,7 +141,21 @@ export class SessionUiService {
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           const evidence = await Promise.race([
-            (async () => ({
+            (async () => {
+              if (session.submissionState === 'submission_unknown' && session.conversationId === null && session.pageKey !== null) {
+                const binding = this.#registry.refreshPage(session.pageKey);
+                if (binding.conversationId !== null) {
+                  const candidate = this.#registry.unknownConversationCandidate(session.pageKey, session);
+                  if (new URL(candidate.page.url()).origin !== this.#chatgptOrigin) throw new SessionPlaneDomainError(
+                    'session.page-identity-unverified', 'Recovery candidate left the ChatGPT origin');
+                  const submissionCandidates = await inspectChatGptSubmissionCandidates(candidate.page, binding.conversationId);
+                  if (this.#registry.refreshPage(session.pageKey).bindingEpoch !== binding.bindingEpoch) throw new SessionPlaneDomainError(
+                    'browser.snapshot-stale', 'Conversation recovery page changed during inspection');
+                  return { conversationRecovery: { conversationId: binding.conversationId, requiresExplicitAcknowledgement: true },
+                    submissionCandidates: submissionCandidates.filter(candidate => !submittedMessageIds.has(candidate.messageId)) };
+                }
+              }
+              return {
               ...await this.#capture(session, input.maxNodes),
               providerAlerts: await observeChatGptAlerts(this.#requirePage(session), session),
               ...(session.submissionState !== 'submitted' ? {} : {
@@ -162,13 +176,14 @@ export class SessionUiService {
                 submissionCandidates: (await inspectChatGptSubmissionCandidates(this.#requirePage(session), session.conversationId))
                   .filter((candidate) => !submittedMessageIds.has(candidate.messageId)),
               }),
-            }))(),
+              };
+            })(),
             new Promise<never>((_, reject) => {
               timer = setTimeout(() => reject(new BrowserSnapshotError('browser.snapshot-timeout',
                 'The provider page did not respond to request inspection; submission and stop outcomes remain unchanged.')), 5_000);
             }),
           ]);
-          this.#requirePage(session);
+          if (!('conversationRecovery' in evidence)) this.#requirePage(session);
           return evidence;
         } catch (error) { throw typedUiError(error); }
         finally { clearTimeout(timer); }
