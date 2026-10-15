@@ -32,9 +32,19 @@ class HandoverTests(unittest.TestCase):
         busy = copy.deepcopy(idle)
         busy['maintenance']['activeOperations'] = 1
         with patch.object(handover, 'guard'), patch.object(handover.time, 'sleep'), \
-                patch.object(handover, 'health', side_effect=[busy, idle]), \
+                patch.object(handover, 'health', side_effect=[busy, idle]) as health, \
                 patch.object(handover, 'maintenance_rpc', return_value={'phase': 'ready'}) as prepare:
             self.assertEqual(handover.prepare_maintenance(idle), {'phase': 'ready'})
+            self.assertEqual(health.call_count, 2, 'do not fence while the current read is active')
+            prepare.assert_called_once()
+        report = {'locks': []}
+        with patch.object(handover, 'guard', side_effect=[handover.LockActivityError(report), None]), \
+                patch.object(handover, 'health', return_value=idle), patch.object(handover.time, 'sleep'), \
+                patch.object(handover, 'procstat', return_value=['ticks'] * 20), \
+                patch.object(handover, 'drainable_writer', return_value=True) as writer, \
+                patch.object(handover, 'maintenance_rpc', return_value={'phase': 'ready'}) as prepare:
+            self.assertEqual(handover.prepare_maintenance(idle), {'phase': 'ready'})
+            writer.assert_called_once_with(report, 11, 'ticks')
             prepare.assert_called_once()
         with patch.object(handover, 'guard'), patch.object(handover, 'health', return_value=busy), \
                 patch.object(handover, 'maintenance_rpc') as prepare:

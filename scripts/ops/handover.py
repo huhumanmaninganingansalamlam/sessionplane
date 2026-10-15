@@ -475,9 +475,15 @@ def prepare_maintenance(h, quiet_timeout=30):
     deadline = time.monotonic() + quiet_timeout
     while True:
         current = health()
-        guard(current, h, require_idle=False)
+        writer = False
+        try:
+            guard(current, h, require_idle=False)
+        except LockActivityError as error:
+            # The original core may finish its current WAL write while we wait.
+            # Foreign, unknown or reused holders are still rejected.
+            writer = drainable_writer(error.report, h['process']['pid'], procstat(h['process']['pid'])[19])
         require_admission_fence(current, True)
-        if current['maintenance']['activeOperations'] == 0 and current['metrics']['session_actor_queue_depth'] == 0:
+        if not writer and current['maintenance']['activeOperations'] == 0 and current['metrics']['session_actor_queue_depth'] == 0:
             break
         if time.monotonic() >= deadline:
             raise TimeoutError('Current calls did not finish; original core remains running')
