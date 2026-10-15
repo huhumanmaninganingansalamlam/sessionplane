@@ -4,10 +4,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { chromium, type ConnectOverCDPOptions, type ConnectOverCDPTransport } from 'playwright-core';
 import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 
-test('same-target controller recovery preserves Chrome, request binding, saved draft and sibling generation', async () => {
+test('same-target controller recovery preserves Chrome, request binding, saved draft and sibling generation', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-crash-controller-'));
   const registry = new PageRegistry();
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
@@ -54,7 +55,44 @@ test('same-target controller recovery preserves Chrome, request binding, saved d
     await assert.rejects(owner.recoverCrashedPage(expected.pageKey, { ...expected, targetId: 'wrong-target' }), /Exact crashed target/);
     assert.equal(loads, 1, 'Identity refusal does not dispatch reload');
     const generationBefore = Number(await sibling.page.locator('#generation').textContent());
+    const siblingControl = await sibling.page.context().newCDPSession(sibling.page);
+    const siblingTarget = (await siblingControl.send('Target.getTargetInfo')).targetInfo.targetId;
+    await siblingControl.detach();
+    // Reproduce a sibling whose emulation command never acknowledges. Actual
+    // Chrome still handles all other initialization and page operations.
+    const connect = chromium.connectOverCDP.bind(chromium);
+    const stalledDefaults: number[] = [];
+    const recoveryConnection = t.mock.method(chromium, 'connectOverCDP', async (endpoint: string, options: ConnectOverCDPOptions) => {
+      const version = await (await fetch(`${endpoint}/json/version`)).json() as { webSocketDebuggerUrl: string };
+      const socket = new WebSocket(version.webSocketDebuggerUrl);
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener('open', () => resolve(), { once: true });
+        socket.addEventListener('error', reject, { once: true });
+      });
+      const siblings = new Set<string>();
+      const transport: ConnectOverCDPTransport = {
+        send(message: object) {
+          const command = message as { id: number; method: string; sessionId?: string };
+          if (command.sessionId && siblings.has(command.sessionId) && command.method.startsWith('Emulation.')) {
+            stalledDefaults.push(command.id);
+            return;
+          }
+          socket.send(JSON.stringify(message));
+        },
+        close() { socket.close(); },
+      };
+      socket.addEventListener('message', event => {
+        const message = JSON.parse(String(event.data));
+        if (message.method === 'Target.attachedToTarget' && message.params.targetInfo.targetId === siblingTarget)
+          siblings.add(message.params.sessionId);
+        transport.onmessage?.(message);
+      });
+      socket.addEventListener('close', () => transport.onclose?.());
+      return await connect(transport, options);
+    });
     await owner.recoverCrashedPage(expected.pageKey, expected);
+    recoveryConnection.mock.restore();
+    assert.deepEqual(stalledDefaults, [], 'Recovery never reconfigures sibling focus or media');
     const recovered = registry.pageForObservation(expected.pageKey);
     assert.notEqual(recovered, original.page, 'Only the controller Page object is replaced');
     const after = registry.getBinding(expected.pageKey);

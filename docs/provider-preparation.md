@@ -20,6 +20,16 @@ choose/model/ref schema, so connected clients can select without restarting thei
 transport for the new configure schema. Both forms call the same selection implementation.
 Read-only team_get exposes the available catalog and never traverses menus itself.
 Discovery failure is explicit and does not claim that a model is unavailable.
+
+An explicitly requested refresh of a proven crashed, unsubmitted page preserves
+the original target, request, generation and stored prompt. Auxiliary attachment
+and adoption preserve the existing browser defaults. After successful same-target
+recovery, the failed request returns to preparation with all previous choices
+cleared. A native crash receipt can supply evidence after controller replacement,
+but only when its target and conversation still match the freshly verified page.
+The original failure remains in generation events. Read fresh UI evidence and
+choose configuration, composer and submit explicitly; recovery never resends.
+Submitted or ambiguous generations cannot reopen through this path.
 An explicitly collapsed chooser prevents menu reuse; a still-visible exiting
 popup is allowed to unmount before reopening, even if its trigger has already
 dropped aria-controls. State-wait failures identify the configuration stage;

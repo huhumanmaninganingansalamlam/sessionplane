@@ -637,7 +637,7 @@ export class SessionUiService {
         const surface = session.conversationId ? await page.evaluate(conversationLoadSurface, {
           origin: this.#chatgptOrigin, conversationId: session.conversationId, click: false }) : null;
         await prepareChatGptObservation(page, session.pageKey!);
-        return surface?.loadError === true;
+        return { loadError: surface?.loadError === true, targetId: this.#registry.getBinding(session.pageKey!).targetId ?? null };
       });
     } catch (error) {
       throw typedUiError(error);
