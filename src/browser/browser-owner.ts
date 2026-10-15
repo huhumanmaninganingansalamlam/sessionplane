@@ -107,6 +107,7 @@ export class BrowserOwner {
   #context: BrowserContext | null = null;
   #browser: Browser | null = null;
   readonly #recoveryControllers = new Map<string, Browser>();
+  readonly #interactionReady = new WeakMap<Page, Promise<void>>();
   #browserProcess: ChildProcess | null = null;
   #browserPid: number | null = null;
   #debuggingPort: number | null = null;
@@ -184,6 +185,7 @@ export class BrowserOwner {
 
       const browser = await chromium.connectOverCDP(`http://127.0.0.1:${debuggingPort}`, {
         timeout: this.#launchTimeoutMs,
+        ...(adopted === null ? {} : { noDefaults: true }),
       });
       this.#browser = browser;
       const context = browser.contexts()[0];
@@ -295,6 +297,37 @@ export class BrowserOwner {
     }
   }
 
+  /** Caller holds the exact request/page lease; never activate the human's tab. */
+  async preparePageInteraction(pageKey: string, expected: {
+    readonly sessionId: string; readonly generation: number; readonly conversationId: string | null;
+  }): Promise<Page> {
+    const page = this.#pageRegistry.requireSessionPage(pageKey, expected);
+    let ready = this.#interactionReady.get(page);
+    if (!ready) {
+      ready = (async () => {
+        const session = await page.context().newCDPSession(page);
+        try {
+          // noDefaults avoids initializing unavailable siblings during adoption.
+          // Restore only this page's normal Playwright background rendering:
+          // hidden pages otherwise suspend rAF and actionability/menu transitions.
+          if (await settleWithin(session.send('Emulation.setFocusEmulationEnabled', { enabled: true }), 5_000) === undefined)
+            throw new BrowserOwnerError('browser.unavailable', 'Exact page background rendering did not acknowledge');
+        } catch (error) {
+          await settleWithin(session.detach().catch(() => undefined), 1_000);
+          throw error;
+        }
+        // Detaching resets emulation, so retain it for this controller's lifetime.
+        page.once('close', () => { void session.detach().catch(() => undefined); });
+      })();
+      this.#interactionReady.set(page, ready);
+      void ready.catch(() => this.#interactionReady.delete(page));
+    }
+    await ready;
+    if (this.#pageRegistry.requireSessionPage(pageKey, expected) !== page)
+      throw new BrowserOwnerError('browser.unavailable', 'Interaction page changed during initialization');
+    return page;
+  }
+
   /** The caller holds the exact request actor/page lock and authorizes one refresh. */
   async recoverCrashedPage(pageKey: string, expected: PageBindingSnapshot): Promise<void> {
     this.#requireContext();
@@ -346,7 +379,12 @@ export class BrowserOwner {
       if (await settleWithin(session.send('Page.reload'), reloadBudget) === undefined) {
         throw new BrowserOwnerError('browser.unavailable', 'Same-target reload acknowledgement unavailable; do not repeat automatically');
       }
-      replacement = await chromium.connectOverCDP(`http://127.0.0.1:${debuggingPort}`, { timeout: remaining() });
+      // This is an auxiliary controller for an existing profile. Reapplying
+      // focus/media/download defaults to every sibling can block attachment
+      // and changes unrelated pages while recovering this one target.
+      replacement = await chromium.connectOverCDP(`http://127.0.0.1:${debuggingPort}`, {
+        timeout: remaining(), noDefaults: true,
+      });
       let recovered: Page | undefined;
       for (const candidate of replacement.contexts()[0]?.pages() ?? []) {
         const probe = await attach(candidate);

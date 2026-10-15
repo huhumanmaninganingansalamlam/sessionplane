@@ -14,6 +14,7 @@ import {
   type ProviderSubmission,
   type ProviderSubmissionAcknowledgement,
   type ProviderSubmissionAttempt,
+  type ProviderAcknowledgementRecoveryEvidence,
   type PreparationChoices,
   type PreparationPurpose,
   type PreparationTarget,
@@ -368,13 +369,26 @@ export class SubmissionService {
           .filter(e => e.requestRef === currentOutbox.outboxId && e.conversationId === currentConversationId &&
             e.promptHash === createHash('sha256').update(currentPrompt).digest('hex'))
           .map(e => e.attempt as ProviderSubmissionAttempt);
+        let recoveryEvidence: ProviderAcknowledgementRecoveryEvidence | undefined;
         const acknowledgement = await adapter.recoverAcknowledgement?.({
           session: current,
           generation: current.generation,
           prompt: currentPrompt,
           attempts,
+          onRecoveryObservation: evidence => { recoveryEvidence = evidence; },
           ...(selection === undefined ? {} : { selection }),
         });
+        if (recoveryEvidence !== undefined) {
+          const previous = this.#events.latestAcknowledgementRecovery(current.sessionId, current.generation);
+          // Repeated reads during one shared cooldown are not new provider probes.
+          if (recoveryEvidence.source !== 'pacing' || previous?.source !== 'pacing' ||
+              previous.nextCheckAt !== recoveryEvidence.nextCheckAt) {
+            this.#events.append({ teamId: current.teamId, roleId: current.roleId, sessionId: current.sessionId,
+              generation: current.generation, eventType: 'generation.acknowledgement-recovery',
+              createdAt: this.#now().toISOString(), payload: { ...recoveryEvidence,
+                requestRef: currentOutbox.outboxId, conversationId: currentConversationId, pageKey: current.pageKey } });
+          }
+        }
         if (
           acknowledgement === undefined ||
           acknowledgement === null ||
@@ -1134,12 +1148,13 @@ export class SubmissionService {
   async refreshPage(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string },
     reload: (snapshot: SessionSnapshot) => Promise<void>,
-    verifyPage?: (snapshot: SessionSnapshot) => Promise<boolean | void | { loadError: boolean; rendererCrash: { observedAt: string; targetId: string | null; bindingEpoch: number; draftPreservation: 'provider-persisted-only' } }>,
+    verifyPage?: (snapshot: SessionSnapshot) => Promise<boolean | void | { loadError: boolean; targetId?: string | null; rendererCrash?: { observedAt: string; targetId: string | null; bindingEpoch: number; draftPreservation: 'provider-persisted-only' } }>,
   ): Promise<void> {
     const method = 'session.page.refresh';
     const requestHash = hashCanonical({ method, requestId: input.requestId, sessionId: input.sessionId, generation: input.generation });
     const receipts = new ReceiptRepository(this.#database);
-    await this.#scheduler.actorFor(input.sessionId).enqueue(async () => {
+    const actor = this.#scheduler.actorFor(input.sessionId);
+    await actor.enqueue(async () => {
       const prior = receipts.get(input.clientId, input.decisionId);
       if (prior !== null) {
         if (prior.method !== method || prior.requestHash !== requestHash) {
@@ -1170,13 +1185,21 @@ export class SubmissionService {
         requireReady();
         const verification = await verifyPage?.(snapshot);
         loadError = verification === true || (typeof verification === 'object' && verification.loadError);
+        // Native crash evidence survives core/controller replacement. A prior
+        // attempted refresh is not success; only this exact freshly verified
+        // target and the successful reload below can reopen its preparation.
+        const priorRefresh = receipts.latestPageRefresh(input.clientId, input.sessionId, input.generation);
+        const priorResult = priorRefresh === null ? null : JSON.parse(priorRefresh.resultJson);
+        const rendererCrash = typeof verification !== 'object' ? undefined : verification.rendererCrash ??
+          (priorResult?.conversationId === snapshot.conversationId && verification.targetId != null &&
+           priorResult?.rendererCrash?.targetId === verification.targetId ? priorResult.rendererCrash : undefined);
         requireReady();
         const record = (status: 'attempted' | 'complete') => receipts.record({
           clientId: input.clientId, requestId: input.decisionId, method, requestHash, status,
           result: { requestId: input.requestId, sessionId: input.sessionId, generation: input.generation,
             pageKey: snapshot.pageKey, conversationId: snapshot.conversationId,
             dispatch: status === 'complete' ? 'reload-returned' : 'attempted-outcome-unknown',
-            ...(typeof verification === 'object' ? { rendererCrash: verification.rendererCrash } : {}),
+            ...(rendererCrash === undefined ? {} : { rendererCrash }),
             conversationRecovered: null },
         });
         this.#database.transaction(() => {
@@ -1192,7 +1215,32 @@ export class SubmissionService {
           }
         });
         await reload(snapshot);
-        record('complete');
+        let sequence = 0;
+        this.#database.transaction(() => {
+          if (rendererCrash !== undefined && outbox.submissionState === 'failed_pre_submit' &&
+              outbox.errorCode === 'browser.unavailable' && !outbox.promptSubmitted && !snapshot.promptSubmitted &&
+              snapshot.submissionState === 'failed_pre_submit' && snapshot.sessionState === 'ready' && snapshot.terminal &&
+              snapshot.submittedUserMessageId === null && snapshot.submittedUserTurnId === null &&
+              snapshot.responseMessageId === null && snapshot.answerText === null) {
+            const timestamp = this.#now().toISOString();
+            if (!this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
+              sessionState: 'submitting', providerState: 'pending', observationTransport: 'fresh',
+              submissionState: 'prepared', reason: 'crashed-page-preparation-recovered',
+              errorCode: 'provider.preparation-required', nextCheckAt: null, promptSubmitted: false,
+            }, timestamp) || !this.#outbox.transition(outbox.outboxId, ['failed_pre_submit'], 'prepared', {
+              updatedAt: timestamp, errorCode: 'provider.preparation-required', promptSubmitted: false,
+              resultJson: JSON.stringify({ kind: 'pending-preparation', choices: {}, requiresInspection: true }),
+            })) throw new SessionPlaneDomainError('session.generation-superseded', 'Recovered preparation ownership changed');
+            sequence = this.#events.append({ teamId: outbox.teamId, roleId: outbox.roleId,
+              sessionId: snapshot.sessionId, generation: snapshot.generation,
+              eventType: 'generation.preparation-required', createdAt: timestamp,
+              payload: { reason: 'crashed-page-preparation-recovered', refreshRequestId: input.decisionId,
+                promptSubmitted: false, priorFailure: { reason: snapshot.reason, errorCode: outbox.errorCode,
+                  recordedAt: outbox.updatedAt, resultHash: hashCanonical(JSON.parse(outbox.resultJson ?? 'null')) } } });
+          }
+          record('complete');
+        });
+        if (sequence !== 0) actor.publishResumedPreparation(this.#requireSnapshot(input.sessionId), sequence);
       });
     });
   }

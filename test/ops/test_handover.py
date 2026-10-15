@@ -25,6 +25,37 @@ spec.loader.exec_module(handover)
 
 
 class HandoverTests(unittest.TestCase):
+    def test_long_read_finishes_before_fenced_drain_and_busy_or_changed_core_is_preserved(self):
+        idle = {'requestOk': True, 'process': {'pid': 11, 'startedAt': 'original'},
+                'maintenance': {'phase': 'running', 'activeOperations': 0},
+                'metrics': {'session_actor_queue_depth': 0}}
+        busy = copy.deepcopy(idle)
+        busy['maintenance']['activeOperations'] = 1
+        with patch.object(handover, 'guard'), patch.object(handover.time, 'sleep'), \
+                patch.object(handover, 'health', side_effect=[busy, idle]) as health, \
+                patch.object(handover, 'maintenance_rpc', return_value={'phase': 'ready'}) as prepare:
+            self.assertEqual(handover.prepare_maintenance(idle), {'phase': 'ready'})
+            self.assertEqual(health.call_count, 2, 'do not fence while the current read is active')
+            prepare.assert_called_once()
+        report = {'locks': []}
+        with patch.object(handover, 'guard', side_effect=[handover.LockActivityError(report), None]), \
+                patch.object(handover, 'health', return_value=idle), patch.object(handover.time, 'sleep'), \
+                patch.object(handover, 'procstat', return_value=['ticks'] * 20), \
+                patch.object(handover, 'drainable_writer', return_value=True) as writer, \
+                patch.object(handover, 'maintenance_rpc', return_value={'phase': 'ready'}) as prepare:
+            self.assertEqual(handover.prepare_maintenance(idle), {'phase': 'ready'})
+            writer.assert_called_once_with(report, 11, 'ticks')
+            prepare.assert_called_once()
+        with patch.object(handover, 'guard'), patch.object(handover, 'health', return_value=busy), \
+                patch.object(handover, 'maintenance_rpc') as prepare:
+            with self.assertRaises(TimeoutError): handover.prepare_maintenance(idle, quiet_timeout=0)
+            prepare.assert_not_called()
+        with patch.object(handover, 'guard', side_effect=AssertionError('identity changed')), \
+                patch.object(handover, 'health', return_value=idle), \
+                patch.object(handover, 'maintenance_rpc') as prepare:
+            with self.assertRaises(AssertionError): handover.prepare_maintenance(idle)
+            prepare.assert_not_called()
+
     def test_local_candidate_requires_bound_complete_evidence_and_live_fence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -75,6 +106,11 @@ class HandoverTests(unittest.TestCase):
             db.execute.return_value.fetchone.return_value = (0,)
             with patch.object(handover, 'read_db', return_value=db), patch.object(handover, 'no_writer'):
                 handover.guard(before, before)
+                busy = copy.deepcopy(before)
+                busy['metrics']['session_actor_queue_depth'] = 1
+                handover.guard(busy, before, require_idle=False)  # pre-fence only
+                with self.assertRaisesRegex(AssertionError, 'Actor running or queued'):
+                    handover.guard(busy, before)  # still mandatory after draining
                 for part, key, value in [('metrics', 'session_actor_queue_depth', 1),
                                          ('process', 'pid', 33), ('process', 'startedAt', 'replacement'),
                                          ('browser', 'browserPid', 44), ('database', 'integrity', 'error'),
@@ -84,6 +120,9 @@ class HandoverTests(unittest.TestCase):
                         current[part][key] = value
                         with self.assertRaises(AssertionError):
                             handover.guard(current, before)
+                        if part != 'metrics':
+                            with self.assertRaises(AssertionError):
+                                handover.guard(current, before, require_idle=False)
                 db.execute.return_value.fetchone.return_value = (1,)
                 with self.assertRaisesRegex(AssertionError, 'Active submission'):
                     handover.guard(before, before)

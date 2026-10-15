@@ -132,6 +132,10 @@ test('isolated MCP get/wait displays required user review without terminalizing 
       state: 'exhausted' as const, reason: '100-load-retries-exhausted', lastOutcome: 'clicked' as const,
       lastCheckedAt: '2026-10-06T00:00:00Z', lastAttemptAt: '2026-10-06T00:00:00Z', notifiedAt: '2026-10-06T00:01:00Z' };
     repo.save(record);
+    const scopedUntil = new Date(Date.now() + 60_000).toISOString();
+    new ProbeBudgetRepository(core.database.raw).save({ scope: 'chatgpt:conversation-detail:fixture-conversation',
+      nextAllowedAt: scopedUntil, blockedUntil: scopedUntil, backoffLevel: 1, consecutiveFailures: 1,
+      updatedAt: new Date().toISOString() });
     const before = core.database.raw.prepare('SELECT * FROM generations').all();
     const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: `sessionplane_${name}`,
       arguments: args, socketPath: config.socketPath, timeoutMs: 3000, maxLineBytes: config.rpcMaxLineBytes });
@@ -149,6 +153,8 @@ test('isolated MCP get/wait displays required user review without terminalizing 
       assert.equal(value.submissionState, 'submission_unknown');
       assert.equal(value.promptSubmitted, true); assert.equal(value.terminal, false);
       assert.equal(value.submittedUserMessageId, 'original-anchor'); assert.equal(value.waitExpired, false);
+      assert.equal(value.conversationLoadRecovery.nextAllowedAt, scopedUntil,
+        'exact get/wait must display this conversation hold rather than the unrelated global UI deadline');
     }
     assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations').all(), before);
     assert.equal(core.database.raw.prepare('SELECT count(*) AS n FROM outbox').get()!.n, 1);

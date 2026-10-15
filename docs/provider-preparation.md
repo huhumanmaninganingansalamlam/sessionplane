@@ -20,6 +20,19 @@ choose/model/ref schema, so connected clients can select without restarting thei
 transport for the new configure schema. Both forms call the same selection implementation.
 Read-only team_get exposes the available catalog and never traverses menus itself.
 Discovery failure is explicit and does not claim that a model is unavailable.
+
+An explicitly requested refresh of a proven crashed, unsubmitted page preserves
+the original target, request, generation and stored prompt. Auxiliary attachment
+and adoption preserve the existing browser defaults. After successful same-target
+recovery, the failed request returns to preparation with all previous choices
+cleared. A native crash receipt can supply evidence after controller replacement,
+but only when its target and conversation still match the freshly verified page.
+The original failure remains in generation events. Read fresh UI evidence and
+choose configuration, composer and submit explicitly; recovery never resends.
+Submitted or ambiguous generations cannot reopen through this path.
+Before configuration or submission, the core enables background rendering only
+on the exact owned interaction page. This restores animation-frame based controls
+without activating its tab or initializing unrelated sibling pages.
 An explicitly collapsed chooser prevents menu reuse; a still-visible exiting
 popup is allowed to unmount before reopening, even if its trigger has already
 dropped aria-controls. State-wait failures identify the configuration stage;
@@ -159,6 +172,13 @@ can bind a single exact prompt match in the same verified conversation and curre
 branch. Duplicate matches, missing identity, wrong branches and failed reads preserve
 submission uncertainty; Retry-After 429 is deferred. Explicit candidate selections
 still require their original DOM evidence hash. No submission is repeated.
+UNKNOWN reads also return `acknowledgementRecovery`: the observed time, HTTP status,
+endpoint and outcome of the canonical check. `source: backend` records an actual
+read; `source: pacing` records no HTTP request and retains the last actual probe
+separately as `lastProbe`. `nextCheckAt` preserves the shared Retry-After boundary.
+A successful read with no exact prompt match is distinct from deferred or failed
+access, but does not prove that the provider never accepted a submission. All
+these outcomes preserve UNKNOWN, the original draft and the no-resend rule.
 Prompt text matching is a fallback, not a requirement for an ID-confirmed
 submission. Provider formatting differences do not discard that identity.
 

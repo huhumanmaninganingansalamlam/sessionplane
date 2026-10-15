@@ -14,6 +14,7 @@ import type {
   ProviderRecoveryResult,
 } from '../../src/providers/provider-adapter.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { EventRepository } from '../../src/storage/event-repository.ts';
 
 interface TeamSnapshot {
   readonly teamId: string;
@@ -22,6 +23,62 @@ interface TeamSnapshot {
 interface WaitSnapshot extends SessionSnapshot {
   readonly latestEventSequence: number;
 }
+
+test('UNKNOWN reads expose durable canonical probe evidence without resending across restart', async () => {
+  const fixture = await createFixture('sessionplane-ack-evidence-');
+  let service = fixture.service;
+  const fake = fixture.fake;
+  try {
+    const { teamId, session } = await createSession(fixture.config.socketPath, 'main', 'ack-evidence');
+    fake.autoFinalText = 'Previous result';
+    await send(fixture.config.socketPath, session.sessionId, 'previous');
+    await waitForSnapshot(fixture.config.socketPath, session.sessionId, s => s.terminal);
+    fake.autoFinalText = null;
+    fake.acknowledgementMode = 'missing';
+    await assert.rejects(send(fixture.config.socketPath, session.sessionId, 'uncertain'),
+      error => (error as { data?: { errorCode?: string } }).data?.errorCode === 'session.submission-unknown');
+    const original = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(original.submissionState, 'submission_unknown');
+    const request = service.database.raw.prepare('SELECT outbox_id,payload_json FROM outbox WHERE session_id=? AND generation=2')
+      .get(session.sessionId) as { outbox_id: string; payload_json: string };
+    const probe = { kind: 'deferred' as const, source: 'backend' as const, reason: 'backend-http-429',
+      observedAt: new Date().toISOString(), nextCheckAt: new Date(Date.now() + 60000).toISOString(),
+      httpStatus: 429, endpointCategory: 'conversation-detail' as const };
+    fake.recoverAcknowledgement = async input => { input.onRecoveryObservation?.(probe); return null; };
+    const read = async () => {
+      await service.submissionService.recoverAcknowledgement(service.teamDirectory.getSession(session.sessionId));
+      return (await rpc<{ request: any }>(fixture.config.socketPath, 'workflow.team_get', {
+        teamId, requestRef: request.outbox_id })).request;
+    };
+    const deferred = await read();
+    assert.equal(deferred.submissionState, 'submission_unknown');
+    assert.equal(deferred.terminal, false);
+    assert.equal(deferred.acknowledgementRecovery.httpStatus, 429);
+    assert.equal(deferred.acknowledgementRecovery.source, 'backend');
+    assert.equal(deferred.acknowledgementRecovery.currentIdentityMatches, true);
+    assert.equal(deferred.acknowledgementRecovery.automaticResubmit, false);
+    assert.equal(new EventRepository(service.database.raw).acknowledgementRetryAtMs(), Date.parse(probe.nextCheckAt));
+    const pacing = { ...probe, source: 'pacing' as const, reason: 'backend-acknowledgement-probe-paced', httpStatus: null };
+    fake.recoverAcknowledgement = async input => { input.onRecoveryObservation?.(pacing); return null; };
+    await read();
+    const before = new EventRepository(service.database.raw).latestSequence(teamId);
+    const cached = await read();
+    assert.equal(cached.acknowledgementRecovery.source, 'pacing');
+    assert.equal(cached.acknowledgementRecovery.lastProbe.httpStatus, 429);
+    assert.equal(new EventRepository(service.database.raw).latestSequence(teamId), before,
+      'repeated cached reads do not create repeated probe events');
+    await service.close();
+    service = await startCore({ config: fixture.config, startBrowser: false, providerAdapters: [fake], logger: silentLogger() });
+    const restored = await read();
+    assert.equal(restored.acknowledgementRecovery.lastProbe.observedAt, probe.observedAt);
+    assert.equal(restored.submittedUserMessageId, null);
+    assert.equal(restored.answerText, null);
+    assert.equal(fake.submitCount, 2, 'only the two original fixture submissions occurred');
+    const preserved = service.database.raw.prepare('SELECT payload_json FROM outbox WHERE outbox_id=?')
+      .get(request.outbox_id) as { payload_json: string };
+    assert.equal(preserved.payload_json, request.payload_json);
+  } finally { await service.close(); rmSync(fixture.root, { recursive: true, force: true }); }
+});
 
 test('human follow-up final completes the same durable request after restart without resubmission', async () => {
   const fixture = await createFixture('sessionplane-human-followup-');

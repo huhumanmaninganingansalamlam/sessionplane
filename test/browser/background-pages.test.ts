@@ -16,8 +16,9 @@ test('headed chat creation and interaction preserve the human foreground tab', {
   t.mock.method(chromium, 'connectOverCDP', (endpoint: string, options: object) =>
     connect(endpoint, { ...options, noDefaults: true }));
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-background-chat-'));
+  const registry = new PageRegistry();
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'),
-    pageRegistry: new PageRegistry(), headless: false });
+    pageRegistry: registry, headless: false });
   try {
     await owner.start();
     const human = await owner.createPage();
@@ -29,20 +30,22 @@ test('headed chat creation and interaction preserve the human foreground tab', {
     assert.equal(await visible(), 'visible');
     const created = await Promise.all([owner.createPage(), owner.createPage()]);
     assert.notEqual(created[0]!.binding.targetId, created[1]!.binding.targetId);
-    for (const { page } of created) {
+    for (const { page, binding } of created) {
       assert.equal(await visible(), 'visible', 'Creating a chat must not activate its tab');
-      const session = await page.context().newCDPSession(page);
-      // Match normal Playwright interaction, then remove emulation for the visibility assertion.
-      await session.send('Emulation.setFocusEmulationEnabled', { enabled: true });
+      assert.equal(await page.evaluate(() => document.visibilityState), 'hidden');
+      const expected = { sessionId: binding.pageKey, generation: 1, conversationId: null };
+      registry.reservePage(binding.pageKey, expected);
+      await assert.rejects(owner.preparePageInteraction(binding.pageKey, { ...expected, sessionId: 'unrelated' }), /ownership/);
+      await owner.preparePageInteraction(binding.pageKey, expected);
+      await owner.preparePageInteraction(binding.pageKey, expected);
       await page.goto('data:text/html,<form onsubmit="event.preventDefault();document.querySelector(\'p\').textContent=document.querySelector(\'textarea\').value"><textarea></textarea><button>Send</button></form><p></p>');
       await page.locator('textarea').focus();
       await page.locator('textarea').fill('Background message');
       await page.locator('button').click();
       assert.equal(await page.locator('p').innerText(), 'Background message');
       assert.equal(await visible(), 'visible', 'Chat interaction must not activate its tab');
-      await session.send('Emulation.setFocusEmulationEnabled', { enabled: false });
-      assert.equal(await page.evaluate(() => document.visibilityState), 'hidden');
-      await session.detach();
+      await page.close();
+      assert.equal(await visible(), 'visible', 'Closing the background chat must preserve the human tab');
     }
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });

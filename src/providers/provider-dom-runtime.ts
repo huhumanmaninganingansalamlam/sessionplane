@@ -104,7 +104,7 @@ export class DomProviderAdapter implements ProviderAdapter {
           conversationId: request.session.conversationId,
         });
       }
-      const page = this.#pageRegistry.requireSessionPage(pageKey, {
+      const page = await this.#browserOwner.preparePageInteraction(pageKey, {
         sessionId: request.session.sessionId,
         generation: request.generation,
         conversationId: request.session.conversationId,

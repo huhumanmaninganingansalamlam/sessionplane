@@ -309,6 +309,9 @@ test('a new core owner adopts the exact live profile and positive CDP endpoint a
   });
   try {
     await first.start();
+    const retained = await first.createPage();
+    await retained.page.setContent('<textarea>Retained adoption draft</textarea>');
+    await retained.page.emulateMedia({ colorScheme: 'dark' });
     const lockPath = path.join(profileDir, '.sessionplane-profile.lock');
     const lock = JSON.parse(readFileSync(lockPath, 'utf8')) as Record<string, unknown>;
     writeFileSync(lockPath, JSON.stringify({ ...lock, pid: 99_999_999 }), { mode: 0o600 });
@@ -317,6 +320,9 @@ test('a new core owner adopts the exact live profile and positive CDP endpoint a
     assert.equal(second.status.ownership, 'adopted');
     assert.equal(second.status.browserPid, first.status.browserPid);
     assert.equal(second.status.debuggingPort, first.status.debuggingPort);
+    assert.equal(await retained.page.evaluate(() => matchMedia('(prefers-color-scheme: dark)').matches), true,
+      'Adoption does not reapply media defaults to retained pages');
+    assert.equal(await retained.page.locator('textarea').inputValue(), 'Retained adoption draft');
     const page = await second.createPage();
     assert.equal(await page.page.evaluate(() => document.location.href), 'about:blank');
   } finally {

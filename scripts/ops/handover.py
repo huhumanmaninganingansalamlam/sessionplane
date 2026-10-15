@@ -131,12 +131,13 @@ def no_writer(dbpath):
     if any(row['blocksHandover'] for row in report['locks']):
         raise LockActivityError(report)
 
-def guard_state(h, expected):
+def guard_state(h, expected, require_idle=True):
     assert h['requestOk'] and h['browser']['state']=='ready' and h['database']['integrity']=='ok'
     assert h['database']['path'] == expected['database']['path'], 'Database path changed'
     for key in ['pid','startedAt']: assert h['process'][key]==expected['process'][key], 'Core owner changed'
     for key in ['browserPid','profileDir','debuggingPort']: assert h['browser'][key]==expected['browser'][key], 'Browser identity changed'
-    assert h['metrics']['session_actor_queue_depth']==0, 'Actor running or queued; natural drain required'
+    if require_idle:
+        assert h['metrics']['session_actor_queue_depth']==0, 'Actor running or queued; natural drain required'
     with read_db(h) as db:
         assert db.execute("SELECT count(*) FROM outbox WHERE submission_state IN ('submit_attempted','composer_filled')").fetchone()[0]==0, 'Active submission'
         assert db.execute("SELECT count(*) FROM outbox o JOIN generations g ON g.session_id=o.session_id AND g.generation=o.generation WHERE json_extract(o.payload_json,'$.thinkingFailureRecovery')=1 AND g.completed_at IS NULL").fetchone()[0]==0, 'Opted-in recovery still active'
@@ -144,8 +145,8 @@ def guard_state(h, expected):
     assert lock['pid']==h['process']['pid'] and lock['browserPid']==h['browser']['browserPid']
 
 
-def guard(h, expected):
-    guard_state(h, expected)
+def guard(h, expected, require_idle=True):
+    guard_state(h, expected, require_idle)
     no_writer(h['database']['path'])
 
 def drainable_writer(report, pid, ticks):
@@ -468,6 +469,31 @@ def require_admission_fence(h, required):
         assert h.get('maintenance', {}).get('phase') == 'running', 'Core admission fence unavailable or already leased; no legacy fallback'
 
 
+def prepare_maintenance(h, quiet_timeout=30):
+    # Long read/wait calls are not interrupted by maintenance. Let their current
+    # round finish before starting the short fenced drain; admission stays open.
+    deadline = time.monotonic() + quiet_timeout
+    while True:
+        current = health()
+        writer = False
+        try:
+            guard(current, h, require_idle=False)
+        except LockActivityError as error:
+            # The original core may finish its current WAL write while we wait.
+            # Foreign, unknown or reused holders are still rejected.
+            writer = drainable_writer(error.report, h['process']['pid'], procstat(h['process']['pid'])[19])
+        require_admission_fence(current, True)
+        if not writer and current['maintenance']['activeOperations'] == 0 and current['metrics']['session_actor_queue_depth'] == 0:
+            break
+        if time.monotonic() >= deadline:
+            raise TimeoutError('Current calls did not finish; original core remains running')
+        time.sleep(.1)
+    # The quiet sample is only scheduling: the fence and post-fence guards still
+    # decide whether a concurrent caller permits the actual transition.
+    return maintenance_rpc(h, 'system.maintenance.prepare', {
+        **lease_owner(h), 'drainTimeoutMs': 5000, 'leaseMs': 30000})
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
@@ -523,8 +549,10 @@ def main():
     # Rollback may restart only the reviewed browser-preserving adoption implementation.
     assert hashlib.sha256((installed/'dist/browser/browser-owner.js').read_bytes()).hexdigest() == manifest['runtimeBrowserOwnerSha256'], 'Unreviewed original browser adoption; no automatic rollback path'
     identity=request_identity(h, args)
-    guard(h,h)
-    print(json.dumps({'phase':'preflight','corePid':pid,'chromePid':args.chrome_pid,'sourceCommit':manifest['sourceCommit'],'packageVerified':True,'actorDepth':0,'activeSubmitCount':0,'dbWriterLocks':0,'next':'apply through required core admission fence' if args.core_maintenance else 'apply only during coordinated issuer pause'},indent=2),flush=True)
+    # The supported fence drains recovery actors atomically. An idle sample before
+    # acquiring it races those actors; all post-fence guards still require idle.
+    guard(h,h,require_idle=not args.core_maintenance)
+    print(json.dumps({'phase':'preflight','corePid':pid,'chromePid':args.chrome_pid,'sourceCommit':manifest['sourceCommit'],'packageVerified':True,'actorDepth':h['metrics']['session_actor_queue_depth'],'activeSubmitCount':0,'dbWriterLocks':0,'next':'apply through required core admission fence' if args.core_maintenance else 'apply only during coordinated issuer pause'},indent=2),flush=True)
     if not args.apply: return
     receipt=args.receipt_dir.resolve() if args.receipt_dir is not None else root/'local-receipt'
     receipt.mkdir(mode=0o700) # never rerun an issued handover blindly
@@ -547,8 +575,7 @@ def main():
     lease = None
     try:
         if 'maintenance' in h:
-            lease = maintenance_rpc(h, 'system.maintenance.prepare', {
-                **lease_owner(h), 'drainTimeoutMs': 5000, 'leaseMs': 30000})
+            lease = prepare_maintenance(h)
             assert lease['phase'] == 'ready', 'Core has not drained'
             save(receipt/'maintenance.json', lease)
         if lease is None:

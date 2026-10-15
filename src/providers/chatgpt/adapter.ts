@@ -42,6 +42,7 @@ import { ChatGptSubmission, recoverChatGptAcknowledgement } from './submission.t
 
 export interface ChatGptAdapterOptions {
   readonly onBackendRateLimit?: ChatGptBackendRecoveryOptions['onRateLimit'];
+  readonly acknowledgementRetryAtMs?: number;
   readonly pageMutex?: PageMutationMutex;
   readonly canRestoreLatestPosition?: (request: ProviderObservationRequest) => boolean;
   readonly browserOwner: BrowserOwner;
@@ -71,6 +72,7 @@ export class ChatGptAdapter implements ProviderAdapter {
     this.#acknowledgementTimeoutMs = options.acknowledgementTimeoutMs;
     this.#backendRecovery = new ChatGptBackendRecovery({
       ...(options.onBackendRateLimit === undefined ? {} : { onRateLimit: options.onBackendRateLimit }),
+      ...(options.acknowledgementRetryAtMs === undefined ? {} : { acknowledgementRetryAtMs: options.acknowledgementRetryAtMs }),
       requestTimeoutMs: options.backendRequestTimeoutMs ?? 15_000,
       tokenCacheTtlMs: options.tokenCacheTtlMs ?? 60_000,
     });
@@ -141,7 +143,7 @@ export class ChatGptAdapter implements ProviderAdapter {
         });
       }
 
-      const page = this.#pageRegistry.requireSessionPage(pageKey, {
+      const page = await this.#browserOwner.preparePageInteraction(pageKey, {
         sessionId: request.session.sessionId,
         generation: request.generation,
         conversationId: request.session.conversationId,
@@ -187,7 +189,8 @@ export class ChatGptAdapter implements ProviderAdapter {
         const selected = await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, request.selection);
         if (selected === null) return null;
         const server = await this.#backendRecovery.recoverAcknowledgement(
-          foundId, request.prompt, backendClient(candidate.page), new URL(candidate.page.url()).origin);
+          foundId, request.prompt, backendClient(candidate.page), new URL(candidate.page.url()).origin,
+          undefined, request.onRecoveryObservation);
         if (server === null || server.submittedUserMessageId !== selected.submittedUserMessageId ||
             server.submittedUserTurnId !== selected.submittedUserTurnId) return null;
         const fresh = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);
@@ -206,6 +209,7 @@ export class ChatGptAdapter implements ProviderAdapter {
           binding.conversationId,
           request.selection,
           request.attempts,
+          request.onRecoveryObservation,
         );
         if (acknowledgement === null ||
           this.#pageRegistry.refreshPage(pageKey).bindingEpoch !== binding.bindingEpoch) {
@@ -224,7 +228,7 @@ export class ChatGptAdapter implements ProviderAdapter {
         generation: request.generation,
         conversationId,
       });
-      const acknowledgement = await this.#recoverAcknowledgement(page, request.prompt, conversationId, request.selection, request.attempts);
+      const acknowledgement = await this.#recoverAcknowledgement(page, request.prompt, conversationId, request.selection, request.attempts, request.onRecoveryObservation);
       return this.#pageRegistry.refreshPage(pageKey).bindingEpoch === binding.bindingEpoch ? acknowledgement : null;
     } catch {
       return null;
@@ -233,7 +237,8 @@ export class ChatGptAdapter implements ProviderAdapter {
 
   async #recoverAcknowledgement(page: Page, prompt: string, conversationId: string,
     selection?: { readonly messageId: string; readonly evidenceHash: string },
-    attempts?: ProviderAcknowledgementRecoveryRequest['attempts']) {
+    attempts?: ProviderAcknowledgementRecoveryRequest['attempts'],
+    observe?: ProviderAcknowledgementRecoveryRequest['onRecoveryObservation']) {
     if (selection !== undefined) return await recoverChatGptAcknowledgement(page, prompt, conversationId, selection);
     // Durable dispatch evidence identifies the exact user even when only an
     // older duplicate is mounted. Canonical identity/parent/hash stay mandatory.
@@ -241,7 +246,7 @@ export class ChatGptAdapter implements ProviderAdapter {
     // An optimistic user node and cleared composer prove no server acceptance.
     // Automatic UNKNOWN recovery needs canonical evidence for that exact user.
     const server = await this.#backendRecovery.recoverAcknowledgement(
-      conversationId, prompt, backendClient(page), new URL(page.url()).origin, attempts);
+      conversationId, prompt, backendClient(page), new URL(page.url()).origin, attempts, observe);
     if (dom !== null && dom.submittedUserMessageId !== server?.submittedUserMessageId) return null;
     return server === null ? null : { ...server, evidence: 'backend-exact-user' as const };
   }

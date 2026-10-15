@@ -92,6 +92,24 @@ export class EventRepository {
       .map(row => parsePayload(row.payloadJson));
   }
 
+  latestAcknowledgementRecovery(sessionId: string, generation: number, backendOnly = false): Readonly<Record<string, unknown>> | null {
+    const row = this.#database.prepare(`SELECT payload_json AS payloadJson FROM events
+      WHERE session_id=? AND generation=? AND event_type='generation.acknowledgement-recovery'
+        AND (?=0 OR json_extract(payload_json, '$.source')='backend')
+      ORDER BY sequence DESC LIMIT 1`).get(sessionId, generation, backendOnly ? 1 : 0) as
+      { payloadJson: string } | undefined;
+    return row ? parsePayload(row.payloadJson) : null;
+  }
+
+  acknowledgementRetryAtMs(): number {
+    const row = this.#database.prepare(`SELECT MAX(json_extract(payload_json, '$.nextCheckAt')) AS retryAt
+      FROM events WHERE event_type='generation.acknowledgement-recovery'
+        AND json_extract(payload_json, '$.source')='backend'
+        AND json_extract(payload_json, '$.httpStatus')=429`).get() as { retryAt: string | null };
+    const timestamp = row.retryAt === null ? 0 : Date.parse(row.retryAt);
+    return Number.isFinite(timestamp) ? timestamp : 0;
+  }
+
   latestSequencesForSessions(sessionIds: readonly string[]): ReadonlyMap<string, number> {
     const sequences = new Map<string, number>();
     const batchSize = 900;

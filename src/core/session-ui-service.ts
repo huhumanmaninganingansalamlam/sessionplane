@@ -36,7 +36,7 @@ export class SessionUiService {
   async discover(input: PreparationOwner & { decisionId: string }) {
     const result = await this.#submissions.decidePreparation({ ...input, decision: 'discover', purpose: 'model' }, async session => {
       try {
-        return { choice: null, result: await new ChatGptConfigurationMenu(this.#requirePage(session), session.pageKey!).discover() };
+        return { choice: null, result: await new ChatGptConfigurationMenu(await this.#interactionPage(session), session.pageKey!).discover() };
       } catch (error) {
         const result: ConfigurationCatalog = { status: 'unavailable', observedAt: new Date().toISOString(), options: [], unavailableVersions: [],
           message: error instanceof Error ? error.message : String(error) };
@@ -68,7 +68,7 @@ export class SessionUiService {
       const option = this.#catalog?.options.find(option => option.id === configurationId);
       if (!option) throw new SessionPlaneDomainError('provider.configuration-stale', 'Discover current configurations and choose an observed configurationId');
       try {
-        const summary = await new ChatGptConfigurationMenu(this.#requirePage(session), session.pageKey!).select(option);
+        const summary = await new ChatGptConfigurationMenu(await this.#interactionPage(session), session.pageKey!).select(option);
         return { choice: toPreparationTarget('model', summary), result: { configurationId: option.id, label: option.label } };
       } catch (error) {
         if (error instanceof SessionPlaneDomainError &&
@@ -410,7 +410,7 @@ export class SessionUiService {
         }
         return await this.#selectConfiguration(session, configurationId);
       }
-      const page = this.#requirePage(session);
+      const page = await this.#interactionPage(session);
       const binding = this.#registry.refreshPage(session.pageKey);
       let element: ElementHandle<Element> | null = null;
       try {
@@ -637,7 +637,7 @@ export class SessionUiService {
         const surface = session.conversationId ? await page.evaluate(conversationLoadSurface, {
           origin: this.#chatgptOrigin, conversationId: session.conversationId, click: false }) : null;
         await prepareChatGptObservation(page, session.pageKey!);
-        return surface?.loadError === true;
+        return { loadError: surface?.loadError === true, targetId: this.#registry.getBinding(session.pageKey!).targetId ?? null };
       });
     } catch (error) {
       throw typedUiError(error);
@@ -646,6 +646,11 @@ export class SessionUiService {
 
   async resume(input: PreparationOwner) {
     return await this.#submissions.resumePreparation(input);
+  }
+
+  async #interactionPage(session: SessionSnapshot): Promise<Page> {
+    const page = this.#requirePage(session);
+    return this.#browserOwner === null ? page : await this.#browserOwner.preparePageInteraction(session.pageKey!, session);
   }
 
   #requirePage(session: { readonly sessionId: string; readonly generation: number; readonly pageKey: string | null; readonly conversationId: string | null }): Page {

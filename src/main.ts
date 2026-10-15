@@ -144,6 +144,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       ? []
       : [
           new ChatGptAdapter({
+            acknowledgementRetryAtMs: new EventRepository(database.raw).acknowledgementRetryAtMs(),
             onBackendRateLimit: ({ session, generation }, evidence) => {
               maintenance.callback(() => new EventRepository(database.raw).append({ teamId: session.teamId, roleId: session.roleId,
                 sessionId: session.sessionId, generation, eventType: 'provider.backend-rate-limit-observed',

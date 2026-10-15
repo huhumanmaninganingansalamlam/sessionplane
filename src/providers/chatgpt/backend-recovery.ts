@@ -3,6 +3,7 @@ import type {
   ProviderRecoveryRequest,
   ProviderSubmissionAcknowledgement,
   ProviderRecoveryResult,
+  ProviderAcknowledgementRecoveryEvidence,
 } from '../provider-adapter.ts';
 import { createHash } from 'node:crypto';
 import { limitationHeaders } from './rate-limit-evidence.ts';
@@ -37,6 +38,7 @@ export interface BackendJsonClient {
 export interface ChatGptBackendRecoveryOptions {
   readonly requestTimeoutMs: number;
   readonly tokenCacheTtlMs: number;
+  readonly acknowledgementRetryAtMs?: number;
   readonly now?: () => Date;
   readonly onRateLimit?: (request: ProviderRecoveryRequest, evidence: BackendRateLimitEvidence) => void;
 }
@@ -53,12 +55,14 @@ export class ChatGptBackendRecovery {
   readonly #onRateLimit: ChatGptBackendRecoveryOptions['onRateLimit'];
   #token: CachedToken | null = null;
   #acknowledgementRetryAt = 0;
+  readonly #acknowledgementWaiting = new Map<string, number>();
 
   constructor(options: ChatGptBackendRecoveryOptions) {
     this.#requestTimeoutMs = options.requestTimeoutMs;
     this.#tokenCacheTtlMs = options.tokenCacheTtlMs;
     this.#now = options.now ?? (() => new Date());
     this.#onRateLimit = options.onRateLimit;
+    this.#acknowledgementRetryAt = options.acknowledgementRetryAtMs ?? 0;
   }
 
   async recover(
@@ -88,8 +92,25 @@ export class ChatGptBackendRecovery {
   async recoverAcknowledgement(
     conversationId: string, prompt: string, client: BackendJsonClient, origin: string,
     attempts?: readonly ProviderSubmissionAttempt[],
+    observe?: (evidence: ProviderAcknowledgementRecoveryEvidence) => void,
   ): Promise<ProviderSubmissionAcknowledgement | null> {
-    if (this.#now().getTime() < this.#acknowledgementRetryAt) return null;
+    const now = this.#now().getTime();
+    // A stopped caller must not retain the head of the queue. Live recovery
+    // callers renew while waiting; the grace covers a request timeout and retry.
+    const callerGraceMs = 2 * Math.max(5_000, this.#requestTimeoutMs);
+    for (const [id, seenAt] of this.#acknowledgementWaiting) {
+      if (now - seenAt > callerGraceMs) this.#acknowledgementWaiting.delete(id);
+    }
+    this.#acknowledgementWaiting.set(conversationId, now);
+    const queued = this.#acknowledgementWaiting.keys().next().value !== conversationId;
+    if (now < this.#acknowledgementRetryAt || queued) {
+      observe?.({ kind: 'deferred', source: 'pacing', reason: queued && now >= this.#acknowledgementRetryAt
+          ? 'backend-acknowledgement-probe-queued' : 'backend-acknowledgement-probe-paced',
+        observedAt: this.#now().toISOString(), nextCheckAt: new Date(Math.max(now + 5_000, this.#acknowledgementRetryAt)).toISOString(),
+        httpStatus: null, endpointCategory: null });
+      return null;
+    }
+    this.#acknowledgementWaiting.delete(conversationId);
     // The shared account probe is bounded even when callers repeatedly inspect.
     this.#acknowledgementRetryAt = this.#now().getTime() + 5_000;
     const result = await this.#conversation(conversationId, client, origin);
@@ -97,14 +118,38 @@ export class ChatGptBackendRecovery {
       if (result.recovery.kind === 'deferred') {
         this.#acknowledgementRetryAt = this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0);
       }
+      observe?.({ kind: result.recovery.kind === 'deferred' ? 'deferred'
+          : result.recovery.kind === 'unverified' ? 'unverified' : 'unavailable',
+        source: 'backend', reason: result.recovery.reason, observedAt: this.#now().toISOString(),
+        nextCheckAt: new Date(this.#acknowledgementRetryAt).toISOString(),
+        httpStatus: result.httpStatus ?? null, endpointCategory: result.endpointCategory ?? null });
       return null;
     }
-    return recoverExactServerAcknowledgement(result.body, conversationId, prompt, attempts);
+    const acknowledgement = recoverExactServerAcknowledgement(result.body, conversationId, prompt, attempts);
+    if (acknowledgement === null) {
+      const payload = result.body;
+      const ids = isRecord(payload) ? [readStringField(payload, 'id'), readStringField(payload, 'conversation_id')]
+        .filter(id => id !== null) : [];
+      const validMapping = isRecord(payload) && isRecord(payload.mapping) && ids.length > 0 && ids.every(id => id === conversationId);
+      const promptMatchCount = validMapping ? Object.values(payload.mapping as Record<string, unknown>).filter(node => {
+        const message = messageForNode(node);
+        return message !== null && messageRole(message) === 'user' &&
+          messageText(message).replaceAll('\r\n', '\n') === prompt.replaceAll('\r\n', '\n');
+      }).length : undefined;
+      observe?.({ kind: 'unverified', source: 'backend', observedAt: this.#now().toISOString(),
+        nextCheckAt: new Date(this.#acknowledgementRetryAt).toISOString(), httpStatus: result.httpStatus,
+        endpointCategory: 'conversation-detail',
+        reason: !validMapping ? 'backend-conversation-mapping-unverified'
+          : promptMatchCount === 0 ? 'backend-exact-prompt-absent'
+          : promptMatchCount! > 1 ? 'backend-exact-prompt-ambiguous' : 'backend-exact-acknowledgement-unverified',
+        ...(promptMatchCount === undefined ? {} : { promptMatchCount }) });
+    }
+    return acknowledgement;
   }
 
   async #conversation(conversationId: string, client: BackendJsonClient, origin: string,
     observe?: (evidence: BackendRateLimitEvidence) => void):
-    Promise<{ body: unknown } | { recovery: ProviderRecoveryResult }> {
+    Promise<{ body: unknown; httpStatus: number } | { recovery: ProviderRecoveryResult; httpStatus?: number; endpointCategory?: 'auth-session' | 'conversation-detail' }> {
     const normalizedOrigin = trustedOrigin(origin);
     if (normalizedOrigin === null) {
       return { recovery: unavailable('backend-origin-untrusted') };
@@ -132,27 +177,27 @@ export class ChatGptBackendRecovery {
     }
 
     if (response.status === 429) {
-      return { recovery: rateLimited(response.headers, this.#now(), 'conversation-detail', observe) };
+      return { recovery: rateLimited(response.headers, this.#now(), 'conversation-detail', observe), httpStatus: response.status, endpointCategory: 'conversation-detail' };
     }
     if (response.status === 401 || response.status === 403) {
       this.#token = null;
-      return { recovery: unavailable('backend-auth-rejected') };
+      return { recovery: unavailable('backend-auth-rejected'), httpStatus: response.status, endpointCategory: 'conversation-detail' };
     }
     if (response.status === 404) {
-      return { recovery: unverified('backend-conversation-not-found') };
+      return { recovery: unverified('backend-conversation-not-found'), httpStatus: response.status, endpointCategory: 'conversation-detail' };
     }
     if (response.status < 200 || response.status >= 300) {
-      return { recovery: unavailable(`backend-http-${response.status}`) };
+      return { recovery: unavailable(`backend-http-${response.status}`), httpStatus: response.status, endpointCategory: 'conversation-detail' };
     }
 
-    return { body: response.body };
+    return { body: response.body, httpStatus: response.status };
   }
 
   async #accessToken(
     client: BackendJsonClient,
     origin: string,
     observe?: (evidence: BackendRateLimitEvidence) => void,
-  ): Promise<{ readonly token: string } | { readonly recovery: ProviderRecoveryResult }> {
+  ): Promise<{ readonly token: string } | { readonly recovery: ProviderRecoveryResult; readonly httpStatus?: number; readonly endpointCategory?: 'auth-session' }> {
     const nowMs = this.#now().getTime();
     if (this.#token !== null && this.#token.expiresAtMs > nowMs) {
       return { token: this.#token.value };
@@ -168,14 +213,14 @@ export class ChatGptBackendRecovery {
       return { recovery: unavailable('backend-auth-session-failed') };
     }
     if (response.status === 429) {
-      return { recovery: rateLimited(response.headers, this.#now(), 'auth-session', observe) };
+      return { recovery: rateLimited(response.headers, this.#now(), 'auth-session', observe), httpStatus: response.status, endpointCategory: 'auth-session' };
     }
     if (response.status < 200 || response.status >= 300) {
-      return { recovery: unavailable(`backend-auth-http-${response.status}`) };
+      return { recovery: unavailable(`backend-auth-http-${response.status}`), httpStatus: response.status, endpointCategory: 'auth-session' };
     }
     const token = readStringField(response.body, 'accessToken');
     if (token === null || token.length < 8) {
-      return { recovery: unavailable('backend-access-token-missing') };
+      return { recovery: unavailable('backend-access-token-missing'), httpStatus: response.status, endpointCategory: 'auth-session' };
     }
     this.#token = {
       value: token,
