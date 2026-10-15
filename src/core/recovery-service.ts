@@ -372,6 +372,7 @@ export class RecoveryService {
           .filter(
             (binding) =>
               binding.generation === snapshot.generation &&
+              binding.bindingState === 'owned' &&
               binding.conversationId !== null &&
               isProviderUrl(snapshot.provider, binding.url),
           )
@@ -600,13 +601,26 @@ export class RecoveryService {
       stored?.targetId == null ||
       stored.sessionId !== snapshot.sessionId ||
       stored.generation !== snapshot.generation ||
-      stored.conversationId !== snapshot.conversationId
+      (stored.conversationId !== snapshot.conversationId && stored.bindingState !== 'identity_lost')
     ) return result(snapshot);
 
     const match = this.#pageRegistry.listBindings({ includeClosed: false }).find(
       (binding) => binding.targetId === stored.targetId,
     );
     if (match === undefined) return result(snapshot);
+    if (needsAcknowledgementRecovery(snapshot) && snapshot.conversationId === null &&
+        match.conversationId !== null && isProviderUrl(snapshot.provider, match.url) &&
+        this.#pageRegistry.findByConversation(match.conversationId).length === 1) {
+      try {
+        if (match.state === 'unbound') this.#pageRegistry.reserveUnknownConversationCandidate(match.pageKey, {
+          sessionId: snapshot.sessionId, generation: snapshot.generation, targetId: stored.targetId });
+        this.#pageRegistry.unknownConversationCandidate(match.pageKey, snapshot);
+        const updated = await this.#recordPageState(snapshot, { pageKey: match.pageKey, observationTransport: 'fresh',
+          reason: 'conversation-awaiting-explicit-acknowledgement', errorCode: snapshot.errorCode },
+          'generation.restart-recovery-candidate');
+        return result(updated, { rebound: true });
+      } catch { return result(snapshot, { unavailable: true }); }
+    }
     if (
       !isProviderUrl(snapshot.provider, match.url) ||
       match.conversationId !== null ||

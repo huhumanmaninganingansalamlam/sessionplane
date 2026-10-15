@@ -268,6 +268,36 @@ export class PageRegistry {
     return this.#snapshot(record);
   }
 
+  /** Restore only a persisted target reservation, without accepting its conversation. */
+  reserveUnknownConversationCandidate(pageKey: string, input: { sessionId: string; generation: number; targetId: string }) {
+    const record = this.#requireRecord(pageKey);
+    const binding = this.refreshPage(pageKey);
+    if (binding.state !== 'unbound' || binding.sessionId !== null || binding.targetId !== input.targetId ||
+        binding.conversationId === null || this.findByConversation(binding.conversationId).length !== 1) {
+      throw new PageRegistryError('session.page-identity-unverified', 'Retained target cannot be reserved for explicit recovery');
+    }
+    record.sessionId = input.sessionId;
+    record.generation = input.generation;
+    record.expectedConversationId = null;
+    this.#reconcileConflicts();
+    this.#emit(record);
+    return this.#snapshot(record);
+  }
+
+  /** Read a caller-retained page after a missing conversation identity is found.
+   * This does not grant ownership or permit page mutation. */
+  unknownConversationCandidate(pageKey: string, identity: { sessionId: string; generation: number }) {
+    const binding = this.refreshPage(pageKey);
+    if (binding.state !== 'identity_lost' || binding.sessionId !== identity.sessionId ||
+        binding.generation !== identity.generation || binding.expectedConversationId !== null ||
+        binding.conversationId === null || binding.targetId === null ||
+        this.findByConversation(binding.conversationId).length !== 1) {
+      throw new PageRegistryError('session.page-identity-unverified',
+        'Conversation recovery requires the unique retained target of this exact generation');
+    }
+    return { binding, page: this.pageForObservation(pageKey) };
+  }
+
   bindVerifiedRedirect(
     pageKey: string,
     input: BindPageInput & { readonly previousConversationId: string },

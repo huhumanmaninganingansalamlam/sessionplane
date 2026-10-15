@@ -174,9 +174,30 @@ export class ChatGptAdapter implements ProviderAdapter {
   ): Promise<ProviderSubmissionAcknowledgement | null> {
     const pageKey = request.session.pageKey;
     const conversationId = request.session.conversationId;
-    if (pageKey === null || conversationId === null) return null;
+    if (pageKey === null) return null;
     try {
       const binding = this.#pageRegistry.refreshPage(pageKey);
+      if (conversationId === null) {
+        // Finding history is not acceptance. Only an explicit selection plus
+        // canonical exact-prompt evidence can bind the retained UNKNOWN page.
+        if (request.selection === undefined) return null;
+        const candidate = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);
+        if (new URL(candidate.page.url()).origin !== new URL(this.#loginUrl).origin) return null;
+        const foundId = candidate.binding.conversationId!;
+        const selected = await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, request.selection);
+        if (selected === null) return null;
+        const server = await this.#backendRecovery.recoverAcknowledgement(
+          foundId, request.prompt, backendClient(candidate.page), new URL(candidate.page.url()).origin);
+        if (server === null || server.submittedUserMessageId !== selected.submittedUserMessageId ||
+            server.submittedUserTurnId !== selected.submittedUserTurnId) return null;
+        const fresh = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);
+        if (fresh.binding.bindingEpoch !== binding.bindingEpoch ||
+            await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, request.selection) === null) return null;
+        if (this.#pageRegistry.refreshPage(pageKey).bindingEpoch !== binding.bindingEpoch) return null;
+        this.#pageRegistry.bindPage(pageKey, { sessionId: request.session.sessionId,
+          generation: request.generation, conversationId: foundId });
+        return { ...server, evidence: 'backend-exact-user' };
+      }
       if (isWebRedirect(binding, request.session.sessionId, request.generation, conversationId)) {
         const page = this.#pageRegistry.pageForObservation(pageKey);
         const acknowledgement = await this.#recoverAcknowledgement(
