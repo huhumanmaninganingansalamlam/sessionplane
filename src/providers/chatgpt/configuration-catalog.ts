@@ -99,7 +99,8 @@ export class ChatGptConfigurationMenu {
         return { x, y };
       });
       this.#lastClick = { role: node.role, expanded: node.expanded, dom: point, browser: box };
-      await this.#page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      // Use the final hit-tested point: compositor geometry can lag a completed animation.
+      await this.#page.mouse.click(point.x, point.y);
     } finally { await element.dispose(); }
   }
 
