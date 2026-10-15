@@ -210,3 +210,68 @@ test('core restart reconnects prepared request to its exact live target, not an 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('restart retains an ambiguous submission on its exact home target without accepting or resending it', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-unknown-target-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  fake.acknowledgementMode = 'missing';
+  const start = () => startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  let service = await start();
+  const firstOwner = service.browserOwner!;
+  const closeFirst = firstOwner.close.bind(firstOwner);
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'unknown-target' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    const original = await firstOwner.createPage();
+    await original.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html',
+      body: '<textarea>Keep the human draft</textarea>' }));
+    await original.page.goto('https://chatgpt.com/');
+    const decoy = await firstOwner.createPage();
+    await decoy.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html',
+      body: '<textarea>Keep the human draft</textarea>' }));
+    await decoy.page.goto('https://chatgpt.com/');
+    const open = fake.openSubmission.bind(fake);
+    t.mock.method(fake, 'openSubmission', async request => {
+      const submission = await open(request);
+      service.pageRegistry.reservePage(original.binding.pageKey, { sessionId: session.sessionId, generation: request.generation });
+      return { ...submission, pageKey: original.binding.pageKey };
+    });
+    await assert.rejects(callRpc({ socketPath: config.socketPath, method: 'session.send', params: {
+      clientId: 'unknown-target', requestId: 'send', sessionId: session.sessionId, prompt: 'Original review',
+    } }), (error: RpcClientError) => (error.data as any).errorCode === 'session.submission-unknown');
+    const before = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(before.conversationId, null);
+    const oldRegistry = service.pageRegistry;
+    firstOwner.close = async () => oldRegistry.detach();
+    await service.close();
+    const lockPath = path.join(firstOwner.status.profileDir, '.sessionplane-profile.lock');
+    const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+    writeFileSync(lockPath, JSON.stringify({ ...lock, pid: 99_999_999 }));
+    service = await start();
+    const after = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(after.submissionState, 'submission_unknown');
+    assert.equal(after.terminal, false);
+    assert.equal(after.submittedUserMessageId, null);
+    assert.equal(after.conversationId, null);
+    assert.equal(after.generation, before.generation);
+    assert.equal(after.reason, 'acknowledgement-missing');
+    const retained = service.pageRegistry.requireSessionPage(after.pageKey!, after);
+    assert.equal(service.pageRegistry.getBinding(after.pageKey!).targetId, original.binding.targetId);
+    assert.equal(await retained.locator('textarea').inputValue(), 'Keep the human draft');
+    assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).find(b => b.targetId === decoy.binding.targetId)?.sessionId, null);
+    assert.equal(fake.submitCount, 1);
+    assert.equal(fake.openCount, 1);
+    service.pageRegistry.unbindPage(after.pageKey!);
+    service.pageRegistry.reservePage(after.pageKey!, { sessionId: 'different-owner', generation: 1 });
+    await service.recoveryService.restore();
+    assert.equal(service.pageRegistry.getBinding(after.pageKey!).sessionId, 'different-owner');
+    // Losing the exact target must not adopt the indistinguishable home tab.
+    await retained.close();
+    await service.recoveryService.restore();
+    assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).find(b => b.targetId === decoy.binding.targetId)?.sessionId, null);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).submissionState, 'submission_unknown');
+    assert.equal(fake.submitCount, 1);
+  } finally { await service.close(); await closeFirst(); rmSync(root, { recursive: true, force: true }); }
+});
