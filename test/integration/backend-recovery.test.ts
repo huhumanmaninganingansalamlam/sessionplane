@@ -335,7 +335,7 @@ test('an unresponsive renderer cannot block exact backend completion or core shu
   }
 });
 
-test('stale DOM recovers an exact server final and backend 429 remains deferred, not blocked', async () => {
+test('stale DOM recovers an exact server final and backend 429 remains deferred, not blocked', async (t) => {
   const fixture = await createFixture('sessionplane-backend-recovery-');
   const { config, fake, service } = fixture;
   try {
@@ -377,6 +377,13 @@ test('stale DOM recovers an exact server final and backend 429 remains deferred,
       roleKey: 'expert.backend',
       provider: 'chatgpt',
     });
+    const recover = fake.recover.bind(fake);
+    t.mock.method(fake, 'recover', async request => {
+      const result = await recover(request);
+      // Hold the provider cooldown boundary while checking DOM-only spinner evidence.
+      if (result.reason === 'backend-http-429') t.mock.timers.enable({ apis: ['Date'], now: Date.now() });
+      return result;
+    });
     fake.queueRecovery(limitedSession.sessionId, {
       kind: 'deferred',
       observationTransport: 'deferred',
@@ -413,6 +420,7 @@ test('stale DOM recovers an exact server final and backend 429 remains deferred,
     });
     assert.equal(afterSpinner.observationTransport, 'deferred');
     assert.equal(afterSpinner.providerState, 'unknown');
+    t.mock.timers.reset();
 
     fake.emitObservation(limitedSession.sessionId, {
       submittedUserFound: false, candidate: null, activity: 'unknown',
@@ -436,6 +444,7 @@ test('stale DOM recovers an exact server final and backend 429 remains deferred,
     assert.equal(restored.errorCode, null);
     assert.equal(restored.answerText, 'Recovered');
   } finally {
+    t.mock.timers.reset();
     await service.close();
     rmSync(fixture.root, { recursive: true, force: true });
   }
