@@ -75,6 +75,11 @@ class HandoverTests(unittest.TestCase):
             db.execute.return_value.fetchone.return_value = (0,)
             with patch.object(handover, 'read_db', return_value=db), patch.object(handover, 'no_writer'):
                 handover.guard(before, before)
+                busy = copy.deepcopy(before)
+                busy['metrics']['session_actor_queue_depth'] = 1
+                handover.guard(busy, before, require_idle=False)  # pre-fence only
+                with self.assertRaisesRegex(AssertionError, 'Actor running or queued'):
+                    handover.guard(busy, before)  # still mandatory after draining
                 for part, key, value in [('metrics', 'session_actor_queue_depth', 1),
                                          ('process', 'pid', 33), ('process', 'startedAt', 'replacement'),
                                          ('browser', 'browserPid', 44), ('database', 'integrity', 'error'),
@@ -84,6 +89,9 @@ class HandoverTests(unittest.TestCase):
                         current[part][key] = value
                         with self.assertRaises(AssertionError):
                             handover.guard(current, before)
+                        if part != 'metrics':
+                            with self.assertRaises(AssertionError):
+                                handover.guard(current, before, require_idle=False)
                 db.execute.return_value.fetchone.return_value = (1,)
                 with self.assertRaisesRegex(AssertionError, 'Active submission'):
                     handover.guard(before, before)
