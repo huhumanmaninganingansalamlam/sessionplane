@@ -54,6 +54,9 @@ machine-readable results and diagnostics.
    `team delete TEAM_ID` permanently removes team history: export needed results first.
    Read chat deletion, tab closure and errors separately; team deletion success does
    not mean every provider chat was deleted, and zero closed tabs does not prove absence.
+   Cleanup preserves composer text, pending file attachments and visible generation.
+   If the page changes conversation during inspection, it stays open with an identity
+   error; inspect the exact predecessor rather than closing the currently active tab.
 
 ## Requirements
 
@@ -67,7 +70,7 @@ Tagged releases attach a prebuilt npm package and SHA-256 checksum. Install the
 release package globally, then run the built-in doctor:
 
 ```bash
-VERSION=0.4.9
+VERSION=0.4.10
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz"
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz.sha256"
 sha256sum -c "sessionplane-$VERSION.tgz.sha256"
@@ -168,11 +171,17 @@ auto-deploy onto user machines because each installation owns local browser
 state and a dedicated persistent profile; host upgrades remain an explicit,
 checksum-verifiable install action.
 
-Start the core in one terminal:
+For an interactive development session, start the core in one terminal:
 
 ```bash
 sessplane serve
 ```
+
+For persistent Linux use, run the same command as a user service tied to the
+graphical login session and enable that service for subsequent logins. A detached
+terminal process or transient scope does not provide reboot startup. Keep the same
+account, state directory and browser profile, and check health before starting to
+avoid a second core.
 
 Query it from another terminal:
 
