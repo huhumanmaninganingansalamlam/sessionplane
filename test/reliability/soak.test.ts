@@ -8,7 +8,6 @@ import { callRpc } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore, type CoreService } from '../../src/main.ts';
-import { RUNTIME_COUNTERS } from '../../src/telemetry/metrics.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 interface TeamSnapshot {
@@ -27,10 +26,7 @@ interface HealthSnapshot {
   readonly metrics: Readonly<Record<string, unknown>>;
 }
 
-const VIRTUAL_MINUTES = 120;
-const VIRTUAL_DURATION_MS = VIRTUAL_MINUTES * 60_000;
-
-test('accelerated two-hour reliability run preserves exact identity across restart and 20 waits', async () => {
+test('restart preserves exact identity across four sessions and 20 concurrent waits', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-reliability-soak-'));
   const initialConfig = resolveConfig({
     cwd: root,
@@ -122,23 +118,12 @@ test('accelerated two-hour reliability run preserves exact identity across resta
       ]),
     );
 
-    for (let minute = 0; minute < 60; minute += 1) {
-      await verifyIdentityCheckpoint(
-        initialConfig.socketPath,
-        sessions.map((session) => session.sessionId),
-        expectedIdentity,
-        minute,
-      );
-      if (minute % 15 === 0) {
-        for (const session of sessions) {
-          firstAdapter.emitObservation(session.sessionId, {
-            activity: 'strong',
-            candidate: null,
-            networkActivity: false,
-          });
-        }
-      }
-    }
+    await verifyIdentityCheckpoint(
+      initialConfig.socketPath,
+      sessions.map((session) => session.sessionId),
+      expectedIdentity,
+      'before restart',
+    );
 
     await service.close();
 
@@ -182,23 +167,12 @@ test('accelerated two-hour reliability run preserves exact identity across resta
     );
     assert.ok(Number(deferredHealth.metrics.backend_probe_deferred_total) >= 1);
 
-    for (let minute = 60; minute < VIRTUAL_MINUTES; minute += 1) {
-      await verifyIdentityCheckpoint(
-        restartConfig.socketPath,
-        sessions.map((session) => session.sessionId),
-        expectedIdentity,
-        minute,
-      );
-      if (minute % 15 === 0) {
-        for (const session of sessions) {
-          restartedAdapter.emitObservation(session.sessionId, {
-            activity: 'strong',
-            candidate: null,
-            networkActivity: false,
-          });
-        }
-      }
-    }
+    await verifyIdentityCheckpoint(
+      restartConfig.socketPath,
+      sessions.map((session) => session.sessionId),
+      expectedIdentity,
+      'after restart',
+    );
 
     const waitSession = sessions[0];
     assert.notEqual(waitSession, undefined);
@@ -295,11 +269,6 @@ test('accelerated two-hour reliability run preserves exact identity across resta
     >;
     assert.equal(Object.values(integrity)[0], 'ok');
     assert.equal(firstAdapter.submitCount + restartedAdapter.submitCount, 4);
-    assert.equal(VIRTUAL_DURATION_MS, 2 * 60 * 60 * 1_000);
-    assert.deepEqual(
-      RUNTIME_COUNTERS.filter((name) => name.endsWith('_total')).sort(),
-      [...RUNTIME_COUNTERS].filter((name) => name.endsWith('_total')).sort(),
-    );
   } finally {
     await service.close();
     rmSync(root, { recursive: true, force: true });
@@ -350,7 +319,7 @@ async function verifyIdentityCheckpoint(
       readonly conversationId: string | null;
     }
   >,
-  minute: number,
+  phase: string,
 ): Promise<void> {
   const snapshots = await Promise.all(
     sessionIds.map((sessionId) =>
@@ -362,14 +331,14 @@ async function verifyIdentityCheckpoint(
   );
   for (const snapshot of snapshots) {
     const identity = expected.get(snapshot.sessionId);
-    assert.notEqual(identity, undefined, `minute ${minute}: unexpected session`);
-    assert.equal(snapshot.teamId, identity?.teamId, `minute ${minute}: team mismatch`);
-    assert.equal(snapshot.roleKey, identity?.roleKey, `minute ${minute}: role mismatch`);
-    assert.equal(snapshot.generation, identity?.generation, `minute ${minute}: generation mismatch`);
+    assert.notEqual(identity, undefined, `${phase}: unexpected session`);
+    assert.equal(snapshot.teamId, identity?.teamId, `${phase}: team mismatch`);
+    assert.equal(snapshot.roleKey, identity?.roleKey, `${phase}: role mismatch`);
+    assert.equal(snapshot.generation, identity?.generation, `${phase}: generation mismatch`);
     assert.equal(
       snapshot.conversationId,
       identity?.conversationId,
-      `minute ${minute}: conversation mismatch`,
+      `${phase}: conversation mismatch`,
     );
   }
 }

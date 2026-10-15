@@ -123,7 +123,11 @@ command at this source checkout. The public command surface is intentionally
 `sessplane` only. To avoid changing the global link, use
 `node bin/sessplane.mjs` directly instead.
 
-Before creating a release tag, run `npm run verify:clean` on a supported host
+`npm run test:acceptance` exercises team/session lifecycle, exact submission,
+large-answer transport and restart with concurrent waits. The restart fixture
+does not simulate elapsed hours; it verifies the actual before/after transitions.
+
+Before creating a release tag, run `npm run release:preflight` on a supported host
 with a user-installed Chromium-family browser. GitHub-hosted CI runs
 `npm run test:ci`, which excludes host-browser spawn tests because the hosted
 runner sandbox is not the SessionPlane runtime environment. Tagged releases

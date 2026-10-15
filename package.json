@@ -24,7 +24,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --test --test-concurrency=1 --experimental-strip-types test/**/*.test.ts",
     "test:ci": "node --test --test-concurrency=1 --experimental-strip-types $(find test -name '*.test.ts' ! -path 'test/browser/*' ! -path 'test/integration/browser-cli-mcp.test.ts' | sort)",
-    "test:acceptance": "node --test --test-concurrency=1 --experimental-strip-types test/reliability/acceptance.test.ts",
+    "test:acceptance": "node --test --test-concurrency=1 --experimental-strip-types test/reliability/soak.test.ts test/integration/session-send.test.ts test/integration/large-answer-transport.test.ts test/integration/team-session-rpc.test.ts",
     "test:reliability": "node --test --test-concurrency=1 --experimental-strip-types test/reliability/*.test.ts test/integration/restart-recovery.test.ts test/browser/browser-restart-recovery.test.ts",
     "test:package": "node scripts/package-smoke.mjs",
     "release:preflight": "node scripts/release-preflight.mjs",
