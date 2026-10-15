@@ -257,7 +257,7 @@ test('provider deletion deferral and uncertain acknowledgement independently clo
   try {
     const team = core.teamDirectory.createTeam({ clientId: 'deferred' });
     const unrelated = await core.browserOwner!.createPage();
-    for (const outcome of ['deferred', 'rejected', 'unknown', 'draft', 'attachment-draft', 'generating', 'navigated', 'late-navigation'] as const) {
+    for (const outcome of ['deferred', 'rejected', 'unknown', 'draft', 'attachment-draft', 'file-input-draft', 'generating', 'navigated', 'late-navigation'] as const) {
       mode = outcome === 'rejected' || outcome === 'unknown' ? outcome : 'deferred';
       core.teamDirectory.createRole({ teamId: team.teamId, roleKey: outcome, roleType: 'expert' });
       const session = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: outcome, provider: 'chatgpt' });
@@ -288,6 +288,10 @@ test('provider deletion deferral and uncertain acknowledgement independently clo
       });
       duringPrepare = async () => {
         prepared = true;
+        if (outcome === 'file-input-draft') {
+          await page.setContent('<form><textarea></textarea><input type="file" data-testid="attachment-input"></form>');
+          await page.locator('input[type="file"]').setInputFiles({ name: 'unsent-notes.txt', mimeType: 'text/plain', buffer: Buffer.from('Preserve original attachment') });
+        }
         if (outcome === 'attachment-draft') await page.setContent('<form><textarea></textarea><input type="file"><div data-testid="file-pill">unsent-notes.txt</div></form>');
         if (outcome === 'draft') await page.locator('textarea').fill('Preserve human draft');
         if (outcome === 'generating') await page.evaluate(() => {

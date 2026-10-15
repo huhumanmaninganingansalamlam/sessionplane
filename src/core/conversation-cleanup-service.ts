@@ -347,6 +347,7 @@ export class ConversationCleanupService {
   async #requireIdlePage(page: import('playwright-core').Page) {
     const unsafe = await page.locator('textarea, [contenteditable="true"]:not(article *, [data-message-author-role] *, [data-chatgpt-search-message-ids] *), input[type="file"], button, [data-testid*="file-pill"], [data-testid*="attachment"]').evaluateAll(elements =>
       elements.some(element => {
+        if (element instanceof HTMLInputElement && element.type === 'file') return (element.files?.length ?? 0) > 0;
         const testId = element.getAttribute('data-testid') ?? '';
         if (/file-pill|attachment/.test(testId)) {
           const form = element.closest('form');
@@ -355,7 +356,6 @@ export class ConversationCleanupService {
             (element.textContent ?? '').trim().length > 0 &&
             element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden';
         }
-        if (element instanceof HTMLInputElement && element.type === 'file') return (element.files?.length ?? 0) > 0;
         if (element instanceof HTMLButtonElement) return element.getClientRects().length > 0 && (
           /^(?:stop generating|stop streaming|stop response|응답 중지|생성 중지|중지)$/i.test(element.getAttribute('aria-label') ?? '') ||
           element.getAttribute('data-testid') === 'stop-button');
