@@ -298,7 +298,14 @@ test('missing DOM user binds only the exact backend prompt and retrieves its fin
     assert.equal(urls.length, 0, 'Explicit selections never bypass original evidence');
     const acknowledgement = await adapter.recoverAcknowledgement({ session, generation: 1, prompt: 'Question' });
     assert.equal(acknowledgement?.submittedUserMessageId, 'backend-user');
-    const result = await adapter.recover({ session: { ...session, ...acknowledgement }, generation: 1 });
+    const acknowledged = { session: { ...session, ...acknowledgement }, generation: 1 };
+    const probes = urls.length;
+    const paced = await adapter.recover(acknowledged);
+    assert.equal(paced.kind, 'deferred');
+    assert.equal(paced.reason, 'backend-conversation-probe-paced');
+    assert.equal(urls.length, probes, 'ACK and answer recovery cannot race separate canonical GETs');
+    await page.waitForTimeout(paced.retryAfterMs! + 20);
+    const result = await adapter.recover(acknowledged);
     assert.equal(result.kind, 'complete');
     assert.equal(result.responseMessageId, 'backend-answer');
     assert.equal(result.answerText, 'Exact recovered result');
