@@ -26,6 +26,49 @@ import { PageRegistry } from '../../src/browser/page-registry.ts';
 
 const HOST_BROWSER = findHostBrowser();
 
+test('retired conversation cleanup finds a pre-adoption crashed target without touching live drafts or other chats', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-crashed-cleanup-'));
+  const first = new BrowserOwner({ profileDir: root, pageRegistry: new PageRegistry(), headless: true,
+    browserExecutable: HOST_BROWSER?.executable ?? null });
+  const registry = new PageRegistry();
+  const second = new BrowserOwner({ profileDir: root, pageRegistry: registry, headless: true,
+    browserExecutable: HOST_BROWSER?.executable ?? null });
+  try {
+    await first.start();
+    const retired = await first.createPage();
+    const other = await first.createPage();
+    for (const [created, conversation] of [[retired, 'retired-conversation'], [other, 'active-conversation']] as const) {
+      await created.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html',
+        body: created === retired ? '<main>Retrieved final</main><textarea></textarea>' : '<textarea>Keep draft</textarea>' }));
+      await created.page.goto('https://chatgpt.com/c/' + conversation);
+    }
+    const control = await retired.page.context().newCDPSession(retired.page);
+    const crashed = once(retired.page, 'crash');
+    void control.send('Page.crash').catch(() => {});
+    await crashed;
+    const lockPath = path.join(root, '.sessionplane-profile.lock');
+    const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+    writeFileSync(lockPath, JSON.stringify({ ...lock, pid: 99_999_999 }), { mode: 0o600 });
+    await second.start();
+    assert.equal(registry.listBindings().some(b => b.targetId === retired.binding.targetId), false,
+      'Original failure: crashed Chrome tab is absent from Playwright pages after adoption');
+    const browserControl = await other.page.context().browser()!.newBrowserCDPSession();
+    const targets = async () => (await browserControl.send('Target.getTargets')).targetInfos.map(t => t.targetId);
+    const held = await second.closeCrashedConversationPages('chatgpt', 'retired-conversation', () => false);
+    assert.equal(held.closedPages, 0);
+    assert.deepEqual(held.pageErrors, ['session.cleanup-not-ready']);
+    assert.ok((await targets()).includes(retired.binding.targetId!));
+    const closed = await second.closeCrashedConversationPages('chatgpt', 'retired-conversation', () => true);
+    assert.deepEqual(closed, { closedPages: 1, pageErrors: [] });
+    assert.equal((await targets()).includes(retired.binding.targetId!), false);
+    assert.equal(other.page.isClosed(), false);
+    assert.equal(await other.page.locator('textarea').inputValue(), 'Keep draft');
+    assert.deepEqual(await second.closeCrashedConversationPages('chatgpt', 'active-conversation', () => true),
+      { closedPages: 0, pageErrors: [] });
+    await browserControl.detach();
+  } finally { await second.close(); await first.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('a zombie core lock owner permits adoption of the same live browser and tabs', { skip: process.platform !== 'linux' }, async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-zombie-owner-'));
   const registry = new PageRegistry();

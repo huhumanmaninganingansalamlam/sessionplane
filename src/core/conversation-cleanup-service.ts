@@ -44,12 +44,14 @@ export class ConversationCleanupService {
     database: SessionPlaneDatabase; scheduler: ActorScheduler; adapters: ProviderAdapterRegistry;
     pageMutex: PageMutationMutex; registry: PageRegistry;
     directory: TeamDirectory; onDeleted: (sessionId: string) => void;
+    closeCrashedPages?: (session: SessionSnapshot, canClose: () => boolean) => Promise<{ closedPages: number; pageErrors: string[] }>;
   };
 
   constructor(options: {
     database: SessionPlaneDatabase; scheduler: ActorScheduler; adapters: ProviderAdapterRegistry;
     pageMutex: PageMutationMutex; registry: PageRegistry;
     directory: TeamDirectory; onDeleted: (sessionId: string) => void;
+    closeCrashedPages?: (session: SessionSnapshot, canClose: () => boolean) => Promise<{ closedPages: number; pageErrors: string[] }>;
   }) {
     this.#options = options;
   }
@@ -343,6 +345,14 @@ export class ConversationCleanupService {
           await page.close();
           result.closedPages += 1;
         });
+      } catch (error) { result.pageErrors.push(cleanupErrorCode(error)); }
+    }
+    if (session.conversationId !== null && this.#options.closeCrashedPages !== undefined) {
+      try {
+        const pages = await this.#options.closeCrashedPages(session, () =>
+          !sessions.conversationCleanupBlocker(session.sessionId, session.conversationId!, true));
+        result.closedPages += pages.closedPages;
+        result.pageErrors.push(...pages.pageErrors);
       } catch (error) { result.pageErrors.push(cleanupErrorCode(error)); }
     }
     return result;
