@@ -14,6 +14,39 @@ import { inspectChatGptSubmissionCandidates, recoverChatGptAcknowledgement } fro
 
 const CONVERSATION_ID = 'conversation-observer-123456';
 
+test('writing-block answers retain authored prose and documents without suggested follow-up UI', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-writing-block-answer-'));
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: new PageRegistry(), headless: true });
+  try {
+    await owner.start();
+    const { page } = await owner.createPage();
+    const authoredQuestion = '명시적 Chosen 기준을 정의해줘';
+    await page.setContent(`<main>
+      <div data-chatgpt-search-message-ids="user-exact"><div data-user-message-bubble>Question</div></div>
+      <div data-chatgpt-search-message-ids="answer-exact">
+        <div data-chatgpt-selection-message-id="answer-exact"><div data-markdown-text-style="assistant-message">
+          <p>Before <code>inline code</code>.</p>
+          <div data-oai-writing-block-surface data-testid="chatgpt-writing-block">
+            <header>Provider document toolbar<button>Copy</button></header>
+            <div class="writing-block-editor"><div role="textbox" class="ProseMirror" contenteditable="true"><p>${authoredQuestion}</p><pre>code\nsecond line</pre><p>SPEC: READY</p></div></div>
+          </div>
+          <div><div><button class="group/suggested-followup">${authoredQuestion}</button><button class="group/suggested-followup">삭제 원자성의 책임 경계를 분명히 해줘</button></div>
+            <div aria-hidden="true" style="visibility:hidden">${authoredQuestion}</div></div>
+          <p>Actual prose after the document.</p>
+          <div data-testid="chatgpt-writing-block"><header>Second toolbar</header><div class="writing-block-editor"><div role="textbox"><p>Second document</p></div></div></div>
+        </div></div>
+      </div><textarea id="prompt-textarea">Preserved manual draft</textarea>
+    </main>`);
+    const observation = await observeChatGptDom(page, { submittedUserMessageId: 'user-exact', submittedUserTurnId: null });
+    assert.equal(observation.submittedUserFound, true);
+    assert.equal(observation.candidate?.responseMessageId, 'answer-exact');
+    assert.equal(observation.candidate?.answerText,
+      `Before inline code.\n\n${authoredQuestion}\n\ncode\nsecond line\n\nSPEC: READY\n\nActual prose after the document.\n\nSecond document`);
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved manual draft');
+    assert.equal(await page.locator('.writing-block-editor [role="textbox"]').first().innerText(), `${authoredQuestion}\n\ncode\nsecond line\n\nSPEC: READY`);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('completed exact artifact discovery restores a virtualized answer through the existing latest-position button', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-virtualized-artifact-'));
   const registry = new PageRegistry();
