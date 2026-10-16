@@ -1,4 +1,5 @@
-import type { ElementHandle, Page } from 'playwright-core';
+import type { ElementHandle, Page, Response } from 'playwright-core';
+import type { BrowserOwner } from '../../browser/browser-owner.ts';
 import { ProviderSubmissionError, type ProviderArtifactCandidate, type ProviderArtifactRequest } from '../provider-adapter.ts';
 import { readChatGptMessages } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
@@ -79,7 +80,7 @@ export async function discoverFileCards(page: Page, request: ProviderArtifactReq
   } finally { await current.dispose(); }
 }
 
-export async function downloadFileCard(page: Page, request: ProviderArtifactRequest, candidate: ProviderArtifactCandidate, check: () => void) {
+export async function downloadFileCard(page: Page, request: ProviderArtifactRequest, candidate: ProviderArtifactCandidate, check: () => void, owner: BrowserOwner) {
   const root = await exactRoot(page, request);
   try {
     const found = (await cards(root)).filter(c => source(request.session.responseMessageId!, c.name) === candidate.sourceUrl);
@@ -103,16 +104,42 @@ export async function downloadFileCard(page: Page, request: ProviderArtifactRequ
     if (!stillNamed) unavailable('File card changed before download');
     check();
     // Keyboard activation avoids the observed preview overlay; never force-click it.
-    const pending = page.waitForEvent('download', { timeout: 15_000 }).then(download => ({ download }), error => ({ error }));
-    await button.focus();
-    await button.press('Enter', { timeout: 5_000 });
-    const result = await pending;
-    if ('error' in result) throw new ProviderSubmissionError('provider.artifact-download-failed', 'File card produced no confirmed download');
-    check();
-    if (result.download.suggestedFilename() !== found[0]!.name) unavailable('Downloaded filename does not match the exact file card');
-    const stream = await result.download.createReadStream();
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
-    return { candidate, bytes: new Uint8Array(Buffer.concat(chunks)) };
+    const transport: string[] = [];
+    let popups = 0;
+    const onPopup = () => { popups++; };
+    const onResponse = (response: Response) => {
+      if (!['fetch', 'xhr', 'document'].includes(response.request().resourceType())) return;
+      const url = new URL(response.url());
+      const category = url.pathname.includes('/files/') ? 'file-metadata'
+        : url.pathname.includes('/content') ? 'file-content' : 'provider-request';
+      const headers = response.headers();
+      const retryAfter = headers['retry-after'];
+      const mime = headers['content-type']?.split(';')[0];
+      const contentType = mime && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(mime) ? mime : 'unknown';
+      const disposition = headers['content-disposition'] ?? '';
+      const filename = /(?:^|;)\s*filename=(?:"([^"]*)"|([^;\s]+))/i.exec(disposition);
+      const exactFilename = (filename?.[1] ?? filename?.[2]) === found[0]!.name;
+      transport.push(`${category}:HTTP${response.status()}:type=${contentType}:attachment=${/^attachment\b/i.test(disposition)}:exactFilename=${exactFilename}${retryAfter && /^\d+$/.test(retryAfter) ? `:Retry-After=${retryAfter}s` : ''}`);
+    };
+    page.on('response', onResponse);
+    page.on('popup', onPopup);
+    try {
+      const bytes = await owner.captureDownload(page, found[0]!.name, async () => {
+        await button.focus();
+        await button.press('Enter', { timeout: 5_000 });
+      });
+      check();
+      const verified = await exactRoot(page, request);
+      await verified.dispose();
+      return { candidate, bytes };
+    } catch (error) {
+      if (error instanceof ProviderSubmissionError) throw error;
+      const focused = await button.evaluate(element => document.activeElement === element).catch(() => false);
+      throw new ProviderSubmissionError('provider.artifact-download-failed',
+        `File card produced no confirmed download (${transport.slice(-10).join(', ') || 'no transport response'}; popups=${popups}; downloadControlFocused=${focused})`);
+    } finally {
+      page.off('response', onResponse);
+      page.off('popup', onPopup);
+    }
   } finally { await root.dispose(); }
 }

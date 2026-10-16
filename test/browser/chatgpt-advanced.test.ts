@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
+import { chromium } from 'playwright-core';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,7 +21,19 @@ import { navigateProviderPage } from '../../src/providers/human-verification.ts'
 
 test('localized file-card discovery and exact download preserve response ancestry', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-localized-file-'));
-  const server = createServer((_req, res) => { res.setHeader('content-type', 'text/html'); res.end('<main></main>'); });
+  let attachmentReads = 0;
+  const server = createServer((req, res) => {
+    if (req.url === '/content/exact-file') {
+      attachmentReads++;
+      const filename = 'PRD.final.md';
+      res.writeHead(200, { 'content-type': 'text/markdown', 'content-disposition': `attachment; filename="${filename}"` });
+      res.end('# Original attachment bytes\n'); return;
+    }
+    if (req.url?.startsWith('/files/blocked')) {
+      res.writeHead(429, { 'retry-after': '3' }); res.end('private provider body'); return;
+    }
+    res.setHeader('content-type', 'text/html'); res.end('<main></main>');
+  });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: new PageRegistry(), headless: true });
   try {
@@ -44,11 +57,48 @@ test('localized file-card discovery and exact download preserve response ancestr
       const found = await discoverFileCards(page, request, () => {});
       assert.deepEqual(found.map(c => c.name), [name]);
       const candidate = { providerArtifactId:'isolated-card', name, sourceUrl:found[0]!.source, mediaType:null };
-      assert.equal(Buffer.from((await downloadFileCard(page, request, candidate, () => {})).bytes).toString(), 'ISOLATED-FIXTURE-BYTES');
+      assert.equal(Buffer.from((await downloadFileCard(page, request, candidate, () => {}, owner)).bytes).toString(), 'ISOLATED-FIXTURE-BYTES');
       await page.evaluate(() => { document.querySelector('[data-message-id="exact-user"]')!.setAttribute('data-message-id','different-user'); });
       await assert.rejects(discoverFileCards(page, request, () => {}), /anchor/);
-      await assert.rejects(downloadFileCard(page, request, candidate, () => {}), /anchor/);
+      await assert.rejects(downloadFileCard(page, request, candidate, () => {}, owner), /anchor/);
     }
+    // A replacement controller uses noDefaults to preserve all sibling pages.
+    // Its download event setup is absent, although the exact attachment GET succeeds.
+    const adopted = await chromium.connectOverCDP(`http://127.0.0.1:${owner.status.debuggingPort}`, { noDefaults: true });
+    try {
+      const retained = adopted.contexts()[0]!.pages().find(p => p.url() === page.url())!;
+      await retained.setContent('<main><div data-message-author-role="user" data-message-id="exact-user">User</div><div data-message-author-role="assistant" data-message-id="exact-answer"><div><button aria-label="Open preview of PRD.final.md"></button><button aria-label="Download file">Download</button></div></div></main>');
+      const trigger = async (wrongName: boolean) => await retained.locator('[aria-label="Download file"]').evaluate((button, wrongName) => {
+        (button as HTMLButtonElement).onclick = async () => {
+          const body = await (await fetch('/content/exact-file')).blob();
+          const link = document.createElement('a'); link.download = wrongName ? 'other.md' : 'PRD.final.md'; link.href = URL.createObjectURL(body); link.click();
+        };
+      }, wrongName);
+      await trigger(false);
+      const card = (await discoverFileCards(retained, request, () => {}))[0]!;
+      const bytes = await downloadFileCard(retained, request, { providerArtifactId: 'retained-card', name: card.name, sourceUrl: card.source, mediaType: null }, () => {}, owner);
+      assert.equal(Buffer.from(bytes.bytes).toString(), '# Original attachment bytes\n');
+      assert.equal(attachmentReads, 1, 'original card activation alone; no duplicate GET');
+      await trigger(true);
+      await assert.rejects(downloadFileCard(retained, request, { providerArtifactId: 'retained-card', name: card.name, sourceUrl: card.source, mediaType: null }, () => {}, owner), /no confirmed download/);
+      assert.equal(attachmentReads, 2, 'a wrong download filename is rejected without another GET');
+      await retained.locator('[aria-label="Download file"]').evaluate(button => {
+        const body = new Blob(['CACHED-ORIGINAL-BYTES']);
+        const url = URL.createObjectURL(body);
+        (button as HTMLButtonElement).onclick = () => { const link = document.createElement('a'); link.download = 'PRD.final.md'; link.href = url; link.click(); };
+      });
+      const cached = await downloadFileCard(retained, request, { providerArtifactId: 'retained-card', name: card.name, sourceUrl: card.source, mediaType: null }, () => {}, owner);
+      assert.equal(Buffer.from(cached.bytes).toString(), 'CACHED-ORIGINAL-BYTES');
+      assert.equal(attachmentReads, 2, 'cached downloads also need no network request');
+    } finally { await adopted.close(); }
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="exact-user">User</div><div data-message-author-role="assistant" data-message-id="exact-answer"><div><button aria-label="Open preview of PRD.final.md"></button><button aria-label="Download file" onclick="void fetch(\'/files/blocked?signature=private-query\')">Download</button></div></div></main>');
+    const blocked = (await discoverFileCards(page, request, () => {}))[0]!;
+    await assert.rejects(downloadFileCard(page, request, { providerArtifactId: 'blocked-card', name: blocked.name,
+      sourceUrl: blocked.source, mediaType: null }, () => {}, owner), error => {
+      assert.match((error as Error).message, /file-metadata:HTTP429:.*Retry-After=3s/);
+      assert.doesNotMatch((error as Error).message, /signature|private-query|private provider body/);
+      return true;
+    });
   } finally { await owner.close(); server.close(); rmSync(root, { recursive:true, force:true }); }
 });
 

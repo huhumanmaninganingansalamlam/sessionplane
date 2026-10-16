@@ -472,7 +472,7 @@ export class ChatGptAdapter implements ProviderAdapter {
     if (candidate.sourceUrl.startsWith('sessionplane-file-card:')) {
       return await this.#pageMutex.runExclusive(request.session.pageKey!, async () => {
         this.#requireExactArtifactPage(request);
-        return await downloadFileCard(page, request, candidate, () => { this.#requireExactArtifactPage(request); });
+        return await downloadFileCard(page, request, candidate, () => { this.#requireExactArtifactPage(request); }, this.#browserOwner);
       });
     }
     const result = await page.evaluate(async (sourceUrl) => {
