@@ -10,7 +10,7 @@ import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { observeChatGptAlerts, observeChatGptDom } from '../../src/providers/chatgpt/dom-observer.ts';
 import { ExactFinalTracker } from '../../src/providers/chatgpt/exact-final.ts';
-import { recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submission.ts';
+import { inspectChatGptSubmissionCandidates, recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submission.ts';
 
 const CONVERSATION_ID = 'conversation-observer-123456';
 
@@ -210,7 +210,7 @@ test('thinking-failed activity headers report an exact nonterminal provider erro
   }
 });
 
-test('automatic UNKNOWN recovery never confirms an optimistic DOM anchor without the same canonical user', async (t) => {
+test('automatic and selected UNKNOWN recovery require the exact canonical user, preserving failed POST uncertainty', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-optimistic-ack-'));
   const registry = new PageRegistry();
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
@@ -234,7 +234,7 @@ test('automatic UNKNOWN recovery never confirms an optimistic DOM anchor without
         json: async () => url.endsWith('/api/auth/session') ? { accessToken: 'fixture-only-token' } : {
           id: CONVERSATION_ID, current_node: userId === null ? 'root' : 'user', mapping: {
             root: { parent: null, message: null },
-            ...(userId === null ? {} : { user: { parent: 'root', message: { id: userId, author: { role: 'user' }, content: { parts: ['Question'] } } } }),
+            ...(userId === null ? {} : { user: { parent: 'root', message: { id: userId, turn_id: userId, author: { role: 'user' }, content: { parts: ['Question'] } } } }),
           },
         },
       };
@@ -245,6 +245,7 @@ test('automatic UNKNOWN recovery never confirms an optimistic DOM anchor without
     for (const scenario of [
       { status: 200, userId: null },
       { status: 429, userId: 'optimistic-user' },
+      { status: 500, userId: 'optimistic-user' },
       { status: 200, userId: 'different-user' },
       { status: 200, userId: 'optimistic-user' },
     ]) {
@@ -261,6 +262,17 @@ test('automatic UNKNOWN recovery never confirms an optimistic DOM anchor without
         const before = probes;
         assert.equal(await adapter.recoverAcknowledgement({ session, generation: 1, prompt: 'Question' }), null);
         assert.equal(probes, before, 'Retry-After prevents another backend probe');
+      }
+      const [selection] = await inspectChatGptSubmissionCandidates(page, CONVERSATION_ID);
+      const selectedAdapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/', acknowledgementTimeoutMs: 500 });
+      const selected = await selectedAdapter.recoverAcknowledgement({ session, generation: 1, prompt: 'Question', selection: selection! });
+      assert.equal(selected?.submittedUserMessageId ?? null,
+        status === 200 && userId === 'optimistic-user' ? userId : null,
+        `Explicit selection cannot turn a failed or unverified POST into acceptance: ${JSON.stringify(scenario)}`);
+      if (status === 429) {
+        const before = probes;
+        assert.equal(await selectedAdapter.recoverAcknowledgement({ session, generation: 1, prompt: 'Question', selection: selection! }), null);
+        assert.equal(probes, before, 'Explicit recovery preserves Retry-After too');
       }
     }
     assert.equal(pageRequests, 1, 'No submit or navigation after the isolated fixture load');
