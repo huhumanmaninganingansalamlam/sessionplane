@@ -406,8 +406,11 @@ Normal refresh/preparation/submission/observation do not share this UI wait.
 Account/user/IP/global scope evidence on a429 holds all affected actions. Otherwise
 list429 holds only the list budget; detail429 holds that conversation's recovery.
 Other endpoint categories do not imply account-wide restrictions. Valid Retry-After
-seconds/date is honored; absent/invalid headers retain the15min fallback in that
-scope. An unquantified visible service-limit notice holds that conversation.
+seconds/date sets the next backend probe delay, subject to normal dispatch spacing;
+accumulated exponential backoff and jitter apply only without a valid server delay.
+Independently retained longer endpoint/account holds still win. Passive load-recovery
+observations without valid headers retain the15min fallback in that scope.
+An unquantified visible service-limit notice holds that conversation.
 A legacy blanket deadline is relocated only when its exact durable event proves
 list-only origin; unknown/operator/broader holds remain. The original event and
 reclassification evidence are retained, and attempts never reset.
