@@ -13,7 +13,7 @@ import {
 import { createServer } from 'node:net';
 import path from 'node:path';
 
-import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
+import { chromium, type Browser, type BrowserContext, type CDPSession, type Page } from 'playwright-core';
 
 import {
   findHostBrowser,
@@ -106,6 +106,7 @@ export class BrowserOwner {
   #lockToken: string | null = null;
   #context: BrowserContext | null = null;
   #browser: Browser | null = null;
+  #downloadControl: Promise<CDPSession> | null = null;
   readonly #recoveryControllers = new Map<string, Browser>();
   readonly #interactionReady = new WeakMap<Page, Promise<void>>();
   #browserProcess: ChildProcess | null = null;
@@ -188,6 +189,7 @@ export class BrowserOwner {
         ...(adopted === null ? {} : { noDefaults: true }),
       });
       this.#browser = browser;
+      this.#downloadControl = null;
       const context = browser.contexts()[0];
       if (context === undefined) {
         throw new BrowserOwnerError(
@@ -239,6 +241,66 @@ export class BrowserOwner {
         `Failed to launch and attach to the selected host browser: ${this.#lastError}`,
         { cause: error },
       );
+    }
+  }
+
+  async captureDownload(page: Page, name: string, activate: () => Promise<void>): Promise<Uint8Array> {
+    if (this.#browser === null || this.#state !== 'ready') throw new BrowserOwnerError('browser.unavailable', 'Download owner is not ready');
+    // noDefaults adoption intentionally skips Playwright's download setup. Restore
+    // only the dedicated profile's download transport, without per-page overrides.
+    const directory = path.join(this.#profileDir, 'sessionplane-downloads');
+    if (this.#downloadControl === null) {
+      mkdirSync(directory, { recursive: true, mode: 0o700 });
+      this.#downloadControl = this.#browser.newBrowserCDPSession().then(async control => {
+        await control.send('Browser.setDownloadBehavior', { behavior: 'allowAndName', downloadPath: directory, eventsEnabled: true });
+        return control;
+      });
+    }
+    const control = await this.#downloadControl;
+    const frameControl = await page.context().newCDPSession(page);
+    let frameId: string;
+    try { frameId = (await frameControl.send('Page.getFrameTree')).frameTree.frame.id; }
+    finally { await frameControl.detach(); }
+    let guid: string | null = null;
+    let resolve!: (bytes: Uint8Array) => void;
+    let reject!: (error: Error) => void;
+    const completion = new Promise<Uint8Array>((yes, no) => { resolve = yes; reject = no; });
+    // Install a handler before activation so failure does not leave a rejection unhandled.
+    const settled = completion.then(bytes => ({ bytes }), error => ({ error }));
+    const fail = (message: string) => reject(new BrowserOwnerError('browser.download-failed', message));
+    const onBegin = (event: { frameId: string; suggestedFilename: string; guid: string }) => {
+      if (event.frameId !== frameId) return;
+      if (event.suggestedFilename !== name || guid !== null || !/^[a-f0-9-]+$/i.test(event.guid)) {
+        fail('Download identity is missing, changed or ambiguous'); return;
+      }
+      guid = event.guid;
+    };
+    const onProgress = (event: { guid: string; state: string; receivedBytes: number; totalBytes: number; filePath?: string }) => {
+      if (event.guid !== guid || event.state === 'inProgress') return;
+      if (event.state !== 'completed') { fail('Exact download was not completed'); return; }
+      const file = path.join(directory, event.guid);
+      if (event.filePath !== undefined && event.filePath !== file) { fail('Download path differs from the owned sink'); return; }
+      try {
+        const bytes = readFileSync(file);
+        if (bytes.length !== event.receivedBytes || (event.totalBytes > 0 && bytes.length !== event.totalBytes)) {
+          fail('Completed download byte count differs'); return;
+        }
+        unlinkSync(file); // Only this exact completed GUID; preserve sibling downloads.
+        resolve(new Uint8Array(bytes));
+      } catch { fail('Completed download bytes are unavailable'); }
+    };
+    control.on('Browser.downloadWillBegin', onBegin);
+    control.on('Browser.downloadProgress', onProgress);
+    const timer = setTimeout(() => fail('No confirmed download completion'), 15_000);
+    try {
+      await activate();
+      const result = await settled;
+      if ('error' in result) throw result.error;
+      return result.bytes;
+    } finally {
+      clearTimeout(timer);
+      control.off('Browser.downloadWillBegin', onBegin);
+      control.off('Browser.downloadProgress', onProgress);
     }
   }
 

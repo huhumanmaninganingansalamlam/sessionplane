@@ -1,4 +1,5 @@
 import type { ElementHandle, Page, Response } from 'playwright-core';
+import type { BrowserOwner } from '../../browser/browser-owner.ts';
 import { ProviderSubmissionError, type ProviderArtifactCandidate, type ProviderArtifactRequest } from '../provider-adapter.ts';
 import { readChatGptMessages } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
@@ -79,7 +80,7 @@ export async function discoverFileCards(page: Page, request: ProviderArtifactReq
   } finally { await current.dispose(); }
 }
 
-export async function downloadFileCard(page: Page, request: ProviderArtifactRequest, candidate: ProviderArtifactCandidate, check: () => void) {
+export async function downloadFileCard(page: Page, request: ProviderArtifactRequest, candidate: ProviderArtifactCandidate, check: () => void, owner: BrowserOwner) {
   const root = await exactRoot(page, request);
   try {
     const found = (await cards(root)).filter(c => source(request.session.responseMessageId!, c.name) === candidate.sourceUrl);
@@ -104,7 +105,6 @@ export async function downloadFileCard(page: Page, request: ProviderArtifactRequ
     check();
     // Keyboard activation avoids the observed preview overlay; never force-click it.
     const transport: string[] = [];
-    const attachmentResponses: Response[] = [];
     let popups = 0;
     const onPopup = () => { popups++; };
     const onResponse = (response: Response) => {
@@ -119,59 +119,27 @@ export async function downloadFileCard(page: Page, request: ProviderArtifactRequ
       const disposition = headers['content-disposition'] ?? '';
       const filename = /(?:^|;)\s*filename=(?:"([^"]*)"|([^;\s]+))/i.exec(disposition);
       const exactFilename = (filename?.[1] ?? filename?.[2]) === found[0]!.name;
-      if (category === 'file-content' && response.request().method() === 'GET' && response.status() === 200 && /^attachment\b/i.test(disposition) && exactFilename) {
-        attachmentResponses.push(response);
-      }
       transport.push(`${category}:HTTP${response.status()}:type=${contentType}:attachment=${/^attachment\b/i.test(disposition)}:exactFilename=${exactFilename}${retryAfter && /^\d+$/.test(retryAfter) ? `:Retry-After=${retryAfter}s` : ''}`);
     };
     page.on('response', onResponse);
     page.on('popup', onPopup);
-    const pending = page.waitForEvent('download', { timeout: 15_000 }).then(download => ({ download }), error => ({ error }));
-    let result;
     try {
-      await button.focus();
-      await button.press('Enter', { timeout: 5_000 });
-      result = await pending;
+      const bytes = await owner.captureDownload(page, found[0]!.name, async () => {
+        await button.focus();
+        await button.press('Enter', { timeout: 5_000 });
+      });
+      check();
+      const verified = await exactRoot(page, request);
+      await verified.dispose();
+      return { candidate, bytes };
+    } catch (error) {
+      if (error instanceof ProviderSubmissionError) throw error;
+      const focused = await button.evaluate(element => document.activeElement === element).catch(() => false);
+      throw new ProviderSubmissionError('provider.artifact-download-failed',
+        `File card produced no confirmed download (${transport.slice(-10).join(', ') || 'no transport response'}; popups=${popups}; downloadControlFocused=${focused})`);
     } finally {
       page.off('response', onResponse);
       page.off('popup', onPopup);
     }
-    if ('error' in result) {
-      // A noDefaults controller preserves sibling settings but has no download
-      // event setup. Read the exact named attachment through the same authenticated
-      // page instead of changing browser-wide download behavior.
-      if (attachmentResponses.length === 1) {
-        check();
-        const verified = await exactRoot(page, request);
-        await verified.dispose();
-        const file = await page.evaluate(async ({ url, name }) => {
-          const response = await fetch(url, { credentials: 'include' });
-          const disposition = response.headers.get('content-disposition') ?? '';
-          const filename = /(?:^|;)\s*filename=(?:"([^"]*)"|([^;\s]+))/i.exec(disposition);
-          if (response.status !== 200 || !/^attachment\b/i.test(disposition) || (filename?.[1] ?? filename?.[2]) !== name) {
-            return { ok: false as const, status: response.status, retryAfter: response.headers.get('retry-after'), base64: '' };
-          }
-          const bytes = new Uint8Array(await response.arrayBuffer());
-          let binary = '';
-          for (let offset = 0; offset < bytes.length; offset += 0x8000) binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
-          return { ok: true as const, base64: btoa(binary) };
-        }, { url: attachmentResponses[0]!.url(), name: found[0]!.name });
-        if (!file.ok) throw new ProviderSubmissionError('provider.artifact-download-failed',
-          `Exact attachment read failed (HTTP${file.status}${file.retryAfter && /^\d+$/.test(file.retryAfter) ? `; Retry-After=${file.retryAfter}s` : ''})`);
-        check();
-        const final = await exactRoot(page, request);
-        await final.dispose();
-        return { candidate, bytes: new Uint8Array(Buffer.from(file.base64, 'base64')) };
-      }
-      const focused = await button.evaluate(element => document.activeElement === element).catch(() => false);
-      throw new ProviderSubmissionError('provider.artifact-download-failed',
-        `File card produced no confirmed download (${transport.slice(-10).join(', ') || 'no transport response'}; popups=${popups}; downloadControlFocused=${focused})`);
-    }
-    check();
-    if (result.download.suggestedFilename() !== found[0]!.name) unavailable('Downloaded filename does not match the exact file card');
-    const stream = await result.download.createReadStream();
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream) chunks.push(Buffer.from(chunk));
-    return { candidate, bytes: new Uint8Array(Buffer.concat(chunks)) };
   } finally { await root.dispose(); }
 }
