@@ -67,6 +67,10 @@ test('approved resend display guard preserves drafts/selection and stops origina
     assert.notEqual(await page.locator('[role="textbox"]').innerText(), multilinePrompt);
     await ui.verifyAuthorizedResend(current, original, multilinePrompt, true);
     assert.equal(await page.content(), preparedHtml);
+    const unknown = { ...current, submissionState: 'submission_unknown' as const };
+    await ui.verifyAuthorizedResend(unknown, unknown, multilinePrompt, false);
+    assert.equal(await page.content(), preparedHtml, 'An authorized original UNKNOWN draft is inspected without rewriting');
+    await assert.rejects(ui.verifyAuthorizedResend(unknown, unknown, multilinePrompt + ' edited', false));
     await assert.rejects(ui.verifyAuthorizedResend(current, original, multilinePrompt + ' edited', true),
       (error: unknown) => {
         const details = (error as { details: { blockingReasons: string[] } }).details;

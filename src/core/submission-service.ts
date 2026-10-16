@@ -996,12 +996,15 @@ export class SubmissionService {
     const source = this.#outbox.getById(authorization.requestRef);
     const original = source === null ? null : this.#sessions.getGenerationResult(source.sessionId, source.generation);
     const proof = source === null ? null : this.#events.latestAnchorRecovery(source.sessionId, source.generation);
+    const unknownWithoutAnchor = original?.submissionState === 'submission_unknown' &&
+      original.submittedUserMessageId === null && original.submittedUserTurnId === null;
     if (source === null || original === null || source.sessionId !== current.sessionId || source.teamId !== current.teamId ||
         current.provider !== 'chatgpt' || current.terminal ||
         ![source.generation, source.generation + 1].includes(current.generation) ||
-        original.submissionState !== 'submitted' || !original.promptSubmitted || original.completedAt !== null ||
+        !original.promptSubmitted || original.completedAt !== null ||
         original.responseMessageId !== null || original.answerText !== null ||
-        (original.submittedUserMessageId === null && original.submittedUserTurnId === null)) throw new SessionPlaneDomainError(
+        (!unknownWithoutAnchor && (original.submissionState !== 'submitted' ||
+          (original.submittedUserMessageId === null && original.submittedUserTurnId === null)))) throw new SessionPlaneDomainError(
       'provider.preparation-required', 'Approved resend requires the exact unresolved original request');
     const identity = proof?.recoveryIdentity as Record<string, unknown> | undefined;
     if (proof && (!identity || identity.conversationId !== current.conversationId ||
