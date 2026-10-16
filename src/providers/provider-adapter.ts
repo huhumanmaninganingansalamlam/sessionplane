@@ -85,9 +85,20 @@ export interface ProviderAcknowledgementRecoveryEvidence {
   readonly httpStatus: number | null;
   readonly endpointCategory: 'auth-session' | 'conversation-detail' | null;
   readonly promptMatchCount?: number;
+  readonly canonicalUserMessageCount?: number;
+  readonly selectedMessagePresent?: boolean;
   readonly retryAfterMs?: number | null;
   readonly retryAfterSource?: 'valid-header' | 'header-absent-fallback' | 'header-invalid-fallback';
   readonly candidateConversationId?: string;
+  readonly selectedMessageComparison?: {
+    readonly messageId: string;
+    readonly textLength: number;
+    readonly textSha256: string;
+    readonly whitespaceOnlyDifference: boolean;
+    readonly firstDifference: number;
+    readonly expectedCodePoint: number | null;
+    readonly actualCodePoint: number | null;
+  };
 }
 
 export interface ProviderSubmission {

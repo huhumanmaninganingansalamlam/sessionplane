@@ -661,6 +661,15 @@ test('session.send submits once, persists exact acknowledgement, and never resen
       hasRpcError('provider.observation-deferred'));
     assert.equal(service.teamDirectory.getSession(unknown.sessionId).submissionState, 'submission_unknown');
     assert.equal(afterRestart.submitCount, 0, 'A deferred acknowledgement cannot dispatch another prompt');
+    afterRestart.recoverAcknowledgement = async request => {
+      request.onRecoveryObservation?.({ kind: 'unverified', source: 'backend', reason: 'backend-exact-prompt-absent',
+        observedAt: new Date().toISOString(), nextCheckAt: null, httpStatus: 200,
+        endpointCategory: 'conversation-detail', promptMatchCount: 0 });
+      return null;
+    };
+    await assert.rejects(rpc(config.socketPath, 'workflow.decide', decision),
+      hasRpcError('provider.acknowledgement-unverified'));
+    assert.equal(service.teamDirectory.getSession(unknown.sessionId).submissionState, 'submission_unknown');
     afterRestart.recoverAcknowledgement = recoverSelected;
     const confirmed = await rpc<SessionSnapshot>(config.socketPath, 'workflow.decide', decision);
     assert.equal(confirmed.submittedUserMessageId, decision.messageId);

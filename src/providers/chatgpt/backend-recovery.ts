@@ -93,6 +93,7 @@ export class ChatGptBackendRecovery {
     conversationId: string, prompt: string, client: BackendJsonClient, origin: string,
     attempts?: readonly ProviderSubmissionAttempt[],
     observe?: (evidence: ProviderAcknowledgementRecoveryEvidence) => void,
+    selectedMessageId?: string,
   ): Promise<ProviderSubmissionAcknowledgement | null> {
     const now = this.#now().getTime();
     // A stopped caller must not retain the head of the queue. Live recovery
@@ -139,13 +140,29 @@ export class ChatGptBackendRecovery {
         return message !== null && messageRole(message) === 'user' &&
           messageText(message).replaceAll('\r\n', '\n') === prompt.replaceAll('\r\n', '\n');
       }).length : undefined;
+      const selected = validMapping && selectedMessageId !== undefined
+        ? Object.values(payload.mapping as Record<string, unknown>).map(messageForNode)
+          .filter(message => message !== null && messageRole(message) === 'user' && readStringField(message, 'id') === selectedMessageId)
+        : [];
+      const text = selected.length === 1 ? messageText(selected[0]!).replaceAll('\r\n', '\n') : null;
+      const expected = prompt.replaceAll('\r\n', '\n');
+      let firstDifference = 0;
+      if (text !== null) while (firstDifference < Math.min(text.length, expected.length) && text[firstDifference] === expected[firstDifference]) firstDifference++;
       observe?.({ kind: 'unverified', source: 'backend', observedAt: this.#now().toISOString(),
         nextCheckAt: new Date(this.#acknowledgementRetryAt).toISOString(), httpStatus: result.httpStatus,
         endpointCategory: 'conversation-detail',
         reason: !validMapping ? 'backend-conversation-mapping-unverified'
           : promptMatchCount === 0 ? 'backend-exact-prompt-absent'
           : promptMatchCount! > 1 ? 'backend-exact-prompt-ambiguous' : 'backend-exact-acknowledgement-unverified',
-        ...(promptMatchCount === undefined ? {} : { promptMatchCount }) });
+        ...(promptMatchCount === undefined ? {} : { promptMatchCount }),
+        ...(validMapping ? { canonicalUserMessageCount: Object.values(payload.mapping as Record<string, unknown>)
+          .map(messageForNode).filter(message => message !== null && messageRole(message) === 'user').length,
+          ...(selectedMessageId === undefined ? {} : { selectedMessagePresent: selected.length === 1 }) } : {}),
+        ...(text === null ? {} : { selectedMessageComparison: { messageId: selectedMessageId!, textLength: text.length,
+          textSha256: createHash('sha256').update(text).digest('hex'),
+          whitespaceOnlyDifference: text.replace(/\s+/g, ' ').trim() === expected.replace(/\s+/g, ' ').trim(),
+          firstDifference, expectedCodePoint: expected.codePointAt(firstDifference) ?? null,
+          actualCodePoint: text.codePointAt(firstDifference) ?? null } }) });
     }
     return acknowledgement;
   }

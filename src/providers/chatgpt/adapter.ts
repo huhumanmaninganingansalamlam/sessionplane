@@ -190,7 +190,7 @@ export class ChatGptAdapter implements ProviderAdapter {
         if (selected === null) return null;
         const server = await this.#backendRecovery.recoverAcknowledgement(
           foundId, request.prompt, backendClient(candidate.page), new URL(candidate.page.url()).origin,
-          undefined, request.onRecoveryObservation);
+          undefined, request.onRecoveryObservation, request.selection.messageId);
         if (server === null || server.submittedUserMessageId !== selected.submittedUserMessageId ||
             server.submittedUserTurnId !== selected.submittedUserTurnId) return null;
         const fresh = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);

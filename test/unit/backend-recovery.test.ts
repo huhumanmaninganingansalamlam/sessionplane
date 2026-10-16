@@ -346,12 +346,20 @@ test('canonical ACK evidence separates no match and access rejection from a reco
   assert.equal(evidence.at(-1)?.reason, 'backend-auth-rejected');
   now += 6000; status = 200;
   payload = conversationPayload([node('root', null, null),
+    node('user-node', 'root', { ...userMessage('original-user', 'original-turn'), content: { content_type: 'text', parts: ['Question\n'] } })], 'user-node');
+  assert.equal(await recovery.recoverAcknowledgement(CONVERSATION_ID, 'Question', client, 'https://chatgpt.com',
+    undefined, value => evidence.push(value), 'original-user'), null);
+  assert.equal(evidence.at(-1)?.selectedMessageComparison?.whitespaceOnlyDifference, true);
+  assert.equal(evidence.at(-1)?.selectedMessageComparison?.firstDifference, 8);
+  assert.equal(evidence.at(-1)?.selectedMessageComparison?.textLength, 9);
+  now += 6000; status = 200;
+  payload = conversationPayload([node('root', null, null),
     node('user-node', 'root', userMessage('original-user', 'original-turn')),
     node('answer-node', 'user-node', finalAssistant('original-answer', 'Original result'))], 'answer-node');
   const acknowledgement = await inspect();
   assert.equal(acknowledgement?.submittedUserMessageId, 'original-user');
   assert.equal(recoverExactServerFinal(payload, acknowledgement!).answerText, 'Original result');
-  assert.equal(evidence.length, 2, 'successful recovery does not retain a new failure');
+  assert.equal(evidence.length, 3, 'successful recovery does not retain a new failure');
 });
 
 function identity() {
