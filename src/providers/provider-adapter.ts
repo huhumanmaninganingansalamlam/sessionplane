@@ -79,7 +79,7 @@ export interface ProviderAcknowledgementRecoveryRequest {
 /** Read evidence only; absence of a match never authorizes another submission. */
 export interface ProviderAcknowledgementRecoveryEvidence {
   readonly kind: 'deferred' | 'unavailable' | 'unverified';
-  readonly source: 'backend' | 'pacing';
+  readonly source: 'backend' | 'pacing' | 'dom';
   readonly reason: string;
   readonly observedAt: string;
   readonly nextCheckAt: string | null;
@@ -91,6 +91,13 @@ export interface ProviderAcknowledgementRecoveryEvidence {
   readonly retryAfterMs?: number | null;
   readonly retryAfterSource?: 'valid-header' | 'header-absent-fallback' | 'header-invalid-fallback';
   readonly candidateConversationId?: string;
+  readonly renderedPromptComparisons?: readonly {
+    readonly textLength: number;
+    readonly textSha256: string;
+    readonly firstDifference: number;
+    readonly expectedCodePoint: number | null;
+    readonly actualCodePoint: number | null;
+  }[];
   readonly selectedMessageComparison?: {
     readonly messageId: string;
     readonly textLength: number;

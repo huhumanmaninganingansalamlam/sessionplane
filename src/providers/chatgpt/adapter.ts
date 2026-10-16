@@ -186,7 +186,19 @@ export class ChatGptAdapter implements ProviderAdapter {
         const candidate = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);
         if (new URL(candidate.page.url()).origin !== new URL(this.#loginUrl).origin) return null;
         const foundId = candidate.binding.conversationId!;
-        const selection = { ...request.selection, verifyExactPrompt: true as const };
+        const selection = { ...request.selection, verifyExactPrompt: true as const,
+          onPromptMismatch: (values: readonly string[]) => {
+            const expected = request.prompt.replaceAll('\r\n', '\n');
+            request.onRecoveryObservation?.({ kind: 'unverified', source: 'dom', reason: 'dom-exact-prompt-absent',
+              observedAt: new Date().toISOString(), nextCheckAt: null, httpStatus: null, endpointCategory: null,
+              candidateConversationId: foundId, renderedPromptComparisons: values.map(value => {
+                const text = value.replaceAll('\r\n', '\n');
+                let firstDifference = 0;
+                while (firstDifference < Math.min(text.length, expected.length) && text[firstDifference] === expected[firstDifference]) firstDifference++;
+                return { textLength: text.length, textSha256: createHash('sha256').update(text).digest('hex'), firstDifference,
+                  expectedCodePoint: expected.codePointAt(firstDifference) ?? null, actualCodePoint: text.codePointAt(firstDifference) ?? null };
+              }).sort((a, b) => b.firstDifference - a.firstDifference).slice(0, 3) });
+          } };
         const selected = await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, selection);
         if (selected === null) return null;
         const server = await this.#backendRecovery.recoverAcknowledgement(
