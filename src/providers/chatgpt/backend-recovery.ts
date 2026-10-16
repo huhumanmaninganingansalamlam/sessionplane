@@ -113,7 +113,8 @@ export class ChatGptBackendRecovery {
     this.#acknowledgementWaiting.delete(conversationId);
     // The shared account probe is bounded even when callers repeatedly inspect.
     this.#acknowledgementRetryAt = this.#now().getTime() + 5_000;
-    const result = await this.#conversation(conversationId, client, origin);
+    let rateLimit: BackendRateLimitEvidence | undefined;
+    const result = await this.#conversation(conversationId, client, origin, evidence => { rateLimit = evidence; });
     if ('recovery' in result) {
       if (result.recovery.kind === 'deferred') {
         this.#acknowledgementRetryAt = this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0);
@@ -122,7 +123,9 @@ export class ChatGptBackendRecovery {
           : result.recovery.kind === 'unverified' ? 'unverified' : 'unavailable',
         source: 'backend', reason: result.recovery.reason, observedAt: this.#now().toISOString(),
         nextCheckAt: new Date(this.#acknowledgementRetryAt).toISOString(),
-        httpStatus: result.httpStatus ?? null, endpointCategory: result.endpointCategory ?? null });
+        httpStatus: result.httpStatus ?? null, endpointCategory: result.endpointCategory ?? null,
+        candidateConversationId: conversationId,
+        ...(rateLimit ? { retryAfterMs: rateLimit.retryAfterDurationMs, retryAfterSource: rateLimit.retryAfterSource } : {}) });
       return null;
     }
     const acknowledgement = recoverExactServerAcknowledgement(result.body, conversationId, prompt, attempts);

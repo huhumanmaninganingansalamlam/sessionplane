@@ -650,6 +650,18 @@ test('session.send submits once, persists exact acknowledgement, and never resen
       decision: 'acknowledge', messageId: 'recovered-user-message-1', evidenceHash: 'a'.repeat(64) };
     await assert.rejects(rpc(config.socketPath, 'workflow.decide', { ...decision, messageId: 'wrong-message' }),
       hasRpcError('browser.snapshot-stale'));
+    const recoverSelected = afterRestart.recoverAcknowledgement.bind(afterRestart);
+    afterRestart.recoverAcknowledgement = async request => {
+      request.onRecoveryObservation?.({ kind: 'deferred', source: 'backend', reason: 'backend-http-429',
+        observedAt: new Date().toISOString(), nextCheckAt: new Date(Date.now() + 50000).toISOString(),
+        httpStatus: 429, endpointCategory: 'conversation-detail' });
+      return null;
+    };
+    await assert.rejects(rpc(config.socketPath, 'workflow.decide', decision),
+      hasRpcError('provider.observation-deferred'));
+    assert.equal(service.teamDirectory.getSession(unknown.sessionId).submissionState, 'submission_unknown');
+    assert.equal(afterRestart.submitCount, 0, 'A deferred acknowledgement cannot dispatch another prompt');
+    afterRestart.recoverAcknowledgement = recoverSelected;
     const confirmed = await rpc<SessionSnapshot>(config.socketPath, 'workflow.decide', decision);
     assert.equal(confirmed.submittedUserMessageId, decision.messageId);
     assert.equal(confirmed.generation, 1);

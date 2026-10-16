@@ -85,6 +85,9 @@ export interface ProviderAcknowledgementRecoveryEvidence {
   readonly httpStatus: number | null;
   readonly endpointCategory: 'auth-session' | 'conversation-detail' | null;
   readonly promptMatchCount?: number;
+  readonly retryAfterMs?: number | null;
+  readonly retryAfterSource?: 'valid-header' | 'header-absent-fallback' | 'header-invalid-fallback';
+  readonly candidateConversationId?: string;
 }
 
 export interface ProviderSubmission {

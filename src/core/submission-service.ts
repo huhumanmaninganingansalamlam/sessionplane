@@ -389,6 +389,11 @@ export class SubmissionService {
                 requestRef: currentOutbox.outboxId, conversationId: currentConversationId, pageKey: current.pageKey } });
           }
         }
+        if (selection !== undefined && acknowledgement == null && recoveryEvidence?.kind === 'deferred') {
+          throw new SessionPlaneDomainError('provider.observation-deferred',
+            'Acknowledgement verification is deferred; preserve this UNKNOWN request and retry the same selection after the provider delay. No prompt was sent.',
+            { ...recoveryEvidence, requestRef: currentOutbox.outboxId, pageKey: current.pageKey, automaticResubmit: false });
+        }
         if (
           acknowledgement === undefined ||
           acknowledgement === null ||
