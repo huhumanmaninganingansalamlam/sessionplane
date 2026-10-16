@@ -255,7 +255,16 @@ export class ChatGptAdapter implements ProviderAdapter {
     selection?: { readonly messageId: string; readonly evidenceHash: string },
     attempts?: ProviderAcknowledgementRecoveryRequest['attempts'],
     observe?: ProviderAcknowledgementRecoveryRequest['onRecoveryObservation']) {
-    if (selection !== undefined) return await recoverChatGptAcknowledgement(page, prompt, conversationId, selection);
+    if (selection !== undefined) {
+      const selected = await recoverChatGptAcknowledgement(page, prompt, conversationId, selection);
+      if (selected === null) return null;
+      const server = await this.#backendRecovery.recoverAcknowledgement(
+        conversationId, prompt, backendClient(page), new URL(page.url()).origin, attempts, observe, selection.messageId);
+      if (server === null || server.submittedUserMessageId !== selected.submittedUserMessageId ||
+          server.submittedUserTurnId !== selected.submittedUserTurnId ||
+          await recoverChatGptAcknowledgement(page, prompt, conversationId, selection) === null) return null;
+      return { ...server, evidence: server.evidence ?? 'backend-exact-user' as const };
+    }
     // Durable dispatch evidence identifies the exact user even when only an
     // older duplicate is mounted. Canonical identity/parent/hash stay mandatory.
     const dom = attempts?.length ? null : await recoverChatGptAcknowledgement(page, prompt, conversationId);
