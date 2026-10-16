@@ -185,6 +185,55 @@ test(`explicit refresh reopens a missing conversation with a stale ${staleState}
 });
 }
 
+test('approved unacknowledged review keeps its original UNKNOWN and reuses the exact conversation and prompt once', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-unknown-resend-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  t.mock.method(SessionUiService.prototype, 'reserveResendPage', () => {});
+  t.mock.method(SessionUiService.prototype, 'verifyAuthorizedResend', async () => {});
+  let service = await startCore({ config, startBrowser: false, providerAdapters: [fake] });
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'unknown-review-owner' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: team.primaryRoleKey, provider: 'chatgpt' });
+    const clientId = `team:${team.teamId}`;
+    fake.autoFinalText = 'Previous completed review';
+    const seed = await service.submissionService.send({ clientId, sessionId: session.sessionId,
+      requestId: 'previous-review', prompt: 'Previous review', sessionDeadlineSec: 600 });
+    await callRpc(config.socketPath, 'session.wait', { clientId, sessionId: session.sessionId, generation: 1, waitMs: 1000 });
+    fake.autoFinalText = null;
+    fake.acknowledgementMode = 'missing';
+    const prompt = 'The exact preserved review\n\nWith its original evidence.';
+    await assert.rejects(service.submissionService.send({ clientId, sessionId: session.sessionId,
+      requestId: 'unknown-review', prompt, sessionDeadlineSec: 600 }), /acknowledgement/);
+    const original = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId)!;
+    const originalGeneration = service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=2').get(session.sessionId);
+    assert.equal(original.submission_state, 'submission_unknown');
+    const approval = { teamId: team.teamId, requestRef: original.outbox_id, requestId: 'approved-unknown-once',
+      decision: 'prepare_resend', approvalRef: 'user-delegated-exact-once', duplicateRiskAccepted: true };
+    const reserved = await callRpc(config.socketPath, 'workflow.decide', approval) as { requestRef: string; generation: number };
+    assert.equal(reserved.generation, 3);
+    assert.equal(fake.submitCount, 2, 'Reservation never submits');
+    await service.close();
+    service = await startCore({ config, startBrowser: false, providerAdapters: [fake] });
+    assert.deepEqual(await callRpc(config.socketPath, 'workflow.decide', approval), reserved);
+    await assert.rejects(callRpc(config.socketPath, 'workflow.decide', { ...approval, requestId: 'another-resend' }), /one authorized resend/);
+    fake.acknowledgementMode = 'success';
+    await service.submissionService.withPendingPreparation({ clientId, sessionId: session.sessionId,
+      generation: 3, requestId: 'approved-unknown-once' }, async () => ({ inspected: true }));
+    const submitted = await service.submissionService.resumePreparation({ clientId, sessionId: session.sessionId,
+      generation: 3, requestId: 'approved-unknown-once' });
+    assert.equal(submitted.conversationId, seed.conversationId);
+    assert.equal(submitted.promptSubmitted, true);
+    assert.equal(fake.submissionRequests.at(-1)!.prompt, prompt);
+    assert.equal(fake.submitCount, 3, 'One uncertain original attempt plus exactly one authorized recovery');
+    await service.submissionService.resumePreparation({ clientId, sessionId: session.sessionId,
+      generation: 3, requestId: 'approved-unknown-once' });
+    assert.equal(fake.submitCount, 3);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(original.outbox_id), original);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=2').get(session.sessionId), originalGeneration);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('approved resend reserves once across restart, preserves uncertainty, and stops a late answer before dispatch', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-approved-resend-'));
   const config = resolveConfig({ cwd: root, env: { SESSIONPLANE_PROBE_SUCCESS_INTERVAL_MS: '1' }, stateDir: '.state' });

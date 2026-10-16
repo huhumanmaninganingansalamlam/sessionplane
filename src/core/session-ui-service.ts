@@ -247,8 +247,10 @@ export class SessionUiService {
     }, CHATGPT_COMPOSER_SELECTOR);
     // The same exact-text contract as preparation: ProseMirror innerText can
     // contain layout-only newlines absent from the authored paragraph text.
+    // An approved unacknowledged attempt may still have its exact original prompt
+    // in the composer. Keep it; a changed or unrelated draft still blocks recovery.
     const separateDraft = (await Promise.all(state.drafts.map(async draft => draft.text.trim() !== '' &&
-      ((!allowPreparedDraft && current.generation === original.generation) ||
+      ((!allowPreparedDraft && current.generation === original.generation && original.submissionState !== 'submission_unknown') ||
         !await composerHasExactValue(page.locator(CHATGPT_COMPOSER_SELECTOR).nth(draft.index), prompt))))).some(Boolean);
     const blockingReasons = [
       dom.submittedUserFound && 'original-anchor', dom.candidate !== null && 'original-answer',
