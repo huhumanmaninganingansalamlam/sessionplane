@@ -55,7 +55,7 @@ export class ChatGptBackendRecovery {
   readonly #onRateLimit: ChatGptBackendRecoveryOptions['onRateLimit'];
   #token: CachedToken | null = null;
   #conversationRetryAt = 0;
-  readonly #conversationWaiting = new Map<string, number>();
+  readonly #conversationWaiting = new Map<string, { expiresAt: number; selected: boolean }>();
   #conversationInFlight = false;
 
   constructor(options: ChatGptBackendRecoveryOptions) {
@@ -97,7 +97,7 @@ export class ChatGptBackendRecovery {
     selectedMessageId?: string,
   ): Promise<ProviderSubmissionAcknowledgement | null> {
     let rateLimit: BackendRateLimitEvidence | undefined;
-    const result = await this.#conversation(conversationId, client, origin, evidence => { rateLimit = evidence; }, true);
+    const result = await this.#conversation(conversationId, client, origin, evidence => { rateLimit = evidence; }, true, selectedMessageId !== undefined);
     if ('recovery' in result) {
       observe?.({ kind: result.recovery.kind === 'deferred' ? 'deferred'
           : result.recovery.kind === 'unverified' ? 'unverified' : 'unavailable',
@@ -152,15 +152,19 @@ export class ChatGptBackendRecovery {
   }
 
   async #conversation(conversationId: string, client: BackendJsonClient, origin: string,
-    observe?: (evidence: BackendRateLimitEvidence) => void, acknowledgement = false):
+    observe?: (evidence: BackendRateLimitEvidence) => void, acknowledgement = false, selected = false):
     Promise<{ body: unknown; httpStatus: number } | { recovery: ProviderRecoveryResult; httpStatus?: number; endpointCategory?: 'auth-session' | 'conversation-detail'; pacing?: boolean }> {
     const now = this.#now().getTime();
     const graceMs = 2 * Math.max(5_000, this.#requestTimeoutMs);
-    for (const [id, expiresAt] of this.#conversationWaiting) {
-      if (now > expiresAt) this.#conversationWaiting.delete(id);
+    for (const [id, entry] of this.#conversationWaiting) {
+      if (now > entry.expiresAt) this.#conversationWaiting.delete(id);
     }
-    this.#conversationWaiting.set(conversationId, Math.max(now, this.#conversationRetryAt) + graceMs);
-    const queued = this.#conversationWaiting.keys().next().value !== conversationId;
+    this.#conversationWaiting.set(conversationId, { expiresAt: Math.max(now, this.#conversationRetryAt) + graceMs,
+      selected: selected || this.#conversationWaiting.get(conversationId)?.selected === true });
+    // A user-selected ACK gets the next legal slot ahead of repeated background
+    // UNKNOWN polling. It still obeys the same Retry-After and in-flight guard.
+    const nextSelected = [...this.#conversationWaiting].find(([, entry]) => entry.selected)?.[0];
+    const queued = (nextSelected ?? this.#conversationWaiting.keys().next().value) !== conversationId;
     if (now < this.#conversationRetryAt || queued || this.#conversationInFlight) {
       const next = Math.max(now + 5_000, this.#conversationRetryAt);
       return { pacing: true, recovery: { ...unavailable(acknowledgement
@@ -177,8 +181,8 @@ export class ChatGptBackendRecovery {
         this.#conversationRetryAt = this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0);
       }
       // A caller honoring Retry-After must not expire before its allowed turn.
-      for (const [id, expiresAt] of this.#conversationWaiting) {
-        this.#conversationWaiting.set(id, Math.max(expiresAt, this.#conversationRetryAt + graceMs));
+      for (const entry of this.#conversationWaiting.values()) {
+        entry.expiresAt = Math.max(entry.expiresAt, this.#conversationRetryAt + graceMs);
       }
       return result;
     } finally {

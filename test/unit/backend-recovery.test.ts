@@ -392,6 +392,27 @@ test('ordinary collection cannot consume a waiting ACK slot or ignore its shared
   assert.deepEqual(reads, ['ongoing-generation', CONVERSATION_ID, 'ongoing-generation', CONVERSATION_ID]);
 });
 
+test('explicit selected ACK gets the next permitted read ahead of background UNKNOWN polling', async () => {
+  let now = 0;
+  const reads: string[] = [];
+  const recovery = new ChatGptBackendRecovery({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000, now: () => new Date(now) });
+  const client: BackendJsonClient = { async get(url) {
+    if (url.endsWith('/api/auth/session')) return { status: 200, headers: {}, body: { accessToken: 'memory-only-token' } };
+    reads.push(url.split('/').at(-1)!);
+    return { status: 429, headers: { 'retry-after': '50' }, body: null };
+  } };
+  const ack = (id: string, selected?: string) => recovery.recoverAcknowledgement(id, 'Question', client, 'https://chatgpt.com', undefined, undefined, selected);
+  await ack('background');
+  now = 1000; await ack('background');
+  now = 2000; await ack('selected', 'original-user');
+  assert.deepEqual(reads, ['background'], 'An explicit selection never bypasses Retry-After');
+  now = 50001;
+  await ack('background');
+  assert.deepEqual(reads, ['background'], 'Repeated background no-match recovery must leave the interactive read available');
+  await ack('selected', 'original-user');
+  assert.deepEqual(reads, ['background', 'selected']);
+});
+
 test('canonical ACK evidence separates no match and access rejection from a recovered original answer', async () => {
   let now = 0;
   let status = 200;
