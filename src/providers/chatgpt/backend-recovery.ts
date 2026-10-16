@@ -309,13 +309,16 @@ export function recoverExactServerAcknowledgement(
 }
 
 // The ChatGPT editor serializes literal punctuation as CommonMark escapes
-// and bare URLs as autolinks. Parse both together so escaped angle brackets
-// and literal backslashes within URLs retain their authored meaning.
+// and bare URLs as autolinks or same-URL links. Parse these together so escaped
+// angle brackets and literal backslashes within URLs retain their meaning.
 // Decode only that representation: never collapse whitespace, strip markup or
 // relax a recorded POST identity/hash. Callers must explicitly select the user.
 function decodeLiteralMarkdown(text: string): string {
-  return text.replace(/\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])|<(https?:\/\/[^\s<>]+)>/g,
-    (_match, punctuation: string | undefined, url: string | undefined) => punctuation ?? url!);
+  return text.replace(/\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])|<(https?:\/\/[^\s<>]+)>|\[(https?:\/\/[^\s[\]<>]+)\]\(((?:\\[\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]|[^\\()\s])+)\)/g,
+    (match, punctuation: string | undefined, url: string | undefined, label: string | undefined, target: string | undefined) => {
+      if (label !== undefined) return target!.replace(/\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])/g, '$1') === label ? label : match;
+      return punctuation ?? url!;
+    });
 }
 
 export function recoverExactServerFinal(
