@@ -20,7 +20,12 @@ import { navigateProviderPage } from '../../src/providers/human-verification.ts'
 
 test('localized file-card discovery and exact download preserve response ancestry', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-localized-file-'));
-  const server = createServer((_req, res) => { res.setHeader('content-type', 'text/html'); res.end('<main></main>'); });
+  const server = createServer((req, res) => {
+    if (req.url?.startsWith('/files/blocked')) {
+      res.writeHead(429, { 'retry-after': '3' }); res.end('private provider body'); return;
+    }
+    res.setHeader('content-type', 'text/html'); res.end('<main></main>');
+  });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: new PageRegistry(), headless: true });
   try {
@@ -49,6 +54,14 @@ test('localized file-card discovery and exact download preserve response ancestr
       await assert.rejects(discoverFileCards(page, request, () => {}), /anchor/);
       await assert.rejects(downloadFileCard(page, request, candidate, () => {}), /anchor/);
     }
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="exact-user">User</div><div data-message-author-role="assistant" data-message-id="exact-answer"><div><button aria-label="Open preview of PRD.final.md"></button><button aria-label="Download file" onclick="void fetch(\'/files/blocked?signature=private-query\')">Download</button></div></div></main>');
+    const blocked = (await discoverFileCards(page, request, () => {}))[0]!;
+    await assert.rejects(downloadFileCard(page, request, { providerArtifactId: 'blocked-card', name: blocked.name,
+      sourceUrl: blocked.source, mediaType: null }, () => {}), error => {
+      assert.match((error as Error).message, /file-metadata:HTTP429:Retry-After=3s/);
+      assert.doesNotMatch((error as Error).message, /signature|private-query|private provider body/);
+      return true;
+    });
   } finally { await owner.close(); server.close(); rmSync(root, { recursive:true, force:true }); }
 });
 

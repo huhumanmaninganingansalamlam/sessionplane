@@ -1,4 +1,4 @@
-import type { ElementHandle, Page } from 'playwright-core';
+import type { ElementHandle, Page, Response } from 'playwright-core';
 import { ProviderSubmissionError, type ProviderArtifactCandidate, type ProviderArtifactRequest } from '../provider-adapter.ts';
 import { readChatGptMessages } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
@@ -103,11 +103,34 @@ export async function downloadFileCard(page: Page, request: ProviderArtifactRequ
     if (!stillNamed) unavailable('File card changed before download');
     check();
     // Keyboard activation avoids the observed preview overlay; never force-click it.
+    const transport: string[] = [];
+    let popups = 0;
+    const onPopup = () => { popups++; };
+    const onResponse = (response: Response) => {
+      if (!['fetch', 'xhr', 'document'].includes(response.request().resourceType())) return;
+      const url = new URL(response.url());
+      const category = url.pathname.includes('/files/') ? 'file-metadata'
+        : url.pathname.includes('/content') ? 'file-content' : 'provider-request';
+      const retryAfter = response.headers()['retry-after'];
+      transport.push(`${category}:HTTP${response.status()}${retryAfter && /^\d+$/.test(retryAfter) ? `:Retry-After=${retryAfter}s` : ''}`);
+    };
+    page.on('response', onResponse);
+    page.on('popup', onPopup);
     const pending = page.waitForEvent('download', { timeout: 15_000 }).then(download => ({ download }), error => ({ error }));
-    await button.focus();
-    await button.press('Enter', { timeout: 5_000 });
-    const result = await pending;
-    if ('error' in result) throw new ProviderSubmissionError('provider.artifact-download-failed', 'File card produced no confirmed download');
+    let result;
+    try {
+      await button.focus();
+      await button.press('Enter', { timeout: 5_000 });
+      result = await pending;
+    } finally {
+      page.off('response', onResponse);
+      page.off('popup', onPopup);
+    }
+    if ('error' in result) {
+      const focused = await button.evaluate(element => document.activeElement === element).catch(() => false);
+      throw new ProviderSubmissionError('provider.artifact-download-failed',
+        `File card produced no confirmed download (${transport.slice(-10).join(', ') || 'no transport response'}; popups=${popups}; downloadControlFocused=${focused})`);
+    }
     check();
     if (result.download.suggestedFilename() !== found[0]!.name) unavailable('Downloaded filename does not match the exact file card');
     const stream = await result.download.createReadStream();
