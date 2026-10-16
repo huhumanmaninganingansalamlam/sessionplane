@@ -22,7 +22,7 @@ import {
   type BrowserStatusSource,
   type ChromeInstallation,
 } from './browser-health.ts';
-import { isChatGptUrl, type PageBindingSnapshot } from './page-binding.ts';
+import { isChatGptUrl, isProviderUrl, parseProviderConversationId, type PageBindingSnapshot } from './page-binding.ts';
 import { PageRegistry } from './page-registry.ts';
 import {
   assertDedicatedBrowserProfile,
@@ -357,6 +357,60 @@ export class BrowserOwner {
     } finally {
       await session.detach();
     }
+  }
+
+  /** A crashed target can predate adoption and never become a Playwright Page. */
+  async closeCrashedConversationPages(provider: string, conversationId: string, canClose: () => boolean) {
+    const result = { closedPages: 0, pageErrors: [] as string[] };
+    const browser = this.#browser;
+    if (browser === null) return result;
+    const control = await browser.newBrowserCDPSession();
+    try {
+      const { targetInfos } = await control.send('Target.getTargets');
+      const { browserContextIds } = await control.send('Target.getBrowserContexts');
+      const registered = () => new Set(this.#pageRegistry.listBindings({ includeClosed: false }).map(p => p.targetId));
+      for (const target of targetInfos) {
+        // This owner controls the persistent default context only. Never touch
+        // another context, an unidentified home/draft or a registered live Page.
+        if (target.type !== 'page' || registered().has(target.targetId) ||
+            (target.browserContextId !== undefined && browserContextIds.includes(target.browserContextId)) ||
+            !isProviderUrl(provider, target.url) || parseProviderConversationId(target.url) !== conversationId) continue;
+        let sessionId: string | undefined;
+        let crashed = false;
+        let notify!: () => void;
+        const observed = new Promise<void>(resolve => { notify = resolve; });
+        const onMessage = (event: { sessionId: string; message: string }) => {
+          if (event.sessionId !== sessionId) return;
+          const message = JSON.parse(event.message) as { method?: string };
+          if (message.method === 'Inspector.targetCrashed') { crashed = true; notify(); }
+          if (message.method === 'Inspector.targetReloadedAfterCrash') crashed = false;
+        };
+        control.on('Target.receivedMessageFromTarget', onMessage);
+        try {
+          ({ sessionId } = await control.send('Target.attachToTarget', { targetId: target.targetId, flatten: false }));
+          await control.send('Target.sendMessageToTarget', { sessionId,
+            message: JSON.stringify({ id: 1, method: 'Inspector.enable' }) });
+          await settleWithin(observed, 1_000);
+          const { targetInfo: current } = await control.send('Target.getTargetInfo', { targetId: target.targetId });
+          if (!crashed || !canClose() || registered().has(target.targetId) || current.type !== 'page' ||
+              current.url !== target.url || current.browserContextId !== target.browserContextId) {
+            throw new BrowserOwnerError('session.cleanup-not-ready', 'Preserve an unverified or newly active target');
+          }
+          const closed = await control.send('Target.closeTarget', { targetId: target.targetId });
+          const remaining = await control.send('Target.getTargets');
+          if (!closed.success || remaining.targetInfos.some(t => t.targetId === target.targetId)) {
+            throw new BrowserOwnerError('browser.unavailable', 'Retired crashed target closure was not confirmed');
+          }
+          result.closedPages++;
+        } catch (error) {
+          result.pageErrors.push(error instanceof BrowserOwnerError ? error.errorCode : 'browser.unavailable');
+        } finally {
+          control.off('Target.receivedMessageFromTarget', onMessage);
+          if (sessionId !== undefined) await control.send('Target.detachFromTarget', { sessionId }).catch(() => undefined);
+        }
+      }
+    } finally { await control.detach(); }
+    return result;
   }
 
   /** Caller holds the exact request/page lease; never activate the human's tab. */
