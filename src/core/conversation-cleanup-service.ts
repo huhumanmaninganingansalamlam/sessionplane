@@ -78,6 +78,7 @@ export class ConversationCleanupService {
       for (const initial of sessions.listSnapshotsForTeam(input.teamId)) {
         const cleanup = { sessionId: initial.sessionId, providerDeleted: false,
           providerError: null as string | null, stopError: null as string | null,
+          providerErrorDetails: null as ReturnType<typeof cleanupProviderErrorDetails>,
           closedPages: 0, pageErrors: [] as string[] };
         const requestId = 'team-delete:' + hashCanonical({ requestId: input.requestId, sessionId: initial.sessionId });
         if (!initial.terminal && initial.generation > 0) {
@@ -102,7 +103,10 @@ export class ConversationCleanupService {
             cleanup.providerError = deleted.errorCode;
             cleanup.closedPages += deleted.pageCleanup?.closedPages ?? 0;
             cleanup.pageErrors.push(...(deleted.pageCleanup?.pageErrors ?? []));
-          } catch (error) { cleanup.providerError = cleanupErrorCode(error); }
+          } catch (error) {
+            cleanup.providerError = cleanupErrorCode(error);
+            cleanup.providerErrorDetails = cleanupProviderErrorDetails(error);
+          }
         }
         const remainingPages = await this.#closeSessionPages(current);
         cleanup.closedPages += remainingPages.closedPages;
@@ -518,7 +522,18 @@ interface TeamDeletionResult {
   teamId: string;
   deleted: boolean;
   sessions: Array<{ sessionId: string; providerDeleted: boolean; providerError: string | null;
+    providerErrorDetails: ReturnType<typeof cleanupProviderErrorDetails>;
     stopError: string | null; closedPages: number; pageErrors: string[] }>;
+}
+
+function cleanupProviderErrorDetails(error: unknown) {
+  if (!(error instanceof SessionPlaneDomainError) || error.details === null || typeof error.details !== 'object') return null;
+  const { stage, httpStatus, retryAfterMs } = error.details as Record<string, unknown>;
+  // Keep only transport diagnostics, never provider bodies or authentication data.
+  if ((stage !== 'authentication' && stage !== 'conversation-verification') ||
+      typeof httpStatus !== 'number' || !Number.isInteger(httpStatus) || httpStatus < 100 || httpStatus > 599) return null;
+  return { stage, httpStatus, retryAfterMs: typeof retryAfterMs === 'number' &&
+    Number.isSafeInteger(retryAfterMs) && retryAfterMs >= 0 ? retryAfterMs : null };
 }
 
 function cleanupErrorCode(error: unknown): string {
