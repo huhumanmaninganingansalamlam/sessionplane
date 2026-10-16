@@ -16,6 +16,27 @@ import {
 
 const CONVERSATION_ID = 'conversation-backend-1';
 
+test('explicit retained message ACK compares the full literal editor text, preserving whitespace and POST evidence', () => {
+  const prompt = 'Required response:\n1) Keep **all** code: `a_b` and \\path\n\nFinal.';
+  const serialized = 'Required response:\n1\\) Keep \\*\\*all\\*\\* code: \\`a\\_b\\` and \\\\path\n\nFinal\\.';
+  const payload = conversationPayload([node('root', null, null),
+    node('user-node', 'root', { ...userMessage('selected-user', 'selected-turn'), content: { content_type: 'text', parts: [serialized] } }),
+    node('answer', 'user-node', finalAssistant('answer', 'Original PLAN'))], 'answer');
+  const recover = (text: string, id?: string) => recoverExactServerAcknowledgement(payload, CONVERSATION_ID, text, undefined, id);
+  assert.equal(recover(prompt), null, 'Automatic UNKNOWN recovery cannot assume a text encoding');
+  assert.equal(recover(prompt, 'another-user'), null);
+  const ack = recover(prompt, 'selected-user');
+  assert.equal(ack?.submittedUserMessageId, 'selected-user');
+  assert.equal(ack?.evidence, 'backend-exact-editor-text');
+  assert.equal(ack?.promptEncoding?.decodedTextSha256, createHash('sha256').update(prompt).digest('hex'));
+  assert.equal(recoverExactServerFinal(payload, ack!).answerText, 'Original PLAN');
+  assert.equal(recover(prompt.replace('Keep', 'Delete'), 'selected-user'), null);
+  assert.equal(recover(prompt.replace('\n\n', '\n'), 'selected-user'), null, 'Blank lines are not collapsed');
+  assert.equal(recoverExactServerAcknowledgement(payload, CONVERSATION_ID, prompt, [{ conversationId: CONVERSATION_ID,
+    messageId: 'selected-user', parentMessageId: 'root', textHash: '0'.repeat(64), observedAt: new Date(0).toISOString() }], 'selected-user'), null,
+    'An incompatible captured POST hash remains authoritative');
+});
+
 test('late ACK uses durable dispatch identity among duplicate questions, never recency', () => {
   const old = [node('root', null, null), node('old-user', 'root', userMessage('old-user', 'old-turn')),
     node('old-final', 'old-user', finalAssistant('old-answer', 'Previous answer'))];

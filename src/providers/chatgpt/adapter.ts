@@ -199,7 +199,7 @@ export class ChatGptAdapter implements ProviderAdapter {
         if (this.#pageRegistry.refreshPage(pageKey).bindingEpoch !== binding.bindingEpoch) return null;
         this.#pageRegistry.bindPage(pageKey, { sessionId: request.session.sessionId,
           generation: request.generation, conversationId: foundId });
-        return { ...server, evidence: 'backend-exact-user' };
+        return { ...server, evidence: server.evidence ?? 'backend-exact-user' };
       }
       if (isWebRedirect(binding, request.session.sessionId, request.generation, conversationId)) {
         const page = this.#pageRegistry.pageForObservation(pageKey);

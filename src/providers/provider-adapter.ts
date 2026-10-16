@@ -60,7 +60,8 @@ export interface PreparationTarget {
 export type PreparationChoices = Readonly<Partial<Record<PreparationPurpose, PreparationTarget>>>;
 
 export interface ProviderSubmissionAcknowledgement {
-  readonly evidence?: 'stable-anchor-cleared-composer' | 'accepted-request-stable-anchor-cleared-composer' | 'backend-exact-user';
+  readonly evidence?: 'stable-anchor-cleared-composer' | 'accepted-request-stable-anchor-cleared-composer' | 'backend-exact-user' | 'backend-exact-editor-text';
+  readonly promptEncoding?: { readonly kind: 'commonmark-literal'; readonly canonicalTextSha256: string; readonly decodedTextSha256: string };
   readonly conversationId: string;
   readonly submittedUserMessageId: string;
   readonly submittedUserTurnId: string;
@@ -98,6 +99,9 @@ export interface ProviderAcknowledgementRecoveryEvidence {
     readonly firstDifference: number;
     readonly expectedCodePoint: number | null;
     readonly actualCodePoint: number | null;
+    readonly decodedTextLength: number;
+    readonly decodedFirstDifference: number;
+    readonly decodedActualCodePoint: number | null;
   };
 }
 

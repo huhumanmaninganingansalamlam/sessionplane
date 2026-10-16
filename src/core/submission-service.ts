@@ -467,6 +467,7 @@ export class SubmissionService {
               hasSubmittedUserMessageId: true,
               hasSubmittedUserTurnId: true,
               acknowledgementEvidence: acknowledgement.evidence ?? 'provider-adapter',
+              ...(acknowledgement.promptEncoding === undefined ? {} : { promptEncoding: acknowledgement.promptEncoding }),
               conversationId: acknowledgement.conversationId,
               submittedUserMessageId: acknowledgement.submittedUserMessageId,
               submittedUserTurnId: acknowledgement.submittedUserTurnId,

@@ -129,7 +129,7 @@ export class ChatGptBackendRecovery {
         ...(rateLimit ? { retryAfterMs: rateLimit.retryAfterDurationMs, retryAfterSource: rateLimit.retryAfterSource } : {}) });
       return null;
     }
-    const acknowledgement = recoverExactServerAcknowledgement(result.body, conversationId, prompt, attempts);
+    const acknowledgement = recoverExactServerAcknowledgement(result.body, conversationId, prompt, attempts, selectedMessageId);
     if (acknowledgement === null) {
       const payload = result.body;
       const ids = isRecord(payload) ? [readStringField(payload, 'id'), readStringField(payload, 'conversation_id')]
@@ -148,6 +148,9 @@ export class ChatGptBackendRecovery {
       const expected = prompt.replaceAll('\r\n', '\n');
       let firstDifference = 0;
       if (text !== null) while (firstDifference < Math.min(text.length, expected.length) && text[firstDifference] === expected[firstDifference]) firstDifference++;
+      const decoded = text === null ? null : decodeLiteralMarkdown(text);
+      let decodedFirstDifference = 0;
+      if (decoded !== null) while (decodedFirstDifference < Math.min(decoded.length, expected.length) && decoded[decodedFirstDifference] === expected[decodedFirstDifference]) decodedFirstDifference++;
       observe?.({ kind: 'unverified', source: 'backend', observedAt: this.#now().toISOString(),
         nextCheckAt: new Date(this.#acknowledgementRetryAt).toISOString(), httpStatus: result.httpStatus,
         endpointCategory: 'conversation-detail',
@@ -162,7 +165,9 @@ export class ChatGptBackendRecovery {
           textSha256: createHash('sha256').update(text).digest('hex'),
           whitespaceOnlyDifference: text.replace(/\s+/g, ' ').trim() === expected.replace(/\s+/g, ' ').trim(),
           firstDifference, expectedCodePoint: expected.codePointAt(firstDifference) ?? null,
-          actualCodePoint: text.codePointAt(firstDifference) ?? null } }) });
+          actualCodePoint: text.codePointAt(firstDifference) ?? null,
+          decodedTextLength: decoded!.length, decodedFirstDifference,
+          decodedActualCodePoint: decoded!.codePointAt(decodedFirstDifference) ?? null } }) });
     }
     return acknowledgement;
   }
@@ -265,6 +270,7 @@ function trustedOrigin(value: string): string | null {
 export function recoverExactServerAcknowledgement(
   payload: unknown, conversationId: string, prompt: string,
   attempts?: readonly ProviderSubmissionAttempt[],
+  selectedMessageId?: string,
 ): ProviderSubmissionAcknowledgement | null {
   if (!isRecord(payload) || !isRecord(payload.mapping)) return null;
   const ids = [readStringField(payload, 'id'), readStringField(payload, 'conversation_id')].filter(id => id !== null);
@@ -286,14 +292,27 @@ export function recoverExactServerAcknowledgement(
       if (messageId !== exactAttempt.messageId ||
           createHash('sha256').update(text).digest('hex') !== exactAttempt.textHash ||
           (parent !== exactAttempt.parentMessageId && readStringField(parentMessage, 'id') !== exactAttempt.parentMessageId)) return [];
-    } else if (text !== prompt.replaceAll('\r\n', '\n')) return [];
+    } else if (text !== prompt.replaceAll('\r\n', '\n') &&
+      !(messageId === selectedMessageId && decodeLiteralMarkdown(text) === prompt.replaceAll('\r\n', '\n'))) return [];
     return [{ conversationId, submittedUserMessageId: messageId,
-      submittedUserTurnId: readStringField(message, 'turn_id') ?? nodeId }];
+      submittedUserTurnId: readStringField(message, 'turn_id') ?? nodeId,
+      ...(text === prompt.replaceAll('\r\n', '\n') || exactAttempt !== undefined ? {} : {
+        evidence: 'backend-exact-editor-text' as const,
+        promptEncoding: { kind: 'commonmark-literal' as const,
+          canonicalTextSha256: createHash('sha256').update(text).digest('hex'),
+          decodedTextSha256: createHash('sha256').update(decodeLiteralMarkdown(text)).digest('hex') } }) }];
   });
   if (matches.length !== 1) return null;
   const acknowledgement = matches[0]!;
   const anchored = recoverExactServerFinal(payload, acknowledgement);
   return anchored.kind === 'complete' || anchored.kind === 'pending' ? acknowledgement : null;
+}
+
+// The ChatGPT editor serializes literal punctuation as CommonMark escapes.
+// Decode only that representation: never collapse whitespace, strip markup or
+// relax a recorded POST identity/hash. Callers must explicitly select the user.
+function decodeLiteralMarkdown(text: string): string {
+  return text.replace(/\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])/g, '$1');
 }
 
 export function recoverExactServerFinal(
