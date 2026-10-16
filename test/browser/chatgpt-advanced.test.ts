@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
+import { chromium } from 'playwright-core';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,7 +21,15 @@ import { navigateProviderPage } from '../../src/providers/human-verification.ts'
 
 test('localized file-card discovery and exact download preserve response ancestry', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-localized-file-'));
+  let attachmentReads = 0;
+  let changedFilenameOnRead = false;
   const server = createServer((req, res) => {
+    if (req.url === '/content/exact-file') {
+      attachmentReads++;
+      const filename = changedFilenameOnRead && attachmentReads % 2 === 0 ? 'other.md' : 'PRD.final.md';
+      res.writeHead(200, { 'content-type': 'text/markdown', 'content-disposition': `attachment; filename="${filename}"` });
+      res.end('# Original attachment bytes\n'); return;
+    }
     if (req.url?.startsWith('/files/blocked')) {
       res.writeHead(429, { 'retry-after': '3' }); res.end('private provider body'); return;
     }
@@ -54,6 +63,26 @@ test('localized file-card discovery and exact download preserve response ancestr
       await assert.rejects(discoverFileCards(page, request, () => {}), /anchor/);
       await assert.rejects(downloadFileCard(page, request, candidate, () => {}), /anchor/);
     }
+    // A replacement controller uses noDefaults to preserve all sibling pages.
+    // Its download event setup is absent, although the exact attachment GET succeeds.
+    const adopted = await chromium.connectOverCDP(`http://127.0.0.1:${owner.status.debuggingPort}`, { noDefaults: true });
+    try {
+      const retained = adopted.contexts()[0]!.pages().find(p => p.url() === page.url())!;
+      await retained.setContent('<main><div data-message-author-role="user" data-message-id="exact-user">User</div><div data-message-author-role="assistant" data-message-id="exact-answer"><div><button aria-label="Open preview of PRD.final.md"></button><button aria-label="Download file">Download</button></div></div></main>');
+      await retained.locator('[aria-label="Download file"]').evaluate(button => {
+        (button as HTMLButtonElement).onclick = async () => {
+          const body = await (await fetch('/content/exact-file')).blob();
+          const link = document.createElement('a'); link.download = 'PRD.final.md'; link.href = URL.createObjectURL(body); link.click();
+        };
+      });
+      const card = (await discoverFileCards(retained, request, () => {}))[0]!;
+      const bytes = await downloadFileCard(retained, request, { providerArtifactId: 'retained-card', name: card.name, sourceUrl: card.source, mediaType: null }, () => {});
+      assert.equal(Buffer.from(bytes.bytes).toString(), '# Original attachment bytes\n');
+      assert.equal(attachmentReads, 2, 'one card activation and one exact authenticated attachment read');
+      changedFilenameOnRead = true;
+      await assert.rejects(downloadFileCard(retained, request, { providerArtifactId: 'retained-card', name: card.name, sourceUrl: card.source, mediaType: null }, () => {}), /Exact attachment read failed/);
+      assert.equal(attachmentReads, 4, 'a changed attachment is rejected without another retry');
+    } finally { await adopted.close(); }
     await page.setContent('<main><div data-message-author-role="user" data-message-id="exact-user">User</div><div data-message-author-role="assistant" data-message-id="exact-answer"><div><button aria-label="Open preview of PRD.final.md"></button><button aria-label="Download file" onclick="void fetch(\'/files/blocked?signature=private-query\')">Download</button></div></div></main>');
     const blocked = (await discoverFileCards(page, request, () => {}))[0]!;
     await assert.rejects(downloadFileCard(page, request, { providerArtifactId: 'blocked-card', name: blocked.name,
