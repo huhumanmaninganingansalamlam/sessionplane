@@ -11,6 +11,7 @@ import { invokeMcpTool, getMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 import { callRpc } from '../../src/cli/client.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
+import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 
 test('team deletion removes only its owned state, cancels work and survives provider failure and replay', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-team-delete-'));
@@ -119,6 +120,70 @@ test('team deletion closes owned browser tabs and leaves unrelated tabs open', a
     assert.deepEqual(replay.structuredContent, result.structuredContent);
     assert.equal(differentProvider.page.isClosed(), false, 'Another provider is not cleanup ownership');
     assert.equal(service.pageRegistry.listBindings().some(b => b.sessionId === session.sessionId), false);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('completed team cleanup retains safe provider preparation failures independently of tab closure', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-team-provider-failure-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  fake.autoFinalText = 'Retrieved original answer';
+  const failures = new Map<string, { stage: string; httpStatus: number; retryAfterMs: number | null }>();
+  let preparations = 0;
+  t.mock.method(fake, 'openDeletion', async ({ session }) => {
+    preparations++;
+    throw new ProviderSubmissionError('provider.unavailable', 'Provider preparation failed', {
+      details: { ...failures.get(session.sessionId), authorization: 'private-token', body: 'private-response' },
+    });
+  });
+  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const invoke = () => invokeMcpTool({ name: 'sessionplane_team_delete', arguments: {
+    teamId: team.teamId, requestId: 'completed-cleanup' }, socketPath: config.socketPath,
+    timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
+  const team = service.teamDirectory.createTeam({ clientId: 'completed-cleanup' });
+  try {
+    const unrelated = await service.browserOwner!.createPage();
+    await unrelated.page.setContent('<textarea>Unrelated user draft</textarea>');
+    const owned = [];
+    for (const [index, details] of [
+      { stage: 'authentication', httpStatus: 403, retryAfterMs: null },
+      { stage: 'conversation-verification', httpStatus: 429, retryAfterMs: 52000 },
+    ].entries()) {
+      const roleKey = index === 0 ? 'main' : 'expert';
+      if (index > 0) service.teamDirectory.createRole({ teamId: team.teamId, roleKey, roleType: 'expert' });
+      const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey, provider: 'chatgpt' });
+      failures.set(session.sessionId, details);
+      await callRpc({ socketPath: config.socketPath, method: 'session.send', params: {
+        clientId: 'completed-cleanup', sessionId: session.sessionId, requestId: 'send-' + index, prompt: 'Local fixture' } });
+      const final = await callRpc<SessionSnapshot>({ socketPath: config.socketPath, method: 'session.wait', params: {
+        clientId: 'completed-cleanup', sessionId: session.sessionId, generation: 1, waitMs: 3000 } });
+      assert.equal(final.terminal, true);
+      const { page, binding } = await service.browserOwner!.createPage();
+      await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<textarea></textarea>' }));
+      await page.goto('https://chatgpt.com/c/' + final.conversationId);
+      service.pageRegistry.bindPage(binding.pageKey, { sessionId: session.sessionId, generation: 1, conversationId: final.conversationId! });
+      owned.push(page);
+    }
+    const result = await invoke();
+    assert.equal(result.isError, false, JSON.stringify(result));
+    assert.equal(result.structuredContent.deleted, true);
+    const cleanups = result.structuredContent.sessions as Array<{ sessionId: string; providerDeleted: boolean;
+      providerError: string; providerErrorDetails: unknown; closedPages: number; pageErrors: string[] }>;
+    for (const cleanup of cleanups) {
+      assert.equal(cleanup.providerDeleted, false);
+      assert.equal(cleanup.providerError, 'provider.unavailable');
+      assert.deepEqual(cleanup.providerErrorDetails, failures.get(cleanup.sessionId));
+      assert.equal(cleanup.closedPages, 1);
+      assert.deepEqual(cleanup.pageErrors, []);
+    }
+    assert.equal(cleanups.length, 2);
+    assert.equal(owned.every(page => page.isClosed()), true);
+    assert.equal(await unrelated.page.locator('textarea').inputValue(), 'Unrelated user draft');
+    assert.doesNotMatch(JSON.stringify(result), /private-token|private-response/);
+    assert.deepEqual((await invoke()).structuredContent, result.structuredContent);
+    assert.equal(preparations, 2, 'Receipt replay does not repeat provider preparation or deletion');
+    assert.equal(fake.stopCount, 0, 'Completed generations require no Stop');
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
