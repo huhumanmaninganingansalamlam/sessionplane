@@ -58,7 +58,7 @@ test('localized file-card discovery and exact download preserve response ancestr
     const blocked = (await discoverFileCards(page, request, () => {}))[0]!;
     await assert.rejects(downloadFileCard(page, request, { providerArtifactId: 'blocked-card', name: blocked.name,
       sourceUrl: blocked.source, mediaType: null }, () => {}), error => {
-      assert.match((error as Error).message, /file-metadata:HTTP429:Retry-After=3s/);
+      assert.match((error as Error).message, /file-metadata:HTTP429:.*Retry-After=3s/);
       assert.doesNotMatch((error as Error).message, /signature|private-query|private provider body/);
       return true;
     });

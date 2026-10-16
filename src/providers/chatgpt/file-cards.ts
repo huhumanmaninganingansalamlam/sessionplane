@@ -111,8 +111,13 @@ export async function downloadFileCard(page: Page, request: ProviderArtifactRequ
       const url = new URL(response.url());
       const category = url.pathname.includes('/files/') ? 'file-metadata'
         : url.pathname.includes('/content') ? 'file-content' : 'provider-request';
-      const retryAfter = response.headers()['retry-after'];
-      transport.push(`${category}:HTTP${response.status()}${retryAfter && /^\d+$/.test(retryAfter) ? `:Retry-After=${retryAfter}s` : ''}`);
+      const headers = response.headers();
+      const retryAfter = headers['retry-after'];
+      const mime = headers['content-type']?.split(';')[0];
+      const contentType = mime && /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i.test(mime) ? mime : 'unknown';
+      const disposition = headers['content-disposition'] ?? '';
+      const exactFilename = disposition.includes('filename=\"' + found[0]!.name + '\"');
+      transport.push(`${category}:HTTP${response.status()}:type=${contentType}:attachment=${/^attachment\b/i.test(disposition)}:exactFilename=${exactFilename}${retryAfter && /^\d+$/.test(retryAfter) ? `:Retry-After=${retryAfter}s` : ''}`);
     };
     page.on('response', onResponse);
     page.on('popup', onPopup);
