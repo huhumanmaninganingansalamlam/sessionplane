@@ -439,7 +439,7 @@ export async function recoverChatGptAcknowledgement(
   page: Page,
   prompt: string,
   expectedConversationId: string,
-  selection?: { readonly messageId: string; readonly evidenceHash: string },
+  selection?: { readonly messageId: string; readonly evidenceHash: string; readonly verifyExactPrompt?: true },
 ): Promise<ProviderSubmissionAcknowledgement | null> {
   const first = await readChatGptAcknowledgement(page, prompt, expectedConversationId, selection);
   if (first === null || !(await hasClearedComposer(page))) return null;
@@ -453,7 +453,7 @@ async function readChatGptAcknowledgement(
   page: Page,
   prompt: string,
   expectedConversationId: string,
-  selection?: { readonly messageId: string; readonly evidenceHash: string },
+  selection?: { readonly messageId: string; readonly evidenceHash: string; readonly verifyExactPrompt?: true },
 ): Promise<ProviderSubmissionAcknowledgement | null> {
   const conversationId = parseChatGptConversationId(page.url());
   if (conversationId !== expectedConversationId) return null;
@@ -463,6 +463,8 @@ async function readChatGptAcknowledgement(
     const candidates = messages.filter((message) => userIdentity(message)?.messageId === selection.messageId &&
       submissionEvidenceHash(conversationId, message) === selection.evidenceHash);
     if (candidates.length !== 1) return null;
+    if (selection.verifyExactPrompt && normalizeLineEndings(candidates[0]!.text) !== normalizeLineEndings(prompt) &&
+        !(await messageHasExactPrompt(page, candidates[0]!, prompt))) return null;
     const identity = userIdentity(candidates[0]!);
     return identity === null ? null : { conversationId, submittedUserMessageId: identity.messageId, submittedUserTurnId: identity.turnId };
   }
@@ -804,7 +806,11 @@ async function messageHasExactPrompt(page: Page, identity: ChatGptMessage, expec
 
   const collapsedControl = message.locator(CHATGPT_SELECTORS.userMessageExpansionControls);
   if ((await collapsedControl.count().catch(() => 0)) !== 1) return false;
-  await collapsedControl.click({ timeout: 1_000 }).catch(() => undefined);
+  // A retained background page may not receive animation frames. Expand only
+  // this message's own control without focusing the page or touching its draft.
+  await collapsedControl.evaluate((button) => {
+    if (button instanceof HTMLButtonElement && !button.disabled) button.click();
+  }, undefined, { timeout: 1_000 }).catch(() => undefined);
   return await matchesExactPrompt();
 }
 

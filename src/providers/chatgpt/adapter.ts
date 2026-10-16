@@ -186,16 +186,17 @@ export class ChatGptAdapter implements ProviderAdapter {
         const candidate = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);
         if (new URL(candidate.page.url()).origin !== new URL(this.#loginUrl).origin) return null;
         const foundId = candidate.binding.conversationId!;
-        const selected = await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, request.selection);
+        const selection = { ...request.selection, verifyExactPrompt: true as const };
+        const selected = await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, selection);
         if (selected === null) return null;
         const server = await this.#backendRecovery.recoverAcknowledgement(
           foundId, request.prompt, backendClient(candidate.page), new URL(candidate.page.url()).origin,
-          undefined, request.onRecoveryObservation, request.selection.messageId);
+          request.attempts, request.onRecoveryObservation, request.selection.messageId);
         if (server === null || server.submittedUserMessageId !== selected.submittedUserMessageId ||
             server.submittedUserTurnId !== selected.submittedUserTurnId) return null;
         const fresh = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);
         if (fresh.binding.bindingEpoch !== binding.bindingEpoch ||
-            await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, request.selection) === null) return null;
+            await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, selection) === null) return null;
         if (this.#pageRegistry.refreshPage(pageKey).bindingEpoch !== binding.bindingEpoch) return null;
         this.#pageRegistry.bindPage(pageKey, { sessionId: request.session.sessionId,
           generation: request.generation, conversationId: foundId });

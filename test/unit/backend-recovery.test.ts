@@ -17,8 +17,8 @@ import {
 const CONVERSATION_ID = 'conversation-backend-1';
 
 test('explicit retained message ACK compares the full literal editor text, preserving whitespace and POST evidence', () => {
-  const prompt = 'Required response:\n1) Keep **all** code: `a_b` and \\path\n\nFinal.';
-  const serialized = 'Required response:\n1\\) Keep \\*\\*all\\*\\* code: \\`a\\_b\\` and \\\\path\n\nFinal\\.';
+  const prompt = 'Required response:\n1) Keep **all** code: `a_b` and \\path\nURL https://example.test/a\\b vs literal <https://example.test/>\n\nFinal.';
+  const serialized = 'Required response:\n1\\) Keep \\*\\*all\\*\\* code: \\`a\\_b\\` and \\\\path\nURL <https://example.test/a\\b> vs literal \\<https://example.test/\\>\n\nFinal\\.';
   const payload = conversationPayload([node('root', null, null),
     node('user-node', 'root', { ...userMessage('selected-user', 'selected-turn'), content: { content_type: 'text', parts: [serialized] } }),
     node('answer', 'user-node', finalAssistant('answer', 'Original PLAN'))], 'answer');
