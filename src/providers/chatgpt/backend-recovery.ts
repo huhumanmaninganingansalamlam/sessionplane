@@ -54,15 +54,16 @@ export class ChatGptBackendRecovery {
   readonly #now: () => Date;
   readonly #onRateLimit: ChatGptBackendRecoveryOptions['onRateLimit'];
   #token: CachedToken | null = null;
-  #acknowledgementRetryAt = 0;
-  readonly #acknowledgementWaiting = new Map<string, number>();
+  #conversationRetryAt = 0;
+  readonly #conversationWaiting = new Map<string, number>();
+  #conversationInFlight = false;
 
   constructor(options: ChatGptBackendRecoveryOptions) {
     this.#requestTimeoutMs = options.requestTimeoutMs;
     this.#tokenCacheTtlMs = options.tokenCacheTtlMs;
     this.#now = options.now ?? (() => new Date());
     this.#onRateLimit = options.onRateLimit;
-    this.#acknowledgementRetryAt = options.acknowledgementRetryAtMs ?? 0;
+    this.#conversationRetryAt = options.acknowledgementRetryAtMs ?? 0;
   }
 
   async recover(
@@ -95,35 +96,13 @@ export class ChatGptBackendRecovery {
     observe?: (evidence: ProviderAcknowledgementRecoveryEvidence) => void,
     selectedMessageId?: string,
   ): Promise<ProviderSubmissionAcknowledgement | null> {
-    const now = this.#now().getTime();
-    // A stopped caller must not retain the head of the queue. Live recovery
-    // callers renew while waiting; the grace covers a request timeout and retry.
-    const callerGraceMs = 2 * Math.max(5_000, this.#requestTimeoutMs);
-    for (const [id, seenAt] of this.#acknowledgementWaiting) {
-      if (now - seenAt > callerGraceMs) this.#acknowledgementWaiting.delete(id);
-    }
-    this.#acknowledgementWaiting.set(conversationId, now);
-    const queued = this.#acknowledgementWaiting.keys().next().value !== conversationId;
-    if (now < this.#acknowledgementRetryAt || queued) {
-      observe?.({ kind: 'deferred', source: 'pacing', reason: queued && now >= this.#acknowledgementRetryAt
-          ? 'backend-acknowledgement-probe-queued' : 'backend-acknowledgement-probe-paced',
-        observedAt: this.#now().toISOString(), nextCheckAt: new Date(Math.max(now + 5_000, this.#acknowledgementRetryAt)).toISOString(),
-        httpStatus: null, endpointCategory: null });
-      return null;
-    }
-    this.#acknowledgementWaiting.delete(conversationId);
-    // The shared account probe is bounded even when callers repeatedly inspect.
-    this.#acknowledgementRetryAt = this.#now().getTime() + 5_000;
     let rateLimit: BackendRateLimitEvidence | undefined;
-    const result = await this.#conversation(conversationId, client, origin, evidence => { rateLimit = evidence; });
+    const result = await this.#conversation(conversationId, client, origin, evidence => { rateLimit = evidence; }, true);
     if ('recovery' in result) {
-      if (result.recovery.kind === 'deferred') {
-        this.#acknowledgementRetryAt = this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0);
-      }
       observe?.({ kind: result.recovery.kind === 'deferred' ? 'deferred'
           : result.recovery.kind === 'unverified' ? 'unverified' : 'unavailable',
-        source: 'backend', reason: result.recovery.reason, observedAt: this.#now().toISOString(),
-        nextCheckAt: new Date(this.#acknowledgementRetryAt).toISOString(),
+        source: result.pacing ? 'pacing' : 'backend', reason: result.recovery.reason, observedAt: this.#now().toISOString(),
+        nextCheckAt: result.recovery.nextCheckAt ?? new Date(this.#conversationRetryAt).toISOString(),
         httpStatus: result.httpStatus ?? null, endpointCategory: result.endpointCategory ?? null,
         candidateConversationId: conversationId,
         ...(rateLimit ? { retryAfterMs: rateLimit.retryAfterDurationMs, retryAfterSource: rateLimit.retryAfterSource } : {}) });
@@ -152,7 +131,7 @@ export class ChatGptBackendRecovery {
       let decodedFirstDifference = 0;
       if (decoded !== null) while (decodedFirstDifference < Math.min(decoded.length, expected.length) && decoded[decodedFirstDifference] === expected[decodedFirstDifference]) decodedFirstDifference++;
       observe?.({ kind: 'unverified', source: 'backend', observedAt: this.#now().toISOString(),
-        nextCheckAt: new Date(this.#acknowledgementRetryAt).toISOString(), httpStatus: result.httpStatus,
+        nextCheckAt: new Date(this.#conversationRetryAt).toISOString(), httpStatus: result.httpStatus,
         endpointCategory: 'conversation-detail',
         reason: !validMapping ? 'backend-conversation-mapping-unverified'
           : promptMatchCount === 0 ? 'backend-exact-prompt-absent'
@@ -173,6 +152,41 @@ export class ChatGptBackendRecovery {
   }
 
   async #conversation(conversationId: string, client: BackendJsonClient, origin: string,
+    observe?: (evidence: BackendRateLimitEvidence) => void, acknowledgement = false):
+    Promise<{ body: unknown; httpStatus: number } | { recovery: ProviderRecoveryResult; httpStatus?: number; endpointCategory?: 'auth-session' | 'conversation-detail'; pacing?: boolean }> {
+    const now = this.#now().getTime();
+    const graceMs = 2 * Math.max(5_000, this.#requestTimeoutMs);
+    for (const [id, expiresAt] of this.#conversationWaiting) {
+      if (now > expiresAt) this.#conversationWaiting.delete(id);
+    }
+    this.#conversationWaiting.set(conversationId, Math.max(now, this.#conversationRetryAt) + graceMs);
+    const queued = this.#conversationWaiting.keys().next().value !== conversationId;
+    if (now < this.#conversationRetryAt || queued || this.#conversationInFlight) {
+      const next = Math.max(now + 5_000, this.#conversationRetryAt);
+      return { pacing: true, recovery: { ...unavailable(acknowledgement
+        ? queued && now >= this.#conversationRetryAt ? 'backend-acknowledgement-probe-queued' : 'backend-acknowledgement-probe-paced'
+        : 'backend-conversation-probe-paced'), kind: 'deferred', retryAfterMs: next - now,
+        nextCheckAt: new Date(next).toISOString() } };
+    }
+    this.#conversationWaiting.delete(conversationId);
+    this.#conversationInFlight = true;
+    this.#conversationRetryAt = now + 5_000;
+    try {
+      const result = await this.#readConversation(conversationId, client, origin, observe);
+      if ('recovery' in result && result.recovery.kind === 'deferred') {
+        this.#conversationRetryAt = this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0);
+      }
+      // A caller honoring Retry-After must not expire before its allowed turn.
+      for (const [id, expiresAt] of this.#conversationWaiting) {
+        this.#conversationWaiting.set(id, Math.max(expiresAt, this.#conversationRetryAt + graceMs));
+      }
+      return result;
+    } finally {
+      this.#conversationInFlight = false;
+    }
+  }
+
+  async #readConversation(conversationId: string, client: BackendJsonClient, origin: string,
     observe?: (evidence: BackendRateLimitEvidence) => void):
     Promise<{ body: unknown; httpStatus: number } | { recovery: ProviderRecoveryResult; httpStatus?: number; endpointCategory?: 'auth-session' | 'conversation-detail' }> {
     const normalizedOrigin = trustedOrigin(origin);
