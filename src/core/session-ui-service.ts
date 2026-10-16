@@ -148,7 +148,19 @@ export class SessionUiService {
                   const candidate = this.#registry.unknownConversationCandidate(session.pageKey, session);
                   if (new URL(candidate.page.url()).origin !== this.#chatgptOrigin) throw new SessionPlaneDomainError(
                     'session.page-identity-unverified', 'Recovery candidate left the ChatGPT origin');
-                  const submissionCandidates = await inspectChatGptSubmissionCandidates(candidate.page, binding.conversationId);
+                  const available = (await inspectChatGptSubmissionCandidates(candidate.page, binding.conversationId))
+                    .filter(candidate => !submittedMessageIds.has(candidate.messageId));
+                  // Multiple unclaimed users cannot identify this request's response.
+                  // Observe the transcript once, only for an unambiguous candidate.
+                  const response = available.length === 1 ? await observeChatGptDom(candidate.page, {
+                    submittedUserMessageId: available[0]!.messageId, submittedUserTurnId: null,
+                  }) : null;
+                  const submissionCandidates = available.map(message => ({ ...message,
+                    responseCandidate: response?.candidate == null ? null : {
+                      ...response.candidate, submissionVerified: false as const,
+                      scope: 'mounted-dom-unverified-submission' as const,
+                      observedAt: response.messageDiagnostics.observedAt,
+                    } }));
                   const snapshot = await this.#refs.capture({ pageKey: session.pageKey, bindingEpoch: binding.bindingEpoch,
                     page: candidate.page, ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: input.maxNodes ?? 1000 });
                   const observedSession = { ...session, conversationId: binding.conversationId };
@@ -160,7 +172,7 @@ export class SessionUiService {
                   return { ...snapshot, providerAlerts,
                     conversationRecovery: { conversationId: binding.conversationId, requiresExplicitAcknowledgement: true,
                       observedAt: dom.messageDiagnostics.observedAt, activity: activity.strength, activityReason: activity.reason },
-                    submissionCandidates: submissionCandidates.filter(candidate => !submittedMessageIds.has(candidate.messageId)) };
+                    submissionCandidates };
                 }
               }
               return {

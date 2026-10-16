@@ -186,11 +186,27 @@ export class ChatGptAdapter implements ProviderAdapter {
         const candidate = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);
         if (new URL(candidate.page.url()).origin !== new URL(this.#loginUrl).origin) return null;
         const foundId = candidate.binding.conversationId!;
+        const selection = { ...request.selection, verifyExactPrompt: true as const,
+          onPromptMismatch: (values: readonly string[]) => {
+            const expected = request.prompt.replaceAll('\r\n', '\n');
+            request.onRecoveryObservation?.({ kind: 'unverified', source: 'dom', reason: 'dom-exact-prompt-absent',
+              observedAt: new Date().toISOString(), nextCheckAt: null, httpStatus: null, endpointCategory: null,
+              candidateConversationId: foundId, renderedPromptComparisons: values.map(value => {
+                const text = value.replaceAll('\r\n', '\n');
+                let firstDifference = 0;
+                while (firstDifference < Math.min(text.length, expected.length) && text[firstDifference] === expected[firstDifference]) firstDifference++;
+                return { textLength: text.length, textSha256: createHash('sha256').update(text).digest('hex'), firstDifference,
+                  expectedCodePoint: expected.codePointAt(firstDifference) ?? null, actualCodePoint: text.codePointAt(firstDifference) ?? null };
+              }).sort((a, b) => b.firstDifference - a.firstDifference).slice(0, 3) });
+          } };
+        // Rendered paragraphs/links can add layout whitespace. Inspect the full
+        // DOM, but only exact canonical full-text proof may establish acceptance.
+        await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, selection);
         const selected = await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, request.selection);
         if (selected === null) return null;
         const server = await this.#backendRecovery.recoverAcknowledgement(
           foundId, request.prompt, backendClient(candidate.page), new URL(candidate.page.url()).origin,
-          undefined, request.onRecoveryObservation);
+          request.attempts, request.onRecoveryObservation, request.selection.messageId);
         if (server === null || server.submittedUserMessageId !== selected.submittedUserMessageId ||
             server.submittedUserTurnId !== selected.submittedUserTurnId) return null;
         const fresh = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);
@@ -199,7 +215,7 @@ export class ChatGptAdapter implements ProviderAdapter {
         if (this.#pageRegistry.refreshPage(pageKey).bindingEpoch !== binding.bindingEpoch) return null;
         this.#pageRegistry.bindPage(pageKey, { sessionId: request.session.sessionId,
           generation: request.generation, conversationId: foundId });
-        return { ...server, evidence: 'backend-exact-user' };
+        return { ...server, evidence: server.evidence ?? 'backend-exact-user' };
       }
       if (isWebRedirect(binding, request.session.sessionId, request.generation, conversationId)) {
         const page = this.#pageRegistry.pageForObservation(pageKey);

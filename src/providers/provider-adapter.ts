@@ -60,7 +60,8 @@ export interface PreparationTarget {
 export type PreparationChoices = Readonly<Partial<Record<PreparationPurpose, PreparationTarget>>>;
 
 export interface ProviderSubmissionAcknowledgement {
-  readonly evidence?: 'stable-anchor-cleared-composer' | 'accepted-request-stable-anchor-cleared-composer' | 'backend-exact-user';
+  readonly evidence?: 'stable-anchor-cleared-composer' | 'accepted-request-stable-anchor-cleared-composer' | 'backend-exact-user' | 'backend-exact-editor-text';
+  readonly promptEncoding?: { readonly kind: 'commonmark-literal'; readonly canonicalTextSha256: string; readonly decodedTextSha256: string; readonly terminalLineBreakOmitted?: true };
   readonly conversationId: string;
   readonly submittedUserMessageId: string;
   readonly submittedUserTurnId: string;
@@ -78,16 +79,37 @@ export interface ProviderAcknowledgementRecoveryRequest {
 /** Read evidence only; absence of a match never authorizes another submission. */
 export interface ProviderAcknowledgementRecoveryEvidence {
   readonly kind: 'deferred' | 'unavailable' | 'unverified';
-  readonly source: 'backend' | 'pacing';
+  readonly source: 'backend' | 'pacing' | 'dom';
   readonly reason: string;
   readonly observedAt: string;
   readonly nextCheckAt: string | null;
   readonly httpStatus: number | null;
   readonly endpointCategory: 'auth-session' | 'conversation-detail' | null;
   readonly promptMatchCount?: number;
+  readonly canonicalUserMessageCount?: number;
+  readonly selectedMessagePresent?: boolean;
   readonly retryAfterMs?: number | null;
   readonly retryAfterSource?: 'valid-header' | 'header-absent-fallback' | 'header-invalid-fallback';
   readonly candidateConversationId?: string;
+  readonly renderedPromptComparisons?: readonly {
+    readonly textLength: number;
+    readonly textSha256: string;
+    readonly firstDifference: number;
+    readonly expectedCodePoint: number | null;
+    readonly actualCodePoint: number | null;
+  }[];
+  readonly selectedMessageComparison?: {
+    readonly messageId: string;
+    readonly textLength: number;
+    readonly textSha256: string;
+    readonly whitespaceOnlyDifference: boolean;
+    readonly firstDifference: number;
+    readonly expectedCodePoint: number | null;
+    readonly actualCodePoint: number | null;
+    readonly decodedTextLength: number;
+    readonly decodedFirstDifference: number;
+    readonly decodedActualCodePoint: number | null;
+  };
 }
 
 export interface ProviderSubmission {

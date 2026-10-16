@@ -16,6 +16,37 @@ import {
 
 const CONVERSATION_ID = 'conversation-backend-1';
 
+test('explicit retained message ACK compares the full literal editor text, preserving whitespace and POST evidence', () => {
+  const prompt = 'Required response:\n1) Keep **all** code: `a_b` and \\path\nURL https://example.test/a\\b vs literal <https://example.test/>\n[Brave 검색](https://search.brave.com/search?q=Android+tablet)과 [GitHub](https://api.github.com/search?q=receiver&sort=updated)\n\nFinal.';
+  const serialized = 'Required response:\n1\\) Keep \\*\\*all\\*\\* code: \\`a\\_b\\` and \\\\path\nURL <https://example.test/a\\b> vs literal \\<https://example.test/\\>\n\\[Brave 검색\\]\\([https://search.brave.com/search?q=Android+tablet)과](https://search.brave.com/search?q=Android+tablet\\)과) \\[GitHub\\]\\([https://api.github.com/search?q=receiver&sort=updated](https://api.github.com/search?q=receiver\\&sort=updated))\n\nFinal\\.';
+  const payload = conversationPayload([node('root', null, null),
+    node('user-node', 'root', { ...userMessage('selected-user', 'selected-turn'), content: { content_type: 'text', parts: [serialized] } }),
+    node('answer', 'user-node', finalAssistant('answer', 'Original PLAN'))], 'answer');
+  const recover = (text: string, id?: string) => recoverExactServerAcknowledgement(payload, CONVERSATION_ID, text, undefined, id);
+  assert.equal(recover(prompt), null, 'Automatic UNKNOWN recovery cannot assume a text encoding');
+  assert.equal(recover(prompt, 'another-user'), null);
+  const terminalBreak = recover(prompt + '\n', 'selected-user');
+  assert.equal(terminalBreak?.submittedUserMessageId, 'selected-user');
+  assert.equal(terminalBreak?.promptEncoding?.terminalLineBreakOmitted, true);
+  assert.equal(recover(prompt + '\n\n', 'selected-user'), null, 'Multiple trailing blank lines are not discarded');
+  assert.equal(recover(prompt + ' ', 'selected-user'), null, 'Trailing spaces remain significant');
+  assert.equal(recover(prompt + '\n'), null, 'Automatic recovery cannot assume the editor omitted a final paragraph break');
+  const ack = recover(prompt, 'selected-user');
+  assert.equal(ack?.submittedUserMessageId, 'selected-user');
+  assert.equal(ack?.evidence, 'backend-exact-editor-text');
+  assert.equal(ack?.promptEncoding?.decodedTextSha256, createHash('sha256').update(prompt).digest('hex'));
+  assert.equal(recoverExactServerFinal(payload, ack!).answerText, 'Original PLAN');
+  assert.equal(recover(prompt.replace('Keep', 'Delete'), 'selected-user'), null);
+  assert.equal(recover(prompt.replace('\n\n', '\n'), 'selected-user'), null, 'Blank lines are not collapsed');
+  const wrongTarget = JSON.parse(JSON.stringify(payload));
+  wrongTarget.mapping['user-node'].message.content.parts[0] = serialized.replace('tablet\\)과)', 'tablet\\)evil)');
+  assert.equal(recoverExactServerAcknowledgement(wrongTarget, CONVERSATION_ID, prompt, undefined, 'selected-user'), null,
+    'A link with a different destination is not the literal editor representation');
+  assert.equal(recoverExactServerAcknowledgement(payload, CONVERSATION_ID, prompt, [{ conversationId: CONVERSATION_ID,
+    messageId: 'selected-user', parentMessageId: 'root', textHash: '0'.repeat(64), observedAt: new Date(0).toISOString() }], 'selected-user'), null,
+    'An incompatible captured POST hash remains authoritative');
+});
+
 test('late ACK uses durable dispatch identity among duplicate questions, never recency', () => {
   const old = [node('root', null, null), node('old-user', 'root', userMessage('old-user', 'old-turn')),
     node('old-final', 'old-user', finalAssistant('old-answer', 'Previous answer'))];
@@ -166,6 +197,7 @@ test('backend recovery requires final channel, finished status, end_turn, and no
 
 test('backend client caches access token in memory and classifies Retry-After 429', async () => {
   const now = new Date('2026-09-17T00:00:00.000Z');
+  let clock = now.getTime();
   const responses: BackendJsonResponse[] = [
     { status: 200, headers: {}, body: { accessToken: 'memory-only-token' } },
     {
@@ -192,18 +224,19 @@ test('backend client caches access token in memory and classifies Retry-After 42
   const recovery = new ChatGptBackendRecovery({
     requestTimeoutMs: 1_000,
     tokenCacheTtlMs: 60_000,
-    now: () => now,
+    now: () => new Date(clock),
     onRateLimit: (_request, value) => evidence.push(value),
   });
   const request = { session: sessionSnapshot(), generation: 1 } as const;
 
   assert.equal((await recovery.recover(request, client, 'https://chatgpt.com/')).kind, 'complete');
+  clock += 6000;
   const limited = await recovery.recover(request, client, 'https://chatgpt.com/');
   assert.equal(limited.kind, 'deferred');
   assert.equal(limited.reason, 'backend-http-429');
   assert.equal(limited.retryAfterMs, 120_000);
   assert.deepEqual(evidence, [{ status: 429, method: 'GET', endpointCategory: 'conversation-detail',
-    receivedAt: now.toISOString(), source: 'sessionplane-backend-recovery', headers: { 'retry-after': '120' },
+    receivedAt: new Date(clock).toISOString(), source: 'sessionplane-backend-recovery', headers: { 'retry-after': '120' },
     retryAfterSource: 'valid-header', retryAfterDurationMs: 120_000 }]);
   assert.equal(urls.filter((url) => url.endsWith('/api/auth/session')).length, 1);
   assert.equal(parseRetryAfterMs({ 'Retry-After': '2' }, now), 2_000);
@@ -311,16 +344,73 @@ test('ACK reads give the waiting conversation its turn without retaining a stopp
   await inspect('waiting');
   assert.deepEqual(reads, ['no-match', 'waiting']);
   now = 7000; await inspect('stopped');
-  now = 18001; await inspect('no-match');
+  now = 13000; await inspect('stopped');
+  assert.equal(reads.length, 2, 'the stopped caller still has its allowed turn plus grace');
+  now = 29001; await inspect('no-match');
   assert.deepEqual(reads, ['no-match', 'waiting', 'no-match'], 'a caller that stopped renewing cannot block recovery');
   const restarted = new ChatGptBackendRecovery({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000,
-    now: () => new Date(now), acknowledgementRetryAtMs: 20000 });
+    now: () => new Date(now), acknowledgementRetryAtMs: 31000 });
   await restarted.recoverAcknowledgement('waiting', 'Question', client, 'https://chatgpt.com');
   assert.equal(reads.length, 3, 'restarting a controller must not bypass recorded Retry-After');
-  now = 20001;
+  now = 31001;
   await restarted.recoverAcknowledgement('waiting', 'Question', client, 'https://chatgpt.com');
   assert.equal(reads.at(-1), 'waiting');
   assert.equal(reads.length, 4);
+});
+
+test('ordinary collection cannot consume a waiting ACK slot or ignore its shared Retry-After', async () => {
+  let now = 0;
+  const reads: string[] = [];
+  const recovery = new ChatGptBackendRecovery({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000, now: () => new Date(now) });
+  const client: BackendJsonClient = { async get(url) {
+    if (url.endsWith('/api/auth/session')) return { status: 200, headers: {}, body: { accessToken: 'memory-only-token' } };
+    const id = url.split('/').at(-1)!;
+    reads.push(id);
+    if (id === 'ongoing-generation' && now >= 12000) return { status: 429, headers: { 'retry-after': '50' }, body: null };
+    return { status: 200, headers: {}, body: { ...conversationPayload([node('root', null, null),
+      node('user', 'root', userMessage('user-message-1', 'user-turn-1')),
+      node('answer', 'user', finalAssistant('answer', 'Original result'))], 'answer'), id } };
+  } };
+  const request = { session: { ...sessionSnapshot(), conversationId: 'ongoing-generation' }, generation: 1 } as const;
+  const collect = () => recovery.recover(request, client, 'https://chatgpt.com');
+  const ack = () => recovery.recoverAcknowledgement(CONVERSATION_ID, 'Question', client, 'https://chatgpt.com');
+  assert.equal((await collect()).kind, 'complete');
+  now = 1000;
+  assert.equal(await ack(), null);
+  now = 6000;
+  assert.equal((await collect()).kind, 'deferred', 'An ordinary read cannot race ahead of an ACK already waiting');
+  assert.deepEqual(reads, ['ongoing-generation']);
+  assert.equal((await ack())?.submittedUserMessageId, 'user-message-1');
+  now = 12000;
+  assert.equal((await collect()).reason, 'backend-http-429');
+  now = 13000;
+  assert.equal(await ack(), null);
+  assert.deepEqual(reads, ['ongoing-generation', CONVERSATION_ID, 'ongoing-generation']);
+  now = 62001;
+  assert.equal((await collect()).kind, 'deferred', 'A client honoring a long server delay retains its queue slot');
+  assert.equal((await ack())?.submittedUserMessageId, 'user-message-1');
+  assert.deepEqual(reads, ['ongoing-generation', CONVERSATION_ID, 'ongoing-generation', CONVERSATION_ID]);
+});
+
+test('explicit selected ACK gets the next permitted read ahead of background UNKNOWN polling', async () => {
+  let now = 0;
+  const reads: string[] = [];
+  const recovery = new ChatGptBackendRecovery({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000, now: () => new Date(now) });
+  const client: BackendJsonClient = { async get(url) {
+    if (url.endsWith('/api/auth/session')) return { status: 200, headers: {}, body: { accessToken: 'memory-only-token' } };
+    reads.push(url.split('/').at(-1)!);
+    return { status: 429, headers: { 'retry-after': '50' }, body: null };
+  } };
+  const ack = (id: string, selected?: string) => recovery.recoverAcknowledgement(id, 'Question', client, 'https://chatgpt.com', undefined, undefined, selected);
+  await ack('background');
+  now = 1000; await ack('background');
+  now = 2000; await ack('selected', 'original-user');
+  assert.deepEqual(reads, ['background'], 'An explicit selection never bypasses Retry-After');
+  now = 50001;
+  await ack('background');
+  assert.deepEqual(reads, ['background'], 'Repeated background no-match recovery must leave the interactive read available');
+  await ack('selected', 'original-user');
+  assert.deepEqual(reads, ['background', 'selected']);
 });
 
 test('canonical ACK evidence separates no match and access rejection from a recovered original answer', async () => {
@@ -346,12 +436,20 @@ test('canonical ACK evidence separates no match and access rejection from a reco
   assert.equal(evidence.at(-1)?.reason, 'backend-auth-rejected');
   now += 6000; status = 200;
   payload = conversationPayload([node('root', null, null),
+    node('user-node', 'root', { ...userMessage('original-user', 'original-turn'), content: { content_type: 'text', parts: ['Question\n'] } })], 'user-node');
+  assert.equal(await recovery.recoverAcknowledgement(CONVERSATION_ID, 'Question', client, 'https://chatgpt.com',
+    undefined, value => evidence.push(value), 'original-user'), null);
+  assert.equal(evidence.at(-1)?.selectedMessageComparison?.whitespaceOnlyDifference, true);
+  assert.equal(evidence.at(-1)?.selectedMessageComparison?.firstDifference, 8);
+  assert.equal(evidence.at(-1)?.selectedMessageComparison?.textLength, 9);
+  now += 6000; status = 200;
+  payload = conversationPayload([node('root', null, null),
     node('user-node', 'root', userMessage('original-user', 'original-turn')),
     node('answer-node', 'user-node', finalAssistant('original-answer', 'Original result'))], 'answer-node');
   const acknowledgement = await inspect();
   assert.equal(acknowledgement?.submittedUserMessageId, 'original-user');
   assert.equal(recoverExactServerFinal(payload, acknowledgement!).answerText, 'Original result');
-  assert.equal(evidence.length, 2, 'successful recovery does not retain a new failure');
+  assert.equal(evidence.length, 3, 'successful recovery does not retain a new failure');
 });
 
 function identity() {

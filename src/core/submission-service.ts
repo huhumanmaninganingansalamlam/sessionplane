@@ -389,9 +389,11 @@ export class SubmissionService {
                 requestRef: currentOutbox.outboxId, conversationId: currentConversationId, pageKey: current.pageKey } });
           }
         }
-        if (selection !== undefined && acknowledgement == null && recoveryEvidence?.kind === 'deferred') {
-          throw new SessionPlaneDomainError('provider.observation-deferred',
-            'Acknowledgement verification is deferred; preserve this UNKNOWN request and retry the same selection after the provider delay. No prompt was sent.',
+        if (selection !== undefined && acknowledgement == null && recoveryEvidence !== undefined) {
+          throw new SessionPlaneDomainError(recoveryEvidence.kind === 'deferred' ? 'provider.observation-deferred' : 'provider.acknowledgement-unverified',
+            recoveryEvidence.kind === 'deferred'
+              ? 'Acknowledgement verification is deferred; preserve this UNKNOWN request and retry the same selection after the provider delay. No prompt was sent.'
+              : 'Canonical verification did not confirm the selected submission. Inspect the preserved comparison evidence; no prompt was sent and the original request remains UNKNOWN.',
             { ...recoveryEvidence, requestRef: currentOutbox.outboxId, pageKey: current.pageKey, automaticResubmit: false });
         }
         if (
@@ -465,6 +467,7 @@ export class SubmissionService {
               hasSubmittedUserMessageId: true,
               hasSubmittedUserTurnId: true,
               acknowledgementEvidence: acknowledgement.evidence ?? 'provider-adapter',
+              ...(acknowledgement.promptEncoding === undefined ? {} : { promptEncoding: acknowledgement.promptEncoding }),
               conversationId: acknowledgement.conversationId,
               submittedUserMessageId: acknowledgement.submittedUserMessageId,
               submittedUserTurnId: acknowledgement.submittedUserTurnId,

@@ -439,7 +439,7 @@ export async function recoverChatGptAcknowledgement(
   page: Page,
   prompt: string,
   expectedConversationId: string,
-  selection?: { readonly messageId: string; readonly evidenceHash: string },
+  selection?: { readonly messageId: string; readonly evidenceHash: string; readonly verifyExactPrompt?: true; readonly onPromptMismatch?: (values: readonly string[]) => void },
 ): Promise<ProviderSubmissionAcknowledgement | null> {
   const first = await readChatGptAcknowledgement(page, prompt, expectedConversationId, selection);
   if (first === null || !(await hasClearedComposer(page))) return null;
@@ -453,7 +453,7 @@ async function readChatGptAcknowledgement(
   page: Page,
   prompt: string,
   expectedConversationId: string,
-  selection?: { readonly messageId: string; readonly evidenceHash: string },
+  selection?: { readonly messageId: string; readonly evidenceHash: string; readonly verifyExactPrompt?: true; readonly onPromptMismatch?: (values: readonly string[]) => void },
 ): Promise<ProviderSubmissionAcknowledgement | null> {
   const conversationId = parseChatGptConversationId(page.url());
   if (conversationId !== expectedConversationId) return null;
@@ -463,6 +463,8 @@ async function readChatGptAcknowledgement(
     const candidates = messages.filter((message) => userIdentity(message)?.messageId === selection.messageId &&
       submissionEvidenceHash(conversationId, message) === selection.evidenceHash);
     if (candidates.length !== 1) return null;
+    if (selection.verifyExactPrompt && normalizeLineEndings(candidates[0]!.text) !== normalizeLineEndings(prompt) &&
+        !(await messageHasExactPrompt(page, candidates[0]!, prompt, selection.onPromptMismatch))) return null;
     const identity = userIdentity(candidates[0]!);
     return identity === null ? null : { conversationId, submittedUserMessageId: identity.messageId, submittedUserTurnId: identity.turnId };
   }
@@ -775,7 +777,7 @@ export async function composerHasExactValue(
   return values.some((value) => normalizeLineEndings(value) === normalizedExpected);
 }
 
-async function messageHasExactPrompt(page: Page, identity: ChatGptMessage, expected: string): Promise<boolean> {
+async function messageHasExactPrompt(page: Page, identity: ChatGptMessage, expected: string, onMismatch?: (values: readonly string[]) => void): Promise<boolean> {
   const id = identity.messageId ?? identity.turnId;
   if (id === null) return false;
   const escaped = await page.evaluate((value) => CSS.escape(value), id);
@@ -785,16 +787,19 @@ async function messageHasExactPrompt(page: Page, identity: ChatGptMessage, expec
   const message = page.locator(`:is(${identitySelector}):is(${CHATGPT_SELECTORS.userMessages}), :is(${identitySelector}) :is(${CHATGPT_SELECTORS.userMessages})`).first();
   if (await message.count() === 0) return false;
   const normalizedExpected = normalizeLineEndings(expected);
+  const compared = new Set<string>();
   const matchesExactPrompt = async (): Promise<boolean> => {
     for (const selector of CHATGPT_SELECTORS.userMessageContent) {
       const content = message.locator(selector).first();
       if ((await content.count().catch(() => 0)) === 0) continue;
       const values = await readExactTextCandidates(content, true);
+      values.forEach(value => compared.add(value));
       if (values.some((value) => normalizeLineEndings(value) === normalizedExpected)) {
         return true;
       }
     }
     const fallbackValues = await readExactTextCandidates(message, true);
+    fallbackValues.forEach(value => compared.add(value));
     return fallbackValues.some(
       (value) => normalizeLineEndings(value) === normalizedExpected,
     );
@@ -803,9 +808,15 @@ async function messageHasExactPrompt(page: Page, identity: ChatGptMessage, expec
   if (await matchesExactPrompt()) return true;
 
   const collapsedControl = message.locator(CHATGPT_SELECTORS.userMessageExpansionControls);
-  if ((await collapsedControl.count().catch(() => 0)) !== 1) return false;
-  await collapsedControl.click({ timeout: 1_000 }).catch(() => undefined);
-  return await matchesExactPrompt();
+  if ((await collapsedControl.count().catch(() => 0)) !== 1) { onMismatch?.([...compared]); return false; }
+  // A retained background page may not receive animation frames. Expand only
+  // this message's own control without focusing the page or touching its draft.
+  await collapsedControl.evaluate((button) => {
+    if (button instanceof HTMLButtonElement && !button.disabled) button.click();
+  }, undefined, { timeout: 1_000 }).catch(() => undefined);
+  const matched = await matchesExactPrompt();
+  if (!matched) onMismatch?.([...compared]);
+  return matched;
 }
 
 async function writeExactComposerValue(

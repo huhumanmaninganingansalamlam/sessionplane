@@ -54,15 +54,16 @@ export class ChatGptBackendRecovery {
   readonly #now: () => Date;
   readonly #onRateLimit: ChatGptBackendRecoveryOptions['onRateLimit'];
   #token: CachedToken | null = null;
-  #acknowledgementRetryAt = 0;
-  readonly #acknowledgementWaiting = new Map<string, number>();
+  #conversationRetryAt = 0;
+  readonly #conversationWaiting = new Map<string, { expiresAt: number; selected: boolean }>();
+  #conversationInFlight = false;
 
   constructor(options: ChatGptBackendRecoveryOptions) {
     this.#requestTimeoutMs = options.requestTimeoutMs;
     this.#tokenCacheTtlMs = options.tokenCacheTtlMs;
     this.#now = options.now ?? (() => new Date());
     this.#onRateLimit = options.onRateLimit;
-    this.#acknowledgementRetryAt = options.acknowledgementRetryAtMs ?? 0;
+    this.#conversationRetryAt = options.acknowledgementRetryAtMs ?? 0;
   }
 
   async recover(
@@ -93,42 +94,21 @@ export class ChatGptBackendRecovery {
     conversationId: string, prompt: string, client: BackendJsonClient, origin: string,
     attempts?: readonly ProviderSubmissionAttempt[],
     observe?: (evidence: ProviderAcknowledgementRecoveryEvidence) => void,
+    selectedMessageId?: string,
   ): Promise<ProviderSubmissionAcknowledgement | null> {
-    const now = this.#now().getTime();
-    // A stopped caller must not retain the head of the queue. Live recovery
-    // callers renew while waiting; the grace covers a request timeout and retry.
-    const callerGraceMs = 2 * Math.max(5_000, this.#requestTimeoutMs);
-    for (const [id, seenAt] of this.#acknowledgementWaiting) {
-      if (now - seenAt > callerGraceMs) this.#acknowledgementWaiting.delete(id);
-    }
-    this.#acknowledgementWaiting.set(conversationId, now);
-    const queued = this.#acknowledgementWaiting.keys().next().value !== conversationId;
-    if (now < this.#acknowledgementRetryAt || queued) {
-      observe?.({ kind: 'deferred', source: 'pacing', reason: queued && now >= this.#acknowledgementRetryAt
-          ? 'backend-acknowledgement-probe-queued' : 'backend-acknowledgement-probe-paced',
-        observedAt: this.#now().toISOString(), nextCheckAt: new Date(Math.max(now + 5_000, this.#acknowledgementRetryAt)).toISOString(),
-        httpStatus: null, endpointCategory: null });
-      return null;
-    }
-    this.#acknowledgementWaiting.delete(conversationId);
-    // The shared account probe is bounded even when callers repeatedly inspect.
-    this.#acknowledgementRetryAt = this.#now().getTime() + 5_000;
     let rateLimit: BackendRateLimitEvidence | undefined;
-    const result = await this.#conversation(conversationId, client, origin, evidence => { rateLimit = evidence; });
+    const result = await this.#conversation(conversationId, client, origin, evidence => { rateLimit = evidence; }, true, selectedMessageId !== undefined);
     if ('recovery' in result) {
-      if (result.recovery.kind === 'deferred') {
-        this.#acknowledgementRetryAt = this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0);
-      }
       observe?.({ kind: result.recovery.kind === 'deferred' ? 'deferred'
           : result.recovery.kind === 'unverified' ? 'unverified' : 'unavailable',
-        source: 'backend', reason: result.recovery.reason, observedAt: this.#now().toISOString(),
-        nextCheckAt: new Date(this.#acknowledgementRetryAt).toISOString(),
+        source: result.pacing ? 'pacing' : 'backend', reason: result.recovery.reason, observedAt: this.#now().toISOString(),
+        nextCheckAt: result.recovery.nextCheckAt ?? new Date(this.#conversationRetryAt).toISOString(),
         httpStatus: result.httpStatus ?? null, endpointCategory: result.endpointCategory ?? null,
         candidateConversationId: conversationId,
         ...(rateLimit ? { retryAfterMs: rateLimit.retryAfterDurationMs, retryAfterSource: rateLimit.retryAfterSource } : {}) });
       return null;
     }
-    const acknowledgement = recoverExactServerAcknowledgement(result.body, conversationId, prompt, attempts);
+    const acknowledgement = recoverExactServerAcknowledgement(result.body, conversationId, prompt, attempts, selectedMessageId);
     if (acknowledgement === null) {
       const payload = result.body;
       const ids = isRecord(payload) ? [readStringField(payload, 'id'), readStringField(payload, 'conversation_id')]
@@ -139,18 +119,78 @@ export class ChatGptBackendRecovery {
         return message !== null && messageRole(message) === 'user' &&
           messageText(message).replaceAll('\r\n', '\n') === prompt.replaceAll('\r\n', '\n');
       }).length : undefined;
+      const selected = validMapping && selectedMessageId !== undefined
+        ? Object.values(payload.mapping as Record<string, unknown>).map(messageForNode)
+          .filter(message => message !== null && messageRole(message) === 'user' && readStringField(message, 'id') === selectedMessageId)
+        : [];
+      const text = selected.length === 1 ? messageText(selected[0]!).replaceAll('\r\n', '\n') : null;
+      const expected = prompt.replaceAll('\r\n', '\n');
+      let firstDifference = 0;
+      if (text !== null) while (firstDifference < Math.min(text.length, expected.length) && text[firstDifference] === expected[firstDifference]) firstDifference++;
+      const decoded = text === null ? null : decodeLiteralMarkdown(text);
+      let decodedFirstDifference = 0;
+      if (decoded !== null) while (decodedFirstDifference < Math.min(decoded.length, expected.length) && decoded[decodedFirstDifference] === expected[decodedFirstDifference]) decodedFirstDifference++;
       observe?.({ kind: 'unverified', source: 'backend', observedAt: this.#now().toISOString(),
-        nextCheckAt: new Date(this.#acknowledgementRetryAt).toISOString(), httpStatus: result.httpStatus,
+        nextCheckAt: new Date(this.#conversationRetryAt).toISOString(), httpStatus: result.httpStatus,
         endpointCategory: 'conversation-detail',
         reason: !validMapping ? 'backend-conversation-mapping-unverified'
           : promptMatchCount === 0 ? 'backend-exact-prompt-absent'
           : promptMatchCount! > 1 ? 'backend-exact-prompt-ambiguous' : 'backend-exact-acknowledgement-unverified',
-        ...(promptMatchCount === undefined ? {} : { promptMatchCount }) });
+        ...(promptMatchCount === undefined ? {} : { promptMatchCount }),
+        ...(validMapping ? { canonicalUserMessageCount: Object.values(payload.mapping as Record<string, unknown>)
+          .map(messageForNode).filter(message => message !== null && messageRole(message) === 'user').length,
+          ...(selectedMessageId === undefined ? {} : { selectedMessagePresent: selected.length === 1 }) } : {}),
+        ...(text === null ? {} : { selectedMessageComparison: { messageId: selectedMessageId!, textLength: text.length,
+          textSha256: createHash('sha256').update(text).digest('hex'),
+          whitespaceOnlyDifference: text.replace(/\s+/g, ' ').trim() === expected.replace(/\s+/g, ' ').trim(),
+          firstDifference, expectedCodePoint: expected.codePointAt(firstDifference) ?? null,
+          actualCodePoint: text.codePointAt(firstDifference) ?? null,
+          decodedTextLength: decoded!.length, decodedFirstDifference,
+          decodedActualCodePoint: decoded!.codePointAt(decodedFirstDifference) ?? null } }) });
     }
     return acknowledgement;
   }
 
   async #conversation(conversationId: string, client: BackendJsonClient, origin: string,
+    observe?: (evidence: BackendRateLimitEvidence) => void, acknowledgement = false, selected = false):
+    Promise<{ body: unknown; httpStatus: number } | { recovery: ProviderRecoveryResult; httpStatus?: number; endpointCategory?: 'auth-session' | 'conversation-detail'; pacing?: boolean }> {
+    const now = this.#now().getTime();
+    const graceMs = 2 * Math.max(5_000, this.#requestTimeoutMs);
+    for (const [id, entry] of this.#conversationWaiting) {
+      if (now > entry.expiresAt) this.#conversationWaiting.delete(id);
+    }
+    this.#conversationWaiting.set(conversationId, { expiresAt: Math.max(now, this.#conversationRetryAt) + graceMs,
+      selected: selected || this.#conversationWaiting.get(conversationId)?.selected === true });
+    // A user-selected ACK gets the next legal slot ahead of repeated background
+    // UNKNOWN polling. It still obeys the same Retry-After and in-flight guard.
+    const nextSelected = [...this.#conversationWaiting].find(([, entry]) => entry.selected)?.[0];
+    const queued = (nextSelected ?? this.#conversationWaiting.keys().next().value) !== conversationId;
+    if (now < this.#conversationRetryAt || queued || this.#conversationInFlight) {
+      const next = Math.max(now + 5_000, this.#conversationRetryAt);
+      return { pacing: true, recovery: { ...unavailable(acknowledgement
+        ? queued && now >= this.#conversationRetryAt ? 'backend-acknowledgement-probe-queued' : 'backend-acknowledgement-probe-paced'
+        : 'backend-conversation-probe-paced'), kind: 'deferred', retryAfterMs: next - now,
+        nextCheckAt: new Date(next).toISOString() } };
+    }
+    this.#conversationWaiting.delete(conversationId);
+    this.#conversationInFlight = true;
+    this.#conversationRetryAt = now + 5_000;
+    try {
+      const result = await this.#readConversation(conversationId, client, origin, observe);
+      if ('recovery' in result && result.recovery.kind === 'deferred') {
+        this.#conversationRetryAt = this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0);
+      }
+      // A caller honoring Retry-After must not expire before its allowed turn.
+      for (const entry of this.#conversationWaiting.values()) {
+        entry.expiresAt = Math.max(entry.expiresAt, this.#conversationRetryAt + graceMs);
+      }
+      return result;
+    } finally {
+      this.#conversationInFlight = false;
+    }
+  }
+
+  async #readConversation(conversationId: string, client: BackendJsonClient, origin: string,
     observe?: (evidence: BackendRateLimitEvidence) => void):
     Promise<{ body: unknown; httpStatus: number } | { recovery: ProviderRecoveryResult; httpStatus?: number; endpointCategory?: 'auth-session' | 'conversation-detail' }> {
     const normalizedOrigin = trustedOrigin(origin);
@@ -248,6 +288,7 @@ function trustedOrigin(value: string): string | null {
 export function recoverExactServerAcknowledgement(
   payload: unknown, conversationId: string, prompt: string,
   attempts?: readonly ProviderSubmissionAttempt[],
+  selectedMessageId?: string,
 ): ProviderSubmissionAcknowledgement | null {
   if (!isRecord(payload) || !isRecord(payload.mapping)) return null;
   const ids = [readStringField(payload, 'id'), readStringField(payload, 'conversation_id')].filter(id => id !== null);
@@ -269,14 +310,43 @@ export function recoverExactServerAcknowledgement(
       if (messageId !== exactAttempt.messageId ||
           createHash('sha256').update(text).digest('hex') !== exactAttempt.textHash ||
           (parent !== exactAttempt.parentMessageId && readStringField(parentMessage, 'id') !== exactAttempt.parentMessageId)) return [];
-    } else if (text !== prompt.replaceAll('\r\n', '\n')) return [];
+    } else if (text !== prompt.replaceAll('\r\n', '\n') &&
+      !(messageId === selectedMessageId && matchesLiteralEditorText(text, prompt.replaceAll('\r\n', '\n')))) return [];
     return [{ conversationId, submittedUserMessageId: messageId,
-      submittedUserTurnId: readStringField(message, 'turn_id') ?? nodeId }];
+      submittedUserTurnId: readStringField(message, 'turn_id') ?? nodeId,
+      ...(text === prompt.replaceAll('\r\n', '\n') || exactAttempt !== undefined ? {} : {
+        evidence: 'backend-exact-editor-text' as const,
+        promptEncoding: { kind: 'commonmark-literal' as const,
+          canonicalTextSha256: createHash('sha256').update(text).digest('hex'),
+          decodedTextSha256: createHash('sha256').update(decodeLiteralMarkdown(text)).digest('hex'),
+          ...(decodeLiteralMarkdown(text) === prompt.replaceAll('\r\n', '\n') ? {} : { terminalLineBreakOmitted: true as const }) } }) }];
   });
   if (matches.length !== 1) return null;
   const acknowledgement = matches[0]!;
   const anchored = recoverExactServerFinal(payload, acknowledgement);
   return anchored.kind === 'complete' || anchored.kind === 'pending' ? acknowledgement : null;
+}
+
+// The retained original canonical message omits the editor's final paragraph
+// break. Permit exactly that one LF only with observed Markdown serialization;
+// internal whitespace, blank lines and captured POST bytes remain authoritative.
+function matchesLiteralEditorText(text: string, prompt: string): boolean {
+  const decoded = decodeLiteralMarkdown(text);
+  return decoded === prompt || (decoded !== text && prompt.endsWith('\n') &&
+    !prompt.endsWith('\n\n') && decoded === prompt.slice(0, -1));
+}
+
+// The ChatGPT editor serializes literal punctuation as CommonMark escapes
+// and bare URLs as autolinks or same-URL links. Parse these together so escaped
+// angle brackets and literal backslashes within URLs retain their meaning.
+// Decode only that representation: never collapse internal whitespace, strip markup or
+// relax a recorded POST identity/hash. Callers must explicitly select the user.
+function decodeLiteralMarkdown(text: string): string {
+  return text.replace(/\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])|<(https?:\/\/[^\s<>]+)>|\[(https?:\/\/[^\s[\]<>]+)\]\(((?:\\[\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]|[^\\()\s])+)\)/g,
+    (match, punctuation: string | undefined, url: string | undefined, label: string | undefined, target: string | undefined) => {
+      if (label !== undefined) return target!.replace(/\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])/g, '$1') === label ? label : match;
+      return punctuation ?? url!;
+    });
 }
 
 export function recoverExactServerFinal(

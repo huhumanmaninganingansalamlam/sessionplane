@@ -61,6 +61,11 @@ test('UNKNOWN history acknowledgement requires retained ownership, empty draft a
     restarted.reserveUnknownConversationCandidate(retained.pageKey, { sessionId: 'original', generation: 1, targetId });
     assert.equal(restarted.unknownConversationCandidate(retained.pageKey, session).binding.state, 'identity_lost');
     assert.ok(await recoverChatGptAcknowledgement(page, 'Exact original', 'recovered123456', selection), 'stable selected DOM evidence');
+    let compared: readonly string[] = [];
+    assert.equal(await recoverChatGptAcknowledgement(page, 'Exact original changed', 'recovered123456', {
+      ...selection, verifyExactPrompt: true, onPromptMismatch: values => { compared = values; },
+    }), null);
+    assert.ok(compared.includes('Exact original'), 'Retained full-text mismatch exposes its actual text candidates to privacy-safe diagnostics');
     const ack = await recover();
     assert.equal(ack?.submittedUserMessageId, 'original-user');
     assert.equal(ack?.conversationId, 'recovered123456');

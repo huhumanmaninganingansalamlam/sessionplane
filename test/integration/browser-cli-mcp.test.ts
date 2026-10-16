@@ -535,7 +535,7 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
     const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
     await assert.rejects(callRpc({
       socketPath: config.socketPath, method: 'session.send',
-      params: { clientId: 'inspection-owner', requestId: 'original', sessionId: session.sessionId, prompt: 'Exact pending draft', sessionDeadlineSec: 30 },
+      params: { clientId: 'inspection-owner', requestId: 'original', sessionId: session.sessionId, prompt: 'Exact pending draft https://example.test/plan\n', sessionDeadlineSec: 30 },
     }), (error: unknown) => error instanceof RpcClientError &&
       (error.data as { errorCode?: string }).errorCode === 'provider.preparation-required');
     const prepared = service.teamDirectory.getSession(session.sessionId);
@@ -567,13 +567,14 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
     assert.equal(snapshot.submissionState, 'submission_unknown');
     assert.equal(snapshot.generation, sent.generation);
     assert.ok(snapshot.evidence.nodes.some((node) => node.editable && node.value === null));
-    assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft');
+    assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft https://example.test/plan\n');
     assert.equal(await page.locator('[data-message-author-role]').count(), 0);
 
     // A DOM echo alone with the original draft still present must remain ambiguous.
     // The provider later commits the message and clears its composer; no resend.
     await page.locator('#messages').evaluate((messages) => {
-      messages.innerHTML = '<div data-message-author-role="user" data-message-id="delayed-user">Exact pending draft</div>' +
+      messages.innerHTML = '<div data-message-author-role="user" data-message-id="delayed-user"><div data-user-message-bubble>' +
+        '<span>Exact pending draft</span><button onclick="this.parentElement.textContent=\'Exact pending draft https://example.test/plan\'">더 보기</button></div></div>' +
         '<div data-message-author-role="assistant" data-message-id="delayed-answer" data-message-status="completed">Recovered final</div>' +
         '<aside role="alert">Stream interrupted<button>Retry</button></aside>';
     });
@@ -584,25 +585,45 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
       'restart reconciliation must not promote an unverified history URL');
     const optimistic = await inspect();
     assert.equal((optimistic.structuredContent.request as { submittedUserMessageId: string | null }).submittedUserMessageId, null);
+    const preview = (optimistic.structuredContent.request as { evidence: { submissionCandidates: Array<{ responseCandidate: {
+      responseMessageId: string; answerText: string; submissionVerified: boolean;
+    } }> } }).evidence.submissionCandidates[0]!.responseCandidate;
+    assert.equal(preview.responseMessageId, 'delayed-answer');
+    assert.equal(preview.answerText, 'Recovered final');
+    assert.equal(preview.submissionVerified, false, 'Reading an anchored candidate response never acknowledges an uncertain submission');
+    await page.locator('#messages').evaluate(element => element.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="other-user">Another unclaimed turn</div>'));
+    const ambiguous = (await inspect()).structuredContent.request as { evidence: { submissionCandidates: Array<{ responseCandidate: unknown }> } };
+    assert.ok(ambiguous.evidence.submissionCandidates.every(candidate => candidate.responseCandidate === null),
+      'Ambiguous users never choose this request response by recency');
+    await page.locator('[data-message-id="other-user"]').evaluate(element => element.remove());
     // Canonical provider acceptance is required for automatic UNKNOWN recovery.
     t.mock.method(page.context().request, 'get', async (url: string) => ({
       status: () => 200, headers: () => ({}), dispose: async () => {},
       json: async () => url.endsWith('/api/auth/session') ? { accessToken: 'isolated-fixture-token' } : {
         id: 'conversation-123456', current_node: 'delayed-user', mapping: {
-          'delayed-user': { parent: null, message: { id: 'delayed-user', author: { role: 'user' }, content: { content_type: 'text', parts: ['Exact pending draft'] } } },
+          'delayed-user': { parent: null, message: { id: 'delayed-user', author: { role: 'user' }, content: { content_type: 'text', parts: ['Exact pending draft <https://example.test/plan>'] } } },
         },
       },
     }));
     {
-      const candidate = (optimistic.structuredContent.request as { evidence: { submissionCandidates: Array<{ messageId: string; evidenceHash: string }> } }).evidence.submissionCandidates[0]!;
+      let candidate = (optimistic.structuredContent.request as { evidence: { submissionCandidates: Array<{ messageId: string; evidenceHash: string }> } }).evidence.submissionCandidates[0]!;
       const acknowledge = (requestId: string) => invokeMcpTool({ name: 'sessionplane_decide', arguments: {
         ...identity, requestId, decision: 'acknowledge', messageId: candidate.messageId, evidenceHash: candidate.evidenceHash },
         socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
       assert.equal((await acknowledge('draft-preserved')).isError, true);
-      assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft');
+      assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft https://example.test/plan\n');
       assert.equal(service.teamDirectory.getSession(session.sessionId).conversationId, null);
+      assert.equal(await page.locator('[data-user-message-bubble]').textContent(), 'Exact pending draft https://example.test/plan', 'Explicit recovery expands only the selected original user message');
       await page.locator('textarea').evaluate(element => { element.value = ''; });
-      assert.equal(((await inspect()).structuredContent.request as { conversationId: string | null }).conversationId, null, 'read does not accept history navigation');
+      const expanded = (await inspect()).structuredContent.request as { conversationId: string | null; evidence: { submissionCandidates: Array<typeof candidate> } };
+      assert.equal(expanded.conversationId, null, 'read does not accept history navigation');
+      candidate = expanded.evidence.submissionCandidates[0]!;
+      await page.locator('[data-user-message-bubble]').evaluate(element => { element.textContent = 'Different PLAN'; });
+      assert.equal((await acknowledge('different-full-message')).isError, true, 'A changed selected message invalidates the original full-text evidence hash');
+      assert.equal(service.teamDirectory.getSession(session.sessionId).conversationId, null);
+      await page.locator('[data-user-message-bubble]').evaluate(element => { element.textContent = 'Exact pending draft https://example.test/plan'; });
+      candidate = ((await inspect()).structuredContent.request as typeof expanded).evidence.submissionCandidates[0]!;
       const ack = await acknowledge('explicit-history-ack');
       assert.equal(ack.isError, false, JSON.stringify(ack.structuredContent));
     }
@@ -643,8 +664,8 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
     }
     // Provider history becomes readable after a reload; no prompt is submitted again.
     installPreparationFixtureRoute(service, `<!doctype html>
-        <textarea>Exact pending draft</textarea>
-        <div data-message-author-role="user" data-message-id="delayed-user">Exact pending draft</div>
+        <textarea>Exact pending draft https://example.test/plan</textarea>
+        <div data-message-author-role="user" data-message-id="delayed-user">Exact pending draft https://example.test/plan</div>
         <div data-message-author-role="assistant" data-message-id="delayed-answer" data-message-status="completed">Recovered final</div>
         <script>sessionStorage.setItem('refreshes', String(Number(sessionStorage.getItem('refreshes') || 0) + 1));</script>`);
     await page.close();
@@ -665,7 +686,7 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
     assert.equal(final.generation, sent.generation);
     assert.equal(final.answerText, 'Recovered final');
     assert.equal(await recoveredPage.locator('[data-message-author-role="user"]').count(), 1);
-    assert.equal(await recoveredPage.locator('textarea').inputValue(), 'Exact pending draft');
+    assert.equal(await recoveredPage.locator('textarea').inputValue(), 'Exact pending draft https://example.test/plan');
     await assert.rejects(callRpc({ socketPath: config.socketPath, method: 'session.send', params: {
       clientId: 'inspection-owner', requestId: 'newer', sessionId: session.sessionId,
       prompt: 'Next request', sessionDeadlineSec: 30,

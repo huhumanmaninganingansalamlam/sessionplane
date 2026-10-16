@@ -34,7 +34,7 @@ export const CHATGPT_SELECTORS = {
     '.whitespace-pre-wrap',
     '[data-testid*="user-message-content"]',
   ],
-  userMessageExpansionControls: 'button[aria-expanded="false"]',
+  userMessageExpansionControls: 'button[aria-expanded="false"], button:text-is("더 보기"), button:text-is("… 더 보기"), button:text-is("Show more"), button:text-is("Read more")',
   messages: '[data-message-author-role], [data-chatgpt-search-message-ids]',
   stopControls: [
     '[data-testid="stop-button"]',
