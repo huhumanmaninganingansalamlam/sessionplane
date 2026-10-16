@@ -22,6 +22,21 @@ export async function readChatGptMessages(page: Page, includeArtifacts = false):
 export async function readChatGptMessageObservation(page: Page, includeArtifacts = false, anchorIds: readonly string[] = []) {
   const identitySelector = '[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids], [data-chatgpt-selection-message-id]';
   return await page.locator(`${CHATGPT_SELECTORS.messages}, ${identitySelector}`).evaluateAll((elements, { selector, artifactSelector, includeArtifacts, anchorIds }) => {
+    const writingBlock = '[data-oai-writing-block-surface], [data-testid="chatgpt-writing-block"]';
+    const followup = '[class~="group/suggested-followup"]';
+    const renderedText = (element: HTMLElement): string => element.innerText ?? element.textContent ?? '';
+    const assistantText = (element: HTMLElement): string => {
+      if (element.matches(followup) || element.getAttribute('aria-hidden') === 'true') return '';
+      if (element.matches(writingBlock)) {
+        const editor = element.querySelector<HTMLElement>('.writing-block-editor [role="textbox"]');
+        if (editor !== null) return renderedText(editor);
+      }
+      if (element.querySelector(`${writingBlock}, ${followup}`) === null) return renderedText(element);
+      // Writing-block chrome and suggested follow-ups share the answer wrapper.
+      // Read authored document/prose in order, without changing the live DOM.
+      return [...element.childNodes].map(child => child instanceof HTMLElement
+        ? assistantText(child) : child.textContent ?? '').filter(text => text.trim() !== '').join('\n\n');
+    };
     const messages: ChatGptMessage[] = [];
     const seen = new Set<Element>();
     const nodes = elements.filter(element => element.matches(selector)) as HTMLElement[];
@@ -73,7 +88,7 @@ export async function readChatGptMessageObservation(page: Page, includeArtifacts
         role,
         messageId,
         turnId,
-        text: (content.innerText ?? content.textContent ?? '').replaceAll('\r\n', '\n'),
+        text: (role === 'assistant' ? assistantText(content) : renderedText(content)).replaceAll('\r\n', '\n'),
         terminalMarker: /^(complete|completed|finished|finished_successfully|success)$/.test(status) ||
           endTurn === 'true' || isStreaming === 'false',
         streamingMarker: /^(in_progress|streaming|generating|pending)$/.test(status) ||
