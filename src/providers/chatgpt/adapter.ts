@@ -199,7 +199,10 @@ export class ChatGptAdapter implements ProviderAdapter {
                   expectedCodePoint: expected.codePointAt(firstDifference) ?? null, actualCodePoint: text.codePointAt(firstDifference) ?? null };
               }).sort((a, b) => b.firstDifference - a.firstDifference).slice(0, 3) });
           } };
-        const selected = await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, selection);
+        // Rendered paragraphs/links can add layout whitespace. Inspect the full
+        // DOM, but only exact canonical full-text proof may establish acceptance.
+        await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, selection);
+        const selected = await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, request.selection);
         if (selected === null) return null;
         const server = await this.#backendRecovery.recoverAcknowledgement(
           foundId, request.prompt, backendClient(candidate.page), new URL(candidate.page.url()).origin,
@@ -208,7 +211,7 @@ export class ChatGptAdapter implements ProviderAdapter {
             server.submittedUserTurnId !== selected.submittedUserTurnId) return null;
         const fresh = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);
         if (fresh.binding.bindingEpoch !== binding.bindingEpoch ||
-            await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, selection) === null) return null;
+            await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, request.selection) === null) return null;
         if (this.#pageRegistry.refreshPage(pageKey).bindingEpoch !== binding.bindingEpoch) return null;
         this.#pageRegistry.bindPage(pageKey, { sessionId: request.session.sessionId,
           generation: request.generation, conversationId: foundId });

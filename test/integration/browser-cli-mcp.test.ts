@@ -608,8 +608,7 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
       assert.equal(expanded.conversationId, null, 'read does not accept history navigation');
       candidate = expanded.evidence.submissionCandidates[0]!;
       await page.locator('[data-user-message-bubble]').evaluate(element => { element.textContent = 'Different PLAN'; });
-      candidate = ((await inspect()).structuredContent.request as typeof expanded).evidence.submissionCandidates[0]!;
-      assert.equal((await acknowledge('different-full-message')).isError, true, 'Fresh identity and hash cannot replace exact full prompt evidence');
+      assert.equal((await acknowledge('different-full-message')).isError, true, 'A changed selected message invalidates the original full-text evidence hash');
       assert.equal(service.teamDirectory.getSession(session.sessionId).conversationId, null);
       await page.locator('[data-user-message-bubble]').evaluate(element => { element.textContent = 'Exact pending draft https://example.test/plan'; });
       candidate = ((await inspect()).structuredContent.request as typeof expanded).evidence.submissionCandidates[0]!;
