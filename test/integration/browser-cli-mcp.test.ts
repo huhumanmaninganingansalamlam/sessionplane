@@ -585,6 +585,12 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
       'restart reconciliation must not promote an unverified history URL');
     const optimistic = await inspect();
     assert.equal((optimistic.structuredContent.request as { submittedUserMessageId: string | null }).submittedUserMessageId, null);
+    const preview = (optimistic.structuredContent.request as { evidence: { submissionCandidates: Array<{ responseCandidate: {
+      responseMessageId: string; answerText: string; submissionVerified: boolean;
+    } }> } }).evidence.submissionCandidates[0]!.responseCandidate;
+    assert.equal(preview.responseMessageId, 'delayed-answer');
+    assert.equal(preview.answerText, 'Recovered final');
+    assert.equal(preview.submissionVerified, false, 'Reading an anchored candidate response never acknowledges an uncertain submission');
     // Canonical provider acceptance is required for automatic UNKNOWN recovery.
     t.mock.method(page.context().request, 'get', async (url: string) => ({
       status: () => 200, headers: () => ({}), dispose: async () => {},
