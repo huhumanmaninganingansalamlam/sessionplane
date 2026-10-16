@@ -535,7 +535,7 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
     const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
     await assert.rejects(callRpc({
       socketPath: config.socketPath, method: 'session.send',
-      params: { clientId: 'inspection-owner', requestId: 'original', sessionId: session.sessionId, prompt: 'Exact pending draft https://example.test/plan', sessionDeadlineSec: 30 },
+      params: { clientId: 'inspection-owner', requestId: 'original', sessionId: session.sessionId, prompt: 'Exact pending draft https://example.test/plan\n', sessionDeadlineSec: 30 },
     }), (error: unknown) => error instanceof RpcClientError &&
       (error.data as { errorCode?: string }).errorCode === 'provider.preparation-required');
     const prepared = service.teamDirectory.getSession(session.sessionId);
@@ -567,7 +567,7 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
     assert.equal(snapshot.submissionState, 'submission_unknown');
     assert.equal(snapshot.generation, sent.generation);
     assert.ok(snapshot.evidence.nodes.some((node) => node.editable && node.value === null));
-    assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft https://example.test/plan');
+    assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft https://example.test/plan\n');
     assert.equal(await page.locator('[data-message-author-role]').count(), 0);
 
     // A DOM echo alone with the original draft still present must remain ambiguous.
@@ -612,7 +612,7 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
         ...identity, requestId, decision: 'acknowledge', messageId: candidate.messageId, evidenceHash: candidate.evidenceHash },
         socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
       assert.equal((await acknowledge('draft-preserved')).isError, true);
-      assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft https://example.test/plan');
+      assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft https://example.test/plan\n');
       assert.equal(service.teamDirectory.getSession(session.sessionId).conversationId, null);
       assert.equal(await page.locator('[data-user-message-bubble]').textContent(), 'Exact pending draft https://example.test/plan', 'Explicit recovery expands only the selected original user message');
       await page.locator('textarea').evaluate(element => { element.value = ''; });

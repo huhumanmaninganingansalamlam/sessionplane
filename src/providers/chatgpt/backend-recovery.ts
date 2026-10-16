@@ -307,14 +307,15 @@ export function recoverExactServerAcknowledgement(
           createHash('sha256').update(text).digest('hex') !== exactAttempt.textHash ||
           (parent !== exactAttempt.parentMessageId && readStringField(parentMessage, 'id') !== exactAttempt.parentMessageId)) return [];
     } else if (text !== prompt.replaceAll('\r\n', '\n') &&
-      !(messageId === selectedMessageId && decodeLiteralMarkdown(text) === prompt.replaceAll('\r\n', '\n'))) return [];
+      !(messageId === selectedMessageId && matchesLiteralEditorText(text, prompt.replaceAll('\r\n', '\n')))) return [];
     return [{ conversationId, submittedUserMessageId: messageId,
       submittedUserTurnId: readStringField(message, 'turn_id') ?? nodeId,
       ...(text === prompt.replaceAll('\r\n', '\n') || exactAttempt !== undefined ? {} : {
         evidence: 'backend-exact-editor-text' as const,
         promptEncoding: { kind: 'commonmark-literal' as const,
           canonicalTextSha256: createHash('sha256').update(text).digest('hex'),
-          decodedTextSha256: createHash('sha256').update(decodeLiteralMarkdown(text)).digest('hex') } }) }];
+          decodedTextSha256: createHash('sha256').update(decodeLiteralMarkdown(text)).digest('hex'),
+          ...(decodeLiteralMarkdown(text) === prompt.replaceAll('\r\n', '\n') ? {} : { terminalLineBreakOmitted: true as const }) } }) }];
   });
   if (matches.length !== 1) return null;
   const acknowledgement = matches[0]!;
@@ -322,10 +323,19 @@ export function recoverExactServerAcknowledgement(
   return anchored.kind === 'complete' || anchored.kind === 'pending' ? acknowledgement : null;
 }
 
+// The retained original canonical message omits the editor's final paragraph
+// break. Permit exactly that one LF only with observed Markdown serialization;
+// internal whitespace, blank lines and captured POST bytes remain authoritative.
+function matchesLiteralEditorText(text: string, prompt: string): boolean {
+  const decoded = decodeLiteralMarkdown(text);
+  return decoded === prompt || (decoded !== text && prompt.endsWith('\n') &&
+    !prompt.endsWith('\n\n') && decoded === prompt.slice(0, -1));
+}
+
 // The ChatGPT editor serializes literal punctuation as CommonMark escapes
 // and bare URLs as autolinks or same-URL links. Parse these together so escaped
 // angle brackets and literal backslashes within URLs retain their meaning.
-// Decode only that representation: never collapse whitespace, strip markup or
+// Decode only that representation: never collapse internal whitespace, strip markup or
 // relax a recorded POST identity/hash. Callers must explicitly select the user.
 function decodeLiteralMarkdown(text: string): string {
   return text.replace(/\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])|<(https?:\/\/[^\s<>]+)>|\[(https?:\/\/[^\s[\]<>]+)\]\(((?:\\[\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]|[^\\()\s])+)\)/g,

@@ -61,7 +61,7 @@ export type PreparationChoices = Readonly<Partial<Record<PreparationPurpose, Pre
 
 export interface ProviderSubmissionAcknowledgement {
   readonly evidence?: 'stable-anchor-cleared-composer' | 'accepted-request-stable-anchor-cleared-composer' | 'backend-exact-user' | 'backend-exact-editor-text';
-  readonly promptEncoding?: { readonly kind: 'commonmark-literal'; readonly canonicalTextSha256: string; readonly decodedTextSha256: string };
+  readonly promptEncoding?: { readonly kind: 'commonmark-literal'; readonly canonicalTextSha256: string; readonly decodedTextSha256: string; readonly terminalLineBreakOmitted?: true };
   readonly conversationId: string;
   readonly submittedUserMessageId: string;
   readonly submittedUserTurnId: string;

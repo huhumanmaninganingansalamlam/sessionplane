@@ -25,6 +25,12 @@ test('explicit retained message ACK compares the full literal editor text, prese
   const recover = (text: string, id?: string) => recoverExactServerAcknowledgement(payload, CONVERSATION_ID, text, undefined, id);
   assert.equal(recover(prompt), null, 'Automatic UNKNOWN recovery cannot assume a text encoding');
   assert.equal(recover(prompt, 'another-user'), null);
+  const terminalBreak = recover(prompt + '\n', 'selected-user');
+  assert.equal(terminalBreak?.submittedUserMessageId, 'selected-user');
+  assert.equal(terminalBreak?.promptEncoding?.terminalLineBreakOmitted, true);
+  assert.equal(recover(prompt + '\n\n', 'selected-user'), null, 'Multiple trailing blank lines are not discarded');
+  assert.equal(recover(prompt + ' ', 'selected-user'), null, 'Trailing spaces remain significant');
+  assert.equal(recover(prompt + '\n'), null, 'Automatic recovery cannot assume the editor omitted a final paragraph break');
   const ack = recover(prompt, 'selected-user');
   assert.equal(ack?.submittedUserMessageId, 'selected-user');
   assert.equal(ack?.evidence, 'backend-exact-editor-text');
