@@ -149,9 +149,17 @@ export class SessionUiService {
                   if (new URL(candidate.page.url()).origin !== this.#chatgptOrigin) throw new SessionPlaneDomainError(
                     'session.page-identity-unverified', 'Recovery candidate left the ChatGPT origin');
                   const submissionCandidates = await inspectChatGptSubmissionCandidates(candidate.page, binding.conversationId);
+                  const snapshot = await this.#refs.capture({ pageKey: session.pageKey, bindingEpoch: binding.bindingEpoch,
+                    page: candidate.page, ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: input.maxNodes ?? 1000 });
+                  const observedSession = { ...session, conversationId: binding.conversationId };
+                  const dom = await observeChatGptDom(candidate.page, observedSession);
+                  const activity = await observeChatGptActivity(candidate.page, dom);
+                  const providerAlerts = await observeChatGptAlerts(candidate.page, observedSession);
                   if (this.#registry.refreshPage(session.pageKey).bindingEpoch !== binding.bindingEpoch) throw new SessionPlaneDomainError(
                     'browser.snapshot-stale', 'Conversation recovery page changed during inspection');
-                  return { conversationRecovery: { conversationId: binding.conversationId, requiresExplicitAcknowledgement: true },
+                  return { ...snapshot, providerAlerts,
+                    conversationRecovery: { conversationId: binding.conversationId, requiresExplicitAcknowledgement: true,
+                      observedAt: dom.messageDiagnostics.observedAt, activity: activity.strength, activityReason: activity.reason },
                     submissionCandidates: submissionCandidates.filter(candidate => !submittedMessageIds.has(candidate.messageId)) };
                 }
               }
@@ -520,9 +528,15 @@ export class SessionUiService {
   async focus(session: SessionSnapshot) {
     if (session.pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'No connected tab exists for this request');
     try {
-      const page = this.#registry.requireSessionPage(session.pageKey, session);
+      // Explicit viewing of the unique retained target does not adopt its
+      // conversation or authorize content actions while acceptance is unknown.
+      const unknown = session.submissionState === 'submission_unknown' && session.conversationId === null;
+      const page = unknown ? this.#registry.unknownConversationCandidate(session.pageKey, session).page
+        : this.#registry.requireSessionPage(session.pageKey, session);
+      if (new URL(page.url()).origin !== this.#chatgptOrigin) throw new SessionPlaneDomainError(
+        'session.page-identity-unverified', 'The request page left the provider origin');
       await page.bringToFront();
-      return { pageKey: session.pageKey, url: page.url() };
+      return { pageKey: session.pageKey, url: page.url(), ...(unknown ? { conversationVerified: false } : {}) };
     } catch (error) {
       throw typedUiError(error);
     }

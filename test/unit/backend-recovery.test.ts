@@ -275,6 +275,9 @@ test('backend acknowledgement preserves uncertainty and Retry-After without repe
   assert.equal(evidence.at(-1)?.source, 'backend');
   assert.equal(evidence.at(-1)?.httpStatus, 429);
   assert.equal(evidence.at(-1)?.endpointCategory, 'conversation-detail');
+  assert.equal(evidence.at(-1)?.retryAfterMs, 120000);
+  assert.equal(evidence.at(-1)?.retryAfterSource, 'valid-header');
+  assert.equal(evidence.at(-1)?.candidateConversationId, CONVERSATION_ID);
   assert.equal(evidence.at(-1)?.nextCheckAt, new Date(120000).toISOString());
   now = 6000;
   assert.equal(await inspect(), null);

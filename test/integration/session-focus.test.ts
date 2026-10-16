@@ -8,6 +8,58 @@ import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
+test('explicit focus shows the unique retained UNKNOWN target without accepting it or touching its draft', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-focus-unknown-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  fake.acknowledgementMode = 'missing';
+  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const target = await service.browserOwner!.createPage();
+    let loads = 0, activations = 0;
+    await target.page.route('https://chatgpt.com/**', route => {
+      loads++;
+      return route.fulfill({ contentType: 'text/html; charset=utf-8', body: '<main><textarea>Human draft</textarea><button aria-label="중지">Stop</button></main>' });
+    });
+    const open = fake.openSubmission.bind(fake);
+    fake.openSubmission = async request => {
+      const submission = await open(request);
+      service.pageRegistry.reservePage(target.binding.pageKey, {
+        sessionId: request.session.sessionId, generation: request.generation, conversationId: null });
+      await target.page.goto('https://chatgpt.com/c/discovered-conversation');
+      return { ...submission, pageKey: target.binding.pageKey };
+    };
+    const team = service.teamDirectory.createTeam({ clientId: 'focus-unknown' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: team.primaryRoleKey, provider: 'chatgpt' });
+    await assert.rejects(service.submissionService.send({ clientId: 'team:' + team.teamId,
+      requestId: 'unknown-plan', sessionId: session.sessionId, prompt: 'Original plan', sessionDeadlineSec: 600 }), /acknowledgement/);
+    const original = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(original.submissionState, 'submission_unknown');
+    const activate = target.page.bringToFront.bind(target.page);
+    target.page.bringToFront = async () => { activations++; await activate(); };
+    const requestRef = service.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=?').get(session.sessionId)!.outbox_id;
+    const inspected = await invokeMcpTool({ name: 'sessionplane_team_get', socketPath: config.socketPath,
+      timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes, arguments: { teamId: team.teamId, requestRef } });
+    const evidence = (inspected.structuredContent.request as { evidence: { conversationRecovery: { activityReason: string } } }).evidence;
+    assert.equal(evidence.conversationRecovery.activityReason, 'unverified-stop-control');
+    assert.equal(activations, 0, 'Read-only inspection does not focus the target');
+    const result = await invokeMcpTool({ name: 'sessionplane_decide', socketPath: config.socketPath,
+      timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes,
+      arguments: { teamId: team.teamId, requestRef, requestId: 'show-unknown', decision: 'focus' } });
+    assert.equal(result.isError, false, JSON.stringify(result));
+    const focused = result.structuredContent;
+    assert.equal(focused.pageKey, target.binding.pageKey);
+    assert.equal(focused.url, 'https://chatgpt.com/c/discovered-conversation');
+    assert.equal(activations, 1);
+    assert.equal(loads, 1);
+    assert.equal(await target.page.locator('textarea').inputValue(), 'Human draft');
+    assert.deepEqual(service.teamDirectory.getSession(session.sessionId), original);
+    assert.equal(service.pageRegistry.getBinding(target.binding.pageKey).state, 'identity_lost');
+    assert.equal(fake.submitCount, 1);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('explicit focus activates only the exact live request tab without reloading or resubmitting', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-focus-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
