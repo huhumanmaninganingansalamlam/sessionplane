@@ -591,6 +591,12 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
     assert.equal(preview.responseMessageId, 'delayed-answer');
     assert.equal(preview.answerText, 'Recovered final');
     assert.equal(preview.submissionVerified, false, 'Reading an anchored candidate response never acknowledges an uncertain submission');
+    await page.locator('#messages').evaluate(element => element.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="other-user">Another unclaimed turn</div>'));
+    const ambiguous = (await inspect()).structuredContent.request as { evidence: { submissionCandidates: Array<{ responseCandidate: unknown }> } };
+    assert.ok(ambiguous.evidence.submissionCandidates.every(candidate => candidate.responseCandidate === null),
+      'Ambiguous users never choose this request response by recency');
+    await page.locator('[data-message-id="other-user"]').evaluate(element => element.remove());
     // Canonical provider acceptance is required for automatic UNKNOWN recovery.
     t.mock.method(page.context().request, 'get', async (url: string) => ({
       status: () => 200, headers: () => ({}), dispose: async () => {},
