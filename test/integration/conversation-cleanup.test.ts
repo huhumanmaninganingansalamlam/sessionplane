@@ -257,7 +257,9 @@ test('provider deletion deferral and uncertain acknowledgement independently clo
   try {
     const team = core.teamDirectory.createTeam({ clientId: 'deferred' });
     const unrelated = await core.browserOwner!.createPage();
-    for (const outcome of ['deferred', 'rejected', 'unknown', 'draft', 'attachment-draft', 'file-input-draft', 'generating', 'navigated', 'late-navigation'] as const) {
+    await unrelated.page.route('https://chatgpt.com/**', route => route.abort('failed'));
+    await unrelated.page.goto('https://chatgpt.com/c/unrelated-failed-navigation').catch(() => {});
+    for (const outcome of ['deferred', 'failed-navigation', 'failed-navigation-draft', 'failed-navigation-late-navigation', 'rejected', 'unknown', 'draft', 'attachment-draft', 'file-input-draft', 'generating', 'navigated', 'late-navigation'] as const) {
       mode = outcome === 'rejected' || outcome === 'unknown' ? outcome : 'deferred';
       core.teamDirectory.createRole({ teamId: team.teamId, roleKey: outcome, roleType: 'expert' });
       const session = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: outcome, provider: 'chatgpt' });
@@ -265,21 +267,36 @@ test('provider deletion deferral and uncertain acknowledgement independently clo
       const complete = await rpc<SessionSnapshot>('session.wait', { sessionId: session.sessionId, generation: 1, waitMs: 3000 });
       assert.equal(complete.terminal, true);
       const { page, binding } = await core.browserOwner!.createPage();
-      await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main><article><div data-testid="file-pill">old-response.txt</div></article><form><textarea></textarea><button data-testid="attachment-button">Attach</button></form></main>' }));
-      await page.goto('https://chatgpt.com/c/' + complete.conversationId);
-      core.pageRegistry.bindPage(binding.pageKey, { sessionId: session.sessionId, generation: 1, conversationId: complete.conversationId! });
+      const failedNavigation = outcome.startsWith('failed-navigation');
+      await page.route('https://chatgpt.com/**', route => failedNavigation ? route.abort('failed') :
+        route.fulfill({ contentType: 'text/html', body: '<main><article><div data-testid="file-pill">old-response.txt</div></article><form><textarea></textarea><button data-testid="attachment-button">Attach</button></form></main>' }));
+      if (failedNavigation) {
+        await assert.rejects(page.goto('https://chatgpt.com/c/' + complete.conversationId), /ERR_FAILED/);
+        await page.waitForURL('chrome-error://chromewebdata/');
+        assert.equal(core.pageRegistry.getBinding(binding.pageKey).sessionId, null);
+        if (outcome === 'failed-navigation-draft') await page.setContent('<textarea>Preserve error-page draft</textarea>');
+      } else {
+        await page.goto('https://chatgpt.com/c/' + complete.conversationId);
+        core.pageRegistry.bindPage(binding.pageKey, { sessionId: session.sessionId, generation: 1, conversationId: complete.conversationId! });
+      }
       let prepared = false;
       const locator = page.locator.bind(page);
       const locatorMock = t.mock.method(page, 'locator', (...args: Parameters<typeof page.locator>) => {
         const found = locator(...args);
-        if (outcome === 'late-navigation') {
+        if (outcome === 'late-navigation' || outcome === 'failed-navigation-late-navigation') {
           const evaluateAll = found.evaluateAll.bind(found);
           t.mock.method(found, 'evaluateAll', async (...parameters: Parameters<typeof found.evaluateAll>) => {
             const value = await evaluateAll(...parameters);
             if (prepared) {
               prepared = false;
-              await page.goto('https://chatgpt.com/c/new-human-conversation');
-              await page.locator('textarea').fill('New conversation draft');
+              if (failedNavigation) {
+                const navigated = page.waitForEvent('framenavigated', { predicate: frame => frame === page.mainFrame() });
+                await page.goto('https://chatgpt.com/c/new-human-conversation').catch(() => {});
+                await navigated;
+              } else {
+                await page.goto('https://chatgpt.com/c/new-human-conversation');
+                await page.locator('textarea').fill('New conversation draft');
+              }
             }
             return value;
           });
@@ -308,12 +325,16 @@ test('provider deletion deferral and uncertain acknowledgement independently clo
           assert.ok(error instanceof RpcClientError);
           const data = error.data as { errorCode: string; details: { retryAfterMs: number; deletionAttempted: boolean; deleted: boolean; pageCleanup: Result['pageCleanup'] } };
           const details = data.details;
+          if (outcome === 'failed-navigation-draft') {
+            assert.equal(data.errorCode, 'session.cleanup-not-ready');
+            return true;
+          }
           assert.equal(data.errorCode, 'provider.unavailable');
           assert.equal(details.retryAfterMs, 9000);
           assert.equal(details.deletionAttempted, false);
           assert.equal(details.deleted, false);
-          assert.equal(details.pageCleanup.closedPages, outcome === 'deferred' ? 1 : 0, outcome);
-          if (outcome !== 'deferred') assert.equal(details.pageCleanup.pageErrors.length, 1);
+          assert.equal(details.pageCleanup.closedPages, outcome === 'deferred' || outcome === 'failed-navigation' ? 1 : 0, outcome);
+          if (outcome !== 'deferred' && outcome !== 'failed-navigation') assert.equal(details.pageCleanup.pageErrors.length, 1);
           return true;
         });
       } else {
@@ -326,11 +347,22 @@ test('provider deletion deferral and uncertain acknowledgement independently clo
         assert.equal(replay.pageCleanup.closedPages, 1);
         assert.equal(deletes, attempts, 'Repeated cleanup must not repeat a provider DELETE');
       }
-      assert.equal(page.isClosed(), ['deferred', 'rejected', 'unknown'].includes(outcome));
-      assert.equal(core.pageRegistry.getBinding(binding.pageKey).sessionId, session.sessionId);
+      assert.equal(page.isClosed(), ['deferred', 'failed-navigation', 'rejected', 'unknown'].includes(outcome));
+      assert.equal(core.pageRegistry.getBinding(binding.pageKey).sessionId, failedNavigation ? null : session.sessionId);
+      if (outcome === 'failed-navigation') {
+        const control = await unrelated.page.context().browser()!.newBrowserCDPSession();
+        assert.equal((await control.send('Target.getTargets')).targetInfos.some(target => target.targetId === binding.targetId), false);
+        await control.detach();
+      }
+      if (outcome === 'failed-navigation-draft') assert.equal(await page.locator('textarea').inputValue(), 'Preserve error-page draft');
       if (outcome === 'draft') assert.equal(await page.locator('textarea').inputValue(), 'Preserve human draft');
       if (outcome === 'attachment-draft') assert.equal(await page.getByTestId('file-pill').textContent(), 'unsent-notes.txt');
       if (outcome === 'late-navigation') assert.equal(await page.locator('textarea').inputValue(), 'New conversation draft');
+      if (outcome === 'failed-navigation-late-navigation') {
+        const control = await page.context().newCDPSession(page);
+        assert.equal((await control.send('Target.getTargetInfo')).targetInfo.url, 'https://chatgpt.com/c/new-human-conversation');
+        await control.detach();
+      }
       locatorMock.mock.restore();
       const after = await rpc<SessionSnapshot>('session.get', { sessionId: session.sessionId });
       assert.equal(after.answerText, complete.answerText);

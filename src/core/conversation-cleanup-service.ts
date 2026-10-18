@@ -45,6 +45,7 @@ export class ConversationCleanupService {
     pageMutex: PageMutationMutex; registry: PageRegistry;
     directory: TeamDirectory; onDeleted: (sessionId: string) => void;
     closeCrashedPages?: (session: SessionSnapshot, canClose: () => boolean) => Promise<{ closedPages: number; pageErrors: string[] }>;
+    isFailedConversationPage?: (pageKey: string, session: SessionSnapshot) => Promise<boolean>;
   };
 
   constructor(options: {
@@ -52,6 +53,7 @@ export class ConversationCleanupService {
     pageMutex: PageMutationMutex; registry: PageRegistry;
     directory: TeamDirectory; onDeleted: (sessionId: string) => void;
     closeCrashedPages?: (session: SessionSnapshot, canClose: () => boolean) => Promise<{ closedPages: number; pageErrors: string[] }>;
+    isFailedConversationPage?: (pageKey: string, session: SessionSnapshot) => Promise<boolean>;
   }) {
     this.#options = options;
   }
@@ -325,8 +327,10 @@ export class ConversationCleanupService {
       binding.conversationId === session.conversationId && isProviderUrl(session.provider, binding.url) &&
       !sessions.conversationCleanupBlocker(session.sessionId, session.conversationId, true);
     for (const binding of registry.listBindings({ includeClosed: false })) {
-      if (binding.sessionId !== session.sessionId && !isUnboundConversation(binding)) continue;
       try {
+        const failedNavigation = binding.state === 'unbound' && binding.url === 'chrome-error://chromewebdata/' &&
+          await this.#options.isFailedConversationPage?.(binding.pageKey, session) === true;
+        if (binding.sessionId !== session.sessionId && !isUnboundConversation(binding) && !failedNavigation) continue;
         await pageMutex.runExclusive(binding.pageKey, async () => {
           if (session.conversationId !== null && sessions.conversationCleanupBlocker(session.sessionId, session.conversationId, true)) {
             throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Conversation now has shared work; preserve its pages');
@@ -335,11 +339,17 @@ export class ConversationCleanupService {
           const page = current.sessionId === session.sessionId
             ? registry.requireSessionPage(binding.pageKey, { sessionId: session.sessionId,
                 generation: session.generation, conversationId: session.conversationId })
-            : isUnboundConversation(current) ? registry.pageForObservation(binding.pageKey, current.bindingEpoch) : null;
-          if (page === null) return;
+            : isUnboundConversation(current) || (failedNavigation &&
+                await this.#options.isFailedConversationPage?.(binding.pageKey, session) === true)
+              ? registry.pageForObservation(binding.pageKey, current.bindingEpoch) : null;
+          if (page === null) {
+            if (failedNavigation) throw new SessionPlaneDomainError('session.page-identity-unverified', 'Failed navigation target changed during cleanup; preserve it');
+            return;
+          }
           await this.#requireIdlePage(page);
           const final = registry.refreshPage(binding.pageKey);
-          if (final.bindingEpoch !== current.bindingEpoch || final.state !== current.state || final.url !== current.url) {
+          if (final.bindingEpoch !== current.bindingEpoch || final.state !== current.state || final.url !== current.url ||
+              (failedNavigation && !await this.#options.isFailedConversationPage?.(binding.pageKey, session))) {
             throw new SessionPlaneDomainError('session.page-identity-unverified', 'Page changed during cleanup inspection; preserve it');
           }
           await page.close();
@@ -435,7 +445,9 @@ export class ConversationCleanupService {
           throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Conversation has active, unresolved or shared work; retrieve completed outputs before deletion');
         }
         for (const binding of registry.listBindings({ includeClosed: false })) {
-          if (binding.sessionId === session.sessionId || (binding.sessionId === null && binding.conversationId === session.conversationId && isProviderUrl(session.provider, binding.url))) {
+          if (binding.sessionId === session.sessionId || (binding.sessionId === null && binding.conversationId === session.conversationId && isProviderUrl(session.provider, binding.url)) ||
+              (binding.state === 'unbound' && binding.url === 'chrome-error://chromewebdata/' &&
+                await this.#options.isFailedConversationPage?.(binding.pageKey, session))) {
             await pageMutex.runExclusive(binding.pageKey, async () => {
               await this.#requireIdlePage(registry.pageForObservation(binding.pageKey, binding.bindingEpoch));
             });
