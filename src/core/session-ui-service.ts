@@ -10,6 +10,7 @@ import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionE
 import type { SessionSnapshot } from '../domain/session.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import { ProviderSubmissionError, type PreparationPurpose, type PreparationTarget } from '../providers/provider-adapter.ts';
+import { assertNoHumanVerification } from '../providers/human-verification.ts';
 import { CHATGPT_PREPARATION_SNAPSHOT, CHATGPT_COMPOSER_SELECTOR } from '../providers/chatgpt/selectors.ts';
 import { composerHasExactValue, inspectChatGptSubmissionCandidates, inspectChatGptPageReady, prepareChatGptObservation } from '../providers/chatgpt/submission.ts';
 import { observeChatGptDialog } from '../providers/chatgpt/dialog-observer.ts';
@@ -638,13 +639,17 @@ export class SessionUiService {
 
   async refresh(input: PreparationOwner & { readonly decisionId: string }): Promise<void> {
     let crashedBinding: PageBindingSnapshot | null = null;
+    let incompleteDocument = false;
     try {
       await this.#submissions.refreshPage(input, async (session) => {
         const page = this.#requirePage(session);
         if (crashedBinding !== null) {
           await this.#browserOwner!.recoverCrashedPage(session.pageKey!, crashedBinding);
           await prepareChatGptObservation(this.#requirePage(session), session.pageKey!);
-        } else await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+        } else {
+          await page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+          if (incompleteDocument) await prepareChatGptObservation(page, session.pageKey!);
+        }
         this.#requirePage(session);
         this.#refs.clear(session.pageKey!);
       }, async (session) => {
@@ -664,6 +669,18 @@ export class SessionUiService {
         }
         const surface = session.conversationId ? await page.evaluate(conversationLoadSurface, {
           origin: this.#chatgptOrigin, conversationId: session.conversationId, click: false }) : null;
+        // An explicitly refreshed pre-submit failure may still be parsing an
+        // empty document. Requiring DOM readiness here prevents the reload that
+        // recovers it. Keep the failed request unchanged and validate after reload.
+        if (session.terminal && session.submissionState === 'failed_pre_submit' && !session.promptSubmitted &&
+            session.errorCode === 'browser.unavailable' && session.conversationId !== null &&
+            session.submittedUserMessageId === null && session.submittedUserTurnId === null &&
+            session.responseMessageId === null && session.answerText === null &&
+            await page.evaluate(() => document.readyState === 'loading' && document.body === null)) {
+          await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
+          incompleteDocument = true;
+          return { loadError: false, targetId: this.#registry.getBinding(session.pageKey!).targetId ?? null };
+        }
         await prepareChatGptObservation(page, session.pageKey!);
         return { loadError: surface?.loadError === true, targetId: this.#registry.getBinding(session.pageKey!).targetId ?? null };
       });
