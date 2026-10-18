@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
@@ -18,6 +19,47 @@ function capture() {
     stderr: new Writable({ write(chunk, _encoding, done) { stderr += String(chunk); done(); } }) };
   return { io, result: () => ({ stdout, stderr }) };
 }
+
+test('subcommand help never dispatches login or other mutations, while explicit login still works', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-cli-help-'));
+  const socketPath = path.join(root, 'core.sock');
+  const requests: Array<{ method: string; params: unknown }> = [];
+  const server = createServer((socket) => {
+    let input = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk) => {
+      input += chunk;
+      if (!input.includes('\n')) return;
+      const request = JSON.parse(input.split('\n')[0]!);
+      requests.push({ method: request.method, params: request.params });
+      socket.end(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { requestOk: true } })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socketPath, resolve);
+    });
+    for (const args of [
+      ['login', '--help'], ['login', '-h'], ['login', '--manual', '--help'],
+      ['login', '--resume', '--help'], ['team', 'delete', 'retained-team', '--help'],
+      ['serve', '--help'], ['--help'], ['help'], [],
+    ]) {
+      const output = capture();
+      const code = await runCli([...args, '--socket', socketPath], output.io);
+      assert.deepEqual(requests, [], `help must not dispatch: ${args.join(' ')}`);
+      assert.equal(code, 0, output.result().stderr);
+      assert.match(output.result().stdout, /Usage:/);
+      assert.equal(output.result().stderr, '');
+    }
+    const output = capture();
+    assert.equal(await runCli(['login', '--json', '--socket', socketPath], output.io), 0);
+    assert.deepEqual(requests, [{ method: 'browser.login', params: { mode: 'automated' } }]);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('human CLI collects an exact answer, preserves unknown delivery and reports independent cleanup', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-human-cli-'));
