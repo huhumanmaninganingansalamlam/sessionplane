@@ -359,6 +359,25 @@ export class BrowserOwner {
     }
   }
 
+  /** Chrome retains the attempted URL separately from a failed navigation document. */
+  async isFailedConversationPage(pageKey: string, provider: string, conversationId: string): Promise<boolean> {
+    const binding = this.#pageRegistry.refreshPage(pageKey);
+    if (binding.state !== 'unbound' || binding.sessionId !== null || binding.conversationId !== null ||
+        binding.url !== 'chrome-error://chromewebdata/' || binding.targetId === null) return false;
+    const page = this.#pageRegistry.pageForObservation(pageKey, binding.bindingEpoch);
+    const control = await page.context().newCDPSession(page);
+    try {
+      const { frameTree } = await control.send('Page.getFrameTree');
+      const { targetInfo } = await control.send('Target.getTargetInfo');
+      const current = this.#pageRegistry.refreshPage(pageKey);
+      return current.bindingEpoch === binding.bindingEpoch && current.state === binding.state &&
+        current.sessionId === null && current.url === binding.url && current.targetId === binding.targetId &&
+        targetInfo.targetId === binding.targetId && targetInfo.type === 'page' &&
+        frameTree.frame.url === binding.url && frameTree.frame.unreachableUrl === targetInfo.url &&
+        isProviderUrl(provider, targetInfo.url) && parseProviderConversationId(targetInfo.url) === conversationId;
+    } finally { await control.detach(); }
+  }
+
   /** A crashed target can predate adoption and never become a Playwright Page. */
   async closeCrashedConversationPages(provider: string, conversationId: string, canClose: () => boolean) {
     const result = { closedPages: 0, pageErrors: [] as string[] };
