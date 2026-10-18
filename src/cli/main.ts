@@ -176,6 +176,10 @@ export async function runCli(
   }
 
   const command = parsed.words[0] ?? 'help';
+  if (command === 'help' || parsed.words.includes('--help') || parsed.words.includes('-h')) {
+    io.stdout.write(helpText());
+    return 0;
+  }
   let stateDir = parsed.options['state-dir'];
   if (command === 'serve') {
     const canonical = path.join(homedir(), '.local', 'state', 'sessionplane');
@@ -341,11 +345,6 @@ export async function runCli(
       case '--version':
       case '-v':
         io.stdout.write(`${SESSIONPLANE_VERSION}\n`);
-        return 0;
-      case 'help':
-      case '--help':
-      case '-h':
-        io.stdout.write(helpText());
         return 0;
       default:
         throw new Error(`Unknown command: ${command}`);
