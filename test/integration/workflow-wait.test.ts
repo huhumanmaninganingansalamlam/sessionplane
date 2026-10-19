@@ -45,6 +45,11 @@ test('short workflow wait holds progress/429 for a full minute and cancellation 
     await flush();
     await flush();
     assert.equal(returned, false, 'Transient progress must not wake the model');
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
+      { reason: 'provider-network-activity', observationTransport: 'dom' });
+    await flush();
+    await flush();
+    assert.equal(returned, false, 'Hither provider-network-activity must stay inside the external wait');
     t.mock.timers.tick(59_999);
     await flush();
     assert.equal(returned, false, 'A sub-minute request must not expire early');

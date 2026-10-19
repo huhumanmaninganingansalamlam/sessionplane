@@ -38,6 +38,7 @@ export const CHATGPT_SELECTORS = {
   messages: '[data-message-author-role], [data-chatgpt-search-message-ids]',
   stopControls: [
     '[data-testid="stop-button"]',
+    'button[aria-label="Stop"]',
     'button[aria-label="Stop generating"]',
     'button[aria-label="Stop streaming"]',
     'button[aria-label="생성 중지"]',

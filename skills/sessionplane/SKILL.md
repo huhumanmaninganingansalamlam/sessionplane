@@ -26,6 +26,12 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
 3. `sessionplane_send` takes teamId, a fresh roleRef, prompt and intended model/
    effort. Every mutation needs a distinct stable requestId; retry that ID only
    with identical arguments. A stale roleRef requires refreshing team_get.
+   For implementing Experts, request GPT-6 Thinking / Extra High by default and
+   verify that exact version and effort in fresh UI evidence before the next send.
+   Fall back to GPT-5.6 Thinking / Extra High only when GPT-6 Extra High is actually
+   unavailable; incomplete discovery is not unavailability. `Thinking` alone is
+   not a version alias. Keep Main Director Pro and Coordinator GPT-6.1 Sol low.
+   Do not reconfigure or replay a live request to apply this default.
 4. `status: needs_decision` is a normal handoff, not a failed send.
    The first send returns `configurationCatalog.options`: combined configuration
    labels observed by SessionPlane in the provider UI, each with an `id`.
