@@ -323,9 +323,14 @@ export class ConversationCleanupService {
     const sessions = new SessionRepository(database.raw);
     const result = { closedPages: 0, pageErrors: [] as string[] };
     const isUnboundConversation = (binding: ReturnType<PageRegistry['getBinding']>) =>
-      binding.state === 'unbound' && binding.sessionId === null && session.conversationId !== null &&
+      (binding.state === 'unbound' || binding.state === 'conflict') && binding.sessionId === null && session.conversationId !== null &&
+      (binding.expectedConversationId === null || binding.expectedConversationId === session.conversationId) &&
       binding.conversationId === session.conversationId && isProviderUrl(session.provider, binding.url) &&
       !sessions.conversationCleanupBlocker(session.sessionId, session.conversationId, true);
+    const isOwnedConflict = (binding: ReturnType<PageRegistry['getBinding']>) =>
+      binding.state === 'conflict' && binding.sessionId === session.sessionId && binding.generation === session.generation &&
+      binding.conversationId === session.conversationId && binding.expectedConversationId === session.conversationId &&
+      isProviderUrl(session.provider, binding.url);
     for (const binding of registry.listBindings({ includeClosed: false })) {
       try {
         const failedNavigation = binding.state === 'unbound' && binding.url === 'chrome-error://chromewebdata/' &&
@@ -336,7 +341,8 @@ export class ConversationCleanupService {
             throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Conversation now has shared work; preserve its pages');
           }
           const current = registry.refreshPage(binding.pageKey);
-          const page = current.sessionId === session.sessionId
+          const page = isOwnedConflict(current) ? registry.pageForObservation(binding.pageKey, current.bindingEpoch)
+            : current.sessionId === session.sessionId
             ? registry.requireSessionPage(binding.pageKey, { sessionId: session.sessionId,
                 generation: session.generation, conversationId: session.conversationId })
             : isUnboundConversation(current) || (failedNavigation &&
