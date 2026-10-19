@@ -412,12 +412,15 @@ test('native observation recovers an exact open-shadow anchor without crossing r
       main.insertAdjacentHTML('beforeend', '<div data-message-author-role="assistant" data-message-id="unrelated-answer" data-end-turn="true">Do not attach</div>');
     });
     assert.equal((await observeChatGptDom(page, identity)).candidate, null);
+    assert.deepEqual((await observeChatGptDom(page, identity)).turnBoundary.map(m => m.messageId),
+      [identity.submittedUserMessageId], 'Recovery never reads a different transcript root');
     await page.locator('main').first().evaluate((main, anchor) => {
       main.insertAdjacentHTML('beforeend', `<div data-message-author-role="user" data-message-id="${anchor}">Duplicate anchor</div>`);
     }, identity.submittedUserMessageId);
     const duplicate = await observeChatGptDom(page, identity);
     assert.equal(duplicate.submittedUserFound, false);
     assert.equal(duplicate.candidate, null);
+    assert.deepEqual(duplicate.turnBoundary, [], 'Duplicate anchors are not evidence for a unique turn');
     assert.equal(await page.locator('textarea').inputValue(), 'Retained human draft');
     assert.equal(networkRequests, 1, 'Only the isolated initial navigation; no recovery send or refresh');
     assert.deepEqual(session, original);
@@ -499,6 +502,19 @@ test('current ChatGPT message units recover the exact submitted turn and answer'
     });
     const continued = await observeChatGptDom(page, identity);
     assert.equal(continued.candidate, null, 'Follow-up final must never complete the original partial');
+    assert.deepEqual(continued.turnBoundary.map(m => [m.role, m.messageId, m.text]), [
+      ['user', 'user-exact', 'Question'],
+      ['assistant', 'partial-answer', 'Partial response'],
+      ['user', 'human-followup', 'Please finish the analysis with the corrected evidence.'],
+      ['assistant', 'continued-final', 'Completed review'],
+    ], 'Recovery distinguishes original partial from an untracked follow-up');
+    assert.equal(new ExactFinalTracker(1).evaluate({ ...continued, provider: 'chatgpt', pageKey: 'fixture',
+      bindingEpoch: 1, observedAt: new Date().toISOString(), conversationId: CONVERSATION_ID,
+      activity: 'none', dialogKind: null, networkActivity: false, observationTransport: 'fresh' }, Date.now()).kind, 'unverified');
+    await page.locator('main').evaluate(main => main.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="third-user">Unrelated later work</div>'));
+    assert.equal((await observeChatGptDom(page, identity)).turnBoundary.length, 4);
+    assert.deepEqual((await observeChatGptDom(page, { ...identity, submittedUserMessageId: 'missing' })).turnBoundary, []);
     await page.setContent(`<main>
       <div data-message-author-role="user" data-message-id="user-exact">Question A</div>
       <div data-message-author-role="assistant" data-message-id="original-final" data-end-turn="true">Answer A</div>

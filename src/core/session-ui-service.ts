@@ -199,6 +199,7 @@ export class SessionUiService {
                     messageTimeout: dom.providerAlerts.some(isMessageTimeoutAlert),
                     // Passive evidence is not a completed answer or permission to submit.
                     responseCandidate: dom.candidate,
+                    turnBoundary: dom.turnBoundary,
                     messageDiagnostics: dom.messageDiagnostics,
                     scope: 'mounted-dom' as const,
                   };

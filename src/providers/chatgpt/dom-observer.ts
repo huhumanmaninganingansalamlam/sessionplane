@@ -1,7 +1,7 @@
 import type { Page } from 'playwright-core';
 
 import type { ProviderAssistantCandidate, ProviderWakeReason } from '../provider-adapter.ts';
-import { readChatGptMessageObservation } from './message-dom.ts';
+import { readChatGptMessageObservation, type ChatGptMessage } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
 // Capacity blocks a new turn, not read-only collection of an existing exact answer.
@@ -15,6 +15,8 @@ export interface ChatGptDomObservation {
   readonly submittedUserFound: boolean;
   readonly laterUserFound: boolean;
   readonly candidate: ProviderAssistantCandidate | null;
+  /** Read-only transcript evidence, never an exact-final decision or a replay authorization. */
+  readonly turnBoundary: readonly ChatGptMessage[];
 }
 
 export interface SubmittedUserIdentity {
@@ -37,6 +39,13 @@ export async function observeChatGptDom(
   // Roots have no common message order. Never splice an answer from another root,
   // or choose among duplicate exact anchors in different mounted transcripts.
   const anchor = anchors.length === 1 ? anchors[0] : undefined;
+  const turnBoundary: ChatGptMessage[] = [];
+  let userTurns = 0;
+  for (const message of messages.slice(anchor === undefined ? messages.length : messages.indexOf(anchor))) {
+    if (message.rootIndex !== anchor?.rootIndex) continue;
+    if (message.role === 'user' && ++userTurns > 2) break;
+    turnBoundary.push(message);
+  }
   for (const message of messages) {
     if (anchor === undefined || message.rootIndex !== anchor.rootIndex) continue;
     if (!submittedUserFound) {
@@ -78,7 +87,7 @@ export async function observeChatGptDom(
     !CONVERSATION_CAPACITY_NOTICE.test(alert.replace(/\s+/g, ' ').trim()));
   // Retain all notices for diagnostics. Quiet/Stop/streaming and modal guards still
   // decide completion; this exception never permits another submission.
-  return { messageDiagnostics, submittedUserFound, laterUserFound, candidate, conversationSurfaceAvailable,
+  return { messageDiagnostics, submittedUserFound, laterUserFound, candidate, turnBoundary, conversationSurfaceAvailable,
     actionableAlert, providerAlerts };
 }
 
