@@ -9,6 +9,7 @@ import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
 import { ProviderSubmissionError, type ProviderRecoveryRequest, type ProviderSubmissionRequest } from '../../src/providers/provider-adapter.ts';
+import { SessionRepository } from '../../src/storage/session-repository.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 test('conversation deletion protects unresolved work, retains answers and persists uncertain outcomes', async () => {
@@ -69,6 +70,28 @@ test('conversation deletion protects unresolved work, retains answers and persis
     sessionId: session.sessionId, generation: session.generation,
     conversationId: session.conversationId, outputsRetrieved: true });
   try {
+    const failed = await create();
+    const repository = new SessionRepository(core.database.raw);
+    const timestamp = new Date().toISOString();
+    repository.updateCurrentGeneration(failed.sessionId, 1, {
+      sessionState: 'failed', providerState: 'error', completedAt: timestamp,
+      errorCode: 'provider.execution-failed', reason: 'unverified-provider-error',
+    }, timestamp);
+    await assert.rejects(rpc('session.delete', deletion(failed, 'unverified-failure')),
+      (error: unknown) => JSON.stringify(error).includes('session.cleanup-not-ready'));
+    // Durable outcome produced by supported reconcile_failure, not a cancelled observation.
+    repository.updateCurrentGeneration(failed.sessionId, 1, {
+      sessionState: 'failed', providerState: 'error', completedAt: timestamp,
+      errorCode: 'provider.execution-failed', reason: 'message-timeout-reconciled',
+    }, timestamp);
+    const replacement = core.teamDirectory.createSession({ teamId: failed.teamId,
+      roleKey: failed.roleKey, provider: 'chatgpt' });
+    const failedGeneration = core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').get(failed.sessionId);
+    assert.equal((await rpc<{ deleted: boolean }>('session.delete', deletion(failed, 'delete-confirmed-failure'))).deleted, true);
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').get(failed.sessionId), failedGeneration);
+    assert.equal(core.teamDirectory.getSession(replacement.sessionId).generation, 0);
+    assert.equal(fake.submitCount, 1);
+    fake.deleted.clear();
     const active = await create();
     await assert.rejects(rpc('session.delete', deletion(active, 'active')),
       (error: unknown) => JSON.stringify(error).includes('session.cleanup-not-ready'));
