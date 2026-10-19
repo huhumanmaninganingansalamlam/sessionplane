@@ -29,6 +29,7 @@ const SessionSelector = z.union([
 ]);
 
 export function registerArtifactMethods(router: RpcRouter, artifacts: ArtifactService): void {
+  router.register('artifact.read', z.object({ clientId: ClientId, artifactId: ArtifactId, offset: z.number().int().nonnegative(), length: z.number().int().min(1).max(65536) }).strict(), params => artifacts.read(params));
   router.register('artifact.discover', SessionSelector, (params) =>
     artifacts.discover(selector(params)),
   );

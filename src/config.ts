@@ -18,7 +18,15 @@ function readSessionPlaneVersion(): string {
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
+export interface RemoteConnection {
+  readonly controlPath?: string;
+  readonly host: string;
+  readonly executable: string;
+  readonly socketPath?: string;
+}
+
 export interface SessionPlaneConfig {
+  readonly remote: RemoteConnection | undefined;
   readonly cwd: string;
   readonly stateDir: string;
   readonly socketPath: string;
@@ -53,6 +61,7 @@ export interface SessionPlaneConfig {
 }
 
 export interface ConfigOverrides {
+  readonly remote?: RemoteConnection;
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly stateDir?: string;
@@ -249,6 +258,12 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
   );
 
   return Object.freeze({
+    remote: overrides.remote ?? (env.SESSIONPLANE_REMOTE_HOST?.trim() ? {
+      host: env.SESSIONPLANE_REMOTE_HOST.trim(),
+      ...(env.SESSIONPLANE_REMOTE_CONTROL_PATH ? { controlPath: env.SESSIONPLANE_REMOTE_CONTROL_PATH } : {}),
+      executable: env.SESSIONPLANE_REMOTE_EXECUTABLE || 'sessplane',
+      ...(env.SESSIONPLANE_REMOTE_SOCKET ? { socketPath: env.SESSIONPLANE_REMOTE_SOCKET } : {}),
+    } : undefined),
     cwd,
     stateDir,
     socketPath,

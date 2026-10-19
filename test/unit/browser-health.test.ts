@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, symlinkSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -98,6 +99,28 @@ test('Playwright-managed Chrome for Testing is rejected as a host browser', () =
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('browser discovery preserves a symlink launcher identity for version and launch', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-browser-launcher-'));
+  try {
+    const dispatcher = path.join(root, 'dispatcher');
+    const launcher = path.join(root, 'chromium');
+    writeFileSync(dispatcher, `#!/bin/sh
+case "$0" in */chromium) ;; *) exit 2 ;; esac
+if [ "$1" = --version ]; then echo 'Chromium 155.0.0.0'; else echo 'browser-started'; fi
+`, { mode: 0o700 });
+    symlinkSync(dispatcher, launcher);
+    const browser = findHostBrowser({ executablePath: launcher, preference: 'custom', env: { PATH: root } });
+    assert.ok(browser);
+    const launched = spawnSync(browser.executable, ['--remote-debugging-port=12345'], { encoding: 'utf8' });
+    assert.equal(launched.status, 0);
+    assert.equal(launched.stdout.trim(), 'browser-started');
+    const managed = fakeBrowser(path.join(root, 'ms-playwright'), 'chrome', 'Google Chrome 155.0.0.0');
+    const disguised = path.join(root, 'user-browser');
+    symlinkSync(managed, disguised);
+    assert.equal(findHostBrowser({ executablePath: disguised, preference: 'custom', env: { PATH: root } }), null);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 function fakeBrowser(root: string, name: string, version: string): string {
