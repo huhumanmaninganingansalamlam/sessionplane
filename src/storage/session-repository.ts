@@ -304,7 +304,7 @@ export class SessionRepository {
             (session_state = 'failed' AND EXISTS (SELECT 1 FROM generations g
               WHERE g.session_id = sessions.session_id AND g.generation = sessions.current_generation
                 AND g.submission_state = 'submitted' AND g.prompt_submitted = 1
-                AND g.error_code = 'provider.execution-failed' AND g.reason = 'thinking-failed-reconciled'))
+                AND g.error_code = 'provider.execution-failed' AND g.reason IN ('thinking-failed-reconciled', 'message-timeout-reconciled')))
             OR (session_state = 'cancelled' AND EXISTS (SELECT 1 FROM generations g
               WHERE g.session_id = sessions.session_id AND g.generation = sessions.current_generation
                 AND g.submission_state = 'submitted' AND g.prompt_submitted = 1

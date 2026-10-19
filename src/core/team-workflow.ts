@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { workflowWaitMs, workflowWaitOutcome } from '../domain/workflow-wait.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
 import type { PageMutationMutex } from '../browser/page-mutex.ts';
@@ -64,7 +65,13 @@ export class TeamWorkflow {
     return {
       ...(selected === undefined ? team : {
         requestOk: true,
-        request: await this.#observe(selected, input.maxNodes, true),
+        request: { ...await this.#observe(selected, input.maxNodes, true),
+          activity: {
+            lastGenerationStateChange: new EventRepository(this.services.database.raw)
+              .latestGenerationActivity(selected.sessionId, selected.generation),
+            latestStoredArtifactChangeAt: this.services.artifacts.list({ sessionId: selected.sessionId, generation: selected.generation })
+              .artifacts.reduce<string | null>((latest, artifact) => latest === null || artifact.updatedAt > latest ? artifact.updatedAt : latest, null),
+          } },
         teamId: team.teamId, name: team.name, teamState: team.teamState,
       }),
       capabilities: { uploadsEnabled: this.services.submissions.uploadsEnabled, downloadsEnabled: true },
@@ -266,7 +273,7 @@ export class TeamWorkflow {
       return { ...await this.#observe(request), reconciliation };
     }
     if (input.decision === 'reconcile_failure') {
-      const reconciliation = await this.services.ui.reconcileFailure({ ...owner, decisionId: input.requestId });
+      const reconciliation = await this.services.ui.reconcileFailure({ ...owner, decisionId: input.requestId, allowMessageTimeout: true });
       return { ...await this.#observe(request), reconciliation };
     }
     if (input.decision === 'discover') {
@@ -310,21 +317,35 @@ export class TeamWorkflow {
     return await this.#observe(this.#request(input));
   }
 
-  async wait(input: { teamId: string; requestRefs: string[]; waitMs: number; outputDir?: string | undefined }) {
+  async wait(input: { teamId: string; requestRefs: string[]; waitMs: number; outputDir?: string | undefined }, signal?: AbortSignal) {
     const requestRefs = [...new Set(input.requestRefs)];
-    // Actor waits share one deadline. File capture remains sequential to bound network and memory use.
-    const observed = await Promise.all(requestRefs.map(async (requestRef) => {
+    const deadline = Date.now() + workflowWaitMs(input.waitMs);
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) controller.abort();
+    // One outcome wakes the caller; progress/pacing revisions remain in this process.
+    const observed: Array<{ request: OutboxRecord | null; result: Record<string, unknown> }> = await Promise.all(requestRefs.map(async (requestRef) => {
       try {
         const request = this.#request({ teamId: input.teamId, requestRef });
-        const current = this.services.directory.getSession(request.sessionId);
-        let waitExpired = false;
-        if (current.generation === request.generation && !needsDecision(current) && this.#loadRecoveryRequired(current) === null && this.#lostSubmission(current) === null) {
-          const waited = await this.services.scheduler.waitSession(request.sessionId, { expectedGeneration: request.generation, waitMs: input.waitMs });
-          waitExpired = waited.waitExpired;
+        let result: Record<string, unknown> = await this.#observe(request);
+        for (;;) {
+          if (workflowWaitOutcome(result)) { controller.abort(); break; }
+          const remaining = deadline - Date.now();
+          if (remaining <= 0 || controller.signal.aborted) break;
+          const waited = await this.services.scheduler.waitSession(request.sessionId, {
+            expectedGeneration: request.generation, waitMs: remaining, signal: controller.signal,
+          });
+          if (controller.signal.aborted) break;
+          result = await this.#observe(request);
+          if (waited.waitExpired) break;
         }
-        return { request, result: { ...await this.#observe(request), waitExpired } };
-      } catch (error) { return { request: null, result: failure(error, requestRef) }; }
-    }));
+        return { request, result: { ...result, waitExpired: !workflowWaitOutcome(result) && Date.now() >= deadline } };
+      } catch (error) { controller.abort(); return { request: null, result: failure(error, requestRef) }; }
+    })).finally(() => {
+      signal?.removeEventListener('abort', abort);
+      controller.abort();
+    });
     const results = [];
     for (const { request, result } of observed) {
       if (request === null) { results.push(result); continue; }
@@ -344,7 +365,14 @@ export class TeamWorkflow {
             this.services.artifacts.export({ artifactId: a.artifactId, outputPath: path.join(outputDir, request.outboxId, a.artifactId, path.basename(a.name)) })) };
         } catch (error) { files = { ...files, exportError: failure(error, request.outboxId) }; }
       }
-      results.push({ ...result, ...(files === undefined ? {} : { files }) });
+      if (!workflowWaitOutcome(result)) {
+        const { requestOk, requestRef, teamId, sessionId, generation, submissionState, sessionState,
+          providerState, observationTransport, terminal, waitExpired, promptSubmitted, conversationId,
+          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt } = result;
+        results.push({ requestOk, requestRef, teamId, sessionId, generation, submissionState, sessionState,
+          providerState, observationTransport, terminal, waitExpired, promptSubmitted, conversationId,
+          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt });
+      } else results.push({ ...result, ...(files === undefined ? {} : { files }) });
     }
     return { requestOk: true, teamId: input.teamId, results };
   }

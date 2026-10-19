@@ -78,7 +78,7 @@ test('team MCP deduplicates sends, rejects stale/cross-team refs and keeps concu
     assert.notEqual(otherSend.structuredContent.requestRef, first.requestRef);
     const wrong = await invoke('team_get', { teamId: other.structuredContent.teamId, requestRef: first.requestRef });
     assert.equal(wrong.structuredContent.errorCode, 'input.invalid');
-    const waiting = await invoke('wait', { teamId, requestRefs: [first.requestRef], waitMs: 1 });
+    const waiting = await invoke('wait', { teamId, requestRefs: [first.requestRef], waitMs: 0 });
     assert.equal((waiting.structuredContent.results as Array<{ waitExpired: boolean }>)[0]!.waitExpired, true);
     for (const [i, result] of sent.entries()) {
       fake.emitObservation(result.structuredContent.sessionId as string, {

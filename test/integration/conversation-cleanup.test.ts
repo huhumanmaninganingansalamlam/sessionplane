@@ -312,7 +312,7 @@ test('provider deletion deferral and uncertain acknowledgement independently clo
         if (outcome === 'attachment-draft') await page.setContent('<form><textarea></textarea><input type="file"><div data-testid="file-pill">unsent-notes.txt</div></form>');
         if (outcome === 'draft') await page.locator('textarea').fill('Preserve human draft');
         if (outcome === 'generating') await page.evaluate(() => {
-          const stop = document.createElement('button'); stop.setAttribute('aria-label', 'Stop generating');
+          const stop = document.createElement('button'); stop.setAttribute('aria-label', 'Stop');
           stop.textContent = 'Stop'; document.body.append(stop);
         });
         if (outcome === 'navigated') await page.goto('https://chatgpt.com/c/different-conversation');
