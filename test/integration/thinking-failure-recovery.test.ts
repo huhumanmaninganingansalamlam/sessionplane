@@ -291,3 +291,57 @@ test('confirmed manual follow-up releases only original tracking and permits new
     assert.equal(retained.submitted_user_message_id, original.submittedUserMessageId);
   } finally { await f.close(); }
 });
+
+
+test('explicit message-timeout reconciliation preserves original ACK, rejects live Stop and permits one owner continuation', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users + '<aside role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요. 다시 시도</aside>';
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const input = { teamId: f.team.teamId, requestRef, requestId: 'timeout-reconcile', decision: 'reconcile_failure' };
+    await f.fake.page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend', '<button aria-label="Stop">Stop</button>'));
+    await assert.rejects(f.rpc('decide', input), /active generation/);
+    assert.equal(f.fake.submitCount, 1);
+    await f.fake.page.locator('button[aria-label="Stop"]').evaluate(node => node.remove());
+    await f.fake.page.locator('textarea').fill('Preserved user draft');
+    await assert.rejects(f.rpc('decide', input), /Preserve the current draft/);
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved user draft');
+    await f.fake.page.locator('textarea').fill('');
+    // Automatic recovery cannot classify this as a Thinking failure.
+    await assert.rejects(f.core.thinkingFailureRecovery.services.ui.reconcileFailure({ clientId: `team:${f.team.teamId}`, requestId: 'original', sessionId: original.sessionId,
+      generation: original.generation, decisionId: 'automatic-timeout' }));
+    const result = await f.rpc<any>('decide', input);
+    assert.equal(result.reconciliation.evidence.kind, 'message-timeout');
+    const failed = f.core.teamDirectory.getSession(f.session.sessionId);
+    assert.equal(failed.reason, 'message-timeout-reconciled');
+    assert.equal(failed.submittedUserMessageId, original.submittedUserMessageId);
+    assert.equal(failed.promptSubmitted, true);
+    assert.equal(failed.answerText, null);
+    await f.rpc('decide', input);
+    assert.equal(f.fake.submitCount, 1, 'Reconciliation and receipt replay never submit');
+    f.fake.failureCount = 1;
+    f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="final" data-end-turn="true">Normal final</div>';
+    await assert.rejects(f.core.submissionService.send({ clientId: `team:${f.team.teamId}`, sessionId: failed.sessionId, expectedGeneration: 1, requestId: 'owner-continuation', prompt: '계속', model: '5.5 Pro', effort: 'Extra High', sessionDeadlineSec: 60 }), error => { assert.match(String(error), /composer|preparation|decision/i); return true; });
+    const child = f.core.teamDirectory.getSession(f.session.sessionId);
+    assert.equal(child.generation, 2);
+    assert.equal(child.submissionState, 'prepared');
+    assert.equal(f.fake.submitCount, 1);
+    const childRef = f.core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=? AND generation=2').get(child.sessionId)!.outbox_id;
+    for (const purpose of ['model', 'composer', 'submit']) {
+      const observed = await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef: childRef });
+      const evidence = observed.request.evidence;
+      const node = evidence.nodes.find((n: BrowserSnapshot['nodes'][number]) => purpose === 'model' ? n.id === 'configuration' :
+        purpose === 'composer' ? n.role === 'textbox' : n.submitControl === true)!;
+      await f.rpc('decide', { teamId: f.team.teamId, requestRef: childRef, requestId: 'continuation-' + purpose,
+        decision: 'choose', purpose, snapshotId: evidence.snapshotId, ref: node.ref });
+    }
+    await until(() => f.core.teamDirectory.getSession(child.sessionId).sessionState === 'complete');
+    assert.equal(f.fake.submitCount, 2);
+    assert.equal(f.fake.submissionRequests.at(-1)!.prompt, '계속');
+    const originalRow = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(child.sessionId)!;
+    assert.equal(originalRow.submitted_user_message_id, original.submittedUserMessageId);
+    assert.equal(originalRow.answer_text, null);
+    assert.equal(f.core.teamDirectory.getSession(child.sessionId).answerText, 'Normal final');
+  } finally { await f.close(); }
+});

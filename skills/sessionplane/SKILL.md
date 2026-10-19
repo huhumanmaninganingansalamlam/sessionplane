@@ -109,14 +109,18 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    For provider-actionable-alert, inspect evidence or team_get on the same requestRef
    and report the visible error. Active thinking/streaming needs waiting; a visible
    stream/history recovery failure may need scoped refresh, then reinspection.
-   For an idle current-turn Thinking failed, the original Coordinator can use
+   For an idle current-turn Thinking failed, or a message-send timeout with explicit
+   user authorization to continue in the same chat, the original Coordinator can use
    decide with decision `reconcile_failure`, the same teamId/requestRef and a
    stable requestId. The core freshly verifies the original submitted anchor,
    actual failure header and composer, rejecting later user turns, answer candidates,
    Stop/thinking/streaming, stale/missing evidence, generic alerts and refusals.
    Success records failed/terminal with provider.execution-failed while keeping
    submitted:true, original evidence and conversation; no Stop, deletion or replay
-   occurs. Only then may the original Coordinator send an explicitly authorized
+   occurs. Message-timeout reconciliation does not enable automatic continuation;
+   once reconciled, the owner may send the authorized literal `계속` once in the
+   same conversation, keeping the failed original and successor ACK/answer separate.
+   Only then may the original Coordinator send an explicitly authorized
    follow-up as the next generation in the same chat. This does not authorize tool
    reexecution. For an explicitly recovery-authorized task, a **new** ChatGPT send
    may set `thinkingFailureRecovery:true` to hand follow-up sending to the core.

@@ -280,7 +280,7 @@ test('explicit duplicate recovery retains the exact unsubmitted request and clos
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-duplicate-preparation-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const fake = new FakeProviderAdapter();
-  fake.autoFinalText = 'Original completed answer';
+  fake.autoFinalText = 'Original completed answer\n일반 텍스트\nExact code';
   const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
     logger: { debug() {}, info() {}, warn() {}, error() {} } });
   const rpc = <T = any>(method: string, params: Record<string, unknown>) => callRpc<T>({ socketPath: config.socketPath, method, params });
@@ -292,7 +292,8 @@ test('explicit duplicate recovery retains the exact unsubmitted request and clos
     await rpc('session.send', { clientId: 'duplicate-owner', requestId: 'original', sessionId: session.sessionId, prompt: 'Original completed work' });
     await rpc('session.wait', { clientId: 'duplicate-owner', sessionId: session.sessionId, generation: 1, waitMs: 2000 });
     const original = service.teamDirectory.getSession(session.sessionId);
-    const body = `<main><article data-message-author-role="user" data-message-id="${original.submittedUserMessageId}">Original completed work</article><article data-message-author-role="assistant" data-message-id="${original.responseMessageId}"><div class="markdown">Original completed answer</div></article><textarea id="prompt-textarea"></textarea></main>`;
+    const body = `<main><article data-message-author-role="user" data-message-id="${original.submittedUserMessageId}">Original completed work</article><article data-message-author-role="assistant" data-message-id="${original.responseMessageId}"><div class="markdown">Original completed answer
+<div data-code-block><div data-markdown-copy="exclude">Plain text</div><pre>Exact code</pre></div></div></article><textarea id="prompt-textarea"></textarea></main>`;
     const pages = [];
     for (let i = 0; i < 2; i++) {
       const target = await service.browserOwner!.createPage();

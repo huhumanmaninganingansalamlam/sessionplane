@@ -423,9 +423,18 @@ export class RecoveryService {
           const page = this.#pageRegistry.pageForObservation(binding.pageKey, binding.bindingEpoch);
           await requireIdleConversationPage(page);
           const dom = await observeChatGptDom(page, previous);
+          let priorAnswer = previous.answerText!.trim();
+          // The same exact response can localize its non-authored code toolbar
+          // after reload. Accept only this observed chrome label substitution;
+          // all answer content and message identity still have to match.
+          const headers = await page.locator('[data-code-block] > [data-markdown-copy="exclude"]').allTextContents();
+          const oldLabels = priorAnswer.split('\n일반 텍스트\n').length - 1;
+          if (oldLabels > 0 && headers.filter(text => text.trim() === 'Plain text').length >= oldLabels) {
+            priorAnswer = priorAnswer.replaceAll('\n일반 텍스트\n', '\nPlain text\n');
+          }
           if (!dom.submittedUserFound || dom.laterUserFound || dom.actionableAlert ||
               dom.candidate?.streamingMarker || dom.candidate?.responseMessageId !== previous.responseMessageId ||
-              dom.candidate.answerText.trim() !== previous.answerText!.trim()) return false;
+              dom.candidate.answerText.trim() !== priorAnswer) return false;
         }
         return true;
       };

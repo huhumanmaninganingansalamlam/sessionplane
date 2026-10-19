@@ -273,7 +273,7 @@ export class TeamWorkflow {
       return { ...await this.#observe(request), reconciliation };
     }
     if (input.decision === 'reconcile_failure') {
-      const reconciliation = await this.services.ui.reconcileFailure({ ...owner, decisionId: input.requestId });
+      const reconciliation = await this.services.ui.reconcileFailure({ ...owner, decisionId: input.requestId, allowMessageTimeout: true });
       return { ...await this.#observe(request), reconciliation };
     }
     if (input.decision === 'discover') {

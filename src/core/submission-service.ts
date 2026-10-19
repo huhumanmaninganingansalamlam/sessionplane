@@ -1103,7 +1103,7 @@ export class SubmissionService {
   async reconcileFailure(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string },
     observe: (snapshot: SessionSnapshot) => Promise<{
-      readonly kind: 'thinking-failed'; readonly pageKey: string; readonly bindingEpoch: number;
+      readonly kind: 'thinking-failed' | 'message-timeout'; readonly pageKey: string; readonly bindingEpoch: number;
       readonly conversationId: string; readonly submittedUserMessageId: string | null;
       readonly submittedUserTurnId: string | null; readonly observedAt: string; readonly providerAlerts: readonly string[];
     }>,
@@ -1133,7 +1133,7 @@ export class SubmissionService {
         const evidence = await observe(snapshot);
         if (evidence.conversationId !== snapshot.conversationId || evidence.pageKey !== snapshot.pageKey ||
             evidence.submittedUserMessageId !== snapshot.submittedUserMessageId ||
-            evidence.submittedUserTurnId !== snapshot.submittedUserTurnId || evidence.kind !== 'thinking-failed') {
+            evidence.submittedUserTurnId !== snapshot.submittedUserTurnId || !['thinking-failed', 'message-timeout'].includes(evidence.kind)) {
           throw new SessionPlaneDomainError('provider.failure-unverified', 'Failure evidence does not match the submitted binding');
         }
         const result = receipts.execute({ clientId: input.clientId, requestId: input.decisionId, method, payload,
@@ -1141,7 +1141,7 @@ export class SubmissionService {
             const timestamp = this.#now().toISOString();
             if (!this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
               sessionState: 'failed', providerState: 'error', observationTransport: 'fresh', nextCheckAt: null,
-              completedAt: timestamp, errorCode: 'provider.execution-failed', reason: 'thinking-failed-reconciled',
+              completedAt: timestamp, errorCode: 'provider.execution-failed', reason: `${evidence.kind}-reconciled`,
             }, timestamp)) throw new SessionPlaneDomainError('session.generation-superseded', 'Failed generation is no longer current');
             this.#events.append({ teamId: snapshot.teamId, roleId: snapshot.roleId, sessionId: snapshot.sessionId,
               generation: snapshot.generation, eventType: 'generation.failure-reconciled',
@@ -1573,7 +1573,7 @@ export class SubmissionService {
       if (authorizedOriginal === undefined && !['created', 'ready', 'complete'].includes(session.sessionState) &&
           !(session.sessionState === 'cancelled' && this.#requireSnapshot(sessionId).reason === 'manual-followup-reconciled') &&
           !(session.sessionState === 'failed' &&
-            this.#requireSnapshot(sessionId).reason === 'thinking-failed-reconciled' &&
+            ['thinking-failed-reconciled', 'message-timeout-reconciled'].includes(this.#requireSnapshot(sessionId).reason ?? '') &&
             this.#requireSnapshot(sessionId).errorCode === 'provider.execution-failed')) {
         throw new SessionPlaneDomainError(
           'session.busy',
