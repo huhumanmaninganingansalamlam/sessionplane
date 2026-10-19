@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setImmediate as flush } from 'node:timers/promises';
 import test from 'node:test';
+import { Readable, Writable } from 'node:stream';
+import { runCli } from '../../src/cli/main.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
@@ -28,7 +30,7 @@ async function fixture() {
     }
     assert.fail('Wait did not subscribe');
   };
-  return { core, fake, invoke, team, sent, untilSubscribed,
+  return { core, config, fake, invoke, team, sent, untilSubscribed,
     close: async () => { await core.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
@@ -50,6 +52,12 @@ test('short workflow wait holds progress/429 for a full minute and cancellation 
     await flush();
     await flush();
     assert.equal(returned, false, 'Hither provider-network-activity must stay inside the external wait');
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
+      { errorCode: 'provider.observation-unavailable', reason: 'dom-observation-timeout',
+        providerState: 'unknown', observationTransport: 'unavailable' });
+    await flush();
+    await flush();
+    assert.equal(returned, false, 'A DOM observation timeout must not expire the caller wait');
     t.mock.timers.tick(59_999);
     await flush();
     assert.equal(returned, false, 'A sub-minute request must not expire early');
@@ -99,6 +107,59 @@ test('one completed result wakes a multi-request long wait immediately; actual e
     const blocked = (await errorWait).structuredContent.results as any[];
     assert.equal(blocked[0].providerState, 'blocked');
     assert.equal(blocked[0].waitExpired, false);
+    await f.core.actorScheduler.updateGeneration(other.sessionId as string, 1,
+      { providerState: 'unknown', reason: null, errorCode: null });
+    const failureWait = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [other.requestRef], waitMs: 600_000 });
+    await f.untilSubscribed(other.sessionId as string);
+    await f.core.actorScheduler.updateGeneration(other.sessionId as string, 1,
+      { providerState: 'error', errorCode: 'provider.execution-failed', reason: 'verified-failure' });
+    const [failed] = (await failureWait).structuredContent.results as any[];
+    assert.equal(failed.errorCode, 'provider.execution-failed');
+    assert.equal(failed.waitExpired, false);
     assert.equal(f.fake.submitCount, 2);
   } finally { await f.close(); }
+});
+
+
+test('ten-minute wait survives the TabletAuto observation timeout then returns the exact completion immediately', async t => {
+  const f = await fixture();
+  try {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    let returned = false;
+    let stdout = '', stderr = '';
+    const waiting = runCli(['request', 'wait', f.team.teamId as string, f.sent.requestRef as string,
+      '--wait-ms', '600000', '--socket', f.config.socketPath, '--json'], {
+      stdin: Readable.from([]),
+      stdout: new Writable({ write(chunk, _encoding, done) { stdout += chunk; done(); } }),
+      stderr: new Writable({ write(chunk, _encoding, done) { stderr += chunk; done(); } }),
+    }).then(code => { returned = true; assert.equal(code, 0, stderr); return JSON.parse(stdout); });
+    await f.untilSubscribed(f.sent.sessionId as string);
+    t.mock.timers.tick(116_547);
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, {
+      providerState: 'unknown', observationTransport: 'unavailable',
+      errorCode: 'provider.observation-unavailable', reason: 'dom-observation-timeout',
+    });
+    await flush();
+    await flush();
+    assert.equal(returned, false);
+    await f.untilSubscribed(f.sent.sessionId as string);
+    t.mock.timers.tick(4_000);
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, {
+      providerState: 'generating', observationTransport: 'dom', errorCode: null, reason: 'provider-network-activity',
+    });
+    await flush();
+    await flush();
+    assert.equal(returned, false);
+    await f.untilSubscribed(f.sent.sessionId as string);
+    t.mock.timers.tick(400_000);
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, {
+      sessionState: 'complete', providerState: 'complete', responseMessageId: 'recovered-final', answerText: 'Original completed answer',
+    });
+    const [result] = (await waiting).results as any[];
+    assert.equal(result.responseMessageId, 'recovered-final');
+    assert.equal(result.answerText, 'Original completed answer');
+    assert.equal(result.waitExpired, false);
+    assert.equal(result.submittedUserMessageId, f.sent.submittedUserMessageId);
+    assert.equal(f.fake.submitCount, 1);
+  } finally { t.mock.timers.reset(); await f.close(); }
 });
