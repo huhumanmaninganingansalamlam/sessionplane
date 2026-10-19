@@ -1,7 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
+import type { Duplex } from 'node:stream';
 
 import type { JsonRpcResponse } from '../rpc/schemas.ts';
+import type { RemoteConnection } from '../config.ts';
+import { connectRemote } from './remote.ts';
+import { remoteArtifacts } from './remote-artifacts.ts';
 
 export class RpcClientError extends Error {
   readonly code: number;
@@ -16,6 +20,7 @@ export class RpcClientError extends Error {
 }
 
 export interface RpcCallOptions {
+  readonly remote?: RemoteConnection | undefined;
   readonly socketPath: string;
   readonly method: string;
   readonly params?: unknown;
@@ -25,12 +30,25 @@ export interface RpcCallOptions {
 }
 
 export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> {
+  if (options.remote) {
+    const connection = { socket: connectRemote(options.remote), ready: false, error: undefined as Error | undefined };
+    // Keep one encrypted stream for collection and all file chunks, then release it.
+    connection.socket.on('error', error => { connection.error = error; });
+    try {
+      return await remoteArtifacts(options, (method, params) =>
+        callTransport({ ...options, method, params }, connection)) as Result;
+    } finally { connection.socket.destroy(); }
+  }
+  return await callTransport<Result>(options);
+}
+
+async function callTransport<Result>(options: RpcCallOptions, connection?: { socket: Duplex; ready: boolean; error: Error | undefined }): Promise<Result> {
   const id = randomUUID();
   const timeoutMs = options.timeoutMs ?? 10_000;
   const maxLineBytes = options.maxLineBytes ?? 2 * 1024 * 1024;
 
   return await new Promise<Result>((resolve, reject) => {
-    const socket = net.createConnection(options.socketPath);
+    const socket = connection?.socket ?? net.createConnection(options.socketPath);
     socket.setEncoding('utf8');
     let buffer = '';
     let settled = false;
@@ -47,7 +65,10 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
       settled = true;
       clearTimeout(timer);
       options.signal?.removeEventListener('abort', onAbort);
-      socket.destroy();
+      socket.removeListener('data', onData);
+      socket.removeListener('error', onError);
+      socket.removeListener('end', onEnd);
+      if (!connection) socket.destroy();
       operation();
     };
 
@@ -61,12 +82,8 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
     }, timeoutMs);
     timer.unref?.();
     options.signal?.addEventListener('abort', onAbort, { once: true });
-    if (options.signal?.aborted === true) {
-      onAbort();
-      return;
-    }
 
-    socket.once('connect', () => {
+    const dispatch = () => {
       requestDispatched = true;
       socket.write(`${JSON.stringify({
         jsonrpc: '2.0',
@@ -74,9 +91,10 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
         method: options.method,
         params: options.params ?? {},
       })}\n`);
-    });
+    };
+    let ready = !connection || connection.ready;
 
-    socket.on('data', (chunk: string) => {
+    const onData = (chunk: string) => {
       buffer += chunk;
       if (Buffer.byteLength(buffer, 'utf8') > maxLineBytes) {
         finish(() => reject(new Error('RPC response line exceeded configured limit')));
@@ -88,6 +106,19 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
       }
 
       const line = buffer.slice(0, newline).replace(/\r$/, '');
+      buffer = buffer.slice(newline + 1);
+      if (!ready) {
+        try {
+          if (JSON.parse(line).sessionplaneRemote !== 1) throw new Error('Unsupported remote relay');
+        } catch {
+          finish(() => reject(transportError('core.unavailable', 'Remote did not provide a compatible SessionPlane relay')));
+          return;
+        }
+        ready = true;
+        if (connection) connection.ready = true;
+        dispatch();
+        return;
+      }
       let response: JsonRpcResponse;
       try {
         response = JSON.parse(line) as JsonRpcResponse;
@@ -105,12 +136,20 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
         return;
       }
       finish(() => resolve(response.result as Result));
-    });
+    };
 
-    socket.once('error', (error: NodeJS.ErrnoException) => finish(() => reject(transportError(
+    const onError = (error: NodeJS.ErrnoException) => finish(() => reject(transportError(
       requestDispatched ? 'core.connection-lost' : 'core.unavailable', error.message, error.code,
-    ))));
-    socket.once('end', () => finish(() => reject(transportError('core.connection-lost',
-      'Core connection closed before responding; recover the same request identity before another mutation.'))));
+    )));
+    const onEnd = () => finish(() => reject(transportError(requestDispatched ? 'core.connection-lost' : 'core.unavailable',
+      'Core connection closed before responding; recover the same request identity before another mutation.')));
+    socket.on('data', onData);
+    socket.once('error', onError);
+    socket.once('end', onEnd);
+    if (options.signal?.aborted) onAbort();
+    else if (connection?.error) onError(connection.error);
+    else if (connection?.socket.destroyed) onEnd();
+    else if (connection?.ready) dispatch();
+    else if (!connection) socket.once('connect', dispatch);
   });
 }

@@ -18,6 +18,12 @@ export interface DoctorReport {
 }
 
 export async function runDoctor(config: SessionPlaneConfig): Promise<DoctorReport> {
+  if (config.remote) {
+    const health = await callRpc<Record<string, unknown>>({ remote: config.remote, socketPath: config.socketPath,
+      method: 'system.health', timeoutMs: config.rpcRequestTimeoutMs });
+    return { requestOk: health.requestOk !== false, service: 'sessionplane', version: typeof health.version === 'string' ? health.version : 'unknown',
+      checks: [{ name: 'remote-core', ok: health.requestOk !== false, health }], pageBindings: [] };
+  }
   const checks: Array<Readonly<Record<string, unknown>>> = [];
 
   const [major = 0, minor = 0] = process.versions.node.split('.').map(Number);

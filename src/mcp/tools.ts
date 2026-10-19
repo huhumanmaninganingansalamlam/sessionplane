@@ -1,3 +1,4 @@
+import type { RemoteConnection } from '../config.ts';
 import { z } from 'zod';
 import { workflowSchemas } from '../rpc/methods/workflow.ts';
 import { callRpc, RpcClientError } from '../cli/client.ts';
@@ -69,6 +70,7 @@ export async function invokeMcpTool(options: {
   readonly name: string;
   readonly arguments: unknown;
   readonly socketPath: string;
+  readonly remote?: RemoteConnection | undefined;
   readonly timeoutMs: number;
   readonly maxLineBytes: number;
   readonly signal?: AbortSignal;
@@ -81,6 +83,7 @@ export async function invokeMcpTool(options: {
   try {
     const result = await callRpc<unknown>({
       socketPath: options.socketPath,
+      remote: options.remote,
       method: definition.rpcMethod,
       params: options.arguments,
       timeoutMs: options.timeoutMs,

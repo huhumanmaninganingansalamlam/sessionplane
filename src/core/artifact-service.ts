@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  openSync, readSync, closeSync, fstatSync,
   chmodSync,
   copyFileSync,
   existsSync,
@@ -229,6 +230,20 @@ export class ArtifactService {
     const artifact = this.#requireArtifact(artifactId);
     this.#directory.getSession(artifact.sessionId);
     return { requestOk: true, artifact };
+  }
+
+  read(input: { artifactId: string; offset: number; length: number }) {
+    const artifact = this.#requireArtifact(input.artifactId);
+    this.#directory.getSession(artifact.sessionId);
+    if (artifact.artifactState !== 'downloaded' || artifact.relativePath === null || artifact.sizeBytes === null || artifact.sha256 === null)
+      throw new SessionPlaneDomainError('provider.artifact-not-downloaded', 'Artifact bytes are not available');
+    const fd = openSync(this.#resolveStoredPath(artifact.relativePath), 'r');
+    try {
+      if (fstatSync(fd).size !== artifact.sizeBytes) throw new SessionPlaneDomainError('provider.artifact-missing', 'Stored artifact size changed');
+      const buffer = Buffer.alloc(Math.min(input.length, Math.max(0, artifact.sizeBytes - input.offset)));
+      const count = readSync(fd, buffer, 0, buffer.length, input.offset);
+      return { artifact, offset: input.offset, data: buffer.subarray(0, count).toString('base64') };
+    } finally { closeSync(fd); }
   }
 
   export(input: {

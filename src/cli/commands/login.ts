@@ -13,6 +13,7 @@ export async function runLogin(
   const mode = options.mode ?? 'automated';
   return await callRpc({
     socketPath: config.socketPath,
+    remote: config.remote,
     method: 'browser.login',
     params: {
       mode,

@@ -1,3 +1,4 @@
+import { runRpcRelay } from './remote.ts';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -50,6 +51,7 @@ const FLAG_OPTIONS = new Set([
 ]);
 const MULTI_VALUE_OPTIONS = new Set(['file', 'skill']);
 const VALUE_OPTIONS = new Set([
+  'remote', 'remote-executable', 'remote-socket', 'remote-control-path',
   'state-dir',
   'browser',
   'browser-executable',
@@ -203,7 +205,16 @@ export async function runCli(
     stateDir = canonical;
   }
 
+  const remoteHost = parsed.options.remote ?? process.env.SESSIONPLANE_REMOTE_HOST;
+  const remoteSocket = parsed.options['remote-socket'] ?? process.env.SESSIONPLANE_REMOTE_SOCKET;
+  const controlPath = parsed.options['remote-control-path'] ?? process.env.SESSIONPLANE_REMOTE_CONTROL_PATH;
   const config = resolveConfig({
+    ...(remoteHost ? { remote: {
+      host: remoteHost,
+      executable: parsed.options['remote-executable'] ?? process.env.SESSIONPLANE_REMOTE_EXECUTABLE ?? 'sessplane',
+      ...(controlPath ? { controlPath } : {}),
+      ...(remoteSocket ? { socketPath: remoteSocket } : {}),
+    } } : {}),
     ...(stateDir === undefined ? {} : { stateDir }),
     ...(parsed.options.socket === undefined ? {} : { socketPath: parsed.options.socket }),
     ...(parsed.options.browser === undefined
@@ -225,7 +236,10 @@ export async function runCli(
       );
     }
     switch (command) {
+      case 'rpc-stdio':
+        return await runRpcRelay(config.socketPath, io);
       case 'serve':
+        if (config.remote) throw new Error('Start serve on the remote computer without SESSIONPLANE_REMOTE_HOST');
         await serveForever(config);
         return 0;
       case 'health':
@@ -236,6 +250,7 @@ export async function runCli(
         return report.requestOk ? 0 : 1;
       }
       case 'browser-list': {
+        if (config.remote) throw new Error('Run browser-list on the remote computer; use doctor here to inspect the remote core');
         const available = listHostBrowsers();
         const selected = findHostBrowser({
           preference: config.browserPreference,
@@ -377,6 +392,7 @@ async function assertCoreBrowserSelection(config: SessionPlaneConfig): Promise<v
     };
   }>({
     socketPath: config.socketPath,
+    remote: config.remote,
     method: 'system.health',
     params: {},
     timeoutMs: config.rpcRequestTimeoutMs,
@@ -1061,6 +1077,7 @@ async function printRpc(
   }
   const result = await callRpc<unknown>({
     socketPath: config.socketPath,
+    remote: config.remote,
     method,
     params,
     timeoutMs: Math.max(config.rpcRequestTimeoutMs, minimumTimeoutMs),
@@ -1277,6 +1294,14 @@ Usage:
   sessplane doctor [--json]
   sessplane browser-list [--browser NAME] [--browser-executable PATH]
   sessplane login [--manual|--resume] [--json] [--url HTTPS_URL]
+
+Remote execution:
+  Add --remote SSH_HOST or set SESSIONPLANE_REMOTE_HOST for CLI and MCP.
+  --remote-executable PATH selects the installed remote sessplane executable.
+  --remote-socket PATH selects its existing core socket.
+  --remote-control-path PATH reuses an authenticated OpenSSH master connection.
+  SSH uses existing authentication and verified host keys; no local fallback.
+  Start serve/login on the remote computer. --out exports verified files here.
 
 Provider browser runtime:
   SessionPlane owns browser state only for supported AI provider sessions.

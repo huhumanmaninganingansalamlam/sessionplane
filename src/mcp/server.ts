@@ -210,6 +210,7 @@ class SessionPlaneMcpServer {
         name,
         arguments: toolArguments,
         socketPath: this.#config.socketPath,
+        remote: this.#config.remote,
         timeoutMs: resolveMcpToolTimeoutMs({
           rpcRequestTimeoutMs: this.#config.rpcRequestTimeoutMs,
           submissionAckTimeoutMs: this.#config.submissionAckTimeoutMs,

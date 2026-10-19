@@ -1,6 +1,6 @@
 # SessionPlane
 
-SessionPlane is a local runtime that controls a user-installed Chromium-family
+SessionPlane is a local or SSH-accessed remote runtime that controls a user-installed Chromium-family
 browser through Playwright, owns one dedicated persistent profile, and safely
 coordinates durable, role-addressed AI chat sessions for multiple clients.
 
@@ -8,6 +8,57 @@ The core process owns browser state, SQLite state, session actors, observation,
 and recovery. The `sessplane` CLI and MCP adapter are thin Unix-socket clients.
 SessionPlane is maintained as an independent project with one canonical CLI
 and one runtime contract.
+
+## Remote execution over SSH
+
+Local mode remains the default. For remote mode, install the same SessionPlane
+version, Node.js and a supported browser on the external computer. Start its
+normal `sessplane serve` service and complete `sessplane login` on that computer's
+display. Its dedicated profile, SQLite state, browser and generations stay there.
+The agent computer needs Node.js, SessionPlane and an existing working SSH login;
+it does not need to run a core or browser for remote requests.
+
+After verifying the SSH host key and access normally, configure the host client:
+
+```sh
+export SESSIONPLANE_REMOTE_HOST=workshop@remote-host
+# Set this if sessplane is not on the remote noninteractive SSH PATH:
+export SESSIONPLANE_REMOTE_EXECUTABLE=/absolute/path/to/sessplane
+sessplane health --json
+sessplane mcp
+```
+
+CLI commands also accept `--remote HOST`, `--remote-executable PATH` and
+`--remote-socket PATH`. MCP uses the same environment settings. An SSH config
+alias can supply the port, identity file and other existing SSH settings. Batch
+mode and strict host-key checking remain enabled. For password authentication,
+open a normal interactive OpenSSH master first, entering the password only in its
+terminal, and reuse it with `SESSIONPLANE_REMOTE_CONTROL_PATH` (or
+`--remote-control-path`). For example, create a private directory with `mktemp -d`,
+run `ssh -M -S "$PRIVATE_DIR/control" USER@HOST`, then set
+`SESSIONPLANE_REMOTE_CONTROL_PATH="$PRIVATE_DIR/control"` in the agent environment.
+Keep that connection open; terminate only your own master with OpenSSH `-O exit`
+after remote work. No password is stored by SessionPlane. The relay is `sessplane
+rpc-stdio`; it connects only to the remote core's existing Unix socket. It never
+starts another core, opens an unauthenticated network API, or falls back locally.
+Run `serve` on the external computer without remote-client settings.
+
+Use the same team, role and request handles for send, preparation, collection,
+recovery and cleanup. A lost connection does not cancel a remote generation.
+Inspect the same request after reconnecting; a dispatched mutation is never
+replayed automatically. Pre-connection failures report `requestDispatched:false`.
+Keep the selected endpoint consistent: handles belong to that core's database.
+Human login and explicit focus happen on the external computer's display.
+
+`request wait --out DIR` (MCP `wait.outputDir`) transfers captured artifacts to
+**the agent computer**, verifying size and SHA256 before publishing each local
+file. `artifact export` also writes locally. Transfer errors appear separately
+from the recovered answer in `files.exportError`; retry collection/export of the
+same stored artifact without sending again. Existing different files are never
+overwritten implicitly. Host attachment uploads are currently unsupported in
+remote mode and fail before dispatch; they are never interpreted as remote paths.
+Chat deletion and owned-tab closure still run independently on the remote core;
+inspect both results, and confirm retired tab closure even if deletion fails.
 
 ## Agent workflow
 
