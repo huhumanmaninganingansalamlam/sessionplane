@@ -470,6 +470,16 @@ def require_admission_fence(h, required):
 
 
 def prepare_maintenance(h, quiet_timeout=30):
+    if h.get('maintenance', {}).get('coordinatedDrain'):
+        lease = maintenance_rpc(h, 'system.maintenance.quiesce', lease_owner(h))
+        try:
+            while lease['phase'] != 'ready':
+                time.sleep(1)
+                lease = maintenance_rpc(h, 'system.maintenance.quiesce', {**lease_owner(h), 'token': lease['token']})
+            return lease
+        except BaseException:
+            maintenance_rpc(h, 'system.maintenance.resume', {**lease_owner(h), 'token': lease['token']})
+            raise
     # Long read/wait calls are not interrupted by maintenance. Let their current
     # round finish before starting the short fenced drain; admission stays open.
     deadline = time.monotonic() + quiet_timeout

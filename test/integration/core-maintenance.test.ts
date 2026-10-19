@@ -34,7 +34,7 @@ function page(url: string) {
   return { fake, callbacks };
 }
 
-test('maintenance drains a late observer before ready although the actor queue is empty', async () => {
+test('coordinated maintenance lets admitted work finish and defers a new call without dispatch or cancellation', async () => {
   const fake = new FakeProviderAdapter();
   const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
   const open = fake.openObservation.bind(fake);
@@ -49,14 +49,18 @@ test('maintenance drains a late observer before ready although the actor queue i
       prompt: 'preserved original', sessionDeadlineSec: 600 });
     await entered.promise;
     assert.equal(f.core.actorScheduler.totalQueueDepth, 0);
-    const preparing = f.prepare();
-    await delay(30);
+    let lease = await f.rpc<{ phase: string; token: string }>('system.maintenance.quiesce', f.owner);
     assert.equal(f.core.maintenance.status().phase, 'draining');
     const newCall = { clientId: 'maintenance-test', requestId: 'must-not-be-issued', name: 'blocked' };
-    await assert.rejects(f.rpc('team.create', newCall), /handover is draining/);
+    const deferred = callRpc<{ teamId: string }>({ socketPath: f.core.config.socketPath,
+      method: 'team.create', params: newCall, timeoutMs: 50 });
+    await delay(150);
     assert.equal(f.core.database.raw.prepare("SELECT count(*) AS n FROM request_receipts WHERE request_id='must-not-be-issued'").get()!.n, 0);
     finish.resolve();
-    const lease = await preparing;
+    while (lease.phase !== 'ready') {
+      await delay(10);
+      lease = await f.rpc('system.maintenance.quiesce', { ...f.owner, token: lease.token });
+    }
     assert.equal(lease.phase, 'ready');
     assert.equal(f.core.maintenance.status().activeOperations, 0);
     assert.equal(fake.submitCount, 1);
@@ -65,6 +69,8 @@ test('maintenance drains a late observer before ready although the actor queue i
     assert.equal(f.core.maintenance.status().phase, 'ready');
     assert.deepEqual(f.core.database.raw.prepare('SELECT request_hash,prompt_submitted FROM outbox').all(), saved);
     await f.rpc('system.maintenance.resume', { ...f.owner, token: lease.token });
+    assert.ok((await deferred).teamId);
+    assert.equal(f.core.database.raw.prepare("SELECT count(*) AS n FROM request_receipts WHERE request_id='must-not-be-issued'").get()!.n, 1);
     assert.equal(f.core.maintenance.status().phase, 'running');
   } finally { finish.resolve(); await f.dispose(); }
 });

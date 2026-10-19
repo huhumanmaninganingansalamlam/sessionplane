@@ -25,6 +25,19 @@ spec.loader.exec_module(handover)
 
 
 class HandoverTests(unittest.TestCase):
+    def test_coordinated_drain_renews_short_lease_until_existing_calls_return(self):
+        current = {'process': {'pid': 11, 'startedAt': 'original'},
+                   'maintenance': {'phase': 'running', 'coordinatedDrain': True}}
+        with patch.object(handover.time, 'sleep'), patch.object(handover, 'health', side_effect=AssertionError('No idle-sample race')), \
+                patch.object(handover, 'maintenance_rpc', side_effect=[
+                    {'phase': 'draining', 'token': 'owned'}, {'phase': 'ready', 'token': 'owned'}]) as rpc:
+            self.assertEqual(handover.prepare_maintenance(current)['phase'], 'ready')
+            self.assertEqual(rpc.call_args.args[2]['token'], 'owned')
+        with patch.object(handover.time, 'sleep', side_effect=KeyboardInterrupt), \
+                patch.object(handover, 'maintenance_rpc', return_value={'phase': 'draining', 'token': 'owned'}) as rpc:
+            with self.assertRaises(KeyboardInterrupt): handover.prepare_maintenance(current)
+            self.assertEqual(rpc.call_args.args[1], 'system.maintenance.resume')
+
     def test_long_read_finishes_before_fenced_drain_and_busy_or_changed_core_is_preserved(self):
         idle = {'requestOk': True, 'process': {'pid': 11, 'startedAt': 'original'},
                 'maintenance': {'phase': 'running', 'activeOperations': 0},

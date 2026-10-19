@@ -10,7 +10,7 @@ export class CoreMaintenance {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #active = 0;
   get paused(): boolean { return this.#phase !== 'running'; }
-  status() { return { phase: this.#phase, activeOperations: this.#active, expiresAt: this.#expiresAt }; }
+  status() { return { phase: this.#phase, activeOperations: this.#active, expiresAt: this.#expiresAt, coordinatedDrain: true }; }
 
   enter(): (() => void) | null {
     if (this.paused) return null;
@@ -20,7 +20,7 @@ export class CoreMaintenance {
   }
   async rpc<T>(operation: () => T | Promise<T>): Promise<T> {
     const release = this.enter();
-    if (!release) throw this.#error('Core handover is draining; preserve and resume the same request');
+    if (!release) throw new SessionPlaneDomainError('core.maintenance', 'Core handover is draining; preserve and resume the same request', { operationStarted: false });
     try { return await operation(); } finally { release(); }
   }
   track<T>(operation: Promise<T>): Promise<T> {
@@ -36,6 +36,20 @@ export class CoreMaintenance {
     while (this.paused && !signal.aborted) {
       await delay(20, undefined, { signal }).catch(() => undefined);
     }
+  }
+  /** A live updater renews the existing short lease while old calls finish naturally. */
+  quiesce(token: string | undefined, idle: () => boolean) {
+    if (token === undefined) {
+      if (this.paused) throw this.#error('An existing handover lease must expire or be released first');
+      this.#token = randomUUID();
+      this.#phase = 'draining';
+    } else if (token !== this.#token || !this.paused) throw this.#error('Stale maintenance lease');
+    clearTimeout(this.#timer);
+    this.#expiresAt = Date.now() + 30_000;
+    this.#timer = setTimeout(() => this.resume(), 30_000);
+    this.#timer.unref();
+    this.#phase = this.#active === 0 && idle() ? 'ready' : 'draining';
+    return { ...this.status(), token: this.#token! };
   }
   async prepare(drainTimeoutMs: number, leaseMs: number, idle: () => boolean) {
     if (!Number.isInteger(drainTimeoutMs) || drainTimeoutMs < 1 || drainTimeoutMs > 10_000 ||
