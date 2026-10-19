@@ -22,6 +22,10 @@ import { readChatGptMessages } from '../providers/chatgpt/message-dom.ts';
 import { observeChatGptDom, observeChatGptAlerts } from '../providers/chatgpt/dom-observer.ts';
 import type { SubmissionService } from './submission-service.ts';
 
+function isMessageTimeoutAlert(alert: string): boolean {
+  return /^(?:메시지 전송 시간이 초과되었습니다\. 다시 시도하세요\.|Message (?:sending )?timed out\. Please try again\.)(?:\s*(?:다시 시도|Retry|Try again))?$/i.test(alert.trim());
+}
+
 export class SessionUiService {
   readonly #submissions: SubmissionService;
   readonly #registry: PageRegistry;
@@ -183,12 +187,18 @@ export class SessionUiService {
               ...(session.submissionState !== 'submitted' ? {} : {
                 submissionVerification: await (async () => {
                   const dom = await observeChatGptDom(this.#requirePage(session), session);
+                  const activity = await observeChatGptActivity(this.#requirePage(session), dom);
                   return {
                     observedAt: dom.messageDiagnostics.observedAt, pageKey: session.pageKey,
                     conversationId: session.conversationId,
                     submittedUserMessageId: session.submittedUserMessageId,
                     submittedUserTurnId: session.submittedUserTurnId,
                     anchorPresent: dom.submittedUserFound,
+                    laterUserFound: dom.laterUserFound,
+                    activity: activity.strength, activityReason: activity.reason,
+                    messageTimeout: dom.providerAlerts.some(isMessageTimeoutAlert),
+                    // Passive evidence is not a completed answer or permission to submit.
+                    responseCandidate: dom.candidate,
                     messageDiagnostics: dom.messageDiagnostics,
                     scope: 'mounted-dom' as const,
                   };
@@ -323,8 +333,7 @@ export class SessionUiService {
           const thinkingAlerts = await observeChatGptAlerts(page, anchor, true);
           // Only an explicit owner reconciliation can close this exact idle stream
           // error. Automatic Thinking-failure recovery never accepts message timeouts.
-          const timeoutAlerts = allowMessageTimeout ? dom.providerAlerts.filter(alert =>
-            /^(?:메시지 전송 시간이 초과되었습니다\. 다시 시도하세요\.|Message (?:sending )?timed out\. Please try again\.)(?:\s*(?:다시 시도|Retry|Try again))?$/i.test(alert.trim())) : [];
+          const timeoutAlerts = allowMessageTimeout ? dom.providerAlerts.filter(isMessageTimeoutAlert) : [];
           const alerts = [...thinkingAlerts, ...timeoutAlerts];
           if (continuationPrompt !== undefined && timeoutAlerts.length === 0) throw new SessionPlaneDomainError(
             'provider.failure-unverified', 'A preserved continuation draft requires the exact idle message-timeout surface');
