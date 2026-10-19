@@ -1,3 +1,6 @@
+import { requireIdleConversationPage } from './conversation-cleanup-service.ts';
+import { observeChatGptDom } from '../providers/chatgpt/dom-observer.ts';
+import type { PageMutationMutex } from '../browser/page-mutex.ts';
 import type { CoreMaintenance } from './maintenance.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Page } from 'playwright-core';
@@ -33,6 +36,7 @@ export interface RestartRecoveryReport {
 
 export interface RecoveryServiceOptions {
   readonly maintenance?: CoreMaintenance;
+  readonly pageMutex: PageMutationMutex;
   readonly database: SessionPlaneDatabase;
   readonly browserOwner: BrowserOwner | null;
   readonly pageRegistry: PageRegistry;
@@ -75,9 +79,11 @@ export class RecoveryService {
   #closed = false;
   #tail: Promise<RestartRecoveryReport> = Promise.resolve(emptyReport());
 
+  readonly #pageMutex: PageMutationMutex;
   readonly maintenance: CoreMaintenance | undefined;
   constructor(options: RecoveryServiceOptions) {
     this.maintenance = options.maintenance;
+    this.#pageMutex = options.pageMutex;
     this.#browserOwner = options.browserOwner;
     this.#pageRegistry = options.pageRegistry;
     this.#scheduler = options.scheduler;
@@ -124,7 +130,9 @@ export class RecoveryService {
           if (isObservationReady(snapshot)) this.#observations.start(snapshot);
           return;
         } catch (error) {
-          if (!(error instanceof PageRegistryError) || error.errorCode !== 'browser.unavailable') throw error;
+          if (!(error instanceof PageRegistryError) || (error.errorCode !== 'browser.unavailable' &&
+              !(options.openMissing === true && snapshot.submissionState === 'failed_pre_submit' &&
+                error.errorCode === 'session.page-identity-unverified'))) throw error;
         }
       }
       if (options.openMissing === true && snapshot.provider === 'chatgpt') {
@@ -391,6 +399,56 @@ export class RecoveryService {
     );
   }
 
+  /** Explicit failed-pre-submit recovery only; no account API, reload or submission. */
+  async #reconcileDuplicatePreparation(snapshot: SessionSnapshot, matches: ReturnType<PageRegistry['findByConversation']>) {
+    const previous = this.#sessions.getGenerationResult(snapshot.sessionId, snapshot.generation - 1);
+    if (snapshot.provider !== 'chatgpt' || snapshot.promptSubmitted || snapshot.errorCode !== 'session.page-identity-unverified' ||
+        !previous?.completedAt || previous.errorCode !== null || !previous.submittedUserMessageId ||
+        !previous.responseMessageId || !previous.answerText || snapshot.conversationId === null ||
+        this.#sessions.conversationCleanupBlocker(snapshot.sessionId, snapshot.conversationId, true) ||
+        matches.some(binding => binding.sessionId !== null && binding.sessionId !== snapshot.sessionId)) return null;
+    const locked = async (index: number): Promise<ReturnType<PageRegistry['getBinding']> | null> => {
+      if (index < matches.length) return await this.#pageMutex.runExclusive(matches[index]!.pageKey, () => locked(index + 1));
+      const closed = new Set<string>();
+      const validate = async () => {
+        const current = this.#sessions.getSnapshot(snapshot.sessionId);
+        if (current?.generation !== snapshot.generation || current.submissionState !== 'failed_pre_submit' || current.promptSubmitted ||
+            this.#sessions.conversationCleanupBlocker(snapshot.sessionId, snapshot.conversationId!, true)) return false;
+        for (const expected of matches) {
+          if (closed.has(expected.pageKey)) continue;
+          const binding = this.#pageRegistry.refreshPage(expected.pageKey);
+          if (binding.targetId !== expected.targetId || binding.bindingEpoch !== expected.bindingEpoch ||
+              binding.conversationId !== snapshot.conversationId || !isProviderUrl(snapshot.provider, binding.url) ||
+              (binding.sessionId !== null && binding.sessionId !== snapshot.sessionId)) return false;
+          const page = this.#pageRegistry.pageForObservation(binding.pageKey, binding.bindingEpoch);
+          await requireIdleConversationPage(page);
+          const dom = await observeChatGptDom(page, previous);
+          if (!dom.submittedUserFound || dom.laterUserFound || dom.actionableAlert ||
+              dom.candidate?.streamingMarker || dom.candidate?.responseMessageId !== previous.responseMessageId ||
+              dom.candidate.answerText.trim() !== previous.answerText!.trim()) return false;
+        }
+        return true;
+      };
+      if (!await validate()) return null;
+      // Both surfaces prove the same exact completed turn, with no draft or active
+      // generation. Keep one existing target; never create or delete a conversation.
+      const retained = matches[0]!;
+      for (const duplicate of matches.slice(1)) {
+        if (!await validate()) return null;
+        const page = this.#pageRegistry.pageForObservation(duplicate.pageKey, duplicate.bindingEpoch);
+        await page.close();
+        if (!page.isClosed()) throw new SessionPlaneDomainError('browser.unavailable', 'Duplicate owned page did not close');
+        closed.add(duplicate.pageKey);
+      }
+      const binding = this.#pageRegistry.reservePage(retained.pageKey, { sessionId: snapshot.sessionId,
+        generation: snapshot.generation, conversationId: snapshot.conversationId! });
+      return binding;
+    };
+    const binding = await locked(0);
+    return binding === null ? null : await this.#recordPageState(snapshot, { pageKey: binding.pageKey, observationTransport: 'fresh',
+      reason: 'duplicate-page-preparation-recovered', errorCode: null }, 'generation.duplicate-pages-reconciled');
+  }
+
   async #reconcilePage(snapshot: SessionSnapshot, openMissing = true, reopenFailedPreparation = false): Promise<{
     readonly snapshot: SessionSnapshot;
     readonly rebound: boolean;
@@ -439,18 +497,23 @@ export class RecoveryService {
     if (conversationId === null) {
       return await this.#reconcileRetainedTarget(snapshot);
     }
-    const matches = this.#pageRegistry
+    let matches = this.#pageRegistry
       .findByConversation(conversationId)
       .filter((page) => isProviderUrl(snapshot.provider, page.url));
     if (matches.length > 1) {
-      if (explicitFailedPreparation) return result(snapshot, { conflict: true });
-      const updated = await this.#recordPageState(snapshot, {
-        pageKey: null,
-        observationTransport: 'stale',
-        reason: 'duplicate-conversation-pages',
-        errorCode: 'session.page-identity-unverified',
-      }, 'generation.restart-page-conflict');
-      return result(updated, { conflict: true });
+      if (explicitFailedPreparation) {
+        const reconciled = await this.#reconcileDuplicatePreparation(snapshot, matches);
+        if (reconciled === null) return result(snapshot, { conflict: true });
+        snapshot = reconciled;
+        matches = [...this.#pageRegistry.findByConversation(conversationId)];
+      }
+      if (matches.length > 1) {
+        const updated = await this.#recordPageState(snapshot, {
+          pageKey: null, observationTransport: 'stale', reason: 'duplicate-conversation-pages',
+          errorCode: 'session.page-identity-unverified',
+        }, 'generation.restart-page-conflict');
+        return result(updated, { conflict: true });
+      }
     }
 
     if (matches.length === 1) {
@@ -467,7 +530,7 @@ export class RecoveryService {
         const updated = await this.#recordPageState(snapshot, {
           pageKey: match.pageKey,
           observationTransport: 'fresh',
-          reason: 'restart-page-rebound',
+          reason: snapshot.reason === 'duplicate-page-preparation-recovered' ? snapshot.reason : 'restart-page-rebound',
           errorCode: null,
         }, 'generation.restart-page-rebound');
         return result(updated, { rebound: true });
@@ -675,7 +738,8 @@ export class RecoveryService {
       snapshot.submissionState === 'submission_unknown' ||
       (!snapshot.promptSubmitted && snapshot.errorCode !== null);
     const effectiveUpdate =
-      snapshot.terminal || (preserveGenerationDiagnostic && update.errorCode === null)
+      (snapshot.terminal || (preserveGenerationDiagnostic && update.errorCode === null)) &&
+        eventType !== 'generation.duplicate-pages-reconciled'
         ? {
             ...update,
             reason: snapshot.reason,

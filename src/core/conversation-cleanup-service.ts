@@ -346,7 +346,7 @@ export class ConversationCleanupService {
             if (failedNavigation) throw new SessionPlaneDomainError('session.page-identity-unverified', 'Failed navigation target changed during cleanup; preserve it');
             return;
           }
-          await this.#requireIdlePage(page);
+          await requireIdleConversationPage(page);
           const final = registry.refreshPage(binding.pageKey);
           if (final.bindingEpoch !== current.bindingEpoch || final.state !== current.state || final.url !== current.url ||
               (failedNavigation && !await this.#options.isFailedConversationPage?.(binding.pageKey, session))) {
@@ -368,25 +368,6 @@ export class ConversationCleanupService {
     return result;
   }
 
-  async #requireIdlePage(page: import('playwright-core').Page) {
-    const unsafe = await page.locator('textarea, [contenteditable="true"]:not(article *, [data-message-author-role] *, [data-chatgpt-search-message-ids] *), input[type="file"], button, [data-testid*="file-pill"], [data-testid*="attachment"]').evaluateAll(elements =>
-      elements.some(element => {
-        if (element instanceof HTMLInputElement && element.type === 'file') return (element.files?.length ?? 0) > 0;
-        const testId = element.getAttribute('data-testid') ?? '';
-        if (/file-pill|attachment/.test(testId)) {
-          const form = element.closest('form');
-          return form?.querySelector('textarea, [contenteditable="true"]') != null &&
-            element.closest('article, [data-message-author-role], [data-chatgpt-search-message-ids], button, [role="button"]') === null &&
-            (element.textContent ?? '').trim().length > 0 &&
-            element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden';
-        }
-        if (element instanceof HTMLButtonElement) return element.getClientRects().length > 0 && (
-          /^(?:stop|stop generating|stop streaming|stop response|응답 중지|생성 중지|중지)$/i.test(element.getAttribute('aria-label') ?? '') ||
-          element.getAttribute('data-testid') === 'stop-button');
-        return ((element as HTMLTextAreaElement).value ?? (element as HTMLElement).innerText ?? '').trim().length > 0;
-      }));
-    if (unsafe) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve the page draft or active generation before cleanup');
-  }
 
   async #finishPageCleanup(result: DeletionResult): Promise<DeletionResult> {
     if ((!result.deleted || !result.requestOk) && result.pageCleanup === undefined) return result;
@@ -449,7 +430,7 @@ export class ConversationCleanupService {
               (binding.state === 'unbound' && binding.url === 'chrome-error://chromewebdata/' &&
                 await this.#options.isFailedConversationPage?.(binding.pageKey, session))) {
             await pageMutex.runExclusive(binding.pageKey, async () => {
-              await this.#requireIdlePage(registry.pageForObservation(binding.pageKey, binding.bindingEpoch));
+              await requireIdleConversationPage(registry.pageForObservation(binding.pageKey, binding.bindingEpoch));
             });
           }
         }
@@ -562,3 +543,24 @@ function cleanupErrorCode(error: unknown): string {
   return error !== null && typeof error === 'object' && 'errorCode' in error
     ? String(error.errorCode) : 'browser.unavailable';
 }
+
+export async function requireIdleConversationPage(page: import('playwright-core').Page) {
+    const unsafe = await page.locator('textarea, [contenteditable="true"]:not(article *, [data-message-author-role] *, [data-chatgpt-search-message-ids] *), input[type="file"], button, [data-testid*="file-pill"], [data-testid*="attachment"]').evaluateAll(elements =>
+      elements.some(element => {
+        if (element instanceof HTMLInputElement && element.type === 'file') return (element.files?.length ?? 0) > 0;
+        const testId = element.getAttribute('data-testid') ?? '';
+        if (/file-pill|attachment/.test(testId)) {
+          const form = element.closest('form');
+          return form?.querySelector('textarea, [contenteditable="true"]') != null &&
+            element.closest('article, [data-message-author-role], [data-chatgpt-search-message-ids], button, [role="button"]') === null &&
+            (element.textContent ?? '').trim().length > 0 &&
+            element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden';
+        }
+        if (element instanceof HTMLButtonElement) return element.getClientRects().length > 0 && (
+          /^(?:stop|stop generating|stop streaming|stop response|응답 중지|생성 중지|중지)$/i.test(element.getAttribute('aria-label') ?? '') ||
+          element.getAttribute('data-testid') === 'stop-button');
+        return ((element as HTMLTextAreaElement).value ?? (element as HTMLElement).innerText ?? '').trim().length > 0;
+      }));
+    if (unsafe) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve the page draft or active generation before cleanup');
+  }
+

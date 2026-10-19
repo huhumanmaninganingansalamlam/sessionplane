@@ -244,6 +244,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   });
   const recovery = new RecoveryService({
     maintenance,
+    pageMutex: pageMutationMutex,
     database,
     browserOwner,
     pageRegistry,

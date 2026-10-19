@@ -1228,15 +1228,18 @@ export class SubmissionService {
         await reload(snapshot);
         let sequence = 0;
         this.#database.transaction(() => {
-          if (rendererCrash !== undefined && outbox.submissionState === 'failed_pre_submit' &&
-              outbox.errorCode === 'browser.unavailable' && !outbox.promptSubmitted && !snapshot.promptSubmitted &&
+          const duplicateRecovered = snapshot.reason === 'duplicate-page-preparation-recovered' &&
+            outbox.errorCode === 'session.page-identity-unverified';
+          const recoveryReason = duplicateRecovered ? 'duplicate-page-preparation-recovered' : 'crashed-page-preparation-recovered';
+          if ((rendererCrash !== undefined || duplicateRecovered) && outbox.submissionState === 'failed_pre_submit' &&
+              (outbox.errorCode === 'browser.unavailable' || duplicateRecovered) && !outbox.promptSubmitted && !snapshot.promptSubmitted &&
               snapshot.submissionState === 'failed_pre_submit' && snapshot.sessionState === 'ready' && snapshot.terminal &&
               snapshot.submittedUserMessageId === null && snapshot.submittedUserTurnId === null &&
               snapshot.responseMessageId === null && snapshot.answerText === null) {
             const timestamp = this.#now().toISOString();
             if (!this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
               sessionState: 'submitting', providerState: 'pending', observationTransport: 'fresh',
-              submissionState: 'prepared', reason: 'crashed-page-preparation-recovered',
+              submissionState: 'prepared', reason: recoveryReason,
               errorCode: 'provider.preparation-required', nextCheckAt: null, promptSubmitted: false,
             }, timestamp) || !this.#outbox.transition(outbox.outboxId, ['failed_pre_submit'], 'prepared', {
               updatedAt: timestamp, errorCode: 'provider.preparation-required', promptSubmitted: false,
@@ -1245,7 +1248,7 @@ export class SubmissionService {
             sequence = this.#events.append({ teamId: outbox.teamId, roleId: outbox.roleId,
               sessionId: snapshot.sessionId, generation: snapshot.generation,
               eventType: 'generation.preparation-required', createdAt: timestamp,
-              payload: { reason: 'crashed-page-preparation-recovered', refreshRequestId: input.decisionId,
+              payload: { reason: recoveryReason, refreshRequestId: input.decisionId,
                 promptSubmitted: false, priorFailure: { reason: snapshot.reason, errorCode: outbox.errorCode,
                   recordedAt: outbox.updatedAt, resultHash: hashCanonical(JSON.parse(outbox.resultJson ?? 'null')) } } });
           }

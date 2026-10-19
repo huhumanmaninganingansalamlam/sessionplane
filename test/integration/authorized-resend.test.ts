@@ -94,7 +94,7 @@ test(`explicit refresh reopens a missing conversation with a stale ${staleState}
       }) as unknown as Page;
       return { page, binding: service.pageRegistry.identifyPage(page, `new-target-${creations}`) };
     } } as unknown as BrowserOwner;
-    recovery = new RecoveryService({ database: service.database, browserOwner: browser,
+    recovery = new RecoveryService({ database: service.database, pageMutex: service.pageMutationMutex, browserOwner: browser,
       pageRegistry: service.pageRegistry, scheduler: service.actorScheduler, observations: service.observationService,
       adapters: service.providerAdapters, submissions: service.submissionService,
       chatgptUrl: config.chatgptUrl, geminiUrl: config.geminiUrl, grokUrl: config.grokUrl });
@@ -398,7 +398,7 @@ test('failed approved preparation reattaches the persisted target after restart 
     service.pageRegistry.bindPage(adopted.pageKey, { sessionId: 'foreign-owner', generation: 1, conversationId });
     await assert.rejects(service.recoveryService.ensurePage(session.sessionId, 2, { openMissing: false }), /could not be recovered/);
     service.pageRegistry.unbindPage(adopted.pageKey);
-    const recovery = new RecoveryService({ database: service.database,
+    const recovery = new RecoveryService({ database: service.database, pageMutex: service.pageMutationMutex,
       browserOwner: { createPage: () => { throw new Error('Must not open a replacement page'); } } as unknown as BrowserOwner,
       pageRegistry: service.pageRegistry, scheduler: service.actorScheduler, observations: service.observationService,
       adapters: service.providerAdapters, submissions: service.submissionService,

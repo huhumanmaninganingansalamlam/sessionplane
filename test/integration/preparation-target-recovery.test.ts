@@ -275,3 +275,68 @@ test('restart retains an ambiguous submission on its exact home target without a
     assert.equal(fake.submitCount, 1);
   } finally { await service.close(); await closeFirst(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test('explicit duplicate recovery retains the exact unsubmitted request and closes only proven idle copies', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-duplicate-preparation-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  fake.autoFinalText = 'Original completed answer';
+  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const rpc = <T = any>(method: string, params: Record<string, unknown>) => callRpc<T>({ socketPath: config.socketPath, method, params });
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_' + name,
+    arguments: args, socketPath: config.socketPath, timeoutMs: 30_000, maxLineBytes: config.rpcMaxLineBytes });
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'duplicate-owner' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    await rpc('session.send', { clientId: 'duplicate-owner', requestId: 'original', sessionId: session.sessionId, prompt: 'Original completed work' });
+    await rpc('session.wait', { clientId: 'duplicate-owner', sessionId: session.sessionId, generation: 1, waitMs: 2000 });
+    const original = service.teamDirectory.getSession(session.sessionId);
+    const body = `<main><article data-message-author-role="user" data-message-id="${original.submittedUserMessageId}">Original completed work</article><article data-message-author-role="assistant" data-message-id="${original.responseMessageId}"><div class="markdown">Original completed answer</div></article><textarea id="prompt-textarea"></textarea></main>`;
+    const pages = [];
+    for (let i = 0; i < 2; i++) {
+      const target = await service.browserOwner!.createPage();
+      await target.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body }));
+      await target.page.goto(`https://chatgpt.com/c/${original.conversationId}`);
+      pages.push(target);
+      if (i === 0) {
+        service.pageRegistry.bindPage(target.binding.pageKey, { sessionId: session.sessionId, generation: 1, conversationId: original.conversationId! });
+        await service.actorScheduler.updateGeneration(session.sessionId, 1, { pageKey: target.binding.pageKey });
+      }
+    }
+    const { ProviderSubmissionError } = await import('../../src/providers/provider-adapter.ts');
+    t.mock.method(fake, 'openSubmission', async () => { throw new ProviderSubmissionError('session.page-identity-unverified', 'Duplicate conversation conflict'); });
+    await assert.rejects(rpc('session.send', { clientId: 'duplicate-owner', requestId: 'unsubmitted', sessionId: session.sessionId, prompt: 'Exact preserved follow-up draft' }));
+    const failed = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(failed.submissionState, 'failed_pre_submit');
+    const request = service.database.raw.prepare('SELECT outbox_id,payload_json,request_hash FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId)!;
+    const identity = { teamId: team.teamId, requestRef: request.outbox_id };
+    const refresh = (requestId: string) => invoke('decide', { ...identity, requestId, decision: 'refresh' });
+    const second = pages[1]!.page;
+    await second.locator('textarea').fill('Unsent human draft');
+    assert.equal((await refresh('draft')).isError, true);
+    assert.equal(await second.locator('textarea').inputValue(), 'Unsent human draft');
+    assert.ok(pages.every(target => !target.page.isClosed()));
+    await second.locator('textarea').fill('');
+    await second.locator('main').evaluate(main => main.insertAdjacentHTML('beforeend', '<button aria-label="Stop">Stop</button>'));
+    assert.equal((await refresh('active')).isError, true);
+    assert.ok(pages.every(target => !target.page.isClosed()));
+    await second.locator('button').evaluate(element => element.remove());
+    await second.locator('[data-message-author-role="assistant"]').evaluate(element => element.setAttribute('data-message-id', 'different-answer'));
+    assert.equal((await refresh('different-answer')).isError, true);
+    assert.ok(pages.every(target => !target.page.isClosed()));
+    await second.locator('[data-message-author-role="assistant"]').evaluate((element, id) => element.setAttribute('data-message-id', id!), original.responseMessageId);
+    const restored = await refresh('verified-idle-copies');
+    assert.equal(restored.isError, false, JSON.stringify(restored));
+    const after = service.teamDirectory.getSession(session.sessionId);
+    assert.equal(after.generation, 2);
+    assert.equal(after.submissionState, 'prepared');
+    assert.equal(after.promptSubmitted, false);
+    assert.equal(fake.submitCount, 1);
+    assert.equal(pages.filter(target => target.page.isClosed()).length, 1);
+    assert.equal(service.pageRegistry.findByConversation(original.conversationId!).length, 1);
+    const stored = service.database.raw.prepare('SELECT outbox_id,payload_json,request_hash FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId);
+    assert.deepEqual(stored, request);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).submittedUserMessageId, null);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
