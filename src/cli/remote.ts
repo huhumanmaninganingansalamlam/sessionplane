@@ -25,7 +25,7 @@ export function connectRemote(remote: RemoteConnection): Duplex {
   let diagnostic = '';
   child.stderr.on('data', (chunk: Buffer) => { diagnostic = (diagnostic + chunk.toString()).slice(-4096); });
   child.once('error', error => stream.destroy(error));
-  child.once('exit', (code, signal) => {
+  child.once('close', (code, signal) => {
     if (code !== 0) stream.destroy(new Error(`SSH remote connection failed (${code ?? signal}): ${diagnostic.trim()}`));
     else stream.push(null);
   });
