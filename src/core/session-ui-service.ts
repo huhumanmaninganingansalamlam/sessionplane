@@ -318,7 +318,7 @@ export class SessionUiService {
           const activity = await observeChatGptActivity(page, dom);
           if (allowMessageTimeout) {
             try { await requireIdleConversationPage(page); }
-            catch { throw new SessionPlaneDomainError('provider.failure-unverified', 'Preserve the current draft, attachment or active generation'); }
+            catch { throw new SessionPlaneDomainError('provider.failure-unverified', 'Preserve the current draft, attachment or active generation; failure is unverified'); }
           }
           const thinkingAlerts = await observeChatGptAlerts(page, anchor, true);
           // Only an explicit owner reconciliation can close this exact idle stream
