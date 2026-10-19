@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DEFAULT_WORKFLOW_WAIT_MS, MAX_WORKFLOW_WAIT_MS, workflowWaitMs } from '../../domain/workflow-wait.ts';
 import type { TeamWorkflow } from '../../core/team-workflow.ts';
 import type { RpcRouter } from '../router.ts';
 
@@ -32,7 +33,7 @@ export const workflowSchemas = {
     z.object({ ...request, requestId, decision: z.enum(['choose', 'reveal']), purpose: z.enum(['model', 'effort', 'composer', 'submit']), snapshotId: z.string().uuid(), ref: z.string().regex(/^@e\d+$/), value: z.number().optional() }).strict(),
     z.object({ ...request, requestId, decision: z.enum(['refresh', 'focus', 'latest', 'reconcile_failure']) }).strict(),
   ]),
-  wait: z.object({ teamId, requestRefs: z.array(requestRef).min(1), waitMs: z.number().int().min(0).max(120_000).default(30_000), outputDir: z.string().min(1).optional() }).strict(),
+  wait: z.object({ teamId, requestRefs: z.array(requestRef).min(1), waitMs: z.number().int().min(0).max(MAX_WORKFLOW_WAIT_MS).default(DEFAULT_WORKFLOW_WAIT_MS).transform(workflowWaitMs).describe('External wait duration; positive values round up to whole minutes, minimum one minute. Default ten minutes. Completion, real errors and decisions return immediately. Zero is an explicit snapshot read.'), outputDir: z.string().min(1).optional() }).strict(),
   stop: z.object({ ...request, requestId }).strict(),
 };
 
@@ -46,6 +47,6 @@ export function registerWorkflowMethods(router: RpcRouter, workflow: TeamWorkflo
   router.register('workflow.session_delete', workflowSchemas.session_delete, (input) => workflow.deleteSession(input));
   router.register('workflow.send', workflowSchemas.send, (input) => workflow.send(input));
   router.register('workflow.decide', workflowSchemas.decide, (input) => workflow.decide(input));
-  router.register('workflow.wait', workflowSchemas.wait, (input) => workflow.wait(input));
+  router.register('workflow.wait', workflowSchemas.wait, (input, context) => workflow.wait(input, context.signal));
   router.register('workflow.stop', workflowSchemas.stop, (input) => workflow.stop(input));
 }

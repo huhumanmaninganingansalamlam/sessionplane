@@ -1,3 +1,4 @@
+import { DEFAULT_WORKFLOW_WAIT_MS, MAX_WORKFLOW_WAIT_MS, workflowWaitMs } from '../domain/workflow-wait.ts';
 import { runRpcRelay } from './remote.ts';
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -707,7 +708,7 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   const mutation = { ...request, requestId };
   if (action === 'show') return await printRpc(io, parsed, config, 'workflow.team_get', request);
   if (action === 'wait') {
-    const waitMs = integerOption(parsed, 'wait-ms', 30_000, 0, 120_000);
+    const waitMs = workflowWaitMs(integerOption(parsed, 'wait-ms', DEFAULT_WORKFLOW_WAIT_MS, 0, MAX_WORKFLOW_WAIT_MS));
     return await printRpc(io, parsed, config, 'workflow.wait', { teamId, requestRefs: [ref], waitMs,
       ...optionalParam('outputDir', parsed.options.out) }, waitMs + 5_000);
   }

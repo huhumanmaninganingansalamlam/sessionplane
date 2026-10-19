@@ -10,7 +10,9 @@ import {
   type JsonRpcResponse,
 } from './schemas.ts';
 
-type RpcHandler<Params> = (params: Params) => unknown | Promise<unknown>;
+interface RpcContext { readonly signal?: AbortSignal | undefined }
+
+type RpcHandler<Params> = (params: Params, context: RpcContext) => unknown | Promise<unknown>;
 
 interface RegisteredMethod {
   readonly paramsSchema: ZodType<unknown>;
@@ -50,7 +52,7 @@ export class RpcRouter {
     });
   }
 
-  async dispatch(input: unknown): Promise<JsonRpcResponse | null> {
+  async dispatch(input: unknown, context: RpcContext = {}): Promise<JsonRpcResponse | null> {
     const requestResult = JsonRpcRequestSchema.safeParse(input);
     if (!requestResult.success) {
       return rpcError(null, -32600, 'Invalid Request', {
@@ -81,7 +83,7 @@ export class RpcRouter {
     }
 
     try {
-      const operation = () => method.handler(paramsResult.data);
+      const operation = () => method.handler(paramsResult.data, context);
       const exempt = ['system.health', 'system.maintenance.prepare', 'system.maintenance.resume', 'system.maintenance.commit'].includes(request.method);
       const result = await (this.maintenance && !exempt ? this.maintenance.rpc(operation) : operation());
       return request.id === undefined ? null : rpcSuccess(request.id, result);

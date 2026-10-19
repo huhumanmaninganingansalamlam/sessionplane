@@ -72,8 +72,28 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    Inspect each result and file failure. Old requests can capture files from their
    exact answer even after a newer send; unavailable provider content is a file error. A timeout does not stop provider work.
    When terminal:false, backend-http-429, probe pacing and waitExpired are
-   observation delays, not failed generation. Continue bounded `sessionplane_wait`
-   calls on the same requestRef with positive `waitMs`, including before `nextCheckAt`.
+   observation delays, not failed generation. Wait outside the model with the same requestRef: positive `waitMs` rounds up to
+   whole minutes, minimum one minute and default ten minutes. Intermediate progress
+   and pacing do not wake the model; completion, actual errors and decisions return
+   immediately. Ten minutes to two hours or longer can be normal generation.
+   Zero explicitly reads a snapshot; use team_get for an immediate status check.
+   MCP clients must set their existing `tool_timeout_sec` above the desired wait
+   duration (Codex defaults to60s). If a client cannot keep a long tool call open,
+   run the existing CLI request wait in its external command process and use that
+   client's existing command-completion notification/resume path with the same
+   thread/task/requestRefs. Automatic same-thread wake and exactly-once delivery require an actually verified owning-host connection; task resume only restores context. Do not claim those from API schemas alone. Do not turn process status polling into short model
+   turns or add another scheduler. Wait expiration never stops or resends work.
+   Continue on the same requestRef, including before `nextCheckAt`.
+   At roughly30-minute reviews, use exact team_get activity (last observed generation
+   state change and stored artifact change) together with the owning project's existing
+   HostSpan execution/output references. A state timestamp is not proof of continuing
+   output growth; no available execution evidence means unknown, not stalled. Concrete
+   send/connection failures can be reviewed at about ten minutes or earlier when returned.
+   Never infer a stall or blame Extra High from elapsed time. On a real completion,
+   error or context/output limit, retrieve the original result and execution IDs first;
+   the owning coordinator continues unfinished acceptance work with the same expert
+   and existing handoff. Never send a continuation into active generation. Replacement
+   requires an actual supported signal and the existing lifecycle procedure.
    `nextCheckAt` schedules the core's backend probes only, not result collection.
    Do not sleep until it: DOM observation continues and `wait` can return completion
    earlier. The core enforces probe cooldowns; do not bypass them with refresh or resend.
