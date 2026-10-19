@@ -305,7 +305,25 @@ test('explicit message-timeout reconciliation preserves original ACK, rejects li
     await f.fake.page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend', '<button aria-label="Stop">Stop</button>'));
     await assert.rejects(f.rpc('decide', { ...input, continuationPrompt: '계속' }), /active generation/);
     assert.equal(f.fake.submitCount, 1);
+    const active = await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef });
+    assert.equal(active.request.submissionVerification.nextAction, 'read_same_request');
     await f.fake.page.locator('button[aria-label="Stop"]').evaluate(node => node.remove());
+    let inspected = '';
+    const inspectCode = await runCli(['request', 'show', f.team.teamId, requestRef,
+      '--socket', f.config.socketPath, '--json'], {
+      stdin: Readable.from([]),
+      stdout: new Writable({ write(chunk, _encoding, done) { inspected += chunk; done(); } }),
+      stderr: new Writable({ write(_chunk, _encoding, done) { done(); } }),
+    });
+    assert.equal(inspectCode, 0, inspected);
+    const idle = JSON.parse(inspected);
+    assert.equal(idle.request.submissionVerification.nextAction, 'reconcile_failure');
+    assert.equal(idle.request.submissionVerification.recovery.requiresFreshValidation, true);
+    assert.equal(idle.request.evidence.submissionVerification.responseCandidate.responseMessageId, 'interrupted');
+    assert.equal(idle.request.evidence.submissionVerification.responseCandidate.answerText, 'Started the original work; results are still pending.');
+    assert.equal(idle.request.terminal, false);
+    assert.equal(idle.request.answerText, null);
+    assert.equal(f.fake.submitCount, 1, 'Passive inspection never continues or terminalizes the request');
     await f.fake.page.locator('textarea').fill('Preserved user draft');
     await assert.rejects(f.rpc('decide', input), /Preserve the current draft/);
     assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved user draft');
