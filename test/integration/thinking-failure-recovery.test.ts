@@ -247,6 +247,7 @@ test('confirmed manual follow-up releases only original tracking and permits new
   const f = await fixture();
   const { createHash } = await import('node:crypto');
   const answer = 'Review complete: CHANGES_REQUIRED';
+  const partial = '<div data-message-author-role="assistant" data-message-id="original-partial">Original checkpoint, work remains.</div>';
   const followup = '<div data-message-author-role="user" data-message-id="manual-user">Repeat the missing answer</div>';
   const final = `<div data-message-author-role="assistant" data-message-id="manual-answer">${answer}</div>`;
   try {
@@ -259,15 +260,26 @@ test('confirmed manual follow-up releases only original tracking and permits new
     const body = (middle: string) => `<main>${configuration}<div data-message-author-role="user" data-message-id="user-message-1">Original</div>${middle}<textarea>Preserved draft</textarea></main>`;
     for (const unsafe of [followup + final + '<button data-testid="stop-button">Stop</button>',
       followup + final.replace(answer, 'Different answer'), followup + final + '<div data-message-author-role="user" data-message-id="newer">Newer question</div>',
-      '<div data-message-author-role="assistant" data-message-id="original-answer" data-end-turn="true">Original recovered</div>' + followup + final]) {
+      '<div data-message-author-role="assistant" data-message-id="original-answer" data-end-turn="true">Original recovered</div>' + followup + final,
+      partial.replace('original-partial"', 'original-partial" data-is-streaming="true"') + followup + final,
+      '<div data-message-author-role="user" data-message-id="unrelated-user">Different work</div>' + followup + final,
+      '<div data-message-author-role="user" data-message-id="user-message-1">Duplicate original</div>' + followup + final,
+      followup + followup + final]) {
       await f.fake.page.setContent(body(unsafe));
       await assert.rejects(f.rpc('decide', input), /not verified/);
       assert.equal(f.core.teamDirectory.getSession(f.session.sessionId).terminal, false);
     }
-    await f.fake.page.setContent(body(followup + final));
+    await f.fake.page.setContent(body(partial + '<div id="other-root"></div>'));
+    await f.fake.page.locator('#other-root').evaluate((host, content) => {
+      host.attachShadow({ mode: 'open' }).innerHTML = content;
+    }, followup + final);
+    await assert.rejects(f.rpc('decide', input), /not verified/, 'Separate transcript roots cannot establish ancestry');
+    await f.fake.page.setContent(body(partial + followup + final));
     const released = await f.rpc<any>('decide', input);
     assert.equal(released.reconciliation.disposition, 'tracking-cancelled');
     assert.equal(released.reconciliation.providerMutation, false);
+    assert.deepEqual(released.reconciliation.evidence.originalPartialResponses, [{ responseMessageId: 'original-partial',
+      responseSha256: createHash('sha256').update('Original checkpoint, work remains.').digest('hex') }]);
     const closed = f.core.teamDirectory.getSession(f.session.sessionId);
     assert.equal(closed.sessionState, 'cancelled');
     assert.equal(closed.reason, 'manual-followup-reconciled');
@@ -294,6 +306,21 @@ test('confirmed manual follow-up releases only original tracking and permits new
   } finally { await f.close(); }
 });
 
+
+test('manual follow-up reconciliation cannot release an UNKNOWN submission', async () => {
+  const f = await fixture();
+  try {
+    f.fake.acknowledgementMode = 'missing';
+    const requestRef = await f.submit(false);
+    const before = f.core.teamDirectory.getSession(f.session.sessionId);
+    assert.equal(before.submissionState, 'submission_unknown');
+    await assert.rejects(f.rpc('decide', { teamId: f.team.teamId, requestRef, requestId: 'unknown-manual-release',
+      decision: 'reconcile_followup', followupUserMessageId: 'manual-user', responseMessageId: 'manual-answer',
+      responseSha256: '0'.repeat(64), followupCompleted: true }), /unresolved acknowledged/);
+    assert.deepEqual(f.core.teamDirectory.getSession(f.session.sessionId), before);
+    assert.equal(f.fake.submitCount, 1);
+  } finally { await f.close(); }
+});
 
 test('explicit message-timeout reconciliation preserves original ACK, rejects live Stop and permits one owner continuation', async () => {
   const f = await fixture();
