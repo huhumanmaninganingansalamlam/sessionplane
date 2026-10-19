@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
+import { Readable, Writable } from 'node:stream';
+import { runCli } from '../../src/cli/main.ts';
 import type { Page } from 'playwright-core';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore, type CoreService } from '../../src/main.ts';
@@ -314,7 +316,15 @@ test('explicit message-timeout reconciliation preserves original ACK, rejects li
     // Automatic recovery cannot classify this as a Thinking failure.
     await assert.rejects(f.core.thinkingFailureRecovery.services.ui.reconcileFailure({ clientId: `team:${f.team.teamId}`, requestId: 'original', sessionId: original.sessionId,
       generation: original.generation, decisionId: 'automatic-timeout' }));
-    const result = await f.rpc<any>('decide', input);
+    let stdout = '', stderr = '';
+    const code = await runCli(['request', 'reconcile_failure', f.team.teamId, requestRef,
+      '--continuation-prompt', '계속', '--request-id', input.requestId, '--socket', f.config.socketPath, '--json'], {
+      stdin: Readable.from([]),
+      stdout: new Writable({ write(chunk, _encoding, done) { stdout += chunk; done(); } }),
+      stderr: new Writable({ write(chunk, _encoding, done) { stderr += chunk; done(); } }),
+    });
+    assert.equal(code, 0, stderr);
+    const result = JSON.parse(stdout);
     assert.equal(result.reconciliation.evidence.kind, 'message-timeout');
     assert.equal(result.reconciliation.evidence.continuationPrompt, '계속');
     assert.equal(await f.fake.page.locator('textarea').inputValue(), '계속');
