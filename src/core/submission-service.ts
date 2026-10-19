@@ -1101,7 +1101,7 @@ export class SubmissionService {
   }
 
   async reconcileFailure(
-    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string },
+    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string; readonly continuationPrompt?: '계속' | undefined },
     observe: (snapshot: SessionSnapshot) => Promise<{
       readonly kind: 'thinking-failed' | 'message-timeout'; readonly pageKey: string; readonly bindingEpoch: number;
       readonly conversationId: string; readonly submittedUserMessageId: string | null;
@@ -1109,7 +1109,8 @@ export class SubmissionService {
     }>,
   ) {
     const method = 'session.failure.reconcile';
-    const payload = { requestId: input.requestId, sessionId: input.sessionId, generation: input.generation };
+    const payload = { requestId: input.requestId, sessionId: input.sessionId, generation: input.generation,
+      ...(input.continuationPrompt === undefined ? {} : { continuationPrompt: input.continuationPrompt }) };
     const receipts = new ReceiptRepository(this.#database);
     return await this.#scheduler.actorFor(input.sessionId).enqueue(async () => {
       const prior = receipts.get(input.clientId, input.decisionId);

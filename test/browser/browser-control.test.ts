@@ -322,11 +322,15 @@ test('preparation evidence omits transcript and draft text while retaining contr
     assert.ok(snapshot.nodes.some(node => node.role === 'alert'));
     assert.equal(snapshot.nodes.some(node => /Earlier conversation|Message action|History navigation|Private draft/.test(node.name + node.text + node.value + node.description)), false);
     for (const role of ['button', 'slider', 'textbox']) assert.ok(snapshot.nodes.some(node => node.role === role));
+    assert.equal(snapshot.nodes.find(node => node.role === 'textbox')!.draftPresent, true);
     const slider = snapshot.nodes.find(node => node.role === 'slider')!;
     assert.equal(Number(slider.ariaValueNow ?? slider.value), 4);
     const element = await refs.resolve({ ...capture, ref: slider.ref, snapshotId: snapshot.snapshotId });
     assert.equal(await element.getAttribute('type'), 'range');
     await element.dispose();
+    await page.locator('[contenteditable]').fill('');
+    const emptyDraft = await refs.capture({ ...capture, interactive: false });
+    assert.equal(emptyDraft.nodes.find(node => node.role === 'textbox')!.draftPresent, false);
     const controls = await refs.capture({ ...capture, interactive: true });
     assert.equal(controls.nodesTruncated, false);
     await page.setContent('<form hidden><textarea></textarea></form><main><h1>Conversation unavailable</h1><button>Retry</button></main>');

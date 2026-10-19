@@ -115,7 +115,7 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    stable requestId. The core freshly verifies the original submitted anchor,
    actual failure header and composer, rejecting later user turns, answer candidates,
    Stop/thinking/streaming, stale/missing evidence, generic alerts and refusals.
-   Success records failed/terminal with provider.execution-failed while keeping
+   Compact textbox text/value are redacted, not proof of an empty composer; inspect draftPresent. For an explicitly authorized message-timeout continuation with an existing exact `계속` draft, pass `continuationPrompt: "계속"` to manual reconcile_failure; the draft stays unchanged and submission remains a separate owner action. Other drafts, attachments and activity still block. Success records failed/terminal with provider.execution-failed while keeping
    submitted:true, original evidence and conversation; no Stop, deletion or replay
    occurs. Message-timeout reconciliation does not enable automatic continuation;
    once reconciled, the owner may send the authorized literal `계속` once in the
