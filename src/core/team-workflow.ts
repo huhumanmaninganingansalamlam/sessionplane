@@ -509,14 +509,22 @@ export class TeamWorkflow {
     const identityMatches = identity != null && identity.conversationId === result.conversationId &&
       identity.pageKey === result.pageKey && identity.submittedUserMessageId === result.submittedUserMessageId &&
       identity.submittedUserTurnId === result.submittedUserTurnId;
-    const dom = (result.evidence as { submissionVerification?: { anchorPresent: boolean } } | undefined)?.submissionVerification;
+    const dom = (result.evidence as { submissionVerification?: {
+      anchorPresent: boolean; laterUserFound: boolean; activity: string; messageTimeout: boolean;
+      responseCandidate: { streamingMarker: boolean } | null;
+    } } | undefined)?.submissionVerification;
     const missing = dom?.anchorPresent === false || (dom === undefined && identityMatches &&
       backend?.recoveryReason === 'backend-user-anchor-absent-from-mapping');
+    const inspectTimeout = dom?.anchorPresent && !dom.laterUserFound && dom.messageTimeout &&
+      dom.activity === 'none' && !dom.responseCandidate?.streamingMarker;
+    const { responseCandidate: _candidate, ...verification } = dom ?? {};
     return { submissionVerification: { state: missing ? 'anchor-unverified' : dom?.anchorPresent ? 'anchor-observed' : 'unverified',
-      storedSubmissionState: 'submitted', automaticResubmit: false, dom: dom ?? null,
+      storedSubmissionState: 'submitted', automaticResubmit: false, dom: dom ? verification : null,
       backend: backend ? { ...backend, currentIdentityMatches: identityMatches,
         identityScope: identity ? 'recorded-conversation-page-anchor' : 'historical-session-generation-only' } : null,
-      nextAction: 'read_same_request' },
+      nextAction: inspectTimeout ? 'reconcile_failure' : 'read_same_request',
+      ...(inspectTimeout ? { recovery: { decision: 'reconcile_failure', requiresFreshValidation: true,
+        continuationRequiresExplicitAuthorization: true, automaticContinuation: false } } : {}) },
       ...(missing ? { status: 'recovery_required',
         message: 'The legacy submitted record is retained, but the original anchor is not verified in the observed surface. This proves neither non-submission nor completion. Revalidate this same request through get/wait and the existing paced observer; preserve its draft, conversation and anchor. Do not resend or attach another generation\'s answer.' } : {}) };
   }
