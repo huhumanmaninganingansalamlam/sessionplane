@@ -1055,7 +1055,8 @@ export class SubmissionService {
       readonly decisionId: string; readonly followupUserMessageId: string; readonly responseMessageId: string;
       readonly responseSha256: string; readonly followupCompleted: true },
     observe: (snapshot: SessionSnapshot) => Promise<{ readonly pageKey: string; readonly conversationId: string;
-      readonly bindingEpoch: number; readonly observedAt: string }>,
+      readonly bindingEpoch: number; readonly observedAt: string;
+      readonly originalPartialResponses: readonly { readonly responseMessageId: string; readonly responseSha256: string }[] }>,
   ) {
     const method = 'session.manual-followup.reconcile';
     const { clientId, decisionId, ...payload } = input;

@@ -228,20 +228,26 @@ export class SessionUiService {
     return await this.#submissions.reconcileFollowup(input, async session => {
       const page = this.#requirePage(session);
       const binding = this.#registry.refreshPage(session.pageKey!);
-      const messages = await readChatGptMessages(page);
+      const transcript = await readChatGptMessages(page);
+      const originals = transcript.filter(m => m.role === 'user' && m.messageId === session.submittedUserMessageId);
+      const followups = transcript.filter(m => m.role === 'user' && m.messageId === input.followupUserMessageId);
+      const messages = transcript.filter(m => m.rootIndex === originals[0]?.rootIndex);
       const original = messages.findIndex(m => m.role === 'user' && m.messageId === session.submittedUserMessageId);
       const user = messages.findIndex(m => m.role === 'user' && m.messageId === input.followupUserMessageId);
       const answer = messages.at(-1);
+      // An interrupted checkpoint is evidence to retain, not a completed answer to discard.
+      const partials = messages.slice(original + 1, user);
       const controls = await this.#capture(session);
       const dom = await observeChatGptDom(page, { submittedUserMessageId: input.followupUserMessageId, submittedUserTurnId: null });
       const activity = await observeChatGptActivity(page, dom);
       this.#requirePage(session);
       const after = this.#registry.refreshPage(session.pageKey!);
-      if (original < 0 || user <= original || user !== messages.length - 2 || answer?.role !== 'assistant' ||
+      if (originals.length !== 1 || followups.length !== 1 || originals[0]?.rootIndex !== followups[0]?.rootIndex ||
+          original < 0 || user <= original || user !== messages.length - 2 || answer?.role !== 'assistant' ||
           answer.messageId !== input.responseMessageId || !answer.text.trim() || answer.streamingMarker ||
           createHash('sha256').update(answer.text).digest('hex') !== input.responseSha256 ||
-          messages.slice(original + 1, user).some(m => m.role === 'assistant') ||
-          messages.some(m => m.streamingMarker) || activity.strength !== 'none' || dom.actionableAlert ||
+          partials.some(m => m.role !== 'assistant' || !m.messageId || m.terminalMarker) ||
+          transcript.some(m => m.streamingMarker) || activity.strength !== 'none' || dom.actionableAlert ||
           !dom.conversationSurfaceAvailable || !dom.submittedUserFound || dom.laterUserFound ||
           dom.candidate?.responseMessageId !== input.responseMessageId || dom.candidate.streamingMarker ||
           createHash('sha256').update(dom.candidate.answerText).digest('hex') !== input.responseSha256 ||
@@ -252,7 +258,9 @@ export class SessionUiService {
           'Exact idle manual follow-up and unchanged answer are not verified; original tracking remains unchanged');
       }
       return { pageKey: session.pageKey!, conversationId: session.conversationId!,
-        bindingEpoch: after.bindingEpoch, observedAt: controls.capturedAt };
+        bindingEpoch: after.bindingEpoch, observedAt: controls.capturedAt,
+        originalPartialResponses: partials.map(m => ({ responseMessageId: m.messageId!,
+          responseSha256: createHash('sha256').update(m.text).digest('hex') })) };
     });
   }
 
