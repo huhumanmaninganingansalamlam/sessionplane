@@ -381,7 +381,7 @@ export class ConversationCleanupService {
             element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden';
         }
         if (element instanceof HTMLButtonElement) return element.getClientRects().length > 0 && (
-          /^(?:stop generating|stop streaming|stop response|응답 중지|생성 중지|중지)$/i.test(element.getAttribute('aria-label') ?? '') ||
+          /^(?:stop|stop generating|stop streaming|stop response|응답 중지|생성 중지|중지)$/i.test(element.getAttribute('aria-label') ?? '') ||
           element.getAttribute('data-testid') === 'stop-button');
         return ((element as HTMLTextAreaElement).value ?? (element as HTMLElement).innerText ?? '').trim().length > 0;
       }));
