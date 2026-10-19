@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
+import { Readable, Writable } from 'node:stream';
+import { runCli } from '../../src/cli/main.ts';
 import type { Page } from 'playwright-core';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore, type CoreService } from '../../src/main.ts';
@@ -296,7 +298,7 @@ test('confirmed manual follow-up releases only original tracking and permits new
 test('explicit message-timeout reconciliation preserves original ACK, rejects live Stop and permits one owner continuation', async () => {
   const f = await fixture();
   try {
-    f.fake.surface = users => users + '<aside role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요. 다시 시도</aside>';
+    f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="interrupted">Started the original work; results are still pending.</div><aside role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요. 다시 시도</aside>';
     const requestRef = await f.submit(false);
     const original = f.core.teamDirectory.getSession(f.session.sessionId);
     const input: { teamId: string; requestRef: string; requestId: string; decision: string; continuationPrompt?: '계속' } = { teamId: f.team.teamId, requestRef, requestId: 'timeout-reconcile', decision: 'reconcile_failure' };
@@ -314,9 +316,19 @@ test('explicit message-timeout reconciliation preserves original ACK, rejects li
     // Automatic recovery cannot classify this as a Thinking failure.
     await assert.rejects(f.core.thinkingFailureRecovery.services.ui.reconcileFailure({ clientId: `team:${f.team.teamId}`, requestId: 'original', sessionId: original.sessionId,
       generation: original.generation, decisionId: 'automatic-timeout' }));
-    const result = await f.rpc<any>('decide', input);
+    let stdout = '', stderr = '';
+    const code = await runCli(['request', 'reconcile_failure', f.team.teamId, requestRef,
+      '--continuation-prompt', '계속', '--request-id', input.requestId, '--socket', f.config.socketPath, '--json'], {
+      stdin: Readable.from([]),
+      stdout: new Writable({ write(chunk, _encoding, done) { stdout += chunk; done(); } }),
+      stderr: new Writable({ write(chunk, _encoding, done) { stderr += chunk; done(); } }),
+    });
+    assert.equal(code, 0, stderr);
+    const result = JSON.parse(stdout);
     assert.equal(result.reconciliation.evidence.kind, 'message-timeout');
     assert.equal(result.reconciliation.evidence.continuationPrompt, '계속');
+    assert.equal(result.reconciliation.evidence.interruptedResponse.responseMessageId, 'interrupted');
+    assert.equal(result.reconciliation.evidence.interruptedResponse.answerText, 'Started the original work; results are still pending.');
     assert.equal(await f.fake.page.locator('textarea').inputValue(), '계속');
     const failed = f.core.teamDirectory.getSession(f.session.sessionId);
     assert.equal(failed.reason, 'message-timeout-reconciled');

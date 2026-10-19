@@ -331,7 +331,7 @@ export class SessionUiService {
           this.#requirePage(session);
           const after = this.#registry.refreshPage(session.pageKey!);
           if (binding.bindingEpoch !== after.bindingEpoch || !dom.submittedUserFound || dom.laterUserFound ||
-              dom.candidate !== null || activity.strength !== 'none' || alerts.length === 0 ||
+              (dom.candidate !== null && (timeoutAlerts.length === 0 || dom.candidate.streamingMarker)) || activity.strength !== 'none' || alerts.length === 0 ||
               dom.providerAlerts.some(alert => !alerts.includes(alert)) ||
               controls.nodes.some(node => node.role === 'dialog' || node.role === 'alertdialog') ||
               !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
@@ -340,7 +340,9 @@ export class SessionUiService {
           }
           return { kind: timeoutAlerts.length > 0 ? 'message-timeout' as const : 'thinking-failed' as const, pageKey: session.pageKey!, bindingEpoch: after.bindingEpoch,
             conversationId: session.conversationId!, submittedUserMessageId: anchor.submittedUserMessageId,
-            submittedUserTurnId: anchor.submittedUserTurnId, observedAt: controls.capturedAt, providerAlerts: alerts, ...(continuationPrompt === undefined ? {} : { continuationPrompt }) };
+            submittedUserTurnId: anchor.submittedUserTurnId, observedAt: controls.capturedAt, providerAlerts: alerts,
+            ...(dom.candidate === null ? {} : { interruptedResponse: dom.candidate }),
+            ...(continuationPrompt === undefined ? {} : { continuationPrompt }) };
         })(),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new SessionPlaneDomainError('provider.failure-unverified',
@@ -798,7 +800,8 @@ function typedUiError(error: unknown): SessionPlaneDomainError {
 export function latestDisplayTarget(session: SessionSnapshot): { role: 'user' | 'assistant'; ids: string[] } | null {
   const reconciledFailure = session.terminal && session.sessionState === 'failed' &&
     ['thinking-failed-reconciled', 'message-timeout-reconciled'].includes(session.reason ?? '') && session.errorCode === 'provider.execution-failed';
-  if (session.provider !== 'chatgpt' || (session.errorCode !== null && !reconciledFailure) || !session.promptSubmitted || session.conversationId === null) return null;
+  const unresolvedAlert = !session.terminal && session.errorCode === 'provider.actionable-alert';
+  if (session.provider !== 'chatgpt' || (session.errorCode !== null && !unresolvedAlert && !reconciledFailure) || !session.promptSubmitted || session.conversationId === null) return null;
   if (session.terminal && session.sessionState === 'complete' && session.responseMessageId !== null)
     return { role: 'assistant', ids: [session.responseMessageId] };
   const ids = [session.submittedUserMessageId, session.submittedUserTurnId].filter((id): id is string => id !== null);
