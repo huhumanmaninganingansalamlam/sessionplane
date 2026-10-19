@@ -112,14 +112,15 @@ function inspectBrowserExecutable(
   productHint: HostBrowserProduct | null,
   executablePath: string,
 ): ChromeInstallation | null {
-  let candidate = resolve(executablePath);
+  const candidate = resolve(executablePath);
+  let canonical: string;
   try {
     accessSync(candidate, constants.X_OK);
-    candidate = realpathSync(candidate);
+    canonical = realpathSync(candidate);
   } catch {
     return null;
   }
-  if (isPlaywrightManagedBrowserPath(candidate)) return null;
+  if (isPlaywrightManagedBrowserPath(candidate) || isPlaywrightManagedBrowserPath(canonical)) return null;
 
   const result = spawnSync(candidate, ['--version'], {
     encoding: 'utf8',
