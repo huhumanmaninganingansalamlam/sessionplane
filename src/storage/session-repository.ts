@@ -187,6 +187,9 @@ export class SessionRepository {
     return (!discard && this.#database.prepare(`
       SELECT 1 FROM generations WHERE session_id = ? AND (
         submission_state = 'failed_pre_submit' OR
+        (submission_state = 'submitted' AND prompt_submitted = 1 AND completed_at IS NOT NULL
+          AND submitted_user_message_id IS NOT NULL AND error_code = 'provider.execution-failed'
+          AND reason IN ('thinking-failed-reconciled', 'message-timeout-reconciled')) OR
         (submission_state = 'submitted' AND completed_at IS NOT NULL AND response_message_id IS NOT NULL
           AND answer_text IS NOT NULL AND error_code IS NULL)
       ) IS NOT TRUE AND generation IS NOT ? LIMIT 1
