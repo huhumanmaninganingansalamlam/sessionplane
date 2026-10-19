@@ -165,6 +165,52 @@ class HandoverTests(unittest.TestCase):
                 db.execute('DELETE FROM outbox')
             self.assertEqual(path.read_bytes(), before)
 
+    def test_admitted_generation_progress_preserves_identity_but_corruption_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory, 'fixture.sqlite')
+            with closing(sqlite3.connect(path)) as db:
+                db.executescript("""
+                    CREATE TABLE outbox(outbox_id,session_id,generation,request_hash,prompt_submitted);
+                    CREATE TABLE generations(session_id,generation,submitted_user_message_id,submitted_user_turn_id,prompt_hash);
+                    CREATE TABLE page_bindings(page_key,session_id,generation,conversation_id,target_id);
+                    CREATE TABLE probe_budget(scope,next_allowed_at,blocked_until,backoff_level,consecutive_failures);
+                    INSERT INTO outbox VALUES('original','maetda',16,'original-hash',1);
+                    INSERT INTO generations VALUES('maetda',16,'original-ack','original-turn','original-prompt');
+                    INSERT INTO outbox VALUES('hither-12','hither',12,'previous-hash',1);
+                    INSERT INTO generations VALUES('hither',12,'previous-ack','previous-turn','previous-prompt');
+                    INSERT INTO page_bindings VALUES('page','hither',12,'conversation','target');
+                """)
+            health = {'database': {'path': str(path)}}
+            target = types.SimpleNamespace(request_ref='original', session_id='maetda', generation=16, user_anchor='original-ack')
+            before = handover.request_identity(health, target)
+            # Baseline precedes staging; an admitted request advances the same
+            # page while the helper drains existing calls, as Hither12→13 did.
+            with closing(sqlite3.connect(path)) as db:
+                db.executescript("""
+                    INSERT INTO outbox VALUES('hither-13','hither',13,'next-hash',0);
+                    INSERT INTO generations VALUES('hither',13,NULL,NULL,'next-prompt');
+                    UPDATE page_bindings SET generation=13 WHERE page_key='page';
+                """)
+            after = handover.request_identity(health, target)
+            handover.verify_bindings(health, before['bindings'], after['bindings'])
+            self.assertEqual(after['request'], before['request'])
+            self.assertEqual(after['anchor'], before['anchor'])
+            self.assertTrue(all(after['requests'][key] == value for key, value in before['requests'].items()))
+            for column, value in [(0, 'other-page'), (1, 'other-session'), (3, 'other-conversation'),
+                                  (4, 'other-target'), (2, 11), (2, 14)]:
+                changed = list(after['bindings'][0]); changed[column] = value
+                with self.subTest(column=column), self.assertRaises(AssertionError):
+                    handover.verify_bindings(health, before['bindings'], [changed])
+            with self.assertRaises(AssertionError):
+                handover.verify_bindings(health, before['bindings'], [])
+            # An outbox row alone cannot justify skipping the generation record.
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("INSERT INTO outbox VALUES('hither-14','hither',14,'unverified',0)")
+                db.commit()
+            changed = list(after['bindings'][0]); changed[2] = 14
+            with self.assertRaisesRegex(AssertionError, 'no durable request'):
+                handover.verify_bindings(health, before['bindings'], [changed])
+
     def test_optimized_python_cannot_disable_guards(self):
         result = subprocess.run([sys.executable, '-O', str(SCRIPT), '--help'], capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)

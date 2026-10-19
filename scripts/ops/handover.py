@@ -67,6 +67,24 @@ def request_identity(h, target):
             'bindings': list(db.execute('SELECT page_key,session_id,generation,conversation_id,target_id FROM page_bindings')),
             'probeBudgets': list(db.execute('SELECT scope,next_allowed_at,blocked_until,backoff_level,consecutive_failures FROM probe_budget'))}
 
+def verify_bindings(h, before, after):
+    """A drained caller may advance a generation, never the page's identity."""
+    current = {row[0]: tuple(row) for row in after}
+    with read_db(h) as db:
+        for original in before:
+            original = tuple(original)
+            row = current.get(original[0])
+            assert row is not None and row[:2] == original[:2] and row[3:] == original[3:], \
+                'Binding identity changed; inspect, never overwrite DB'
+            if row[2] != original[2]:
+                assert original[1] is not None and isinstance(original[2], int) and \
+                    isinstance(row[2], int) and row[2] > original[2], 'Binding generation regressed or is unverified'
+                assert db.execute('SELECT 1 FROM outbox o JOIN generations g '
+                    'ON g.session_id=o.session_id AND g.generation=o.generation '
+                    'WHERE o.session_id=? AND o.generation=?', (row[1], row[2])).fetchone(), \
+                    'Binding generation has no durable request'
+
+
 class LockActivityError(AssertionError):
     def __init__(self, report):
         self.report = report
@@ -232,7 +250,7 @@ def frozen_guard(current, expected, ticks, chrome_ticks, target, identity):
     post = request_identity(expected, target)
     assert post['request'] == identity['request'] and post['anchor'] == identity['anchor']
     assert all(post['requests'].get(k) == v for k, v in identity['requests'].items()), 'Durable request changed'
-    assert all(row in post['bindings'] for row in identity['bindings']), 'Binding identity changed'
+    verify_bindings(current, identity['bindings'], post['bindings'])
     no_writer(expected['database']['path'])
 
 
@@ -415,7 +433,7 @@ def rollback_exited(h, old_pid, successor, chrome_ticks, installed, stage, recei
     post = request_identity(after, target)
     assert post['request'] == identity['request'] and post['anchor'] == identity['anchor']
     assert all(post['requests'].get(k) == v for k, v in identity['requests'].items())
-    assert all(row in post['bindings'] for row in identity['bindings'])
+    verify_bindings(after, identity['bindings'], post['bindings'])
     save(receipt/'rollback-health.json', after)
     save(receipt/'rollback.json', {'phase': 'original-core-restored', 'pid': restored.pid, 'databaseRestored': False})
     return restored
@@ -647,7 +665,7 @@ def main():
     post=request_identity(after, args)
     assert post['request']==identity['request'] and post['anchor']==identity['anchor']
     assert all(post['requests'].get(k)==v for k,v in identity['requests'].items()), 'Durable request changed'
-    assert all(row in post['bindings'] for row in identity['bindings']), 'Binding identity changed; inspect, never overwrite DB'
+    verify_bindings(after, identity['bindings'], post['bindings'])
     save(receipt/'after-health.json',after)
     save(receipt/'after-identity.json',post)
     result={'sourceCommit':manifest['sourceCommit'],'packageSha256':manifest['packageSha256'],'oldPid':pid,'newPid':successor.pid,'chromePid':args.chrome_pid,'databaseIntegrity':'ok','requestAndAnchorPreserved':True,'bindingIdentityPreserved':True,'browserIdentityPreserved':True,'installedCatalogSha256':catalog_hash,'loadedClientCatalog':'not reloaded; existing request schemas unchanged','draftSelectionVisualCheck':'required by original owner; no browser protocol used by this script','answerRecovery':'not yet verified'}
