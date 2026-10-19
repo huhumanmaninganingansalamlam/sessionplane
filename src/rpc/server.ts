@@ -78,6 +78,8 @@ export class RpcServer {
     socket.setEncoding('utf8');
     let buffer = '';
     let queued = Promise.resolve();
+    const controller = new AbortController();
+    socket.once('close', () => controller.abort());
 
     const forget = (): void => {
       this.#sockets.delete(socket);
@@ -104,7 +106,7 @@ export class RpcServer {
         if (line.trim() === '') {
           continue;
         }
-        queued = queued.then(() => this.#processLine(socket, line));
+        queued = queued.then(() => this.#processLine(socket, line, controller.signal));
       }
     });
 
@@ -113,7 +115,7 @@ export class RpcServer {
     });
   }
 
-  async #processLine(socket: Socket, line: string): Promise<void> {
+  async #processLine(socket: Socket, line: string, signal: AbortSignal): Promise<void> {
     let input: unknown;
     try {
       input = JSON.parse(line) as unknown;
@@ -124,7 +126,7 @@ export class RpcServer {
       return;
     }
 
-    const response = await this.#options.router.dispatch(input);
+    const response = await this.#options.router.dispatch(input, { signal });
     if (response !== null) {
       writeResponse(socket, response);
     }

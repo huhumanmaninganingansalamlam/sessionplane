@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { requireIdleConversationPage } from './conversation-cleanup-service.ts';
 import { conversationLoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
 import { ChatGptConfigurationMenu, type ConfigurationCatalog } from '../providers/chatgpt/configuration-catalog.ts';
 import { errors, type ElementHandle, type Page } from 'playwright-core';
@@ -244,8 +245,8 @@ export class SessionUiService {
     });
   }
 
-  async reconcileFailure(input: PreparationOwner & { readonly decisionId: string }) {
-    return await this.#submissions.reconcileFailure(input, session => this.#failureEvidence(session, session));
+  async reconcileFailure(input: PreparationOwner & { readonly decisionId: string; readonly allowMessageTimeout?: boolean }) {
+    return await this.#submissions.reconcileFailure(input, session => this.#failureEvidence(session, session, input.allowMessageTimeout));
   }
 
   /** Passive, exact-owner checks; this never dispatches or clears a draft. */
@@ -305,7 +306,7 @@ export class SessionUiService {
       generation: successor.generation, conversationId: original.conversationId });
   }
 
-  async #failureEvidence(session: SessionSnapshot, anchor: SessionSnapshot) {
+  async #failureEvidence(session: SessionSnapshot, anchor: SessionSnapshot, allowMessageTimeout = false) {
     const page = this.#requirePage(session);
     const binding = this.#registry.refreshPage(session.pageKey!);
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -315,7 +316,16 @@ export class SessionUiService {
           const controls = await this.#capture(session);
           const dom = await observeChatGptDom(page, anchor);
           const activity = await observeChatGptActivity(page, dom);
-          const alerts = await observeChatGptAlerts(page, anchor, true);
+          if (allowMessageTimeout) {
+            try { await requireIdleConversationPage(page); }
+            catch { throw new SessionPlaneDomainError('provider.failure-unverified', 'Preserve the current draft, attachment or active generation; failure is unverified'); }
+          }
+          const thinkingAlerts = await observeChatGptAlerts(page, anchor, true);
+          // Only an explicit owner reconciliation can close this exact idle stream
+          // error. Automatic Thinking-failure recovery never accepts message timeouts.
+          const timeoutAlerts = allowMessageTimeout ? dom.providerAlerts.filter(alert =>
+            /^(?:메시지 전송 시간이 초과되었습니다\. 다시 시도하세요\.|Message (?:sending )?timed out\. Please try again\.)(?:\s*(?:다시 시도|Retry|Try again))?$/i.test(alert.trim())) : [];
+          const alerts = [...thinkingAlerts, ...timeoutAlerts];
           this.#requirePage(session);
           const after = this.#registry.refreshPage(session.pageKey!);
           if (binding.bindingEpoch !== after.bindingEpoch || !dom.submittedUserFound || dom.laterUserFound ||
@@ -324,9 +334,9 @@ export class SessionUiService {
               controls.nodes.some(node => node.role === 'dialog' || node.role === 'alertdialog') ||
               !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
             throw new SessionPlaneDomainError('provider.failure-unverified',
-              'No exact idle current-turn Thinking failed surface; preserve this submitted request and observe it');
+              'No exact idle current-turn Thinking failed or explicitly accepted message-timeout surface; preserve this submitted request and observe it');
           }
-          return { kind: 'thinking-failed' as const, pageKey: session.pageKey!, bindingEpoch: after.bindingEpoch,
+          return { kind: timeoutAlerts.length > 0 ? 'message-timeout' as const : 'thinking-failed' as const, pageKey: session.pageKey!, bindingEpoch: after.bindingEpoch,
             conversationId: session.conversationId!, submittedUserMessageId: anchor.submittedUserMessageId,
             submittedUserTurnId: anchor.submittedUserTurnId, observedAt: controls.capturedAt, providerAlerts: alerts };
         })(),
@@ -785,7 +795,7 @@ function typedUiError(error: unknown): SessionPlaneDomainError {
 /** Display identity only: this never infers an ACK or completes a generation. */
 export function latestDisplayTarget(session: SessionSnapshot): { role: 'user' | 'assistant'; ids: string[] } | null {
   const reconciledFailure = session.terminal && session.sessionState === 'failed' &&
-    session.reason === 'thinking-failed-reconciled' && session.errorCode === 'provider.execution-failed';
+    ['thinking-failed-reconciled', 'message-timeout-reconciled'].includes(session.reason ?? '') && session.errorCode === 'provider.execution-failed';
   if (session.provider !== 'chatgpt' || (session.errorCode !== null && !reconciledFailure) || !session.promptSubmitted || session.conversationId === null) return null;
   if (session.terminal && session.sessionState === 'complete' && session.responseMessageId !== null)
     return { role: 'assistant', ids: [session.responseMessageId] };

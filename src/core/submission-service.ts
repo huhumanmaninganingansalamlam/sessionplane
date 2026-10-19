@@ -1103,7 +1103,7 @@ export class SubmissionService {
   async reconcileFailure(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string },
     observe: (snapshot: SessionSnapshot) => Promise<{
-      readonly kind: 'thinking-failed'; readonly pageKey: string; readonly bindingEpoch: number;
+      readonly kind: 'thinking-failed' | 'message-timeout'; readonly pageKey: string; readonly bindingEpoch: number;
       readonly conversationId: string; readonly submittedUserMessageId: string | null;
       readonly submittedUserTurnId: string | null; readonly observedAt: string; readonly providerAlerts: readonly string[];
     }>,
@@ -1133,7 +1133,7 @@ export class SubmissionService {
         const evidence = await observe(snapshot);
         if (evidence.conversationId !== snapshot.conversationId || evidence.pageKey !== snapshot.pageKey ||
             evidence.submittedUserMessageId !== snapshot.submittedUserMessageId ||
-            evidence.submittedUserTurnId !== snapshot.submittedUserTurnId || evidence.kind !== 'thinking-failed') {
+            evidence.submittedUserTurnId !== snapshot.submittedUserTurnId || !['thinking-failed', 'message-timeout'].includes(evidence.kind)) {
           throw new SessionPlaneDomainError('provider.failure-unverified', 'Failure evidence does not match the submitted binding');
         }
         const result = receipts.execute({ clientId: input.clientId, requestId: input.decisionId, method, payload,
@@ -1141,7 +1141,7 @@ export class SubmissionService {
             const timestamp = this.#now().toISOString();
             if (!this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
               sessionState: 'failed', providerState: 'error', observationTransport: 'fresh', nextCheckAt: null,
-              completedAt: timestamp, errorCode: 'provider.execution-failed', reason: 'thinking-failed-reconciled',
+              completedAt: timestamp, errorCode: 'provider.execution-failed', reason: `${evidence.kind}-reconciled`,
             }, timestamp)) throw new SessionPlaneDomainError('session.generation-superseded', 'Failed generation is no longer current');
             this.#events.append({ teamId: snapshot.teamId, roleId: snapshot.roleId, sessionId: snapshot.sessionId,
               generation: snapshot.generation, eventType: 'generation.failure-reconciled',
@@ -1228,15 +1228,18 @@ export class SubmissionService {
         await reload(snapshot);
         let sequence = 0;
         this.#database.transaction(() => {
-          if (rendererCrash !== undefined && outbox.submissionState === 'failed_pre_submit' &&
-              outbox.errorCode === 'browser.unavailable' && !outbox.promptSubmitted && !snapshot.promptSubmitted &&
+          const duplicateRecovered = snapshot.reason === 'duplicate-page-preparation-recovered' &&
+            outbox.errorCode === 'session.page-identity-unverified';
+          const recoveryReason = duplicateRecovered ? 'duplicate-page-preparation-recovered' : 'crashed-page-preparation-recovered';
+          if ((rendererCrash !== undefined || duplicateRecovered) && outbox.submissionState === 'failed_pre_submit' &&
+              (outbox.errorCode === 'browser.unavailable' || duplicateRecovered) && !outbox.promptSubmitted && !snapshot.promptSubmitted &&
               snapshot.submissionState === 'failed_pre_submit' && snapshot.sessionState === 'ready' && snapshot.terminal &&
               snapshot.submittedUserMessageId === null && snapshot.submittedUserTurnId === null &&
               snapshot.responseMessageId === null && snapshot.answerText === null) {
             const timestamp = this.#now().toISOString();
             if (!this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
               sessionState: 'submitting', providerState: 'pending', observationTransport: 'fresh',
-              submissionState: 'prepared', reason: 'crashed-page-preparation-recovered',
+              submissionState: 'prepared', reason: recoveryReason,
               errorCode: 'provider.preparation-required', nextCheckAt: null, promptSubmitted: false,
             }, timestamp) || !this.#outbox.transition(outbox.outboxId, ['failed_pre_submit'], 'prepared', {
               updatedAt: timestamp, errorCode: 'provider.preparation-required', promptSubmitted: false,
@@ -1245,7 +1248,7 @@ export class SubmissionService {
             sequence = this.#events.append({ teamId: outbox.teamId, roleId: outbox.roleId,
               sessionId: snapshot.sessionId, generation: snapshot.generation,
               eventType: 'generation.preparation-required', createdAt: timestamp,
-              payload: { reason: 'crashed-page-preparation-recovered', refreshRequestId: input.decisionId,
+              payload: { reason: recoveryReason, refreshRequestId: input.decisionId,
                 promptSubmitted: false, priorFailure: { reason: snapshot.reason, errorCode: outbox.errorCode,
                   recordedAt: outbox.updatedAt, resultHash: hashCanonical(JSON.parse(outbox.resultJson ?? 'null')) } } });
           }
@@ -1570,7 +1573,7 @@ export class SubmissionService {
       if (authorizedOriginal === undefined && !['created', 'ready', 'complete'].includes(session.sessionState) &&
           !(session.sessionState === 'cancelled' && this.#requireSnapshot(sessionId).reason === 'manual-followup-reconciled') &&
           !(session.sessionState === 'failed' &&
-            this.#requireSnapshot(sessionId).reason === 'thinking-failed-reconciled' &&
+            ['thinking-failed-reconciled', 'message-timeout-reconciled'].includes(this.#requireSnapshot(sessionId).reason ?? '') &&
             this.#requireSnapshot(sessionId).errorCode === 'provider.execution-failed')) {
         throw new SessionPlaneDomainError(
           'session.busy',

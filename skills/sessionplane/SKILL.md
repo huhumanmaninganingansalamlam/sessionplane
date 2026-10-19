@@ -26,6 +26,12 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
 3. `sessionplane_send` takes teamId, a fresh roleRef, prompt and intended model/
    effort. Every mutation needs a distinct stable requestId; retry that ID only
    with identical arguments. A stale roleRef requires refreshing team_get.
+   For implementing Experts, request GPT-6 Thinking / Extra High by default and
+   verify that exact version and effort in fresh UI evidence before the next send.
+   Fall back to GPT-5.6 Thinking / Extra High only when GPT-6 Extra High is actually
+   unavailable; incomplete discovery is not unavailability. `Thinking` alone is
+   not a version alias. Keep Main Director Pro and Coordinator GPT-6.1 Sol low.
+   Do not reconfigure or replay a live request to apply this default.
 4. `status: needs_decision` is a normal handoff, not a failed send.
    The first send returns `configurationCatalog.options`: combined configuration
    labels observed by SessionPlane in the provider UI, each with an `id`.
@@ -72,8 +78,28 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    Inspect each result and file failure. Old requests can capture files from their
    exact answer even after a newer send; unavailable provider content is a file error. A timeout does not stop provider work.
    When terminal:false, backend-http-429, probe pacing and waitExpired are
-   observation delays, not failed generation. Continue bounded `sessionplane_wait`
-   calls on the same requestRef with positive `waitMs`, including before `nextCheckAt`.
+   observation delays, not failed generation. Wait outside the model with the same requestRef: positive `waitMs` rounds up to
+   whole minutes, minimum one minute and default ten minutes. Intermediate progress
+   and pacing do not wake the model; completion, actual errors and decisions return
+   immediately. Ten minutes to two hours or longer can be normal generation.
+   Zero explicitly reads a snapshot; use team_get for an immediate status check.
+   MCP clients must set their existing `tool_timeout_sec` above the desired wait
+   duration (Codex defaults to60s). If a client cannot keep a long tool call open,
+   run the existing CLI request wait in its external command process and use that
+   client's existing command-completion notification/resume path with the same
+   thread/task/requestRefs. Automatic same-thread wake and exactly-once delivery require an actually verified owning-host connection; task resume only restores context. Do not claim those from API schemas alone. Do not turn process status polling into short model
+   turns or add another scheduler. Wait expiration never stops or resends work.
+   Continue on the same requestRef, including before `nextCheckAt`.
+   At roughly30-minute reviews, use exact team_get activity (last observed generation
+   state change and stored artifact change) together with the owning project's existing
+   HostSpan execution/output references. A state timestamp is not proof of continuing
+   output growth; no available execution evidence means unknown, not stalled. Concrete
+   send/connection failures can be reviewed at about ten minutes or earlier when returned.
+   Never infer a stall or blame Extra High from elapsed time. On a real completion,
+   error or context/output limit, retrieve the original result and execution IDs first;
+   the owning coordinator continues unfinished acceptance work with the same expert
+   and existing handoff. Never send a continuation into active generation. Replacement
+   requires an actual supported signal and the existing lifecycle procedure.
    `nextCheckAt` schedules the core's backend probes only, not result collection.
    Do not sleep until it: DOM observation continues and `wait` can return completion
    earlier. The core enforces probe cooldowns; do not bypass them with refresh or resend.
@@ -83,14 +109,18 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    For provider-actionable-alert, inspect evidence or team_get on the same requestRef
    and report the visible error. Active thinking/streaming needs waiting; a visible
    stream/history recovery failure may need scoped refresh, then reinspection.
-   For an idle current-turn Thinking failed, the original Coordinator can use
+   For an idle current-turn Thinking failed, or a message-send timeout with explicit
+   user authorization to continue in the same chat, the original Coordinator can use
    decide with decision `reconcile_failure`, the same teamId/requestRef and a
    stable requestId. The core freshly verifies the original submitted anchor,
    actual failure header and composer, rejecting later user turns, answer candidates,
    Stop/thinking/streaming, stale/missing evidence, generic alerts and refusals.
    Success records failed/terminal with provider.execution-failed while keeping
    submitted:true, original evidence and conversation; no Stop, deletion or replay
-   occurs. Only then may the original Coordinator send an explicitly authorized
+   occurs. Message-timeout reconciliation does not enable automatic continuation;
+   once reconciled, the owner may send the authorized literal `계속` once in the
+   same conversation, keeping the failed original and successor ACK/answer separate.
+   Only then may the original Coordinator send an explicitly authorized
    follow-up as the next generation in the same chat. This does not authorize tool
    reexecution. For an explicitly recovery-authorized task, a **new** ChatGPT send
    may set `thinkingFailureRecovery:true` to hand follow-up sending to the core.

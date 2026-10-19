@@ -75,6 +75,16 @@ export class EventRepository {
     return Number(row.sequence);
   }
 
+  latestGenerationActivity(sessionId: string, generation: number): { eventType: string; observedAt: string } | null {
+    const row = this.#database.prepare(`SELECT event_type AS eventType, created_at AS observedAt
+      FROM events WHERE session_id=? AND generation=? AND event_type IN (
+        'generation.started', 'generation.submitted', 'generation.dom-progress',
+        'generation.dom-complete', 'generation.backend-complete', 'generation.provider-blocked',
+        'generation.provider-interstitial') ORDER BY sequence DESC LIMIT 1`)
+      .get(sessionId, generation) as { eventType: string; observedAt: string } | undefined;
+    return row ?? null;
+  }
+
   latestAnchorRecovery(sessionId: string, generation: number): (Readonly<Record<string, unknown>> & { sequence: number; observedAt: string }) | null {
     const row = this.#database.prepare(`SELECT sequence, payload_json AS payloadJson, created_at AS createdAt
       FROM events WHERE session_id=? AND generation=? AND event_type LIKE 'generation.backend-%'

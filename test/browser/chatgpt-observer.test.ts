@@ -904,6 +904,12 @@ test('conversation capacity notice permits only exact idle answer collection, re
       const withStop = new ExactFinalTracker(1);
       withStop.evaluate(await source.observe(), 0);
       assert.notEqual(withStop.evaluate(await source.observe(), 5000).kind, 'complete');
+      await page.locator('button[aria-label="Stop generating"]').evaluate(button => button.setAttribute('aria-label', 'Stop'));
+      const hither = new ExactFinalTracker(1);
+      const active = await source.observe();
+      assert.equal(active.activity, 'weak', 'Current Hither Stop must prevent announcement completion');
+      hither.evaluate(active, 0);
+      assert.notEqual(hither.evaluate(await source.observe(), 120_000).kind, 'complete');
       await page.setContent(body + '<aside role="alert">Sign in to continue</aside>');
       assert.equal((await source.observe()).errorCode, 'provider.actionable-alert');
       await page.setContent(body.replace('capacity-final"', 'capacity-final" data-is-streaming="true"'));
