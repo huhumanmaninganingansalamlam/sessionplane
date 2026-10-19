@@ -469,10 +469,19 @@ def require_admission_fence(h, required):
         assert h.get('maintenance', {}).get('phase') == 'running', 'Core admission fence unavailable or already leased; no legacy fallback'
 
 
-def prepare_maintenance(h, quiet_timeout=30):
+def prepare_maintenance(h):
+    if h.get('maintenance', {}).get('coordinatedDrain'):
+        lease = maintenance_rpc(h, 'system.maintenance.quiesce', lease_owner(h))
+        try:
+            while lease['phase'] != 'ready':
+                time.sleep(1)
+                lease = maintenance_rpc(h, 'system.maintenance.quiesce', {**lease_owner(h), 'token': lease['token']})
+            return lease
+        except BaseException:
+            maintenance_rpc(h, 'system.maintenance.resume', {**lease_owner(h), 'token': lease['token']})
+            raise
     # Long read/wait calls are not interrupted by maintenance. Let their current
     # round finish before starting the short fenced drain; admission stays open.
-    deadline = time.monotonic() + quiet_timeout
     while True:
         current = health()
         writer = False
@@ -485,8 +494,6 @@ def prepare_maintenance(h, quiet_timeout=30):
         require_admission_fence(current, True)
         if not writer and current['maintenance']['activeOperations'] == 0 and current['metrics']['session_actor_queue_depth'] == 0:
             break
-        if time.monotonic() >= deadline:
-            raise TimeoutError('Current calls did not finish; original core remains running')
         time.sleep(.1)
     # The quiet sample is only scheduling: the fence and post-fence guards still
     # decide whether a concurrent caller permits the actual transition.

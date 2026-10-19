@@ -72,6 +72,7 @@ const VALUE_OPTIONS = new Set([
   'brief',
   'prompt',
   'prompt-file',
+  'continuation-prompt',
   'text',
   'model',
   'effort',

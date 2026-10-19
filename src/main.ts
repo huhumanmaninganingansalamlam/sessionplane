@@ -335,6 +335,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     Number(database.raw.prepare("SELECT count(*) AS n FROM outbox WHERE submission_state IN ('submit_attempted','composer_filled')").get()!.n) === 0 &&
     Number(database.raw.prepare("SELECT count(*) AS n FROM outbox o JOIN generations g ON g.session_id=o.session_id AND g.generation=o.generation WHERE json_extract(o.payload_json,'$.thinkingFailureRecovery')=1 AND g.completed_at IS NULL").get()!.n) === 0;
   const ownerSchema = { expectedPid: z.literal(process.pid), expectedStartedAt: z.literal(startedAt.toISOString()) };
+  router.register('system.maintenance.quiesce', z.object({ ...ownerSchema, token: z.string().uuid().optional() }).strict(), input =>
+    maintenance.quiesce(input.token, handoverIdle));
   router.register('system.maintenance.prepare', z.object({ ...ownerSchema,
     drainTimeoutMs: z.number().int().min(1).max(10_000).default(5_000),
     leaseMs: z.number().int().min(100).max(60_000).default(30_000),

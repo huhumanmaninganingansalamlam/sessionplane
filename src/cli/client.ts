@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import type { Duplex } from 'node:stream';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import type { JsonRpcResponse } from '../rpc/schemas.ts';
 import type { RemoteConnection } from '../config.ts';
@@ -43,6 +44,28 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
 }
 
 async function callTransport<Result>(options: RpcCallOptions, connection?: { socket: Duplex; ready: boolean; error: Error | undefined }): Promise<Result> {
+  let deadline = Date.now() + (options.timeoutMs ?? 10_000);
+  let deferred = false;
+  while (true) {
+    try { return await callTransportOnce<Result>(options, connection); }
+    catch (error) {
+      const data = error instanceof RpcClientError ? error.data as { errorCode?: string; details?: { operationStarted?: boolean; requestDispatched?: boolean } } | undefined : undefined;
+      if (data?.errorCode === 'core.maintenance' && data.details?.operationStarted === false) {
+        deferred = true;
+        deadline = Date.now() + (options.timeoutMs ?? 10_000);
+      }
+      else if (!(deferred && data?.errorCode === 'core.unavailable' && data.details?.requestDispatched === false)) throw error;
+      if (Date.now() >= deadline) throw error;
+      await delay(Math.min(250, deadline - Date.now()), undefined, { signal: options.signal });
+      if (connection?.socket.destroyed && options.remote) {
+        connection.socket = connectRemote(options.remote); connection.ready = false; connection.error = undefined;
+        connection.socket.on('error', error => { connection.error = error; });
+      }
+    }
+  }
+}
+
+async function callTransportOnce<Result>(options: RpcCallOptions, connection?: { socket: Duplex; ready: boolean; error: Error | undefined }): Promise<Result> {
   const id = randomUUID();
   const timeoutMs = options.timeoutMs ?? 10_000;
   const maxLineBytes = options.maxLineBytes ?? 2 * 1024 * 1024;

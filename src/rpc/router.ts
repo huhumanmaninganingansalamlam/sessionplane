@@ -84,7 +84,7 @@ export class RpcRouter {
 
     try {
       const operation = () => method.handler(paramsResult.data, context);
-      const exempt = ['system.health', 'system.maintenance.prepare', 'system.maintenance.resume', 'system.maintenance.commit'].includes(request.method);
+      const exempt = ['system.health', 'system.maintenance.quiesce', 'system.maintenance.prepare', 'system.maintenance.resume', 'system.maintenance.commit'].includes(request.method);
       const result = await (this.maintenance && !exempt ? this.maintenance.rpc(operation) : operation());
       return request.id === undefined ? null : rpcSuccess(request.id, result);
     } catch (error) {

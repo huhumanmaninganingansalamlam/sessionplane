@@ -67,6 +67,11 @@ test('failed exact request remains inspectable and displayable without reopening
     assert.equal(await page.locator('#retry').getAttribute('data-clicked'), null);
 
     const failed = core.teamDirectory.getSession(session.sessionId);
+    const interrupted = { ...failed, terminal: false, completedAt: null, sessionState: 'observing' as const,
+      errorCode: 'provider.actionable-alert', reason: 'provider-actionable-alert' };
+    assert.equal(latestDisplayTarget(interrupted)?.role, 'user');
+    assert.ok(latestDisplayTarget(interrupted)?.ids.includes(failed.submittedUserMessageId!));
+    assert.equal(latestDisplayTarget({ ...interrupted, submittedUserMessageId: null, submittedUserTurnId: null }), null);
     assert.equal(latestDisplayTarget({ ...failed, errorCode: 'provider.access-denied' }), null);
     assert.equal(latestDisplayTarget({ ...failed, reason: 'other-terminal-failure' }), null);
     assert.equal(latestDisplayTarget({ ...failed, submittedUserMessageId: null, submittedUserTurnId: null }), null);
