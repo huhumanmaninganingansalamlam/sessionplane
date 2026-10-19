@@ -299,20 +299,25 @@ test('explicit message-timeout reconciliation preserves original ACK, rejects li
     f.fake.surface = users => users + '<aside role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요. 다시 시도</aside>';
     const requestRef = await f.submit(false);
     const original = f.core.teamDirectory.getSession(f.session.sessionId);
-    const input = { teamId: f.team.teamId, requestRef, requestId: 'timeout-reconcile', decision: 'reconcile_failure' };
+    const input: { teamId: string; requestRef: string; requestId: string; decision: string; continuationPrompt?: '계속' } = { teamId: f.team.teamId, requestRef, requestId: 'timeout-reconcile', decision: 'reconcile_failure' };
     await f.fake.page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend', '<button aria-label="Stop">Stop</button>'));
-    await assert.rejects(f.rpc('decide', input), /active generation/);
+    await assert.rejects(f.rpc('decide', { ...input, continuationPrompt: '계속' }), /active generation/);
     assert.equal(f.fake.submitCount, 1);
     await f.fake.page.locator('button[aria-label="Stop"]').evaluate(node => node.remove());
     await f.fake.page.locator('textarea').fill('Preserved user draft');
     await assert.rejects(f.rpc('decide', input), /Preserve the current draft/);
     assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved user draft');
-    await f.fake.page.locator('textarea').fill('');
+    await assert.rejects(f.rpc('decide', { ...input, continuationPrompt: '계속' }), /Preserve the current draft/);
+    await f.fake.page.locator('textarea').fill('계속');
+    await assert.rejects(f.rpc('decide', input), /Preserve the current draft/);
+    input.continuationPrompt = '계속' as const;
     // Automatic recovery cannot classify this as a Thinking failure.
     await assert.rejects(f.core.thinkingFailureRecovery.services.ui.reconcileFailure({ clientId: `team:${f.team.teamId}`, requestId: 'original', sessionId: original.sessionId,
       generation: original.generation, decisionId: 'automatic-timeout' }));
     const result = await f.rpc<any>('decide', input);
     assert.equal(result.reconciliation.evidence.kind, 'message-timeout');
+    assert.equal(result.reconciliation.evidence.continuationPrompt, '계속');
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), '계속');
     const failed = f.core.teamDirectory.getSession(f.session.sessionId);
     assert.equal(failed.reason, 'message-timeout-reconciled');
     assert.equal(failed.submittedUserMessageId, original.submittedUserMessageId);
@@ -320,6 +325,7 @@ test('explicit message-timeout reconciliation preserves original ACK, rejects li
     assert.equal(failed.answerText, null);
     await f.rpc('decide', input);
     assert.equal(f.fake.submitCount, 1, 'Reconciliation and receipt replay never submit');
+    await assert.rejects(f.rpc('decide', { ...input, continuationPrompt: undefined }), /different|conflict|reused/);
     f.fake.failureCount = 1;
     f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="final" data-end-turn="true">Normal final</div>';
     await assert.rejects(f.core.submissionService.send({ clientId: `team:${f.team.teamId}`, sessionId: failed.sessionId, expectedGeneration: 1, requestId: 'owner-continuation', prompt: '계속', model: '5.5 Pro', effort: 'Extra High', sessionDeadlineSec: 60 }), error => { assert.match(String(error), /composer|preparation|decision/i); return true; });

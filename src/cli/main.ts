@@ -743,7 +743,9 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
     ...(parsed.options.value === undefined ? {} : { value: Number(parsed.options.value) }),
   }, sessionSendRpcTimeoutMs(config));
   if (['discover', 'refresh', 'focus', 'latest', 'reconcile_failure'].includes(action ?? '')) {
-    return await printRpc(io, parsed, config, 'workflow.decide', { ...mutation, decision: action }, sessionSendRpcTimeoutMs(config));
+    return await printRpc(io, parsed, config, 'workflow.decide', { ...mutation, decision: action,
+      ...(action === 'reconcile_failure' && parsed.options['continuation-prompt'] !== undefined
+        ? { continuationPrompt: parsed.options['continuation-prompt'] } : {}) }, sessionSendRpcTimeoutMs(config));
   }
   throw new Error(`Unknown request action: ${action}. See sessplane --help.`);
 }

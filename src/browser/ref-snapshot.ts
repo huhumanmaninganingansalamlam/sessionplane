@@ -12,6 +12,7 @@ export interface BrowserSnapshotNode {
   readonly name: string;
   readonly tag: string;
   readonly text: string;
+  readonly draftPresent?: boolean;
   readonly depth: number;
   readonly ancestorIds: readonly string[];
   readonly disabled: boolean;
@@ -104,6 +105,7 @@ export class BrowserRefSnapshotStore {
           name: string;
           tag: string;
           text: string;
+          draftPresent?: boolean;
           depth: number;
           ancestorIds: string[];
           disabled: boolean;
@@ -340,6 +342,8 @@ export class BrowserRefSnapshotStore {
               name: accessibleName(element),
               tag: element.tagName.toLowerCase(),
               text: compact && role === 'textbox' ? '' : normalize(evidenceText(element, true), 500),
+              ...(role === 'textbox' ? { draftPresent: (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+                ? element.value : (element as HTMLElement).innerText ?? '').trim().length > 0 } : {}),
               depth,
               ancestorIds: [...ancestorIds],
               disabled:
