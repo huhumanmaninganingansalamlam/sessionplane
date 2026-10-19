@@ -245,8 +245,8 @@ export class SessionUiService {
     });
   }
 
-  async reconcileFailure(input: PreparationOwner & { readonly decisionId: string; readonly allowMessageTimeout?: boolean }) {
-    return await this.#submissions.reconcileFailure(input, session => this.#failureEvidence(session, session, input.allowMessageTimeout));
+  async reconcileFailure(input: PreparationOwner & { readonly decisionId: string; readonly allowMessageTimeout?: boolean; readonly continuationPrompt?: '계속' | undefined }) {
+    return await this.#submissions.reconcileFailure(input, session => this.#failureEvidence(session, session, input.allowMessageTimeout, input.continuationPrompt));
   }
 
   /** Passive, exact-owner checks; this never dispatches or clears a draft. */
@@ -306,7 +306,7 @@ export class SessionUiService {
       generation: successor.generation, conversationId: original.conversationId });
   }
 
-  async #failureEvidence(session: SessionSnapshot, anchor: SessionSnapshot, allowMessageTimeout = false) {
+  async #failureEvidence(session: SessionSnapshot, anchor: SessionSnapshot, allowMessageTimeout = false, continuationPrompt?: '계속') {
     const page = this.#requirePage(session);
     const binding = this.#registry.refreshPage(session.pageKey!);
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -317,7 +317,7 @@ export class SessionUiService {
           const dom = await observeChatGptDom(page, anchor);
           const activity = await observeChatGptActivity(page, dom);
           if (allowMessageTimeout) {
-            try { await requireIdleConversationPage(page); }
+            try { await requireIdleConversationPage(page, continuationPrompt); }
             catch { throw new SessionPlaneDomainError('provider.failure-unverified', 'Preserve the current draft, attachment or active generation; failure is unverified'); }
           }
           const thinkingAlerts = await observeChatGptAlerts(page, anchor, true);
@@ -326,6 +326,8 @@ export class SessionUiService {
           const timeoutAlerts = allowMessageTimeout ? dom.providerAlerts.filter(alert =>
             /^(?:메시지 전송 시간이 초과되었습니다\. 다시 시도하세요\.|Message (?:sending )?timed out\. Please try again\.)(?:\s*(?:다시 시도|Retry|Try again))?$/i.test(alert.trim())) : [];
           const alerts = [...thinkingAlerts, ...timeoutAlerts];
+          if (continuationPrompt !== undefined && timeoutAlerts.length === 0) throw new SessionPlaneDomainError(
+            'provider.failure-unverified', 'A preserved continuation draft requires the exact idle message-timeout surface');
           this.#requirePage(session);
           const after = this.#registry.refreshPage(session.pageKey!);
           if (binding.bindingEpoch !== after.bindingEpoch || !dom.submittedUserFound || dom.laterUserFound ||
@@ -338,7 +340,7 @@ export class SessionUiService {
           }
           return { kind: timeoutAlerts.length > 0 ? 'message-timeout' as const : 'thinking-failed' as const, pageKey: session.pageKey!, bindingEpoch: after.bindingEpoch,
             conversationId: session.conversationId!, submittedUserMessageId: anchor.submittedUserMessageId,
-            submittedUserTurnId: anchor.submittedUserTurnId, observedAt: controls.capturedAt, providerAlerts: alerts };
+            submittedUserTurnId: anchor.submittedUserTurnId, observedAt: controls.capturedAt, providerAlerts: alerts, ...(continuationPrompt === undefined ? {} : { continuationPrompt }) };
         })(),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new SessionPlaneDomainError('provider.failure-unverified',
