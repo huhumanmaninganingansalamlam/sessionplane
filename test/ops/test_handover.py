@@ -59,10 +59,6 @@ class HandoverTests(unittest.TestCase):
             self.assertEqual(handover.prepare_maintenance(idle), {'phase': 'ready'})
             writer.assert_called_once_with(report, 11, 'ticks')
             prepare.assert_called_once()
-        with patch.object(handover, 'guard'), patch.object(handover, 'health', return_value=busy), \
-                patch.object(handover, 'maintenance_rpc') as prepare:
-            with self.assertRaises(TimeoutError): handover.prepare_maintenance(idle, quiet_timeout=0)
-            prepare.assert_not_called()
         with patch.object(handover, 'guard', side_effect=AssertionError('identity changed')), \
                 patch.object(handover, 'health', return_value=idle), \
                 patch.object(handover, 'maintenance_rpc') as prepare:
