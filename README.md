@@ -9,6 +9,21 @@ and recovery. The `sessplane` CLI and MCP adapter are thin Unix-socket clients.
 SessionPlane is maintained as an independent project with one canonical CLI
 and one runtime contract.
 
+## Browser diagnostics
+
+Persistent Chromium histogram files are disabled by default for both normal
+and manual-login browsers. `SESSIONPLANE_BROWSER_METRICS=true` explicitly enables
+it for diagnosis on the browser host. Modern Chrome initializes metrics before
+feature flags: SessionPlane reserves the dedicated `BrowserMetrics` storage path
+with its own marker file, causing Chrome to use its local-memory fallback. Opt-in
+restores that owned path to a directory. Unknown or active files are never replaced.
+On launch and normal close, only retired
+BrowserMetrics files are pruned: opt-in keeps at most 64 for 24 hours; default
+keeps none. Files belonging to live/inaccessible PIDs are preserved. Chromium's
+single spare file is removed only after the owned browser exits. Existing running
+browsers keep their launch options until their next normal launch; no restart is
+required or performed to change this setting.
+
 ## Remote execution over SSH
 
 Local mode remains the default. For remote mode, install the same SessionPlane

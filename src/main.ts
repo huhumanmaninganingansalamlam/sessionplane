@@ -120,6 +120,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
           scopeProfileByBrowser: config.browserScopedProfile,
           pageRegistry,
           headless: options.browserHeadless ?? config.browserHeadless,
+          persistentMetrics: config.browserMetrics,
           browserPreference: config.browserPreference,
           browserExecutable: config.browserExecutable,
           launchTimeoutMs: config.browserLaunchTimeoutMs,

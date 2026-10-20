@@ -39,6 +39,7 @@ export interface SessionPlaneConfig {
   readonly rpcRequestTimeoutMs: number;
   readonly browserLaunchTimeoutMs: number;
   readonly browserHeadless: boolean;
+  readonly browserMetrics: boolean;
   readonly browserPreference: BrowserPreference;
   readonly browserExecutable: string | null;
   readonly enabledProviders: readonly ProviderName[];
@@ -74,6 +75,7 @@ export interface ConfigOverrides {
   readonly rpcRequestTimeoutMs?: number;
   readonly browserLaunchTimeoutMs?: number;
   readonly browserHeadless?: boolean;
+  readonly browserMetrics?: boolean;
   readonly browserPreference?: BrowserPreference;
   readonly browserExecutable?: string;
   readonly enabledProviders?: readonly string[];
@@ -288,6 +290,7 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
     browserHeadless:
       overrides.browserHeadless ??
       parseBoolean(env.SESSIONPLANE_BROWSER_HEADLESS, false, 'SESSIONPLANE_BROWSER_HEADLESS'),
+    browserMetrics: overrides.browserMetrics ?? parseBoolean(env.SESSIONPLANE_BROWSER_METRICS, false, 'SESSIONPLANE_BROWSER_METRICS'),
     browserPreference,
     browserExecutable,
     enabledProviders,
