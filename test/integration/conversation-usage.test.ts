@@ -42,6 +42,11 @@ test('ten confirmed turns recommend handoff; failures, replays, restart and repl
       const waited = await rpc('wait', { teamId, requestRefs: [lastRequest], waitMs: 5_000 });
       assert.equal(waited.results[0].terminal, true);
       assert.equal(waited.results[0].conversationUsage.confirmedTurnCount, turn);
+      if (turn === 10) {
+        assert.match(sent.conversationUsage.recommendation, /same team, stable role and provider/);
+        assert.doesNotMatch(sent.conversationUsage.recommendation, /sessionplane_role_create/);
+        assert.equal(waited.results[0].conversationUsage.recommendation, sent.conversationUsage.recommendation);
+      }
       team = await rpc('team_get', { teamId });
     }
     assert.match(team.roles[0].conversationUsage.recommendation, /handoff.*sessionplane_session_replace/);
@@ -50,11 +55,17 @@ test('ten confirmed turns recommend handoff; failures, replays, restart and repl
     service = await startCore(options);
     team = await rpc('team_get', { teamId });
     assert.equal(team.roles[0].conversationUsage.confirmedTurnCount, 10);
+    const originalRole = team.roles[0];
     const replaced = await rpc('session_replace', { teamId, roleRef: team.roles[0].roleRef, requestId: 'replace-after-handoff' });
+    assert.equal(replaced.roles.length, 1);
+    assert.equal(replaced.roles[0].roleId, originalRole.roleId);
+    assert.equal(replaced.roles[0].roleKey, originalRole.roleKey);
+    assert.notEqual(replaced.roles[0].currentSessionId, originalRole.currentSessionId);
     assert.equal(replaced.roles[0].conversationUsage.confirmedTurnCount, 0);
     assert.equal(replaced.roles[0].conversationUsage.handoffRecommended, false);
     const historical = await rpc('team_get', { teamId, requestRef: lastRequest });
     assert.equal(historical.request.conversationUsage.confirmedTurnCount, 10);
+    assert.equal(historical.request.answerText, 'Verified answer');
     assert.deepEqual(historical.requests, [], 'exact recovery does not repeat old request lists');
     assert.equal(Object.keys(historical)[1], 'request', 'the requested state precedes team context');
     assert.equal(historical.objective, undefined);

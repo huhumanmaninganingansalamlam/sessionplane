@@ -222,29 +222,27 @@ out prompts, infer consensus, or inject answers into other roles.
   prior deletion attempts are rejected. This is not an access/security bypass or
   automatic recovery; do not duplicate or migrate an active continuation without
   its current coordinator's routing decision.
-- By default, `sessionplane_session_replace` attempts to permanently delete the previous provider
-  conversation once and ends observation, then creates its successor. Tabs close only
-  after confirmed deletion; refused or uncertain deletion keeps them available.
-  Retrieve required outputs and write the handoff first. Local stored answers/files
-  remain. Deletion failure or unknown conversation identity does not block replacement;
-  provider deletion is never blindly retried. A confirmed deletion can resume only tab closure on an explicit replay. Old observation stays stopped across restarts.
-  It never replays unresolved work.
-  Routing success is separate from `replacement.cleanup`: inspect its exact
-  predecessor session/generation/conversation, deletion request ID and actual
-  deletion receipt client/request/status. Outcomes are `confirmed`, `refused`,
-  `uncertain`, `not-attempted`; historical missing results stay `unknown` without
-  cleanup retry. Obtain required specific deletion confirmation before replacement;
-  a handoff or turn-count recommendation is not confirmation.
-  Read `conversationUsage`: at 10 confirmed user turns, `handoffRecommended:true`
-  recommends finishing the current request, retrieving outputs, and writing a
-  handoff with the objective, decisions, evidence/files, unresolved work, next step,
-  and model/effort. For a nondeleting handoff, use `sessionplane_role_create` with
-  a unique roleKey and roleType `custom` in the same team, then continue through
-  that role's fresh roleRef. The old role/session stays available; this does not
-  repoint the primary role. For the narrow prepared/unsubmitted same-role case,
-  use preserving replacement above. Default deleting replacement still requires
-  specific deletion confirmation.
-  This recommendation does not authorize replaying an unresolved submission.
+- For authorized context renewal, use `sessionplane_session_replace` on the same
+  stable role with its fresh `roleRef` and the same provider. Keep the role ID/key;
+  do not create dated continuation roles for the same responsibility.
+  Resolve the current request, retrieve required answers/files and save a concise
+  handoff first: objective, decisions, evidence/artifacts, unresolved work, next
+  step and model/effort. Carry it into the returned successor's fresh roleRef with
+  fresh preparation. Replacement itself never sends or replays a prompt.
+  `conversationUsage.handoffRecommended` at 10 confirmed turns is a cue to prepare
+  this handoff, not a cutoff or permission to interrupt active/UNKNOWN work.
+  Default replacement makes one authorized best-effort provider conversation
+  deletion attempt, ends old observation and independently closes verified idle
+  owned tabs. Deletion failure does not block routing or safe tab closure. Preserve
+  active work, uncollected results, shared pages and drafts; never bypass a guard.
+  Local stored answers/files and original request identities remain available.
+  Inspect `replacement.cleanup` for the exact predecessor and deletion receipt:
+  outcomes are `confirmed`, `refused`, `uncertain`, `not-attempted`, or historical
+  `unknown`. Check `pageCleanup.closedPages` and `pageErrors` separately and confirm
+  the old target is closed; tab closure does not prove provider deletion. Do not
+  blindly retry a provider DELETE. Use already granted cleanup authorization;
+  a turn count alone grants none. The preserving recovery mode above deliberately
+  retains old pages and is not the completed-context renewal path.
   If team_get shows an existing role with no session/roleRef, initialize it with
   session_replace using its roleKey instead. Do not recreate that role.
 - `sessionplane_team_delete` deletes an entire team, its roles and request history,
@@ -252,15 +250,14 @@ out prompts, infer consensus, or inject answers into other roles.
   deletion is attempted once; per-session failures do not block local deletion.
   Pass teamId and a stable requestId; exported files remain.
 - `sessionplane_role_retire` ends a non-primary role without deleting provider history.
-- `sessionplane_session_delete` permanently removes a completed provider conversation
-  after retrieving required outputs. Pass its exact requestRef and outputsRetrieved:true.
-  Verify both `deleted:true` and `pageCleanup.pageErrors:[]`; provider deletion alone
-  does not prove the tabs closed. Replaying the same request resumes failed tab closure
-  without repeating confirmed provider deletion. Preserve draft/streaming pages.
-  After an authorized handoff to a new custom role is complete and all old outputs
-  are saved, explicitly delete the old completed conversation by its exact requestRef.
-  A token/length limit warning, role retirement, or a newly created role is not cleanup.
-  Never delete active, ambiguous or shared work.
+- `sessionplane_session_delete` attempts deletion of the exact completed provider
+  conversation after retrieving required outputs. Pass its exact requestRef and
+  outputsRetrieved:true. Check provider deletion separately from
+  `pageCleanup.closedPages`/`pageErrors`, including typed error details: deletion
+  failure does not block safe idle-tab closure. Replaying a confirmed deletion
+  receipt can resume tab closure without repeating the provider DELETE. Preserve
+  drafts, active generation and ambiguous/shared work. Role retirement or creating
+  another role is not cleanup; normal context renewal uses the same stable role.
 - ChatGPT is enabled by default. Gemini/Grok require explicit operator enablement.
   Human verification must be completed by a human; never solve or bypass it.
 

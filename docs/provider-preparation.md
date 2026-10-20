@@ -333,12 +333,15 @@ Keep requested model/effort and verify attachment identity. Do not copy an entir
 long transcript. The 10-turn recommendation is a handoff cue, not an automatic cutoff. New sends still require
 fresh preparation decisions. A new session does not imply permission to repeat
 an unresolved submission; follow the caller/operator's explicit recovery intent.
-Use deletion-backed replacement only with the required specific deletion confirmation. An
-instruction to hand off or continue, including the 10-turn cue, is not that
-confirmation. A supported nondeleting handoff uses `sessionplane_role_create`
-with a unique custom role in the same team; the original role/session remains
-available and the primary route is unchanged. The preserving mode above is the
-narrow same-role option for prepared/unsubmitted recovery, not submitted work.
+Use existing replacement/cleanup authorization; a 10-turn cue alone grants none.
+Keep the same stable role ID/key and provider for the same responsibility, using
+its fresh roleRef and the successor returned by `sessionplane_session_replace`.
+Do not create dated/custom continuation roles to renew context. Provider deletion
+is best effort; inspect `replacement.cleanup.pageCleanup` and confirm verified
+idle old tabs close independently of deletion success. Preserve active/UNKNOWN
+work, uncollected results, shared pages and drafts. The preserving mode above is
+the narrow same-role option for prepared/unsubmitted recovery, not the ordinary
+completed-context handoff.
 
 Default deleting replacement deliberately discards the predecessor's unresolved observation; it
 does not prove an uncertain submission was never accepted, nor that provider
