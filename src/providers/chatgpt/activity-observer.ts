@@ -19,7 +19,7 @@ export async function observeChatGptActivity(
     const disconnected = await page.locator('[role="status"]').evaluateAll(nodes => nodes.some(node =>
       node.closest('[data-message-author-role], [data-chatgpt-search-message-ids], article, nav, aside, [aria-hidden="true"], [inert]') === null &&
       node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
-      /^(?:연결이 (?:해제|끊어)되었습니다\.\s*전체 답변을 기다리는 중입니다\.?|Disconnected\.\s*Waiting for (?:the )?(?:full|complete) (?:answer|response)\.?)$/i.test((node.textContent ?? '').trim())));
+      /^(?:연결이 (?:해제되었습니다|끊어졌습니다)\.\s*전체 답변을 기다리는 중입니다\.?|Disconnected\.\s*Waiting for (?:the )?(?:full|complete) (?:answer|response)\.?)$/i.test((node.textContent ?? '').trim())));
     if (disconnected) return { strength: 'unknown', reason: 'provider-stream-disconnected' };
     if (dom.candidate?.streamingMarker === true) {
       return { strength: 'strong', reason: 'assistant-streaming-marker' };
