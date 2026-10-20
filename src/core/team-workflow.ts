@@ -160,9 +160,33 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName: string; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
+    if (input.decision === 'hostspan_permission') {
+      return await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
+        const method = 'workflow.hostspan_permission';
+        const requestHash = hashCanonical({ method, payload: input });
+        const receipt = { clientId: request.clientId, requestId: input.requestId, method, requestHash };
+        const prior = this.services.receipts.get(receipt.clientId, receipt.requestId);
+        if (prior !== null) {
+          if (prior.method !== method || prior.requestHash !== requestHash) throw new SessionPlaneDomainError(
+            'input.idempotency-conflict', 'Permission action identity was reused with different arguments');
+          if (prior.status === 'complete') return JSON.parse(prior.resultJson) as Record<string, unknown>;
+          throw new SessionPlaneDomainError('provider.action-unknown', 'Permission action was attempted; inspect without repeating the grant');
+        }
+        const session = this.#role({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}` });
+        if (!session.pageKey) throw new SessionPlaneDomainError('browser.unavailable', 'No connected request page');
+        return await this.services.pageMutex.runExclusive(session.pageKey, async () => {
+          this.services.receipts.record({ ...receipt, status: 'attempted', result: { requestRef: input.requestRef } });
+          const permission = await this.services.ui.hostspanPermission(session, input);
+          const result = { requestOk: true, requestRef: input.requestRef, sessionId: session.sessionId,
+            generation: session.generation, permission };
+          this.services.receipts.record({ ...receipt, status: 'complete', result });
+          return result;
+        });
+      });
+    }
     if (input.decision === 'retire_observation') {
       return await this.services.scheduler.actorFor(request.sessionId).enqueue(() => {
         const result = this.services.receipts.execute({ clientId: request.clientId, requestId: input.requestId,
