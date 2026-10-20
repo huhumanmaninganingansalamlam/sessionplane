@@ -357,6 +357,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageRegistry,
     loginUrl: config.chatgptUrl,
     profileDir: config.profileDir,
+    recoverBrowser: () => restartBrowser(),
   });
   if (options.enableInternalBrowserControlRpc === true) {
     registerBrowserControlMethods(router, browserControl);

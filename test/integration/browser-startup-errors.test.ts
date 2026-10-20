@@ -10,6 +10,7 @@ import { findHostBrowser } from '../../src/browser/browser-health.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { callRpc } from '../../src/cli/client.ts';
 import { setTimeout as delay } from 'node:timers/promises';
 import { normalizeCliError } from '../../src/cli/format.ts';
 
@@ -93,7 +94,15 @@ exec ${quote(actual.executable)} "$@"
     assert.equal(core.teamDirectory.getSession(session.sessionId).generation, before.generation);
     assert.deepEqual(core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(session.sessionId), outbox);
     rmSync(fail);
-    await core.restartBrowser();
+    // Existing public login path performs explicit recovery; no private control API.
+    const navigationPage = core.browserOwner!.openLoginPage.bind(core.browserOwner!);
+    core.browserOwner!.openLoginPage = async () => {
+      const { binding } = await core.browserOwner!.createPage();
+      return binding; // Isolate ChatGPT navigation from the real launch/recovery path.
+    };
+    try {
+      await callRpc({ socketPath: config.socketPath, method: 'browser.login', params: {}, timeoutMs: 30_000, maxLineBytes: config.rpcMaxLineBytes });
+    } finally { core.browserOwner!.openLoginPage = navigationPage; }
     assert.equal(core.browserOwner!.status.state, 'ready');
     assert.equal(core.teamDirectory.getSession(session.sessionId).generation, before.generation);
     assert.equal(fake.submitCount, 1);
