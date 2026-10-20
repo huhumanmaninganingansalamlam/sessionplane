@@ -24,12 +24,13 @@ test('explicit HostSpan permission controls only the current exact grant, preser
       <div data-message-author-role="user" data-message-id="user-message-1">Fixture question</div>
       <textarea id="prompt-textarea">Keep my draft</textarea><button data-testid="stop-button">Stop generating</button>
       <div role="alert" id="permission">hostspan-desktop Process Start
-        <button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#details').hidden=false">View details</button>
-        <section id="details" hidden>Command: original work
-          <button id="allow" onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove()">Allow once</button>
+        <button aria-expanded="false" onclick="document.querySelector('#details').hidden=false">View details</button>
+        <button id="allow" onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove()">Allow once</button>
           <button onclick="throw Error('Must not click')">Always allow</button>
-        </section>
-      </div><div role="alert">another-app Process Start<button>Allow</button></div>
+      </div>
+      <section role="dialog" id="details" hidden>hostspan-desktop Process Start Command: original work
+        <button aria-label="Close dialog" onclick="document.querySelector('#details').hidden=true">Close dialog</button>
+      </section><div role="alert">another-app Process Start<button>Allow</button></div>
     </main>` }));
     await page.goto(`https://chatgpt.com/c/conversation-${session.sessionId}`);
     const open = fake.openSubmission.bind(fake);
