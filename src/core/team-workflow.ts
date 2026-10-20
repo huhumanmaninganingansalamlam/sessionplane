@@ -603,7 +603,7 @@ export class TeamWorkflow {
                 return this.services.ui.recoverHistoricalAnswer(latest.original, latest.current, false);
               }));
             const answer = recovery.answerRecovery;
-            observed = { ...recovery, ...(answer.terminal
+            observed = { ...recovery, storedResult: { ...recovery.storedResult, completedAt: original.completedAt }, ...(answer.terminal
               ? { responseMessageId: answer.responseMessageId, answerText: answer.answerText }
               : answer.reason === 'historical-answer-unchanged' ? {} : {
                 terminal: false, completedAt: null, status: 'recovery_required', reason: answer.reason,
