@@ -38,6 +38,17 @@ class HandoverTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt): handover.prepare_maintenance(current)
             self.assertEqual(rpc.call_args.args[1], 'system.maintenance.resume')
 
+    def test_explicit_legacy_recovery_migration_drains_operations_without_waiting_for_generation(self):
+        h = {'process': {'pid': 11, 'startedAt': 'original'}, 'maintenance': {'coordinatedDrain': True}}
+        with patch.object(handover.time, 'sleep'), patch.object(handover, 'maintenance_rpc', side_effect=[
+                {'phase': 'draining', 'activeOperations': 1, 'token': 'owned'},
+                {'phase': 'draining', 'activeOperations': 0, 'token': 'owned'}]) as rpc:
+            lease = handover.prepare_maintenance(h, recovery_handover=True)
+            self.assertEqual(lease['phase'], 'draining')
+            self.assertEqual(lease['activeOperations'], 0)
+            self.assertEqual(rpc.call_count, 2)
+            self.assertEqual(rpc.call_args.args[2]['token'], 'owned')
+
     def test_long_read_finishes_before_fenced_drain_and_busy_or_changed_core_is_preserved(self):
         idle = {'requestOk': True, 'process': {'pid': 11, 'startedAt': 'original'},
                 'maintenance': {'phase': 'running', 'activeOperations': 0},
@@ -139,6 +150,32 @@ class HandoverTests(unittest.TestCase):
             with patch.object(handover, 'read_db', return_value=db), patch.object(handover, 'no_writer', side_effect=AssertionError('writer')):
                 with self.assertRaisesRegex(AssertionError, 'writer'):
                     handover.guard(before, before)
+
+    def test_opted_in_observation_requires_the_live_cores_durable_recovery_fence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, '.sessionplane-profile.lock').write_text(json.dumps({'pid': 11, 'browserPid': 22}))
+            dbpath = pathlib.Path(directory, 'state.sqlite')
+            with closing(sqlite3.connect(dbpath)) as db:
+                db.executescript("CREATE TABLE outbox(session_id,generation,submission_state,payload_json);"
+                                 "CREATE TABLE generations(session_id,generation,completed_at);")
+                db.execute("INSERT INTO outbox VALUES('original',1,'submitted',?)", (json.dumps({'thinkingFailureRecovery': True}),))
+                db.execute("INSERT INTO generations VALUES('original',1,NULL)"); db.commit()
+            h = {'requestOk': True, 'process': {'pid': 11, 'startedAt': 'original'},
+                 'browser': {'state': 'ready', 'browserPid': 22, 'profileDir': directory, 'debuggingPort': 4444},
+                 'database': {'integrity': 'ok', 'path': str(dbpath)},
+                 'metrics': {'session_actor_queue_depth': 0}, 'maintenance': {'durableRecoveryHandover': True}}
+            handover.guard_state(h, h)
+            legacy = copy.deepcopy(h)
+            legacy['maintenance'].pop('durableRecoveryHandover')
+            with self.assertRaisesRegex(AssertionError, 'Legacy core'):
+                handover.guard_state(legacy, legacy)
+            handover.guard_state(legacy, legacy, recovery_handover=True)
+            with closing(sqlite3.connect(dbpath)) as db:
+                db.execute("UPDATE outbox SET submission_state='submit_attempted'"); db.commit()
+            with self.assertRaisesRegex(AssertionError, 'Active submission'):
+                handover.guard_state(h, h)
+            with self.assertRaisesRegex(AssertionError, 'Active submission'):
+                handover.guard_state(legacy, legacy, recovery_handover=True)
 
     def test_target_identity_is_exact_and_read_only(self):
         with tempfile.TemporaryDirectory() as directory:

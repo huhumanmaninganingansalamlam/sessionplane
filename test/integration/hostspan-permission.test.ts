@@ -23,11 +23,11 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: `<main>
       <div data-message-author-role="user" data-message-id="user-message-1">Fixture question</div>
       <textarea id="prompt-textarea">Keep my draft</textarea><button data-testid="stop-button">Stop generating</button>
-      <div role="alert" id="permission">hostspan-desktop Process Start
-        <button aria-expanded="false" onclick="document.querySelector('#details').hidden=false">View details</button>
-        <button id="allow" onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove()">Allow once</button>
+      <section id="permission"><div role="alert">hostspan-desktop Process Start
+        <button aria-expanded="false" onclick="document.querySelector('#details').hidden=false">View details</button></div>
+        <button id="allow" aria-label="Allow once" onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove()"><svg></svg></button>
           <button onclick="throw Error('Must not click')">Always allow</button>
-      </div>
+      </section>
       <section role="dialog" id="details" hidden>hostspan-desktop Process Start Command: original work
         <button aria-label="Close dialog" onclick="document.querySelector('#details').hidden=true">Close dialog</button>
       </section><div role="alert">another-app Process Start<button>Allow</button></div>
@@ -68,6 +68,14 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     assert.equal(await page.evaluate(() => (window as unknown as { grants: number }).grants), 1);
     assert.equal(await page.locator('textarea').inputValue(), 'Keep my draft');
     assert.equal(await page.locator('[data-testid="stop-button"]').count(), 1);
+    await page.evaluate(() => document.querySelector('main')!.insertAdjacentHTML('beforeend',
+      '<section><div role="alert">hostspan-desktop Process Start Command: second read</div><button onclick="window.grants++">Allow once</button></section>'));
+    const pending = await decide('inspect-second', { action: 'inspect' });
+    const second = await decide('allow-second', { action: 'allow',
+      evidenceHash: (pending.structuredContent.permission as { evidenceHash: string }).evidenceHash });
+    assert.equal((second.structuredContent.permission as { permissionStillVisible: boolean }).permissionStillVisible, true,
+      'A surviving permission alert is not reported as gone just because its actions are outside the alert');
+    assert.equal(await page.evaluate(() => (window as unknown as { grants: number }).grants), 2);
     assert.equal(fake.submitCount, 1);
     assert.equal(fake.stopCount, 0);
     assert.equal(core.teamDirectory.getSession(session.sessionId).generation, 1);
