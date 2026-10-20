@@ -149,7 +149,7 @@ def no_writer(dbpath):
     if any(row['blocksHandover'] for row in report['locks']):
         raise LockActivityError(report)
 
-def guard_state(h, expected, require_idle=True):
+def guard_state(h, expected, require_idle=True, recovery_handover=False):
     assert h['requestOk'] and h['browser']['state']=='ready' and h['database']['integrity']=='ok'
     assert h['database']['path'] == expected['database']['path'], 'Database path changed'
     for key in ['pid','startedAt']: assert h['process'][key]==expected['process'][key], 'Core owner changed'
@@ -158,14 +158,14 @@ def guard_state(h, expected, require_idle=True):
         assert h['metrics']['session_actor_queue_depth']==0, 'Actor running or queued; natural drain required'
     with read_db(h) as db:
         assert db.execute("SELECT count(*) FROM outbox WHERE submission_state IN ('submit_attempted','composer_filled')").fetchone()[0]==0, 'Active submission'
-        if not h.get('maintenance', {}).get('durableRecoveryHandover'):
+        if not recovery_handover and not h.get('maintenance', {}).get('durableRecoveryHandover'):
             assert db.execute("SELECT count(*) FROM outbox o JOIN generations g ON g.session_id=o.session_id AND g.generation=o.generation WHERE json_extract(o.payload_json,'$.thinkingFailureRecovery')=1 AND g.completed_at IS NULL").fetchone()[0]==0, 'Legacy core cannot hand over unfinished opted-in recovery; preserve request until natural completion'
     lock=json.loads((pathlib.Path(h['browser']['profileDir'])/'.sessionplane-profile.lock').read_text())
     assert lock['pid']==h['process']['pid'] and lock['browserPid']==h['browser']['browserPid']
 
 
-def guard(h, expected, require_idle=True):
-    guard_state(h, expected, require_idle)
+def guard(h, expected, require_idle=True, recovery_handover=False):
+    guard_state(h, expected, require_idle, recovery_handover)
     no_writer(h['database']['path'])
 
 def drainable_writer(report, pid, ticks):
@@ -238,14 +238,17 @@ def prefreeze_drain(h, ticks, chrome_ticks, target, identity, receipt, timeout=5
                                          'timings': timings, 'samples': samples})
 
 
-def frozen_guard(current, expected, ticks, chrome_ticks, target, identity):
+def frozen_guard(current, expected, ticks, chrome_ticks, target, identity, recovery_handover=False):
     """Called only under the bounded guardian; never issue health to a frozen core."""
     pid = expected['process']['pid']
     chrome = expected['browser']['browserPid']
     assert procstat(pid)[19] == ticks and procstat(chrome)[19] == chrome_ticks, 'PID reused'
     assert live(chrome), 'Chrome exited'
     no_writer(expected['database']['path'])
-    guard(current, expected)  # Includes fresh submission/recovery/profile/lock checks.
+    if recovery_handover:
+        assert current['maintenance']['phase'] == 'draining' and current['maintenance']['activeOperations'] == 0, 'Recovery handover requires drained admission'
+        assert current['maintenance']['expiresAt'] > time.time() * 1000, 'Recovery handover lease expired; preserve core'
+    guard(current, expected, recovery_handover=recovery_handover)  # Fresh submission/profile/lock checks.
     with read_db(expected) as db:
         assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok', 'DB not healthy'
     post = request_identity(expected, target)
@@ -488,11 +491,16 @@ def require_admission_fence(h, required):
         assert h.get('maintenance', {}).get('phase') == 'running', 'Core admission fence unavailable or already leased; no legacy fallback'
 
 
-def prepare_maintenance(h):
+def prepare_maintenance(h, recovery_handover=False):
     if h.get('maintenance', {}).get('coordinatedDrain'):
         lease = maintenance_rpc(h, 'system.maintenance.quiesce', lease_owner(h))
         try:
             while lease['phase'] != 'ready':
+                # Bootstrap only: old cores track recovery operations but incorrectly
+                # require the external generation to finish. Keep admission closed;
+                # the existing bounded freeze/DB guards perform the atomic exit.
+                if recovery_handover and lease['phase'] == 'draining' and lease['activeOperations'] == 0:
+                    return lease
                 time.sleep(1)
                 lease = maintenance_rpc(h, 'system.maintenance.quiesce', {**lease_owner(h), 'token': lease['token']})
             return lease
@@ -525,6 +533,7 @@ def main():
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--issuers-quiesced', action='store_true')
     parser.add_argument('--core-maintenance', action='store_true', help='Require the live core admission fence; never fall back to legacy freeze')
+    parser.add_argument('--legacy-recovery-handover', action='store_true', help='Explicit browser-preserving migration from the legacy unfinished-recovery guard; requires drained core admission and bounded exact-PID transition')
     parser.add_argument('--local-validation', type=pathlib.Path, help='Explicit local-only validation receipt instead of remote CI')
     parser.add_argument('--core-pid', type=int, required=True)
     parser.add_argument('--chrome-pid', type=int, required=True)
@@ -556,6 +565,8 @@ def main():
         assert (args.resume_staged or args.resume_pre_signal).resolve() == (root/'local-receipt').resolve(), 'Existing bundle receipt must be the inspected prior attempt'
     h=health(); assert h['process']['pid']==args.core_pid and h['browser']['browserPid']==args.chrome_pid, 'PID differs from supplied live receipt'
     require_admission_fence(h, args.core_maintenance)
+    if args.legacy_recovery_handover:
+        assert args.core_maintenance and h.get('maintenance', {}).get('coordinatedDrain') and not h['maintenance'].get('durableRecoveryHandover'), 'Legacy recovery migration requires the old coordinated admission fence'
     pid=args.core_pid; proc=pathlib.Path(f'/proc/{pid}')
     assert proc.stat().st_uid==os.getuid() and pathlib.Path(f'/proc/{args.chrome_pid}').stat().st_uid==os.getuid()
     ticks=procstat(pid)[19]; chrome_ticks=procstat(args.chrome_pid)[19]
@@ -577,15 +588,23 @@ def main():
     identity=request_identity(h, args)
     # The supported fence drains recovery actors atomically. An idle sample before
     # acquiring it races those actors; all post-fence guards still require idle.
-    guard(h,h,require_idle=not args.core_maintenance)
-    print(json.dumps({'phase':'preflight','corePid':pid,'chromePid':args.chrome_pid,'sourceCommit':manifest['sourceCommit'],'packageVerified':True,'actorDepth':h['metrics']['session_actor_queue_depth'],'activeSubmitCount':0,'dbWriterLocks':0,'next':'apply through required core admission fence' if args.core_maintenance else 'apply only during coordinated issuer pause'},indent=2),flush=True)
+    guard_state(h,h,require_idle=not args.core_maintenance, recovery_handover=args.legacy_recovery_handover)
+    if args.core_maintenance:
+        # An admitted operation may still own the WAL writer before draining.
+        # Foreign/checkpoint/recovery locks remain errors; post-drain is strict.
+        writer_pending = drainable_writer(lock_report(h['database']['path']), pid, ticks)
+    else:
+        no_writer(h['database']['path'])
+        writer_pending = False
+    print(json.dumps({'phase':'preflight','corePid':pid,'chromePid':args.chrome_pid,'sourceCommit':manifest['sourceCommit'],'packageVerified':True,'actorDepth':h['metrics']['session_actor_queue_depth'],'activeSubmitCount':0,'ownWriterPendingDrain':writer_pending,'next':'apply through required core admission fence' if args.core_maintenance else 'apply only during coordinated issuer pause'},indent=2),flush=True)
     if not args.apply: return
     receipt=args.receipt_dir.resolve() if args.receipt_dir is not None else root/'local-receipt'
     receipt.mkdir(mode=0o700) # never rerun an issued handover blindly
     save(receipt/'validation-basis.json', {'mode': 'local' if args.local_validation else 'ci',
         'sourceCommit': manifest['sourceCommit'], 'packageSha256': manifest['packageSha256'],
         'localValidation': json.loads(args.local_validation.read_text()) if args.local_validation else None,
-        'admission': 'core-maintenance' if args.core_maintenance else 'issuers-quiesced'})
+        'admission': 'core-maintenance' if args.core_maintenance else 'issuers-quiesced',
+        'legacyRecoveryHandover': args.legacy_recovery_handover})
     save(receipt/'before-health.json',h); save(receipt/'before-identity.json',identity)
     if args.resume_pre_signal is not None:
         save(receipt/'resumes.json', {'priorReceipt': str(args.resume_pre_signal.resolve()), 'meaning': 'same original live core; pinned candidate already on disk; runtime SHA not inferred from disk'})
@@ -601,19 +620,21 @@ def main():
     lease = None
     try:
         if 'maintenance' in h:
-            lease = prepare_maintenance(h)
-            assert lease['phase'] == 'ready', 'Core has not drained'
+            lease = prepare_maintenance(h, recovery_handover=args.legacy_recovery_handover)
+            assert lease['phase'] == 'ready' or (args.legacy_recovery_handover and lease['phase'] == 'draining' and lease['activeOperations'] == 0), 'Core has not drained'
             save(receipt/'maintenance.json', lease)
         if lease is None:
             current = prefreeze_drain(h, ticks, chrome_ticks, args, identity, receipt)
         else:
             for _ in range(2):
-                current=health(); guard(current,h)
+                current=health(); guard(current,h, recovery_handover=args.legacy_recovery_handover)
+                if args.legacy_recovery_handover:
+                    assert current['maintenance']['phase'] == 'draining' and current['maintenance']['activeOperations'] == 0, 'Core admission changed'
                 assert procstat(pid)[19]==ticks and procstat(args.chrome_pid)[19]==chrome_ticks, 'PID reused'
                 assert request_identity(current, args)['request']==identity['request']
             no_writer(h['database']['path'])
         transition = {'phase':'drained-core-only-transition','oldPid':pid,'oldStartTicks':ticks,'chromePid':args.chrome_pid,'atUnix':time.time(),'sourceCommit':manifest['sourceCommit']}
-        if lease is not None:
+        if lease is not None and not args.legacy_recovery_handover:
             # The core rechecks the lease synchronously and exits without closing Chrome.
             # EOF is not success until the pinned process is independently gone below.
             save(receipt/'handover.json', transition)
@@ -623,7 +644,7 @@ def main():
             with frozen_core(fd, pid, ticks) as commit:
                 save(receipt/'transition-phase.json', {'phase': 'frozen-guard'})
                 # Frozen core cannot race this DB/lock check. Do not issue health RPC.
-                frozen_guard(current, h, ticks, chrome_ticks, args, identity)
+                frozen_guard(current, h, ticks, chrome_ticks, args, identity, recovery_handover=args.legacy_recovery_handover)
                 save(receipt/'handover.json', transition)
                 commit()
     except LockActivityError as error:
