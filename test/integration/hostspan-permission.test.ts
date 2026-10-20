@@ -5,6 +5,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
+import { runCli } from '../../src/cli/main.ts';
+import { Readable, Writable } from 'node:stream';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
@@ -42,8 +44,13 @@ test('explicit HostSpan permission controls only the current exact grant, preser
         decision: 'hostspan_permission', appName: 'hostspan-desktop', toolName: 'Process Start', ...extra },
       socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
     t.mock.method(page, 'bringToFront', async () => { throw Error('Must not focus'); });
-    const inspected = await decide('inspect', { action: 'inspect' });
-    assert.equal(inspected.isError, false, JSON.stringify(inspected));
+    let output = '';
+    const stream = new Writable({ write(chunk, _encoding, done) { output += chunk.toString(); done(); } });
+    assert.equal(await runCli(['request', 'hostspan_permission', team.teamId, String(row.outbox_id), '--action', 'inspect',
+      '--app-name', 'hostspan-desktop', '--tool-name', 'Process Start', '--request-id', 'cli-inspect', '--socket', config.socketPath, '--json'],
+      { stdin: Readable.from([]), stdout: stream, stderr: stream }), 0, output);
+    const inspected = { structuredContent: JSON.parse(output) };
+    assert.equal(inspected.structuredContent.requestOk, true, JSON.stringify(inspected));
     const permission = inspected.structuredContent.permission as { evidenceHash: string; permissionText: string };
     assert.match(permission.permissionText, /Command: original work/);
     assert.equal((await decide('foreign-app', { action: 'allow', appName: 'another-app', evidenceHash: permission.evidenceHash })).isError, true);

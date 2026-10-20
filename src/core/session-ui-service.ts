@@ -581,9 +581,11 @@ export class SessionUiService {
     const messages = (await readChatGptMessages(page)).filter(message => message.role === 'user');
     if (messages.at(-1)?.messageId !== session.submittedUserMessageId) throw new SessionPlaneDomainError(
       'provider.permission-unverified', 'The original user anchor must be the current turn');
-    const result = await controlHostSpanPermission(page, input);
-    this.#requirePage(session);
-    return result;
+    try {
+      const result = await controlHostSpanPermission(page, input);
+      this.#requirePage(session);
+      return result;
+    } catch (error) { throw typedUiError(error); }
   }
 
   async focus(session: SessionSnapshot) {
