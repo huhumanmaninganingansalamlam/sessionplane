@@ -181,7 +181,10 @@ export class TeamWorkflow {
             if (input.workComplete !== true || (role.currentSessionId === request.sessionId &&
                 role.roleState !== 'retired' && !completedSuccessor)) throw new SessionPlaneDomainError(
               'session.recovery-unavailable', 'Requires explicit work completion and a displaced/retired session or a completed same-team successor request');
-            if (current.terminal || !current.promptSubmitted ||
+            const generation = this.#sessions.getGenerationResult(request.sessionId, request.generation);
+            // Superseded routing does not prove that the submitted generation resolved.
+            if ((current.terminal && current.sessionState !== 'superseded') ||
+                generation?.completedAt !== null || !current.promptSubmitted ||
                 !['submitted', 'submission_unknown'].includes(current.submissionState ?? '')) throw new SessionPlaneDomainError(
               'session.recovery-unavailable', 'Only unresolved submitted observation can be retired');
             const timestamp = new Date().toISOString();

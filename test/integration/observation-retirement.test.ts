@@ -8,6 +8,7 @@ import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { callRpc } from '../../src/cli/client.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 
 test('explicit obsolete observation retirement preserves submissions, rejects active/foreign evidence and survives restart', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-retire-observation-'));
@@ -26,7 +27,11 @@ test('explicit obsolete observation retirement preserves submissions, rejects ac
   try {
     const team = core.teamDirectory.createTeam({ clientId: 'owner' });
     const original = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
-    const old = await send(original.sessionId, 'old');
+    fake.acknowledgementMode = 'missing';
+    await assert.rejects(send(original.sessionId, 'old'), (error: any) => error.data?.errorCode === 'session.submission-unknown');
+    const old = core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(original.sessionId)!;
+    assert.equal(old.submission_state, 'submission_unknown');
+    fake.acknowledgementMode = 'success';
     const input = { teamId: team.teamId, requestRef: old.outbox_id, requestId: 'retire-old',
       decision: 'retire_observation', workComplete: true, evidenceRef: 'Archived task; explicit user completion' };
     assert.equal((await decide(input)).structuredContent.errorCode, 'session.recovery-unavailable');
@@ -71,16 +76,27 @@ test('explicit obsolete observation retirement preserves submissions, rejects ac
     assert.equal(fake.submitCount, submits);
     assert.equal((await decide(second)).structuredContent.disposition, 'observation-retired');
 
+    // Routing retirement must never turn a collected final into an unresolved observation.
+    const completedEvidence = core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').get(followup.sessionId);
+    await rpc('workflow.session_replace', { teamId: team.teamId, roleRef: `${followup.sessionId}:1`, requestId: 'replace-completed' });
+    assert.equal(core.teamDirectory.getSession(followup.sessionId).sessionState, 'superseded');
+    assert.equal((await decide({ ...input, requestRef: completed.outbox_id, requestId: 'retire-completed' })).structuredContent.errorCode,
+      'session.recovery-unavailable');
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').get(followup.sessionId), completedEvidence);
+
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test('explicit retired disposal preserves both generations and protects drafts and generation', async t => {
+test('displaced routing retirement permits explicit disposal but preserves unresolved evidence, drafts and active successor', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-retired-disposal-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', observationActiveSweepMs: 5, observationQuietSweepMs: 5 });
   const fake = new FakeProviderAdapter(); fake.autoFinalText = 'Collected original answer';
   let deletes = 0;
-  t.mock.method(fake, 'openDeletion', async () => ({ alreadyDeleted: false,
-    deleteOnce: async () => { deletes++; return true; }, close: async () => {} }));
+  let unavailable = true;
+  t.mock.method(fake, 'openDeletion', async () => {
+    if (unavailable) throw new ProviderSubmissionError('provider.unavailable', 'Fixture provider unavailable');
+    return { alreadyDeleted: false, deleteOnce: async () => { deletes++; return true; }, close: async () => {} };
+  });
   const core = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
     logger: { debug() {}, info() {}, warn() {}, error() {} } });
   const rpc = (method: string, params: Record<string, unknown>) => callRpc<any>({ socketPath: config.socketPath,
@@ -104,7 +120,16 @@ test('explicit retired disposal preserves both generations and protects drafts a
     const input = { teamId: team.teamId, requestRef: requests[1]!.outbox_id, requestId: 'dispose', outputsRetrieved: true,
       discardRetiredObservation: { conversationId: first.conversationId, evidenceRef: 'User explicitly discards obsolete conversation; unresolved original retained' } };
     assert.equal((await workflow('session_delete', input)).structuredContent.errorCode, 'session.cleanup-not-ready');
-    await rpc('team.role.retire', { teamId: team.teamId, roleKey: 'director.main', requestId: 'retire-role' });
+    const replacement = (await workflow('session_replace', { teamId: team.teamId,
+      roleRef: `${session.sessionId}:2`, requestId: 'replace-role' })).structuredContent;
+    const successor = replacement.replacement;
+    assert.ok(successor, JSON.stringify(replacement));
+    assert.equal(core.teamDirectory.getSession(session.sessionId).sessionState, 'superseded');
+    assert.equal(replacement.replacement.cleanup.errorCode, 'provider.unavailable');
+    await rpc('session.send', { sessionId: successor.sessionId, requestId: 'successor-active', prompt: 'Independent new implementation' });
+    const successorBefore = core.teamDirectory.getSession(successor.sessionId);
+    assert.equal(successorBefore.terminal, false);
+    unavailable = false;
     assert.equal((await workflow('session_delete', input)).structuredContent.errorCode, 'session.cleanup-not-ready');
     assert.equal((await workflow('decide', { teamId: team.teamId, requestRef: requests[1]!.outbox_id,
       requestId: 'retire-observation', decision: 'retire_observation', workComplete: true,
@@ -132,7 +157,8 @@ test('explicit retired disposal preserves both generations and protects drafts a
     assert.deepEqual(core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? ORDER BY generation').all(session.sessionId), requests);
     assert.deepEqual((await workflow('session_delete', input)).structuredContent, deleted);
     assert.equal(deletes, 1);
-    assert.equal(fake.submitCount, 2);
+    assert.deepEqual(core.teamDirectory.getSession(successor.sessionId), successorBefore);
+    assert.equal(fake.submitCount, 3);
     assert.equal(fake.stopCount, 0);
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
