@@ -16,29 +16,50 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
   if (!/^hostspan(?:-[a-z0-9_-]+)?$/i.test(input.appName)) throw unavailable('Only HostSpan permissions are supported');
   const app = new RegExp(`(^|[^\\w-])${input.appName}($|[^\\w-])`, 'i');
   const scopes = page.locator('[role="dialog"], [role="alertdialog"], [role="alert"]');
-  const find = async () => {
+  const matching = async () => {
     const matches = [];
     for (const scope of await scopes.all()) {
       if (!await scope.isVisible()) continue;
       const text = (await scope.innerText()).trim();
       if (app.test(text) && text.includes(input.toolName)) matches.push(scope);
     }
+    return matches;
+  };
+  // ChatGPT opens command details in a separate modal over the permission alert.
+  // Inspect and close only that exact modal, then act on the original permission.
+  const closeDetails = async () => {
+    const dialogs = await matching();
+    let command = '';
+    for (const dialog of dialogs) {
+      if (!['dialog', 'alertdialog'].includes(await dialog.getAttribute('role') ?? '')) continue;
+      const close = dialog.getByRole('button', { name: /^(?:대화 상자 닫기|Close dialog)$/i });
+      if (await close.count() !== 1 || await dialog.getByRole('button', { name: once }).count() !== 0) continue;
+      if (command) throw unavailable('The exact HostSpan command details are ambiguous');
+      command = (await dialog.innerText()).trim();
+      await close.click({ timeout: 5_000 });
+      await dialog.waitFor({ state: 'hidden', timeout: 5_000 });
+    }
+    return command;
+  };
+  const find = async () => {
+    const matches = await matching();
     if (matches.length !== 1) throw unavailable('The exact HostSpan tool permission is absent or ambiguous');
     return matches[0]!;
   };
+  let command = await closeDetails();
   let scope = await find();
-  if (input.action === 'inspect') {
-    const details = scope.getByRole('button', { name: /^(?:자세히 보기|View details|See details)$/i });
-    if (await details.count() === 1 && await details.getAttribute('aria-expanded') !== 'true') {
-      await details.click({ timeout: 5_000 });
-      scope = await find();
-    }
+  const details = scope.getByRole('button', { name: /^(?:자세히 보기|View details|See details)$/i });
+  if (await details.count() === 1 && await details.getAttribute('aria-expanded') !== 'true') {
+    await details.click({ timeout: 5_000 });
+    command = await closeDetails() || command;
+    scope = await find();
   }
   const text = (await scope.innerText()).trim();
   const buttons = await scope.getByRole('button').allTextContents();
-  const evidenceHash = createHash('sha256').update(JSON.stringify([page.url(), input.appName, input.toolName, text])).digest('hex');
+  const permissionText = command ? `${text}\n${command}` : text;
+  const evidenceHash = createHash('sha256').update(JSON.stringify([page.url(), input.appName, input.toolName, permissionText])).digest('hex');
   if (input.action === 'inspect') return { outcome: 'inspected', appName: input.appName, toolName: input.toolName,
-    evidenceHash, permissionText: text, buttons: buttons.map(name => name.trim()) };
+    evidenceHash, permissionText, buttons: buttons.map(name => name.trim()) };
   if (input.evidenceHash !== evidenceHash) throw unavailable('Inspect the current exact permission before allowing it');
   // Recheck the command/details and once-only button in the same DOM operation.
   const clicked = await scope.evaluate((element, expected) => {
