@@ -1140,7 +1140,7 @@ export class SubmissionService {
             ack.conversationId !== snapshot.conversationId || ack.submittedUserMessageId !== previous.submittedUserMessageId ||
             ack.submittedUserTurnId !== previous.submittedUserTurnId) {
           throw new SessionPlaneDomainError('session.generation-superseded',
-            'Historical failure reconciliation requires the exact quiet-final and immediately following unsubmitted preparation');
+            'Request superseded: historical failure reconciliation requires the exact quiet-final and immediately following unsubmitted preparation');
         }
         historical = true;
         anchor = { ...snapshot, ...previous, terminal: true, sessionState: 'complete', providerState: 'complete' };
