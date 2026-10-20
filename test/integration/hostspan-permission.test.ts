@@ -44,6 +44,7 @@ test('explicit HostSpan permission controls only the current exact grant, preser
         decision: 'hostspan_permission', appName: 'hostspan-desktop', toolName: 'Process Start', ...extra },
       socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
     t.mock.method(page, 'bringToFront', async () => { throw Error('Must not focus'); });
+    const prepare = t.mock.method(core.browserOwner!, 'preparePageInteraction');
     let output = '';
     const stream = new Writable({ write(chunk, _encoding, done) { output += chunk.toString(); done(); } });
     assert.equal(await runCli(['request', 'hostspan_permission', team.teamId, String(row.outbox_id), '--action', 'inspect',
@@ -51,6 +52,7 @@ test('explicit HostSpan permission controls only the current exact grant, preser
       { stdin: Readable.from([]), stdout: stream, stderr: stream }), 0, output);
     const inspected = { structuredContent: JSON.parse(output) };
     assert.equal(inspected.structuredContent.requestOk, true, JSON.stringify(inspected));
+    assert.equal(prepare.mock.callCount(), 1, 'Use the existing exact-page background interaction lifecycle');
     const permission = inspected.structuredContent.permission as { evidenceHash: string; permissionText: string };
     assert.match(permission.permissionText, /Command: original work/);
     assert.equal((await decide('foreign-app', { action: 'allow', appName: 'another-app', evidenceHash: permission.evidenceHash })).isError, true);
