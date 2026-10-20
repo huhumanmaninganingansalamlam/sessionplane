@@ -110,6 +110,21 @@ test('strong current-turn activity prevents quiet completion', () => {
   assert.equal(tracker.evaluate(active, 10_000).freshExactProgress, false);
 });
 
+test('streaming time is not idle time and a disconnected stream cannot certify a cached answer', () => {
+  const tracker = new ExactFinalTracker(1_000);
+  const candidate = { responseMessageId: 'plan', answerText: 'I will implement it.',
+    terminalMarker: false, streamingMarker: true };
+  assert.equal(tracker.evaluate(evidence({ candidate, activity: 'strong' }), 0).kind, 'progress');
+  assert.equal(tracker.evaluate(evidence({ candidate, activity: 'strong' }), 60_000).kind, 'progress');
+  const idle = evidence({ candidate: { ...candidate, streamingMarker: false } });
+  assert.equal(tracker.evaluate(idle, 120_000).kind, 'progress');
+  assert.equal(tracker.evaluate(evidence({ ...idle, activity: 'unknown', reason: 'provider-stream-disconnected' }), 121_000).kind, 'unverified');
+  assert.equal(tracker.evaluate(idle, 122_000).kind, 'progress');
+  assert.equal(tracker.evaluate(idle, 123_000).kind, 'complete');
+  assert.equal(tracker.evaluate(evidence({ ...idle, activity: 'unknown', reason: 'provider-stream-disconnected',
+    candidate: { ...candidate, streamingMarker: false, terminalMarker: true } }), 124_000).kind, 'unverified');
+});
+
 test('request placeholder messages can never become final answers', () => {
   const tracker = new ExactFinalTracker(10);
   const placeholder = evidence({

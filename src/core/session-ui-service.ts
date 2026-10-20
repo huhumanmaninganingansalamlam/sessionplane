@@ -635,8 +635,8 @@ export class SessionUiService {
   /** Read the original turn under the current prepared generation's ownership.
    * Return separate evidence; never rewrite either generation or its stored answer.
    */
-  async recoverHistoricalAnswer(original: SessionSnapshot, owner: SessionSnapshot) {
-    const display = await this.latest({ ...original, terminal: false, responseMessageId: null }, owner);
+  async recoverHistoricalAnswer(original: SessionSnapshot, owner: SessionSnapshot, restorePosition = true) {
+    const display = restorePosition ? await this.latest({ ...original, terminal: false, responseMessageId: null }, owner) : {};
     const page = this.#requirePage(owner);
     const binding = this.#registry.refreshPage(owner.pageKey!);
     const tracker = new ExactFinalTracker(this.#quietWindowMs);
