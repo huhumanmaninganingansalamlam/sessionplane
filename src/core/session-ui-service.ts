@@ -266,7 +266,7 @@ export class SessionUiService {
   }
 
   async reconcileFailure(input: PreparationOwner & { readonly decisionId: string; readonly allowMessageTimeout?: boolean; readonly continuationPrompt?: '계속' | undefined }) {
-    return await this.#submissions.reconcileFailure(input, session => this.#failureEvidence(session, session, input.allowMessageTimeout, input.continuationPrompt));
+    return await this.#submissions.reconcileFailure(input, (owner, anchor) => this.#failureEvidence(owner, anchor, input.allowMessageTimeout, input.continuationPrompt));
   }
 
   /** Passive, exact-owner checks; this never dispatches or clears a draft. */
