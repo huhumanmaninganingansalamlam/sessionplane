@@ -576,14 +576,16 @@ export class SessionUiService {
     if (session.provider !== 'chatgpt' || session.terminal || session.submissionState !== 'submitted' ||
         !session.submittedUserMessageId || !session.conversationId) throw new SessionPlaneDomainError(
       'provider.permission-unverified', 'Recover the original ACK before controlling its tool permission');
-    const page = this.#requirePage(session);
-    await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
-    const messages = (await readChatGptMessages(page)).filter(message => message.role === 'user');
-    if (messages.at(-1)?.messageId !== session.submittedUserMessageId) throw new SessionPlaneDomainError(
-      'provider.permission-unverified', 'The original user anchor must be the current turn');
-    const result = await controlHostSpanPermission(page, input);
-    this.#requirePage(session);
-    return result;
+    try {
+      const page = await this.#interactionPage(session);
+      await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
+      const messages = (await readChatGptMessages(page)).filter(message => message.role === 'user');
+      if (messages.at(-1)?.messageId !== session.submittedUserMessageId) throw new SessionPlaneDomainError(
+        'provider.permission-unverified', 'The original user anchor must be the current turn');
+      const result = await controlHostSpanPermission(page, input);
+      this.#requirePage(session);
+      return result;
+    } catch (error) { throw typedUiError(error); }
   }
 
   async focus(session: SessionSnapshot) {

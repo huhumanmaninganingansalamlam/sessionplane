@@ -116,6 +116,9 @@ const VALUE_OPTIONS = new Set([
   'chatgpt-url',
   'message-id',
   'evidence-hash',
+  'action',
+  'app-name',
+  'tool-name',
 ]);
 
 const INTERNAL_BROWSER_COMMANDS = new Set([
