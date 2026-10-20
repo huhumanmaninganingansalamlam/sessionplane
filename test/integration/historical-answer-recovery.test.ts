@@ -6,6 +6,7 @@ import test from 'node:test';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
+import { SessionRepository } from '../../src/storage/session-repository.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
@@ -101,6 +102,53 @@ test('original quiet-final can be recovered through latest under an unsubmitted 
     await page.locator('#messages').evaluate(node => { node.innerHTML += '<div data-message-author-role="user" data-message-id="other-user">Other request</div><div data-message-author-role="assistant" data-message-id="other-answer" data-end-turn="true">Wrong answer</div>'; });
     assert.equal(((await latest('later-turn')).structuredContent.answerRecovery as any).terminal, false);
     assert.deepEqual(rows(), before);
+    assert.equal(fake.submitCount, 1);
+    assert.equal(navigations, 1);
+
+    // Replay Areum's quiet-final -> prepared successor -> explicit idle timeout.
+    const reconcile = (id: string) => invokeMcpTool({ name: 'sessionplane_decide', arguments: {
+      teamId: team.teamId, requestRef: original.outbox_id, requestId: id, decision: 'reconcile_failure' },
+      socketPath: config.socketPath, timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
+    await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend',
+      '<div role="alert" id="timeout">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</div>'));
+    await page.locator('textarea').fill('');
+    assert.equal((await reconcile('later-user-failure')).isError, true);
+    await page.locator('[data-message-id="other-user"], [data-message-id="other-answer"], [data-message-id="actual-final"]').evaluateAll(nodes => nodes.forEach(node => node.remove()));
+    await page.locator('textarea').fill('Preserved draft');
+    assert.equal((await reconcile('draft-failure')).isError, true);
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
+    await page.locator('textarea').fill('');
+    await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend', '<button id="running" aria-label="Stop">Stop</button>'));
+    assert.equal((await reconcile('active-failure')).isError, true);
+    await page.locator('#running').evaluate(node => node.remove());
+    assert.deepEqual(rows(), before);
+    const sessions = new SessionRepository(core.database.raw);
+    const timestamp = (core.database.raw.prepare('SELECT updated_at FROM sessions WHERE session_id=?').get(session.sessionId) as { updated_at: string }).updated_at;
+    for (const submissionState of ['submitted', 'submission_unknown'] as const) {
+      sessions.updateCurrentGeneration(session.sessionId, 2, { submissionState, promptSubmitted: true }, timestamp);
+      assert.equal((await reconcile(`protect-${submissionState}`)).isError, true,
+        'A submitted or uncertain successor must never be reconciled through its predecessor');
+    }
+    sessions.updateCurrentGeneration(session.sessionId, 2, { submissionState: 'prepared', promptSubmitted: false }, timestamp);
+    assert.deepEqual(rows(), before);
+    const closed = await reconcile('close-historical-timeout');
+    assert.equal(closed.isError, false, JSON.stringify(closed));
+    const closure = closed.structuredContent.reconciliation as any;
+    assert.equal(closure.historical, true);
+    assert.equal(closure.disposition, 'failed');
+    assert.equal(closure.providerMutation, false);
+    assert.equal(closure.successorSubmitted, false);
+    assert.equal(closure.successorRequestRef, before.outbox[1]!.outbox_id);
+    assert.deepEqual(rows(), before, 'Closure preserves the original result and unsubmitted successor');
+    assert.deepEqual((await reconcile('close-historical-timeout')).structuredContent.reconciliation, closure);
+    const read = await invokeMcpTool({ name: 'sessionplane_team_get', arguments: {
+      teamId: team.teamId, requestRef: original.outbox_id }, socketPath: config.socketPath,
+      timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
+    const failed = read.structuredContent.request as any;
+    assert.equal(failed.terminal, true);
+    assert.equal(failed.errorCode, 'provider.execution-failed');
+    assert.equal(failed.answerText, null);
+    assert.equal(failed.storedResult.responseMessageId, 'announcement');
     assert.equal(fake.submitCount, 1);
     assert.equal(navigations, 1);
 

@@ -85,6 +85,14 @@ export class EventRepository {
     return row ?? null;
   }
 
+  historicalFailureReconciliation(sessionId: string, generation: number): Readonly<Record<string, unknown>> | null {
+    const row = this.#database.prepare(`SELECT payload_json AS payloadJson, created_at AS createdAt FROM events
+      WHERE session_id=? AND generation=? AND event_type='generation.failure-reconciled'
+        AND json_extract(payload_json, '$.historical')=1 ORDER BY sequence DESC LIMIT 1`)
+      .get(sessionId, generation) as { payloadJson: string; createdAt: string } | undefined;
+    return row ? { ...parsePayload(row.payloadJson), completedAt: row.createdAt } : null;
+  }
+
   latestAnchorRecovery(sessionId: string, generation: number): (Readonly<Record<string, unknown>> & { sequence: number; observedAt: string }) | null {
     const row = this.#database.prepare(`SELECT sequence, payload_json AS payloadJson, created_at AS createdAt
       FROM events WHERE session_id=? AND generation=? AND event_type LIKE 'generation.backend-%'

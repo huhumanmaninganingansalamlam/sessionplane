@@ -587,6 +587,14 @@ export class TeamWorkflow {
         ack.submittedUserMessageId === original.submittedUserMessageId &&
         ack.submittedUserTurnId === original.submittedUserTurnId && typeof ack.conversationId === 'string'
         ? ack.conversationId : null;
+      const reconciled = new EventRepository(this.services.database.raw).historicalFailureReconciliation(request.sessionId, request.generation);
+      if (reconciled !== null && reconciled.requestRef === request.outboxId) {
+        return { requestOk: true, requestRef: request.outboxId, sessionId: request.sessionId, generation: request.generation,
+          ...original, conversationId, historical: true, terminal: true, waitExpired: false,
+          responseMessageId: null, answerText: null, completedAt: reconciled.completedAt,
+          errorCode: 'provider.execution-failed', reason: 'message-timeout-reconciled',
+          storedResult: reconciled.storedResult, reconciliation: reconciled };
+      }
       let observed = {};
       // Recheck only the exact quiet-final immediately preceding an unsubmitted
       // preparation. Never rebind a page, restore scroll or rewrite either result.
