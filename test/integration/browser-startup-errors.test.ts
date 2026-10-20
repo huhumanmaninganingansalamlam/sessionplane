@@ -66,7 +66,7 @@ test('disconnect recovery does not relaunch a failed browser every five seconds;
   const executable = path.join(root, 'chrome');
   const fail = path.join(root, 'fail');
   const attempts = path.join(root, 'attempts');
-  const actual = findHostBrowser()!;
+  const actual = findHostBrowser({ preference: 'chrome' })!;
   const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
   writeFileSync(executable, `#!/bin/sh
 if [ "$1" = "--version" ]; then echo 'Google Chrome 154.0.8037.97'; exit 0; fi
