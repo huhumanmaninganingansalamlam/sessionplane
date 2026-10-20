@@ -14,6 +14,7 @@ export function registerBrowserMethods(
     readonly pageRegistry: PageRegistry;
     readonly loginUrl: string;
     readonly profileDir: string;
+    readonly recoverBrowser?: () => Promise<unknown>;
   },
 ): void {
   router.register('browser.health', z.object({}).strict(), () => ({
@@ -67,6 +68,7 @@ export function registerBrowserMethods(
       try {
         if (mode === 'manual') return await owner.beginManualLogin(loginUrl);
         if (mode === 'resume') return await owner.resumeManualLogin();
+        if (owner.status.state === 'error') await dependencies.recoverBrowser?.();
         const page = await owner.openLoginPage(loginUrl);
         return { requestOk: true, mode: 'automated', page };
       } catch (error) {

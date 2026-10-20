@@ -120,6 +120,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
           scopeProfileByBrowser: config.browserScopedProfile,
           pageRegistry,
           headless: options.browserHeadless ?? config.browserHeadless,
+          persistentMetrics: config.browserMetrics,
           browserPreference: config.browserPreference,
           browserExecutable: config.browserExecutable,
           launchTimeoutMs: config.browserLaunchTimeoutMs,
@@ -356,6 +357,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     pageRegistry,
     loginUrl: config.chatgptUrl,
     profileDir: config.profileDir,
+    recoverBrowser: () => restartBrowser(),
   });
   if (options.enableInternalBrowserControlRpc === true) {
     registerBrowserControlMethods(router, browserControl);
@@ -434,7 +436,10 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   const browserRecoveryTimer = browserOwner === null ? null : setInterval(() => {
     if (closed || browserRecovery !== null || maintenance.paused) return;
     const state = browserOwner.status.state;
-    if (state !== 'disconnected' && state !== 'error') return;
+    // A disconnect is a new recovery event. A failed launch is an error, not
+    // another disconnect: retrying it on every tick churns processes/profiles.
+    // Keep the original failure visible until explicit browser recovery.
+    if (state !== 'disconnected') return;
     const release = maintenance.enter();
     if (!release) return;
     logger.warn('browser.disconnected', { state });

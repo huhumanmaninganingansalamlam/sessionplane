@@ -1,3 +1,4 @@
+import { prepareBrowserMetrics, pruneBrowserMetrics } from './browser-metrics.ts';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import {
   chmodSync,
@@ -74,6 +75,7 @@ export interface BrowserOwnerOptions {
   readonly scopeProfileByBrowser?: boolean;
   readonly pageRegistry: PageRegistry;
   readonly headless?: boolean;
+  readonly persistentMetrics?: boolean;
   readonly browserPreference?: BrowserPreference;
   readonly browserExecutable?: string | null;
   readonly launchTimeoutMs?: number;
@@ -97,6 +99,7 @@ export class BrowserOwner {
   #profileDir: string;
   readonly #pageRegistry: PageRegistry;
   readonly #headless: boolean;
+  readonly #persistentMetrics: boolean;
   readonly #browserPreference: BrowserPreference;
   readonly #browserExecutable: string | null;
   readonly #launchTimeoutMs: number;
@@ -126,6 +129,7 @@ export class BrowserOwner {
     this.#profileDir = this.#profileRoot;
     this.#pageRegistry = options.pageRegistry;
     this.#headless = options.headless ?? false;
+    this.#persistentMetrics = options.persistentMetrics ?? false;
     this.#browserPreference = options.browserPreference ?? 'chrome';
     this.#browserExecutable = options.browserExecutable ?? null;
     this.#launchTimeoutMs = options.launchTimeoutMs ?? 30_000;
@@ -317,6 +321,7 @@ export class BrowserOwner {
     try {
       this.#pageRegistry.detach();
       await this.#shutdownBrowser();
+      pruneBrowserMetrics(this.#profileDir, this.#persistentMetrics, true, this.#now().getTime());
     } finally {
       this.#releaseProfileLock();
       this.#closing = false;
@@ -731,9 +736,10 @@ export class BrowserOwner {
     browser: ChromeInstallation,
     loginUrl: string,
   ): Promise<void> {
+    prepareBrowserMetrics(this.#profileDir, this.#persistentMetrics, this.#now().getTime());
     const child = spawn(
       browser.executable,
-      buildManualLoginArguments({ profileDir: this.#profileDir, loginUrl }),
+      buildManualLoginArguments({ profileDir: this.#profileDir, loginUrl, persistentMetrics: this.#persistentMetrics }),
       {
         env: process.env,
         detached: process.platform !== 'win32',
@@ -821,6 +827,7 @@ export class BrowserOwner {
   }
 
   async #launchOwnedBrowser(browser: ChromeInstallation): Promise<number> {
+    prepareBrowserMetrics(this.#profileDir, this.#persistentMetrics, this.#now().getTime());
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= MAX_LAUNCH_ATTEMPTS; attempt += 1) {
       const debuggingPort = await reserveLoopbackPort();
@@ -830,6 +837,7 @@ export class BrowserOwner {
           profileDir: this.#profileDir,
           debuggingPort,
           headless: this.#headless,
+          persistentMetrics: this.#persistentMetrics,
         }),
         {
           env: process.env,
@@ -1096,6 +1104,7 @@ export function buildHostBrowserArguments(input: {
   readonly profileDir: string;
   readonly debuggingPort: number;
   readonly headless: boolean;
+  readonly persistentMetrics?: boolean;
 }): readonly string[] {
   if (
     !Number.isSafeInteger(input.debuggingPort) ||
@@ -1111,6 +1120,7 @@ export function buildHostBrowserArguments(input: {
     '--window-size=1440,900',
     '--no-first-run',
     '--no-default-browser-check',
+    ...(input.persistentMetrics ? ['--enable-features=PersistentHistograms'] : ['--disable-features=PersistentHistograms']),
     // Recover persisted tabs and form state when both core and browser have exited.
     '--restore-last-session',
     ...(input.headless ? ['--headless=new'] : []),
@@ -1121,12 +1131,14 @@ export function buildHostBrowserArguments(input: {
 export function buildManualLoginArguments(input: {
   readonly profileDir: string;
   readonly loginUrl: string;
+  readonly persistentMetrics?: boolean;
 }): readonly string[] {
   return Object.freeze([
     `--user-data-dir=${path.resolve(input.profileDir)}`,
     '--window-size=1440,900',
     '--no-first-run',
     '--no-default-browser-check',
+    ...(input.persistentMetrics ? ['--enable-features=PersistentHistograms'] : ['--disable-features=PersistentHistograms']),
     '--new-window',
     input.loginUrl,
   ]);

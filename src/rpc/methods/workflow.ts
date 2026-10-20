@@ -21,6 +21,9 @@ export const workflowSchemas = {
   session_delete: z.object({ ...request, requestId, outputsRetrieved: z.literal(true), discardRetiredObservation: z.object({ conversationId: z.string().min(1).max(300), evidenceRef: z.string().trim().min(1).max(2000) }).strict().optional().describe('Explicitly authorize permanent deletion of this exact obsolete conversation after observation retirement and role displacement/retirement. Preserves unresolved generation records; never means its answer was retrieved.'), }).strict(),
   send: z.object({ ...mutation, roleRef, thinkingFailureRecovery: z.literal(true).optional().describe('Explicit sender handoff to core for same-chat 계속 after exact idle Thinking failed; off when omitted. Preserves original deadline and failure; no refusal/auth retry.'), prompt: z.string().min(1).max(200_000), model: z.string().trim().min(1).max(200).optional(), effort: z.string().trim().min(1).max(200).optional(), files: z.array(z.string().min(1).max(20_000)).max(20).optional().describe('Attachment paths. Uploads are disabled by default; use only when team capabilities.uploadsEnabled is true.'), sessionDeadlineSec: z.number().int().min(1).max(86_400).default(5400) }).strict(),
   decide: z.union([
+    z.object({ ...request, requestId, decision: z.literal('hostspan_permission'), action: z.enum(['inspect', 'allow']),
+      appName: z.string().regex(/^hostspan(?:-[a-z0-9_-]+)?$/i), toolName: z.string().trim().min(1).max(200),
+      evidenceHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict(),
     z.object({ ...request, requestId, decision: z.literal('retire_observation'), workComplete: z.literal(true),
       evidenceRef: z.string().trim().min(1).max(2000), successorRequestRef: requestRef.optional() }).strict(),
     z.object({ ...request, requestId, decision: z.literal('reconcile_followup'), followupUserMessageId: z.string().min(1).max(300),
