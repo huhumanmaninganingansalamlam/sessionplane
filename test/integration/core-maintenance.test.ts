@@ -8,6 +8,7 @@ import type { Page } from 'playwright-core';
 import { startCore } from '../../src/main.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { callRpc } from '../../src/cli/client.ts';
+import { SessionRepository } from '../../src/storage/session-repository.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 async function fixture(fake = new FakeProviderAdapter()) {
@@ -72,6 +73,41 @@ test('coordinated maintenance lets admitted work finish and defers a new call wi
     assert.ok((await deferred).teamId);
     assert.equal(f.core.database.raw.prepare("SELECT count(*) AS n FROM request_receipts WHERE request_id='must-not-be-issued'").get()!.n, 1);
     assert.equal(f.core.maintenance.status().phase, 'running');
+  } finally { finish.resolve(); await f.dispose(); }
+});
+
+test('unfinished opted-in observation hands over only after the actual recovery operation drains', async () => {
+  const f = await fixture(), entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
+  try {
+    await f.rpc('session.send', { clientId: 'maintenance-test', requestId: 'original', sessionId: f.session.sessionId,
+      prompt: 'preserved original', sessionDeadlineSec: 600 });
+    // Model the persisted opt-in request without changing the provider generation.
+    f.core.database.raw.prepare("UPDATE outbox SET payload_json=json_set(payload_json,'$.thinkingFailureRecovery',json('true'))").run();
+    const snapshot = new SessionRepository(f.core.database.raw).getSnapshot(f.session.sessionId)!;
+    const original = f.core.database.raw.prepare('SELECT * FROM outbox').all();
+    const generations = f.core.database.raw.prepare('SELECT * FROM generations').all();
+    f.core.receipts.execute({ clientId: 'maintenance-test', requestId: `thinking-failure-configuration:${original[0]!.outbox_id}`,
+      method: 'session.thinking-failure.configuration', payload: {}, operation: () => ({ model: {} }) });
+    f.core.thinkingFailureRecovery.services.ui.reconcileFailure = async () => { entered.resolve(); await finish.promise; return {}; };
+    const recovery = f.core.thinkingFailureRecovery.observe({ ...snapshot, errorCode: 'provider.actionable-alert' });
+    await entered.promise;
+    let lease = await f.rpc<{ phase: string; token: string }>('system.maintenance.quiesce', f.owner);
+    assert.equal(lease.phase, 'draining');
+    assert.ok(f.core.maintenance.status().activeOperations > 0);
+    finish.resolve(); await recovery;
+    while (lease.phase !== 'ready') {
+      await delay(10);
+      lease = await f.rpc('system.maintenance.quiesce', { ...f.owner, token: lease.token });
+    }
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM outbox').all(), original);
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM generations').all(), generations);
+    assert.equal(f.fake.stopCount, 0);
+    await f.rpc('system.maintenance.resume', { ...f.owner, token: lease.token });
+    f.core.thinkingFailureRecovery.restore();
+    await delay(20);
+    assert.equal(f.fake.submitCount, 1);
+    const health = await f.rpc<{maintenance: {durableRecoveryHandover: boolean}}>('system.health');
+    assert.equal(health.maintenance.durableRecoveryHandover, true);
   } finally { finish.resolve(); await f.dispose(); }
 });
 

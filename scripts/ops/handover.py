@@ -158,7 +158,8 @@ def guard_state(h, expected, require_idle=True):
         assert h['metrics']['session_actor_queue_depth']==0, 'Actor running or queued; natural drain required'
     with read_db(h) as db:
         assert db.execute("SELECT count(*) FROM outbox WHERE submission_state IN ('submit_attempted','composer_filled')").fetchone()[0]==0, 'Active submission'
-        assert db.execute("SELECT count(*) FROM outbox o JOIN generations g ON g.session_id=o.session_id AND g.generation=o.generation WHERE json_extract(o.payload_json,'$.thinkingFailureRecovery')=1 AND g.completed_at IS NULL").fetchone()[0]==0, 'Opted-in recovery still active'
+        if not h.get('maintenance', {}).get('durableRecoveryHandover'):
+            assert db.execute("SELECT count(*) FROM outbox o JOIN generations g ON g.session_id=o.session_id AND g.generation=o.generation WHERE json_extract(o.payload_json,'$.thinkingFailureRecovery')=1 AND g.completed_at IS NULL").fetchone()[0]==0, 'Legacy core cannot hand over unfinished opted-in recovery; preserve request until natural completion'
     lock=json.loads((pathlib.Path(h['browser']['profileDir'])/'.sessionplane-profile.lock').read_text())
     assert lock['pid']==h['process']['pid'] and lock['browserPid']==h['browser']['browserPid']
 

@@ -330,11 +330,14 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       actorScheduler,
       observationService,
       metrics,
-    }), conversationLoadRecovery: conversationLoadRecovery.status(), maintenance: maintenance.status() }),
+    }), conversationLoadRecovery: conversationLoadRecovery.status(), maintenance: {
+      ...maintenance.status(), durableRecoveryHandover: true,
+    } }),
   );
   const handoverIdle = () => (browserOwner === null || browserOwner.status.state === 'ready') && actorScheduler.totalQueueDepth === 0 && pageMutationMutex.activeCount === 0 &&
-    Number(database.raw.prepare("SELECT count(*) AS n FROM outbox WHERE submission_state IN ('submit_attempted','composer_filled')").get()!.n) === 0 &&
-    Number(database.raw.prepare("SELECT count(*) AS n FROM outbox o JOIN generations g ON g.session_id=o.session_id AND g.generation=o.generation WHERE json_extract(o.payload_json,'$.thinkingFailureRecovery')=1 AND g.completed_at IS NULL").get()!.n) === 0;
+    // Recovery mutations enter maintenance and drain naturally. Durable opt-in
+    // observation is restored below; a generating browser need not finish first.
+    Number(database.raw.prepare("SELECT count(*) AS n FROM outbox WHERE submission_state IN ('submit_attempted','composer_filled')").get()!.n) === 0;
   const ownerSchema = { expectedPid: z.literal(process.pid), expectedStartedAt: z.literal(startedAt.toISOString()) };
   router.register('system.maintenance.quiesce', z.object({ ...ownerSchema, token: z.string().uuid().optional() }).strict(), input =>
     maintenance.quiesce(input.token, handoverIdle));

@@ -140,6 +140,29 @@ class HandoverTests(unittest.TestCase):
                 with self.assertRaisesRegex(AssertionError, 'writer'):
                     handover.guard(before, before)
 
+    def test_opted_in_observation_requires_the_live_cores_durable_recovery_fence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, '.sessionplane-profile.lock').write_text(json.dumps({'pid': 11, 'browserPid': 22}))
+            dbpath = pathlib.Path(directory, 'state.sqlite')
+            with closing(sqlite3.connect(dbpath)) as db:
+                db.executescript("CREATE TABLE outbox(session_id,generation,submission_state,payload_json);"
+                                 "CREATE TABLE generations(session_id,generation,completed_at);")
+                db.execute("INSERT INTO outbox VALUES('original',1,'submitted',?)", (json.dumps({'thinkingFailureRecovery': True}),))
+                db.execute("INSERT INTO generations VALUES('original',1,NULL)"); db.commit()
+            h = {'requestOk': True, 'process': {'pid': 11, 'startedAt': 'original'},
+                 'browser': {'state': 'ready', 'browserPid': 22, 'profileDir': directory, 'debuggingPort': 4444},
+                 'database': {'integrity': 'ok', 'path': str(dbpath)},
+                 'metrics': {'session_actor_queue_depth': 0}, 'maintenance': {'durableRecoveryHandover': True}}
+            handover.guard_state(h, h)
+            legacy = copy.deepcopy(h)
+            legacy['maintenance'].pop('durableRecoveryHandover')
+            with self.assertRaisesRegex(AssertionError, 'Legacy core'):
+                handover.guard_state(legacy, legacy)
+            with closing(sqlite3.connect(dbpath)) as db:
+                db.execute("UPDATE outbox SET submission_state='submit_attempted'"); db.commit()
+            with self.assertRaisesRegex(AssertionError, 'Active submission'):
+                handover.guard_state(h, h)
+
     def test_target_identity_is_exact_and_read_only(self):
         with tempfile.TemporaryDirectory() as directory:
             path = pathlib.Path(directory, 'fixture.sqlite')
