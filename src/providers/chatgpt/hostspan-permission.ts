@@ -44,7 +44,16 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
   const find = async () => {
     const matches = await matching();
     if (matches.length !== 1) throw unavailable('The exact HostSpan tool permission is absent or ambiguous');
-    return matches[0]!;
+    let scope = matches[0]!;
+    // The permission's action row can be a sibling of its ARIA alert.
+    // Use only the nearest card with this single alert, never the page/main.
+    while (await scope.getByRole('button', { name: once }).count() === 0) {
+      const parent = scope.locator('..');
+      if (await parent.evaluate(element => element.matches('body, main, [role="main"]')) ||
+          await parent.locator('[role="alert"], [role="alertdialog"], [role="dialog"]').count() !== 1) break;
+      scope = parent;
+    }
+    return scope;
   };
   let command = await closeDetails();
   let scope = await find();
@@ -55,7 +64,9 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
     scope = await find();
   }
   const text = (await scope.innerText()).trim();
-  const buttons = await scope.getByRole('button').allTextContents();
+  const alertText = (await (await matching())[0]!.innerText()).trim();
+  const buttons = await scope.getByRole('button').evaluateAll(elements => elements.map(element =>
+    element.getAttribute('aria-label') ?? element.textContent ?? ''));
   const permissionText = command ? `${text}\n${command}` : text;
   const evidenceHash = createHash('sha256').update(JSON.stringify([page.url(), input.appName, input.toolName, permissionText])).digest('hex');
   if (input.action === 'inspect') return { outcome: 'inspected', appName: input.appName, toolName: input.toolName,
@@ -67,7 +78,7 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
     const buttons = [...element.querySelectorAll('button, [role="button"]')].filter(button =>
       button instanceof HTMLElement && button.getClientRects().length > 0 &&
       !button.hasAttribute('disabled') && button.getAttribute('aria-disabled') !== 'true' &&
-      new RegExp(expected.once, 'i').test((button.textContent ?? '').trim()));
+      new RegExp(expected.once, 'i').test((button.getAttribute('aria-label') ?? button.textContent ?? '').trim()));
     if (buttons.length !== 1) return false;
     (buttons[0] as HTMLElement).click();
     return true;
@@ -75,9 +86,10 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
   if (!clicked) throw unavailable('The exact one-time Allow control changed or is unavailable');
   await page.waitForFunction(expected => ![...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="alert"]')]
     .some(element => element instanceof HTMLElement && element.getClientRects().length > 0 &&
-      element.innerText.trim() === expected), text, { timeout: 5_000 }).catch(() => undefined);
+      element.innerText.trim() === expected), alertText, { timeout: 5_000 }).catch(() => undefined);
   return { outcome: 'clicked', appName: input.appName, toolName: input.toolName, evidenceHash,
-    permissionStillVisible: (await scopes.allTextContents()).some(value => value.trim() === text) };
+    permissionStillVisible: await scopes.evaluateAll((elements, expected) => elements.some(element =>
+      element instanceof HTMLElement && element.getClientRects().length > 0 && element.innerText.trim() === expected), alertText) };
 }
 
 function unavailable(message: string) { return new SessionPlaneDomainError('provider.permission-unverified', message); }
