@@ -145,14 +145,19 @@ handler or permission to route around an access/security restriction. No origina
 preparation cancellation is needed. Do not migrate an already active continuation
 without its coordinator's explicit routing decision.
 
-For other authorized handoffs that preserve the old provider conversation, use `role_create`
-with a unique `roleKey` and `roleType:"custom"` in the same team, then carry the
-handoff into that role under its own fresh roleRef. This keeps the old role/session
-and does not repoint the primary role. Raw occupied-role `session.create` retains
-the default deleting behavior; it does not expose preserving recovery. Obtain the
-required specific deletion confirmation before choosing the deleting path. A 10-turn
-recommendation is only a handoff cue, never deletion confirmation. This is a
-caller authorization requirement, not a new confirmation field in the API.
+For normal authorized context renewal, keep the same stable role ID/key and
+provider. Resolve the current request, retrieve required answers/files, save the
+handoff, and call `session_replace` with that role's fresh `roleRef`. Carry the
+handoff into the returned successor using fresh preparation. Do not create a new
+custom or dated continuation role for the same responsibility; `role_create` is
+for a distinct responsibility. Default replacement makes one best-effort provider
+deletion attempt and independently closes verified idle owned tabs. Check
+`replacement.cleanup.pageCleanup` even when provider deletion fails; confirm the
+old target is closed without claiming deletion succeeded. Use existing cleanup
+authorization; the 10-turn cue grants no new authority. Preserve active/UNKNOWN
+work, uncollected results, shared pages and drafts. Raw occupied-role
+`session.create` uses the same default replacement path; preserving recovery above
+remains limited to its prepared/unsubmitted case.
 
 An explicit user-approved, duplicate-risk-accepted resend of a legacy unresolved
 ChatGPT submission uses `decide` with the **original** `requestRef`,

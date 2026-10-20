@@ -11,4 +11,8 @@ choose composer/submit from fresh evidence, then wait on returned exact request 
 operator enablement; never silently switch model/provider or resend ambiguous work.
 When `conversationUsage.handoffRecommended` becomes true at 10 confirmed user turns,
 finish the current request, retrieve outputs, write a concise handoff, and use
-`sessionplane_session_replace` before continuing in the new conversation.
+`sessionplane_session_replace` with the same stable role, provider and fresh roleRef.
+Keep the role ID/key; do not create dated continuation roles for the same work.
+Carry the handoff into the returned successor with fresh preparation. Provider
+conversation deletion is best effort; verify idle old-tab closure independently.
+Preserve active/UNKNOWN work, uncollected results and drafts; the count is not a cutoff.
