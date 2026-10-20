@@ -6,6 +6,11 @@ import test from 'node:test';
 
 import { BrowserOwner, BrowserOwnerError } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
+import { findHostBrowser } from '../../src/browser/browser-health.ts';
+import { resolveConfig } from '../../src/config.ts';
+import { startCore } from '../../src/main.ts';
+import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { setTimeout as delay } from 'node:timers/promises';
 import { normalizeCliError } from '../../src/cli/format.ts';
 
 test('headed startup exposes the original display failure without changing profile or retrying it', {
@@ -52,4 +57,45 @@ test('CLI preserves browser ownership errors without exposing arbitrary cause ob
   assert.deepEqual(normalizeCliError(failure), { requestOk: false,
     errorCode: 'browser.profile-in-use', message: 'Profile is owned by another live core' });
   assert.equal(normalizeCliError(new Error('Invalid flag')).errorCode, 'input.invalid');
+});
+
+
+test('disconnect recovery does not relaunch a failed browser every five seconds; explicit recovery resumes the same requests', { skip: process.platform === 'win32' }, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-recovery-launch-'));
+  const executable = path.join(root, 'chrome');
+  const fail = path.join(root, 'fail');
+  const attempts = path.join(root, 'attempts');
+  const actual = findHostBrowser()!;
+  const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
+  writeFileSync(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then echo 'Google Chrome 154.0.8037.97'; exit 0; fi
+if [ -f ${quote(fail)} ]; then echo attempt >> ${quote(attempts)}; echo 'Missing X server or $DISPLAY' >&2; exit 1; fi
+exec ${quote(actual.executable)} "$@"
+`, { mode: 0o700 });
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', browserPreference: 'custom', browserExecutable: executable });
+  const fake = new FakeProviderAdapter();
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [fake], logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'fixture-owner' });
+    const session = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    await core.submissionService.send({ clientId: 'fixture-owner', requestId: 'original', sessionId: session.sessionId, prompt: 'Preserve original work', sessionDeadlineSec: 600 });
+    core.observationService.stop(session.sessionId, 1);
+    const before = core.teamDirectory.getSession(session.sessionId);
+    const outbox = core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(session.sessionId);
+    writeFileSync(fail, 'fail launch');
+    process.kill(core.browserOwner!.status.browserPid!, 'SIGTERM');
+    const deadline = Date.now() + 15_000;
+    while (core.browserOwner!.status.state !== 'error' && Date.now() < deadline) await delay(100);
+    assert.equal(core.browserOwner!.status.state, 'error');
+    await delay(10_500); // More than two real automatic recovery ticks.
+    assert.equal(readFileSync(attempts, 'utf8'), 'attempt\n');
+    assert.match(core.browserOwner!.status.lastError!, /Missing X server/);
+    assert.equal(core.teamDirectory.getSession(session.sessionId).generation, before.generation);
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(session.sessionId), outbox);
+    rmSync(fail);
+    await core.restartBrowser();
+    assert.equal(core.browserOwner!.status.state, 'ready');
+    assert.equal(core.teamDirectory.getSession(session.sessionId).generation, before.generation);
+    assert.equal(fake.submitCount, 1);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
