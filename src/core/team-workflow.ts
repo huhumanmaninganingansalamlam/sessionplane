@@ -606,13 +606,13 @@ export class TeamWorkflow {
             observed = { ...recovery, ...(answer.terminal
               ? { responseMessageId: answer.responseMessageId, answerText: answer.answerText }
               : answer.reason === 'historical-answer-unchanged' ? {} : {
-                terminal: false, status: 'recovery_required', reason: answer.reason,
+                terminal: false, completedAt: null, status: 'recovery_required', reason: answer.reason,
                 responseMessageId: null, answerText: null,
               }) };
           }
         } catch (error) {
           if (!(error instanceof SessionPlaneDomainError)) throw error;
-          observed = { terminal: false, status: 'recovery_required', reason: error.errorCode,
+          observed = { terminal: false, completedAt: null, status: 'recovery_required', reason: error.errorCode,
             responseMessageId: null, answerText: null };
         }
       }

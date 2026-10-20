@@ -666,7 +666,7 @@ export class SessionUiService {
         reason: 'historical-answer-unchanged', freshExactProgress: false };
     }
     return { ...display, historical: true, bindingGeneration: owner.generation,
-      storedResult: { responseMessageId: original.responseMessageId, answerText: original.answerText, reason: original.reason },
+      storedResult: { responseMessageId: original.responseMessageId, answerText: original.answerText, reason: original.reason, completedAt: original.completedAt },
       answerRecovery: { observedAt: new Date().toISOString(), conversationId: original.conversationId,
         submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId,
         responseMessageId: recovered.responseMessageId, answerText: recovered.answerText,
