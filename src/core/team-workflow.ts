@@ -587,8 +587,37 @@ export class TeamWorkflow {
         ack.submittedUserMessageId === original.submittedUserMessageId &&
         ack.submittedUserTurnId === original.submittedUserTurnId && typeof ack.conversationId === 'string'
         ? ack.conversationId : null;
+      let observed = {};
+      // Recheck only the exact quiet-final immediately preceding an unsubmitted
+      // preparation. Never rebind a page, restore scroll or rewrite either result.
+      if (original?.reason === 'dom-quiet-stable-final' && snapshot.generation === request.generation + 1 &&
+          needsDecision(snapshot) && !snapshot.promptSubmitted && snapshot.pageKey !== null) {
+        try {
+          const target = this.#latestRequest(request);
+          if (target.original !== null) {
+            const recovery = await this.services.scheduler.actorFor(request.sessionId).enqueue(() =>
+              this.services.pageMutex.runExclusive(snapshot.pageKey!, () => {
+                const latest = this.#latestRequest(request);
+                if (latest.original === null) throw new SessionPlaneDomainError(
+                  'session.generation-superseded', 'Historical recovery ownership changed');
+                return this.services.ui.recoverHistoricalAnswer(latest.original, latest.current, false);
+              }));
+            const answer = recovery.answerRecovery;
+            observed = { ...recovery, storedResult: { ...recovery.storedResult, completedAt: original.completedAt }, ...(answer.terminal
+              ? { responseMessageId: answer.responseMessageId, answerText: answer.answerText }
+              : answer.reason === 'historical-answer-unchanged' ? {} : {
+                terminal: false, completedAt: null, status: 'recovery_required', reason: answer.reason,
+                responseMessageId: null, answerText: null,
+              }) };
+          }
+        } catch (error) {
+          if (!(error instanceof SessionPlaneDomainError)) throw error;
+          observed = { terminal: false, completedAt: null, status: 'recovery_required', reason: error.errorCode,
+            responseMessageId: null, answerText: null };
+        }
+      }
       return { requestOk: true, requestRef: request.outboxId, sessionId: request.sessionId, generation: request.generation,
-        ...original, conversationId, historical: true, terminal: true, waitExpired: false,
+        ...original, conversationId, historical: true, terminal: true, waitExpired: false, ...observed,
         ...(failureMessage === undefined ? {} : { message: failureMessage }) };
     }
     const recovery = this.#lostSubmission(snapshot);

@@ -9,10 +9,40 @@ import { PageRegistry } from '../../src/browser/page-registry.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { observeChatGptAlerts, observeChatGptDom } from '../../src/providers/chatgpt/dom-observer.ts';
+import { observeChatGptActivity } from '../../src/providers/chatgpt/activity-observer.ts';
 import { ExactFinalTracker } from '../../src/providers/chatgpt/exact-final.ts';
 import { inspectChatGptSubmissionCandidates, recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submission.ts';
 
 const CONVERSATION_ID = 'conversation-observer-123456';
+
+test('Areum disconnected status prevents quiet completion without Stop and preserves the draft', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-disconnected-answer-'));
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: new PageRegistry(), headless: true });
+  try {
+    await owner.start();
+    const { page } = await owner.createPage();
+    await page.setContent(`<main><div data-message-author-role="user" data-message-id="original">Implement</div>
+      <div data-message-author-role="assistant" data-message-id="plan">I will implement it.</div>
+      <div role="status" id="disconnected">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>
+      <textarea>Keep this draft</textarea></main>`);
+    const dom = await observeChatGptDom(page, { submittedUserMessageId: 'original', submittedUserTurnId: null });
+    const activity = await observeChatGptActivity(page, dom);
+    assert.equal(activity.strength, 'unknown');
+    assert.equal(activity.reason, 'provider-stream-disconnected');
+    const evidence = { provider: 'chatgpt', pageKey: 'original', bindingEpoch: 1, observedAt: new Date().toISOString(),
+      conversationId: CONVERSATION_ID, submittedUserFound: true, laterUserFound: false, candidate: dom.candidate,
+      activity: activity.strength, reason: activity.reason, dialogKind: null, networkActivity: false, observationTransport: 'fresh' as const };
+    const tracker = new ExactFinalTracker(10);
+    assert.equal(tracker.evaluate(evidence, 0).kind, 'unverified');
+    assert.equal(tracker.evaluate(evidence, 100_000).kind, 'unverified');
+    await page.locator('#disconnected').evaluate(node => node.remove());
+    await page.locator('[data-message-id="plan"]').evaluate(node => {
+      node.innerHTML = '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>';
+    });
+    assert.equal((await observeChatGptActivity(page, dom)).strength, 'none', 'Quoted answer text is not provider status');
+    assert.equal(await page.locator('textarea').inputValue(), 'Keep this draft');
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('writing-block answers retain authored prose and documents without suggested follow-up UI', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-writing-block-answer-'));

@@ -81,6 +81,15 @@ test('original quiet-final can be recovered through latest under an unsubmitted 
     assert.equal(await page.locator('textarea').inputValue(), 'Preserved user draft');
 
     await page.evaluate(() => { const stop = document.createElement('button'); stop.id = 'active'; stop.setAttribute('aria-label', '중지'); document.querySelector('main')!.append(stop); });
+    const get = await invokeMcpTool({ name: 'sessionplane_team_get',
+      arguments: { teamId: team.teamId, requestRef: original.outbox_id },
+      socketPath: config.socketPath, timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
+    const observed = get.structuredContent.request as any;
+    assert.equal(observed.terminal, false);
+    assert.equal(observed.status, 'recovery_required');
+    assert.equal(observed.answerText, null);
+    assert.equal(observed.storedResult.responseMessageId, 'announcement');
+    assert.deepEqual(rows(), before);
     const active = await latest('still-active');
     assert.equal((active.structuredContent.answerRecovery as any).terminal, false);
     assert.equal((active.structuredContent.answerRecovery as any).answerText, null);

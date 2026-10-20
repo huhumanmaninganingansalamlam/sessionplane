@@ -20,7 +20,7 @@ export class ExactFinalTracker {
   readonly #quietWindowMs: number;
   #candidateId: string | null = null;
   #candidateText: string | null = null;
-  #stableSinceMs = 0;
+  #stableSinceMs: number | null = null;
 
   constructor(quietWindowMs: number) {
     if (!Number.isSafeInteger(quietWindowMs) || quietWindowMs <= 0) {
@@ -88,7 +88,12 @@ export class ExactFinalTracker {
     }
 
     if (candidate.streamingMarker || evidence.activity === 'strong') {
+      this.#stableSinceMs = null;
       return decision('progress', 'assistant-generation-active', textChanged);
+    }
+    if (evidence.activity === 'unknown') {
+      this.#reset();
+      return decision('unverified', evidence.reason ?? 'activity-observation-unknown');
     }
     if (candidate.terminalMarker) {
       return complete(candidate.responseMessageId, text, 'dom-terminal-marker');
@@ -97,10 +102,7 @@ export class ExactFinalTracker {
       this.#reset();
       return decision('progress', 'provider-activity-prevents-quiet-final');
     }
-    if (evidence.activity === 'unknown') {
-      this.#reset();
-      return decision('unverified', 'activity-observation-unknown');
-    }
+    this.#stableSinceMs ??= nowMs;
     if (nowMs - this.#stableSinceMs >= this.#quietWindowMs) {
       return complete(candidate.responseMessageId, text, 'dom-quiet-stable-final');
     }
@@ -110,7 +112,7 @@ export class ExactFinalTracker {
   #reset(): void {
     this.#candidateId = null;
     this.#candidateText = null;
-    this.#stableSinceMs = 0;
+    this.#stableSinceMs = null;
   }
 }
 
