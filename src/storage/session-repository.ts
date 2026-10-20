@@ -190,10 +190,17 @@ export class SessionRepository {
         (submission_state = 'submitted' AND prompt_submitted = 1 AND completed_at IS NOT NULL
           AND submitted_user_message_id IS NOT NULL AND error_code = 'provider.execution-failed'
           AND reason IN ('thinking-failed-reconciled', 'message-timeout-reconciled')) OR
+        (submission_state = 'submitted' AND prompt_submitted = 1 AND completed_at IS NOT NULL
+          AND submitted_user_message_id IS NOT NULL AND error_code IS NULL
+          AND reason = 'manual-followup-reconciled' AND EXISTS (
+            SELECT 1 FROM events e WHERE e.session_id = generations.session_id
+              AND e.generation = generations.generation AND e.event_type = 'generation.manual-followup-reconciled'
+              AND json_extract(e.payload_json, '$.evidence.originalUserMessageId') = generations.submitted_user_message_id
+              AND json_extract(e.payload_json, '$.evidence.conversationId') = ?)) OR
         (submission_state = 'submitted' AND completed_at IS NOT NULL AND response_message_id IS NOT NULL
           AND answer_text IS NOT NULL AND error_code IS NULL)
       ) IS NOT TRUE AND generation IS NOT ? LIMIT 1
-    `).get(sessionId, retiredGeneration) !== undefined) || this.#database.prepare(`
+    `).get(sessionId, conversationId, retiredGeneration) !== undefined) || this.#database.prepare(`
       SELECT 1 FROM sessions WHERE conversation_id = ? AND session_id != ? LIMIT 1
     `).get(conversationId, sessionId) !== undefined;
   }

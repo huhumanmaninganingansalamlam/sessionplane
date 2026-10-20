@@ -10,7 +10,48 @@ import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
 import { ProviderSubmissionError, type ProviderRecoveryRequest, type ProviderSubmissionRequest } from '../../src/providers/provider-adapter.ts';
 import { SessionRepository } from '../../src/storage/session-repository.ts';
+import { EventRepository } from '../../src/storage/event-repository.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+
+test('displaced timeout cleanup accepts an earlier officially reconciled manual followup without assigning its answer', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-followup-cleanup-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const core = await startCore({ config, startBrowser: false, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const rpc = <T>(method: string, params: object) => callRpc<T>({ socketPath: config.socketPath,
+    method, params: { clientId: 'cleanup-followup', ...params }, timeoutMs: 5000 });
+  try {
+    const team = await rpc<{ teamId: string }>('team.create', { requestId: 'team', name: 'followup' });
+    const session = await rpc<SessionSnapshot>('session.create', { requestId: 'session', teamId: team.teamId,
+      roleKey: 'main', provider: 'chatgpt' });
+    await rpc('session.send', { requestId: 'original', sessionId: session.sessionId, prompt: 'Original' });
+    const original = core.teamDirectory.getSession(session.sessionId);
+    const sessions = new SessionRepository(core.database.raw);
+    const timestamp = new Date().toISOString();
+    sessions.updateCurrentGeneration(session.sessionId, 1, { sessionState: 'cancelled', completedAt: timestamp,
+      reason: 'manual-followup-reconciled', errorCode: null }, timestamp);
+    const deletion = { requestId: 'delete', sessionId: session.sessionId, generation: 1,
+      conversationId: original.conversationId, outputsRetrieved: true };
+    await assert.rejects(rpc('session.delete', deletion), /retrieve completed outputs/,
+      'A reason alone does not establish official reconciliation');
+    new EventRepository(core.database.raw).append({ teamId: team.teamId, roleId: session.roleId,
+      sessionId: session.sessionId, generation: 1, eventType: 'generation.manual-followup-reconciled',
+      payload: { evidence: { originalUserMessageId: original.submittedUserMessageId,
+        conversationId: original.conversationId, followupUserMessageId: 'manual-user',
+        responseMessageId: 'manual-answer' } }, createdAt: timestamp });
+    await rpc('session.send', { requestId: 'next', sessionId: session.sessionId, prompt: 'Next work' });
+    sessions.updateCurrentGeneration(session.sessionId, 2, { sessionState: 'failed', providerState: 'error',
+      completedAt: timestamp, errorCode: 'provider.execution-failed', reason: 'message-timeout-reconciled' }, timestamp);
+    const before = core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(session.sessionId);
+    const successor = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    assert.equal((await rpc<{ deleted: boolean }>('session.delete', { ...deletion, generation: 2 })).deleted, true);
+    assert.equal(sessions.conversationCleanupBlocker(session.sessionId, original.conversationId!), false);
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(session.sessionId), before);
+    assert.equal(core.teamDirectory.getCurrentSession(team.teamId, 'main').sessionId, successor.sessionId);
+    assert.equal(fake.submitCount, 2);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('conversation deletion protects unresolved work, retains answers and persists uncertain outcomes', async () => {
   class DeletingProvider extends FakeProviderAdapter {
