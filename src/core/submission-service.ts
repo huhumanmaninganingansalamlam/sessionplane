@@ -1184,8 +1184,10 @@ export class SubmissionService {
     });
   }
 
+  submittedMessageIds(sessionId: string): ReadonlySet<string> { return this.#sessions.submittedMessageIds(sessionId); }
+
   async reconcileFailure(
-    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string; readonly continuationPrompt?: '계속' | undefined },
+    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly decisionId: string; readonly continuationPrompt?: '계속' | undefined; readonly allowMessageTimeout?: boolean },
     observe: (owner: SessionSnapshot, anchor: SessionSnapshot) => Promise<{
       readonly kind: 'thinking-failed' | 'message-timeout'; readonly pageKey: string; readonly bindingEpoch: number;
       readonly conversationId: string; readonly submittedUserMessageId: string | null;
@@ -1231,7 +1233,7 @@ export class SubmissionService {
       if (!historical && (snapshot.provider !== 'chatgpt' || snapshot.terminal || snapshot.submissionState !== 'submitted' ||
           !snapshot.promptSubmitted || snapshot.conversationId === null || snapshot.pageKey === null ||
           (snapshot.submittedUserMessageId === null && snapshot.submittedUserTurnId === null) ||
-          snapshot.errorCode !== 'provider.actionable-alert')) {
+          (snapshot.errorCode !== 'provider.actionable-alert' && input.allowMessageTimeout !== true))) {
         throw new SessionPlaneDomainError('provider.failure-unverified', 'Requires a confirmed submitted current provider failure, not preparation or an ambiguous submission');
       }
       if (snapshot.provider !== 'chatgpt' || snapshot.conversationId === null || snapshot.pageKey === null) {
@@ -1242,7 +1244,8 @@ export class SubmissionService {
         if (evidence.conversationId !== snapshot.conversationId || evidence.pageKey !== snapshot.pageKey ||
             evidence.submittedUserMessageId !== anchor.submittedUserMessageId ||
             evidence.submittedUserTurnId !== anchor.submittedUserTurnId || !['thinking-failed', 'message-timeout'].includes(evidence.kind) ||
-            (historical && evidence.kind !== 'message-timeout')) {
+            (historical && evidence.kind !== 'message-timeout') ||
+            (snapshot.errorCode !== 'provider.actionable-alert' && evidence.kind !== 'message-timeout')) {
           throw new SessionPlaneDomainError('provider.failure-unverified', 'Failure evidence does not match the submitted binding');
         }
         const result = receipts.execute({ clientId: input.clientId, requestId: input.decisionId, method, payload,

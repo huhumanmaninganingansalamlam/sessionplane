@@ -20,12 +20,8 @@ import { ExactFinalTracker } from '../providers/chatgpt/exact-final.ts';
 import { observeChatGptActivity } from '../providers/chatgpt/activity-observer.ts';
 import { restoreLatestPosition } from '../providers/chatgpt/latest-position-recovery.ts';
 import { readChatGptMessages } from '../providers/chatgpt/message-dom.ts';
-import { observeChatGptDom, observeChatGptAlerts } from '../providers/chatgpt/dom-observer.ts';
+import { observeChatGptDom, observeChatGptAlerts, isMessageTimeoutAlert } from '../providers/chatgpt/dom-observer.ts';
 import type { SubmissionService } from './submission-service.ts';
-
-function isMessageTimeoutAlert(alert: string): boolean {
-  return /^(?:메시지 전송 시간이 초과되었습니다\. 다시 시도하세요\.|Message (?:sending )?timed out\. Please try again\.)(?:\s*(?:다시 시도|Retry|Try again))?$/i.test(alert.trim());
-}
 
 export class SessionUiService {
   readonly #submissions: SubmissionService;
@@ -398,12 +394,17 @@ export class SessionUiService {
           // Only an explicit owner reconciliation can close this exact idle stream
           // error. Automatic Thinking-failure recovery never accepts message timeouts.
           const timeoutAlerts = allowMessageTimeout ? dom.providerAlerts.filter(isMessageTimeoutAlert) : [];
+          const knownUsers = this.#submissions.submittedMessageIds(anchor.sessionId);
+          const missingTimeoutAnchor = timeoutAlerts.length > 0 && !dom.submittedUserFound &&
+            !dom.messageDiagnostics.parsedMessagesTruncated &&
+            dom.messageDiagnostics.parsedMessages.filter(message => message.role === 'user')
+              .every(message => message.messageId !== null && knownUsers.has(message.messageId));
           const alerts = [...thinkingAlerts, ...timeoutAlerts];
           if (continuationPrompt !== undefined && timeoutAlerts.length === 0) throw new SessionPlaneDomainError(
             'provider.failure-unverified', 'A preserved continuation draft requires the exact idle message-timeout surface');
           this.#requirePage(session);
           const after = this.#registry.refreshPage(session.pageKey!);
-          if (binding.bindingEpoch !== after.bindingEpoch || !dom.submittedUserFound || dom.laterUserFound ||
+          if (binding.bindingEpoch !== after.bindingEpoch || (!dom.submittedUserFound && !missingTimeoutAnchor) || dom.laterUserFound ||
               (dom.candidate !== null && (timeoutAlerts.length === 0 || dom.candidate.streamingMarker)) || activity.strength !== 'none' || alerts.length === 0 ||
               dom.providerAlerts.some(alert => !alerts.includes(alert)) ||
               controls.nodes.some(node => node.role === 'dialog' || node.role === 'alertdialog') ||
@@ -412,7 +413,7 @@ export class SessionUiService {
               'No exact idle current-turn Thinking failed or explicitly accepted message-timeout surface; preserve this submitted request and observe it');
           }
           return { kind: timeoutAlerts.length > 0 ? 'message-timeout' as const : 'thinking-failed' as const, pageKey: session.pageKey!, bindingEpoch: after.bindingEpoch,
-            conversationId: session.conversationId!, submittedUserMessageId: anchor.submittedUserMessageId,
+            conversationId: session.conversationId!, anchorPresent: dom.submittedUserFound, submittedUserMessageId: anchor.submittedUserMessageId,
             submittedUserTurnId: anchor.submittedUserTurnId, observedAt: controls.capturedAt, providerAlerts: alerts,
             ...(dom.candidate === null ? {} : { interruptedResponse: dom.candidate }),
             ...(continuationPrompt === undefined ? {} : { continuationPrompt }) };
