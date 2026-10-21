@@ -9,6 +9,7 @@ import test from 'node:test';
 import { callRpc } from '../../src/cli/client.ts';
 import { runCli } from '../../src/cli/main.ts';
 import { resolveConfig } from '../../src/config.ts';
+import type { ChatGptSurface } from '../../src/providers/chatgpt/surface.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
 import {
@@ -104,13 +105,20 @@ test('CLI and modern/legacy MCP expose the same core state across MCP process re
       '--json',
     ]);
     assert.equal(cliStatus.code, 0, cliStatus.stderr);
-    const cliSnapshot = JSON.parse(cliStatus.stdout) as SessionSnapshot;
-    const directSnapshot = await callRpc<SessionSnapshot>({
+    const cliSnapshot = JSON.parse(cliStatus.stdout) as SessionSnapshot & { observedSurface: ChatGptSurface };
+    const directSnapshot = await callRpc<SessionSnapshot & { observedSurface: ChatGptSurface }>({
       socketPath: config.socketPath,
       method: 'session.get',
       params: { clientId: 'cli-mcp-client', sessionId: created.sessionId },
     });
-    assert.deepEqual(cliSnapshot, directSnapshot);
+    const { observedSurface: cliSurface, ...cliState } = cliSnapshot;
+    const { observedSurface: directSurface, ...directState } = directSnapshot;
+    assert.deepEqual(cliState, directState);
+    // Separate fresh reads have independent observation timestamps.
+    assert.equal(cliSurface.mode, directSurface.mode);
+    assert.equal(cliSurface.source, directSurface.source);
+    assert.ok(Number.isFinite(Date.parse(cliSurface.observedAt)));
+    assert.ok(Number.isFinite(Date.parse(directSurface.observedAt)));
 
     const view = await callRpc<{ requests: Array<{ requestRef: string }> }>({ socketPath: config.socketPath,
       method: 'workflow.team_get', params: { teamId: team.teamId } });
