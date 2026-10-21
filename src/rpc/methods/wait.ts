@@ -40,13 +40,14 @@ export function registerWaitMethods(
           })
           .strict(),
       ]),
-    async (params) => {
+    async (params, context) => {
       const snapshot =
         'sessionId' in params
           ? directory.getSession(params.sessionId)
           : directory.getCurrentSession(params.teamId, params.roleKey);
       return await scheduler.waitSession(snapshot.sessionId, {
         waitMs: params.waitMs,
+        ...(context.signal ? { signal: context.signal } : {}),
         ...(params.generation === undefined
           ? {}
           : { expectedGeneration: params.generation }),
@@ -69,7 +70,7 @@ export function registerWaitMethods(
         waitMs: WaitMs,
       })
       .strict(),
-    async (params) => {
+    async (params, context) => {
       const deadline = Date.now() + params.waitMs;
       let team = directory.getTeam(params.teamId);
       let cursor = params.afterEventSequence ?? team.latestEventSequence;
@@ -87,7 +88,7 @@ export function registerWaitMethods(
         }
 
         const remaining = Math.max(0, deadline - Date.now());
-        if (remaining === 0) {
+        if (remaining === 0 || context.signal?.aborted) {
           return teamWaitResult(team.teamId, params.until, true, team.latestEventSequence, selected);
         }
 
@@ -97,7 +98,7 @@ export function registerWaitMethods(
             waitMs: remaining,
             afterRevision: cursor,
             expectedGeneration: snapshot.generation,
-            signal: controller.signal,
+            signal: context.signal ? AbortSignal.any([controller.signal, context.signal]) : controller.signal,
             wakeOnTerminal: false,
           }),
         );

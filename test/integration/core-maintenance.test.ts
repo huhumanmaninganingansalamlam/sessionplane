@@ -167,3 +167,24 @@ test('drain failure and lost-caller lease expiry resume normal service without c
     assert.equal(fake.submitCount, 1); assert.equal(fake.stopCount, 0); assert.equal(f.exits(), 0);
   } finally { finish.resolve(); await f.dispose(); }
 });
+
+
+test('handover releases an admitted long read wait without stopping the provider generation', async () => {
+  const f = await fixture();
+  try {
+    await f.rpc('session.send', { clientId: 'maintenance-test', requestId: 'long-read', sessionId: f.session.sessionId,
+      prompt: 'preserved original', sessionDeadlineSec: 600 });
+    const waiting = f.rpc<any>('workflow.wait', { teamId: f.session.teamId,
+      requestRefs: [f.core.database.raw.prepare('SELECT outbox_id FROM outbox').get()!.outbox_id],
+      waitMs: 1800000, untilResult: false });
+    while (!f.core.actorScheduler.actorFor(f.session.sessionId).subscriberCount) await delay(1);
+    const lease = await f.prepare();
+    const returned = await waiting;
+    assert.equal(lease.phase, 'ready');
+    assert.equal(returned.results[0].terminal, false);
+    assert.equal(f.fake.stopCount, 0);
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(f.core.teamDirectory.getSession(f.session.sessionId).generation, 1);
+    await f.rpc('system.maintenance.resume', { ...f.owner, token: lease.token });
+  } finally { await f.dispose(); }
+});

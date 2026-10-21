@@ -675,7 +675,7 @@ export class SubmissionService {
           const result = original && this.#sessions.getGenerationResult(original.sessionId, original.generation);
           const current = this.#requireSnapshot(prepared.outbox.sessionId);
           if (!original || original.clientId !== input.clientId || original.sessionId !== current.sessionId ||
-              original.generation !== current.generation - 1 || result?.reason !== 'approved-continuation-prepared' ||
+              original.generation !== current.generation - 1 || !['approved-continuation-prepared', 'message-timeout-reconciled'].includes(result?.reason ?? '') ||
               input.prompt !== '계속' || !this.#beforeContinuation) throw new ProviderSubmissionError(
             'provider.preparation-required', 'Exact approved continuation ownership is unavailable');
           await this.#beforeContinuation(current, { ...current, ...result, generation: original.generation });
@@ -1085,10 +1085,11 @@ export class SubmissionService {
       const original = this.#outbox.getByRequest(clientId, input.requestId);
       const snapshot = this.#requireSnapshot(input.sessionId);
       this.#requireActiveRoleSession(snapshot);
+      const timeout = snapshot.reason === 'message-timeout-reconciled' && snapshot.errorCode === 'provider.execution-failed';
       if (!original || original.sessionId !== input.sessionId || original.generation !== input.generation ||
-          snapshot.generation !== input.generation || snapshot.terminal || snapshot.provider !== 'chatgpt' ||
+          snapshot.generation !== input.generation || (snapshot.terminal && !timeout) || snapshot.provider !== 'chatgpt' ||
           snapshot.submissionState !== 'submitted' || !snapshot.promptSubmitted || !snapshot.submittedUserMessageId ||
-          !snapshot.pageKey || !snapshot.conversationId || snapshot.answerText !== null || snapshot.responseMessageId !== null) {
+          !snapshot.pageKey || !snapshot.conversationId || (!timeout && (snapshot.answerText !== null || snapshot.responseMessageId !== null))) {
         throw new SessionPlaneDomainError('provider.failure-unverified', 'Continuation requires the exact unresolved acknowledged request');
       }
       return await this.#pageMutex.runExclusive(snapshot.pageKey, async () => {
@@ -1096,13 +1097,13 @@ export class SubmissionService {
         const identity = recorded?.recoveryIdentity as Record<string, unknown> | undefined;
         const server = recorded?.serverObservation as import('../providers/provider-adapter.ts').ProviderServerObservation | undefined;
         const last = server?.messages.at(-1);
-        if (!identity || identity.conversationId !== snapshot.conversationId || identity.pageKey !== snapshot.pageKey ||
+        if (!timeout && (!identity || identity.conversationId !== snapshot.conversationId || identity.pageKey !== snapshot.pageKey ||
             identity.submittedUserMessageId !== snapshot.submittedUserMessageId ||
             identity.submittedUserTurnId !== snapshot.submittedUserTurnId || !recorded ||
             this.#now().getTime() - Date.parse(String(recorded.observedAt)) > 180_000 ||
             !server || server.nextUserFound || last?.role !== 'tool' || last.status !== 'finished_successfully' ||
             last.messageId !== server.currentNodeId || !server.assistantCount ||
-            server.messages.some(message => message.status === 'in_progress' || message.endTurn === true)) {
+            server.messages.some(message => message.status === 'in_progress' || message.endTurn === true))) {
           throw new SessionPlaneDomainError('provider.failure-unverified',
             'Fresh exact server evidence of an unclosed successful tool turn is required; preserve active or uncertain work');
         }
@@ -1114,11 +1115,11 @@ export class SubmissionService {
         const evidence = await observe(snapshot);
         const result = receipts.execute({ clientId, requestId: decisionId, method, payload, operation: () => {
           const timestamp = this.#now().toISOString();
-          if (!this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
+          if (!timeout && !this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
             sessionState: 'cancelled', providerState: 'unknown', completedAt: timestamp, nextCheckAt: null,
             errorCode: null, reason: 'approved-continuation-prepared',
           }, timestamp)) throw new SessionPlaneDomainError('session.generation-superseded', 'Continuation owner changed');
-          const proof = { ...evidence, serverSequence: recorded.sequence, originalUserMessageId: snapshot.submittedUserMessageId };
+          const proof = { ...evidence, serverSequence: recorded?.sequence, originalUserMessageId: snapshot.submittedUserMessageId };
           this.#events.append({ teamId: snapshot.teamId, roleId: snapshot.roleId, sessionId: snapshot.sessionId,
             generation: snapshot.generation, eventType: 'generation.continuation-prepared',
             payload: { requestRef: original.outboxId, receiptId: decisionId, evidence: proof, providerMutation: false }, createdAt: timestamp });

@@ -129,13 +129,9 @@ export class ChatGptBackendRecovery {
         if (entry !== undefined) {
           const message = messageForNode(entry[1])!;
           const textHash = createHash('sha256').update(messageText(message).replaceAll('\r\n', '\n')).digest('hex');
-          const parent = readStringField(entry[1], 'parent');
           if (textHash === attempt.textHash) {
-            exactIdentityReason = parent !== attempt.parentMessageId &&
-              readStringField(parent === null ? null : messageForNode(mapping[parent]), 'id') !== attempt.parentMessageId
-              ? 'backend-submission-parent-mismatch'
-              : recoverExactServerFinal(payload, { conversationId,
-                submittedUserMessageId: attempt.messageId, submittedUserTurnId: null }).reason;
+            exactIdentityReason = recoverExactServerFinal(payload, { conversationId,
+              submittedUserMessageId: attempt.messageId, submittedUserTurnId: null }).reason;
           }
         }
       }

@@ -716,6 +716,7 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   if (action === 'wait') {
     const waitMs = workflowWaitMs(integerOption(parsed, 'wait-ms', DEFAULT_WORKFLOW_WAIT_MS, 0, MAX_WORKFLOW_WAIT_MS));
     return await printRpc(io, parsed, config, 'workflow.wait', { teamId, requestRefs: [ref], waitMs,
+      ...(parsed.options['continuation-approved'] === 'true' ? { continuationApproved: true as const } : {}),
       untilResult: waitMs > 0 && parsed.options['return-on-wait-expiry'] !== 'true',
       ...optionalParam('followupUserMessageId', parsed.options['followup-message-id']),
       ...optionalParam('outputDir', parsed.options.out) }, (waitMs > 0 && parsed.options['return-on-wait-expiry'] !== 'true' ? MAX_WORKFLOW_WAIT_MS : waitMs) + 5_000);

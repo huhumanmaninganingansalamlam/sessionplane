@@ -256,6 +256,7 @@ export class SessionUiService {
   }
 
   async verifyContinuation(session: SessionSnapshot, original: SessionSnapshot) {
+      if (original.reason === 'message-timeout-reconciled') return await this.#failureEvidence(session, original, true, '계속');
       const page = this.#requirePage(session);
       const binding = this.#registry.refreshPage(session.pageKey!);
       await requireIdleConversationPage(page, '계속');

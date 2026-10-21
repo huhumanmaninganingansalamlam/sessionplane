@@ -26,6 +26,7 @@ type RoleInput = Mutation & { roleRef: string };
 
 export class TeamWorkflow {
   readonly #outbox: OutboxRepository;
+  readonly #continuationReviews = new Map<string, number>();
   readonly #sessions: SessionRepository;
   readonly #loadRecovery: ConversationLoadRecoveryRepository;
   readonly services: {
@@ -297,7 +298,17 @@ export class TeamWorkflow {
       });
     }
     if (input.decision === 'continue') {
-      const reconciliation = await this.services.ui.prepareContinuation({ ...owner, decisionId: input.requestId });
+      let reconciliation;
+      try { reconciliation = await this.services.ui.prepareContinuation({ ...owner, decisionId: input.requestId }); }
+      catch (error) {
+        if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.failure-unverified') throw error;
+        try { await this.services.ui.reconcileFailure({ ...owner, decisionId: `timeout:${input.requestId}`, allowMessageTimeout: true, continuationPrompt: '계속' }); }
+        catch (failure) {
+          if (failure instanceof SessionPlaneDomainError && failure.errorCode === 'provider.failure-unverified') throw error;
+          throw failure;
+        }
+        reconciliation = await this.services.ui.prepareContinuation({ ...owner, decisionId: input.requestId });
+      }
       const payload = JSON.parse(request.payloadJson);
       await this.send({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}`,
         requestId: `continue:${input.requestId}`, prompt: '계속', continuationOf: request.outboxId, sessionDeadlineSec: payload.sessionDeadlineSec ?? 5400,
@@ -361,7 +372,7 @@ export class TeamWorkflow {
     return await this.#observe(this.#request(input));
   }
 
-  async wait(input: { teamId: string; requestRefs: string[]; waitMs: number; untilResult?: boolean | undefined; followupUserMessageId?: string | undefined; outputDir?: string | undefined }, signal?: AbortSignal) {
+  async wait(input: { teamId: string; requestRefs: string[]; waitMs: number; continuationApproved?: boolean | undefined; untilResult?: boolean | undefined; followupUserMessageId?: string | undefined; outputDir?: string | undefined }, signal?: AbortSignal) {
     const requestRefs = [...new Set(input.requestRefs)];
     const deadline = Date.now() + workflowWaitMs(input.waitMs);
     const controller = new AbortController();
@@ -371,7 +382,7 @@ export class TeamWorkflow {
     // One outcome wakes the caller; progress/pacing revisions remain in this process.
     const observed: Array<{ request: OutboxRecord | null; result: Record<string, unknown> }> = await Promise.all(requestRefs.map(async (requestRef) => {
       try {
-        const request = this.#request({ teamId: input.teamId, requestRef });
+        let request = this.#request({ teamId: input.teamId, requestRef });
         let result: Record<string, unknown> = await this.#observe(request);
         const followupTracker = new ExactFinalTracker(1500);
         for (;;) {
@@ -397,6 +408,35 @@ export class TeamWorkflow {
             }
             if (evidence.errorCode) { result = { ...result, errorCode: evidence.errorCode, reason: evidence.reason }; controller.abort(); break; }
           }
+          if (input.waitMs > 0 && input.continuationApproved && !input.followupUserMessageId && !controller.signal.aborted) {
+            // Durable receipts own the single send. This clock only limits broad
+            // reassessment; a disconnected banner is never evidence to continue.
+            const reviewId = `managed-continuation:${request.outboxId}`;
+            const successor = this.#outbox.getByRequest(request.clientId, `continue:${reviewId}`);
+            if (successor) {
+              request = successor;
+              result = await this.#observe(request);
+              continue;
+            }
+            const priorReview = this.#continuationReviews.get(request.outboxId);
+            const lastReview = priorReview ?? request.createdAt;
+            const due = Date.now() - (typeof lastReview === 'number' ? lastReview : Date.parse(lastReview)) >= 30 * 60_000;
+            if ((due || (priorReview === undefined && result.errorCode === 'provider.actionable-alert')) &&
+                result.submissionState === 'submitted' && result.promptSubmitted === true &&
+                result.terminal !== true && result.status !== 'recovery_required') {
+              this.#continuationReviews.set(request.outboxId, Date.now());
+              try {
+                result = await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
+                  requestId: reviewId, decision: 'continue', continuationApproved: true });
+                request = this.#request({ teamId: input.teamId, requestRef: String(result.requestRef) });
+                continue;
+              } catch (error) {
+                if (!(error instanceof SessionPlaneDomainError) ||
+                    !['provider.failure-unverified', 'provider.preparation-required', 'session.busy'].includes(error.errorCode)) throw error;
+                // Live/uncertain generation or a distinct draft stays untouched.
+              }
+            }
+          }
           if (workflowWaitOutcome(result)) { controller.abort(); break; }
           const remaining = deadline - Date.now();
           if (remaining <= 0 || controller.signal.aborted) break;
@@ -404,11 +444,11 @@ export class TeamWorkflow {
           const nextAckCheck = Date.parse(String((result.acknowledgementRecovery as { nextCheckAt?: string } | undefined)?.nextCheckAt));
           const acknowledgementWait = Number.isFinite(nextAckCheck) ? Math.max(1_000, nextAckCheck - Date.now()) : 30_000;
           const waited = await this.services.scheduler.waitSession(request.sessionId, {
-            expectedGeneration: request.generation, waitMs: Math.min(remaining, input.followupUserMessageId ? 5_000 : acknowledgementPending ? acknowledgementWait : workflowWaitMs(input.waitMs)), signal: controller.signal,
+            expectedGeneration: request.generation, waitMs: Math.min(remaining, input.continuationApproved ? 30 * 60_000 : remaining, input.followupUserMessageId ? 5_000 : acknowledgementPending ? acknowledgementWait : workflowWaitMs(input.waitMs)), signal: controller.signal,
           });
           if (controller.signal.aborted) break;
           result = await this.#observe(request);
-          if (waited.waitExpired && !input.followupUserMessageId && !acknowledgementPending) break;
+          if (waited.waitExpired && Date.now() >= deadline && !input.followupUserMessageId && !acknowledgementPending) break;
         }
         return { request, result: { ...result, waitExpired: !workflowWaitOutcome(result) && Date.now() >= deadline } };
       } catch (error) { controller.abort(); return { request: null, result: failure(error, requestRef) }; }
@@ -438,10 +478,10 @@ export class TeamWorkflow {
       if (!workflowWaitOutcome(result) && !(result.followup as { terminal?: boolean } | undefined)?.terminal) {
         const { requestOk, requestRef, teamId, sessionId, generation, submissionState, sessionState,
           providerState, observationTransport, terminal, waitExpired, promptSubmitted, conversationId,
-          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt } = result;
+          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt, conversationLoadRecovery, recovery } = result;
         results.push({ requestOk, requestRef, teamId, sessionId, generation, submissionState, sessionState,
           providerState, observationTransport, terminal, waitExpired, promptSubmitted, conversationId,
-          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt });
+          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt, conversationLoadRecovery, recovery });
       } else results.push({ ...result, ...(files === undefined ? {} : { files }) });
     }
     return { requestOk: true, teamId: input.teamId, results };

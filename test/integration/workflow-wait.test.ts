@@ -6,6 +6,7 @@ import { setImmediate as flush } from 'node:timers/promises';
 import test from 'node:test';
 import { Readable, Writable } from 'node:stream';
 import { SessionUiService } from '../../src/core/session-ui-service.ts';
+import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { workflowWaitOutcome } from '../../src/domain/workflow-wait.ts';
 import { runCli } from '../../src/cli/main.ts';
 import { resolveConfig } from '../../src/config.ts';
@@ -241,4 +242,33 @@ test('CLI retains paced UNKNOWN ACK recovery through collection without a select
     assert.equal(workflowWaitOutcome({ ...pending, status: 'recovery_required' }), true);
     assert.equal(workflowWaitOutcome({ ...pending, errorCode: 'provider.actionable-alert' }), true);
   } finally { t.mock.restoreAll(); await f.close(); }
+});
+
+
+test('authorized broad continuation review stays inside the wait and runs at thirty-minute intervals', async t => {
+  const f = await fixture();
+  try {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    let reviews = 0;
+    t.mock.method(SessionUiService.prototype, 'prepareContinuation', async () => {
+      reviews++;
+      throw new SessionPlaneDomainError('provider.failure-unverified', 'Still generating or uncertain');
+    });
+    let returned = false;
+    const waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef], waitMs: 3600000,
+      untilResult: false, continuationApproved: true }).then(value => { returned = true; return value; });
+    await f.untilSubscribed(f.sent.sessionId as string);
+    assert.equal(reviews, 0);
+    t.mock.timers.tick(1800000);
+    for (let i = 0; i < 20; i++) await flush();
+    assert.equal(reviews, 1);
+    assert.equal(returned, false);
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, { reason: 'provider-stream-disconnected' });
+    for (let i = 0; i < 20; i++) await flush();
+    assert.equal(reviews, 1, 'Progress cannot cause rapid broad reviews');
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
+      { sessionState: 'complete', providerState: 'complete', answerText: 'Original final', responseMessageId: 'final' });
+    await waiting;
+    assert.equal(f.fake.submitCount, 1);
+  } finally { t.mock.timers.reset(); await f.close(); }
 });

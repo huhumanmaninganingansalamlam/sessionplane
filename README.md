@@ -105,7 +105,7 @@ machine-readable results and diagnostics.
    using the displayed `request configure` command, then the fresh composer control.
    Inspect the input before explicitly choosing the submit control. Disabled or stale
    controls are not a fallback; inspect the same request again.
-4. Use the displayed `request wait` command to collect the answer. Add `--out DIR`
+4. Use the displayed `request wait` command to collect the answer. When same-conversation recovery is authorized, add `--continuation-approved`: the existing wait retains routine ACK/load delays, reviews unresolved work about every 30 minutes, and uses exact idle timeout or interrupted-tool evidence for a single continuation. A disconnected banner or active generation never authorizes a send. Add `--out DIR`
    to export captured files. A client wait timeout does not cancel generation.
 5. If delivery is unconfirmed, inspect the same request. Never repeat `send` as a
    retry. If fresh evidence offers a single matching user message, `request acknowledge`

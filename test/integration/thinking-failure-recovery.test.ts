@@ -483,3 +483,47 @@ test('explicit message-timeout reconciliation preserves original ACK, rejects li
     assert.equal(f.core.teamDirectory.getSession(child.sessionId).answerText, 'Normal final');
   } finally { await f.close(); }
 });
+
+
+test('managed wait continues a verified message timeout once and preserves the failed original', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users + '<div role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</div>';
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    f.fake.failureCount = 1;
+    f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="continued-answer">Continued answer</div>';
+    const input = { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000, continuationApproved: true };
+    const result = await f.rpc<any>('wait', input);
+    assert.equal(f.fake.submitCount, 2);
+    assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, 2);
+    const stored = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(original.sessionId)!;
+    assert.equal(stored.reason, 'message-timeout-reconciled');
+    assert.equal(stored.submitted_user_message_id, original.submittedUserMessageId);
+    assert.equal(stored.error_code, 'provider.execution-failed');
+    assert.equal(result.results[0].generation, 2);
+    await f.rpc('wait', { ...input, waitMs: 0 });
+    assert.equal(f.fake.submitCount, 2);
+  } finally { await f.close(); }
+});
+
+
+test('approved managed wait preserves disconnected or actively generating original turns', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
+    for (const surface of [
+      '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div><textarea></textarea>',
+      '<div role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</div><textarea></textarea><button data-testid="stop-button">Stop</button>',
+      '<div role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</div><textarea>Distinct draft</textarea>'
+    ]) {
+      await f.fake.page.setContent(body + surface + '</main>');
+      await f.rpc('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000, continuationApproved: true });
+      assert.equal(f.fake.submitCount, 1);
+      assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, 1);
+    }
+  } finally { await f.close(); }
+});
