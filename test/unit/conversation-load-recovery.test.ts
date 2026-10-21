@@ -247,7 +247,7 @@ test('list429 keeps sanitized scoped evidence across restart without holding unr
     assert.equal(evidence()[1].retryAfterSource, 'header-absent-fallback');
     assert.equal(evidence()[1].fallbackMs, 900_000);
     assert.equal(evidence()[1].policyUntil, '2026-10-06T00:15:05.000Z');
-    assert.equal(evidence()[1].effectiveUntil, '2026-10-06T00:00:10.000Z');
+    assert.equal(evidence()[1].effectiveUntil, '2026-10-06T00:15:05.000Z');
     f.controls[1]!.response!(response({ 'retry-after': 'private-invalid' }));
     assert.equal(evidence()[2].retryAfterSource, 'header-invalid-fallback');
     assert.deepEqual(evidence()[2].headers, {});

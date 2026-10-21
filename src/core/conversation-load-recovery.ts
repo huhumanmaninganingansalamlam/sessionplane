@@ -8,6 +8,7 @@ import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import type { ProbeCoordinator } from '../scheduler/probe-coordinator.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
+import { ProbeBudgetRepository } from '../storage/probe-budget-repository.ts';
 import { EventRepository } from '../storage/event-repository.ts';
 import { ConversationLoadRecoveryRepository, conversationLimitScope, type LoadRecoveryRecord } from '../storage/conversation-load-recovery-repository.ts';
 import { conversationLoadSurface, type LoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
@@ -99,6 +100,7 @@ export class ConversationLoadRecovery {
         const policyScope = broad ? 'chatgpt:default' : category === 'conversation-detail' && (detailId || binding.conversationId)
           ? conversationLimitScope(detailId || binding.conversationId!) : `chatgpt:${category}`;
         this.services.probes.defer(policyScope, until);
+        const policyBudget = new ProbeBudgetRepository(this.services.database.raw).get(policyScope);
         // Passive evidence only: no body read, probe, raw URL/query or arbitrary header values.
         try {
           const session = binding.sessionId && this.#sessions.getSnapshot(binding.sessionId);
@@ -115,7 +117,7 @@ export class ConversationLoadRecovery {
               retryAfterDurationMs: valid ? Math.max(0, specified - received) : null,
               minimumIntervalMs: this.intervalMs, fallbackMs: valid ? null : 900_000,
               policyScope, serverScope, policyUntil: until,
-              effectiveUntil: this.repository.effectiveNextAllowedAt() } });
+              effectiveUntil: [policyBudget?.nextAllowedAt, policyBudget?.blockedUntil].filter(Boolean).sort().at(-1) ?? null } });
         } catch { /* Evidence failure cannot weaken or retry the existing cooldown operation. */ }
       };
       if (this.services.maintenance) this.services.maintenance.callback(recordResponse);

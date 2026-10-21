@@ -158,7 +158,14 @@ export class ProbeCoordinator {
       this.#metrics?.increment('backend_probe_deferred_total');
     }
 
-    const nextAllowedAt = new Date(now.getTime() + Math.max(this.#successIntervalMs, minimumIntervalMs)).toISOString();
+    // An internal queue/cooldown did not dispatch an HTTP probe. Applying the
+    // success interval here can expire the backend queue lease before the
+    // observer returns, repeatedly evicting every waiting conversation.
+    const deferredDelay = result.kind === 'deferred' && result.nextCheckAt !== null
+      ? Date.parse(result.nextCheckAt) - now.getTime() : NaN;
+    const interval = Number.isFinite(deferredDelay)
+      ? Math.max(1, deferredDelay, minimumIntervalMs) : Math.max(this.#successIntervalMs, minimumIntervalMs);
+    const nextAllowedAt = new Date(now.getTime() + interval).toISOString();
     this.#save(scope, nextAllowedAt, null, 0, 0, now);
     return { ...result, nextCheckAt: result.nextCheckAt ?? nextAllowedAt };
   }
