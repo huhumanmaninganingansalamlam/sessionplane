@@ -448,3 +448,39 @@ test('provider deletion deferral and uncertain acknowledgement independently clo
     assert.equal(deletes, 2);
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+
+test('displaced unsubmitted preparation permits cleanup after earlier answers were collected', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-prepared-cleanup-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const core = await startCore({ config, startBrowser: false, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const rpc = <T>(method: string, params: object) => callRpc<T>({ socketPath: config.socketPath,
+    method, params: { clientId: 'cleanup-prepared', ...params } });
+  try {
+    const team = await rpc<{ teamId: string }>('team.create', { requestId: 'team' });
+    const old = await rpc<SessionSnapshot>('session.create', { requestId: 'session', teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    await rpc('session.send', { requestId: 'original', sessionId: old.sessionId, prompt: 'Original' });
+    const sessions = new SessionRepository(core.database.raw), now = new Date().toISOString();
+    sessions.updateCurrentGeneration(old.sessionId, 1, { sessionState: 'complete', providerState: 'complete', completedAt: now,
+      responseMessageId: 'original-answer', answerText: 'Collected answer', errorCode: null }, now);
+    fake.prepareError = new ProviderSubmissionError('provider.preparation-required', 'Preserve preparation');
+    await assert.rejects(rpc('session.send', { requestId: 'prepared', sessionId: old.sessionId, prompt: 'Preserved successor draft' }));
+    const prepared = core.teamDirectory.getSession(old.sessionId);
+    assert.equal(prepared.promptSubmitted, false);
+    assert.equal(sessions.conversationCleanupBlocker(old.sessionId, prepared.conversationId!), true, 'Active preparation remains protected');
+    const successor = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    sessions.updateCurrentGeneration(old.sessionId, 2, { submissionState: 'submission_unknown' }, now);
+    assert.equal(sessions.conversationCleanupBlocker(old.sessionId, prepared.conversationId!), true, 'UNKNOWN remains protected after displacement');
+    sessions.updateCurrentGeneration(old.sessionId, 2, { submissionState: 'prepared' }, now);
+    const before = core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').all(old.sessionId);
+    assert.equal(sessions.conversationCleanupBlocker(old.sessionId, prepared.conversationId!), false);
+    const result = await rpc<{ deleted: boolean }>('session.delete', { requestId: 'cleanup', sessionId: old.sessionId,
+      generation: 2, conversationId: prepared.conversationId, outputsRetrieved: true });
+    assert.equal(result.deleted, true);
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').all(old.sessionId), before);
+    assert.equal(core.teamDirectory.getCurrentSession(team.teamId, 'main').sessionId, successor.sessionId);
+    assert.equal(fake.submitCount, 1);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
