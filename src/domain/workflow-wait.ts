@@ -36,6 +36,7 @@ export function workflowPreparationPending(result: Record<string, unknown>): boo
 
 /** Observation transport delays, pacing/429 and progress are not completion or a decision. */
 export function workflowWaitOutcome(result: Record<string, unknown>): boolean {
+  if ((result.recovery as { decisionRequired?: boolean } | undefined)?.decisionRequired === true) return true;
   if (workflowPreparationPending(result)) return false;
   if (result.followup !== undefined) return result.requestOk === false || (result.followup as { terminal?: boolean }).terminal === true || result.errorCode === 'provider.actionable-alert';
   const load = result.conversationLoadRecovery as { state?: string } | undefined;

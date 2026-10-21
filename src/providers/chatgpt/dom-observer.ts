@@ -6,6 +6,8 @@ import { CHATGPT_SELECTORS } from './selectors.ts';
 
 // Capacity blocks a new turn, not read-only collection of an existing exact answer.
 const CONVERSATION_CAPACITY_NOTICE = /^You['’]ve reached the maximum length for this conversation, but you can keep talking by starting a new chat\.(?: Start new chat)?$/i;
+const MESSAGE_TIMEOUT = /^(?:메시지 전송 시간이 초과되었습니다\. 다시 시도하세요\.|Message (?:sending )?timed out\. Please try again\.)(?:\s*(?:다시 시도|Retry|Try again))?$/i;
+export function isMessageTimeoutAlert(alert: string): boolean { return MESSAGE_TIMEOUT.test(alert.trim()); }
 
 export interface ChatGptDomObservation {
   readonly messageDiagnostics: Awaited<ReturnType<typeof readChatGptMessageObservation>>['diagnostics'];
@@ -92,7 +94,7 @@ export async function observeChatGptDom(
 }
 
 export async function observeChatGptAlerts(page: Page, identity: SubmittedUserIdentity, thinkingFailuresOnly = false): Promise<string[]> {
-  return await page.locator('[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids], [role=alert], [role=alertdialog], .text-token-text-error, .text-danger, [class~="group/activity-header"]').evaluateAll((elements, { identity, messagesSelector, userSelector, thinkingFailuresOnly }) => {
+  return await page.locator('[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids], [role=alert], [role=alertdialog], .text-token-text-error, .text-danger, [class~="group/activity-header"]').evaluateAll((elements, { identity, messagesSelector, userSelector, thinkingFailuresOnly, messageTimeoutPattern }) => {
     const roots = [...new Set<Document | ShadowRoot>([document, ...elements.map(element => element.getRootNode() as Document | ShadowRoot)])];
     const query = (selector: string) => roots.flatMap(root => [...root.querySelectorAll<HTMLElement>(selector)]);
     const ids = [identity.submittedUserMessageId, identity.submittedUserTurnId].filter(Boolean);
@@ -122,13 +124,19 @@ export async function observeChatGptAlerts(page: Page, identity: SubmittedUserId
         // Global alerts do not depend on a readable transcript. Turn-local errors
         // belong only between the exact submitted user and the next user.
         if (!alert.closest('main, article, [data-message-id], [data-turn-id], [data-chatgpt-search-message-ids]')) return !thinkingFailuresOnly;
+        // The composer timeout aside belongs to the conversation, even when a
+        // failed optimistic user turn has disappeared. Never read quoted errors
+        // or a different message's local error as this conversation-level alert.
+        if (!thinkingFailuresOnly && alert.matches('[role="alert"]') &&
+            !alert.closest('[data-message-id], [data-turn-id], [data-message-author-role], [data-message-content], .markdown') &&
+            new RegExp(messageTimeoutPattern, 'i').test(alert.innerText.trim())) return true;
         if (!hasMessages) return !thinkingFailuresOnly;
         return anchor !== undefined && anchor.getRootNode() === alert.getRootNode() &&
           !alert.closest('[data-message-author-role="user"], [data-user-message-bubble]') &&
           Boolean(anchor.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING) &&
           (nextUser === undefined || Boolean(alert.compareDocumentPosition(nextUser) & Node.DOCUMENT_POSITION_FOLLOWING));
       }).map(alert => alert.innerText.trim().slice(0, 1_000));
-  }, { identity, messagesSelector: CHATGPT_SELECTORS.messages, userSelector: CHATGPT_SELECTORS.userMessages, thinkingFailuresOnly });
+  }, { identity, messagesSelector: CHATGPT_SELECTORS.messages, userSelector: CHATGPT_SELECTORS.userMessages, thinkingFailuresOnly, messageTimeoutPattern: MESSAGE_TIMEOUT.source });
 }
 
 export async function waitForChatGptDomMutation(

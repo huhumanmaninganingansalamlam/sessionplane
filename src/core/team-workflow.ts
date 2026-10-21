@@ -302,6 +302,8 @@ export class TeamWorkflow {
       try { reconciliation = await this.services.ui.prepareContinuation({ ...owner, decisionId: input.requestId }); }
       catch (error) {
         if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.failure-unverified') throw error;
+        const inspected = await this.#observe(request, undefined, true);
+        if ((inspected.submissionVerification as { nextAction?: string } | undefined)?.nextAction !== 'reconcile_failure') throw error;
         try { await this.services.ui.reconcileFailure({ ...owner, decisionId: `timeout:${input.requestId}`, allowMessageTimeout: true, continuationPrompt: '계속' }); }
         catch (failure) {
           if (failure instanceof SessionPlaneDomainError && failure.errorCode === 'provider.failure-unverified') throw error;
@@ -419,11 +421,12 @@ export class TeamWorkflow {
               continue;
             }
             const priorReview = this.#continuationReviews.get(request.outboxId);
+            const timeoutReady = (result.submissionVerification as { nextAction?: string } | undefined)?.nextAction === 'reconcile_failure';
             const lastReview = priorReview ?? request.createdAt;
             const due = Date.now() - (typeof lastReview === 'number' ? lastReview : Date.parse(lastReview)) >= 30 * 60_000;
-            if ((due || (priorReview === undefined && result.errorCode === 'provider.actionable-alert')) &&
+            if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || timeoutReady))) &&
                 result.submissionState === 'submitted' && result.promptSubmitted === true &&
-                result.terminal !== true && result.status !== 'recovery_required') {
+                result.terminal !== true && (result.status !== 'recovery_required' || timeoutReady)) {
               this.#continuationReviews.set(request.outboxId, Date.now());
               try {
                 result = await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
@@ -434,6 +437,10 @@ export class TeamWorkflow {
                 if (!(error instanceof SessionPlaneDomainError) ||
                     !['provider.failure-unverified', 'provider.preparation-required', 'session.busy'].includes(error.errorCode)) throw error;
                 // Live/uncertain generation or a distinct draft stays untouched.
+                if (timeoutReady) result = { ...result, status: 'recovery_required', recovery: {
+                  state: 'decision_required', decisionRequired: true, userActionRequired: false,
+                  reason: error.errorCode, message: error.message,
+                } };
               }
             }
           }
@@ -628,7 +635,7 @@ export class TeamWorkflow {
     } } | undefined)?.submissionVerification;
     const missing = dom?.anchorPresent === false || (dom === undefined && identityMatches &&
       backend?.recoveryReason === 'backend-user-anchor-absent-from-mapping');
-    const inspectTimeout = dom?.anchorPresent && !dom.laterUserFound && dom.messageTimeout &&
+    const inspectTimeout = dom && !dom.laterUserFound && dom.messageTimeout &&
       dom.activity === 'none' && !dom.responseCandidate?.streamingMarker;
     const { responseCandidate: _candidate, ...verification } = dom ?? {};
     return { submissionVerification: { state: missing ? 'anchor-unverified' : dom?.anchorPresent ? 'anchor-observed' : 'unverified',

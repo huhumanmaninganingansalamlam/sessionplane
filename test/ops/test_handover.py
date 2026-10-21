@@ -230,6 +230,13 @@ class HandoverTests(unittest.TestCase):
                 """)
             after = handover.request_identity(health, target)
             handover.verify_bindings(health, before['bindings'], after['bindings'])
+            alias = ('recovered-page-key', None, None, 'conversation', 'target')
+            recovered = ('recovered-page-key', 'hither', 13, 'conversation', 'target')
+            handover.verify_bindings(health, [*after['bindings'], alias], [*after['bindings'], recovered])
+            for column, value in [(1, 'other-session'), (2, 14), (3, 'other-conversation'), (4, 'other-target')]:
+                changed = list(recovered); changed[column] = value
+                with self.subTest(recovered_column=column), self.assertRaises(AssertionError):
+                    handover.verify_bindings(health, [*after['bindings'], alias], [*after['bindings'], changed])
             self.assertEqual(after['request'], before['request'])
             self.assertEqual(after['anchor'], before['anchor'])
             self.assertTrue(all(after['requests'][key] == value for key, value in before['requests'].items()))
@@ -247,6 +254,11 @@ class HandoverTests(unittest.TestCase):
             changed = list(after['bindings'][0]); changed[2] = 14
             with self.assertRaisesRegex(AssertionError, 'no durable request'):
                 handover.verify_bindings(health, before['bindings'], [changed])
+            with closing(sqlite3.connect(path)) as db:
+                db.execute("INSERT INTO generations VALUES('hither',14,NULL,NULL,'next-prompt')")
+                db.commit()
+            advanced = list(recovered); advanced[2] = 14
+            handover.verify_bindings(health, [*after['bindings'], alias], [*after['bindings'], advanced])
 
     def test_optimized_python_cannot_disable_guards(self):
         result = subprocess.run([sys.executable, '-O', str(SCRIPT), '--help'], capture_output=True, text=True)

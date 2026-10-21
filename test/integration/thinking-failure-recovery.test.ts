@@ -10,6 +10,7 @@ import type { Page } from 'playwright-core';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore, type CoreService } from '../../src/main.ts';
 import { callRpc, RpcClientError } from '../../src/cli/client.ts';
+import { EventRepository } from '../../src/storage/event-repository.ts';
 import { workflowSchemas } from '../../src/rpc/methods/workflow.ts';
 import { ThinkingFailureRecovery } from '../../src/core/thinking-failure-recovery.ts';
 import type { BrowserSnapshot } from '../../src/browser/ref-snapshot.ts';
@@ -25,6 +26,7 @@ class FailedChat extends FakeProviderAdapter {
   pageKey!: string;
   core!: CoreService;
   failureCount = 2;
+  missingTimeoutAnchor = false;
   surface: ((users: string) => string) | null = null;
   afterPrepare: ((request: ProviderSubmissionRequest) => void) | null = null;
   readonly submittedAt: number[] = [];
@@ -57,7 +59,9 @@ class FailedChat extends FakeProviderAdapter {
     const source = await super.openObservation(request);
     const observe = source.observe.bind(source);
     source.observe = async () => ({ ...await observe(), activity: 'none' as const,
-      ...(request.generation <= this.failureCount ? { observationTransport: 'unavailable' as const, errorCode: 'provider.actionable-alert',
+      ...(request.generation <= this.failureCount && this.missingTimeoutAnchor ? {
+        observationTransport: 'deferred' as const, errorCode: undefined, reason: 'dom-user-anchor-missing', candidate: null,
+      } : request.generation <= this.failureCount ? { observationTransport: 'unavailable' as const, errorCode: 'provider.actionable-alert',
         reason: 'provider-actionable-alert', candidate: null } : { errorCode: undefined, reason: null,
         candidate: { responseMessageId: 'normal-final', answerText: 'Normal final', terminalMarker: true, streamingMarker: false } }) });
     return source;
@@ -485,12 +489,32 @@ test('explicit message-timeout reconciliation preserves original ACK, rejects li
 });
 
 
-test('managed wait continues a verified message timeout once and preserves the failed original', async () => {
+test('managed wait recovers an idle conversation timeout with missing ACK and stale failure state exactly once', async () => {
   const f = await fixture();
   try {
-    f.fake.surface = users => users + '<div role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</div>';
+    f.fake.missingTimeoutAnchor = true;
+    f.fake.surface = () => '<aside role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요. 다시 시도</aside>';
     const requestRef = await f.submit(false);
     const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    new EventRepository(f.core.database.raw).append({ teamId: f.team.teamId, sessionId: original.sessionId,
+      generation: original.generation, eventType: 'generation.backend-unverified', createdAt: new Date().toISOString(),
+      payload: { recoveryReason: 'backend-user-anchor-absent-from-mapping', recoveryIdentity: {
+        conversationId: original.conversationId, pageKey: original.pageKey,
+        submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId } } });
+    const inspect = await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef });
+    assert.equal(inspect.request.errorCode, null, 'Stored observation has not classified this real UI failure');
+    assert.equal(inspect.request.submissionVerification.dom.anchorPresent, false);
+    assert.equal(inspect.request.submissionVerification.nextAction, 'reconcile_failure');
+    const reconcile = { teamId: f.team.teamId, requestRef, decision: 'reconcile_failure', requestId: 'guard-check' };
+    await f.fake.page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend', '<button aria-label="Stop">Stop</button>'));
+    await assert.rejects(f.rpc('decide', reconcile), /active generation/);
+    await f.fake.page.locator('button[aria-label="Stop"]').evaluate(node => node.remove());
+    await f.fake.page.locator('textarea').fill('Separate draft');
+    await assert.rejects(f.rpc('decide', reconcile), /draft/);
+    await f.fake.page.locator('textarea').fill('');
+    await f.fake.page.locator('main').evaluate(node => node.insertAdjacentHTML('afterbegin', '<div data-message-author-role="user" data-message-id="unclaimed">Another user turn</div>'));
+    await assert.rejects(f.rpc('decide', reconcile), /No exact idle/);
+    await f.fake.page.locator('[data-message-id="unclaimed"]').evaluate(node => node.remove());
     f.fake.failureCount = 1;
     f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="continued-answer">Continued answer</div>';
     const input = { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000, continuationApproved: true };
@@ -507,6 +531,20 @@ test('managed wait continues a verified message timeout once and preserves the f
   } finally { await f.close(); }
 });
 
+
+test('managed timeout recovery returns changed transcript evidence for agent judgment without a resend', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = () => '<div data-message-author-role="user" data-message-id="unclaimed">A manual turn</div><aside role="alert">Message timed out. Please try again.</aside>';
+    const requestRef = await f.submit(false);
+    const result = await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
+      waitMs: 60000, continuationApproved: true });
+    assert.equal(result.results[0].recovery.decisionRequired, true);
+    assert.equal(result.results[0].recovery.userActionRequired, false);
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(f.core.teamDirectory.getSession(f.session.sessionId).terminal, false);
+  } finally { await f.close(); }
+});
 
 test('approved managed wait preserves disconnected or actively generating original turns', async () => {
   const f = await fixture();
