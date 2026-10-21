@@ -105,7 +105,7 @@ machine-readable results and diagnostics.
    using the displayed `request configure` command, then the fresh composer control.
    Inspect the input before explicitly choosing the submit control. Disabled or stale
    controls are not a fallback; inspect the same request again.
-4. Use the displayed `request wait` command to collect the answer. When same-conversation recovery is authorized, add `--continuation-approved`: the existing wait retains routine ACK/load delays, reviews unresolved work about every 30 minutes, and uses exact idle timeout or interrupted-tool evidence for a single continuation. A disconnected banner or active generation never authorizes a send. Add `--out DIR`
+4. Use the displayed `request wait` command to collect the answer. When same-conversation recovery is authorized, add `--continuation-approved`: the existing wait retains routine ACK/load delays, holds unavailable preparation until the composer is ready, reviews unresolved work about every 30 minutes, and uses exact idle timeout or interrupted-tool evidence for a single continuation. A disconnected banner or active generation never authorizes a send. Add `--out DIR`
    to export captured files. A client wait timeout does not cancel generation.
 5. If delivery is unconfirmed, inspect the same request. Never repeat `send` as a
    retry. If fresh evidence offers a single matching user message, `request acknowledge`
@@ -136,7 +136,7 @@ Tagged releases attach a prebuilt npm package and SHA-256 checksum. Install the
 release package globally, then run the built-in doctor:
 
 ```bash
-VERSION=0.4.45
+VERSION=0.4.46
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz"
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz.sha256"
 sha256sum -c "sessionplane-$VERSION.tgz.sha256"
