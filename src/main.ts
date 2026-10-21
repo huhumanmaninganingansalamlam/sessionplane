@@ -378,7 +378,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     database, scheduler: actorScheduler, adapters: providerAdapters,
     pageMutex: pageMutationMutex, registry: pageRegistry,
   });
-  registerSessionMethods(router, teamDirectory, receipts, cleanup);
   const ui = new SessionUiService({
     browserOwner,
     submissions: submissionService,
@@ -386,6 +385,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     chatgptUrl: config.chatgptUrl,
     quietWindowMs: config.observationQuietWindowMs,
   });
+  registerSessionMethods(router, teamDirectory, receipts, cleanup, ui);
   thinkingFailureRecovery = new ThinkingFailureRecovery({ maintenance, database, submissions: submissionService, ui });
   registerSessionUiMethods(router, ui);
   registerTeamMethods(router, teamDirectory, receipts, cleanup, stopService);

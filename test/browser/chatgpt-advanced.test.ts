@@ -17,6 +17,7 @@ import type { ProviderAttachment, ProviderArtifactRequest } from '../../src/prov
 import { discoverFileCards, downloadFileCard } from '../../src/providers/chatgpt/file-cards.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { ChatGptSubmission } from '../../src/providers/chatgpt/submission.ts';
+import { observeChatGptSurface } from '../../src/providers/chatgpt/surface.ts';
 import { navigateProviderPage } from '../../src/providers/human-verification.ts';
 
 test('localized file-card discovery and exact download preserve response ancestry', async () => {
@@ -156,6 +157,11 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
       acknowledgementTimeoutMs: 2_000,
     });
 
+    // Same prepared request survives temporary selection loss during hydration.
+    await created.page.evaluate(() => {
+      document.querySelector('#chat')!.setAttribute('aria-checked', 'false');
+      setTimeout(() => document.querySelector('#chat')!.setAttribute('aria-checked', 'true'), 700);
+    });
     await prepareFixture(submission, registry.pageForObservation(submission.pageKey));
     assert.equal(await created.page.locator('#chat').getAttribute('aria-checked'), 'true');
     assert.deepEqual(
@@ -539,6 +545,41 @@ test('ChatGPT Work surface is rejected before composer mutation', async () => {
     await owner.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('existing-thread composer selection is observable without sending; missing or conflicting evidence stays unknown', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-surface-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body:
+      '<main><form data-chatgpt-composer><textarea id="prompt-textarea">Keep my draft</textarea><button>Extra High</button></form></main>' }));
+    await page.goto('https://chatgpt.com/c/surface-existing');
+    registry.refreshPage(binding.pageKey);
+    registry.reservePage(binding.pageKey, { sessionId: 'surface-session', generation: 1, conversationId: 'surface-existing' });
+    assert.equal((await observeChatGptSurface(page)).mode, 'unknown', 'Effort is not mode');
+    const submission = new ChatGptSubmission({ page, pageKey: binding.pageKey, pageRegistry: registry,
+      request: { session: { ...sessionSnapshot(binding.pageKey), sessionId: 'surface-session', conversationId: 'surface-existing' },
+        generation: 1, prompt: 'Do not send', model: null, surface: 'chat' }, acknowledgementTimeoutMs: 100 });
+    await assert.rejects(submission.prepare(), /selection is unverified/);
+    const setWork = (work: boolean) => page.evaluate(work => {
+      Object.assign(document.querySelector('[data-chatgpt-composer]')!, {
+        __reactFiber$fixture: { memoizedProps: {}, return: { memoizedProps: { isWorkConversation: work } } },
+      });
+    }, work);
+    await setWork(false);
+    const chat = await observeChatGptSurface(page);
+    assert.equal(chat.mode, 'chat'); assert.equal(chat.source, 'composer-state');
+    await setWork(true);
+    assert.equal((await observeChatGptSurface(page)).mode, 'work');
+    await assert.rejects(submission.prepare(), /composer is Work/);
+    await page.evaluate(() => document.body.insertAdjacentHTML('beforeend', '<button role="radio" aria-checked="true">Chat</button>'));
+    const conflict = await observeChatGptSurface(page);
+    assert.equal(conflict.mode, 'unknown'); assert.equal(conflict.source, 'conflicting-evidence');
+    assert.equal(await page.locator('textarea').inputValue(), 'Keep my draft');
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test('provider navigation surfaces visible verification before DOM readiness timeout', async () => {

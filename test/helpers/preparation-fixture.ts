@@ -6,6 +6,13 @@ import type { ProviderSubmission, PreparationChoices } from '../../src/providers
 // These fixtures have one composer and a Send button. Model decisions are
 // exercised through the public MCP workflow, not inferred by this helper.
 export async function prepareFixture(submission: ProviderSubmission, page: Page): Promise<void> {
+  await page.evaluate(() => {
+    if (!document.querySelector('[role="radio"]')) {
+      const choice = document.createElement('button');
+      choice.type = 'button'; choice.role = 'radio'; choice.setAttribute('aria-checked', 'true'); choice.textContent = 'Chat';
+      document.body.prepend(choice);
+    }
+  });
   await submission.prepareForObservation?.();
   const snapshot = await new BrowserRefSnapshotStore().capture({ page, pageKey: submission.pageKey, bindingEpoch: 1, interactive: false });
   const composer = snapshot.nodes.find((node) => node.role === 'textbox' && node.editable);

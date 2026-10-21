@@ -132,7 +132,7 @@ test('core restart reconnects prepared request to its exact live target, not an 
   firstOwner.createPage = async () => {
     const created = await createPage();
     await created.page.route('https://chatgpt.com/**', route => route.fulfill({
-      contentType: 'text/html', body: '<form onsubmit="event.preventDefault()"><textarea id="prompt-textarea"></textarea><button type="submit">Send</button></form><button type="button" aria-label="Model selection" aria-haspopup="menu" aria-expanded="true" aria-controls="fixture-menu">Model</button><div id="fixture-menu" role="menu"><div role="menuitem" aria-label="Model selection">Fixture model</div><div role="menuitemradio" aria-checked="true">Fixture model</div></div>',
+      contentType: 'text/html', body: '<button role="radio" aria-checked="true">Chat</button><form onsubmit="event.preventDefault()"><textarea id="prompt-textarea"></textarea><button type="submit">Send</button></form><button type="button" aria-label="Model selection" aria-haspopup="menu" aria-expanded="true" aria-controls="fixture-menu">Model</button><div id="fixture-menu" role="menu"><div role="menuitem" aria-label="Model selection">Fixture model</div><div role="menuitemradio" aria-checked="true">Fixture model</div></div>',
     }));
     return created;
   };

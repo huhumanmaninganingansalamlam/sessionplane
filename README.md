@@ -9,6 +9,18 @@ and recovery. The `sessplane` CLI and MCP adapter are thin Unix-socket clients.
 SessionPlane is maintained as an independent project with one canonical CLI
 and one runtime contract.
 
+## ChatGPT mode
+
+ChatGPT sends require an observed Chat selection, independently of model and effort.
+`session show` and exact-request `team_get` return `observedSurface` with `mode`,
+`source` and `observedAt`; `requested.surface` is caller intent, not observation.
+The provider reads an explicit selected control or the mounted composer's explicit
+Work-conversation state. During preparation, temporary missing or conflicting
+evidence is reobserved on the same composer within the normal readiness wait.
+Confirmed Chat continues the same request; unresolved evidence remains `unknown`
+without changing the draft or requiring human confirmation. Existing Work requests remain readable;
+only their Coordinator performs an authorized same-role Chat replacement.
+
 ## Browser diagnostics
 
 Persistent Chromium histogram files are disabled by default for both normal
@@ -136,7 +148,7 @@ Tagged releases attach a prebuilt npm package and SHA-256 checksum. Install the
 release package globally, then run the built-in doctor:
 
 ```bash
-VERSION=0.4.48
+VERSION=0.4.49
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz"
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz.sha256"
 sha256sum -c "sessionplane-$VERSION.tgz.sha256"

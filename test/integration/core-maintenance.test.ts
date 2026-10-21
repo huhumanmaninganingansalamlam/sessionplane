@@ -79,10 +79,10 @@ test('coordinated maintenance lets admitted work finish and defers a new call wi
   } finally { finish.resolve(); await f.dispose(); }
 });
 
-test('stalled passive Chat readiness count times out and releases admission without disabling its checks', async t => {
-  const maintenance = new CoreMaintenance(), entered = Promise.withResolvers<void>(), count = Promise.withResolvers<number>();
-  const page = { waitForLoadState: async () => {}, waitForTimeout: async () => {}, evaluate: async () => null,
-    locator: () => ({ count: () => { entered.resolve(); return count.promise; } }) } as unknown as Page;
+test('stalled passive Chat readiness read times out and releases admission without disabling its checks', async t => {
+  const maintenance = new CoreMaintenance(), entered = Promise.withResolvers<void>(), read = Promise.withResolvers<null>();
+  const page = { waitForLoadState: async () => {}, waitForTimeout: async () => {},
+    evaluate: () => { entered.resolve(); return read.promise; } } as unknown as Page;
   t.mock.timers.enable({ apis: ['setTimeout'] });
   try {
     const reading = maintenance.rpc(() => inspectChatGptPageReady(page, 'exact-page'));
@@ -92,10 +92,10 @@ test('stalled passive Chat readiness count times out and releases admission with
     assert.equal(lease.phase, 'draining');
     t.mock.timers.tick(5001); await rejected;
     assert.equal(maintenance.quiesce(lease.token, () => true).phase, 'ready');
-    count.resolve(0);
-    await count.promise;
+    read.resolve(null);
+    await read.promise;
     assert.equal(maintenance.status().activeOperations, 0);
-  } finally { count.resolve(0); maintenance.resume(); t.mock.timers.reset(); }
+  } finally { read.resolve(null); maintenance.resume(); t.mock.timers.reset(); }
 });
 
 test('timed-out renderer observation no longer holds drain and late evidence cannot finish a paused request', async () => {
