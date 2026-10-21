@@ -318,7 +318,12 @@ export class SessionRepository {
             OR (session_state = 'cancelled' AND EXISTS (SELECT 1 FROM generations g
               WHERE g.session_id = sessions.session_id AND g.generation = sessions.current_generation
                 AND g.submission_state = 'submitted' AND g.prompt_submitted = 1
-                AND g.reason = 'manual-followup-reconciled' AND g.response_message_id IS NULL AND g.answer_text IS NULL)))
+                AND (g.reason = 'manual-followup-reconciled' OR (g.reason = 'approved-continuation-prepared' AND EXISTS (
+                  SELECT 1 FROM events e WHERE e.session_id = g.session_id AND e.generation = g.generation
+                    AND e.event_type = 'generation.continuation-prepared'
+                    AND json_extract(e.payload_json, '$.evidence.originalUserMessageId') = g.submitted_user_message_id
+                    AND json_extract(e.payload_json, '$.evidence.conversationId') = sessions.conversation_id)))
+                AND g.response_message_id IS NULL AND g.answer_text IS NULL)))
       `)
       .run(
         input.nextGeneration,

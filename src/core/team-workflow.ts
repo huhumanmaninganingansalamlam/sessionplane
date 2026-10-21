@@ -1,4 +1,6 @@
 import path from 'node:path';
+import { createHash } from 'node:crypto';
+import { ExactFinalTracker } from '../providers/chatgpt/exact-final.ts';
 import { workflowWaitMs, workflowWaitOutcome } from '../domain/workflow-wait.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
@@ -125,7 +127,7 @@ export class TeamWorkflow {
     } };
   }
 
-  async send(input: RoleInput & { prompt: string; model?: string | undefined; effort?: string | undefined; files?: string[] | undefined; thinkingFailureRecovery?: true | undefined; sessionDeadlineSec: number }) {
+  async send(input: RoleInput & { prompt: string; model?: string | undefined; effort?: string | undefined; files?: string[] | undefined; thinkingFailureRecovery?: true | undefined; continuationOf?: string | undefined; sessionDeadlineSec: number }) {
     this.services.directory.getTeam(input.teamId);
     const clientId = `team:${input.teamId}`;
     const existing = this.#outbox.getByRequest(clientId, input.requestId);
@@ -142,6 +144,7 @@ export class TeamWorkflow {
         ...(input.effort === undefined ? {} : { effort: input.effort }),
         ...(input.files === undefined ? {} : { files: input.files }),
         ...(input.thinkingFailureRecovery === undefined ? {} : { thinkingFailureRecovery: input.thinkingFailureRecovery }),
+        ...(input.continuationOf === undefined ? {} : { continuationOf: input.continuationOf }),
       });
     } catch (error) {
       if (!(error instanceof SessionPlaneDomainError)) throw error;
@@ -154,13 +157,13 @@ export class TeamWorkflow {
     }
     const request = this.#outbox.getByRequest(clientId, input.requestId);
     if (request === null) throw new SessionPlaneDomainError('internal.invariant-violation', 'Accepted request has no outbox identity');
-    if (needsDecision(this.services.directory.getSession(request.sessionId)) && this.services.ui.configurationCatalog === null) {
+    if (input.continuationOf === undefined && needsDecision(this.services.directory.getSession(request.sessionId)) && this.services.ui.configurationCatalog === null) {
       await this.services.ui.discover({ ...ownerOf(request), decisionId: `catalog:${request.outboxId}` });
     }
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName: string; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName: string; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
     if (input.decision === 'hostspan_permission') {
@@ -293,6 +296,20 @@ export class TeamWorkflow {
         return result;
       });
     }
+    if (input.decision === 'continue') {
+      const reconciliation = await this.services.ui.prepareContinuation({ ...owner, decisionId: input.requestId });
+      const payload = JSON.parse(request.payloadJson);
+      await this.send({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}`,
+        requestId: `continue:${input.requestId}`, prompt: '계속', continuationOf: request.outboxId, sessionDeadlineSec: payload.sessionDeadlineSec ?? 5400,
+        ...(typeof payload.model === 'string' ? { model: payload.model } : {}),
+        ...(typeof payload.effort === 'string' ? { effort: payload.effort } : {}) });
+      const successor = this.#outbox.getByRequest(request.clientId, `continue:${input.requestId}`)!;
+      if (this.services.directory.getSession(successor.sessionId).generation === successor.generation &&
+          this.services.directory.getSession(successor.sessionId).submissionState === 'prepared') {
+        await this.services.ui.prepareFailureContinuation(ownerOf(successor), reconciliation.model);
+      }
+      return { ...await this.#observe(successor), continuationOf: request.outboxId, reconciliation };
+    }
     if (input.decision === 'reconcile_followup') {
       const reconciliation = await this.services.ui.reconcileFollowup({ ...owner, decisionId: input.requestId,
         followupUserMessageId: input.followupUserMessageId, responseMessageId: input.responseMessageId,
@@ -344,7 +361,7 @@ export class TeamWorkflow {
     return await this.#observe(this.#request(input));
   }
 
-  async wait(input: { teamId: string; requestRefs: string[]; waitMs: number; outputDir?: string | undefined }, signal?: AbortSignal) {
+  async wait(input: { teamId: string; requestRefs: string[]; waitMs: number; untilResult?: boolean | undefined; followupUserMessageId?: string | undefined; outputDir?: string | undefined }, signal?: AbortSignal) {
     const requestRefs = [...new Set(input.requestRefs)];
     const deadline = Date.now() + workflowWaitMs(input.waitMs);
     const controller = new AbortController();
@@ -356,16 +373,39 @@ export class TeamWorkflow {
       try {
         const request = this.#request({ teamId: input.teamId, requestRef });
         let result: Record<string, unknown> = await this.#observe(request);
+        const followupTracker = new ExactFinalTracker(1500);
         for (;;) {
+          if (input.followupUserMessageId) {
+            const evidence = await this.services.ui.observeFollowup(ownerOf(request), input.followupUserMessageId).catch(error => {
+              if (!(error instanceof SessionPlaneDomainError) || !['browser.snapshot-timeout', 'provider.observation-unavailable'].includes(error.errorCode)) throw error;
+              const snapshot = this.services.directory.getSession(request.sessionId);
+              return { provider: 'chatgpt', pageKey: snapshot.pageKey!, bindingEpoch: 0, observedAt: new Date().toISOString(),
+                conversationId: snapshot.conversationId, submittedUserFound: false, laterUserFound: false,
+                candidate: null, activity: 'unknown' as const, dialogKind: null, networkActivity: false,
+                observationTransport: 'unavailable' as const, reason: 'followup-observation-delayed', errorCode: undefined };
+            });
+            const decision = followupTracker.evaluate({ ...evidence, candidate: evidence.candidate && evidence.activity !== 'none'
+              ? { ...evidence.candidate, terminalMarker: false } : evidence.candidate }, Date.now());
+            result = { ...result, errorCode: undefined, reason: 'followup-collecting', followup: { ...decision, terminal: decision.kind === 'complete',
+              userMessageId: input.followupUserMessageId, originalRequestRef: request.outboxId } };
+            if (decision.kind === 'complete') {
+              const reconciliation = await this.services.ui.reconcileFollowup({ ...ownerOf(request),
+                decisionId: `followup:${request.outboxId}:${input.followupUserMessageId}`,
+                followupUserMessageId: input.followupUserMessageId, responseMessageId: decision.responseMessageId!,
+                responseSha256: createHash('sha256').update(decision.answerText!).digest('hex'), followupCompleted: true });
+              result = { ...result, reconciliation }; controller.abort(); break;
+            }
+            if (evidence.errorCode) { result = { ...result, errorCode: evidence.errorCode, reason: evidence.reason }; controller.abort(); break; }
+          }
           if (workflowWaitOutcome(result)) { controller.abort(); break; }
           const remaining = deadline - Date.now();
           if (remaining <= 0 || controller.signal.aborted) break;
           const waited = await this.services.scheduler.waitSession(request.sessionId, {
-            expectedGeneration: request.generation, waitMs: remaining, signal: controller.signal,
+            expectedGeneration: request.generation, waitMs: Math.min(remaining, input.followupUserMessageId ? 5_000 : workflowWaitMs(input.waitMs)), signal: controller.signal,
           });
           if (controller.signal.aborted) break;
           result = await this.#observe(request);
-          if (waited.waitExpired) break;
+          if (waited.waitExpired && !input.followupUserMessageId) break;
         }
         return { request, result: { ...result, waitExpired: !workflowWaitOutcome(result) && Date.now() >= deadline } };
       } catch (error) { controller.abort(); return { request: null, result: failure(error, requestRef) }; }
@@ -392,7 +432,7 @@ export class TeamWorkflow {
             this.services.artifacts.export({ artifactId: a.artifactId, outputPath: path.join(outputDir, request.outboxId, a.artifactId, path.basename(a.name)) })) };
         } catch (error) { files = { ...files, exportError: failure(error, request.outboxId) }; }
       }
-      if (!workflowWaitOutcome(result)) {
+      if (!workflowWaitOutcome(result) && !(result.followup as { terminal?: boolean } | undefined)?.terminal) {
         const { requestOk, requestRef, teamId, sessionId, generation, submissionState, sessionState,
           providerState, observationTransport, terminal, waitExpired, promptSubmitted, conversationId,
           submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt } = result;

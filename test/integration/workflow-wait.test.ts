@@ -39,7 +39,7 @@ test('short workflow wait holds progress/429 for a full minute and cancellation 
   try {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
     let returned = false;
-    const waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef], waitMs: 20_000 })
+    const waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef], waitMs: 20_000, untilResult: false })
       .then(r => { returned = true; return r; });
     await f.untilSubscribed(f.sent.sessionId as string);
     await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
@@ -120,6 +120,29 @@ test('one completed result wakes a multi-request long wait immediately; actual e
   } finally { await f.close(); }
 });
 
+
+test('default MCP wait keeps multiple expired rounds internal and returns only the exact answer', async t => {
+  const f = await fixture();
+  try {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+    let returned = false;
+    const waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef], waitMs: 600_000 })
+      .then(result => { returned = true; return result; });
+    await f.untilSubscribed(f.sent.sessionId as string);
+    for (let i = 0; i < 3; i++) {
+      t.mock.timers.tick(600_001);
+      for (let j = 0; j < 12; j++) await flush();
+      assert.equal(returned, false, 'Routine ten-minute expiry must not invoke the model');
+    }
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, {
+      sessionState: 'complete', providerState: 'complete', responseMessageId: 'same-request-answer', answerText: 'Recovered final',
+      completedAt: new Date().toISOString() });
+    const result = (await waiting).structuredContent.results as any[];
+    assert.equal(result[0].responseMessageId, 'same-request-answer');
+    assert.equal(result[0].waitExpired, false);
+    assert.equal(f.fake.submitCount, 1);
+  } finally { t.mock.timers.reset(); await f.close(); }
+});
 
 test('ten-minute wait survives the TabletAuto observation timeout then returns the exact completion immediately', async t => {
   const f = await fixture();

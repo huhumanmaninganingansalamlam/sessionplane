@@ -62,6 +62,7 @@ export interface SessionSendInput {
   readonly thinkingFailureRecovery?: true;
   readonly failureContinuation?: FailureContinuation;
   readonly authorizedResend?: AuthorizedResend;
+  readonly continuationOf?: string;
 }
 
 interface PendingPreparation {
@@ -82,6 +83,7 @@ interface StoredOutboxPayload {
   readonly thinkingFailureRecovery?: true;
   readonly failureContinuation?: FailureContinuation;
   readonly authorizedResend?: AuthorizedResend;
+  readonly continuationOf?: string;
 }
 
 interface PreparedOutbox {
@@ -109,6 +111,7 @@ export class SubmissionService {
   readonly #requestMutex = new KeyedMutex();
   readonly #beforeFailureContinuation: ((snapshot: SessionSnapshot, continuation: FailureContinuation) => Promise<void>) | null;
   readonly #beforeAuthorizedResend: ((current: SessionSnapshot, original: SessionSnapshot, prompt: string, allowPreparedDraft: boolean) => Promise<void>) | null;
+  readonly #beforeContinuation: ((current: SessionSnapshot, original: SessionSnapshot) => Promise<void>) | null;
   readonly #reserveResendPage: ((original: SessionSnapshot, successor: SessionSnapshot) => void) | null;
 
   constructor(options: {
@@ -123,9 +126,11 @@ export class SubmissionService {
     readonly onSubmissionUnknown?: (snapshot: SessionSnapshot) => void;
     readonly beforeFailureContinuation?: (snapshot: SessionSnapshot, continuation: FailureContinuation) => Promise<void>;
     readonly beforeAuthorizedResend?: (current: SessionSnapshot, original: SessionSnapshot, prompt: string, allowPreparedDraft: boolean) => Promise<void>;
+    readonly beforeContinuation?: (current: SessionSnapshot, original: SessionSnapshot) => Promise<void>;
     readonly reserveResendPage?: (original: SessionSnapshot, successor: SessionSnapshot) => void;
     readonly now?: () => Date;
   }) {
+    this.#beforeContinuation = options.beforeContinuation ?? null;
     this.#beforeFailureContinuation = options.beforeFailureContinuation ?? null;
     this.#beforeAuthorizedResend = options.beforeAuthorizedResend ?? null;
     this.#reserveResendPage = options.reserveResendPage ?? null;
@@ -512,6 +517,7 @@ export class SubmissionService {
       sessionDeadlineSec: input.sessionDeadlineSec,
       ...(input.thinkingFailureRecovery === true ? { thinkingFailureRecovery: true } : {}),
       ...(input.failureContinuation === undefined ? {} : { failureContinuation: input.failureContinuation }),
+      ...(input.continuationOf === undefined ? {} : { continuationOf: input.continuationOf }),
     };
     const requestHash = hashCanonical({ method: 'session.send', payload });
     const requestKey = JSON.stringify([input.clientId, input.requestId]);
@@ -663,6 +669,16 @@ export class SubmissionService {
     return await this.#pageMutex.runExclusive(submission.pageKey, async retainUntil => {
       const stageTimeoutMs = Math.min(PROVIDER_STAGE_TIMEOUT_MS, input.sessionDeadlineSec * 1_000);
       const verifyContinuation = async () => {
+        if (input.continuationOf !== undefined) {
+          const original = this.#outbox.getById(input.continuationOf);
+          const result = original && this.#sessions.getGenerationResult(original.sessionId, original.generation);
+          const current = this.#requireSnapshot(prepared.outbox.sessionId);
+          if (!original || original.clientId !== input.clientId || original.sessionId !== current.sessionId ||
+              original.generation !== current.generation - 1 || result?.reason !== 'approved-continuation-prepared' ||
+              input.prompt !== '계속' || !this.#beforeContinuation) throw new ProviderSubmissionError(
+            'provider.preparation-required', 'Exact approved continuation ownership is unavailable');
+          await this.#beforeContinuation(current, { ...current, ...result, generation: original.generation });
+        }
         if (input.failureContinuation === undefined) return;
         if (this.#beforeFailureContinuation === null) throw new ProviderSubmissionError(
           'provider.preparation-required', 'Automatic continuation validation is unavailable; preserve this prepared request');
@@ -688,6 +704,10 @@ export class SubmissionService {
         await verifyContinuation();
         await this.#verifyAuthorizedResend(this.#requireSnapshot(prepared.outbox.sessionId), input.authorizedResend, true);
         this.#requireAccountReady(this.#requireSnapshot(prepared.outbox.sessionId));
+        const selectedConfiguration = choices?.model ?? choices?.effort;
+        if (selectedConfiguration) new ReceiptRepository(this.#database).execute({ clientId: input.clientId,
+          requestId: `submission-configuration:${prepared.outbox.outboxId}`, method: 'session.submission.configuration',
+          payload: { model: selectedConfiguration }, operation: () => ({ model: selectedConfiguration }) });
         if (input.thinkingFailureRecovery === true) {
           const model = choices?.model ?? choices?.effort;
           if (model === undefined) throw new ProviderSubmissionError(
@@ -1050,12 +1070,73 @@ export class SubmissionService {
     }
   }
 
+  async prepareContinuation(
+    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string;
+      readonly generation: number; readonly decisionId: string },
+    observe: (snapshot: SessionSnapshot) => Promise<Readonly<Record<string, unknown>>>,
+  ) {
+    const method = 'session.continuation.prepare';
+    const { clientId, decisionId, ...payload } = input;
+    const receipts = new ReceiptRepository(this.#database);
+    return await this.#scheduler.actorFor(input.sessionId).enqueue(async () => {
+      if (receipts.get(clientId, decisionId) !== null) return receipts.execute({ clientId, requestId: decisionId,
+        method, payload, operation: () => { throw new Error('Existing receipt must replay'); } });
+      const original = this.#outbox.getByRequest(clientId, input.requestId);
+      const snapshot = this.#requireSnapshot(input.sessionId);
+      this.#requireActiveRoleSession(snapshot);
+      if (!original || original.sessionId !== input.sessionId || original.generation !== input.generation ||
+          snapshot.generation !== input.generation || snapshot.terminal || snapshot.provider !== 'chatgpt' ||
+          snapshot.submissionState !== 'submitted' || !snapshot.promptSubmitted || !snapshot.submittedUserMessageId ||
+          !snapshot.pageKey || !snapshot.conversationId || snapshot.answerText !== null || snapshot.responseMessageId !== null) {
+        throw new SessionPlaneDomainError('provider.failure-unverified', 'Continuation requires the exact unresolved acknowledged request');
+      }
+      return await this.#pageMutex.runExclusive(snapshot.pageKey, async () => {
+        const recorded = this.#events.latestServerObservation(snapshot.sessionId, snapshot.generation);
+        const identity = recorded?.recoveryIdentity as Record<string, unknown> | undefined;
+        const server = recorded?.serverObservation as import('../providers/provider-adapter.ts').ProviderServerObservation | undefined;
+        const last = server?.messages.at(-1);
+        if (!identity || identity.conversationId !== snapshot.conversationId || identity.pageKey !== snapshot.pageKey ||
+            identity.submittedUserMessageId !== snapshot.submittedUserMessageId ||
+            identity.submittedUserTurnId !== snapshot.submittedUserTurnId || !recorded ||
+            this.#now().getTime() - Date.parse(String(recorded.observedAt)) > 180_000 ||
+            !server || server.nextUserFound || last?.role !== 'tool' || last.status !== 'finished_successfully' ||
+            last.messageId !== server.currentNodeId || !server.assistantCount ||
+            server.messages.some(message => message.status === 'in_progress' || message.endTurn === true)) {
+          throw new SessionPlaneDomainError('provider.failure-unverified',
+            'Fresh exact server evidence of an unclosed successful tool turn is required; preserve active or uncertain work');
+        }
+        const configuration = receipts.get(clientId, `submission-configuration:${original.outboxId}`) ??
+          receipts.get(clientId, `thinking-failure-configuration:${original.outboxId}`);
+        if (!configuration) throw new SessionPlaneDomainError('provider.preparation-required',
+          'Preserved original model/mode/effort evidence is unavailable; do not guess a continuation configuration');
+        const model = JSON.parse(configuration.resultJson).model;
+        const evidence = await observe(snapshot);
+        const result = receipts.execute({ clientId, requestId: decisionId, method, payload, operation: () => {
+          const timestamp = this.#now().toISOString();
+          if (!this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
+            sessionState: 'cancelled', providerState: 'unknown', completedAt: timestamp, nextCheckAt: null,
+            errorCode: null, reason: 'approved-continuation-prepared',
+          }, timestamp)) throw new SessionPlaneDomainError('session.generation-superseded', 'Continuation owner changed');
+          const proof = { ...evidence, serverSequence: recorded.sequence, originalUserMessageId: snapshot.submittedUserMessageId };
+          this.#events.append({ teamId: snapshot.teamId, roleId: snapshot.roleId, sessionId: snapshot.sessionId,
+            generation: snapshot.generation, eventType: 'generation.continuation-prepared',
+            payload: { requestRef: original.outboxId, receiptId: decisionId, evidence: proof, providerMutation: false }, createdAt: timestamp });
+          return { requestOk: true, requestRef: original.outboxId, disposition: 'tracking-preserved-for-continuation',
+            providerMutation: false, evidence: proof, model };
+        } });
+        this.#scheduler.refreshSession(snapshot.sessionId);
+        return result;
+      });
+    });
+  }
+
   async reconcileFollowup(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number;
       readonly decisionId: string; readonly followupUserMessageId: string; readonly responseMessageId: string;
       readonly responseSha256: string; readonly followupCompleted: true },
     observe: (snapshot: SessionSnapshot) => Promise<{ readonly pageKey: string; readonly conversationId: string;
       readonly bindingEpoch: number; readonly observedAt: string;
+      readonly followupPartialResponses?: readonly { readonly responseMessageId: string; readonly responseSha256: string }[];
       readonly originalPartialResponses: readonly { readonly responseMessageId: string; readonly responseSha256: string }[] }>,
   ) {
     const method = 'session.manual-followup.reconcile';
@@ -1599,7 +1680,9 @@ export class SubmissionService {
           payload.authorizedResend === undefined)) throw new SessionPlaneDomainError(
         'session.generation-superseded', 'Authorized resend source is no longer current');
       if (authorizedOriginal === undefined && !['created', 'ready', 'complete'].includes(session.sessionState) &&
-          !(session.sessionState === 'cancelled' && this.#requireSnapshot(sessionId).reason === 'manual-followup-reconciled') &&
+          !(session.sessionState === 'cancelled' && (this.#requireSnapshot(sessionId).reason === 'manual-followup-reconciled' ||
+            (this.#requireSnapshot(sessionId).reason === 'approved-continuation-prepared' && input.continuationOf ===
+              this.#outbox.getByGeneration(sessionId, session.currentGeneration)?.outboxId))) &&
           !(session.sessionState === 'failed' &&
             ['thinking-failed-reconciled', 'message-timeout-reconciled'].includes(this.#requireSnapshot(sessionId).reason ?? '') &&
             this.#requireSnapshot(sessionId).errorCode === 'provider.execution-failed')) {
@@ -2271,6 +2354,7 @@ function sessionSendInputFromOutbox(outbox: OutboxRecord, payload: StoredOutboxP
     ...(payload.thinkingFailureRecovery === true ? { thinkingFailureRecovery: true } : {}),
     ...(payload.failureContinuation === undefined ? {} : { failureContinuation: payload.failureContinuation }),
     ...(payload.authorizedResend === undefined ? {} : { authorizedResend: payload.authorizedResend }),
+    ...(payload.continuationOf === undefined ? {} : { continuationOf: payload.continuationOf }),
   };
 }
 

@@ -8,10 +8,12 @@ export function workflowWaitMs(value: number): number {
 
 /** Observation transport delays, pacing/429 and progress are not completion or a decision. */
 export function workflowWaitOutcome(result: Record<string, unknown>): boolean {
+  if (result.followup !== undefined) return result.requestOk === false || (result.followup as { terminal?: boolean }).terminal === true || result.errorCode === 'provider.actionable-alert';
   const recovery = result.recovery as { userActionRequired?: boolean } | undefined;
-  return result.requestOk === false || result.terminal === true ||
+  return result.requestOk === false || result.terminal === true || (result.followup as { terminal?: boolean } | undefined)?.terminal === true ||
     result.status === 'needs_decision' || result.status === 'recovery_required' ||
-    recovery?.userActionRequired === true || result.inspectionError !== undefined ||
+    recovery?.userActionRequired === true || (result.inspectionError !== undefined &&
+      !['browser.snapshot-timeout', 'provider.observation-unavailable'].includes(String((result.inspectionError as { errorCode?: string }).errorCode))) ||
     (result.stopOutcome as { state?: string } | undefined)?.state === 'unknown' || result.reason === 'provider-actionable-alert' ||
     ['provider.interstitial', 'provider.conversation-unavailable', 'provider.actionable-alert'].includes(String(result.errorCode)) ||
     result.providerState === 'blocked' || result.providerState === 'error';

@@ -48,11 +48,13 @@ const FLAG_OPTIONS = new Set([
   'resume',
   'no-activate',
   'outputs-retrieved',
+  'continuation-approved',
+  'return-on-wait-expiry',
   'preserve-conversation',
 ]);
 const MULTI_VALUE_OPTIONS = new Set(['file', 'skill']);
 const VALUE_OPTIONS = new Set([
-  'remote', 'remote-executable', 'remote-socket', 'remote-control-path',
+  'followup-message-id', 'remote', 'remote-executable', 'remote-socket', 'remote-control-path',
   'state-dir',
   'browser',
   'browser-executable',
@@ -714,7 +716,9 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   if (action === 'wait') {
     const waitMs = workflowWaitMs(integerOption(parsed, 'wait-ms', DEFAULT_WORKFLOW_WAIT_MS, 0, MAX_WORKFLOW_WAIT_MS));
     return await printRpc(io, parsed, config, 'workflow.wait', { teamId, requestRefs: [ref], waitMs,
-      ...optionalParam('outputDir', parsed.options.out) }, waitMs + 5_000);
+      untilResult: waitMs > 0 && parsed.options['return-on-wait-expiry'] !== 'true',
+      ...optionalParam('followupUserMessageId', parsed.options['followup-message-id']),
+      ...optionalParam('outputDir', parsed.options.out) }, (waitMs > 0 && parsed.options['return-on-wait-expiry'] !== 'true' ? MAX_WORKFLOW_WAIT_MS : waitMs) + 5_000);
   }
   if (action === 'send') {
     const sources = ['prompt', 'prompt-file', 'prompt-stdin'].filter(key => parsed.options[key] !== undefined);
@@ -751,6 +755,9 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
     ref: requirePositional(parsed.words, 5, 'control ref'), snapshotId: requireOption(parsed, 'snapshot-id'),
     ...(parsed.options.value === undefined ? {} : { value: Number(parsed.options.value) }),
   }, sessionSendRpcTimeoutMs(config));
+  if (action === 'continue') return await printRpc(io, parsed, config, 'workflow.decide', {
+    ...mutation, decision: 'continue', continuationApproved: parsed.options['continuation-approved'] === 'true',
+  }, sessionSendRpcTimeoutMs(config), true);
   if (['discover', 'refresh', 'focus', 'latest', 'reconcile_failure'].includes(action ?? '')) {
     return await printRpc(io, parsed, config, 'workflow.decide', { ...mutation, decision: action,
       ...(action === 'reconcile_failure' && parsed.options['continuation-prompt'] !== undefined
@@ -1083,6 +1090,7 @@ async function printRpc(
   method: string,
   params: Readonly<Record<string, unknown>>,
   minimumTimeoutMs = 0,
+  collectContinuation = false,
 ): Promise<number> {
   if (!parsed.json && typeof params.requestId === 'string') {
     io.stderr.write(`Operation reference: ${params.requestId}. If interrupted, inspect the same request; an identical operation retry must reuse --request-id ${params.requestId}.\n`);
@@ -1094,6 +1102,7 @@ async function printRpc(
     params,
     timeoutMs: Math.max(config.rpcRequestTimeoutMs, minimumTimeoutMs),
     maxLineBytes: config.rpcMaxLineBytes,
+    collectContinuation,
   });
   const view = !parsed.json && result !== null && typeof result === 'object' && !Array.isArray(result)
     ? { ...('teamId' in params ? { teamId: params.teamId } : {}), ...result } : result;
@@ -1349,6 +1358,7 @@ Exact request flow (same request; no automatic resend):
      PURPOSE is model, effort, composer or submit. Submit only after checking the input.
   6. Collect: request wait TEAM_ID REQUEST_REF [--wait-ms N] [--out DIRECTORY]
   Recovery: request discover|refresh|focus|latest|reconcile_failure TEAM_ID REQUEST_REF
+  Approved interrupted tool-turn continuation: request continue TEAM_ID REQUEST_REF --continuation-approved
   Confirm an observed matching submission without resending:
     request acknowledge TEAM_ID REQUEST_REF --message-id ID --evidence-hash HASH
   Approved HostSpan tool permission: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow --app-name NAME --tool-name NAME [--evidence-hash HASH]
