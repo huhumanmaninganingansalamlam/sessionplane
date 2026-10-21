@@ -11,7 +11,7 @@ import { PageRegistry, PageRegistryError } from '../browser/page-registry.ts';
 import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionEvidence, isPreparationSummary, matchesPreparationTarget, sameSnapshotSemantics, type BrowserSnapshot, type BrowserSnapshotNode } from '../browser/ref-snapshot.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
-import { ProviderSubmissionError, type PreparationPurpose, type PreparationTarget } from '../providers/provider-adapter.ts';
+import { ProviderSubmissionError, type ProviderObservationEvidence, type PreparationPurpose, type PreparationTarget } from '../providers/provider-adapter.ts';
 import { assertNoHumanVerification } from '../providers/human-verification.ts';
 import { CHATGPT_PREPARATION_SNAPSHOT, CHATGPT_COMPOSER_SELECTOR } from '../providers/chatgpt/selectors.ts';
 import { composerHasExactValue, inspectChatGptSubmissionCandidates, inspectChatGptPageReady, prepareChatGptObservation } from '../providers/chatgpt/submission.ts';
@@ -224,6 +224,57 @@ export class SessionUiService {
       });
   }
 
+  async observeFollowup(input: PreparationOwner, followupUserMessageId: string): Promise<ProviderObservationEvidence> {
+    const read = await this.#submissions.inspectSubmission(input, async session => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try { return await Promise.race([(async () => {
+      const page = this.#requirePage(session);
+      const original = await observeChatGptDom(page, session);
+      if (!original.submittedUserFound || !original.turnBoundary.some(message =>
+        message.role === 'user' && message.messageId === followupUserMessageId && message.messageId !== session.submittedUserMessageId)) {
+        throw new SessionPlaneDomainError('session.page-identity-unverified', 'Follow-up is not after the exact original ACK on this transcript');
+      }
+      const dom = await observeChatGptDom(page, { submittedUserMessageId: followupUserMessageId, submittedUserTurnId: null });
+      const activity = await observeChatGptActivity(page, dom);
+      const binding = this.#registry.refreshPage(session.pageKey!);
+      return { provider: 'chatgpt', pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch,
+        observedAt: dom.messageDiagnostics.observedAt, conversationId: session.conversationId,
+        submittedUserFound: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
+        candidate: dom.candidate, activity: activity.strength, dialogKind: null, networkActivity: false,
+        observationTransport: 'fresh' as const, reason: dom.actionableAlert ? 'provider-actionable-alert' : null,
+        ...(dom.actionableAlert ? { errorCode: 'provider.actionable-alert' } : {}) };
+      })(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new SessionPlaneDomainError(
+        'browser.snapshot-timeout', 'Follow-up observation delayed; preserve the original and later turn')), 5000); })]);
+      } finally { clearTimeout(timer); }
+    });
+    if (!read.evidence) throw new SessionPlaneDomainError('browser.unavailable', 'Original follow-up page is unavailable');
+    return read.evidence;
+  }
+
+  async prepareContinuation(input: PreparationOwner & { readonly decisionId: string }) {
+    return await this.#submissions.prepareContinuation(input, session => this.verifyContinuation(session, session));
+  }
+
+  async verifyContinuation(session: SessionSnapshot, original: SessionSnapshot) {
+      const page = this.#requirePage(session);
+      const binding = this.#registry.refreshPage(session.pageKey!);
+      await requireIdleConversationPage(page, '계속');
+      const dom = await observeChatGptDom(page, original);
+      const activity = await observeChatGptActivity(page, dom);
+      const controls = await this.#capture(session);
+      const after = this.#registry.refreshPage(session.pageKey!);
+      if (binding.bindingEpoch !== after.bindingEpoch || !dom.conversationSurfaceAvailable ||
+          !dom.submittedUserFound || dom.laterUserFound || dom.candidate !== null || dom.actionableAlert ||
+          activity.strength !== 'none' || controls.nodesTruncated ||
+          controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role)) ||
+          !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
+        throw new SessionPlaneDomainError('provider.preparation-required',
+          'Continuation requires the exact idle original turn with no answer, later user, alert or separate draft');
+      }
+      return { pageKey: session.pageKey!, conversationId: session.conversationId!, bindingEpoch: after.bindingEpoch,
+        observedAt: controls.capturedAt, continuationPrompt: '계속' };
+  }
+
   async reconcileFollowup(input: PreparationOwner & { readonly decisionId: string; readonly followupUserMessageId: string;
     readonly responseMessageId: string; readonly responseSha256: string; readonly followupCompleted: true }) {
     return await this.#submissions.reconcileFollowup(input, async session => {
@@ -244,7 +295,7 @@ export class SessionUiService {
       this.#requirePage(session);
       const after = this.#registry.refreshPage(session.pageKey!);
       if (originals.length !== 1 || followups.length !== 1 || originals[0]?.rootIndex !== followups[0]?.rootIndex ||
-          original < 0 || user <= original || user !== messages.length - 2 || answer?.role !== 'assistant' ||
+          original < 0 || user <= original || user >= messages.length - 1 || messages.slice(user + 1, -1).some(message => message.role !== 'assistant' || message.terminalMarker) || answer?.role !== 'assistant' ||
           answer.messageId !== input.responseMessageId || !answer.text.trim() || answer.streamingMarker ||
           createHash('sha256').update(answer.text).digest('hex') !== input.responseSha256 ||
           partials.some(m => m.role !== 'assistant' || !m.messageId || m.terminalMarker) ||
@@ -260,6 +311,8 @@ export class SessionUiService {
       }
       return { pageKey: session.pageKey!, conversationId: session.conversationId!,
         bindingEpoch: after.bindingEpoch, observedAt: controls.capturedAt,
+        followupPartialResponses: messages.slice(user + 1, -1).map(m => ({ responseMessageId: m.messageId!,
+          responseSha256: createHash('sha256').update(m.text).digest('hex') })),
         originalPartialResponses: partials.map(m => ({ responseMessageId: m.messageId!,
           responseSha256: createHash('sha256').update(m.text).digest('hex') })) };
     });

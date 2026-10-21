@@ -243,6 +243,53 @@ test('closing the recovery owner during child preparation preserves its saved dr
   } finally { await f.close(); }
 });
 
+test('approved interrupted tool continuation preserves original ACK and uses one ordinary successor', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const input = { teamId: f.team.teamId, requestRef, requestId: 'approved-continue',
+      decision: 'continue', continuationApproved: true };
+    const identity = { conversationId: original.conversationId, pageKey: original.pageKey,
+      submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId };
+    const evidence = { anchorNodeId: original.submittedUserMessageId, currentNodeId: 'tool-done',
+      nextUserFound: false, assistantCount: 1, messages: [{ messageId: 'tool-done', role: 'tool' as const,
+        channel: 'commentary', status: 'finished_successfully', endTurn: null, hidden: false, textLength: 0 }] };
+    const record = async (patch = {}, scope = identity) => f.core.actorScheduler.updateGeneration(original.sessionId, 1,
+      {}, 'generation.backend-pending', 'backend-assistant-not-final', scope, { ...evidence, ...patch });
+    await assert.rejects(f.rpc('decide', input), /server evidence/);
+    for (const patch of [{ nextUserFound: true }, { messages: [{ ...evidence.messages[0]!, status: 'in_progress' }] }]) {
+      await record(patch); await assert.rejects(f.rpc('decide', input), /server evidence/);
+    }
+    await record({}, { ...identity, conversationId: 'different' });
+    await assert.rejects(f.rpc('decide', input), /server evidence/);
+    await record();
+    const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
+    for (const unsafe of ['<textarea>Separate draft</textarea>',
+      '<textarea></textarea><button data-testid="stop-button">Stop</button>',
+      '<div data-message-author-role="user" data-message-id="already-continued">계속</div><textarea></textarea>',
+      '<div data-message-author-role="assistant" data-message-id="final">Final</div><textarea></textarea>']) {
+      await f.fake.page.setContent(body + unsafe + '</main>');
+      await assert.rejects(f.rpc('decide', input), /draft|active|idle|cleanup/);
+      assert.equal(f.core.teamDirectory.getSession(original.sessionId).terminal, false);
+    }
+    await f.fake.page.setContent(body + '<textarea>계속</textarea><button data-testid="send-button">Send</button></main>');
+    f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="continued-answer">Continued answer</div>';
+    const prepared = await f.rpc<any>('decide', input);
+    assert.equal(prepared.generation, 2); assert.equal(prepared.promptSubmitted, true);
+    assert.equal(prepared.continuationOf, requestRef); assert.equal(f.fake.submitCount, 2);
+    const stored = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(original.sessionId)!;
+    assert.equal(stored.submitted_user_message_id, original.submittedUserMessageId);
+    assert.equal(stored.answer_text, null); assert.equal(stored.response_message_id, null);
+    assert.equal(stored.reason, 'approved-continuation-prepared');
+    await f.rpc('decide', input); assert.equal(f.fake.submitCount, 2);
+    const successor = f.core.database.raw.prepare('SELECT payload_json FROM outbox WHERE outbox_id=?').get(prepared.requestRef)!;
+    const payload = JSON.parse(String(successor.payload_json));
+    assert.equal(payload.prompt, '계속'); assert.equal(payload.continuationOf, requestRef);
+  } finally { await f.close(); }
+});
+
 test('confirmed manual follow-up releases only original tracking and permits new work without borrowing its answer', async () => {
   const f = await fixture();
   const { createHash } = await import('node:crypto');
@@ -318,6 +365,34 @@ test('manual follow-up reconciliation cannot release an UNKNOWN submission', asy
       decision: 'reconcile_followup', followupUserMessageId: 'manual-user', responseMessageId: 'manual-answer',
       responseSha256: '0'.repeat(64), followupCompleted: true }), /unresolved acknowledged/);
     assert.deepEqual(f.core.teamDirectory.getSession(f.session.sessionId), before);
+    assert.equal(f.fake.submitCount, 1);
+  } finally { await f.close(); }
+});
+
+test('already-submitted continuation collects checkpoints and reconciles without another submit', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users + '<div data-message-author-role="user" data-message-id="manual-user">계속</div><button data-testid="stop-button">Stop</button>';
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    let returned = false;
+    const waiting = f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
+      waitMs: 600000, followupUserMessageId: 'manual-user' }).then(result => { returned = true; return result; });
+    await delay(250);
+    assert.equal(returned, false);
+    await f.fake.page.setContent(`<main>${configuration}<div data-message-author-role="user" data-message-id="user-message-1">Original</div>
+      <div data-message-author-role="assistant" data-message-id="original-partial">Original unfinished</div>
+      <div data-message-author-role="user" data-message-id="manual-user">계속</div>
+      <div data-message-author-role="assistant" data-message-id="checkpoint">Implementing</div>
+      <div data-message-author-role="assistant" data-message-id="manual-final" data-end-turn="true">Actual final</div><textarea></textarea></main>`);
+    const [result] = (await waiting).results;
+    assert.equal(result.followup.responseMessageId, 'manual-final');
+    assert.equal(result.followup.answerText, 'Actual final');
+    assert.equal(result.reconciliation.providerMutation, false);
+    const closed = f.core.teamDirectory.getSession(f.session.sessionId);
+    assert.equal(closed.submittedUserMessageId, original.submittedUserMessageId);
+    assert.equal(closed.responseMessageId, null);
+    assert.equal(closed.reason, 'manual-followup-reconciled');
     assert.equal(f.fake.submitCount, 1);
   } finally { await f.close(); }
 });

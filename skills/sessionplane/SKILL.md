@@ -265,3 +265,7 @@ Search, context packaging, project-source management and special code ZIP flows
 are not SessionPlane tools. Use the agent's existing file/search tools and include
 needed text in the prompt. Uploads are disabled by default; send files only when
 the team's capabilities.uploadsEnabled is true. Downloads remain available.
+
+For an explicitly authorized continuation of an interrupted tool turn with no final and no current failure alert, use `decide` with `decision: "continue"`, `continuationApproved: true`, the original requestRef and a stable requestId. The core requires fresh exact canonical tool completion and an idle matching page, retains the original uncertain answer/ACK, and prepares one separate same-chat literal `계속` request. The existing client completes configuration/composer/submit and collects the successor internally; no manual browser send is needed. Existing later turns, active work, UNKNOWN delivery and separate drafts block dispatch. If a user already sent `계속`, use positive `wait` with `followupUserMessageId` (CLI `--followup-message-id`) to collect that distinct follow-up and reconcile it internally; never send it again.
+
+Positive CLI/MCP waits retain routine expired rounds and transient observation timeouts inside the existing client until an answer, actual error or required decision. Each core round stays bounded for normal handover. Explicit `untilResult: false` (CLI `--return-on-wait-expiry`) retains bounded return behavior; zero is a snapshot.
