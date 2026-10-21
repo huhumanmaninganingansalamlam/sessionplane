@@ -174,8 +174,21 @@ export type ProviderRecoveryKind =
   | 'deferred'
   | 'unavailable';
 
+export interface ProviderServerObservation {
+  readonly anchorNodeId: string | null;
+  readonly currentNodeId: string | null;
+  readonly nextUserFound: boolean;
+  readonly assistantCount: number;
+  readonly messages: readonly {
+    readonly messageId: string | null; readonly role: 'assistant' | 'tool';
+    readonly channel: string; readonly status: string; readonly endTurn: boolean | null;
+    readonly hidden: boolean; readonly textLength: number;
+  }[];
+}
+
 export interface ProviderRecoveryResult {
   readonly kind: ProviderRecoveryKind;
+  readonly serverObservation?: ProviderServerObservation;
   readonly observationTransport: ObservationTransport;
   readonly responseMessageId: string | null;
   readonly answerText: string | null;
