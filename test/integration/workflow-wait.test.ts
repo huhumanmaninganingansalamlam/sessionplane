@@ -5,6 +5,8 @@ import path from 'node:path';
 import { setImmediate as flush } from 'node:timers/promises';
 import test from 'node:test';
 import { Readable, Writable } from 'node:stream';
+import { SessionUiService } from '../../src/core/session-ui-service.ts';
+import { workflowWaitOutcome } from '../../src/domain/workflow-wait.ts';
 import { runCli } from '../../src/cli/main.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
@@ -185,4 +187,58 @@ test('ten-minute wait survives the TabletAuto observation timeout then returns t
     assert.equal(result.submittedUserMessageId, f.sent.submittedUserMessageId);
     assert.equal(f.fake.submitCount, 1);
   } finally { t.mock.timers.reset(); await f.close(); }
+});
+
+
+test('CLI retains paced UNKNOWN ACK recovery through collection without a selection or replay', async t => {
+  const f = await fixture();
+  try {
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, {
+      sessionState: 'complete', providerState: 'complete', responseMessageId: 'previous', answerText: 'Previous' });
+    f.fake.acknowledgementMode = 'missing';
+    await assert.rejects(f.core.submissionService.send({ clientId: `team:${f.team.teamId}`, requestId: 'unknown',
+      sessionId: f.sent.sessionId as string, expectedGeneration: 1, prompt: 'Exact next prompt', sessionDeadlineSec: 60 }));
+    const request = f.core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=? AND generation=2')
+      .get(f.sent.sessionId as string) as { outbox_id: string };
+    let probes = 0;
+    const nextCheckAt = new Date(Date.now() + 150).toISOString();
+    f.fake.recoverAcknowledgement = async input => {
+      probes++;
+      if (probes === 1) {
+        input.onRecoveryObservation?.({ kind: 'deferred', source: 'backend', reason: 'backend-http-429',
+          observedAt: new Date().toISOString(), nextCheckAt, httpStatus: 429, endpointCategory: 'conversation-detail' });
+        return null;
+      }
+      assert.ok(Date.now() >= Date.parse(nextCheckAt), 'Respect the actual provider delay');
+      assert.equal(input.selection, undefined, 'Do not choose a rendered candidate to bypass canonical proof');
+      return { conversationId: input.session.conversationId!, submittedUserMessageId: 'exact-canonical-user',
+        submittedUserTurnId: 'exact-canonical-user' };
+    };
+    t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async function(input: any) {
+      return await f.core.submissionService.inspectSubmission(input, async snapshot => ({
+        submissionCandidates: snapshot.submissionState === 'submission_unknown' ? [{ messageId: 'visible-user' }] : [] }));
+    }) as any);
+    f.fake.autoFinalText = 'Same request final';
+    let output = '', error = '';
+    const code = await runCli(['request', 'wait', f.team.teamId as string, request.outbox_id,
+      '--wait-ms', '600000', '--socket', f.config.socketPath, '--json'], {
+      stdin: Readable.from([]), stdout: new Writable({ write(c, _e, done) { output += c; done(); } }),
+      stderr: new Writable({ write(c, _e, done) { error += c; done(); } }) });
+    assert.equal(code, 0, error);
+    const [result] = JSON.parse(output).results;
+    assert.equal(result.submissionState, 'submitted');
+    assert.equal(result.submittedUserMessageId, 'exact-canonical-user');
+    assert.equal(result.answerText, 'Same request final');
+    assert.equal(result.terminal, true);
+    assert.equal(f.fake.submitCount, 2, 'Only the two original fixture sends occurred');
+    assert.equal(probes, 2);
+    const pending = { status: 'needs_decision', submissionState: 'submission_unknown', promptSubmitted: true,
+      acknowledgementRecovery: { kind: 'deferred', currentIdentityMatches: true } };
+    assert.equal(workflowWaitOutcome(pending), false);
+    assert.equal(workflowWaitOutcome({ ...pending, acknowledgementRecovery: { kind: 'unverified', currentIdentityMatches: true } }), true);
+    assert.equal(workflowWaitOutcome({ ...pending, acknowledgementRecovery: { kind: 'deferred', currentIdentityMatches: false } }), true);
+    assert.equal(workflowWaitOutcome({ ...pending, status: 'recovery_required' }), true);
+    assert.equal(workflowWaitOutcome({ ...pending, errorCode: 'provider.actionable-alert' }), true);
+  } finally { t.mock.restoreAll(); await f.close(); }
 });
