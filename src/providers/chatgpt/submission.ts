@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { observeChatGptSurface } from './surface.ts';
+import { inspectChatGptSurfaceDocument, observeChatGptSurface } from './surface.ts';
 import type { ElementHandle, Locator, Page, Request, Response } from 'playwright-core';
 
 import type { PageRegistry } from '../../browser/page-registry.ts';
@@ -566,7 +566,19 @@ async function assertChatGptAuthenticated(page: Page): Promise<void> {
 }
 
 async function assertChatOnlySurface(page: Page): Promise<void> {
-  const observed = await observeChatGptSurface(page);
+  let observed = await observeChatGptSurface(page);
+  if (observed.mode === 'unknown') {
+    // Hydration may temporarily omit the selection. Wait on this same composer
+    // before touching its draft; never infer Chat or switch a Work conversation.
+    const handle = await page.waitForFunction(inspectChatGptSurfaceDocument, true,
+      { timeout: COMPOSER_READY_TIMEOUT_MS }).catch(() => null);
+    if (handle) {
+      try {
+        const selection = await handle.jsonValue();
+        if (selection) observed = { ...selection, observedAt: new Date().toISOString() };
+      } finally { await handle.dispose(); }
+    }
+  }
   if (observed.mode === 'work') throw new ProviderSubmissionError('capability.unsupported',
     'The active ChatGPT composer is Work; preserve this conversation and use an authorized same-role Chat replacement');
   if (observed.mode !== 'chat') throw new ProviderSubmissionError('provider.preparation-required',

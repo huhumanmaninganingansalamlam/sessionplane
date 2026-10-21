@@ -7,7 +7,7 @@ export interface ChatGptSurface {
 }
 
 /** Read only the mounted composer's explicit selection, never model/effort or a default. */
-export function inspectChatGptSurfaceDocument(): Omit<ChatGptSurface, 'observedAt'> {
+export function inspectChatGptSurfaceDocument(knownOnly = false): Omit<ChatGptSurface, 'observedAt'> | null {
   const controls = new Set<'chat' | 'work'>();
   for (const e of document.querySelectorAll('[role="radio"], [role="tab"], [role="menuitemradio"]')) {
     if (!e.getBoundingClientRect().width || e.closest('[data-message-author-role], article, [data-chatgpt-search-message-ids]')) continue;
@@ -31,17 +31,17 @@ export function inspectChatGptSurfaceDocument(): Omit<ChatGptSurface, 'observedA
     }
   }
   const modes = new Set([...controls, ...state]);
-  if (modes.size > 1) return { mode: 'unknown', source: 'conflicting-evidence' };
-  if (modes.size === 0) return { mode: 'unknown', source: 'unavailable' };
+  if (modes.size > 1) return knownOnly ? null : { mode: 'unknown', source: 'conflicting-evidence' };
+  if (modes.size === 0) return knownOnly ? null : { mode: 'unknown', source: 'unavailable' };
   return { mode: [...modes][0]!, source: controls.size ? 'selected-control' : 'composer-state' };
 }
 
 export async function observeChatGptSurface(page: Page): Promise<ChatGptSurface> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const selection = await Promise.race([page.evaluate(inspectChatGptSurfaceDocument),
+    const selection = await Promise.race([page.evaluate(inspectChatGptSurfaceDocument, false),
       new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Surface read timed out')), 2_000); })]);
-    return { ...selection, observedAt: new Date().toISOString() };
+    return { ...(selection ?? { mode: 'unknown', source: 'unavailable' }), observedAt: new Date().toISOString() };
   } catch {
     return { mode: 'unknown', source: 'unavailable', observedAt: new Date().toISOString() };
   } finally { clearTimeout(timer); }

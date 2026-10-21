@@ -157,6 +157,11 @@ test('ChatGPT Chat prepares exact attachments before one submit', async () => {
       acknowledgementTimeoutMs: 2_000,
     });
 
+    // Same prepared request survives temporary selection loss during hydration.
+    await created.page.evaluate(() => {
+      document.querySelector('#chat')!.setAttribute('aria-checked', 'false');
+      setTimeout(() => document.querySelector('#chat')!.setAttribute('aria-checked', 'true'), 700);
+    });
     await prepareFixture(submission, registry.pageForObservation(submission.pageKey));
     assert.equal(await created.page.locator('#chat').getAttribute('aria-checked'), 'true');
     assert.deepEqual(

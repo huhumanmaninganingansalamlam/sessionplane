@@ -15,8 +15,10 @@ ChatGPT sends require an observed Chat selection, independently of model and eff
 `session show` and exact-request `team_get` return `observedSurface` with `mode`,
 `source` and `observedAt`; `requested.surface` is caller intent, not observation.
 The provider reads an explicit selected control or the mounted composer's explicit
-Work-conversation state. Missing or conflicting evidence remains `unknown` and
-blocks sending without changing the draft. Existing Work requests remain readable;
+Work-conversation state. During preparation, temporary missing or conflicting
+evidence is reobserved on the same composer within the normal readiness wait.
+Confirmed Chat continues the same request; unresolved evidence remains `unknown`
+without changing the draft or requiring human confirmation. Existing Work requests remain readable;
 only their Coordinator performs an authorized same-role Chat replacement.
 
 ## Browser diagnostics
