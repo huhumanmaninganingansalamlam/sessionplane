@@ -187,6 +187,14 @@ export class SessionRepository {
     return (!discard && this.#database.prepare(`
       SELECT 1 FROM generations WHERE session_id = ? AND (
         submission_state = 'failed_pre_submit' OR
+        (submission_state = 'prepared' AND prompt_submitted = 0
+          AND submitted_user_message_id IS NULL AND submitted_user_turn_id IS NULL
+          AND response_message_id IS NULL AND answer_text IS NULL
+          AND EXISTS (SELECT 1 FROM sessions s JOIN team_roles r ON r.role_id=s.role_id
+            JOIN outbox o ON o.session_id=s.session_id AND o.generation=generations.generation
+            WHERE s.session_id=generations.session_id AND s.session_state='superseded'
+              AND r.current_session_id IS NOT s.session_id
+              AND o.submission_state='prepared' AND o.prompt_submitted=0)) OR
         (submission_state = 'submitted' AND prompt_submitted = 1 AND completed_at IS NOT NULL
           AND submitted_user_message_id IS NOT NULL AND error_code = 'provider.execution-failed'
           AND reason IN ('thinking-failed-reconciled', 'message-timeout-reconciled')) OR

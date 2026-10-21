@@ -83,7 +83,12 @@ export class RpcRouter {
     }
 
     try {
-      const operation = () => method.handler(paramsResult.data, context);
+      // Release only passive RPC waits during handover, never provider work or mutations.
+      const readWait = this.maintenance && ['workflow.wait', 'session.wait', 'team.wait'].includes(request.method);
+      const waitSignal = readWait ? this.maintenance!.readWaitSignal : undefined;
+      const handlerContext = waitSignal ? { signal: context.signal
+        ? AbortSignal.any([context.signal, waitSignal]) : waitSignal } : context;
+      const operation = () => method.handler(paramsResult.data, handlerContext);
       const exempt = ['system.health', 'system.maintenance.quiesce', 'system.maintenance.prepare', 'system.maintenance.resume', 'system.maintenance.commit'].includes(request.method);
       const result = await (this.maintenance && !exempt ? this.maintenance.rpc(operation) : operation());
       return request.id === undefined ? null : rpcSuccess(request.id, result);

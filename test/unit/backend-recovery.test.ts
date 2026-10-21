@@ -47,6 +47,33 @@ test('explicit retained message ACK compares the full literal editor text, prese
     'An incompatible captured POST hash remains authoritative');
 });
 
+test('captured exact ACK preserves server reparenting provenance and rejects a different current branch', async () => {
+  const attempt = { conversationId: CONVERSATION_ID, messageId: 'user-message-1', parentMessageId: 'root',
+    textHash: createHash('sha256').update('Question').digest('hex'), observedAt: new Date(0).toISOString() };
+  for (const [parent, current, expected] of [
+    ['other-root', 'user-node', 'backend-submission-parent-mismatch'],
+    ['root', 'other-root', 'backend-user-anchor-not-on-current-branch'],
+  ]) {
+    const payload = conversationPayload([node('root', null, null), node('other-root', null, null),
+      node('user-node', parent!, userMessage('user-message-1', 'user-turn-1'))], current!);
+    const recovery = new ChatGptBackendRecovery({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000 });
+    const client: BackendJsonClient = { async get(url) { return { status: 200, headers: {},
+      body: url.endsWith('/api/auth/session') ? { accessToken: 'memory-only-token' } : payload }; } };
+    let evidence: ProviderAcknowledgementRecoveryEvidence | undefined;
+    const ack = await recovery.recoverAcknowledgement(CONVERSATION_ID, 'Question', client, 'https://chatgpt.com',
+      [attempt], value => { evidence = value; }, attempt.messageId);
+    if (parent === 'other-root') {
+      assert.equal(ack?.submittedUserMessageId, attempt.messageId);
+      assert.deepEqual(ack?.dispatchParent, { capturedParentMessageId: 'root', canonicalParentNodeId: 'other-root',
+        canonicalParentMessageId: null, matches: false });
+    } else {
+      assert.equal(ack, null, 'A captured UUID/hash never selects another branch');
+      assert.equal(evidence?.reason, expected);
+      assert.equal(evidence?.selectedMessageComparison?.textSha256, attempt.textHash);
+    }
+  }
+});
+
 test('late ACK uses durable dispatch identity among duplicate questions, never recency', () => {
   const old = [node('root', null, null), node('old-user', 'root', userMessage('old-user', 'old-turn')),
     node('old-final', 'old-user', finalAssistant('old-answer', 'Previous answer'))];
@@ -63,7 +90,8 @@ test('late ACK uses durable dispatch identity among duplicate questions, never r
   const ack = recover(payload);
   assert.equal(ack?.submittedUserMessageId, 'new-user');
   assert.equal(recoverExactServerFinal(payload, ack!).responseMessageId, 'new-answer');
-  assert.equal(recover(payload, [{ ...attempt, parentMessageId: 'wrong-parent' }]), null);
+  assert.equal(recover(payload, [{ ...attempt, parentMessageId: 'wrong-parent' }])?.dispatchParent?.matches, false,
+    'Server acceptance of exact captured bytes is separate from parent provenance');
   assert.equal(recover(payload, [{ ...attempt, textHash: '0'.repeat(64) }]), null);
   assert.equal(recover(payload, [{ ...attempt, conversationId: 'other-conversation' }]), null);
   assert.equal(recover({ ...payload, current_node: 'old-final' }), null, 'another branch is not this ACK');

@@ -120,6 +120,21 @@ export class ChatGptBackendRecovery {
         return message !== null && messageRole(message) === 'user' &&
           messageText(message).replaceAll('\r\n', '\n') === prompt.replaceAll('\r\n', '\n');
       }).length : undefined;
+      let exactIdentityReason: string | undefined;
+      const attempt = attempts?.length === 1 ? attempts[0] : undefined;
+      if (validMapping && attempt !== undefined) {
+        const mapping = payload.mapping as Record<string, unknown>;
+        const entry = Object.entries(mapping).find(([, node]) =>
+          readStringField(messageForNode(node), 'id') === attempt.messageId);
+        if (entry !== undefined) {
+          const message = messageForNode(entry[1])!;
+          const textHash = createHash('sha256').update(messageText(message).replaceAll('\r\n', '\n')).digest('hex');
+          if (textHash === attempt.textHash) {
+            exactIdentityReason = recoverExactServerFinal(payload, { conversationId,
+              submittedUserMessageId: attempt.messageId, submittedUserTurnId: null }).reason;
+          }
+        }
+      }
       const selected = validMapping && selectedMessageId !== undefined
         ? Object.values(payload.mapping as Record<string, unknown>).map(messageForNode)
           .filter(message => message !== null && messageRole(message) === 'user' && readStringField(message, 'id') === selectedMessageId)
@@ -136,7 +151,7 @@ export class ChatGptBackendRecovery {
         endpointCategory: 'conversation-detail',
         reason: !validMapping ? 'backend-conversation-mapping-unverified'
           : promptMatchCount === 0 ? 'backend-exact-prompt-absent'
-          : promptMatchCount! > 1 ? 'backend-exact-prompt-ambiguous' : 'backend-exact-acknowledgement-unverified',
+          : promptMatchCount! > 1 ? 'backend-exact-prompt-ambiguous' : exactIdentityReason ?? 'backend-exact-acknowledgement-unverified',
         ...(promptMatchCount === undefined ? {} : { promptMatchCount }),
         ...(validMapping ? { canonicalUserMessageCount: Object.values(payload.mapping as Record<string, unknown>)
           .map(messageForNode).filter(message => message !== null && messageRole(message) === 'user').length,
@@ -306,14 +321,18 @@ export function recoverExactServerAcknowledgement(
     const messageId = readStringField(message, 'id');
     if (messageId === null || messageId.length === 0) return [];
     if (exactAttempt !== undefined) {
-      const parent = readStringField(node, 'parent');
-      const parentMessage = parent === null ? null : messageForNode(mapping[parent]);
+      // The server may reparent an accepted dispatch. Exact UUID and captured
+      // bytes prove its identity; the current-branch check below still applies.
       if (messageId !== exactAttempt.messageId ||
-          createHash('sha256').update(text).digest('hex') !== exactAttempt.textHash ||
-          (parent !== exactAttempt.parentMessageId && readStringField(parentMessage, 'id') !== exactAttempt.parentMessageId)) return [];
+          createHash('sha256').update(text).digest('hex') !== exactAttempt.textHash) return [];
     } else if (text !== prompt.replaceAll('\r\n', '\n') &&
       !(messageId === selectedMessageId && matchesLiteralEditorText(text, prompt.replaceAll('\r\n', '\n')))) return [];
+    const parent = readStringField(node, 'parent');
+    const parentMessageId = readStringField(parent === null ? null : messageForNode(mapping[parent]), 'id');
     return [{ conversationId, submittedUserMessageId: messageId,
+      ...(exactAttempt === undefined ? {} : { dispatchParent: { capturedParentMessageId: exactAttempt.parentMessageId,
+        canonicalParentNodeId: parent, canonicalParentMessageId: parentMessageId,
+        matches: parent === exactAttempt.parentMessageId || parentMessageId === exactAttempt.parentMessageId } }),
       submittedUserTurnId: readStringField(message, 'turn_id') ?? nodeId,
       ...(text === prompt.replaceAll('\r\n', '\n') || exactAttempt !== undefined ? {} : {
         evidence: 'backend-exact-editor-text' as const,

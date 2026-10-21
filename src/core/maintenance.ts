@@ -9,6 +9,8 @@ export class CoreMaintenance {
   #expiresAt: number | null = null;
   #timer: ReturnType<typeof setTimeout> | undefined;
   #active = 0;
+  #readWaits = new AbortController();
+  get readWaitSignal(): AbortSignal { return this.#readWaits.signal; }
   get paused(): boolean { return this.#phase !== 'running'; }
   status() { return { phase: this.#phase, activeOperations: this.#active, expiresAt: this.#expiresAt, coordinatedDrain: true }; }
 
@@ -43,6 +45,7 @@ export class CoreMaintenance {
       if (this.paused) throw this.#error('An existing handover lease must expire or be released first');
       this.#token = randomUUID();
       this.#phase = 'draining';
+      this.#readWaits.abort();
     } else if (token !== this.#token || !this.paused) throw this.#error('Stale maintenance lease');
     clearTimeout(this.#timer);
     this.#expiresAt = Date.now() + 30_000;
@@ -58,6 +61,7 @@ export class CoreMaintenance {
     const token = randomUUID();
     this.#token = token;
     this.#phase = 'draining';
+    this.#readWaits.abort();
     // The total interval, including draining, is bounded even if the caller disappears.
     this.#expiresAt = Date.now() + leaseMs;
     this.#timer = setTimeout(() => this.resume(), leaseMs);
@@ -83,6 +87,7 @@ export class CoreMaintenance {
     this.#token = null;
     this.#expiresAt = null;
     this.#phase = 'running';
+    if (this.#readWaits.signal.aborted) this.#readWaits = new AbortController();
   }
   /** Validation and the terminal action have no awaited gap on the core event loop. */
   commit(token: string, idle: () => boolean, exit: () => never): never {
