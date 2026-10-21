@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import type { ProviderRecoveryResult } from '../../src/providers/provider-adapter.ts';
+import { ChatGptBackendRecovery } from '../../src/providers/chatgpt/backend-recovery.ts';
+import type { ProviderRecoveryRequest, ProviderRecoveryResult } from '../../src/providers/provider-adapter.ts';
 import { ProbeCoordinator } from '../../src/scheduler/probe-coordinator.ts';
 import { SessionPlaneDatabase } from '../../src/storage/database.ts';
 import { ProbeBudgetRepository } from '../../src/storage/probe-budget-repository.ts';
@@ -240,3 +241,43 @@ function pending(): ProviderRecoveryResult {
     nextCheckAt: null,
   };
 }
+
+
+test('queued backend collection reaches every conversation with observer scheduling jitter', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-probe-queue-'));
+  const database = SessionPlaneDatabase.open(path.join(root, 'state.sqlite'));
+  let clock = 0;
+  const coordinator = createCoordinator(database, () => new Date(clock));
+  const backend = new ChatGptBackendRecovery({ requestTimeoutMs: 15000, tokenCacheTtlMs: 60000,
+    now: () => new Date(clock) });
+  const reads: string[] = [];
+  const client = { async get(url: string) {
+    if (url.endsWith('/api/auth/session')) return { status: 200, headers: {}, body: { accessToken: 'test-memory-token' } };
+    const id = url.split('/').at(-1)!;
+    reads.push(id);
+    return { status: 200, headers: {}, body: { id, current_node: 'answer', mapping: {
+      user: { parent: null, message: { id: 'user', author: { role: 'user' } } },
+      answer: { parent: 'user', message: { id: 'answer-' + id, author: { role: 'assistant' },
+        channel: 'final', status: clock < 200000 ? 'in_progress' : 'finished_successfully', end_turn: clock >= 200000,
+        content: { content_type: 'text', parts: ['Original result ' + id] } } },
+    } } };
+  } };
+  const waiting = ['first', 'maetda', 'third', 'fourth', 'fifth', 'sixth', 'seventh'].map((id, i) => ({ id, due: i * 1000, done: false }));
+  try {
+    for (let turn = 0; turn < 300 && waiting.some(item => item.id !== 'first' && !item.done); turn++) {
+      const next = waiting.filter(item => !item.done).sort((a, b) => a.due - b.due)[0]!;
+      clock = next.due;
+      const request = { session: { conversationId: next.id, submittedUserMessageId: 'user',
+        submittedUserTurnId: 'user' }, generation: 4 } as ProviderRecoveryRequest;
+      const result = await coordinator.run('chatgpt:conversation-detail:' + next.id,
+        () => backend.recover(request, client, 'https://chatgpt.com'));
+      next.done = result.kind === 'complete';
+      if (next.done) assert.equal(result.responseMessageId, 'answer-' + next.id);
+      else next.due = Date.parse(result.nextCheckAt!) + 6000;
+    }
+    assert.deepEqual(waiting.filter(item => item.id !== 'first' && !item.done).map(item => item.id), [],
+      'A backend queue deferral must not consume the real-request interval and expire its own waiting lease');
+    assert.ok(reads.filter(id => id === 'maetda').length >= 1);
+    assert.ok(reads.filter(id => id === 'third').length >= 1);
+  } finally { database.close(); rmSync(root, { recursive: true, force: true }); }
+});
