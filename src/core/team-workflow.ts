@@ -302,6 +302,8 @@ export class TeamWorkflow {
       try { reconciliation = await this.services.ui.prepareContinuation({ ...owner, decisionId: input.requestId }); }
       catch (error) {
         if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.failure-unverified') throw error;
+        const inspected = await this.#observe(request, undefined, true);
+        if ((inspected.submissionVerification as { nextAction?: string } | undefined)?.nextAction !== 'reconcile_failure') throw error;
         try { await this.services.ui.reconcileFailure({ ...owner, decisionId: `timeout:${input.requestId}`, allowMessageTimeout: true, continuationPrompt: '계속' }); }
         catch (failure) {
           if (failure instanceof SessionPlaneDomainError && failure.errorCode === 'provider.failure-unverified') throw error;
