@@ -325,14 +325,18 @@ export function recoverExactServerAcknowledgement(
     const messageId = readStringField(message, 'id');
     if (messageId === null || messageId.length === 0) return [];
     if (exactAttempt !== undefined) {
-      const parent = readStringField(node, 'parent');
-      const parentMessage = parent === null ? null : messageForNode(mapping[parent]);
+      // The server may reparent an accepted dispatch. Exact UUID and captured
+      // bytes prove its identity; the current-branch check below still applies.
       if (messageId !== exactAttempt.messageId ||
-          createHash('sha256').update(text).digest('hex') !== exactAttempt.textHash ||
-          (parent !== exactAttempt.parentMessageId && readStringField(parentMessage, 'id') !== exactAttempt.parentMessageId)) return [];
+          createHash('sha256').update(text).digest('hex') !== exactAttempt.textHash) return [];
     } else if (text !== prompt.replaceAll('\r\n', '\n') &&
       !(messageId === selectedMessageId && matchesLiteralEditorText(text, prompt.replaceAll('\r\n', '\n')))) return [];
+    const parent = readStringField(node, 'parent');
+    const parentMessageId = readStringField(parent === null ? null : messageForNode(mapping[parent]), 'id');
     return [{ conversationId, submittedUserMessageId: messageId,
+      ...(exactAttempt === undefined ? {} : { dispatchParent: { capturedParentMessageId: exactAttempt.parentMessageId,
+        canonicalParentNodeId: parent, canonicalParentMessageId: parentMessageId,
+        matches: parent === exactAttempt.parentMessageId || parentMessageId === exactAttempt.parentMessageId } }),
       submittedUserTurnId: readStringField(message, 'turn_id') ?? nodeId,
       ...(text === prompt.replaceAll('\r\n', '\n') || exactAttempt !== undefined ? {} : {
         evidence: 'backend-exact-editor-text' as const,

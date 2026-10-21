@@ -473,6 +473,7 @@ export class SubmissionService {
               hasSubmittedUserTurnId: true,
               acknowledgementEvidence: acknowledgement.evidence ?? 'provider-adapter',
               ...(acknowledgement.promptEncoding === undefined ? {} : { promptEncoding: acknowledgement.promptEncoding }),
+              ...(acknowledgement.dispatchParent === undefined ? {} : { dispatchParent: acknowledgement.dispatchParent }),
               conversationId: acknowledgement.conversationId,
               submittedUserMessageId: acknowledgement.submittedUserMessageId,
               submittedUserTurnId: acknowledgement.submittedUserTurnId,
