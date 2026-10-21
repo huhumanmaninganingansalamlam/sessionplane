@@ -9,6 +9,7 @@ import { SessionUiService } from '../../src/core/session-ui-service.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 import { ConversationLoadRecoveryRepository } from '../../src/storage/conversation-load-recovery-repository.ts';
+import { EventRepository } from '../../src/storage/event-repository.ts';
 import { workflowWaitOutcome } from '../../src/domain/workflow-wait.ts';
 import { runCli } from '../../src/cli/main.ts';
 import { resolveConfig } from '../../src/config.ts';
@@ -38,6 +39,51 @@ async function fixture() {
   return { core, config, fake, invoke, team, sent, untilSubscribed,
     close: async () => { await core.close(); rmSync(root, { recursive: true, force: true }); } };
 }
+
+test('CLI retains submitted missing-anchor pacing until the same ACK answer is recovered', async t => {
+  const f = await fixture();
+  try {
+    const session = f.core.teamDirectory.getSession(f.sent.sessionId as string);
+    new EventRepository(f.core.database.raw).append({ teamId: f.team.teamId as string,
+      sessionId: session.sessionId, generation: 1, eventType: 'generation.backend-unverified',
+      createdAt: new Date().toISOString(), payload: { recoveryReason: 'backend-user-anchor-absent-from-mapping',
+        recoveryIdentity: { conversationId: session.conversationId, pageKey: session.pageKey,
+          submittedUserMessageId: session.submittedUserMessageId, submittedUserTurnId: session.submittedUserTurnId } } });
+    t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+      snapshot: f.core.teamDirectory.getSession(session.sessionId),
+      evidence: { submissionVerification: { anchorPresent: false, laterUserFound: false,
+        activity: 'unknown', messageTimeout: false, responseCandidate: null } }, requested: {},
+    })) as any);
+    await f.core.actorScheduler.updateGeneration(session.sessionId, 1, {
+      providerState: 'unknown', observationTransport: 'deferred', reason: 'backend-conversation-probe-paced',
+      nextCheckAt: new Date(Date.now() + 60_000).toISOString() });
+    let stdout = '', stderr = '';
+    const waiting = runCli(['request', 'wait', f.team.teamId as string, f.sent.requestRef as string,
+      '--wait-ms', '600000', '--continuation-approved', '--socket', f.config.socketPath, '--json'], {
+      stdin: Readable.from([]), stdout: new Writable({ write(c, _e, done) { stdout += c; done(); } }),
+      stderr: new Writable({ write(c, _e, done) { stderr += c; done(); } }) });
+    await f.untilSubscribed(session.sessionId);
+    const pending = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef })).structuredContent.request as any;
+    assert.equal(pending.status, 'recovery_required');
+    assert.equal(workflowWaitOutcome(pending), false);
+    assert.equal(workflowWaitOutcome({ ...pending, errorCode: 'provider.actionable-alert' }), true);
+    assert.equal(workflowWaitOutcome({ ...pending, recovery: { userActionRequired: true } }), true);
+    for (const backend of [
+      { currentIdentityMatches: false, recoveryReason: 'backend-user-anchor-absent-from-mapping' },
+      { currentIdentityMatches: true, recoveryReason: 'backend-user-anchor-not-on-current-branch' },
+    ]) assert.equal(workflowWaitOutcome({ ...pending,
+      submissionVerification: { ...pending.submissionVerification, backend } }), true);
+    await f.core.actorScheduler.updateGeneration(session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
+      responseMessageId: 'original-ack-final', answerText: 'Original recovered answer' });
+    assert.equal(await waiting, 0, stderr);
+    const [result] = JSON.parse(stdout).results;
+    assert.equal(result.responseMessageId, 'original-ack-final');
+    assert.equal(result.submittedUserMessageId, session.submittedUserMessageId);
+    assert.equal(result.terminal, true);
+    assert.equal(f.fake.submitCount, 1, 'No continuation into unknown/disconnected generation');
+  } finally { t.mock.restoreAll(); await f.close(); }
+});
 
 test('short workflow wait holds progress/429 for a full minute and cancellation only releases its subscription', async t => {
   const f = await fixture();
