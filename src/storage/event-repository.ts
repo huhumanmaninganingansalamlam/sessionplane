@@ -93,6 +93,14 @@ export class EventRepository {
     return row ? { ...parsePayload(row.payloadJson), completedAt: row.createdAt } : null;
   }
 
+  latestServerObservation(sessionId: string, generation: number): Readonly<Record<string, unknown>> | null {
+    const row = this.#database.prepare(`SELECT sequence, created_at AS observedAt, payload_json AS payloadJson
+      FROM events WHERE session_id=? AND generation=? AND event_type LIKE 'generation.backend-%'
+        AND json_type(payload_json, '$.serverObservation')='object' ORDER BY sequence DESC LIMIT 1`)
+      .get(sessionId, generation) as { sequence: number; observedAt: string; payloadJson: string } | undefined;
+    return row ? { sequence: Number(row.sequence), observedAt: row.observedAt, ...parsePayload(row.payloadJson) } : null;
+  }
+
   latestAnchorRecovery(sessionId: string, generation: number): (Readonly<Record<string, unknown>> & { sequence: number; observedAt: string }) | null {
     const row = this.#database.prepare(`SELECT sequence, payload_json AS payloadJson, created_at AS createdAt
       FROM events WHERE session_id=? AND generation=? AND event_type LIKE 'generation.backend-%'

@@ -1,3 +1,4 @@
+import type { ProviderServerObservation } from '../providers/provider-adapter.ts';
 import type { CurrentGenerationUpdate } from '../domain/generation.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
@@ -166,6 +167,7 @@ export class ActorScheduler {
     eventType = 'generation.updated',
     recoveryReason?: string | null,
     recoveryIdentity?: Pick<SessionSnapshot, 'conversationId' | 'pageKey' | 'submittedUserMessageId' | 'submittedUserTurnId'>,
+    serverObservation?: ProviderServerObservation,
   ): Promise<SessionSnapshot> {
     const actor = this.actorFor(sessionId);
     return await actor.enqueue(() => {
@@ -214,6 +216,7 @@ export class ActorScheduler {
           eventType,
           payload: {
             ...summarizeUpdate(update),
+            ...(serverObservation ? { serverObservation } : {}),
             ...(recoveryReason != null && /^[a-z0-9-]{1,120}$/.test(recoveryReason)
               ? { recoveryReason, ...(recoveryIdentity ? { recoveryIdentity } : {}) } : {}),
           },

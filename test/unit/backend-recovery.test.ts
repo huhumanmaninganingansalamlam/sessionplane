@@ -193,6 +193,9 @@ test('backend recovery requires final channel, finished status, end_turn, and no
   const result = recoverExactServerFinal(payload, identity());
   assert.equal(result.kind, 'pending');
   assert.equal(result.reason, 'backend-assistant-not-final');
+  assert.deepEqual(result.serverObservation, { anchorNodeId: 'exact-user', currentNodeId: 'assistant',
+    nextUserFound: false, assistantCount: 1, messages: [{ messageId: 'assistant-message', role: 'assistant',
+      channel: 'analysis', status: 'in_progress', endTurn: false, hidden: false, textLength: 0 }] });
 });
 
 test('backend client caches access token in memory and classifies Retry-After 429', async () => {

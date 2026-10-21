@@ -531,7 +531,10 @@ export class TeamWorkflow {
 
   #submissionVerification(request: OutboxRecord, result: Record<string, unknown>) {
     if (result.historical || result.terminal || result.submissionState !== 'submitted') return {};
-    const backend = new EventRepository(this.services.database.raw).latestAnchorRecovery(request.sessionId, request.generation);
+    const events = new EventRepository(this.services.database.raw);
+    const backend = events.latestAnchorRecovery(request.sessionId, request.generation);
+    const serverObservation = events.latestServerObservation(request.sessionId, request.generation);
+    const serverIdentity = serverObservation?.recoveryIdentity as Record<string, unknown> | undefined;
     const identity = backend?.recoveryIdentity as Record<string, unknown> | undefined;
     const identityMatches = identity != null && identity.conversationId === result.conversationId &&
       identity.pageKey === result.pageKey && identity.submittedUserMessageId === result.submittedUserMessageId &&
@@ -547,6 +550,10 @@ export class TeamWorkflow {
     const { responseCandidate: _candidate, ...verification } = dom ?? {};
     return { submissionVerification: { state: missing ? 'anchor-unverified' : dom?.anchorPresent ? 'anchor-observed' : 'unverified',
       storedSubmissionState: 'submitted', automaticResubmit: false, dom: dom ? verification : null,
+      serverObservation: serverObservation ? { ...serverObservation, currentIdentityMatches:
+        serverIdentity != null && serverIdentity.conversationId === result.conversationId &&
+        serverIdentity.pageKey === result.pageKey && serverIdentity.submittedUserMessageId === result.submittedUserMessageId &&
+        serverIdentity.submittedUserTurnId === result.submittedUserTurnId } : null,
       backend: backend ? { ...backend, currentIdentityMatches: identityMatches,
         identityScope: identity ? 'recorded-conversation-page-anchor' : 'historical-session-generation-only' } : null,
       nextAction: inspectTimeout ? 'reconcile_failure' : 'read_same_request',

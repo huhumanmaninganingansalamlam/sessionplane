@@ -374,6 +374,7 @@ export class ObservationService {
       recovery.reason,
       { conversationId: previous.conversationId, pageKey: previous.pageKey,
         submittedUserMessageId: previous.submittedUserMessageId, submittedUserTurnId: previous.submittedUserTurnId },
+      recovery.serverObservation,
     );
   }
 }

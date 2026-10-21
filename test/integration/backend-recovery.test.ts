@@ -130,16 +130,21 @@ test('legacy submitted reads revalidate missing original anchor without adopting
     await service.actorScheduler.updateGeneration(session.sessionId, 1, { pageKey: page.binding.pageKey, reason: 'dom-user-anchor-missing' });
     const requestRef = (service.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=?')
       .get(session.sessionId) as { outbox_id: string }).outbox_id;
+    const serverObservation = { anchorNodeId: 'original-user', currentNodeId: 'analysis-node',
+      nextUserFound: false, assistantCount: 1, messages: [{ messageId: 'analysis-message', role: 'assistant' as const,
+        channel: 'analysis', status: 'in_progress', endTurn: false, hidden: true, textLength: 40 }] };
     // Backend evidence must record the identity of the source snapshot, not infer it from a later binding.
     await service.actorScheduler.updateGeneration(session.sessionId, 1, {}, 'generation.backend-pending',
       'backend-user-anchor-absent-from-mapping', { pageKey: page.binding.pageKey, conversationId: original.conversationId,
-        submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId });
+        submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId }, serverObservation);
     const read = async () => (await rpc<{ request: Record<string, any> }>(config.socketPath, 'workflow.team_get', { teamId, requestRef })).request;
     const missing = await read();
     assert.equal(missing.status, 'recovery_required'); assert.equal(missing.terminal, false);
     assert.equal(missing.submissionState, 'submitted'); assert.equal(missing.responseMessageId, null);
     assert.equal(missing.submittedUserMessageId, original.submittedUserMessageId);
     assert.equal(missing.submissionVerification.backend.currentIdentityMatches, true);
+    assert.equal(missing.submissionVerification.serverObservation.currentIdentityMatches, true);
+    assert.deepEqual(missing.submissionVerification.serverObservation.serverObservation, serverObservation);
     assert.equal(missing.submissionVerification.backend.recoveryReason, 'backend-user-anchor-absent-from-mapping');
     const metadata = missing.submissionVerification.dom.messageDiagnostics;
     assert.equal(metadata.selectorMatchCount, 2);

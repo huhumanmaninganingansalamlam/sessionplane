@@ -1,6 +1,7 @@
 import type {
   ProviderSubmissionAttempt,
   ProviderRecoveryRequest,
+  ProviderServerObservation,
   ProviderSubmissionAcknowledgement,
   ProviderRecoveryResult,
   ProviderAcknowledgementRecoveryEvidence,
@@ -411,6 +412,9 @@ export function recoverExactServerFinal(
       : 'backend-user-anchor-absent-from-mapping');
   }
 
+  const messages: Array<ProviderServerObservation['messages'][number]> = [];
+  const safeId = (value: string | null) => value !== null && /^[A-Za-z0-9_-]{1,200}$/.test(value) ? value : null;
+  let assistantCount = 0;
   let sawAssistant = false;
   let nextUserFound = false;
   let final: { readonly id: string; readonly text: string } | null = null;
@@ -428,16 +432,29 @@ export function recoverExactServerFinal(
       nextUserFound = true;
       break;
     }
-    if (role !== 'assistant') {
-      continue;
+    if (role === 'assistant' || role === 'tool') {
+      const metadata = isRecord(message.metadata) ? message.metadata : {};
+      const channel = readStringField(message, 'channel') ?? readStringField(metadata, 'channel');
+      const status = readStringField(message, 'status');
+      messages.push({ messageId: safeId(readStringField(message, 'id') ?? nodeId), role,
+        channel: ['analysis', 'final', 'commentary', 'summary'].includes(channel ?? '') ? channel! : 'unknown',
+        status: ['in_progress', 'finished_successfully', 'finished_partial', 'failed', 'cancelled', 'error'].includes(status ?? '') ? status! : 'unknown',
+        endTurn: typeof message.end_turn === 'boolean' ? message.end_turn : null,
+        hidden: metadata.is_visually_hidden_from_conversation === true, textLength: messageText(message).length });
+      if (messages.length > 12) messages.shift();
     }
+    if (role !== 'assistant') continue;
+    assistantCount++;
     sawAssistant = true;
     const candidate = exactServerFinal(nodeId, message);
     final = candidate;
   }
 
+  const serverObservation: ProviderServerObservation = { anchorNodeId: safeId(branchIds[submittedIndex]!),
+    currentNodeId: safeId(currentNode), nextUserFound, assistantCount, messages };
   if (final !== null) {
     return {
+      serverObservation,
       kind: 'complete',
       observationTransport: 'fresh',
       responseMessageId: final.id,
@@ -452,6 +469,7 @@ export function recoverExactServerFinal(
     observationTransport: 'fresh',
     responseMessageId: null,
     answerText: null,
+    serverObservation,
     reason: nextUserFound ? 'backend-next-user-turn-before-final' :
       sawAssistant ? 'backend-assistant-not-final' : 'backend-assistant-missing',
     retryAfterMs: null,
