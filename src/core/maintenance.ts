@@ -25,10 +25,6 @@ export class CoreMaintenance {
     if (!release) throw new SessionPlaneDomainError('core.maintenance', 'Core handover is draining; preserve and resume the same request', { operationStarted: false });
     try { return await operation(); } finally { release(); }
   }
-  track<T>(operation: Promise<T>): Promise<T> {
-    this.#active++;
-    return operation.finally(() => { this.#active--; });
-  }
   /** Passive browser events are not dropped. A late writer revokes readiness before writing. */
   callback(operation: () => void): void {
     if (this.#phase === 'ready') this.resume();

@@ -13,6 +13,16 @@ export function workflowAcknowledgementPending(result: Record<string, unknown>):
     result.terminal !== true && recovery?.kind === 'deferred' && recovery.currentIdentityMatches === true;
 }
 
+/** A retained ACK missing from a read surface still belongs to the paced observer. */
+export function workflowAnchorRecoveryPending(result: Record<string, unknown>): boolean {
+  const verification = result.submissionVerification as { state?: string; nextAction?: string;
+    backend?: { currentIdentityMatches?: boolean; recoveryReason?: string } } | undefined;
+  return result.submissionState === 'submitted' && result.promptSubmitted === true && result.terminal !== true &&
+    verification?.state === 'anchor-unverified' && verification.nextAction === 'read_same_request' &&
+    verification.backend?.currentIdentityMatches === true &&
+    verification.backend.recoveryReason === 'backend-user-anchor-absent-from-mapping';
+}
+
 /** A live preparation waiting for its owned conversation is not a model choice yet. */
 export function workflowPreparationPending(result: Record<string, unknown>): boolean {
   const load = result.conversationLoadRecovery as { state?: string } | undefined;
@@ -35,7 +45,8 @@ export function workflowWaitOutcome(result: Record<string, unknown>): boolean {
       (result.recovery as { userActionRequired?: boolean } | undefined)?.userActionRequired !== true) return false;
   const recovery = result.recovery as { userActionRequired?: boolean } | undefined;
   return result.requestOk === false || result.terminal === true || (result.followup as { terminal?: boolean } | undefined)?.terminal === true ||
-    (result.status === 'needs_decision' && !workflowAcknowledgementPending(result)) || result.status === 'recovery_required' ||
+    (result.status === 'needs_decision' && !workflowAcknowledgementPending(result)) ||
+    (result.status === 'recovery_required' && !workflowAnchorRecoveryPending(result)) ||
     recovery?.userActionRequired === true || (result.inspectionError !== undefined &&
       !['browser.snapshot-timeout', 'provider.observation-unavailable'].includes(String((result.inspectionError as { errorCode?: string }).errorCode))) ||
     (result.stopOutcome as { state?: string } | undefined)?.state === 'unknown' || result.reason === 'provider-actionable-alert' ||

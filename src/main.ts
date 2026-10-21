@@ -155,6 +155,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
             },
             pageMutex: pageMutationMutex,
             canRestoreLatestPosition: ({ session, generation }) => {
+              if (maintenance.paused) return false;
               const current = teamDirectory.getSession(session.sessionId);
               const completedAnswer = session.terminal && current.sessionState === 'complete' &&
                 current.errorCode === null && session.responseMessageId !== null &&

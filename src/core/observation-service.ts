@@ -182,7 +182,9 @@ export class ObservationService {
           try {
             if (pendingObservation === null) {
               const operation = source.observe();
-              pendingObservation = (this.maintenance?.track(operation) ?? operation).finally(() => { pendingObservation = null; });
+              // The admitted bounded observation owns drain, not a renderer read
+              // that may never settle after its observation timeout.
+              pendingObservation = operation.finally(() => { pendingObservation = null; });
             }
             const timeout = new AbortController();
             const abort = () => timeout.abort();
