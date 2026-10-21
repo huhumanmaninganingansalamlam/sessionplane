@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import type { Page } from 'playwright-core';
 import { ConversationLoadRecovery } from '../../src/core/conversation-load-recovery.ts';
+import { CoreMaintenance } from '../../src/core/maintenance.ts';
 import { SessionPlaneDatabase } from '../../src/storage/database.ts';
 import { TeamDirectory } from '../../src/core/team-directory.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
@@ -55,11 +56,36 @@ function fixture(count = 3) {
     registry.bindPage(control.pageKey, { sessionId: session.sessionId, generation: 1, conversationId: control.id });
     controls.push(control);
   }
-  const make = () => new ConversationLoadRecovery({ database, registry, scheduler, probes,
+  const make = (maintenance?: CoreMaintenance) => new ConversationLoadRecovery({ database, registry, scheduler, probes,
+    ...(maintenance ? { maintenance } : {}),
     pageMutex: new PageMutationMutex(), chatgptUrl: 'https://chatgpt.com' }, now);
   return { database, registry, scheduler, controls, clicks, probes, make, advance: (ms = 5_000) => { clock += ms; },
     dispose: async (...services: ConversationLoadRecovery[]) => { await Promise.all(services.map(s => s.close())); scheduler.close(); database.close(); rmSync(root, { recursive: true, force: true }); } };
 }
+
+test('expired renderer surface lease releases drain while preserving original work and a late result', async t => {
+  const f = fixture(1), maintenance = new CoreMaintenance(), service = f.make(maintenance);
+  const deferred = Promise.withResolvers<LoadSurface>();
+  const page = f.registry.requireSessionPage(f.controls[0]!.pageKey,
+    { sessionId: f.controls[0]!.sessionId, generation: 1, conversationId: f.controls[0]!.id });
+  t.mock.method(page, 'evaluate', (() => deferred.promise) as any);
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const before = f.database.raw.prepare('SELECT * FROM generations').all();
+  try {
+    const sweeping = service.sweep();
+    const lease = maintenance.quiesce(undefined, () => true);
+    assert.equal(lease.phase, 'draining');
+    f.advance(5001); t.mock.timers.tick(5001);
+    await sweeping;
+    assert.equal(maintenance.quiesce(lease.token, () => true).phase, 'ready');
+    deferred.resolve({ kind: 'normal', reason: 'conversation-rendered', clicked: false, loadError: false });
+    await deferred.promise;
+    assert.deepEqual(f.database.raw.prepare('SELECT * FROM generations').all(), before);
+    assert.deepEqual(f.clicks, []);
+    assert.equal(maintenance.status().phase, 'ready');
+  } finally { deferred.resolve({ kind: 'normal', reason: 'conversation-rendered', clicked: false, loadError: false });
+    maintenance.resume(); t.mock.timers.reset(); await f.dispose(service); }
+});
 
 test('one coalesced global round-robin loop spaces simultaneous tab failures and preserves anchors/partial answers', async () => {
   const f = fixture(), service = f.make();

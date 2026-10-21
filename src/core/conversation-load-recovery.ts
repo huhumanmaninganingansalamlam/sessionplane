@@ -75,7 +75,9 @@ export class ConversationLoadRecovery {
       click, expiresAt: this.now() + 5_000 });
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return await Promise.race([this.services.maintenance?.track(operation) ?? operation, new Promise<LoadSurface>((_, reject) => {
+      // sweep() holds admission until this bounded lease expires. A late
+      // renderer operation cannot click after expiresAt and must not hold drain.
+      return await Promise.race([operation, new Promise<LoadSurface>((_, reject) => {
         timer = setTimeout(() => reject(new Error('bounded-surface-timeout')), 5_000);
       })]);
     } finally { clearTimeout(timer); }

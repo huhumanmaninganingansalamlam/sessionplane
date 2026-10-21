@@ -3,7 +3,7 @@ import type { ElementHandle, Locator, Page, Request, Response } from 'playwright
 
 import type { PageRegistry } from '../../browser/page-registry.ts';
 import { parseChatGptConversationId } from '../../browser/page-binding.ts';
-import { BrowserRefSnapshotStore, hasPreparationSelectionEvidence, matchesPreparationTarget } from '../../browser/ref-snapshot.ts';
+import { BrowserRefSnapshotStore, BrowserSnapshotError, hasPreparationSelectionEvidence, matchesPreparationTarget } from '../../browser/ref-snapshot.ts';
 import {
   ProviderSubmissionError,
   type ProviderAttachment,
@@ -509,9 +509,17 @@ function submissionEvidenceHash(conversationId: string, message: ChatGptMessage)
 
 /** Passive readiness/security checks on an existing page; no authentication request. */
 export async function inspectChatGptPageReady(page: Page, pageKey: string): Promise<void> {
-  await waitForProviderPageReady({ page, provider: 'chatgpt', pageKey });
-  await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey });
-  await assertChatOnlySurface(page);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([(async () => {
+      await waitForProviderPageReady({ page, provider: 'chatgpt', pageKey });
+      await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey });
+      await assertChatOnlySurface(page);
+    })(), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new BrowserSnapshotError('browser.snapshot-timeout',
+        'Passive provider readiness observation timed out; preserve the request and retry its read.')), 5_000);
+    })]);
+  } finally { clearTimeout(timer); }
 }
 
 export async function prepareChatGptObservation(page: Page, pageKey: string): Promise<void> {

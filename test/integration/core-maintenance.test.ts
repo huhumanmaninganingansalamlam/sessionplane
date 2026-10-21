@@ -10,11 +10,14 @@ import { resolveConfig } from '../../src/config.ts';
 import { callRpc } from '../../src/cli/client.ts';
 import { SessionRepository } from '../../src/storage/session-repository.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { CoreMaintenance } from '../../src/core/maintenance.ts';
+import { inspectChatGptPageReady } from '../../src/providers/chatgpt/submission.ts';
 
-async function fixture(fake = new FakeProviderAdapter()) {
+async function fixture(fake = new FakeProviderAdapter(), observationTimeoutMs = 10_000) {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-maintenance-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state',
-    observationActiveSweepMs: 10, observationQuietSweepMs: 20, observationQuietWindowMs: 10 });
+    observationActiveSweepMs: 10, observationQuietSweepMs: 20, observationQuietWindowMs: 10,
+    backendRequestTimeoutMs: observationTimeoutMs });
   let exits = 0;
   const core = await startCore({ config, startBrowser: false, providerAdapters: [fake],
     handoverExit: () => { exits++; throw new Error('fixture exit'); } });
@@ -73,6 +76,56 @@ test('coordinated maintenance lets admitted work finish and defers a new call wi
     assert.ok((await deferred).teamId);
     assert.equal(f.core.database.raw.prepare("SELECT count(*) AS n FROM request_receipts WHERE request_id='must-not-be-issued'").get()!.n, 1);
     assert.equal(f.core.maintenance.status().phase, 'running');
+  } finally { finish.resolve(); await f.dispose(); }
+});
+
+test('stalled passive Chat readiness count times out and releases admission without disabling its checks', async t => {
+  const maintenance = new CoreMaintenance(), entered = Promise.withResolvers<void>(), count = Promise.withResolvers<number>();
+  const page = { waitForLoadState: async () => {}, waitForTimeout: async () => {}, evaluate: async () => null,
+    locator: () => ({ count: () => { entered.resolve(); return count.promise; } }) } as unknown as Page;
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const reading = maintenance.rpc(() => inspectChatGptPageReady(page, 'exact-page'));
+    await entered.promise;
+    const rejected = assert.rejects(reading, /Passive provider readiness observation timed out/);
+    const lease = maintenance.quiesce(undefined, () => true);
+    assert.equal(lease.phase, 'draining');
+    t.mock.timers.tick(5001); await rejected;
+    assert.equal(maintenance.quiesce(lease.token, () => true).phase, 'ready');
+    count.resolve(0);
+    await count.promise;
+    assert.equal(maintenance.status().activeOperations, 0);
+  } finally { count.resolve(0); maintenance.resume(); t.mock.timers.reset(); }
+});
+
+test('timed-out renderer observation no longer holds drain and late evidence cannot finish a paused request', async () => {
+  const fake = new FakeProviderAdapter(), entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
+  const open = fake.openObservation.bind(fake);
+  fake.openObservation = async request => {
+    const source = await open(request), observe = source.observe.bind(source);
+    source.observe = async () => { entered.resolve(); await finish.promise; return observe(); };
+    return source;
+  };
+  const f = await fixture(fake, 30);
+  try {
+    await f.rpc('session.send', { clientId: 'maintenance-test', requestId: 'retained', sessionId: f.session.sessionId,
+      prompt: 'Retain ACK and live provider', sessionDeadlineSec: 600 });
+    await entered.promise;
+    const requests = f.core.database.raw.prepare('SELECT * FROM outbox').all();
+    let lease = await f.rpc<{phase: string; token: string}>('system.maintenance.quiesce', f.owner);
+    assert.equal(lease.phase, 'draining', 'The bounded observation must finish before handover');
+    await delay(60);
+    lease = await f.rpc('system.maintenance.quiesce', { ...f.owner, token: lease.token });
+    assert.equal(lease.phase, 'ready', 'Unsettled raw read is not a live mutation');
+    const generations = f.core.database.raw.prepare('SELECT * FROM generations').all();
+    finish.resolve();
+    await delay(30);
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM generations').all(), generations);
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM outbox').all(), requests);
+    assert.equal(f.core.teamDirectory.getSession(f.session.sessionId).terminal, false);
+    assert.equal(f.fake.submitCount, 1); assert.equal(f.fake.stopCount, 0);
+    await assert.rejects(f.rpc('system.maintenance.commit', { ...f.owner, token: lease.token }), /Internal error/);
+    assert.equal(f.exits(), 1);
   } finally { finish.resolve(); await f.dispose(); }
 });
 
