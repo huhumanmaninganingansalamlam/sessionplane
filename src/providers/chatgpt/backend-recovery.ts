@@ -120,6 +120,25 @@ export class ChatGptBackendRecovery {
         return message !== null && messageRole(message) === 'user' &&
           messageText(message).replaceAll('\r\n', '\n') === prompt.replaceAll('\r\n', '\n');
       }).length : undefined;
+      let exactIdentityReason: string | undefined;
+      const attempt = attempts?.length === 1 ? attempts[0] : undefined;
+      if (validMapping && attempt !== undefined) {
+        const mapping = payload.mapping as Record<string, unknown>;
+        const entry = Object.entries(mapping).find(([, node]) =>
+          readStringField(messageForNode(node), 'id') === attempt.messageId);
+        if (entry !== undefined) {
+          const message = messageForNode(entry[1])!;
+          const textHash = createHash('sha256').update(messageText(message).replaceAll('\r\n', '\n')).digest('hex');
+          const parent = readStringField(entry[1], 'parent');
+          if (textHash === attempt.textHash) {
+            exactIdentityReason = parent !== attempt.parentMessageId &&
+              readStringField(parent === null ? null : messageForNode(mapping[parent]), 'id') !== attempt.parentMessageId
+              ? 'backend-submission-parent-mismatch'
+              : recoverExactServerFinal(payload, { conversationId,
+                submittedUserMessageId: attempt.messageId, submittedUserTurnId: null }).reason;
+          }
+        }
+      }
       const selected = validMapping && selectedMessageId !== undefined
         ? Object.values(payload.mapping as Record<string, unknown>).map(messageForNode)
           .filter(message => message !== null && messageRole(message) === 'user' && readStringField(message, 'id') === selectedMessageId)
@@ -136,7 +155,7 @@ export class ChatGptBackendRecovery {
         endpointCategory: 'conversation-detail',
         reason: !validMapping ? 'backend-conversation-mapping-unverified'
           : promptMatchCount === 0 ? 'backend-exact-prompt-absent'
-          : promptMatchCount! > 1 ? 'backend-exact-prompt-ambiguous' : 'backend-exact-acknowledgement-unverified',
+          : promptMatchCount! > 1 ? 'backend-exact-prompt-ambiguous' : exactIdentityReason ?? 'backend-exact-acknowledgement-unverified',
         ...(promptMatchCount === undefined ? {} : { promptMatchCount }),
         ...(validMapping ? { canonicalUserMessageCount: Object.values(payload.mapping as Record<string, unknown>)
           .map(messageForNode).filter(message => message !== null && messageRole(message) === 'user').length,
