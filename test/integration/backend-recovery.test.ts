@@ -155,8 +155,9 @@ test('legacy submitted reads revalidate missing original anchor without adopting
     assert.equal(metadata.anchorAttributeMatches.messageId, 0);
     assert.equal(JSON.stringify(metadata).includes(draft), false);
     assert.equal(JSON.stringify(metadata).includes('Old answer'), false);
-    const waited = await rpc<{ results: Record<string, any>[] }>(config.socketPath, 'workflow.wait', { teamId, requestRefs: [requestRef], waitMs: 5 });
-    assert.equal(waited.results[0]!.submissionVerification.dom.anchorPresent, false);
+    const waited = await rpc<{ results: Record<string, any>[] }>(config.socketPath, 'workflow.wait', { teamId, requestRefs: [requestRef], waitMs: 0 });
+    assert.equal(waited.results[0]!.terminal, false);
+    assert.equal(waited.results[0]!.submittedUserMessageId, original.submittedUserMessageId);
     assert.equal(await page.page.locator('textarea').inputValue(), draft);
     let reloads = 0;
     const refresh = { clientId: 'backend-client', requestId: 'send-legacy-anchor', sessionId: session.sessionId, generation: 1, decisionId: 'paced-refresh' };
