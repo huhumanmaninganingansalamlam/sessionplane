@@ -179,6 +179,31 @@ test('backend recovery rejects other branches and preserves the anchored turn be
   assert.equal(pending.answerText, 'Original answer');
 });
 
+test('hidden completed final preserves the exact public answer; subsequent live output still blocks completion', () => {
+  const branch = [
+    node('root', null, null),
+    node('user', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('public', 'user', finalAssistant('public-answer', 'Original public result')),
+    node('hidden', 'public', { ...finalAssistant('hidden-answer', 'Internal output'),
+      metadata: { is_visually_hidden_from_conversation: true } }),
+  ];
+  const result = recoverExactServerFinal(conversationPayload(branch, 'hidden'), identity());
+  assert.equal(result.kind, 'complete');
+  assert.equal(result.responseMessageId, 'public-answer');
+  assert.equal(result.answerText, 'Original public result');
+  const live = recoverExactServerFinal(conversationPayload([...branch,
+    node('live', 'hidden', { ...finalAssistant('live-answer', ''), status: 'in_progress', end_turn: false }),
+  ], 'live'), identity());
+  assert.equal(live.kind, 'pending');
+  assert.equal(live.answerText, null);
+  const hiddenOnly = recoverExactServerFinal(conversationPayload([branch[0]!, branch[1]!,
+    node('hidden', 'user', { ...finalAssistant('hidden-answer', 'Internal output'),
+      metadata: { is_visually_hidden_from_conversation: true } }),
+  ], 'hidden'), identity());
+  assert.equal(hiddenOnly.kind, 'pending');
+  assert.equal(hiddenOnly.answerText, null);
+});
+
 test('backend recovery requires final channel, finished status, end_turn, and nonempty text', () => {
   const payload = conversationPayload([
     node('root', null, null),
