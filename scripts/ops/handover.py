@@ -70,10 +70,21 @@ def request_identity(h, target):
 def verify_bindings(h, before, after):
     """A drained caller may advance a generation, never the page's identity."""
     current = {row[0]: tuple(row) for row in after}
+    owned = [tuple(row) for row in before if row[1] is not None and row[4] is not None]
     with read_db(h) as db:
         for original in before:
             original = tuple(original)
             row = current.get(original[0])
+            if original[1:3] == (None, None) and row is not None and row[3:] == original[3:] and any(
+                    owner[1] == row[1] and owner[3:] == row[3:] and isinstance(owner[2], int) and
+                    isinstance(row[2], int) and row[2] >= owner[2] for owner in owned):
+                # Restart may recover an unowned page-key alias of an already
+                # owned target. Its exact durable owner must predate handover.
+                assert db.execute('SELECT 1 FROM outbox o JOIN generations g '
+                    'ON g.session_id=o.session_id AND g.generation=o.generation '
+                    'WHERE o.session_id=? AND o.generation=?', (row[1], row[2])).fetchone(), \
+                    'Recovered binding has no durable request'
+                continue
             assert row is not None and row[:2] == original[:2] and row[3:] == original[3:], \
                 'Binding identity changed; inspect, never overwrite DB'
             if row[2] != original[2]:
