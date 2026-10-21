@@ -13,8 +13,20 @@ export function workflowAcknowledgementPending(result: Record<string, unknown>):
     result.terminal !== true && recovery?.kind === 'deferred' && recovery.currentIdentityMatches === true;
 }
 
+/** A live preparation waiting for its owned conversation is not a model choice yet. */
+export function workflowPreparationPending(result: Record<string, unknown>): boolean {
+  const load = result.conversationLoadRecovery as { state?: string } | undefined;
+  const evidence = result.evidence as { preparationAvailability?: { available?: boolean } } | undefined;
+  return result.requestOk !== false && result.terminal !== true && result.userActionRequired !== true &&
+    result.submissionState === 'prepared' && result.promptSubmitted === false &&
+    result.status === 'needs_decision' && (result.reason === 'account-cooldown' ||
+      (evidence?.preparationAvailability?.available === false &&
+        ['held', 'waiting', 'attempting'].includes(load?.state ?? '')));
+}
+
 /** Observation transport delays, pacing/429 and progress are not completion or a decision. */
 export function workflowWaitOutcome(result: Record<string, unknown>): boolean {
+  if (workflowPreparationPending(result)) return false;
   if (result.followup !== undefined) return result.requestOk === false || (result.followup as { terminal?: boolean }).terminal === true || result.errorCode === 'provider.actionable-alert';
   const load = result.conversationLoadRecovery as { state?: string } | undefined;
   if (result.requestOk !== false && result.terminal !== true && result.promptSubmitted === true &&

@@ -7,6 +7,8 @@ import test from 'node:test';
 import { Readable, Writable } from 'node:stream';
 import { SessionUiService } from '../../src/core/session-ui-service.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
+import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
+import { ConversationLoadRecoveryRepository } from '../../src/storage/conversation-load-recovery-repository.ts';
 import { workflowWaitOutcome } from '../../src/domain/workflow-wait.ts';
 import { runCli } from '../../src/cli/main.ts';
 import { resolveConfig } from '../../src/config.ts';
@@ -270,5 +272,46 @@ test('authorized broad continuation review stays inside the wait and runs at thi
       { sessionState: 'complete', providerState: 'complete', answerText: 'Original final', responseMessageId: 'final' });
     await waiting;
     assert.equal(f.fake.submitCount, 1);
+  } finally { t.mock.timers.reset(); await f.close(); }
+});
+
+
+test('prepared load recovery stays inside wait and returns only the same ready-to-configure request', async t => {
+  const f = await fixture();
+  try {
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
+      { sessionState: 'complete', providerState: 'complete', answerText: 'Original final', responseMessageId: 'original-final' });
+    f.fake.prepareError = new ProviderSubmissionError('provider.preparation-required', 'Composer unavailable');
+    let ready = false;
+    t.mock.method(SessionUiService.prototype, 'inspect', async () => ({
+      preparationAvailability: { available: ready, reason: ready ? 'composer-ready' : 'composer-unavailable' },
+      configurationCatalog: { status: 'cached', selectionAvailable: false }, nodes: [],
+    }) as any);
+    const prepared = (await f.invoke('send', { teamId: f.team.teamId,
+      roleRef: `${f.sent.sessionId}:1`, requestId: 'next-prepared', prompt: 'Preserved next operation' })).structuredContent;
+    const session = f.core.teamDirectory.getSession(f.sent.sessionId as string);
+    new ConversationLoadRecoveryRepository(f.core.database).save({ conversationId: session.conversationId!,
+      sessionId: session.sessionId, pageKey: session.pageKey!, bindingEpoch: 1,
+      url: `https://chatgpt.com/c/${session.conversationId}`, attempts: 82, state: 'held',
+      reason: 'load-retry-button-unavailable', lastOutcome: 'clicked', lastCheckedAt: new Date().toISOString(),
+      lastAttemptAt: null, notifiedAt: null });
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    let returned = false;
+    const waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [prepared.requestRef], waitMs: 600000,
+      untilResult: false }).then(value => { returned = true; return value; });
+    await f.untilSubscribed(session.sessionId);
+    assert.equal(returned, false);
+    t.mock.timers.tick(60000);
+    for (let i = 0; i < 20; i++) await flush();
+    assert.equal(returned, false, 'Cached/unselectable catalog cannot wake the model');
+    ready = true;
+    t.mock.timers.tick(60000);
+    const [result] = (await waiting).structuredContent.results as any[];
+    assert.equal(result.status, 'needs_decision');
+    assert.equal(result.requestRef, prepared.requestRef);
+    assert.equal(result.promptSubmitted, false);
+    assert.equal(result.evidence.preparationAvailability.available, true);
+    assert.equal(f.fake.submitCount, 1, 'Preparation waiting never submits');
+    assert.equal(workflowWaitOutcome({ ...result, terminal: true, sessionState: 'superseded' }), true);
   } finally { t.mock.timers.reset(); await f.close(); }
 });
