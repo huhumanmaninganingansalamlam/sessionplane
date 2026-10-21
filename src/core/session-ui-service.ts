@@ -1,3 +1,4 @@
+import { observeChatGptSurface, type ChatGptSurface } from '../providers/chatgpt/surface.ts';
 import { controlHostSpanPermission, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
 import { createHash } from 'node:crypto';
 import { requireIdleConversationPage } from './conversation-cleanup-service.ts';
@@ -482,14 +483,26 @@ export class SessionUiService {
     return result;
   }
 
+  async inspectSurface(session: SessionSnapshot): Promise<ChatGptSurface> {
+    try {
+      if (session.provider !== 'chatgpt') throw new Error('Not ChatGPT');
+      const page = this.#requirePage(session);
+      const observed = await observeChatGptSurface(page);
+      this.#requirePage(session);
+      return observed;
+    } catch {
+      return { mode: 'unknown', source: 'unavailable', observedAt: new Date().toISOString() };
+    }
+  }
+
   async #capture(session: SessionSnapshot, maxNodes?: number) {
     const page = this.#requirePage(session);
     const binding = this.#registry.refreshPage(session.pageKey!);
     try {
-      return await this.#refs.capture({
+      return { ...await this.#refs.capture({
         pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch, page,
         ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: Math.max(1, Math.min(5_000, maxNodes ?? 1_000)),
-      });
+      }), observedSurface: await this.inspectSurface(session) };
     } catch (error) {
       throw typedUiError(error);
     }

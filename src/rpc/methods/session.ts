@@ -1,3 +1,4 @@
+import type { SessionUiService } from '../../core/session-ui-service.ts';
 import { z } from 'zod';
 import type { ConversationCleanupService } from '../../core/conversation-cleanup-service.ts';
 
@@ -17,6 +18,7 @@ export function registerSessionMethods(
   directory: TeamDirectory,
   receipts: ReceiptRepository,
   cleanup: ConversationCleanupService,
+  ui?: SessionUiService,
 ): void {
   router.register('session.delete', z.object({
     clientId: ClientId, requestId: RequestId, sessionId: SessionId,
@@ -54,10 +56,12 @@ export function registerSessionMethods(
       z.object({ clientId: ClientId, sessionId: SessionId }).strict(),
       z.object({ clientId: ClientId, teamId: TeamId, roleKey: RoleKey }).strict(),
     ]),
-    (params) =>
-      'sessionId' in params
-        ? directory.getSession(params.sessionId)
-        : directory.getCurrentSession(params.teamId, params.roleKey),
+    async (params) => {
+      const session = 'sessionId' in params ? directory.getSession(params.sessionId)
+        : directory.getCurrentSession(params.teamId, params.roleKey);
+      return { ...session, ...(ui && session.provider === 'chatgpt'
+        ? { observedSurface: await ui.inspectSurface(session) } : {}) };
+    },
   );
 
   router.register(

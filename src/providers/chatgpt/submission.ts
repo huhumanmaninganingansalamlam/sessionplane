@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { observeChatGptSurface } from './surface.ts';
 import type { ElementHandle, Locator, Page, Request, Response } from 'playwright-core';
 
 import type { PageRegistry } from '../../browser/page-registry.ts';
@@ -220,6 +221,7 @@ export class ChatGptSubmission implements ProviderSubmission {
   async prepare(choices?: PreparationChoices): Promise<void> {
     this.#checkpoint('page-ready');
     await this.prepareForObservation();
+    await assertChatOnlySurface(this.#page);
     this.#checkpoint('composer-resolve');
     const surface = normalizeLabel(this.#request.surface ?? '');
     if (surface === 'work') {
@@ -313,6 +315,8 @@ export class ChatGptSubmission implements ProviderSubmission {
       }
     }
     this.#checkpoint('submit');
+    await assertChatOnlySurface(this.#page);
+    this.#requireExactPage();
     this.#page.on('request', this.#captureSentIdentity);
     this.#page.on('response', this.#captureAcceptance);
     this.#page.on('requestfailed', this.#captureFailedRequest);
@@ -514,7 +518,6 @@ export async function inspectChatGptPageReady(page: Page, pageKey: string): Prom
     await Promise.race([(async () => {
       await waitForProviderPageReady({ page, provider: 'chatgpt', pageKey });
       await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey });
-      await assertChatOnlySurface(page);
     })(), new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new BrowserSnapshotError('browser.snapshot-timeout',
         'Passive provider readiness observation timed out; preserve the request and retry its read.')), 5_000);
@@ -563,46 +566,11 @@ async function assertChatGptAuthenticated(page: Page): Promise<void> {
 }
 
 async function assertChatOnlySurface(page: Page): Promise<void> {
-  const selectedSurfaceRadios = page.locator(CHATGPT_SELECTORS.chatSurfaceRadios);
-  const selectedCount = await selectedSurfaceRadios.count().catch(() => 0);
-  for (let index = 0; index < selectedCount; index += 1) {
-    const radio = selectedSurfaceRadios.nth(index);
-    if (!(await radio.isVisible().catch(() => false))) continue;
-    const label = normalizeLabel(
-      (await radio.getAttribute('aria-label').catch(() => null)) ??
-        (await radio.textContent().catch(() => null)) ??
-        '',
-    );
-    if (/(?:^|[\s()[\]{}:;,!.?·•])work(?=$|[\s()[\]{}:;,!.?·•])/.test(label)) {
-      throw new ProviderSubmissionError(
-        'capability.unsupported',
-        'The active ChatGPT composer is Work; SessionPlane supports Chat only',
-      );
-    }
-    if (label === 'normal' || /(?:^|[\s()[\]{}:;,!.?·•])chat(?=$|[\s()[\]{}:;,!.?·•])/.test(label)) {
-      return;
-    }
-  }
-
-  const selectedRadios = page.locator(
-    '[role="radio"][aria-checked="true"], [role="radio"][data-state="checked"]',
-  );
-  const count = await selectedRadios.count().catch(() => 0);
-  for (let index = 0; index < count; index += 1) {
-    const radio = selectedRadios.nth(index);
-    if (!(await radio.isVisible().catch(() => false))) continue;
-    const label = normalizeLabel(
-      (await radio.getAttribute('aria-label').catch(() => null)) ??
-        (await radio.textContent().catch(() => null)) ??
-        '',
-    );
-    if (/(?:^|[\s()[\]{}:;,!.?·•])work(?=$|[\s()[\]{}:;,!.?·•])/.test(label)) {
-      throw new ProviderSubmissionError(
-        'capability.unsupported',
-        'The active ChatGPT composer is Work; SessionPlane supports Chat only',
-      );
-    }
-  }
+  const observed = await observeChatGptSurface(page);
+  if (observed.mode === 'work') throw new ProviderSubmissionError('capability.unsupported',
+    'The active ChatGPT composer is Work; preserve this conversation and use an authorized same-role Chat replacement');
+  if (observed.mode !== 'chat') throw new ProviderSubmissionError('provider.preparation-required',
+    'The exact composer Chat/Work selection is unverified; preserve the request and draft. Model and effort do not establish Chat mode');
 }
 
 async function uploadAttachments(

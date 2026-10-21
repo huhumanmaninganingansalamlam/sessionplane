@@ -598,6 +598,9 @@ export class TeamWorkflow {
     const acknowledgementRecovery = result.submissionState === 'submission_unknown'
       ? acknowledgementEvents.latestAcknowledgementRecovery(request.sessionId, request.generation) : null;
     return { ...result, ...verification,
+      ...(inspectCurrent && current.generation === request.generation && current.provider === 'chatgpt'
+        ? { observedSurface: (result.evidence as { observedSurface?: unknown } | undefined)?.observedSurface
+          ?? await this.services.ui.inspectSurface(current) } : {}),
       ...(acknowledgementRecovery ? { acknowledgementRecovery: { ...acknowledgementRecovery,
         automaticResubmit: false,
         currentIdentityMatches: acknowledgementRecovery.requestRef === request.outboxId &&

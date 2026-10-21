@@ -1,3 +1,4 @@
+import { callRpc } from '../../src/cli/client.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -10,7 +11,7 @@ import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import type { ConfigurationCatalog } from '../../src/providers/chatgpt/configuration-catalog.ts';
 import { ChatGptConfigurationMenu } from '../../src/providers/chatgpt/configuration-catalog.ts';
 
-const fixture = `<!doctype html><html><body><main><form>
+const fixture = `<!doctype html><html><body><main><button type="button" role="radio" aria-checked="true">Chat</button><form>
   <button type="button" id="chooser" aria-label="ChatGPT model selection" aria-haspopup="menu" aria-expanded="false" aria-controls="configuration" hidden>Aurora-9 / Balanced</button>
   <textarea aria-label="Prompt">Untouched draft</textarea><button type="submit">Send</button>
 </form><div id="configuration" role="menu" hidden>
@@ -82,6 +83,13 @@ test('unavailable preparation never offers Retry as submit and preserves the sam
       return response.structuredContent.request as Record<string, any>;
     };
     const initial = await inspect();
+    assert.equal(initial.observedSurface.mode, 'chat');
+    assert.equal(initial.evidence.observedSurface.source, 'selected-control');
+    const shown = await callRpc<{ observedSurface: { mode: string; source: string } }>({
+      socketPath: config.socketPath, method: 'session.get',
+      params: { clientId: 'sessionplane-mcp', sessionId: initial.sessionId } });
+    assert.equal(shown.observedSurface.mode, 'chat');
+    assert.equal(shown.observedSurface.source, 'selected-control');
     const option = initial.configurationCatalog.options.find((o: any) => o.label === 'Aurora-8 / Deep');
     assert.ok(option);
     const page = service.pageRegistry.pageForObservation(initial.pageKey);
@@ -108,6 +116,7 @@ test('unavailable preparation never offers Retry as submit and preserves the sam
       assert.equal(current.promptSubmitted, false);
       assert.equal(current.terminal, false);
       assert.equal(current.evidence.preparationAvailability.available, false);
+      assert.equal(current.observedSurface.mode, 'unknown');
       assert.ok(current.evidence.nodes.every((n: any) => !n.actions.choose.includes('submit')));
       if (current.configurationCatalog !== null) {
         assert.equal(current.configurationCatalog.selectionAvailable, false);
