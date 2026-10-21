@@ -31,7 +31,7 @@ export function workflowWaitOutcome(result: Record<string, unknown>): boolean {
   const load = result.conversationLoadRecovery as { state?: string } | undefined;
   if (result.requestOk !== false && result.terminal !== true && result.promptSubmitted === true &&
       result.errorCode === 'provider.conversation-unavailable' && load &&
-      ['held', 'waiting', 'recovering', 'retrying'].includes(load.state ?? '') &&
+      ['held', 'waiting', 'attempting'].includes(load.state ?? '') &&
       (result.recovery as { userActionRequired?: boolean } | undefined)?.userActionRequired !== true) return false;
   const recovery = result.recovery as { userActionRequired?: boolean } | undefined;
   return result.requestOk === false || result.terminal === true || (result.followup as { terminal?: boolean } | undefined)?.terminal === true ||

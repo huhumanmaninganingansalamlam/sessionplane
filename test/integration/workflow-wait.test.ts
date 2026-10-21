@@ -312,6 +312,11 @@ test('prepared load recovery stays inside wait and returns only the same ready-t
     assert.equal(result.promptSubmitted, false);
     assert.equal(result.evidence.preparationAvailability.available, true);
     assert.equal(f.fake.submitCount, 1, 'Preparation waiting never submits');
+    for (const state of ['held', 'waiting', 'attempting']) assert.equal(workflowWaitOutcome({
+      requestOk: true, submissionState: 'submitted', promptSubmitted: true, terminal: false,
+      errorCode: 'provider.conversation-unavailable', conversationLoadRecovery: { state } }), false);
+    assert.equal(workflowWaitOutcome({ requestOk: true, promptSubmitted: true, terminal: false,
+      errorCode: 'provider.conversation-unavailable', conversationLoadRecovery: { state: 'exhausted' } }), true);
     assert.equal(workflowWaitOutcome({ ...result, terminal: true, sessionState: 'superseded' }), true);
   } finally { t.mock.timers.reset(); await f.close(); }
 });
