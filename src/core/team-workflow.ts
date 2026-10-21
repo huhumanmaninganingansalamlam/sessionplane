@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { ExactFinalTracker } from '../providers/chatgpt/exact-final.ts';
-import { workflowWaitMs, workflowWaitOutcome } from '../domain/workflow-wait.ts';
+import { workflowAcknowledgementPending, workflowWaitMs, workflowWaitOutcome } from '../domain/workflow-wait.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
 import type { PageMutationMutex } from '../browser/page-mutex.ts';
@@ -400,12 +400,15 @@ export class TeamWorkflow {
           if (workflowWaitOutcome(result)) { controller.abort(); break; }
           const remaining = deadline - Date.now();
           if (remaining <= 0 || controller.signal.aborted) break;
+          const acknowledgementPending = workflowAcknowledgementPending(result);
+          const nextAckCheck = Date.parse(String((result.acknowledgementRecovery as { nextCheckAt?: string } | undefined)?.nextCheckAt));
+          const acknowledgementWait = Number.isFinite(nextAckCheck) ? Math.max(1_000, nextAckCheck - Date.now()) : 30_000;
           const waited = await this.services.scheduler.waitSession(request.sessionId, {
-            expectedGeneration: request.generation, waitMs: Math.min(remaining, input.followupUserMessageId ? 5_000 : workflowWaitMs(input.waitMs)), signal: controller.signal,
+            expectedGeneration: request.generation, waitMs: Math.min(remaining, input.followupUserMessageId ? 5_000 : acknowledgementPending ? acknowledgementWait : workflowWaitMs(input.waitMs)), signal: controller.signal,
           });
           if (controller.signal.aborted) break;
           result = await this.#observe(request);
-          if (waited.waitExpired && !input.followupUserMessageId) break;
+          if (waited.waitExpired && !input.followupUserMessageId && !acknowledgementPending) break;
         }
         return { request, result: { ...result, waitExpired: !workflowWaitOutcome(result) && Date.now() >= deadline } };
       } catch (error) { controller.abort(); return { request: null, result: failure(error, requestRef) }; }
