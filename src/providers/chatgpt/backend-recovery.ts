@@ -446,6 +446,12 @@ export function recoverExactServerFinal(
     if (role !== 'assistant') continue;
     assistantCount++;
     sawAssistant = true;
+    // Completed hidden provider output is not a replacement for the public answer.
+    // An unfinished assistant still invalidates a preceding final below.
+    const metadata = isRecord(message.metadata) ? message.metadata : {};
+    if (metadata.is_visually_hidden_from_conversation === true &&
+        (readStringField(message, 'channel') ?? readStringField(metadata, 'channel')) === 'final' &&
+        message.status === 'finished_successfully' && message.end_turn === true) continue;
     const candidate = exactServerFinal(nodeId, message);
     final = candidate;
   }
