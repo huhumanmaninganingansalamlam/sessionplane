@@ -429,10 +429,10 @@ test('prepared load recovery stays inside wait and returns only the same ready-t
 });
 
 
-test('disconnected exact ACK with stale server evidence returns inability to continue to the human', async t => {
+test('new approved wait observes a disconnected exact ACK immediately despite stale server evidence', async t => {
   const f = await fixture();
   try {
-    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() + 31 * 60_000 });
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
       snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
@@ -468,11 +468,11 @@ test('an unresolved continuation activates the original tab for manual refresh w
     await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
       { sessionState: 'complete', providerState: 'complete', answerText: 'Retained checkpoint', responseMessageId: 'old' });
     const next = (await f.invoke('send', { teamId: f.team.teamId, roleRef: `${f.sent.sessionId}:1`,
-      requestId: 'existing-continuation', prompt: '계속' })).structuredContent;
+      requestId: `continue:managed-continuation:${f.sent.requestRef}`, prompt: '계속' })).structuredContent;
     // This fixture represents the existing durable same-chat continuation.
     f.core.database.raw.prepare("UPDATE outbox SET payload_json=json_set(payload_json, '$.continuationOf', ?) WHERE outbox_id=?")
       .run(f.sent.requestRef, next.requestRef);
-    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() + 61 * 60_000 });
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
       snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
@@ -488,7 +488,7 @@ test('an unresolved continuation activates the original tab for manual refresh w
       throw new SessionPlaneDomainError('provider.failure-unverified', 'Retry remains uncertain');
     });
     t.mock.method(SessionUiService.prototype, 'focus', async () => { focused++; return { pageKey: 'exact-page', url: 'https://chatgpt.com/c/exact' }; });
-    const outcome = (await f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef],
+    const outcome = (await f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef],
       waitMs: 600000, continuationApproved: true })).structuredContent;
     assert.equal(refreshes, 0);
     assert.equal(reviews, 0);

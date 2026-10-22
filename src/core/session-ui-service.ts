@@ -269,12 +269,13 @@ export class SessionUiService {
       // Disconnected provider chrome can retain Stop; streaming/thinking and
       // draft guards still apply, and no Stop gesture is issued.
       const disconnected = activity.reason === 'provider-stream-disconnected' && !anchor.candidate?.streamingMarker;
-      const confirmedDisconnect = confirmation !== undefined && confirmation.conversationId === original.conversationId &&
+      const confirmedInterruption = confirmation !== undefined && confirmation.conversationId === original.conversationId &&
         confirmation.submittedUserMessageId === original.submittedUserMessageId &&
-        activity.reason === 'provider-stream-disconnected' && !anchor.candidate?.streamingMarker && !anchor.candidate?.terminalMarker;
-      if (confirmation && !confirmedDisconnect) throw new SessionPlaneDomainError('provider.preparation-required',
-        'User-confirmed interruption requires the exact disconnected nonstreaming original page');
-      try { await requireIdleConversationPage(page, '계속', confirmedDisconnect || disconnected); }
+        ((activity.reason === 'provider-stream-disconnected' && !anchor.candidate?.streamingMarker && !anchor.candidate?.terminalMarker) ||
+          (activity.strength === 'none' && anchor.candidate === null));
+      if (confirmation && !confirmedInterruption) throw new SessionPlaneDomainError('provider.preparation-required',
+        'User-confirmed interruption requires the exact nonstreaming disconnected page or idle original turn without a response');
+      try { await requireIdleConversationPage(page, '계속', disconnected); }
       catch (error) {
         if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'session.cleanup-not-ready') throw error;
         throw new SessionPlaneDomainError('provider.preparation-required',
@@ -284,8 +285,8 @@ export class SessionUiService {
       const after = this.#registry.refreshPage(session.pageKey!);
       if (binding.bindingEpoch !== after.bindingEpoch || !anchor.conversationSurfaceAvailable ||
           !anchor.submittedUserFound || anchor.laterUserFound ||
-          (!confirmedDisconnect && anchor.candidate !== null && !(disconnected && !anchor.candidate.terminalMarker)) || anchor.actionableAlert ||
-          (!confirmedDisconnect && !disconnected && activity.strength !== 'none') || controls.nodesTruncated ||
+          (!confirmedInterruption && anchor.candidate !== null && !(disconnected && !anchor.candidate.terminalMarker)) || anchor.actionableAlert ||
+          (!confirmedInterruption && !disconnected && activity.strength !== 'none') || controls.nodesTruncated ||
           controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role)) ||
           !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
         throw new SessionPlaneDomainError('provider.preparation-required',
@@ -296,7 +297,7 @@ export class SessionUiService {
         disconnectedRecovery: disconnected && !anchor.candidate?.terminalMarker,
         ...(retained ? { missingContinuationAcknowledgement: original.submittedUserMessageId,
           retainedPredecessorAcknowledgement: missing!.submittedUserMessageId } : {}),
-        ...(confirmedDisconnect ? { userConfirmedInterruption: confirmation,
+        ...(confirmedInterruption ? { userConfirmedInterruption: confirmation,
           ...(dom.candidate ? { interruptedResponseMessageId: dom.candidate.responseMessageId,
             interruptedResponseSha256: createHash('sha256').update(dom.candidate.answerText).digest('hex') } : {}) } : {}) };
   }
@@ -517,7 +518,7 @@ export class SessionUiService {
         const { original, confirmation } = continuation;
         const evidence = await this.verifyContinuation(session, original, confirmation);
         const composers = snapshot.nodes.filter(node => node.role === 'textbox' && node.editable && !node.disabled);
-        if ('disconnectedRecovery' in evidence && evidence.disconnectedRecovery === true && composers.length === 1) return { choice: { ...toPreparationTarget('submit', composers[0]!), submitGesture: 'enter' as const },
+        if ((('disconnectedRecovery' in evidence && evidence.disconnectedRecovery === true) || 'userConfirmedInterruption' in evidence) && composers.length === 1) return { choice: { ...toPreparationTarget('submit', composers[0]!), submitGesture: 'enter' as const },
           result: { purpose: 'submit', gesture: 'enter', userConfirmedInterruption: confirmation } };
       }
       throw new SessionPlaneDomainError('provider.failure-unverified', 'Unique enabled submit evidence is missing');

@@ -377,6 +377,39 @@ test('approved managed wait resumes an exact disconnected tool turn despite stal
   } finally { await f.close(); }
 });
 
+test('explicitly confirmed idle acknowledged turn with no response continues once without replaying product input', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    f.fake.idleToolTurn = true;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const input = { teamId: f.team.teamId, requestRef, requestId: `managed-continuation:${requestRef}`,
+      decision: 'continue', continuationApproved: true, userConfirmedInterruption: {
+        conversationId: original.conversationId!, submittedUserMessageId: original.submittedUserMessageId!,
+        evidenceRef: 'User explicitly requests continue for the exact idle original with no assistant/tool response' } };
+    const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
+    await f.fake.page.setContent(body + '<textarea></textarea></main>');
+    await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: undefined }), /server evidence/);
+    for (const controls of ['<textarea>Other draft</textarea>', '<textarea></textarea><button data-testid="stop-button">Stop</button>']) {
+      await f.fake.page.setContent(body + controls + '</main>');
+      await assert.rejects(f.rpc('decide', input), /idle|draft/);
+      assert.equal(f.fake.submitCount, 1);
+    }
+    await f.fake.page.setContent(body + '<textarea></textarea></main>');
+    f.fake.failureCount = 1;
+    f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="idle-recovered" data-end-turn="true">Recovered work</div>';
+    const result = await f.rpc<any>('decide', input);
+    assert.equal(result.generation, 2);
+    assert.ok(result.submittedUserMessageId);
+    assert.equal(f.fake.submitCount, 2);
+    await f.rpc('decide', input);
+    assert.equal(f.fake.submitCount, 2);
+    const payload = f.core.database.raw.prepare('SELECT payload_json FROM outbox WHERE outbox_id=?').get(result.requestRef)!;
+    assert.equal(JSON.parse(String(payload.payload_json)).prompt, '계속');
+  } finally { await f.close(); }
+});
+
 test('user-confirmed exact disconnected turn continues once despite deferred backend and stale Stop, preserving partial and ACK', async () => {
   const f = await fixture();
   try {

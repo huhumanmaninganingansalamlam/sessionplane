@@ -390,7 +390,7 @@ export class TeamWorkflow {
     const observed: Array<{ request: OutboxRecord | null; result: Record<string, unknown> }> = await Promise.all(requestRefs.map(async (requestRef) => {
       try {
         let request = this.#request({ teamId: input.teamId, requestRef });
-        let result: Record<string, unknown> = await this.#observe(request);
+        let result: Record<string, unknown> = await this.#observe(request, undefined, input.waitMs > 0 && input.continuationApproved === true);
         const followupTracker = new ExactFinalTracker(1500);
         let followupId = input.followupUserMessageId;
         for (;;) {
@@ -447,7 +447,7 @@ export class TeamWorkflow {
                 }
               }
               request = successor;
-              result = await this.#observe(request);
+              result = await this.#observe(request, undefined, true);
               continue;
             }
             const priorReview = this.#continuationReviews.get(request.outboxId);
@@ -476,7 +476,15 @@ export class TeamWorkflow {
                 result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
               this.#continuationReviews.set(request.outboxId, Date.now());
               try {
-                if (interrupted && parent !== null && !missingContinuation) {
+                const load = typeof result.conversationId === 'string' ? this.#loadRecovery.get(result.conversationId) : null;
+                const userRefreshed = load?.reason === 'user-refresh-observed' && Date.parse(load.lastCheckedAt) > Date.parse(request.createdAt);
+                if (interrupted && parent !== null && !missingContinuation && !userRefreshed) {
+                  const session = this.services.directory.getSession(request.sessionId);
+                  this.#loadRecovery.save({ ...(load ?? { attempts: 0, lastOutcome: null, lastAttemptAt: null, notifiedAt: null }),
+                    conversationId: session.conversationId!, sessionId: session.sessionId, pageKey: session.pageKey!,
+                    bindingEpoch: (result.evidence as { bindingEpoch?: number } | undefined)?.bindingEpoch ?? load?.bindingEpoch ?? 0,
+                    url: `https://chatgpt.com/c/${session.conversationId}`, state: 'held', reason: 'user-refresh-required',
+                    lastCheckedAt: new Date().toISOString() });
                   const viewed = await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
                     requestId: `manual-refresh-view:${request.outboxId}`, decision: 'focus' });
                   result = { ...result, status: 'recovery_required', recovery: {
@@ -720,6 +728,10 @@ export class TeamWorkflow {
   #loadRecoveryRequired(snapshot: SessionSnapshot) {
     if (snapshot.terminal || snapshot.conversationId === null) return null;
     const record = this.#loadRecovery.get(snapshot.conversationId);
+    if (record?.reason === 'user-refresh-required') return { status: 'recovery_required',
+      recovery: { state: 'decision_required', decisionRequired: true, userActionRequired: true,
+        reason: 'provider.manual-refresh-required', url: record.url,
+        message: 'Refresh this original tab in the browser. Automatic recovery is paused; no refresh or message was sent.' } };
     if (record?.state !== 'exhausted') return null;
     return { status: 'recovery_required', userActionRequired: true,
       requestRef: this.#outbox.getByGeneration(snapshot.sessionId, snapshot.generation)?.outboxId ?? null,
