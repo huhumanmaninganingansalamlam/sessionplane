@@ -1080,12 +1080,18 @@ export class SubmissionService {
     }
   }
 
-  confirmedContinuation(input: { readonly clientId: string; readonly requestId: string }): UserConfirmedInterruption | undefined {
+  continuationContext(input: { readonly clientId: string; readonly requestId: string }) {
     const request = this.#outbox.getByRequest(input.clientId, input.requestId);
     const originalRef = request && parseOutboxPayload(request).continuationOf;
     if (!originalRef) return undefined;
+    const source = this.#outbox.getById(originalRef);
+    const current = request && this.#requireSnapshot(request.sessionId);
+    const original = source && this.#sessions.getGenerationResult(source.sessionId, source.generation);
+    if (!source || !current || !original || source.clientId !== input.clientId || source.sessionId !== current.sessionId ||
+        source.generation !== current.generation - 1 || !['approved-continuation-prepared', 'message-timeout-reconciled'].includes(original.reason ?? '')) return undefined;
     const receipt = new ReceiptRepository(this.#database).get(input.clientId, `continuation-authorization:${originalRef}`);
-    return receipt ? JSON.parse(receipt.resultJson).userConfirmedInterruption : undefined;
+    return { original: { ...current, ...original, generation: source.generation },
+      confirmation: receipt ? JSON.parse(receipt.resultJson).userConfirmedInterruption as UserConfirmedInterruption : undefined };
   }
 
   async prepareContinuation(
