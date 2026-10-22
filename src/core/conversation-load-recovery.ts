@@ -87,14 +87,18 @@ export class ConversationLoadRecovery {
     this.#attached.add(page);
     page.on('framenavigated', frame => {
       if (this.#closed || frame !== page.mainFrame()) return;
-      const binding = this.services.registry.getBinding(pageKey);
-      if (!binding.conversationId || page.url() !== `${this.#origin}/c/${binding.conversationId}`) return;
-      const record = this.repository.get(binding.conversationId);
-      if (record?.reason !== 'user-refresh-required' || record.pageKey !== pageKey) return;
-      // A real navigation releases this existing hold; a model lookup or
-      // background execution is not a browser refresh.
-      this.repository.save({ ...record, state: 'held', reason: 'user-refresh-observed',
-        lastCheckedAt: new Date(this.now()).toISOString() });
+      const recordNavigation = () => {
+        const binding = this.services.registry.getBinding(pageKey);
+        if (binding.state !== 'owned' || !binding.conversationId || page.url() !== `${this.#origin}/c/${binding.conversationId}`) return;
+        const record = this.repository.get(binding.conversationId);
+        if (record?.reason !== 'user-refresh-required' || record.pageKey !== pageKey || record.sessionId !== binding.sessionId) return;
+        // A real navigation releases this existing hold; a model lookup or
+        // background execution is not a browser refresh.
+        this.repository.save({ ...record, state: 'held', reason: 'user-refresh-observed',
+          lastCheckedAt: new Date(this.now()).toISOString() });
+      };
+      if (this.services.maintenance) this.services.maintenance.callback(recordNavigation);
+      else recordNavigation();
     });
     page.on('response', response => {
       if (this.#closed || response.status() !== 429 || new URL(response.url()).origin !== this.#origin) return;
