@@ -468,10 +468,16 @@ export class TeamWorkflow {
               // A carried banner is not a new interruption of a just-submitted
               // successor. Reuse the normal broad review cadence for that ACK.
               if (!this.#continuationReviews.has(request.outboxId))
-                this.#continuationReviews.set(request.outboxId, Date.parse(request.createdAt));
+                this.#continuationReviews.set(request.outboxId, Date.parse(request.updatedAt));
               result = await this.#observe(request, undefined, true);
               continue;
             }
+            // A client may attach directly to the successor returned by explicit
+            // continue, or reconnect after restart. Its carried banner is not a
+            // first interruption: retain the broad interval from acknowledgement.
+            if (!this.#continuationReviews.has(request.outboxId) &&
+                typeof JSON.parse(request.payloadJson).continuationOf === 'string')
+              this.#continuationReviews.set(request.outboxId, Date.parse(request.updatedAt));
             const priorReview = this.#continuationReviews.get(request.outboxId);
             const lastReview = priorReview ?? request.createdAt;
             const due = Date.now() - (typeof lastReview === 'number' ? lastReview : Date.parse(lastReview)) >= 30 * 60_000;

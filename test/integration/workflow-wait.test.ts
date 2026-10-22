@@ -615,3 +615,52 @@ test('successor collection retains explicit continuation approval without invent
     }
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); rmSync(root, { recursive: true, force: true }); }
 });
+
+
+test('direct successor collection paces a carried disconnect from the submitted ACK, including reconnect', async t => {
+  const f = await fixture();
+  try {
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
+      { sessionState: 'complete', providerState: 'complete', answerText: 'Checkpoint', responseMessageId: 'old' });
+    const next = (await f.invoke('send', { teamId: f.team.teamId, roleRef: `${f.sent.sessionId}:1`,
+      requestId: `continue:managed-continuation:${f.sent.requestRef}`, prompt: '계속' })).structuredContent;
+    // Existing continuation was prepared long before its actual ACK.
+    const ackAt = Date.now();
+    f.core.database.raw.prepare("UPDATE outbox SET payload_json=json_set(payload_json, '$.continuationOf', ?), created_at=?, updated_at=? WHERE outbox_id=?")
+      .run(f.sent.requestRef, new Date(ackAt - 3600000).toISOString(), new Date(ackAt).toISOString(), next.requestRef);
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: ackAt + 13848 });
+    t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+      snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
+      evidence: { submissionVerification: { anchorPresent: true, laterUserFound: false,
+        activity: 'unknown', activityReason: 'provider-stream-disconnected',
+        messageTimeout: false, responseCandidate: null } }, requested: {},
+    })) as any);
+    t.mock.method(EventRepository.prototype, 'latestServerObservation', () => null);
+    let reviews = 0;
+    t.mock.method(SessionUiService.prototype, 'prepareContinuation', async () => {
+      reviews++;
+      throw new SessionPlaneDomainError('provider.failure-unverified', 'Current submit unavailable');
+    });
+    const cancelled = new AbortController();
+    const waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef],
+      waitMs: 3600000, untilResult: false, continuationApproved: true }, cancelled.signal).catch(() => undefined);
+    await f.untilSubscribed(f.sent.sessionId as string);
+    assert.equal(reviews, 0, 'A new wait on the actual successor cannot immediately send again');
+    cancelled.abort(); await waiting;
+    // The same successor can be reattached without resetting or bypassing cadence.
+    const resumed = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef],
+      waitMs: 3600000, untilResult: false, continuationApproved: true });
+    await f.untilSubscribed(f.sent.sessionId as string);
+    t.mock.timers.tick(30 * 60000 - 13848 - 1);
+    for (let i = 0; i < 30; i++) await flush();
+    assert.equal(reviews, 0, 'No follow-up before thirty minutes from actual ACK');
+    t.mock.timers.tick(2);
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 2, { reason: 'cadence-review-wakeup' });
+    for (let i = 0; i < 30; i++) await flush();
+    assert.equal(reviews, 1, 'The due continuation still executes at the broad boundary');
+    const row = ((await resumed).structuredContent.results as any[])[0];
+    assert.equal(row.recovery.reason, 'provider.failure-unverified');
+    assert.equal(f.fake.submitCount, 2);
+  } finally { t.mock.timers.reset(); t.mock.restoreAll(); await f.close(); }
+});
