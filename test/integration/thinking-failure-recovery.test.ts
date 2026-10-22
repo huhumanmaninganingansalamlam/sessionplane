@@ -494,6 +494,9 @@ test('managed collection links an existing followup under unsubmitted continuati
         <div data-dil-message-id="checkpoint"><div data-d-component="text">Checking</div></div>
         <div data-dil-message-id="final"><div data-d-component="text">RESULT: BLOCKED — VM SSH exit255</div></div>
       </div><textarea>Preserved user draft</textarea></main>`);
+    const bounded = await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 0 });
+    assert.equal(bounded.results[0].followup.terminal, false,
+      'A bounded/drained read must retain followup state so the client cannot mistake the historical terminal for collection completion');
     const result = await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000, continuationApproved: true });
     const recovered = result.results[0];
     assert.equal(recovered.followup.userMessageId, 'manual-user', JSON.stringify(recovered));

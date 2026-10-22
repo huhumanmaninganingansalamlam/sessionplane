@@ -546,10 +546,10 @@ export class TeamWorkflow {
       if (!workflowWaitOutcome(result) && !(result.followup as { terminal?: boolean } | undefined)?.terminal) {
         const { requestOk, requestRef, teamId, sessionId, generation, submissionState, sessionState,
           providerState, observationTransport, terminal, waitExpired, promptSubmitted, conversationId,
-          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt, conversationLoadRecovery, recovery } = result;
+          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt, conversationLoadRecovery, recovery, followup } = result;
         results.push({ requestOk, requestRef, teamId, sessionId, generation, submissionState, sessionState,
           providerState, observationTransport, terminal, waitExpired, promptSubmitted, conversationId,
-          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt, conversationLoadRecovery, recovery });
+          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt, conversationLoadRecovery, recovery, followup });
       } else results.push({ ...result, ...(files === undefined ? {} : { files }) });
     }
     return { requestOk: true, teamId: input.teamId, results };
