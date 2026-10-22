@@ -85,6 +85,29 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     await page.locator('section button').filter({ hasText: 'Allow once' }).evaluateAll(elements => elements.forEach(e => { e.textContent = 'Unverified action'; }));
     assert.equal((await decide('unverified-card-action', { action: 'inspect' })).isError, true,
       'An unknown card action cannot broaden evidence to the entire conversation');
+    await page.locator('main > section').evaluateAll(elements => elements.forEach(element => element.remove()));
+    await page.evaluate(() => document.querySelector('main')!.insertAdjacentHTML('beforeend',
+      `<section id="persistent"><div role="alert">hostspan-desktop Process Start Command: authorized development</div>
+      <button onclick="throw Error('Must not choose once')">Allow once</button>
+      <button onclick="window.alwaysGrants=(window.alwaysGrants||0)+1;document.querySelector('#persistent').remove()">항상 허용</button></section>`));
+    const onceEvidence = await decide('inspect-persistent-once', { action: 'inspect' });
+    assert.equal((await decide('wrong-mode', { action: 'allow', allowMode: 'always',
+      evidenceHash: (onceEvidence.structuredContent.permission as { evidenceHash: string }).evidenceHash })).isError, true,
+      'One-time evidence cannot authorize a persistent permission');
+    output = '';
+    assert.equal(await runCli(['request', 'hostspan_permission', team.teamId, String(row.outbox_id), '--action', 'inspect',
+      '--app-name', 'hostspan-desktop', '--tool-name', 'Process Start', '--allow-mode', 'always',
+      '--request-id', 'cli-inspect-always', '--socket', config.socketPath, '--json'],
+      { stdin: Readable.from([]), stdout: stream, stderr: stream }), 0, output);
+    const persistent = JSON.parse(output).permission;
+    assert.equal(persistent.allowMode, 'always');
+    const alwaysAllowed = await decide('allow-persistent', { action: 'allow', allowMode: 'always', evidenceHash: persistent.evidenceHash });
+    assert.equal(alwaysAllowed.isError, false, JSON.stringify(alwaysAllowed));
+    assert.equal((alwaysAllowed.structuredContent.permission as { allowMode: string }).allowMode, 'always');
+    assert.equal((alwaysAllowed.structuredContent.permission as { permissionStillVisible: boolean }).permissionStillVisible, false);
+    assert.equal(await page.evaluate(() => (window as unknown as { alwaysGrants: number }).alwaysGrants), 1);
+    assert.deepEqual((await decide('allow-persistent', { action: 'allow', allowMode: 'always',
+      evidenceHash: persistent.evidenceHash })).structuredContent, alwaysAllowed.structuredContent);
     assert.equal(fake.submitCount, 1);
     assert.equal(fake.stopCount, 0);
     assert.equal(core.teamDirectory.getSession(session.sessionId).generation, 1);

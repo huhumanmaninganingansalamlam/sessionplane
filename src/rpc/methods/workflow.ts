@@ -24,6 +24,7 @@ export const workflowSchemas = {
     z.object({ ...request, requestId, decision: z.literal('continue'), continuationApproved: z.literal(true) }).strict(),
     z.object({ ...request, requestId, decision: z.literal('hostspan_permission'), action: z.enum(['inspect', 'allow']),
       appName: z.string().regex(/^hostspan(?:-[a-z0-9_-]+)?$/i), toolName: z.string().trim().min(1).max(200),
+      allowMode: z.enum(['once', 'always']).optional().describe('Select the exact observed ChatGPT HostSpan permission option; always requires explicit user authorization. Defaults to once.'),
       evidenceHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict(),
     z.object({ ...request, requestId, decision: z.literal('retire_observation'), workComplete: z.literal(true),
       evidenceRef: z.string().trim().min(1).max(2000), successorRequestRef: requestRef.optional() }).strict(),
