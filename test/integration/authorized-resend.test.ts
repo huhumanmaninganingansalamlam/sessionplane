@@ -12,6 +12,7 @@ import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { SessionUiService } from '../../src/core/session-ui-service.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
+import { ReceiptRepository } from '../../src/storage/receipt-repository.ts';
 import { EventRepository } from '../../src/storage/event-repository.ts';
 import { ProbeBudgetRepository } from '../../src/storage/probe-budget-repository.ts';
 import { callRpc as rpcCall } from '../../src/cli/client.ts';
@@ -458,5 +459,63 @@ test('failed preparation with no conversation cannot steal the same session targ
     assert.equal(service.pageRegistry.getBinding(live.pageKey).generation, 1);
     assert.equal(service.teamDirectory.getSession(session.sessionId).submissionState, 'failed_pre_submit');
     assert.equal(fake.submitCount, 0);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test('explicit new follow-up preserves UNKNOWN and sends only its own literal once without bypassing provider refusal', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-explicit-followup-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  let refused = true;
+  t.mock.method(SessionUiService.prototype, 'reserveResendPage', () => {});
+  t.mock.method(SessionUiService.prototype, 'verifyAuthorizedResend', async (_current, _original, prompt, _after, followup) => {
+    assert.equal(followup, true);
+    assert.equal(prompt, '계속');
+    if (refused) throw new SessionPlaneDomainError('provider.actionable-alert', 'Provider requires message processing review');
+    return 'exact-user-transcript';
+  });
+  const service = await startCore({ config, startBrowser: false, providerAdapters: [fake] });
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'explicit-followup-owner' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: team.primaryRoleKey, provider: 'chatgpt' });
+    const clientId = `team:${team.teamId}`;
+    fake.autoFinalText = 'Previous final';
+    await service.submissionService.send({ clientId, sessionId: session.sessionId, requestId: 'seed', prompt: 'Earlier work', sessionDeadlineSec: 600 });
+    await callRpc(config.socketPath, 'session.wait', { clientId, sessionId: session.sessionId, generation: 1, waitMs: 1000 });
+    fake.autoFinalText = null;
+    fake.acknowledgementMode = 'missing';
+    await assert.rejects(service.submissionService.send({ clientId, sessionId: session.sessionId,
+      requestId: 'unknown-original', prompt: 'The preserved original long work instruction', sessionDeadlineSec: 600 }), /acknowledgement/);
+    const original = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId)!;
+    const generation = service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=2').get(session.sessionId)!;
+    assert.equal(generation.submission_state, 'submission_unknown');
+    assert.equal(generation.submitted_user_message_id, null);
+    new ReceiptRepository(service.database).execute({ clientId, requestId: `submission-configuration:${original.outbox_id}`,
+      method: 'session.submission.configuration', payload: {}, operation: () => ({ model: { purpose: 'model', name: 'GPT-6 Extra High' } }) });
+    // Exercise the real durable reservation and submission; configuration UI has its browser regression.
+    t.mock.method(SessionUiService.prototype, 'prepareFailureContinuation', async input => {
+      await service.submissionService.withPendingPreparation(input, async () => ({}));
+      return await service.submissionService.resumePreparation(input);
+    });
+    const followup = { teamId: team.teamId, requestRef: original.outbox_id, requestId: 'user-new-followup-once',
+      decision: 'followup', approvalRef: 'user-explicit-new-continue-20261022' };
+    await assert.rejects(callRpc(config.socketPath, 'workflow.decide', followup), /Provider requires message processing review/);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).generation, 2);
+    assert.equal(fake.submitCount, 2, 'Provider refusal did not send or reserve a successor');
+    refused = false;
+    fake.acknowledgementMode = 'success';
+    fake.autoFinalText = 'New follow-up answer';
+    const sent = await callRpc(config.socketPath, 'workflow.decide', followup) as { requestRef: string; submittedUserMessageId: string };
+    assert.notEqual(sent.requestRef, original.outbox_id);
+    assert.ok(sent.submittedUserMessageId);
+    assert.equal(fake.submissionRequests.at(-1)!.prompt, '계속');
+    assert.equal(fake.submitCount, 3);
+    await callRpc(config.socketPath, 'workflow.decide', followup);
+    assert.equal(fake.submitCount, 3, 'Replaying the same explicit instruction does not send twice');
+    const final = await callRpc(config.socketPath, 'session.wait', { clientId, sessionId: session.sessionId, generation: 3, waitMs: 1000 }) as { answerText: string };
+    assert.equal(final.answerText, 'New follow-up answer');
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(original.outbox_id), original);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=2').get(session.sessionId), generation);
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });

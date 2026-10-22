@@ -51,6 +51,8 @@ export interface FailureContinuation {
 interface AuthorizedResend {
   readonly requestRef: string;
   readonly approvalRef: string;
+  readonly followup?: true;
+  readonly userTranscriptHash?: string;
 }
 
 export interface SessionSendInput {
@@ -117,7 +119,7 @@ export class SubmissionService {
   readonly #maxUploadFileBytes: number;
   readonly #requestMutex = new KeyedMutex();
   readonly #beforeFailureContinuation: ((snapshot: SessionSnapshot, continuation: FailureContinuation) => Promise<void>) | null;
-  readonly #beforeAuthorizedResend: ((current: SessionSnapshot, original: SessionSnapshot, prompt: string, allowPreparedDraft: boolean) => Promise<void>) | null;
+  readonly #beforeAuthorizedResend: ((current: SessionSnapshot, original: SessionSnapshot, prompt: string, allowPreparedDraft: boolean, followup?: true, userTranscriptHash?: string) => Promise<string | void>) | null;
   readonly #beforeContinuation: ((current: SessionSnapshot, original: SessionSnapshot, confirmation?: UserConfirmedInterruption) => Promise<void>) | null;
   readonly #reserveResendPage: ((original: SessionSnapshot, successor: SessionSnapshot) => void) | null;
 
@@ -132,7 +134,7 @@ export class SubmissionService {
     readonly onSubmitted?: (snapshot: SessionSnapshot) => void;
     readonly onSubmissionUnknown?: (snapshot: SessionSnapshot) => void;
     readonly beforeFailureContinuation?: (snapshot: SessionSnapshot, continuation: FailureContinuation) => Promise<void>;
-    readonly beforeAuthorizedResend?: (current: SessionSnapshot, original: SessionSnapshot, prompt: string, allowPreparedDraft: boolean) => Promise<void>;
+    readonly beforeAuthorizedResend?: (current: SessionSnapshot, original: SessionSnapshot, prompt: string, allowPreparedDraft: boolean, followup?: true, userTranscriptHash?: string) => Promise<string | void>;
     readonly beforeContinuation?: (current: SessionSnapshot, original: SessionSnapshot, confirmation?: UserConfirmedInterruption) => Promise<void>;
     readonly reserveResendPage?: (original: SessionSnapshot, successor: SessionSnapshot) => void;
     readonly now?: () => Date;
@@ -917,9 +919,9 @@ export class SubmissionService {
 
   async prepareAuthorizedResend(input: {
     clientId: string; requestId: string; sessionId: string; generation: number;
-    decisionId: string; approvalRef: string; duplicateRiskAccepted: true;
-  }) {
-    if (input.duplicateRiskAccepted !== true || input.approvalRef.trim() === '') throw new SessionPlaneDomainError(
+    decisionId: string; approvalRef: string;
+  } & ({ duplicateRiskAccepted: true; followup?: never } | { followup: true; duplicateRiskAccepted?: never })) {
+    if ((!input.followup && input.duplicateRiskAccepted !== true) || input.approvalRef.trim() === '') throw new SessionPlaneDomainError(
       'input.invalid', 'A specific user approval after duplicate-risk disclosure is required');
     const original = this.#outbox.getByRequest(input.clientId, input.requestId);
     if (original === null || original.sessionId !== input.sessionId || original.generation !== input.generation) {
@@ -927,9 +929,9 @@ export class SubmissionService {
     }
     return await this.#scheduler.actorFor(input.sessionId).enqueue(async () => {
       const receipts = new ReceiptRepository(this.#database);
-      const method = 'session.resend.prepare';
+      const method = input.followup ? 'session.followup.prepare' : 'session.resend.prepare';
       // One durable reservation per original request, across IDs and restarts.
-      const receiptId = `authorized-resend:${original.outboxId}`;
+      const receiptId = `${input.followup ? 'explicit-followup' : 'authorized-resend'}:${original.outboxId}`;
       const requestHash = hashCanonical({ method, payload: input });
       const previous = receipts.get(input.clientId, receiptId);
       if (previous !== null) {
@@ -982,19 +984,22 @@ export class SubmissionService {
       const current = this.#requireSnapshot(input.sessionId);
       if (current.generation !== original.generation || current.pageKey === null) throw new SessionPlaneDomainError(
         'session.generation-superseded', 'Resend requires the exact current original request page');
-      const authorization = { requestRef: original.outboxId, approvalRef: input.approvalRef };
+      const authorization: AuthorizedResend = { requestRef: original.outboxId, approvalRef: input.approvalRef,
+        ...(input.followup ? { followup: true } : {}) };
       return await this.#pageMutex.runExclusive(current.pageKey, async () => {
-        await this.#verifyAuthorizedResend(current, authorization, false);
+        const userTranscriptHash = await this.#verifyAuthorizedResend(current, authorization, false);
+        const reservedAuthorization = input.followup ? { ...authorization, userTranscriptHash: userTranscriptHash! } : authorization;
         const source = parseOutboxPayload(original);
         if (this.#reserveResendPage === null) throw new SessionPlaneDomainError(
           'capability.unsupported', 'Exact same-page resend reservation is unavailable');
-        if (source.attachments.length !== 0) throw new SessionPlaneDomainError(
+        if (!input.followup && source.attachments.length !== 0) throw new SessionPlaneDomainError(
           'capability.unsupported', 'This narrow resend path does not replay attachment uploads');
-        const payload = { prompt: source.prompt, model: source.model, effort: source.effort,
+        const prompt = input.followup ? '계속' : source.prompt;
+        const payload = { prompt, model: source.model, effort: source.effort,
           surface: source.surface, attachments: [], sessionDeadlineSec: source.sessionDeadlineSec,
-          authorizedResend: authorization };
+          authorizedResend: reservedAuthorization };
         const sendInput: SessionSendInput = { clientId: input.clientId, requestId: input.decisionId,
-          sessionId: input.sessionId, prompt: source.prompt, sessionDeadlineSec: source.sessionDeadlineSec };
+          sessionId: input.sessionId, prompt, sessionDeadlineSec: source.sessionDeadlineSec };
         const result = receipts.execute({ clientId: input.clientId, requestId: receiptId, method, payload: input,
           operation: () => {
             const prepared = this.#prepareOutbox(this.#scheduler.actorFor(input.sessionId), input.sessionId,
@@ -1007,10 +1012,11 @@ export class SubmissionService {
               updatedAt: timestamp, errorCode: 'provider.preparation-required',
               resultJson: JSON.stringify({ kind: 'pending-preparation', choices: {} }), promptSubmitted: false });
             this.#events.append({ teamId: original.teamId, roleId: original.roleId, sessionId: original.sessionId,
-              generation: original.generation, eventType: 'generation.resend-authorized',
+              generation: original.generation, eventType: input.followup ? 'generation.followup-authorized' : 'generation.resend-authorized',
               payload: { originalRequestRef: original.outboxId, successorRequestRef: prepared.outbox.outboxId,
                 successorGeneration: prepared.snapshot.generation, receiptId, approvalRef: input.approvalRef,
-                duplicateRiskAccepted: true, originalDisposition: 'unresolved-preserved', providerMutation: false },
+                ...(input.followup ? { followupPrompt: '계속' } : { duplicateRiskAccepted: true }),
+                originalDisposition: 'unresolved-preserved', providerMutation: false },
               createdAt: timestamp });
             const result = { requestOk: true, requestRef: prepared.outbox.outboxId, originalRequestRef: original.outboxId,
               sessionId: input.sessionId, generation: prepared.snapshot.generation, receiptId,
@@ -1044,6 +1050,8 @@ export class SubmissionService {
         (!unknownWithoutAnchor && (original.submissionState !== 'submitted' ||
           (original.submittedUserMessageId === null && original.submittedUserTurnId === null)))) throw new SessionPlaneDomainError(
       'provider.preparation-required', 'Approved resend requires the exact unresolved original request');
+    if (authorization.followup && (!unknownWithoutAnchor || current.conversationId === null)) throw new SessionPlaneDomainError(
+      'provider.preparation-required', 'Explicit follow-up requires the exact bound UNKNOWN request; collect a recovered ACK normally');
     const identity = proof?.recoveryIdentity as Record<string, unknown> | undefined;
     if (proof && (!identity || identity.conversationId !== current.conversationId ||
         identity.submittedUserMessageId !== original.submittedUserMessageId ||
@@ -1052,8 +1060,9 @@ export class SubmissionService {
     if (proof && proof.recoveryReason !== 'backend-user-anchor-absent-from-mapping') throw new SessionPlaneDomainError(
       'provider.preparation-required', 'Original anchor or answer was found; preserve and collect it before any resend');
     if (current.generation === source.generation + 1) {
-      const approval = receipts.get(source.clientId, `authorized-resend:${source.outboxId}`);
-      const reserved = approval?.method === 'session.resend.prepare' ? JSON.parse(approval.resultJson) as Record<string, unknown> : null;
+      const approval = receipts.get(source.clientId, `${authorization.followup ? 'explicit-followup' : 'authorized-resend'}:${source.outboxId}`);
+      const reserved = approval?.method === (authorization.followup ? 'session.followup.prepare' : 'session.resend.prepare')
+        ? JSON.parse(approval.resultJson) as Record<string, unknown> : null;
       const successor = typeof reserved?.requestRef === 'string' ? this.#outbox.getById(reserved.requestRef) : null;
       if (!reserved || reserved.originalRequestRef !== source.outboxId || reserved.approvalRef !== authorization.approvalRef ||
           successor?.clientId !== source.clientId || successor.sessionId !== current.sessionId || successor.generation !== current.generation) {
@@ -1066,8 +1075,12 @@ export class SubmissionService {
       'provider.preparation-required', 'Approved resend display validation is unavailable');
     const originalSnapshot = { ...current, ...original, generation: source.generation, terminal: false };
     try {
-      await withProviderStageTimeout(
-        this.#beforeAuthorizedResend(current, originalSnapshot, parseOutboxPayload(source).prompt, allowPreparedDraft), 5_000);
+      const transcriptHash = await withProviderStageTimeout(
+        this.#beforeAuthorizedResend(current, originalSnapshot, authorization.followup ? '계속' : parseOutboxPayload(source).prompt,
+          allowPreparedDraft, authorization.followup, authorization.userTranscriptHash), 5_000);
+      if (authorization.followup && !transcriptHash) throw new SessionPlaneDomainError(
+        'provider.preparation-required', 'Exact user transcript evidence is required for this new follow-up');
+      return transcriptHash;
     } catch (error) {
       const detail = error instanceof SessionPlaneDomainError ? preSubmitDetails(error.details) : {};
       if (detail.originalAnchorFound === true || detail.matchingPromptFound === true ||

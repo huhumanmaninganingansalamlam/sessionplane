@@ -164,7 +164,7 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName: string; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName: string; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
     if (input.decision === 'hostspan_permission') {
@@ -236,6 +236,21 @@ export class TeamWorkflow {
       });
     }
 
+    if (input.decision === 'followup') {
+      // Explicit new input has its own ACK; it never resolves or replays UNKNOWN.
+      const saved = this.services.receipts.get(request.clientId, `submission-configuration:${request.outboxId}`);
+      if (!saved) throw new SessionPlaneDomainError('provider.preparation-required',
+        'Preserved model/version/effort evidence is missing; the original UNKNOWN request is unchanged');
+      const prepared = await this.services.submissions.prepareAuthorizedResend({ ...owner,
+        decisionId: input.requestId, approvalRef: input.approvalRef, followup: true });
+      const successor = this.#outbox.requireById(prepared.requestRef as string);
+      if (successor.submissionState === 'prepared') {
+        const payload = JSON.parse(request.payloadJson);
+        await this.services.ui.prepareFailureContinuation(ownerOf(successor), JSON.parse(saved.resultJson).model, payload);
+      }
+      return { ...await this.#observe(successor), followupOf: request.outboxId,
+        originalDisposition: 'unresolved-preserved' };
+    }
     if (input.decision === 'prepare_resend') {
       const prepared = await this.services.submissions.prepareAuthorizedResend({ ...owner,
         decisionId: input.requestId, approvalRef: input.approvalRef, duplicateRiskAccepted: input.duplicateRiskAccepted });
@@ -463,12 +478,13 @@ export class TeamWorkflow {
             }
             const timeoutReady = (result.submissionVerification as { nextAction?: string } | undefined)?.nextAction === 'reconcile_failure';
             const serverReview = (result.submissionVerification as { serverObservation?: {
-              observedAt?: string; currentIdentityMatches?: boolean } } | undefined)?.serverObservation;
+              observedAt?: string; currentIdentityMatches?: boolean;
+              serverObservation?: { messages?: { role: string; textLength: number; status?: string }[] } } } | undefined)?.serverObservation;
             const freshServer = serverReview?.currentIdentityMatches === true && !!serverReview.observedAt &&
               Date.now() - Date.parse(serverReview.observedAt) <= 180_000;
             const dom = (result.submissionVerification as { dom?: {
               activityReason?: string; activity?: string; anchorPresent?: boolean; laterUserFound?: boolean;
-              turnBoundary?: { role: string }[];
+              turnBoundary?: { role: string; text?: string }[];
             } } | undefined)?.dom;
             const missingContinuation = this.services.submissions.missingContinuationAnchor(
               this.services.directory.getSession(request.sessionId)) !== null;
@@ -479,6 +495,33 @@ export class TeamWorkflow {
               dom.turnBoundary.every(turn => turn.role === 'user');
             const interrupted = idleWithoutResponse || timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
               dom.activity !== 'strong' && (dom.anchorPresent === true || missingContinuation) && dom.laterUserFound === false);
+            const previousRef = (JSON.parse(request.payloadJson) as { continuationOf?: string }).continuationOf;
+            const previous = previousRef ? this.#outbox.getById(previousRef) : null;
+            const previousRecovery = previous && previous.clientId === request.clientId &&
+              previous.sessionId === request.sessionId && previous.generation === request.generation - 1
+              ? this.services.receipts.get(request.clientId, `managed-continuation:${previous.outboxId}`) : null;
+            const previousEvidence = previousRecovery?.method === 'session.continuation.prepare'
+              ? JSON.parse(previousRecovery.resultJson).evidence : null;
+            const observedProgress = dom?.activity === 'strong' || dom?.turnBoundary?.some(turn => turn.role === 'tool' ||
+              (turn.role === 'assistant' && !!turn.text?.trim())) ||
+              (serverReview?.currentIdentityMatches && serverReview.serverObservation?.messages?.some(message =>
+                message.role === 'tool' || (message.role === 'assistant' && message.textLength > 0) ||
+                (freshServer && message.status === 'in_progress'))) ||
+              Date.parse(String((result.activity as { latestStoredArtifactChangeAt?: string } | undefined)?.latestStoredArtifactChangeAt)) >= Date.parse(request.createdAt);
+            // A durable managed retry that still has the unresolved response and
+            // no observed answer/tool progress needs a human, not another send.
+            if (due && result.submissionState === 'submitted' && result.terminal !== true &&
+                dom?.anchorPresent === true && dom.laterUserFound === false &&
+                (previousEvidence?.disconnectedRecovery === true || previousEvidence?.userConfirmedInterruption) && !observedProgress) {
+              this.#continuationReviews.delete(request.outboxId);
+              result = { ...result, status: 'recovery_required', recovery: {
+                state: 'decision_required', decisionRequired: true, userActionRequired: true,
+                reason: 'provider.recovery-stalled',
+                message: 'The managed Continue was submitted, but the response remains unresolved without observed answer or tool progress. Check this exact conversation and refresh it manually; automatic continuation is paused. The request and any uncertain execution are preserved.',
+                url: `https://chatgpt.com/c/${result.conversationId}`,
+              } };
+              break;
+            }
             if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
                 (interrupted || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
                 result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
