@@ -133,6 +133,11 @@ out prompts, infer consensus, or inject answers into other roles.
 
 ## Recovery and cleanup
 
+- Approved managed continuation also handles an exact idle acknowledged turn
+  with a standalone message-stream error and enabled Retry: the core clicks that
+  existing provider control once and collects the same request/ACK without sending
+  another prompt. A failed or ineffective Retry returns its actual outcome for
+  review; it does not authorize permission bypass or automatic refresh.
 - Existing core conversation-load recovery may click the exact load-error button;
   this is not a page refresh, generation Retry or prompt replay. Let that existing
   paced recovery run and inspect `conversationLoadRecovery` holds/outcome. Do not
