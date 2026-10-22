@@ -124,6 +124,12 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
           browserPreference: config.browserPreference,
           browserExecutable: config.browserExecutable,
           launchTimeoutMs: config.browserLaunchTimeoutMs,
+          resolveTeam: sessionId => {
+            const session = new SessionRepository(database.raw).getSession(sessionId);
+            if (!session) return null;
+            const team = teamDirectory.getTeam(session.teamId);
+            return { teamId: team.teamId, title: team.name?.trim() || team.teamId };
+          },
         });
 
   try {
@@ -336,7 +342,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       ...maintenance.status(), durableRecoveryHandover: true,
     } }),
   );
-  const handoverIdle = () => (browserOwner === null || browserOwner.status.state === 'ready') && actorScheduler.totalQueueDepth === 0 && pageMutationMutex.activeCount === 0 &&
+  const handoverIdle = () => (browserOwner === null || (browserOwner.status.state === 'ready' && !browserOwner.teamGroupsBusy)) && actorScheduler.totalQueueDepth === 0 && pageMutationMutex.activeCount === 0 &&
     // Recovery mutations enter maintenance and drain naturally. Durable opt-in
     // observation is restored below; a generating browser need not finish first.
     Number(database.raw.prepare("SELECT count(*) AS n FROM outbox WHERE submission_state IN ('submit_attempted','composer_filled')").get()!.n) === 0;
