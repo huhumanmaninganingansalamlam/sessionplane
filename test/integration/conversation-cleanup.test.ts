@@ -13,6 +13,67 @@ import { SessionRepository } from '../../src/storage/session-repository.ts';
 import { EventRepository } from '../../src/storage/event-repository.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
+test('completed approved continuation history permits guarded cleanup only after its exact successor resolves', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-continuation-cleanup-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  let deletes = 0;
+  t.mock.method(fake, 'openDeletion', async () => ({ alreadyDeleted: false,
+    deleteOnce: async () => { deletes++; return false; }, close: async () => {} }));
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const rpc = <T>(method: string, params: object) => callRpc<T>({ socketPath: config.socketPath,
+    method, params: { clientId: 'continuation-cleanup', ...params }, timeoutMs: 10000 });
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'continuation-cleanup' });
+    const old = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    await rpc('session.send', { requestId: 'original', sessionId: old.sessionId, prompt: 'Original' });
+    const original = core.teamDirectory.getSession(old.sessionId);
+    const sessions = new SessionRepository(core.database.raw);
+    const timestamp = new Date().toISOString();
+    sessions.updateCurrentGeneration(old.sessionId, 1, { sessionState: 'complete', completedAt: timestamp,
+      reason: 'approved-continuation-prepared', errorCode: null }, timestamp);
+    const events = new EventRepository(core.database.raw);
+    const evidence = { originalUserMessageId: original.submittedUserMessageId, conversationId: original.conversationId };
+    const record = (receiptId: string) => events.append({ teamId: team.teamId, roleId: old.roleId,
+      sessionId: old.sessionId, generation: 1, eventType: 'generation.continuation-prepared',
+      payload: { receiptId, evidence }, createdAt: timestamp });
+    record('resume');
+    await rpc('session.send', { requestId: 'continue:resume', sessionId: old.sessionId, prompt: '계속' });
+    assert.equal(sessions.conversationCleanupBlocker(old.sessionId, original.conversationId!), true,
+      'An acknowledged but unresolved successor still owns live work');
+    sessions.updateCurrentGeneration(old.sessionId, 2, { sessionState: 'complete', providerState: 'complete',
+      completedAt: timestamp, responseMessageId: 'final', answerText: 'Collected final', errorCode: null }, timestamp);
+    const event = core.database.raw.prepare("SELECT sequence FROM events WHERE session_id=? AND event_type='generation.continuation-prepared'").get(old.sessionId) as { sequence: number };
+    core.database.raw.prepare("UPDATE events SET payload_json=? WHERE sequence=?").run(JSON.stringify({ receiptId: 'unrelated', evidence }), event.sequence);
+    assert.equal(sessions.conversationCleanupBlocker(old.sessionId, original.conversationId!), true,
+      'A terminal reason or unrelated continuation receipt cannot release history');
+    core.database.raw.prepare('UPDATE events SET payload_json=? WHERE sequence=?').run(JSON.stringify({ receiptId: 'resume', evidence }), event.sequence);
+    assert.equal(sessions.conversationCleanupBlocker(old.sessionId, original.conversationId!), false);
+    const before = core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(old.sessionId);
+    const successor = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    const { page, binding } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<textarea>Human draft</textarea>' }));
+    await page.goto('https://chatgpt.com/c/' + original.conversationId);
+    core.pageRegistry.bindPage(binding.pageKey, { sessionId: old.sessionId, generation: 2, conversationId: original.conversationId! });
+    const deletion = { sessionId: old.sessionId, generation: 2, conversationId: original.conversationId, outputsRetrieved: true };
+    await assert.rejects(rpc('session.delete', { ...deletion, requestId: 'draft' }), /Preserve the page draft/);
+    assert.equal(await page.locator('textarea').inputValue(), 'Human draft');
+    await page.setContent('<button data-testid="stop-button">Stop</button>');
+    await assert.rejects(rpc('session.delete', { ...deletion, requestId: 'generating' }), /Preserve the page draft or active generation/);
+    assert.equal(deletes, 0);
+    await page.setContent('<textarea></textarea><main>Collected result</main>');
+    const result = await rpc<{ pageCleanup: { closedPages: number }; providerDeletion: { outcome: string } }>('session.delete', { ...deletion, requestId: 'idle' });
+    assert.equal(result.pageCleanup.closedPages, 1);
+    assert.equal(page.isClosed(), true);
+    assert.equal(deletes, 1);
+    await rpc('session.delete', { ...deletion, requestId: 'idle' });
+    assert.equal(deletes, 1, 'Receipt replay does not repeat provider deletion');
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(old.sessionId), before);
+    assert.equal(core.teamDirectory.getCurrentSession(team.teamId, 'main').sessionId, successor.sessionId);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('displaced timeout cleanup accepts an earlier officially reconciled manual followup without assigning its answer', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-followup-cleanup-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
