@@ -747,18 +747,24 @@ export class SessionUiService {
 
   /** Caller holds the exact current request actor and page mutation lock. */
   async hostspanPermission(session: SessionSnapshot, input: HostSpanPermissionInput) {
-    if (session.provider !== 'chatgpt' || session.terminal || session.submissionState !== 'submitted' ||
-        !session.submittedUserMessageId || !session.conversationId) throw new SessionPlaneDomainError(
+    if (session.provider !== 'chatgpt' || session.terminal ||
+        (session.submissionState !== 'submitted' && session.submissionState !== 'submission_unknown') ||
+        !session.conversationId) throw new SessionPlaneDomainError(
       'provider.permission-unverified', 'Recover the original ACK before controlling its tool permission');
     try {
       const page = await this.#interactionPage(session);
       await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
       const messages = (await readChatGptMessages(page)).filter(message => message.role === 'user');
-      if (messages.at(-1)?.messageId !== session.submittedUserMessageId) throw new SessionPlaneDomainError(
+      // A visible exact grant belongs to this owned conversation independently of
+      // an uncertain outgoing message. Never turn controlling that grant into ACK.
+      const anchor = session.submittedUserMessageId ??
+        (session.submissionState === 'submission_unknown' ? messages.at(-1)?.messageId : null);
+      if (!anchor || messages.at(-1)?.messageId !== anchor) throw new SessionPlaneDomainError(
         'provider.permission-unverified', 'The original user anchor must be the current turn');
-      const result = await controlHostSpanPermission(page, input);
+      const result = await controlHostSpanPermission(page, input, anchor);
       this.#requirePage(session);
-      return result;
+      return { ...result, requestAcknowledgementVerified: session.submissionState === 'submitted' &&
+        session.submittedUserMessageId !== null };
     } catch (error) { throw typedUiError(error); }
   }
 

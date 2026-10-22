@@ -21,17 +21,19 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     const session = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
     const { page, binding } = await core.browserOwner!.createPage();
     await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<main>
+      <button aria-expanded="false" onclick="throw Error('Old work must stay closed')">작업 중입니다</button>
       <div data-message-author-role="user" data-message-id="user-message-1">Fixture question</div>
+      <button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#work').hidden=false">53초 동안 작업함</button>
       <span id="elapsed">1 hour 14 seconds working</span>
       <textarea id="prompt-textarea">Keep my draft</textarea><button data-testid="stop-button">Stop generating</button>
-      <section id="permission"><div role="alert">hostspan-desktop Process Start
+      <div id="work" hidden><section id="permission"><div role="alert">hostspan-desktop Process Start
         <button aria-expanded="false" onclick="document.querySelector('#details').hidden=false">View details</button></div>
         <button id="allow" onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove()"><span>한 번만 허용</span><kbd>⏎</kbd></button>
           <button onclick="throw Error('Must not click')">Always allow</button>
       </section>
       <section role="dialog" id="details" hidden>hostspan-desktop Process Start Command: original work
         <button aria-label="Close dialog" onclick="document.querySelector('#details').hidden=true">Close dialog</button>
-      </section><div role="alert">another-app Process Start<button>Allow</button></div>
+      </section></div><div role="alert">another-app Process Start<button>Allow</button></div>
     </main>` }));
     await page.goto(`https://chatgpt.com/c/conversation-${session.sessionId}`);
     const open = fake.openSubmission.bind(fake);
@@ -123,6 +125,25 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     assert.equal(patchAllowed.isError, false, JSON.stringify(patchAllowed));
     assert.equal((patchAllowed.structuredContent.permission as { permissionStillVisible: boolean }).permissionStillVisible, false);
     assert.equal(await page.evaluate(() => (window as unknown as { patchGrants: number }).patchGrants), 1);
+    // An uncertain later Continue must not make an existing conversation grant
+    // unreadable, nor may granting it fabricate an ACK for that Continue.
+    core.database.raw.prepare("UPDATE generations SET submission_state='submission_unknown', submitted_user_message_id=NULL, submitted_user_turn_id=NULL WHERE session_id=?").run(session.sessionId);
+    await page.evaluate(() => {
+      document.querySelector('[data-message-author-role="user"]')!.outerHTML =
+        '<div data-chatgpt-search-message-ids="user-message-1"><div data-user-message-bubble>Fixture question</div></div>';
+      document.querySelector('main')!.insertAdjacentHTML('beforeend',
+        `<button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#pending-work').hidden=false">작업 중입니다</button>
+        <section id="pending-work" hidden><div role="alert">hostspan-desktop Process Cancel</div>
+        <button onclick="document.querySelector('#pending-work').remove()">Allow once</button></section>`);
+    });
+    const unknown = await decide('inspect-unknown-grant', { action: 'inspect', toolName: 'Process Cancel' });
+    assert.equal(unknown.isError, false, JSON.stringify(unknown));
+    const unknownPermission = unknown.structuredContent.permission as { evidenceHash: string; requestAcknowledgementVerified: boolean };
+    assert.equal(unknownPermission.requestAcknowledgementVerified, false);
+    const unknownAllowed = await decide('allow-unknown-grant', { action: 'allow', toolName: 'Process Cancel', evidenceHash: unknownPermission.evidenceHash });
+    assert.equal(unknownAllowed.isError, false, JSON.stringify(unknownAllowed));
+    assert.equal(core.teamDirectory.getSession(session.sessionId).submissionState, 'submission_unknown');
+    assert.equal(core.teamDirectory.getSession(session.sessionId).submittedUserMessageId, null);
     assert.equal(fake.submitCount, 1);
     assert.equal(fake.stopCount, 0);
     assert.equal(core.teamDirectory.getSession(session.sessionId).generation, 1);
