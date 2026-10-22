@@ -533,7 +533,8 @@ test('an interrupted continuation attempts existing recovery instead of assuming
 });
 
 
-test('managed disconnected retry without answer or tool progress returns human action without sending again', async t => {
+test('managed retry without answer or tool progress returns human action without sending again', async t => {
+  for (const previousEvidence of [{ disconnectedRecovery: true }, { userConfirmedInterruption: { evidenceRef: 'Approved managed idle review' } }]) {
   const f = await fixture();
   try {
     await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
@@ -544,14 +545,14 @@ test('managed disconnected retry without answer or tool progress returns human a
       .run(f.sent.requestRef, next.requestRef);
     f.core.receipts.execute({ clientId: `team:${f.team.teamId}`,
       requestId: `managed-continuation:${f.sent.requestRef}`, method: 'session.continuation.prepare', payload: {},
-      operation: () => ({ evidence: { disconnectedRecovery: true } }) });
+      operation: () => ({ evidence: previousEvidence }) });
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() + 31 * 60_000 });
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
-    let progress = false;
+    let progress = false, activityReason = 'provider-stream-disconnected';
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
       snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
       evidence: { submissionVerification: { anchorPresent: true, laterUserFound: false,
-        activity: 'unknown', activityReason: 'provider-stream-disconnected', messageTimeout: false,
+        activity: 'unknown', activityReason, messageTimeout: false,
         responseCandidate: null, turnBoundary: [{ role: 'user', text: '계속' },
           { role: 'assistant', text: progress ? 'New tool result received' : '' }] } }, requested: {},
     })) as any);
@@ -572,9 +573,11 @@ test('managed disconnected retry without answer or tool progress returns human a
     assert.equal(result.recovery.userActionRequired, true);
     assert.equal(result.recovery.reason, 'provider.recovery-stalled');
     assert.match(result.recovery.url, /chatgpt.com\/c\//);
+    activityReason = 'unverified-stop-control';
     assert.equal((await read())[0].recovery.reason, 'provider.recovery-stalled', 'Reconnecting the wait does not restart the loop');
     assert.equal(reviews, 0);
     progress = true;
+    activityReason = 'provider-stream-disconnected';
     const [progressing] = await read();
     assert.equal(reviews, 1, 'Observed answer/tool activity is not misclassified as repeated empty recovery');
     assert.equal(progressing.recovery.reason, 'provider.failure-unverified');
@@ -582,6 +585,7 @@ test('managed disconnected retry without answer or tool progress returns human a
     assert.equal(focus.mock.callCount(), 0);
     assert.equal(f.fake.submitCount, 2, 'Only the original and its existing Continue were submitted');
   } finally { t.mock.timers.reset(); t.mock.restoreAll(); await f.close(); }
+  }
 });
 
 
