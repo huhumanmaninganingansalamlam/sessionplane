@@ -49,6 +49,7 @@ export interface BrowserStatusSource {
   readonly browserPid: number | null;
   readonly debuggingPort: number | null;
   readonly lastError: string | null;
+  readonly teamTabGroups?: Readonly<Record<string, unknown>>;
 }
 
 interface BrowserCandidate {
@@ -279,6 +280,7 @@ export function summarizeBrowserHealth(
     browserPid: status.browserPid,
     debuggingPort: status.debuggingPort,
     lastError: status.lastError,
+    ...(status.teamTabGroups === undefined ? {} : { teamTabGroups: status.teamTabGroups }),
     pageCount: openBindings.length,
     conflictCount: openBindings.filter((binding) => binding.state === 'conflict').length,
     identityLostCount: openBindings.filter((binding) => binding.state === 'identity_lost').length,
