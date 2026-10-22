@@ -485,7 +485,7 @@ test('new approved wait observes a disconnected exact ACK immediately despite st
       waitMs: 600000, continuationApproved: true })).structuredContent;
     const result = (outcome.results as any[])[0];
     assert.equal(reviews, 1, 'Stale/absent server evidence cannot suppress the provider recovery check');
-    assert.equal(result.recovery.userActionRequired, false);
+    assert.equal(result.recovery.userActionRequired, true);
     assert.equal(result.recovery.reason, 'provider.failure-unverified');
     assert.match(result.recovery.url, /chatgpt.com\/c\//);
     assert.equal(result.terminal, false);
@@ -527,13 +527,13 @@ test('an interrupted continuation attempts existing recovery instead of assuming
     assert.equal(reviews, 1);
     assert.equal(focused, 0);
     assert.equal((outcome.results as any[])[0].recovery.reason, 'provider.failure-unverified');
-    assert.equal((outcome.results as any[])[0].recovery.userActionRequired, false);
+    assert.equal((outcome.results as any[])[0].recovery.userActionRequired, true);
     assert.equal(f.fake.submitCount, 2, 'Only the two preexisting submissions exist');
   } finally { t.mock.timers.reset(); t.mock.restoreAll(); await f.close(); }
 });
 
 
-test('managed retry without answer or tool progress returns human action without sending again', async t => {
+test('managed retry uses current recovery eligibility instead of a previous-Continue count', async t => {
   for (const previousEvidence of [{ disconnectedRecovery: true }, { userConfirmedInterruption: { evidenceRef: 'Approved managed idle review' } }]) {
   const f = await fixture();
   try {
@@ -548,13 +548,13 @@ test('managed retry without answer or tool progress returns human action without
       operation: () => ({ evidence: previousEvidence }) });
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() + 31 * 60_000 });
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
-    let progress = false, activityReason = 'provider-stream-disconnected';
+    const activityReason = 'provider-stream-disconnected';
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
       snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
       evidence: { submissionVerification: { anchorPresent: true, laterUserFound: false,
         activity: 'unknown', activityReason, messageTimeout: false,
         responseCandidate: null, turnBoundary: [{ role: 'user', text: '계속' },
-          { role: 'assistant', text: progress ? 'New tool result received' : '' }] } }, requested: {},
+          { role: 'assistant', text: '' }] } }, requested: {},
     })) as any);
     t.mock.method(EventRepository.prototype, 'latestServerObservation', () => null);
     let reviews = 0;
@@ -571,16 +571,11 @@ test('managed retry without answer or tool progress returns human action without
     assert.equal(result.submittedUserMessageId, next.submittedUserMessageId);
     assert.equal(result.terminal, false);
     assert.equal(result.recovery.userActionRequired, true);
-    assert.equal(result.recovery.reason, 'provider.recovery-stalled');
-    assert.match(result.recovery.url, /chatgpt.com\/c\//);
-    activityReason = 'unverified-stop-control';
-    assert.equal((await read())[0].recovery.reason, 'provider.recovery-stalled', 'Reconnecting the wait does not restart the loop');
-    assert.equal(reviews, 0);
-    progress = true;
-    activityReason = 'provider-stream-disconnected';
-    const [progressing] = await read();
-    assert.equal(reviews, 1, 'Observed answer/tool activity is not misclassified as repeated empty recovery');
-    assert.equal(progressing.recovery.reason, 'provider.failure-unverified');
+    assert.equal(result.recovery.reason, 'provider.failure-unverified');
+    assert.equal(reviews, 1, 'A previous Continue does not skip the currently eligible recovery attempt');
+    t.mock.timers.tick(31 * 60_000);
+    assert.equal((await read())[0].recovery.reason, 'provider.failure-unverified');
+    assert.equal(reviews, 2, 'The next broad review uses current controls, not a fixed retry count');
     assert.equal(refresh.mock.callCount(), 0);
     assert.equal(focus.mock.callCount(), 0);
     assert.equal(f.fake.submitCount, 2, 'Only the original and its existing Continue were submitted');
@@ -588,57 +583,6 @@ test('managed retry without answer or tool progress returns human action without
   }
 });
 
-
-test('unchanged completed tool observations do not postpone the managed human handoff', async t => {
-  const f = await fixture();
-  try {
-    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
-      { sessionState: 'complete', providerState: 'complete', answerText: 'Checkpoint', responseMessageId: 'old' });
-    const next = (await f.invoke('send', { teamId: f.team.teamId, roleRef: `${f.sent.sessionId}:1`,
-      requestId: `continue:managed-continuation:${f.sent.requestRef}`, prompt: '계속' })).structuredContent;
-    f.core.database.raw.prepare("UPDATE outbox SET payload_json=json_set(payload_json, '$.continuationOf', ?) WHERE outbox_id=?")
-      .run(f.sent.requestRef, next.requestRef);
-    f.core.receipts.execute({ clientId: `team:${f.team.teamId}`,
-      requestId: `managed-continuation:${f.sent.requestRef}`, method: 'session.continuation.prepare', payload: {},
-      operation: () => ({ evidence: { userConfirmedInterruption: { evidenceRef: 'Approved idle review' } } }) });
-    const started = Date.now();
-    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: started + 31 * 60_000 });
-    t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
-    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
-      snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
-      evidence: { submissionVerification: { anchorPresent: true, laterUserFound: false,
-        activity: 'none', messageTimeout: false, responseCandidate: null,
-        turnBoundary: [{ role: 'user', text: '계속' }] } }, requested: {},
-    })) as any);
-    const session = f.core.teamDirectory.getSession(f.sent.sessionId as string);
-    const events = new EventRepository(f.core.database.raw);
-    const observeTool = (id: string, at: number) => events.append({ teamId: f.team.teamId as string,
-      sessionId: session.sessionId, generation: 2, eventType: 'generation.backend-pending',
-      createdAt: new Date(at).toISOString(), payload: {
-        recoveryIdentity: { conversationId: session.conversationId, pageKey: session.pageKey,
-          submittedUserMessageId: session.submittedUserMessageId, submittedUserTurnId: session.submittedUserTurnId },
-        serverObservation: { messages: [{ messageId: id, role: 'tool', status: 'finished_successfully',
-          endTurn: true, textLength: 0 }] },
-      } });
-    observeTool('completed-tool', started);
-    observeTool('completed-tool', Date.now());
-    assert.equal(events.latestServerObservation(session.sessionId, 2)?.responseChangedAt, new Date(started).toISOString());
-    let reviews = 0;
-    t.mock.method(SessionUiService.prototype, 'prepareContinuation', async () => {
-      reviews++;
-      throw new SessionPlaneDomainError('provider.failure-unverified', 'No further submission');
-    });
-    const read = async () => ((await f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef],
-      waitMs: 600000, continuationApproved: true })).structuredContent.results as any[])[0];
-    assert.equal((await read()).recovery.reason, 'provider.recovery-stalled');
-    assert.equal(reviews, 0, 'A freshly fetched old completed tool is not new progress');
-    observeTool('new-result', Date.now());
-    assert.equal(events.latestServerObservation(session.sessionId, 2)?.responseChangedAt, new Date().toISOString());
-    await read();
-    assert.equal(reviews, 1, 'A genuinely changed exact response retains the normal recovery path');
-    assert.equal(f.fake.submitCount, 2);
-  } finally { t.mock.timers.reset(); t.mock.restoreAll(); await f.close(); }
-});
 
 test('successor collection retains explicit continuation approval without inventing it', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-approved-collection-'));

@@ -478,7 +478,7 @@ export class TeamWorkflow {
             }
             const timeoutReady = (result.submissionVerification as { nextAction?: string } | undefined)?.nextAction === 'reconcile_failure';
             const serverReview = (result.submissionVerification as { serverObservation?: {
-              observedAt?: string; responseChangedAt?: string; currentIdentityMatches?: boolean;
+              observedAt?: string; currentIdentityMatches?: boolean;
               serverObservation?: { messages?: { role: string; textLength: number; status?: string }[] } } } | undefined)?.serverObservation;
             const freshServer = serverReview?.currentIdentityMatches === true && !!serverReview.observedAt &&
               Date.now() - Date.parse(serverReview.observedAt) <= 180_000;
@@ -495,36 +495,6 @@ export class TeamWorkflow {
               dom.turnBoundary.every(turn => turn.role === 'user');
             const interrupted = idleWithoutResponse || timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
               dom.activity !== 'strong' && (dom.anchorPresent === true || missingContinuation) && dom.laterUserFound === false);
-            const previousRef = (JSON.parse(request.payloadJson) as { continuationOf?: string }).continuationOf;
-            const previous = previousRef ? this.#outbox.getById(previousRef) : null;
-            const previousRecovery = previous && previous.clientId === request.clientId &&
-              previous.sessionId === request.sessionId && previous.generation === request.generation - 1
-              ? this.services.receipts.get(request.clientId, `managed-continuation:${previous.outboxId}`) : null;
-            const previousEvidence = previousRecovery?.method === 'session.continuation.prepare'
-              ? JSON.parse(previousRecovery.resultJson).evidence : null;
-            const changedServerResponse = !!serverReview?.responseChangedAt &&
-              Date.parse(serverReview.responseChangedAt) >= Date.parse(request.createdAt) &&
-              Date.now() - Date.parse(serverReview.responseChangedAt) < 30 * 60_000;
-            const observedProgress = dom?.activity === 'strong' || dom?.turnBoundary?.some(turn =>
-              (turn.role === 'assistant' && !!turn.text?.trim())) ||
-              (serverReview?.currentIdentityMatches && serverReview.serverObservation?.messages?.some(message =>
-                (changedServerResponse && (message.role === 'tool' || (message.role === 'assistant' && message.textLength > 0))) ||
-                (freshServer && message.status === 'in_progress'))) ||
-              Date.parse(String((result.activity as { latestStoredArtifactChangeAt?: string } | undefined)?.latestStoredArtifactChangeAt)) >= Date.parse(request.createdAt);
-            // A durable managed retry that still has the unresolved response and
-            // no observed answer/tool progress needs a human, not another send.
-            if (due && result.submissionState === 'submitted' && result.terminal !== true &&
-                dom?.anchorPresent === true && dom.laterUserFound === false &&
-                (previousEvidence?.disconnectedRecovery === true || previousEvidence?.userConfirmedInterruption) && !observedProgress) {
-              this.#continuationReviews.delete(request.outboxId);
-              result = { ...result, status: 'recovery_required', recovery: {
-                state: 'decision_required', decisionRequired: true, userActionRequired: true,
-                reason: 'provider.recovery-stalled',
-                message: 'The managed Continue was submitted, but the response remains unresolved without observed answer or tool progress. Check this exact conversation and refresh it manually; automatic continuation is paused. The request and any uncertain execution are preserved.',
-                url: `https://chatgpt.com/c/${result.conversationId}`,
-              } };
-              break;
-            }
             if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
                 (interrupted || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
                 result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
@@ -546,7 +516,7 @@ export class TeamWorkflow {
                 // Preserve uncertain work, but never swallow an inability to
                 // recover an observed interruption. The caller must see it now.
                 if (interrupted) result = { ...result, status: 'recovery_required', recovery: {
-                  state: 'decision_required', decisionRequired: true, userActionRequired: !['provider.failure-unverified', 'session.busy'].includes(error.errorCode),
+                  state: 'decision_required', decisionRequired: true, userActionRequired: error.errorCode !== 'session.busy',
                   reason: error.errorCode, message: error.message,
                   url: `https://chatgpt.com/c/${result.conversationId}`,
                 } };
