@@ -49,7 +49,7 @@ test('approved continue retries exact stream chrome once without resubmitting or
     const before = f.core.database.raw.prepare('SELECT * FROM outbox').all();
     for (const extra of ['<button aria-label="중지">Stop</button>', '<div role="dialog">Permission required</div>',
       '<div data-message-author-role="user" data-message-id="later">A later request</div>',
-      '<div data-message-author-role="assistant" data-message-id="answer"><div class="markdown">Partial answer</div></div>']) {
+      '<div data-message-author-role="assistant" data-message-id="answer" data-message-status="complete"><div class="markdown">Completed answer</div></div>']) {
       await f.page.setContent(f.markup.replace('</main>', extra + '</main>'));
       assert.equal((await f.decide()).isError, true);
       assert.equal(await f.page.evaluate(() => (window as any).clicks ?? 0), 0);
@@ -102,7 +102,8 @@ test('UNKNOWN Continue retries existing conversation chrome while preserving dra
     f.core.database.raw.prepare("UPDATE generations SET submission_state='submission_unknown', submitted_user_message_id=NULL, submitted_user_turn_id=NULL WHERE session_id=?").run(f.snapshot.sessionId);
     const markup = f.markup.replace('<aside', `<div data-message-author-role="user" data-message-id="continue-one">계속</div>
       <div data-chatgpt-search-message-ids="continue-two"><div data-user-message-bubble>계속</div></div>
-      <div data-chatgpt-search-message-ids="continue-three"><div data-user-message-bubble>계속</div></div><aside`)
+      <div data-chatgpt-search-message-ids="continue-three"><div data-user-message-bubble>계속</div></div>
+      <div data-message-author-role="assistant" data-message-id="partial-answer">Existing partial work</div><aside`)
       .replace('<textarea>', '<button aria-label="GPT-6 Thinking">Model</button><textarea id="prompt-textarea">');
     await f.page.setContent(markup);
     await f.page.locator('textarea').fill('Unrelated human draft');

@@ -285,7 +285,7 @@ export class SessionUiService {
       const activity = await observeChatGptActivity(page, dom);
       // Exact enabled Retry chrome already rejects live Stop/thinking controls.
       // A weak generic label (including the Thinking model menu) is not a live stream.
-      if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate !== null ||
+      if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate?.terminalMarker || dom.candidate?.streamingMarker ||
           activity.strength === 'strong' || activity.strength === 'unknown' ||
           surface.reason !== 'exact-stream-retry') throw new SessionPlaneDomainError('provider.preparation-required',
         `Preserve the original turn before stream Retry: ${surface.reason}`, {
