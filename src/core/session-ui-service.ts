@@ -207,8 +207,17 @@ export class SessionUiService {
                 })(),
               }),
               ...(session.submissionState !== 'submission_unknown' || session.conversationId === null ? {} : {
-                submissionCandidates: (await inspectChatGptSubmissionCandidates(this.#requirePage(session), session.conversationId))
-                  .filter((candidate) => !submittedMessageIds.has(candidate.messageId)),
+                submissionCandidates: await Promise.all((await inspectChatGptSubmissionCandidates(this.#requirePage(session), session.conversationId))
+                  .filter((candidate) => !submittedMessageIds.has(candidate.messageId)).map(async message => {
+                    const dom = await observeChatGptDom(this.#requirePage(session), {
+                      submittedUserMessageId: message.messageId, submittedUserTurnId: null,
+                    });
+                    return { ...message, responseCandidate: dom.candidate === null ? null : {
+                      ...dom.candidate, submissionVerified: false as const,
+                      scope: 'mounted-dom-unverified-submission' as const,
+                      observedAt: dom.messageDiagnostics.observedAt,
+                    } };
+                  })),
               }),
               };
             })(),
@@ -257,16 +266,22 @@ export class SessionUiService {
 
   async retryStream(input: PreparationOwner & { decisionId: string }, receipts: ReceiptRepository, budgets: ConversationLoadRecoveryRepository) {
     const read = await this.#submissions.inspectSubmission(input, async session => {
-      if (session.terminal || session.submissionState !== 'submitted' || !session.promptSubmitted ||
-          !session.submittedUserMessageId || !session.conversationId || session.answerText !== null || session.responseMessageId !== null)
+      const unknown = session.submissionState === 'submission_unknown';
+      if (session.terminal || (session.submissionState !== 'submitted' && !unknown) || !session.promptSubmitted ||
+          (!unknown && !session.submittedUserMessageId) || !session.conversationId || session.answerText !== null || session.responseMessageId !== null)
         return null;
       if (!this.#registry.listBindings({ includeClosed: false }).some(binding => binding.pageKey === session.pageKey)) return null;
       const page = this.#requirePage(session);
+      // Retry acts on the provider's existing conversation turn, not the uncertain
+      // outgoing Continue. This observed identity must never become its ACK.
+      const anchor = session.submittedUserMessageId ?? (unknown
+        ? (await readChatGptMessages(page)).filter(message => message.role === 'user').at(-1)?.messageId : null);
+      if (!anchor) return null;
       const target = { origin: this.#chatgptOrigin, conversationId: session.conversationId,
-        anchor: session.submittedUserMessageId, click: false };
+        anchor, click: false, preserveContinuationDraft: unknown };
       const surface = await page.evaluate(streamRetrySurface, target);
       if (!surface.present) return null;
-      const dom = await observeChatGptDom(page, session);
+      const dom = await observeChatGptDom(page, { submittedUserMessageId: anchor, submittedUserTurnId: null });
       const activity = await observeChatGptActivity(page, dom);
       if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate !== null || activity.strength !== 'none' ||
           surface.reason !== 'exact-stream-retry') throw new SessionPlaneDomainError('provider.preparation-required',
@@ -286,7 +301,9 @@ export class SessionUiService {
       receipts.record({ ...receipt, status: 'complete', result: { ...retried, anchor: target.anchor } });
       if (!retried.clicked) throw new SessionPlaneDomainError('provider.preparation-required',
         `Stream Retry was not dispatched: ${retried.reason}`);
-      return { ...retried, submittedUserMessageId: target.anchor, generation: session.generation };
+      return { ...retried, observedUserMessageId: target.anchor,
+        ...(unknown ? {} : { submittedUserMessageId: target.anchor }),
+        requestAcknowledgementVerified: !unknown, generation: session.generation };
     });
     return read.evidence ?? null;
   }

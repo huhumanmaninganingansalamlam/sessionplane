@@ -16,32 +16,39 @@ const once = /^(?:허용|이번만 허용|한 번 허용|한 번만 허용|Allow
 
 const always = /^(?:항상 허용|Always allow)(?:\s*⏎)?$/i;
 
+/** Reveal only current provider work chrome; never grants permission or submits. */
+export async function revealCurrentWorkPermission(page: Page, submittedUserMessageId: string) {
+  const users = (await readChatGptMessages(page, true)).filter(message => message.role === 'user');
+  const anchor = users.filter(message => message.messageId === submittedUserMessageId);
+  if (anchor.length !== 1 || users.at(-1) !== anchor[0] || anchor[0]!.elementIndex === undefined) {
+    return false;
+  }
+  // Permission cards can be inside the current turn's collapsed work transcript,
+  // including a completed-work disclosure. Opening it is not a permission grant.
+  let opened = false;
+  const work = page.getByRole('button', { name: /^(?:작업 중입니다|[\d\s시간분초.]+ 동안 작업함|Working(?:…|\.\.\.)?|Worked for .+)$/i });
+  for (const button of await work.all()) {
+    const visibleGrant = page.locator('[role="alert"], [role="alertdialog"], [role="dialog"]')
+      .filter({ hasText: /hostspan(?:-[a-z0-9_-]+)?/i }).filter({ visible: true });
+    if (await visibleGrant.count() > 0) break;
+    if (!await button.isVisible() || (await button.getAttribute('aria-expanded') !== 'false' &&
+        await button.getAttribute('data-state') !== 'closed')) continue;
+    const anchorElement = await page.locator(CHATGPT_SELECTORS.messages).nth(anchor[0]!.elementIndex!).elementHandle();
+    if (!anchorElement) throw unavailable('The original user anchor is no longer mounted');
+    const current = await button.evaluate((element, user) =>
+      !!(user.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+      !element.closest('nav, aside, [role="navigation"], .markdown, [data-message-author-role="user"], [data-user-message-bubble]'), anchorElement).finally(() => anchorElement.dispose());
+    if (current) { await button.click({ timeout: 5_000 }); opened = true; }
+  }
+  return opened;
+}
+
 /** Only an explicitly selected HostSpan tool permission, never a generic UI click. */
 export async function controlHostSpanPermission(page: Page, input: HostSpanPermissionInput, submittedUserMessageId: string) {
   if (!/^hostspan(?:-[a-z0-9_-]+)?$/i.test(input.appName)) throw unavailable('Only HostSpan permissions are supported');
   const allowMode = input.allowMode ?? 'once';
   const allow = allowMode === 'always' ? always : once;
-  const users = (await readChatGptMessages(page, true)).filter(message => message.role === 'user');
-  const anchor = users.filter(message => message.messageId === submittedUserMessageId);
-  if (anchor.length !== 1 || users.at(-1) !== anchor[0] || anchor[0]!.elementIndex === undefined) {
-    throw unavailable('The original user anchor must be the current turn');
-  }
-  // Permission cards can be inside the current turn's collapsed work transcript,
-  // including a completed-work disclosure. Opening it is not a permission grant.
-  const work = page.getByRole('button', { name: /^(?:작업 중입니다|[\d\s시간분초.]+ 동안 작업함|Working(?:…|\.\.\.)?|Worked for .+)$/i });
-  for (const button of await work.all()) {
-    const visibleGrant = page.locator('[role="alert"], [role="alertdialog"], [role="dialog"]')
-      .filter({ hasText: input.appName }).filter({ hasText: input.toolName }).filter({ visible: true });
-    if (await visibleGrant.count() > 0) break;
-    if (!await button.isVisible() || await button.getAttribute('aria-expanded') === 'true' ||
-        await button.getAttribute('data-state') === 'open') continue;
-    const anchorElement = await page.locator(CHATGPT_SELECTORS.messages).nth(anchor[0]!.elementIndex!).elementHandle();
-    if (!anchorElement) throw unavailable('The original user anchor is no longer mounted');
-    const current = await button.evaluate((element, user) =>
-      !!(user.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) &&
-      !element.closest('nav, aside, [role="navigation"]'), anchorElement).finally(() => anchorElement.dispose());
-    if (current) await button.click({ timeout: 5_000 });
-  }
+  await revealCurrentWorkPermission(page, submittedUserMessageId);
   const app = new RegExp(`(^|[^\\w-])${input.appName}($|[^\\w-])`, 'i');
   const scopes = page.locator('[role="dialog"], [role="alertdialog"], [role="alert"]');
   const matching = async () => {

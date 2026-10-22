@@ -1,5 +1,5 @@
 /** Exact provider chrome only; inspect and click share one renderer task. */
-export function streamRetrySurface(input: { origin: string; conversationId: string; anchor: string; click: boolean }) {
+export function streamRetrySurface(input: { origin: string; conversationId: string; anchor: string; click: boolean; preserveContinuationDraft?: boolean }) {
   const result = (present: boolean, reason: string, clicked = false) => ({ present, reason, clicked });
   if (location.origin !== input.origin || location.pathname !== `/c/${input.conversationId}`)
     return result(false, 'binding-url-changed');
@@ -22,7 +22,12 @@ export function streamRetrySurface(input: { origin: string; conversationId: stri
     (validRenderedId ? renderedId : searchIds.length === 1 ? searchIds[0] : null);
   if (id !== input.anchor) return result(true, 'original-anchor-not-latest');
   const edits = [...document.querySelectorAll('textarea,input:not([type=hidden]),[contenteditable=true],[role=textbox]')].filter(visible);
-  if (edits.some(e => ((e as HTMLInputElement).value ?? (e as HTMLElement).innerText ?? '').trim()))
+  if (edits.some(e => {
+    const text = ((e as HTMLInputElement).value ?? (e as HTMLElement).innerText ?? '').trim();
+    return text && !(input.preserveContinuationDraft && text === '계속' &&
+      e.matches('#prompt-textarea, [data-testid="prompt-textarea"], main [role="textbox"][contenteditable="true"]') &&
+      !e.closest(`${messages}, article, nav, aside`));
+  }))
     return result(true, 'preserve-draft');
   if ([...document.querySelectorAll('[data-testid="stop-button"],[data-is-streaming=true],[data-testid*=thinking],[data-testid*=reasoning]')].some(visible) ||
       [...document.querySelectorAll('button')].some(e => visible(e) && /^(중지|생성 중지|Stop generating|Stop streaming)$/i.test(e.getAttribute('aria-label') ?? e.innerText.trim())))

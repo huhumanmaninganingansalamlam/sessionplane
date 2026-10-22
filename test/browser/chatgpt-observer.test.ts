@@ -15,6 +15,43 @@ import { inspectChatGptSubmissionCandidates, recoverChatGptAcknowledgement } fro
 
 const CONVERSATION_ID = 'conversation-observer-123456';
 
+test('actual observation reveals current collapsed HostSpan work and reports its alert without granting', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-work-permission-observer-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  let held = true;
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main></main>' }));
+    await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
+    const session = sessionSnapshot(binding.pageKey);
+    const adapter = new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry, loginUrl: 'https://chatgpt.com/',
+      acknowledgementTimeoutMs: 500, canRestoreLatestPosition: () => !held });
+    const source = await adapter.openObservation({ session, generation: 1 });
+    try {
+      for (const label of ['작업 중입니다', '53초 동안 작업함']) {
+        held = true;
+        await page.setContent(`<main><button aria-expanded="false" onclick="throw Error('Past work')">작업 중입니다</button>
+          <div data-chatgpt-search-message-ids="user-message-1"><div data-user-message-bubble>Original question</div></div>
+          <button id="work" aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');window.opens=(window.opens||0)+1;document.querySelector('#grant').hidden=false">${label}</button>
+          <section id="grant" hidden><div role="alert">hostspan-desktop ChatGPT가 hostspan-desktop의 File Patch 도구를 호출합니다. 자세히 보기</div>
+          <button onclick="window.grants=(window.grants||0)+1">한 번만 허용</button></section><textarea>Original draft</textarea></main>`);
+        assert.notEqual((await source.observe()).reason, 'provider-actionable-alert', 'Human hold must preserve collapsed display');
+        assert.equal(await page.locator('#work').getAttribute('aria-expanded'), 'false');
+        held = false;
+        assert.equal((await source.observe()).reason, 'provider-actionable-alert');
+        assert.equal((await source.observe()).reason, 'provider-actionable-alert');
+        assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0);
+        assert.equal(await page.locator('textarea').inputValue(), 'Original draft');
+        assert.equal(session.submittedUserMessageId, 'user-message-1');
+      }
+      assert.equal(await page.evaluate(() => (window as any).opens), 2, 'Each current disclosure opens once; no old work toggled');
+    } finally { source.close(); }
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('Areum disconnected status prevents quiet completion without Stop and preserves the draft', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-disconnected-answer-'));
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: new PageRegistry(), headless: true });

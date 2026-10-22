@@ -95,3 +95,44 @@ test('continuation-approved managed wait uses stream Retry and collects the same
     assert.equal(await f.page.evaluate(() => (window as any).clicks), 1);
   } finally { await f.close(); }
 });
+
+test('UNKNOWN Continue retries existing conversation chrome while preserving draft and ambiguous ACKs', async () => {
+  const f = await fixture();
+  try {
+    f.core.database.raw.prepare("UPDATE generations SET submission_state='submission_unknown', submitted_user_message_id=NULL, submitted_user_turn_id=NULL WHERE session_id=?").run(f.snapshot.sessionId);
+    const markup = f.markup.replace('<aside', `<div data-message-author-role="user" data-message-id="continue-one">계속</div>
+      <div data-chatgpt-search-message-ids="continue-two"><div data-user-message-bubble>계속</div></div>
+      <div data-chatgpt-search-message-ids="continue-three"><div data-user-message-bubble>계속</div></div><aside`)
+      .replace('<textarea>', '<textarea id="prompt-textarea">');
+    await f.page.setContent(markup);
+    await f.page.locator('textarea').fill('Unrelated human draft');
+    assert.equal((await f.decide()).isError, true);
+    assert.equal(await f.page.locator('textarea').inputValue(), 'Unrelated human draft');
+    await f.page.locator('textarea').fill('계속');
+    await f.page.locator('aside button').evaluate(button => button.addEventListener('click', () => {
+      document.querySelector('aside')!.remove();
+      document.querySelector('main')!.insertAdjacentHTML('beforeend',
+        '<div data-message-author-role="assistant" data-message-id="retry-answer" data-message-status="complete">Existing work resumed</div>');
+    }));
+    const result = await f.decide();
+    assert.equal(result.isError, false, JSON.stringify(result));
+    const retry = result.structuredContent.providerRetry as any;
+    assert.equal(retry.clicked, true);
+    assert.equal(retry.observedUserMessageId, 'continue-three');
+    assert.equal(retry.submittedUserMessageId, undefined);
+    assert.equal(retry.requestAcknowledgementVerified, false);
+    assert.equal(await f.page.locator('textarea').inputValue(), '계속');
+    assert.equal(await f.page.evaluate(() => (window as any).clicks), 1);
+    const observed = await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef });
+    const request = observed.structuredContent.request as any;
+    const candidate = request.evidence.submissionCandidates.find((entry: any) => entry.messageId === 'continue-three');
+    assert.equal(candidate.responseCandidate.answerText, 'Existing work resumed');
+    assert.equal(candidate.responseCandidate.submissionVerified, false);
+    const stored = f.core.teamDirectory.getSession(f.snapshot.sessionId);
+    assert.equal(stored.submissionState, 'submission_unknown');
+    assert.equal(stored.submittedUserMessageId, null);
+    assert.equal(stored.answerText, null);
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(f.core.database.raw.prepare('SELECT count(*) AS n FROM outbox').get()!.n, 1);
+  } finally { await f.close(); }
+});

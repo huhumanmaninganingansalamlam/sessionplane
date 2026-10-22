@@ -34,6 +34,7 @@ import {
 } from './backend-recovery.ts';
 import { observeChatGptDialog } from './dialog-observer.ts';
 import { observeChatGptDom, waitForChatGptDomMutation } from './dom-observer.ts';
+import { revealCurrentWorkPermission } from './hostspan-permission.ts';
 import { ChatGptNetworkObserver } from './network-observer.ts';
 import { readChatGptMessages } from './message-dom.ts';
 import { restoreLatestPosition } from './latest-position-recovery.ts';
@@ -787,6 +788,21 @@ class ChatGptObservationSource implements ProviderObservationSource {
         }),
         observeChatGptDialog(this.#page),
       ]);
+      if (dom.submittedUserFound && !dom.laterUserFound && !dom.actionableAlert && dialog.kind === null &&
+          !this.#request.session.terminal && this.#request.session.submittedUserMessageId &&
+          this.#canRestoreLatestPosition(this.#request)) {
+        const opened = await this.#pageMutex.runExclusive(this.pageKey, async () => {
+          if (this.#closed || !this.#canRestoreLatestPosition(this.#request)) return false;
+          this.#pageRegistry.requireOwnedPage(this.pageKey, {
+            sessionId: this.#request.session.sessionId, generation: this.#request.generation,
+            conversationId: this.#conversationId,
+          });
+          return await revealCurrentWorkPermission(this.#page, this.#request.session.submittedUserMessageId!);
+        });
+        if (opened) [dom, dialog] = await Promise.all([
+          observeChatGptDom(this.#page, this.#request.session), observeChatGptDialog(this.#page),
+        ]);
+      }
       if (!dom.submittedUserFound && dom.conversationSurfaceAvailable && !dom.actionableAlert &&
           dialog.kind === null && !this.#latestPositionAttempted) {
         const restored = await this.#pageMutex.runExclusive(this.pageKey, async () => {
