@@ -1080,12 +1080,18 @@ export class SubmissionService {
     }
   }
 
-  confirmedContinuation(input: { readonly clientId: string; readonly requestId: string }): UserConfirmedInterruption | undefined {
+  continuationContext(input: { readonly clientId: string; readonly requestId: string }) {
     const request = this.#outbox.getByRequest(input.clientId, input.requestId);
     const originalRef = request && parseOutboxPayload(request).continuationOf;
     if (!originalRef) return undefined;
+    const source = this.#outbox.getById(originalRef);
+    const current = request && this.#requireSnapshot(request.sessionId);
+    const original = source && this.#sessions.getGenerationResult(source.sessionId, source.generation);
+    if (!source || !current || !original || source.clientId !== input.clientId || source.sessionId !== current.sessionId ||
+        source.generation !== current.generation - 1 || !['approved-continuation-prepared', 'message-timeout-reconciled'].includes(original.reason ?? '')) return undefined;
     const receipt = new ReceiptRepository(this.#database).get(input.clientId, `continuation-authorization:${originalRef}`);
-    return receipt ? JSON.parse(receipt.resultJson).userConfirmedInterruption : undefined;
+    return { original: { ...current, ...original, generation: source.generation },
+      confirmation: receipt ? JSON.parse(receipt.resultJson).userConfirmedInterruption as UserConfirmedInterruption : undefined };
   }
 
   async prepareContinuation(
@@ -1127,7 +1133,6 @@ export class SubmissionService {
         if (!timeout && !confirmation && (!identity || identity.conversationId !== snapshot.conversationId || identity.pageKey !== snapshot.pageKey ||
             identity.submittedUserMessageId !== snapshot.submittedUserMessageId ||
             identity.submittedUserTurnId !== snapshot.submittedUserTurnId || !recorded ||
-            this.#now().getTime() - Date.parse(String(recorded.observedAt)) > 180_000 ||
             !server || server.nextUserFound || !returnedTool || last?.status !== 'finished_successfully' ||
             last.messageId !== server.currentNodeId || !server.assistantCount ||
             server.messages.some(message => message.status === 'in_progress' ||
@@ -1147,6 +1152,13 @@ export class SubmissionService {
           'Preserved original model/mode/effort evidence is unavailable; do not guess a continuation configuration');
         const model = JSON.parse(configuration.resultJson).model;
         const evidence = await observe(snapshot);
+        // Pacing can age an exact successful tool receipt while the original
+        // page freshly proves an idle interruption. Keep the identity/tool and
+        // active-work checks above; a banner alone cannot authorize a send.
+        if (!timeout && !confirmation && recorded &&
+            this.#now().getTime() - Date.parse(String(recorded.observedAt)) > 180_000 &&
+            evidence.disconnectedRecovery !== true) throw new SessionPlaneDomainError('provider.failure-unverified',
+          'Fresh exact server evidence is required without an idle disconnected original page');
         const result = receipts.execute({ clientId, requestId: decisionId, method, payload, operation: () => {
           const timestamp = this.#now().toISOString();
           if (!timeout && !this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {

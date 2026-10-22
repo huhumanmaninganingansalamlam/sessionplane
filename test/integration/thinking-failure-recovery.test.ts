@@ -46,7 +46,7 @@ class FailedChat extends FakeProviderAdapter {
         if (!choices?.composer) throw new ProviderSubmissionError('provider.preparation-required', 'Select composer');
         await this.page.locator('textarea').fill(request.prompt);
         if (!choices.model || !choices.submit) throw new ProviderSubmissionError('provider.preparation-required', 'Select model and submit');
-        this.afterPrepare?.(request);
+        await this.afterPrepare?.(request);
       },
       submitOnce: async () => {
         await operation.submitOnce(); this.submittedAt.push(Date.now());
@@ -252,7 +252,7 @@ test('closing the recovery owner during child preparation preserves its saved dr
   } finally { await f.close(); }
 });
 
-for (const trailingEmpty of [false, true]) test(`approved interrupted tool continuation${trailingEmpty ? ' after empty finished assistant through managed wait' : ''} preserves original ACK and uses one ordinary successor`, async () => {
+for (const trailingEmpty of [false, true]) test(`approved interrupted tool continuation${trailingEmpty ? ' after empty finished assistant through managed wait' : ''} preserves original ACK and uses one ordinary successor`, async t => {
   const f = await fixture();
   try {
     f.fake.surface = users => users;
@@ -297,7 +297,14 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
       await assert.rejects(f.rpc('decide', input), /draft|active|idle|cleanup/);
       assert.equal(f.core.teamDirectory.getSession(original.sessionId).terminal, false);
     }
-    await f.fake.page.setContent(body + '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div><textarea>계속</textarea><button data-testid="send-button">Send</button></main>');
+    const readServer = EventRepository.prototype.latestServerObservation;
+    t.mock.method(EventRepository.prototype, 'latestServerObservation', function (...args) {
+      const result = readServer.apply(this, args);
+      return result ? { ...result, observedAt: new Date(Date.now() - 20 * 60_000).toISOString() } : result;
+    });
+    await f.fake.page.setContent(body + '<textarea></textarea></main>');
+    await assert.rejects(f.rpc('decide', input), /Fresh exact server evidence/);
+    await f.fake.page.setContent(body + '<div data-message-author-role="assistant" data-message-id="partial">Preserved partial</div><div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div><textarea>계속</textarea><button data-testid="send-button">Send</button></main>');
     f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="continued-answer">Continued answer</div>';
     let prepared;
     if (trailingEmpty) {
@@ -321,7 +328,7 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
   } finally { await f.close(); }
 });
 
-test('managed tool recovery preserves disconnected Stop and escalates inability to continue', async t => {
+test('approved managed wait resumes an exact disconnected tool turn despite stale Stop without human confirmation', async t => {
   const f = await fixture();
   try {
     f.fake.surface = users => users;
@@ -345,18 +352,28 @@ test('managed tool recovery preserves disconnected Stop and escalates inability 
     t.mock.method(SessionUiService.prototype, 'verifyContinuation', async function (...args) {
       try { return await verify.apply(this, args); } finally { checked = true; }
     });
-    let returned = false;
+    const readServer = EventRepository.prototype.latestServerObservation;
+    t.mock.method(EventRepository.prototype, 'latestServerObservation', function (...args) {
+      const result = readServer.apply(this, args);
+      return result ? { ...result, observedAt: new Date(Date.now() - 20 * 60_000).toISOString() } : result;
+    });
+    f.fake.afterPrepare = async request => {
+      if (request.generation === 2) assert.equal(await f.fake.page.locator('[data-testid="stop-button"]').count(), 1);
+    };
+    f.fake.failureCount = 1;
+    f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="continued-final" data-end-turn="true">Recovered tool work</div>';
     const waiting = f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
-      waitMs: 60000, continuationApproved: true }).then(result => { returned = true; return result; });
+      waitMs: 60000, continuationApproved: true });
     await until(() => checked);
-    await delay(100);
-    assert.equal(returned, true, 'An interrupted recovery refusal must reach human review');
     const result = await waiting;
-    assert.equal(result.results[0].recovery.userActionRequired, true);
-    assert.equal(result.results[0].terminal, false);
-    assert.equal(f.fake.submitCount, 1);
-    assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, 1);
-    assert.equal(await f.fake.page.locator('[data-testid="stop-button"]').count(), 1);
+    assert.equal(result.results[0].recovery?.userActionRequired, undefined);
+    assert.equal(result.results[0].generation, 2);
+    assert.equal(result.results[0].terminal, true);
+    assert.ok(result.results[0].submittedUserMessageId);
+    assert.equal(f.fake.submitCount, 2);
+    assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, 2);
+    const authorizations = f.core.database.raw.prepare("SELECT count(*) AS n FROM request_receipts WHERE request_id LIKE 'continuation-authorization:%'").get()!;
+    assert.equal(authorizations.n, 0, 'Automatic approval must not be recorded as human confirmation');
   } finally { await f.close(); }
 });
 

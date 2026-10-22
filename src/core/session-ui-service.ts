@@ -262,15 +262,16 @@ export class SessionUiService {
       const binding = this.#registry.refreshPage(session.pageKey!);
       const dom = await observeChatGptDom(page, original);
       const activity = await observeChatGptActivity(page, dom);
-      // A banner is not proof of stopped work. It permits the existing fresh
-      // server-turn check below the submission boundary; idle/draft/Stop guards remain.
+      // The submission owner verifies the exact successful server tool turn.
+      // Disconnected provider chrome can retain Stop; streaming/thinking and
+      // draft guards still apply, and no Stop gesture is issued.
       const disconnected = activity.reason === 'provider-stream-disconnected' && !dom.candidate?.streamingMarker;
       const confirmedDisconnect = confirmation !== undefined && confirmation.conversationId === original.conversationId &&
         confirmation.submittedUserMessageId === original.submittedUserMessageId &&
         activity.reason === 'provider-stream-disconnected' && !dom.candidate?.streamingMarker && !dom.candidate?.terminalMarker;
       if (confirmation && !confirmedDisconnect) throw new SessionPlaneDomainError('provider.preparation-required',
         'User-confirmed interruption requires the exact disconnected nonstreaming original page');
-      try { await requireIdleConversationPage(page, '계속', confirmedDisconnect); }
+      try { await requireIdleConversationPage(page, '계속', confirmedDisconnect || disconnected); }
       catch (error) {
         if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'session.cleanup-not-ready') throw error;
         throw new SessionPlaneDomainError('provider.preparation-required',
@@ -279,7 +280,8 @@ export class SessionUiService {
       const controls = await this.#capture(session);
       const after = this.#registry.refreshPage(session.pageKey!);
       if (binding.bindingEpoch !== after.bindingEpoch || !dom.conversationSurfaceAvailable ||
-          !dom.submittedUserFound || dom.laterUserFound || (!confirmedDisconnect && dom.candidate !== null) || dom.actionableAlert ||
+          !dom.submittedUserFound || dom.laterUserFound ||
+          (!confirmedDisconnect && dom.candidate !== null && !(disconnected && !dom.candidate.terminalMarker)) || dom.actionableAlert ||
           (!confirmedDisconnect && !disconnected && activity.strength !== 'none') || controls.nodesTruncated ||
           controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role)) ||
           !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
@@ -288,6 +290,7 @@ export class SessionUiService {
       }
       return { pageKey: session.pageKey!, conversationId: session.conversationId!, bindingEpoch: after.bindingEpoch,
         observedAt: controls.capturedAt, continuationPrompt: '계속',
+        disconnectedRecovery: disconnected && !dom.candidate?.terminalMarker,
         ...(confirmedDisconnect ? { userConfirmedInterruption: confirmation,
           ...(dom.candidate ? { interruptedResponseMessageId: dom.candidate.responseMessageId,
             interruptedResponseSha256: createHash('sha256').update(dom.candidate.answerText).digest('hex') } : {}) } : {}) };
@@ -504,13 +507,12 @@ export class SessionUiService {
       if (snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, model)) throw new SessionPlaneDomainError(
         'provider.failure-unverified', 'Fresh configuration evidence is missing');
       if (submits.length === 1) return { choice: toPreparationTarget('submit', submits[0]!), result: { purpose: 'submit' } };
-      const confirmation = this.#submissions.confirmedContinuation(input);
-      if (submits.length === 0 && confirmation) {
-        const original = { ...session, generation: session.generation - 1,
-          submittedUserMessageId: confirmation.submittedUserMessageId, submittedUserTurnId: null };
-        await this.verifyContinuation(session, original, confirmation);
+      const continuation = this.#submissions.continuationContext(input);
+      if (submits.length === 0 && continuation) {
+        const { original, confirmation } = continuation;
+        const evidence = await this.verifyContinuation(session, original, confirmation);
         const composers = snapshot.nodes.filter(node => node.role === 'textbox' && node.editable && !node.disabled);
-        if (composers.length === 1) return { choice: { ...toPreparationTarget('submit', composers[0]!), submitGesture: 'enter' as const },
+        if ('disconnectedRecovery' in evidence && evidence.disconnectedRecovery === true && composers.length === 1) return { choice: { ...toPreparationTarget('submit', composers[0]!), submitGesture: 'enter' as const },
           result: { purpose: 'submit', gesture: 'enter', userConfirmedInterruption: confirmation } };
       }
       throw new SessionPlaneDomainError('provider.failure-unverified', 'Unique enabled submit evidence is missing');
