@@ -478,12 +478,13 @@ export class TeamWorkflow {
             }
             const timeoutReady = (result.submissionVerification as { nextAction?: string } | undefined)?.nextAction === 'reconcile_failure';
             const serverReview = (result.submissionVerification as { serverObservation?: {
-              observedAt?: string; currentIdentityMatches?: boolean } } | undefined)?.serverObservation;
+              observedAt?: string; currentIdentityMatches?: boolean;
+              serverObservation?: { messages?: { role: string; textLength: number }[] } } } | undefined)?.serverObservation;
             const freshServer = serverReview?.currentIdentityMatches === true && !!serverReview.observedAt &&
               Date.now() - Date.parse(serverReview.observedAt) <= 180_000;
             const dom = (result.submissionVerification as { dom?: {
               activityReason?: string; activity?: string; anchorPresent?: boolean; laterUserFound?: boolean;
-              turnBoundary?: { role: string }[];
+              turnBoundary?: { role: string; text?: string }[];
             } } | undefined)?.dom;
             const missingContinuation = this.services.submissions.missingContinuationAnchor(
               this.services.directory.getSession(request.sessionId)) !== null;
@@ -497,6 +498,31 @@ export class TeamWorkflow {
             if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
                 (interrupted || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
                 result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
+              const previousRef = (JSON.parse(request.payloadJson) as { continuationOf?: string }).continuationOf;
+              const previous = previousRef ? this.#outbox.getById(previousRef) : null;
+              const previousRecovery = previous && previous.clientId === request.clientId &&
+                previous.sessionId === request.sessionId && previous.generation === request.generation - 1
+                ? this.services.receipts.get(request.clientId, `managed-continuation:${previous.outboxId}`) : null;
+              const previousEvidence = previousRecovery?.method === 'session.continuation.prepare'
+                ? JSON.parse(previousRecovery.resultJson).evidence : null;
+              const observedProgress = dom?.turnBoundary?.some(turn => turn.role === 'tool' ||
+                (turn.role === 'assistant' && !!turn.text?.trim())) ||
+                (serverReview?.currentIdentityMatches && serverReview.serverObservation?.messages?.some(message =>
+                  message.role === 'tool' || (message.role === 'assistant' && message.textLength > 0))) ||
+                Date.parse(String((result.activity as { latestStoredArtifactChangeAt?: string } | undefined)?.latestStoredArtifactChangeAt)) >= Date.parse(request.createdAt);
+              // A durable managed retry that still has the same interruption and
+              // no observed answer/tool progress needs a human, not another send.
+              if (due && dom?.activityReason === 'provider-stream-disconnected' &&
+                  previousEvidence?.disconnectedRecovery === true && !observedProgress) {
+                this.#continuationReviews.delete(request.outboxId);
+                result = { ...result, status: 'recovery_required', recovery: {
+                  state: 'decision_required', decisionRequired: true, userActionRequired: true,
+                  reason: 'provider.recovery-stalled',
+                  message: 'The managed Continue was submitted, but the same disconnection remains without observed answer or tool progress. Check this exact conversation and refresh it manually; automatic continuation is paused. The request and any uncertain execution are preserved.',
+                  url: `https://chatgpt.com/c/${result.conversationId}`,
+                } };
+                break;
+              }
               this.#continuationReviews.set(request.outboxId, Date.now());
               try {
                 result = await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
