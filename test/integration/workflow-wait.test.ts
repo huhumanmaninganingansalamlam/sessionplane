@@ -297,6 +297,13 @@ test('authorized broad continuation review stays inside the wait and runs at thi
   const f = await fixture();
   try {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    t.mock.method(EventRepository.prototype, 'latestServerObservation', () => {
+      const current = f.core.teamDirectory.getSession(f.sent.sessionId as string);
+      return { observedAt: new Date().toISOString(), recoveryIdentity: {
+        conversationId: current.conversationId, pageKey: current.pageKey,
+        submittedUserMessageId: current.submittedUserMessageId, submittedUserTurnId: current.submittedUserTurnId },
+        serverObservation: {} };
+    });
     let reviews = 0;
     t.mock.method(SessionUiService.prototype, 'prepareContinuation', async () => {
       reviews++;

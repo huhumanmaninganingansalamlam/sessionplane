@@ -29,6 +29,7 @@ class FailedChat extends FakeProviderAdapter {
   core!: CoreService;
   failureCount = 2;
   missingTimeoutAnchor = false;
+  idleToolTurn = false;
   surface: ((users: string) => string) | null = null;
   afterPrepare: ((request: ProviderSubmissionRequest) => void) | null = null;
   readonly submittedAt: number[] = [];
@@ -61,7 +62,9 @@ class FailedChat extends FakeProviderAdapter {
     const source = await super.openObservation(request);
     const observe = source.observe.bind(source);
     source.observe = async () => ({ ...await observe(), activity: 'none' as const,
-      ...(request.generation <= this.failureCount && this.missingTimeoutAnchor ? {
+      ...(this.idleToolTurn && request.generation === 1 ? {
+        observationTransport: 'fresh' as const, errorCode: undefined, reason: null, candidate: null,
+      } : request.generation <= this.failureCount && this.missingTimeoutAnchor ? {
         observationTransport: 'deferred' as const, errorCode: undefined, reason: 'dom-user-anchor-missing', candidate: null,
       } : request.generation <= this.failureCount ? { observationTransport: 'unavailable' as const, errorCode: 'provider.actionable-alert',
         reason: 'provider-actionable-alert', candidate: null } : { errorCode: undefined, reason: null,
@@ -257,7 +260,10 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
     const original = f.core.teamDirectory.getSession(f.session.sessionId);
     const input = { teamId: f.team.teamId, requestRef, requestId: 'approved-continue',
       decision: 'continue', continuationApproved: true };
-    if (trailingEmpty) input.requestId = `managed-continuation:${requestRef}`;
+    if (trailingEmpty) {
+      input.requestId = `managed-continuation:${requestRef}`;
+      f.fake.idleToolTurn = true;
+    }
     const identity = { conversationId: original.conversationId, pageKey: original.pageKey,
       submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId };
     const evidence = { anchorNodeId: original.submittedUserMessageId, currentNodeId: 'tool-done',
@@ -308,7 +314,7 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
       const waited = await waiting;
       prepared = waited.results[0];
     } else prepared = await f.rpc<any>('decide', input);
-    assert.equal(prepared.generation, 2); assert.equal(prepared.promptSubmitted, true);
+    assert.equal(prepared.generation, 2, JSON.stringify(prepared)); assert.equal(prepared.promptSubmitted, true);
     assert.equal(prepared.continuationOf, requestRef); assert.equal(f.fake.submitCount, 2);
     const stored = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(original.sessionId)!;
     assert.equal(stored.submitted_user_message_id, original.submittedUserMessageId);
