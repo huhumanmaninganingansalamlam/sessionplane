@@ -228,6 +228,23 @@ export class ChatGptConfigurationMenu {
     return await this.#wait(ns => ns.some(n => n.role === 'slider' && Number(n.ariaValueNow) === value), 5000, 'power-value');
   }
 
+  async reobserveSelection(model: string, effort: string): Promise<BrowserSnapshotNode> {
+    // Reopen the existing chooser, without selecting another model or power.
+    const versions = await this.#versions();
+    const selected = versions.filter(node => node.role === 'menuitemradio' &&
+      (node.checked === true || node.selected === true));
+    const version = selected.length === 1 ? selected[0]!.text : '';
+    const nodes = await this.#mainMenu();
+    const summary = this.#summary(nodes);
+    // ChatGPT's version list omits the Thinking suffix used by send hints.
+    if (!version || (model !== version && model !== `${version} Thinking`) ||
+        !effort || summary?.text.replaceAll(/\s*\/\s*/g, ' ').replaceAll(/\s+/g, ' ').trim() !== `${version} ${effort}`) {
+      throw new SessionPlaneDomainError('provider.configuration-stale',
+        'Current version/effort does not match the original continuation; preserve preparation');
+    }
+    return await this.#closeSelection(nodes);
+  }
+
   async discover(): Promise<ConfigurationCatalog> {
     const initial = await this.#mainMenu();
     const initialPower = initial.find(n => n.role === 'slider')?.ariaValueNow;
@@ -288,6 +305,10 @@ export class ChatGptConfigurationMenu {
     if (!summary || summary.text !== option.label) {
       throw new SessionPlaneDomainError('provider.configuration-stale', 'Configuration changed since discovery; discover current options before choosing again');
     }
+    return await this.#closeSelection(nodes);
+  }
+
+  async #closeSelection(nodes: readonly BrowserSnapshotNode[]): Promise<BrowserSnapshotNode> {
     // Keep the confirmed evidence visible when filling the composer closes menus.
     const opener = this.#opener(nodes)!;
     await this.#click(opener);

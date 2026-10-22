@@ -12,6 +12,8 @@ import { startCore, type CoreService } from '../../src/main.ts';
 import { callRpc, RpcClientError } from '../../src/cli/client.ts';
 import { EventRepository } from '../../src/storage/event-repository.ts';
 import { workflowSchemas } from '../../src/rpc/methods/workflow.ts';
+import { SessionUiService } from '../../src/core/session-ui-service.ts';
+import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { ThinkingFailureRecovery } from '../../src/core/thinking-failure-recovery.ts';
 import type { BrowserSnapshot } from '../../src/browser/ref-snapshot.ts';
 import type { PreparationChoices, ProviderSubmissionRequest, ProviderObservationRequest } from '../../src/providers/provider-adapter.ts';
@@ -27,6 +29,7 @@ class FailedChat extends FakeProviderAdapter {
   core!: CoreService;
   failureCount = 2;
   missingTimeoutAnchor = false;
+  idleToolTurn = false;
   surface: ((users: string) => string) | null = null;
   afterPrepare: ((request: ProviderSubmissionRequest) => void) | null = null;
   readonly submittedAt: number[] = [];
@@ -59,7 +62,9 @@ class FailedChat extends FakeProviderAdapter {
     const source = await super.openObservation(request);
     const observe = source.observe.bind(source);
     source.observe = async () => ({ ...await observe(), activity: 'none' as const,
-      ...(request.generation <= this.failureCount && this.missingTimeoutAnchor ? {
+      ...(this.idleToolTurn && request.generation === 1 ? {
+        observationTransport: 'fresh' as const, errorCode: undefined, reason: null, candidate: null,
+      } : request.generation <= this.failureCount && this.missingTimeoutAnchor ? {
         observationTransport: 'deferred' as const, errorCode: undefined, reason: 'dom-user-anchor-missing', candidate: null,
       } : request.generation <= this.failureCount ? { observationTransport: 'unavailable' as const, errorCode: 'provider.actionable-alert',
         reason: 'provider-actionable-alert', candidate: null } : { errorCode: undefined, reason: null,
@@ -247,7 +252,7 @@ test('closing the recovery owner during child preparation preserves its saved dr
   } finally { await f.close(); }
 });
 
-test('approved interrupted tool continuation preserves original ACK and uses one ordinary successor', async () => {
+for (const trailingEmpty of [false, true]) test(`approved interrupted tool continuation${trailingEmpty ? ' after empty finished assistant through managed wait' : ''} preserves original ACK and uses one ordinary successor`, async () => {
   const f = await fixture();
   try {
     f.fake.surface = users => users;
@@ -255,6 +260,10 @@ test('approved interrupted tool continuation preserves original ACK and uses one
     const original = f.core.teamDirectory.getSession(f.session.sessionId);
     const input = { teamId: f.team.teamId, requestRef, requestId: 'approved-continue',
       decision: 'continue', continuationApproved: true };
+    if (trailingEmpty) {
+      input.requestId = `managed-continuation:${requestRef}`;
+      f.fake.idleToolTurn = true;
+    }
     const identity = { conversationId: original.conversationId, pageKey: original.pageKey,
       submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId };
     const evidence = { anchorNodeId: original.submittedUserMessageId, currentNodeId: 'tool-done',
@@ -264,15 +273,20 @@ test('approved interrupted tool continuation preserves original ACK and uses one
       {}, 'generation.backend-pending', 'backend-assistant-not-final', scope, { ...evidence, ...patch });
     await assert.rejects(f.rpc('decide', input), /server evidence/);
     for (const patch of [{ nextUserFound: true }, { messages: [{ ...evidence.messages[0]!, status: 'in_progress' }] },
-      // Tool end_turn closes its execution, not the assistant response. An assistant
-      // final or a trailing empty assistant still blocks this tool-only recovery.
+      // Never confuse an actual final or live/meaningful assistant with the
+      // completed empty placeholder after a successful tool return.
       { messages: [{ ...evidence.messages[0]!, role: 'assistant', textLength: 42 }, evidence.messages[0]!] },
       { currentNodeId: 'empty-assistant', messages: [evidence.messages[0]!, { ...evidence.messages[0]!,
-        messageId: 'empty-assistant', role: 'assistant', endTurn: false }] }]) {
+        messageId: 'empty-assistant', role: 'assistant', endTurn: false, status: 'in_progress' }] },
+      { currentNodeId: 'nonempty', messages: [evidence.messages[0]!, { ...evidence.messages[0]!,
+        messageId: 'nonempty', role: 'assistant', endTurn: false, textLength: 3 }] }]) {
       await record(patch); await assert.rejects(f.rpc('decide', input), /server evidence/);
     }
     await record({}, { ...identity, conversationId: 'different' });
     await assert.rejects(f.rpc('decide', input), /server evidence/);
+    if (trailingEmpty) Object.assign(evidence, { currentNodeId: 'empty-assistant',
+      messages: [...evidence.messages, { ...evidence.messages[0]!, messageId: 'empty-assistant',
+        role: 'assistant', endTurn: false, textLength: 0 }] });
     await record();
     const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
     for (const unsafe of ['<textarea>Separate draft</textarea>',
@@ -285,8 +299,22 @@ test('approved interrupted tool continuation preserves original ACK and uses one
     }
     await f.fake.page.setContent(body + '<textarea>계속</textarea><button data-testid="send-button">Send</button></main>');
     f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="continued-answer">Continued answer</div>';
-    const prepared = await f.rpc<any>('decide', input);
-    assert.equal(prepared.generation, 2); assert.equal(prepared.promptSubmitted, true);
+    let prepared;
+    if (trailingEmpty) {
+      f.core.database.raw.prepare('UPDATE outbox SET created_at=? WHERE outbox_id=?')
+        .run(new Date(Date.now() - 31 * 60_000).toISOString(), requestRef);
+      // Stale backend evidence must not spend the broad review interval.
+      f.core.database.raw.prepare("UPDATE events SET created_at=? WHERE session_id=? AND generation=1 AND event_type='generation.backend-pending'")
+        .run(new Date(Date.now() - 4 * 60_000).toISOString(), original.sessionId);
+      const waiting = f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
+        waitMs: 60000, continuationApproved: true });
+      await delay(100);
+      assert.equal(f.fake.submitCount, 1);
+      await record();
+      const waited = await waiting;
+      prepared = waited.results[0];
+    } else prepared = await f.rpc<any>('decide', input);
+    assert.equal(prepared.generation, 2, JSON.stringify(prepared)); assert.equal(prepared.promptSubmitted, true);
     assert.equal(prepared.continuationOf, requestRef); assert.equal(f.fake.submitCount, 2);
     const stored = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(original.sessionId)!;
     assert.equal(stored.submitted_user_message_id, original.submittedUserMessageId);
@@ -296,6 +324,37 @@ test('approved interrupted tool continuation preserves original ACK and uses one
     const successor = f.core.database.raw.prepare('SELECT payload_json FROM outbox WHERE outbox_id=?').get(prepared.requestRef)!;
     const payload = JSON.parse(String(successor.payload_json));
     assert.equal(payload.prompt, '계속'); assert.equal(payload.continuationOf, requestRef);
+  } finally { await f.close(); }
+});
+
+test('managed wait resumes its already prepared continuation without another generation or send', async t => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const identity = { conversationId: original.conversationId, pageKey: original.pageKey,
+      submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId };
+    await f.core.actorScheduler.updateGeneration(original.sessionId, 1, {}, 'generation.backend-pending',
+      'backend-assistant-not-final', identity, { anchorNodeId: original.submittedUserMessageId,
+        currentNodeId: 'tool-done', nextUserFound: false, assistantCount: 1,
+        messages: [{ messageId: 'tool-done', role: 'tool', channel: 'commentary',
+          status: 'finished_successfully', endTurn: true, hidden: false, textLength: 0 }] });
+    await f.fake.page.setContent('<main>' + configuration +
+      '<div data-message-author-role="user" data-message-id="user-message-1">Original</div><textarea></textarea><button data-testid="send-button">Send</button></main>');
+    const blocked = t.mock.method(SessionUiService.prototype, 'prepareFailureContinuation', async () => {
+      throw new SessionPlaneDomainError('provider.failure-unverified', 'Fresh configuration evidence is missing');
+    });
+    await assert.rejects(f.rpc('decide', { teamId: f.team.teamId, requestRef,
+      requestId: `managed-continuation:${requestRef}`, decision: 'continue', continuationApproved: true }), /configuration/);
+    blocked.mock.restore();
+    assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, 2);
+    assert.equal(f.fake.submitCount, 1);
+    f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="resumed-answer">Resumed answer</div>';
+    const result = await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000, continuationApproved: true });
+    assert.equal(result.results[0].generation, 2);
+    assert.equal(f.fake.submitCount, 2);
+    assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, 2);
   } finally { await f.close(); }
 });
 

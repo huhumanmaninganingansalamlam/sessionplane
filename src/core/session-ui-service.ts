@@ -447,13 +447,21 @@ export class SessionUiService {
     } finally { await element.dispose(); }
   }
 
-  async prepareFailureContinuation(input: PreparationOwner, model: PreparationTarget) {
+  async prepareFailureContinuation(input: PreparationOwner, model: PreparationTarget, intended?: { model?: string; effort?: string }) {
     // These are ordinary durable preparation choices; provider mutation stays in resumePreparation.
-    await this.inspect(input);
+    const inspected = await this.inspect(input);
+    const preparationId = inspected.snapshotId;
     for (const purpose of ['model', 'composer'] as const) {
-      await this.#submissions.decidePreparation({ ...input, decisionId: `thinking-failure-${purpose}:${input.requestId}`,
+      await this.#submissions.decidePreparation({ ...input, decisionId: `thinking-failure-${purpose}:${input.requestId}:${preparationId}`,
         decision: 'configure', purpose }, async session => {
-        const snapshot = await this.#capture(session, 5_000);
+        let snapshot = await this.#capture(session, 5_000);
+        if (purpose === 'model' && !snapshot.nodesTruncated && !hasPreparationSelectionEvidence(snapshot.nodes, model) &&
+            intended?.model && intended.effort) {
+          const summary = await new ChatGptConfigurationMenu(this.#requirePage(session), session.pageKey!)
+            .reobserveSelection(intended.model, intended.effort);
+          model = toPreparationTarget('model', summary);
+          snapshot = await this.#capture(session, 5_000);
+        }
         if (snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, model)) throw new SessionPlaneDomainError(
           'provider.failure-unverified', 'Fresh configured model/version/effort evidence is missing');
         const composers = snapshot.nodes.filter(node => node.role === 'textbox' && node.editable && !node.disabled);
@@ -469,7 +477,7 @@ export class SessionUiService {
     } catch (error) {
       if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.preparation-required') throw error;
     }
-    await this.#submissions.decidePreparation({ ...input, decisionId: `thinking-failure-submit:${input.requestId}`,
+    await this.#submissions.decidePreparation({ ...input, decisionId: `thinking-failure-submit:${input.requestId}:${preparationId}`,
       decision: 'configure', purpose: 'submit' }, async session => {
       const snapshot = await this.#capture(session, 5_000);
       const submits = snapshot.nodes.filter(node => node.submitControl === true && !node.disabled);

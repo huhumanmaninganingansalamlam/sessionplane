@@ -672,3 +672,28 @@ test('failed discovery reports the original transition and restoration failure w
     assert.equal(await page.evaluate(() => (window as any).submits), 0);
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+
+test('continuation reobserves exact current model and effort without switching configuration or losing draft', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-continuation-selection-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const service = await startCore({ config, browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await service.browserOwner!.createPage();
+    await page.setContent(fixture);
+    await page.locator('#chooser').evaluate(node => { (node as HTMLElement).hidden = false; });
+    const menu = new ChatGptConfigurationMenu(page, 'continuation-selection');
+    const summary = await menu.reobserveSelection('Aurora-9 Thinking', 'Balanced');
+    assert.equal(summary.text, 'Balanced');
+    assert.equal(summary.role, 'button');
+    assert.equal(summary.expanded, false);
+    await assert.rejects(menu.reobserveSelection('Aurora-8', 'Balanced'), /does not match/);
+    await assert.rejects(menu.reobserveSelection('Aurora-9', 'Deep'), /does not match/);
+    await assert.rejects(menu.reobserveSelection('Aurora-9', 'lanced'), /does not match/);
+    assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');
+    assert.deepEqual(await page.evaluate(() => ({ version: (window as any).version,
+      power: (window as any).powerValue, submits: (window as any).submits })),
+      { version: 'Aurora-9', power: 1, submits: 0 });
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
