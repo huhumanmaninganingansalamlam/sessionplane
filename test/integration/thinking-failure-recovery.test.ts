@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -297,20 +297,14 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
       await assert.rejects(f.rpc('decide', input), /draft|active|idle|cleanup/);
       assert.equal(f.core.teamDirectory.getSession(original.sessionId).terminal, false);
     }
-    await f.fake.page.setContent(body + '<textarea>계속</textarea><button data-testid="send-button">Send</button></main>');
+    await f.fake.page.setContent(body + '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div><textarea>계속</textarea><button data-testid="send-button">Send</button></main>');
     f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="continued-answer">Continued answer</div>';
     let prepared;
     if (trailingEmpty) {
       f.core.database.raw.prepare('UPDATE outbox SET created_at=? WHERE outbox_id=?')
         .run(new Date(Date.now() - 31 * 60_000).toISOString(), requestRef);
-      // Stale backend evidence must not spend the broad review interval.
-      f.core.database.raw.prepare("UPDATE events SET created_at=? WHERE session_id=? AND generation=1 AND event_type='generation.backend-pending'")
-        .run(new Date(Date.now() - 4 * 60_000).toISOString(), original.sessionId);
       const waiting = f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
         waitMs: 60000, continuationApproved: true });
-      await delay(100);
-      assert.equal(f.fake.submitCount, 1);
-      await record();
       const waited = await waiting;
       prepared = waited.results[0];
     } else prepared = await f.rpc<any>('decide', input);
@@ -327,7 +321,7 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
   } finally { await f.close(); }
 });
 
-test('managed tool recovery retains a disconnected original with Stop instead of returning a cleanup error', async t => {
+test('managed tool recovery preserves disconnected Stop and escalates inability to continue', async t => {
   const f = await fixture();
   try {
     f.fake.surface = users => users;
@@ -356,16 +350,82 @@ test('managed tool recovery retains a disconnected original with Stop instead of
       waitMs: 60000, continuationApproved: true }).then(result => { returned = true; return result; });
     await until(() => checked);
     await delay(100);
-    assert.equal(returned, false, 'An active-page refusal must stay inside managed collection');
+    assert.equal(returned, true, 'An interrupted recovery refusal must reach human review');
+    const result = await waiting;
+    assert.equal(result.results[0].recovery.userActionRequired, true);
+    assert.equal(result.results[0].terminal, false);
     assert.equal(f.fake.submitCount, 1);
     assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, 1);
     assert.equal(await f.fake.page.locator('[data-testid="stop-button"]').count(), 1);
-    await f.fake.page.locator('[data-testid="stop-button"]').evaluate(node => node.remove());
-    await f.core.actorScheduler.updateGeneration(original.sessionId, 1, {
-      sessionState: 'complete', providerState: 'complete', answerText: 'Original final', responseMessageId: 'final' });
-    const result = await waiting;
-    assert.equal(result.results[0].responseMessageId, 'final');
-    assert.equal(f.fake.submitCount, 1);
+  } finally { await f.close(); }
+});
+
+test('user-confirmed exact disconnected turn continues once despite deferred backend and stale Stop, preserving partial and ACK', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    f.fake.idleToolTurn = true;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const confirmation = { conversationId: original.conversationId!, submittedUserMessageId: original.submittedUserMessageId!,
+      evidenceRef: 'user directly inspected original disconnected conversation and requested one continue' };
+    const input = { teamId: f.team.teamId, requestRef, requestId: `managed-continuation:${requestRef}`,
+      decision: 'continue', continuationApproved: true, userConfirmedInterruption: confirmation };
+    const partial = '<div data-message-author-role="assistant" data-message-id="original-partial">Retain original partial</div>';
+    const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
+    const disconnected = '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>';
+    const controls = '<textarea></textarea><button data-testid="stop-button">Stop</button></main>';
+    await f.fake.page.setContent(body + partial + disconnected + controls);
+    await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: undefined }), /server evidence/);
+    await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: { ...confirmation, conversationId: 'other-chat' } }), /exact acknowledged/);
+    const scope = { conversationId: original.conversationId, pageKey: original.pageKey,
+      submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId };
+    const server = { anchorNodeId: original.submittedUserMessageId, currentNodeId: 'server-current', nextUserFound: false,
+      assistantCount: 1, messages: [{ messageId: 'server-current', role: 'assistant' as const, channel: 'analysis',
+        status: 'in_progress', endTurn: false, hidden: false, textLength: 1 }] };
+    await f.core.actorScheduler.updateGeneration(original.sessionId, 1, {}, 'generation.backend-pending', 'backend-assistant-not-final', scope, server);
+    await assert.rejects(f.rpc('decide', input), /Fresh server activity/);
+    await f.core.actorScheduler.updateGeneration(original.sessionId, 1, {}, 'generation.backend-pending', 'backend-assistant-not-final', scope,
+      { ...server, messages: [] });
+    for (const unsafe of [body + partial + controls,
+      body + partial.replace('data-message-id="original-partial"', 'data-message-id="original-partial" data-message-status="in_progress"') + disconnected + controls,
+      body + partial + disconnected + '<div data-testid="thinking">Thinking</div>' + controls,
+      body + partial + disconnected + controls.replace('<textarea></textarea>', '<textarea>Separate draft</textarea>'),
+      body + partial + disconnected + '<div role="alertdialog">HostSpan permission</div>' + controls,
+      body + partial + disconnected + '<div data-message-author-role="user" data-message-id="later-user">Already continued</div>' + controls]) {
+      await f.fake.page.setContent(unsafe);
+      await assert.rejects(f.rpc('decide', input), /disconnected|draft|idle/);
+      assert.equal(f.fake.submitCount, 1);
+    }
+    await f.fake.page.setContent(body + partial + disconnected + controls);
+    f.fake.afterPrepare = () => {
+      assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, 2);
+    };
+    f.fake.failureCount = 1;
+    f.fake.surface = users => users + partial +
+      '<div data-message-author-role="assistant" data-message-id="continued-answer" data-end-turn="true">Resumed original work</div>';
+    const result = await f.rpc<any>('decide', input);
+    assert.equal(result.generation, 2); assert.equal(result.promptSubmitted, true);
+    assert.ok(result.submittedUserMessageId); assert.notEqual(result.submittedUserMessageId, original.submittedUserMessageId);
+    assert.equal(f.fake.submitCount, 2);
+    const old = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(original.sessionId)!;
+    assert.equal(old.submitted_user_message_id, original.submittedUserMessageId);
+    assert.equal(old.answer_text, null); assert.equal(old.reason, 'approved-continuation-prepared');
+    assert.equal(result.reconciliation.evidence.interruptedResponseMessageId, 'original-partial');
+    assert.equal(await f.fake.page.locator('[data-message-id="original-partial"]').innerText(), 'Retain original partial');
+    const confirmationPath = path.join(f.root, 'user-confirmation.json');
+    writeFileSync(confirmationPath, JSON.stringify(confirmation));
+    const code = await runCli(['request', 'continue', f.team.teamId, requestRef,
+      '--continuation-approved', '--user-confirmed-interruption', confirmationPath,
+      '--request-id', input.requestId, '--socket', f.config.socketPath, '--json'], {
+      stdin: Readable.from([]), stdout: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+      stderr: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+    });
+    assert.equal(code, 0);
+    assert.equal(f.fake.submitCount, 2, 'CLI replay of the same authorization cannot submit twice');
+    const collected = await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000, continuationApproved: true });
+    assert.equal(collected.results[0].generation, 2, 'Existing manager adopts the same durable successor');
+    assert.equal(f.fake.submitCount, 2);
   } finally { await f.close(); }
 });
 
@@ -397,6 +457,61 @@ test('managed wait resumes its already prepared continuation without another gen
     assert.equal(result.results[0].generation, 2);
     assert.equal(f.fake.submitCount, 2);
     assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, 2);
+  } finally { await f.close(); }
+});
+
+test('managed collection links an existing followup under unsubmitted continuation preserving both generations and draft', async t => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const identity = { conversationId: original.conversationId, pageKey: original.pageKey,
+      submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId };
+    await f.core.actorScheduler.updateGeneration(original.sessionId, 1, {}, 'generation.backend-pending',
+      'backend-assistant-not-final', identity, { anchorNodeId: original.submittedUserMessageId,
+        currentNodeId: 'tool-done', nextUserFound: false, assistantCount: 1,
+        messages: [{ messageId: 'tool-done', role: 'tool', channel: 'commentary',
+          status: 'finished_successfully', endTurn: true, hidden: false, textLength: 0 }] });
+    await f.fake.page.setContent('<main>' + configuration +
+      '<div data-message-author-role="user" data-message-id="user-message-1">Original</div><textarea></textarea><button data-testid="send-button">Send</button></main>');
+    const blocked = t.mock.method(SessionUiService.prototype, 'prepareFailureContinuation', async () => {
+      throw new SessionPlaneDomainError('provider.failure-unverified', 'Fresh configuration evidence is missing');
+    });
+    await assert.rejects(f.rpc('decide', { teamId: f.team.teamId, requestRef,
+      requestId: `managed-continuation:${requestRef}`, decision: 'continue', continuationApproved: true }), /configuration/);
+    blocked.mock.restore();
+    assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, 2);
+    assert.equal(f.fake.submitCount, 1);
+    const generations = () => f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(original.sessionId);
+    const before = generations();
+    // Search groups now contain individually identified assistant renderers.
+    await f.fake.page.setContent(`<main>${configuration}
+      <div data-chatgpt-search-message-ids="user-message-1"><div data-user-message-bubble>Original</div></div>
+      <div data-chatgpt-search-unit-key="fallback-turn-1:2:assistant" data-chatgpt-search-message-ids="partial partial"><div data-dil-message-id="partial"><div data-d-component="text">Original partial</div></div></div>
+      <div data-chatgpt-search-message-ids="manual-user"><div data-user-message-bubble>계속</div></div>
+      <div data-chatgpt-search-unit-key="fallback-turn-2:2:assistant" data-chatgpt-search-message-ids="checkpoint checkpoint final">
+        <div data-dil-message-id="checkpoint"><div data-d-component="text">Checking</div></div>
+        <div data-dil-message-id="final"><div data-d-component="text">RESULT: BLOCKED — VM SSH exit255</div></div>
+      </div><textarea>Preserved user draft</textarea></main>`);
+    const bounded = await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 0 });
+    assert.equal(bounded.results[0].followup.terminal, false,
+      'A bounded/drained read must retain followup state so the client cannot mistake the historical terminal for collection completion');
+    const result = await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000, continuationApproved: true });
+    const recovered = result.results[0];
+    assert.equal(recovered.followup.userMessageId, 'manual-user', JSON.stringify(recovered));
+    assert.equal(recovered.followup.responseMessageId, 'final');
+    assert.equal(recovered.followup.answerText, 'RESULT: BLOCKED — VM SSH exit255');
+    assert.equal(recovered.reconciliation.disposition, 'historical-followup-linked');
+    assert.equal(recovered.reconciliation.evidence.originalUserMessageId, original.submittedUserMessageId);
+    assert.equal(recovered.reconciliation.providerMutation, false);
+    assert.deepEqual(generations(), before);
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved user draft');
+    assert.equal(f.fake.submitCount, 1);
+    const again = await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef });
+    assert.equal(again.request.followup.answerText, recovered.followup.answerText);
+    assert.equal(again.request.responseMessageId, null);
+    assert.equal((await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000 })).results[0].followup.responseMessageId, 'final');
   } finally { await f.close(); }
 });
 
@@ -646,7 +761,7 @@ test('managed timeout recovery returns changed transcript evidence for agent jud
     const result = await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
       waitMs: 60000, continuationApproved: true });
     assert.equal(result.results[0].recovery.decisionRequired, true);
-    assert.equal(result.results[0].recovery.userActionRequired, false);
+    assert.equal(result.results[0].recovery.userActionRequired, true);
     assert.equal(f.fake.submitCount, 1);
     assert.equal(f.core.teamDirectory.getSession(f.session.sessionId).terminal, false);
   } finally { await f.close(); }

@@ -17,7 +17,7 @@ import type { ArtifactService } from './artifact-service.ts';
 import type { ConversationCleanupService } from './conversation-cleanup-service.ts';
 import { latestDisplayTarget, type SessionUiService } from './session-ui-service.ts';
 import type { StopService } from './stop-service.ts';
-import type { SubmissionService } from './submission-service.ts';
+import type { SubmissionService, UserConfirmedInterruption } from './submission-service.ts';
 import type { TeamDirectory } from './team-directory.ts';
 
 type Identity = { teamId: string; requestRef: string };
@@ -164,7 +164,7 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName: string; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName: string; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
     if (input.decision === 'hostspan_permission') {
@@ -299,7 +299,12 @@ export class TeamWorkflow {
     }
     if (input.decision === 'continue') {
       let reconciliation;
-      try { reconciliation = await this.services.ui.prepareContinuation({ ...owner, decisionId: input.requestId }); }
+      const savedAuthorization = this.services.receipts.get(request.clientId, `continuation-authorization:${request.outboxId}`);
+      const confirmation: UserConfirmedInterruption | undefined = input.userConfirmedInterruption ??
+        (savedAuthorization ? JSON.parse(savedAuthorization.resultJson).userConfirmedInterruption : undefined);
+      const continuationInput = { ...owner, decisionId: input.requestId,
+        ...(confirmation ? { userConfirmedInterruption: confirmation } : {}) };
+      try { reconciliation = await this.services.ui.prepareContinuation(continuationInput); }
       catch (error) {
         if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.failure-unverified') throw error;
         const inspected = await this.#observe(request, undefined, true);
@@ -309,7 +314,7 @@ export class TeamWorkflow {
           if (failure instanceof SessionPlaneDomainError && failure.errorCode === 'provider.failure-unverified') throw error;
           throw failure;
         }
-        reconciliation = await this.services.ui.prepareContinuation({ ...owner, decisionId: input.requestId });
+        reconciliation = await this.services.ui.prepareContinuation(continuationInput);
       }
       const payload = JSON.parse(request.payloadJson);
       await this.send({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}`,
@@ -387,30 +392,38 @@ export class TeamWorkflow {
         let request = this.#request({ teamId: input.teamId, requestRef });
         let result: Record<string, unknown> = await this.#observe(request);
         const followupTracker = new ExactFinalTracker(1500);
+        let followupId = input.followupUserMessageId;
         for (;;) {
-          if (input.followupUserMessageId) {
-            const evidence = await this.services.ui.observeFollowup(ownerOf(request), input.followupUserMessageId).catch(error => {
+          if ((result.followup as { terminal?: boolean } | undefined)?.terminal) break;
+          const preparedContinuation = this.#outbox.getByRequest(request.clientId, `continue:managed-continuation:${request.outboxId}`);
+          const discoverFollowup = !followupId && preparedContinuation?.submissionState === 'prepared';
+          if (followupId || discoverFollowup) {
+            const evidence = await this.services.ui.observeFollowup(ownerOf(request), followupId).catch(error => {
               if (!(error instanceof SessionPlaneDomainError) || !['browser.snapshot-timeout', 'provider.observation-unavailable'].includes(error.errorCode)) throw error;
               const snapshot = this.services.directory.getSession(request.sessionId);
               return { provider: 'chatgpt', pageKey: snapshot.pageKey!, bindingEpoch: 0, observedAt: new Date().toISOString(),
                 conversationId: snapshot.conversationId, submittedUserFound: false, laterUserFound: false,
                 candidate: null, activity: 'unknown' as const, dialogKind: null, networkActivity: false,
-                observationTransport: 'unavailable' as const, reason: 'followup-observation-delayed', errorCode: undefined };
+                observationTransport: 'unavailable' as const, reason: 'followup-observation-delayed', errorCode: undefined,
+                followupUserMessageId: followupId ?? '' };
             });
-            const decision = followupTracker.evaluate({ ...evidence, candidate: evidence.candidate && evidence.activity !== 'none'
-              ? { ...evidence.candidate, terminalMarker: false } : evidence.candidate }, Date.now());
-            result = { ...result, errorCode: undefined, reason: 'followup-collecting', followup: { ...decision, terminal: decision.kind === 'complete',
-              userMessageId: input.followupUserMessageId, originalRequestRef: request.outboxId } };
-            if (decision.kind === 'complete') {
-              const reconciliation = await this.services.ui.reconcileFollowup({ ...ownerOf(request),
-                decisionId: `followup:${request.outboxId}:${input.followupUserMessageId}`,
-                followupUserMessageId: input.followupUserMessageId, responseMessageId: decision.responseMessageId!,
-                responseSha256: createHash('sha256').update(decision.answerText!).digest('hex'), followupCompleted: true });
-              result = { ...result, reconciliation }; controller.abort(); break;
+            if (evidence) {
+              followupId = evidence.followupUserMessageId || followupId;
+              const decision = followupTracker.evaluate({ ...evidence, candidate: evidence.candidate && evidence.activity !== 'none'
+                ? { ...evidence.candidate, terminalMarker: false } : evidence.candidate }, Date.now());
+              result = { ...result, errorCode: undefined, reason: 'followup-collecting', followup: { ...decision, terminal: decision.kind === 'complete',
+                userMessageId: followupId, originalRequestRef: request.outboxId } };
+              if (decision.kind === 'complete') {
+                const reconciliation = await this.services.ui.reconcileFollowup({ ...ownerOf(request),
+                  decisionId: `followup:${request.outboxId}:${followupId}`,
+                  followupUserMessageId: followupId!, responseMessageId: decision.responseMessageId!,
+                  responseSha256: createHash('sha256').update(decision.answerText!).digest('hex'), followupCompleted: true, answerText: decision.answerText! });
+                result = { ...result, reconciliation }; controller.abort(); break;
+              }
+              if (evidence.errorCode) { result = { ...result, errorCode: evidence.errorCode, reason: evidence.reason }; controller.abort(); break; }
             }
-            if (evidence.errorCode) { result = { ...result, errorCode: evidence.errorCode, reason: evidence.reason }; controller.abort(); break; }
           }
-          if (input.waitMs > 0 && input.continuationApproved && !input.followupUserMessageId && !controller.signal.aborted) {
+          if (input.waitMs > 0 && input.continuationApproved && !followupId && !controller.signal.aborted) {
             // Durable receipts own the single send. This clock only limits broad
             // reassessment; a disconnected banner is never evidence to continue.
             const reviewId = `managed-continuation:${request.outboxId}`;
@@ -419,53 +432,91 @@ export class TeamWorkflow {
               if (successor.submissionState === 'prepared') {
                 // Resume this durable, unsubmitted continuation; the original
                 // decision/send receipts keep it the same generation.
-                await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
-                  requestId: reviewId, decision: 'continue', continuationApproved: true });
+                try {
+                  await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
+                    requestId: reviewId, decision: 'continue', continuationApproved: true });
+                } catch (error) {
+                  if (!(error instanceof SessionPlaneDomainError)) throw error;
+                  result = { ...await this.#observe(successor), status: 'recovery_required', recovery: {
+                    state: 'decision_required', decisionRequired: true, userActionRequired: true,
+                    reason: error.errorCode, message: error.message,
+                    url: `https://chatgpt.com/c/${result.conversationId}`,
+                  } };
+                  request = successor;
+                  break;
+                }
               }
               request = successor;
               result = await this.#observe(request);
               continue;
             }
             const priorReview = this.#continuationReviews.get(request.outboxId);
+            const lastReview = priorReview ?? request.createdAt;
+            const due = Date.now() - (typeof lastReview === 'number' ? lastReview : Date.parse(lastReview)) >= 30 * 60_000;
+            if (due) {
+              this.#continuationReviews.set(request.outboxId, Date.now());
+              result = await this.#observe(request, undefined, true);
+            }
             const timeoutReady = (result.submissionVerification as { nextAction?: string } | undefined)?.nextAction === 'reconcile_failure';
             const serverReview = (result.submissionVerification as { serverObservation?: {
               observedAt?: string; currentIdentityMatches?: boolean } } | undefined)?.serverObservation;
             const freshServer = serverReview?.currentIdentityMatches === true && !!serverReview.observedAt &&
               Date.now() - Date.parse(serverReview.observedAt) <= 180_000;
-            const lastReview = priorReview ?? request.createdAt;
-            const due = Date.now() - (typeof lastReview === 'number' ? lastReview : Date.parse(lastReview)) >= 30 * 60_000;
+            const dom = (result.submissionVerification as { dom?: {
+              activityReason?: string; activity?: string; anchorPresent?: boolean; laterUserFound?: boolean;
+            } } | undefined)?.dom;
+            const interrupted = timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
+              dom.activity !== 'strong' && dom.anchorPresent === true && dom.laterUserFound === false);
+            const payload = JSON.parse(request.payloadJson);
+            const parent = typeof payload.continuationOf === 'string' ? this.#outbox.getById(payload.continuationOf) : null;
+            const refresh = this.services.receipts.latestPageRefresh(request.clientId, request.sessionId, request.generation);
+            const hourDue = Date.now() - Date.parse(refresh?.status === 'complete' ? refresh.updatedAt : request.createdAt) >= 60 * 60_000;
+            const parentRefresh = parent === null ? null : this.services.receipts.get(request.clientId, `managed-refresh:${parent.outboxId}`);
             if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || timeoutReady))) &&
-                (timeoutReady || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
-                result.terminal !== true && (result.status !== 'recovery_required' || timeoutReady)) {
+                (interrupted || freshServer) && (!interrupted || parent === null || hourDue || parentRefresh !== null) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
+                result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
               this.#continuationReviews.set(request.outboxId, Date.now());
               try {
+                if (interrupted && parent !== null) {
+                  if (parentRefresh !== null) throw new SessionPlaneDomainError('provider.failure-unverified',
+                    'The same conversation is still interrupted after refresh and continuation; human review is required');
+                  if (refresh !== null && refresh.status !== 'complete') throw new SessionPlaneDomainError(
+                    'provider.failure-unverified', 'The previous refresh outcome is unknown; human review is required');
+                  await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
+                    requestId: `managed-refresh:${request.outboxId}`, decision: 'refresh' });
+                  result = await this.#observe(request);
+                  if (result.terminal === true) continue;
+                }
                 result = await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
                   requestId: reviewId, decision: 'continue', continuationApproved: true });
                 request = this.#request({ teamId: input.teamId, requestRef: String(result.requestRef) });
                 continue;
               } catch (error) {
-                if (!(error instanceof SessionPlaneDomainError) ||
-                    !['provider.failure-unverified', 'provider.preparation-required', 'session.busy'].includes(error.errorCode)) throw error;
-                // Live/uncertain generation or a distinct draft stays untouched.
-                if (timeoutReady) result = { ...result, status: 'recovery_required', recovery: {
-                  state: 'decision_required', decisionRequired: true, userActionRequired: false,
+                if (!(error instanceof SessionPlaneDomainError) || (!interrupted &&
+                    !['provider.failure-unverified', 'provider.preparation-required', 'session.busy'].includes(error.errorCode))) throw error;
+                // Preserve uncertain work, but never swallow an inability to
+                // recover an observed interruption. The caller must see it now.
+                if (interrupted) result = { ...result, status: 'recovery_required', recovery: {
+                  state: 'decision_required', decisionRequired: true, userActionRequired: true,
                   reason: error.errorCode, message: error.message,
+                  url: `https://chatgpt.com/c/${result.conversationId}`,
                 } };
               }
             }
           }
-          if (workflowWaitOutcome(result)) { controller.abort(); break; }
+          if (!followupId && workflowWaitOutcome(result)) { controller.abort(); break; }
           const remaining = deadline - Date.now();
           if (remaining <= 0 || controller.signal.aborted) break;
           const acknowledgementPending = workflowAcknowledgementPending(result) || workflowAnchorRecoveryPending(result);
           const nextAckCheck = Date.parse(String((result.acknowledgementRecovery as { nextCheckAt?: string } | undefined)?.nextCheckAt ?? result.nextCheckAt));
           const acknowledgementWait = Number.isFinite(nextAckCheck) ? Math.max(1_000, nextAckCheck - Date.now()) : 30_000;
           const waited = await this.services.scheduler.waitSession(request.sessionId, {
-            expectedGeneration: request.generation, waitMs: Math.min(remaining, input.continuationApproved ? 30 * 60_000 : remaining, input.followupUserMessageId ? 5_000 : workflowPreparationPending(result) ? 60_000 : acknowledgementPending ? acknowledgementWait : workflowWaitMs(input.waitMs)), signal: controller.signal,
+            expectedGeneration: followupId ? this.services.directory.getSession(request.sessionId).generation : request.generation,
+            ...(followupId ? { wakeOnTerminal: false } : {}), waitMs: Math.min(remaining, input.continuationApproved ? 30 * 60_000 : remaining, followupId ? 5_000 : workflowPreparationPending(result) ? 60_000 : acknowledgementPending ? acknowledgementWait : workflowWaitMs(input.waitMs)), signal: controller.signal,
           });
           if (controller.signal.aborted) break;
           result = await this.#observe(request);
-          if (waited.waitExpired && Date.now() >= deadline && !input.followupUserMessageId && !acknowledgementPending) break;
+          if (waited.waitExpired && Date.now() >= deadline && !followupId && !acknowledgementPending) break;
         }
         return { request, result: { ...result, waitExpired: !workflowWaitOutcome(result) && Date.now() >= deadline } };
       } catch (error) { controller.abort(); return { request: null, result: failure(error, requestRef) }; }
@@ -495,10 +546,10 @@ export class TeamWorkflow {
       if (!workflowWaitOutcome(result) && !(result.followup as { terminal?: boolean } | undefined)?.terminal) {
         const { requestOk, requestRef, teamId, sessionId, generation, submissionState, sessionState,
           providerState, observationTransport, terminal, waitExpired, promptSubmitted, conversationId,
-          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt, conversationLoadRecovery, recovery } = result;
+          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt, conversationLoadRecovery, recovery, followup } = result;
         results.push({ requestOk, requestRef, teamId, sessionId, generation, submissionState, sessionState,
           providerState, observationTransport, terminal, waitExpired, promptSubmitted, conversationId,
-          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt, conversationLoadRecovery, recovery });
+          submittedUserMessageId, responseMessageId, reason, errorCode, nextCheckAt, conversationLoadRecovery, recovery, followup });
       } else results.push({ ...result, ...(files === undefined ? {} : { files }) });
     }
     return { requestOk: true, teamId: input.teamId, results };
@@ -689,6 +740,20 @@ export class TeamWorkflow {
     let snapshot = this.services.directory.getSession(request.sessionId);
     const failureMessage = request.submissionState === 'failed_pre_submit'
       ? JSON.parse(request.resultJson ?? '{}').message as string | undefined : undefined;
+    const linked = new EventRepository(this.services.database.raw).followupReconciliation(request.sessionId, request.generation);
+    if (linked?.requestRef === request.outboxId && typeof linked.receiptId === 'string') {
+      const receipt = this.services.receipts.get(request.clientId, linked.receiptId);
+      if (receipt) {
+        const reconciliation = JSON.parse(receipt.resultJson);
+        const evidence = reconciliation.evidence;
+        return { requestOk: true, requestRef: request.outboxId, sessionId: request.sessionId, generation: request.generation,
+          ...this.#sessions.getGenerationResult(request.sessionId, request.generation),
+          historical: snapshot.generation !== request.generation, terminal: true, waitExpired: false,
+          followup: { kind: 'complete', terminal: true, originalRequestRef: request.outboxId,
+            userMessageId: evidence.followupUserMessageId, responseMessageId: evidence.responseMessageId,
+            answerText: reconciliation.answerText }, reconciliation };
+      }
+    }
     if (snapshot.generation !== request.generation) {
       const original = this.#sessions.getGenerationResult(request.sessionId, request.generation);
       const ack = JSON.parse(request.resultJson ?? '{}');

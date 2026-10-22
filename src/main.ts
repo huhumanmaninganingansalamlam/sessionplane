@@ -227,7 +227,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       if (!thinkingFailureRecovery) throw new Error('Thinking-failure validation is unavailable');
       await thinkingFailureRecovery.validateContinuation(snapshot, continuation);
     },
-    beforeContinuation: async (current, original) => { await ui.verifyContinuation(current, original); },
+    beforeContinuation: async (current, original, confirmation) => { await ui.verifyContinuation(current, original, confirmation); },
     beforeAuthorizedResend: async (current, original, prompt, beforeDispatch) => {
       await ui.verifyAuthorizedResend(current, original, prompt, beforeDispatch);
       // Explicit duplicate-risk approval preserves the unresolved original.

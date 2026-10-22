@@ -22,7 +22,7 @@ import { observeChatGptActivity } from '../providers/chatgpt/activity-observer.t
 import { restoreLatestPosition } from '../providers/chatgpt/latest-position-recovery.ts';
 import { readChatGptMessages } from '../providers/chatgpt/message-dom.ts';
 import { observeChatGptDom, observeChatGptAlerts, isMessageTimeoutAlert } from '../providers/chatgpt/dom-observer.ts';
-import type { SubmissionService } from './submission-service.ts';
+import type { SubmissionService, UserConfirmedInterruption } from './submission-service.ts';
 
 export class SessionUiService {
   readonly #submissions: SubmissionService;
@@ -221,20 +221,24 @@ export class SessionUiService {
       });
   }
 
-  async observeFollowup(input: PreparationOwner, followupUserMessageId: string): Promise<ProviderObservationEvidence> {
-    const read = await this.#submissions.inspectSubmission(input, async session => {
+  async observeFollowup(input: PreparationOwner, followupUserMessageId?: string): Promise<(ProviderObservationEvidence & { followupUserMessageId: string }) | null> {
+    const read = await this.#submissions.inspectSubmission({ ...input, followupInspection: true }, async (session, _submittedIds, owner) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try { return await Promise.race([(async () => {
-      const page = this.#requirePage(session);
+      const page = this.#requirePage(owner);
       const original = await observeChatGptDom(page, session);
+      const nextUser = original.turnBoundary.find(message => message.role === 'user' &&
+        message.messageId !== session.submittedUserMessageId);
+      const followupId = followupUserMessageId ?? (nextUser?.text.trim() === '계속' ? nextUser.messageId : null);
+      if (!followupId) return null;
       if (!original.submittedUserFound || !original.turnBoundary.some(message =>
-        message.role === 'user' && message.messageId === followupUserMessageId && message.messageId !== session.submittedUserMessageId)) {
+        message.role === 'user' && message.messageId === followupId && message.messageId !== session.submittedUserMessageId)) {
         throw new SessionPlaneDomainError('session.page-identity-unverified', 'Follow-up is not after the exact original ACK on this transcript');
       }
-      const dom = await observeChatGptDom(page, { submittedUserMessageId: followupUserMessageId, submittedUserTurnId: null });
+      const dom = await observeChatGptDom(page, { submittedUserMessageId: followupId, submittedUserTurnId: null });
       const activity = await observeChatGptActivity(page, dom);
       const binding = this.#registry.refreshPage(session.pageKey!);
-      return { provider: 'chatgpt', pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch,
+      return { followupUserMessageId: followupId, provider: 'chatgpt' as const, pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch,
         observedAt: dom.messageDiagnostics.observedAt, conversationId: session.conversationId,
         submittedUserFound: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
         candidate: dom.candidate, activity: activity.strength, dialogKind: null, networkActivity: false,
@@ -244,44 +248,55 @@ export class SessionUiService {
         'browser.snapshot-timeout', 'Follow-up observation delayed; preserve the original and later turn')), 5000); })]);
       } finally { clearTimeout(timer); }
     });
-    if (!read.evidence) throw new SessionPlaneDomainError('browser.unavailable', 'Original follow-up page is unavailable');
+    if (read.evidence === undefined) throw new SessionPlaneDomainError('browser.unavailable', 'Original follow-up page is unavailable');
     return read.evidence;
   }
 
-  async prepareContinuation(input: PreparationOwner & { readonly decisionId: string }) {
-    return await this.#submissions.prepareContinuation(input, session => this.verifyContinuation(session, session));
+  async prepareContinuation(input: PreparationOwner & { readonly decisionId: string; readonly userConfirmedInterruption?: UserConfirmedInterruption | undefined }) {
+    return await this.#submissions.prepareContinuation(input, session => this.verifyContinuation(session, session, input.userConfirmedInterruption));
   }
 
-  async verifyContinuation(session: SessionSnapshot, original: SessionSnapshot) {
+  async verifyContinuation(session: SessionSnapshot, original: SessionSnapshot, confirmation?: UserConfirmedInterruption) {
       if (original.reason === 'message-timeout-reconciled') return await this.#failureEvidence(session, original, true, '계속');
       const page = this.#requirePage(session);
       const binding = this.#registry.refreshPage(session.pageKey!);
-      try { await requireIdleConversationPage(page, '계속'); }
+      const dom = await observeChatGptDom(page, original);
+      const activity = await observeChatGptActivity(page, dom);
+      // A banner is not proof of stopped work. It permits the existing fresh
+      // server-turn check below the submission boundary; idle/draft/Stop guards remain.
+      const disconnected = activity.reason === 'provider-stream-disconnected' && !dom.candidate?.streamingMarker;
+      const confirmedDisconnect = confirmation !== undefined && confirmation.conversationId === original.conversationId &&
+        confirmation.submittedUserMessageId === original.submittedUserMessageId &&
+        activity.reason === 'provider-stream-disconnected' && !dom.candidate?.streamingMarker && !dom.candidate?.terminalMarker;
+      if (confirmation && !confirmedDisconnect) throw new SessionPlaneDomainError('provider.preparation-required',
+        'User-confirmed interruption requires the exact disconnected nonstreaming original page');
+      try { await requireIdleConversationPage(page, '계속', confirmedDisconnect); }
       catch (error) {
         if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'session.cleanup-not-ready') throw error;
         throw new SessionPlaneDomainError('provider.preparation-required',
           'Preserve the current draft, attachment or active generation before continuation');
       }
-      const dom = await observeChatGptDom(page, original);
-      const activity = await observeChatGptActivity(page, dom);
       const controls = await this.#capture(session);
       const after = this.#registry.refreshPage(session.pageKey!);
       if (binding.bindingEpoch !== after.bindingEpoch || !dom.conversationSurfaceAvailable ||
-          !dom.submittedUserFound || dom.laterUserFound || dom.candidate !== null || dom.actionableAlert ||
-          activity.strength !== 'none' || controls.nodesTruncated ||
+          !dom.submittedUserFound || dom.laterUserFound || (!confirmedDisconnect && dom.candidate !== null) || dom.actionableAlert ||
+          (!confirmedDisconnect && !disconnected && activity.strength !== 'none') || controls.nodesTruncated ||
           controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role)) ||
           !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
         throw new SessionPlaneDomainError('provider.preparation-required',
           'Continuation requires the exact idle original turn with no answer, later user, alert or separate draft');
       }
       return { pageKey: session.pageKey!, conversationId: session.conversationId!, bindingEpoch: after.bindingEpoch,
-        observedAt: controls.capturedAt, continuationPrompt: '계속' };
+        observedAt: controls.capturedAt, continuationPrompt: '계속',
+        ...(confirmedDisconnect ? { userConfirmedInterruption: confirmation,
+          ...(dom.candidate ? { interruptedResponseMessageId: dom.candidate.responseMessageId,
+            interruptedResponseSha256: createHash('sha256').update(dom.candidate.answerText).digest('hex') } : {}) } : {}) };
   }
 
   async reconcileFollowup(input: PreparationOwner & { readonly decisionId: string; readonly followupUserMessageId: string;
-    readonly responseMessageId: string; readonly responseSha256: string; readonly followupCompleted: true }) {
-    return await this.#submissions.reconcileFollowup(input, async session => {
-      const page = this.#requirePage(session);
+    readonly responseMessageId: string; readonly responseSha256: string; readonly followupCompleted: true; readonly answerText?: string }) {
+    return await this.#submissions.reconcileFollowup(input, async (session, owner) => {
+      const page = this.#requirePage(owner);
       const binding = this.#registry.refreshPage(session.pageKey!);
       const transcript = await readChatGptMessages(page);
       const originals = transcript.filter(m => m.role === 'user' && m.messageId === session.submittedUserMessageId);
@@ -292,10 +307,10 @@ export class SessionUiService {
       const answer = messages.at(-1);
       // An interrupted checkpoint is evidence to retain, not a completed answer to discard.
       const partials = messages.slice(original + 1, user);
-      const controls = await this.#capture(session);
+      const controls = await this.#capture(owner);
       const dom = await observeChatGptDom(page, { submittedUserMessageId: input.followupUserMessageId, submittedUserTurnId: null });
       const activity = await observeChatGptActivity(page, dom);
-      this.#requirePage(session);
+      this.#requirePage(owner);
       const after = this.#registry.refreshPage(session.pageKey!);
       if (originals.length !== 1 || followups.length !== 1 || originals[0]?.rootIndex !== followups[0]?.rootIndex ||
           original < 0 || user <= original || user >= messages.length - 1 || messages.slice(user + 1, -1).some(message => message.role !== 'assistant' || message.terminalMarker) || answer?.role !== 'assistant' ||
@@ -482,13 +497,23 @@ export class SessionUiService {
     } catch (error) {
       if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.preparation-required') throw error;
     }
-    await this.#submissions.decidePreparation({ ...input, decisionId: `thinking-failure-submit:${input.requestId}:${preparationId}`,
+    await this.#submissions.decidePreparation<Readonly<Record<string, unknown>>>({ ...input, decisionId: `thinking-failure-submit:${input.requestId}:${preparationId}`,
       decision: 'configure', purpose: 'submit' }, async session => {
       const snapshot = await this.#capture(session, 5_000);
       const submits = snapshot.nodes.filter(node => node.submitControl === true && !node.disabled);
-      if (snapshot.nodesTruncated || submits.length !== 1 || !hasPreparationSelectionEvidence(snapshot.nodes, model)) throw new SessionPlaneDomainError(
-        'provider.failure-unverified', 'Fresh configuration or unique enabled submit evidence is missing');
-      return { choice: toPreparationTarget('submit', submits[0]!), result: { purpose: 'submit' } };
+      if (snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, model)) throw new SessionPlaneDomainError(
+        'provider.failure-unverified', 'Fresh configuration evidence is missing');
+      if (submits.length === 1) return { choice: toPreparationTarget('submit', submits[0]!), result: { purpose: 'submit' } };
+      const confirmation = this.#submissions.confirmedContinuation(input);
+      if (submits.length === 0 && confirmation) {
+        const original = { ...session, generation: session.generation - 1,
+          submittedUserMessageId: confirmation.submittedUserMessageId, submittedUserTurnId: null };
+        await this.verifyContinuation(session, original, confirmation);
+        const composers = snapshot.nodes.filter(node => node.role === 'textbox' && node.editable && !node.disabled);
+        if (composers.length === 1) return { choice: { ...toPreparationTarget('submit', composers[0]!), submitGesture: 'enter' as const },
+          result: { purpose: 'submit', gesture: 'enter', userConfirmedInterruption: confirmation } };
+      }
+      throw new SessionPlaneDomainError('provider.failure-unverified', 'Unique enabled submit evidence is missing');
     });
     const result = await this.#submissions.resumePreparation(input);
     if (result.submissionState !== 'submitted') throw new SessionPlaneDomainError(

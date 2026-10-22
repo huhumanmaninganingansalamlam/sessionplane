@@ -53,6 +53,7 @@ export class ChatGptSubmission implements ProviderSubmission {
   readonly #initialUrl: string | null;
   readonly #preparationRefs = new BrowserRefSnapshotStore();
   #sendButton: PreparationElement | null = null;
+  #submitWithEnter = false;
   #abandoned = false;
   #preparationStage = 'not-started';
 
@@ -161,7 +162,8 @@ export class ChatGptSubmission implements ProviderSubmission {
         maxNodes: 5_000,
       });
       const matches = snapshot.nodes.filter((node) => matchesPreparationTarget(node, target) &&
-        (target.purpose !== 'submit' || node.submitControl === true));
+        (target.purpose !== 'submit' || node.submitControl === true ||
+          (target.submitGesture === 'enter' && node.role === 'textbox' && node.editable && this.#request.prompt === '계속')));
       if (snapshot.nodesTruncated || matches.length > 1) return null;
       const match = matches[0];
       if (match !== undefined) {
@@ -251,6 +253,9 @@ export class ChatGptSubmission implements ProviderSubmission {
     this.#checkpoint('configuration-verify');
     await this.#verifyConfiguration(choices);
     this.#checkpoint('submit-resolve');
+    if (choices?.submit?.submitGesture === 'enter' && (this.#request.prompt !== '계속' ||
+        choices.submit.role !== 'textbox' || !choices.submit.editable)) throw new ProviderSubmissionError(
+      'provider.preparation-required', 'Keyboard continuation requires its exact prepared composer');
 
     if (choices.submit === undefined) {
       throw new ProviderSubmissionError('provider.preparation-required', 'Prompt is prepared; inspect and choose the current submit control');
@@ -281,6 +286,7 @@ export class ChatGptSubmission implements ProviderSubmission {
       this.#requireExactPage();
       this.#checkpoint('prepared');
       this.#sendButton = sendButton;
+      this.#submitWithEnter = choices.submit.submitGesture === 'enter';
     } catch (error) {
       await sendButton.dispose();
       throw error;
@@ -320,7 +326,11 @@ export class ChatGptSubmission implements ProviderSubmission {
     this.#page.on('request', this.#captureSentIdentity);
     this.#page.on('response', this.#captureAcceptance);
     this.#page.on('requestfailed', this.#captureFailedRequest);
-    await this.#sendButton.click({ timeout: 5_000 });
+    if (this.#submitWithEnter) {
+      if (this.#preparedPromptHashes.size === 0) throw new ProviderSubmissionError('provider.preparation-required',
+        'Keyboard continuation lost its exact prepared draft');
+      await this.#sendButton.press('Enter', { timeout: 5_000 });
+    } else await this.#sendButton.click({ timeout: 5_000 });
   }
 
   async captureAcknowledgement(): Promise<ProviderSubmissionAcknowledgement | null> {

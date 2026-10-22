@@ -27,9 +27,9 @@ async function exactRoot(page: Page, request: ProviderArtifactRequest, requireAn
   const node = await page.locator(CHATGPT_SELECTORS.messages).nth(answer.elementIndex!).elementHandle();
   if (node === null) unavailable('Exact artifact answer disappeared');
   const stillExact = await node.evaluate((el, expected) => {
-    const root = el.closest('[data-message-id], [data-turn-id]') ?? el;
+    const root = el.closest('[data-message-id], [data-turn-id], [data-dil-message-id]') ?? el;
     const ids = [...new Set((el.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/).filter(Boolean))];
-    return (root.getAttribute('data-message-id') ?? el.getAttribute('data-message-id') ?? (ids.length === 1 ? ids[0] : null)) === expected;
+    return (root.getAttribute('data-message-id') ?? el.getAttribute('data-message-id') ?? el.getAttribute('data-dil-message-id') ?? (ids.length === 1 ? ids[0] : null)) === expected;
   }, request.session.responseMessageId);
   if (!stillExact) { await node.dispose(); unavailable('Artifact response identity changed'); }
   const handle = await node.evaluateHandle(el => el.closest<HTMLElement>('[data-message-id], [data-turn-id]') ?? el as HTMLElement);

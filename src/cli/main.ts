@@ -54,6 +54,7 @@ const FLAG_OPTIONS = new Set([
 ]);
 const MULTI_VALUE_OPTIONS = new Set(['file', 'skill']);
 const VALUE_OPTIONS = new Set([
+  'user-confirmed-interruption',
   'followup-message-id', 'remote', 'remote-executable', 'remote-socket', 'remote-control-path',
   'state-dir',
   'browser',
@@ -760,6 +761,8 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   }, sessionSendRpcTimeoutMs(config));
   if (action === 'continue') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'continue', continuationApproved: parsed.options['continuation-approved'] === 'true',
+    ...(parsed.options['user-confirmed-interruption'] === undefined ? {} : {
+      userConfirmedInterruption: JSON.parse(readFileSync(parsed.options['user-confirmed-interruption'], 'utf8')) }),
   }, sessionSendRpcTimeoutMs(config), true);
   if (['discover', 'refresh', 'focus', 'latest', 'reconcile_failure'].includes(action ?? '')) {
     return await printRpc(io, parsed, config, 'workflow.decide', { ...mutation, decision: action,
@@ -1362,6 +1365,7 @@ Exact request flow (same request; no automatic resend):
   6. Collect: request wait TEAM_ID REQUEST_REF [--wait-ms N] [--out DIRECTORY]
   Recovery: request discover|refresh|focus|latest|reconcile_failure TEAM_ID REQUEST_REF
   Approved interrupted tool-turn continuation: request continue TEAM_ID REQUEST_REF --continuation-approved
+  User-confirmed disconnected turn: add --user-confirmed-interruption FILE (conversationId, submittedUserMessageId, evidenceRef). Never infer user confirmation.
   Confirm an observed matching submission without resending:
     request acknowledge TEAM_ID REQUEST_REF --message-id ID --evidence-hash HASH
   Approved HostSpan tool permission: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow --app-name NAME --tool-name NAME [--allow-mode once|always] [--evidence-hash HASH]
