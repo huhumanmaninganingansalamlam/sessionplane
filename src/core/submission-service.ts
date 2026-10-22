@@ -1080,6 +1080,14 @@ export class SubmissionService {
     }
   }
 
+  confirmedContinuation(input: { readonly clientId: string; readonly requestId: string }): UserConfirmedInterruption | undefined {
+    const request = this.#outbox.getByRequest(input.clientId, input.requestId);
+    const originalRef = request && parseOutboxPayload(request).continuationOf;
+    if (!originalRef) return undefined;
+    const receipt = new ReceiptRepository(this.#database).get(input.clientId, `continuation-authorization:${originalRef}`);
+    return receipt ? JSON.parse(receipt.resultJson).userConfirmedInterruption : undefined;
+  }
+
   async prepareContinuation(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string;
       readonly generation: number; readonly decisionId: string; readonly userConfirmedInterruption?: UserConfirmedInterruption | undefined },

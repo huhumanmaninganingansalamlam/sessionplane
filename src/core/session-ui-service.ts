@@ -490,13 +490,23 @@ export class SessionUiService {
     } catch (error) {
       if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.preparation-required') throw error;
     }
-    await this.#submissions.decidePreparation({ ...input, decisionId: `thinking-failure-submit:${input.requestId}:${preparationId}`,
+    await this.#submissions.decidePreparation<Readonly<Record<string, unknown>>>({ ...input, decisionId: `thinking-failure-submit:${input.requestId}:${preparationId}`,
       decision: 'configure', purpose: 'submit' }, async session => {
       const snapshot = await this.#capture(session, 5_000);
       const submits = snapshot.nodes.filter(node => node.submitControl === true && !node.disabled);
-      if (snapshot.nodesTruncated || submits.length !== 1 || !hasPreparationSelectionEvidence(snapshot.nodes, model)) throw new SessionPlaneDomainError(
-        'provider.failure-unverified', 'Fresh configuration or unique enabled submit evidence is missing');
-      return { choice: toPreparationTarget('submit', submits[0]!), result: { purpose: 'submit' } };
+      if (snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, model)) throw new SessionPlaneDomainError(
+        'provider.failure-unverified', 'Fresh configuration evidence is missing');
+      if (submits.length === 1) return { choice: toPreparationTarget('submit', submits[0]!), result: { purpose: 'submit' } };
+      const confirmation = this.#submissions.confirmedContinuation(input);
+      if (submits.length === 0 && confirmation) {
+        const original = { ...session, generation: session.generation - 1,
+          submittedUserMessageId: confirmation.submittedUserMessageId, submittedUserTurnId: null };
+        await this.verifyContinuation(session, original, confirmation);
+        const composers = snapshot.nodes.filter(node => node.role === 'textbox' && node.editable && !node.disabled);
+        if (composers.length === 1) return { choice: { ...toPreparationTarget('submit', composers[0]!), submitGesture: 'enter' as const },
+          result: { purpose: 'submit', gesture: 'enter', userConfirmedInterruption: confirmation } };
+      }
+      throw new SessionPlaneDomainError('provider.failure-unverified', 'Unique enabled submit evidence is missing');
     });
     const result = await this.#submissions.resumePreparation(input);
     if (result.submissionState !== 'submitted') throw new SessionPlaneDomainError(

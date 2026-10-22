@@ -6,12 +6,61 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { prepareFixture } from '../helpers/preparation-fixture.ts';
 
+import { BrowserRefSnapshotStore } from '../../src/browser/ref-snapshot.ts';
 import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry, PageRegistryError } from '../../src/browser/page-registry.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ProviderSubmissionError, type ProviderSubmissionAttempt } from '../../src/providers/provider-adapter.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { ChatGptSubmission, recoverChatGptAcknowledgement, inspectChatGptSubmissionCandidates } from '../../src/providers/chatgpt/submission.ts';
+
+test('confirmed continuation Enter gesture uses the original composer and accepted ACK without clicking Stop', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-enter-continuation-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', async route => {
+      if (route.request().url().endsWith('/api/auth/session')) return await route.fulfill({ json: { accessToken: 'isolated-fixture-token' } });
+      if (route.request().method() === 'POST') return await route.fulfill({ json: {} });
+      return await route.fulfill({ contentType: 'text/html', body: `<main>
+        <div role="radiogroup"><button role="radio" aria-checked="true">Chat</button></div>
+        <div data-message-author-role="user" data-message-id="original-ack">Original</div>
+        <div data-message-author-role="assistant" data-message-id="partial">Preserve partial</div>
+        <div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>
+        <div id="prompt-textarea" role="textbox" contenteditable="true"></div>
+        <button data-testid="stop-button" onclick="window.stopCount++">Stop</button>
+        <script>window.stopCount=0;window.sendCount=0;
+        const composer=document.querySelector('#prompt-textarea');
+        composer.addEventListener('keydown',async e=>{if(e.key!=='Enter'||e.shiftKey)return;e.preventDefault();window.sendCount++;
+          const text=composer.innerText;
+          await fetch('/backend-api/f/conversation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+            action:'next',conversation_id:'keyboardconv123',parent_message_id:'partial',messages:[{
+              id:'continuation-ack',author:{role:'user'},content:{content_type:'text',parts:[text]}}]})});
+          const user=document.createElement('div');user.setAttribute('data-message-author-role','user');
+          user.setAttribute('data-message-id','continuation-ack');user.textContent=text;document.querySelector('main').append(user);
+          composer.textContent='';
+        });</script></main>` });
+    });
+    await page.goto('https://chatgpt.com/c/keyboardconv123');
+    registry.reservePage(binding.pageKey, { sessionId: 'confirmed-enter', generation: 3, conversationId: 'keyboardconv123' });
+    const submission = new ChatGptSubmission({ page, pageKey: binding.pageKey, pageRegistry: registry,
+      request: { session: { ...sessionSnapshot({ sessionId: 'confirmed-enter', pageKey: binding.pageKey }), generation: 3,
+        conversationId: 'keyboardconv123' }, generation: 3, prompt: '계속', model: null }, acknowledgementTimeoutMs: 2000 });
+    await submission.prepareForObservation();
+    const snapshot = await new BrowserRefSnapshotStore().capture({ page, pageKey: binding.pageKey, bindingEpoch: 1, interactive: false });
+    const composer = snapshot.nodes.find(node=>node.role==='textbox'&&node.editable)!;
+    await submission.prepare({ composer: { ...composer, purpose: 'composer', selectedValue: null },
+      submit: { ...composer, purpose: 'submit', selectedValue: null, submitGesture: 'enter' } });
+    await submission.submitOnce();
+    const ack = await submission.captureAcknowledgement();
+    assert.equal(ack?.submittedUserMessageId, 'continuation-ack');
+    assert.equal(ack?.conversationId, 'keyboardconv123');
+    assert.equal(await page.locator('[data-message-id="partial"]').innerText(), 'Preserve partial');
+    assert.deepEqual(await page.evaluate(()=>({send:(window as any).sendCount,stop:(window as any).stopCount})), {send:1,stop:0});
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('UNKNOWN history acknowledgement requires retained ownership, empty draft and exact canonical prompt', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-history-ack-'));

@@ -383,8 +383,7 @@ test('user-confirmed exact disconnected turn continues once despite deferred bac
     const partial = '<div data-message-author-role="assistant" data-message-id="original-partial">Retain original partial</div>';
     const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
     const disconnected = '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>';
-    const controls = '<textarea></textarea><button data-testid="stop-button">Stop</button>' +
-      '<button data-testid="send-button">Send</button></main>';
+    const controls = '<textarea></textarea><button data-testid="stop-button">Stop</button></main>';
     await f.fake.page.setContent(body + partial + disconnected + controls);
     await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: undefined }), /server evidence/);
     await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: { ...confirmation, conversationId: 'other-chat' } }), /exact acknowledged/);
