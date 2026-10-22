@@ -256,7 +256,12 @@ export class SessionUiService {
       if (original.reason === 'message-timeout-reconciled') return await this.#failureEvidence(session, original, true, '계속');
       const page = this.#requirePage(session);
       const binding = this.#registry.refreshPage(session.pageKey!);
-      await requireIdleConversationPage(page, '계속');
+      try { await requireIdleConversationPage(page, '계속'); }
+      catch (error) {
+        if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'session.cleanup-not-ready') throw error;
+        throw new SessionPlaneDomainError('provider.preparation-required',
+          'Preserve the current draft, attachment or active generation before continuation');
+      }
       const dom = await observeChatGptDom(page, original);
       const activity = await observeChatGptActivity(page, dom);
       const controls = await this.#capture(session);
