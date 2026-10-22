@@ -77,6 +77,29 @@ test('approved resend display guard preserves drafts/selection and stops origina
         assert.deepEqual(details.blockingReasons, ['separate-draft']);
         return true;
       });
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="older-continue">계속</div><textarea id="prompt-textarea">계속</textarea></main>');
+    const followupHtml = await page.content();
+    const transcriptHash = await ui.verifyAuthorizedResend(unknown, unknown, '계속', false, true);
+    assert.equal(await page.content(), followupHtml, 'A new explicit follow-up neither borrows an older ACK nor clears its exact draft');
+    await assert.rejects(ui.verifyAuthorizedResend(unknown, unknown, '계속', false), /matching-user-message/);
+    await page.locator('main').evaluate(e => e.insertAdjacentHTML('afterbegin',
+      '<aside role="alert">Refresh and check whether the message was processed before sending again</aside>'));
+    await ui.verifyAuthorizedResend(unknown, unknown, '계속', false, true);
+    await ui.verifyAuthorizedResend(unknown, unknown, '계속', true, true, transcriptHash);
+    await page.locator('main').evaluate(e => e.insertAdjacentHTML('afterbegin',
+      '<div data-message-author-role="user" data-message-id="human-new-continue">계속</div>'));
+    await assert.rejects(ui.verifyAuthorizedResend(unknown, unknown, '계속', true, true, transcriptHash), /transcript changed/);
+    for (const html of [
+      '<div role="dialog">Sign in to continue</div><textarea id="prompt-textarea">계속</textarea>',
+      '<div role="alert">HostSpan Process Start<button>한 번만 허용</button></div><textarea id="prompt-textarea">계속</textarea>',
+      '<button data-testid="stop-button">Stop</button><textarea id="prompt-textarea">계속</textarea>',
+      '<textarea id="prompt-textarea">A different user draft</textarea>',
+    ]) {
+      await page.setContent(`<main>${html}</main>`);
+      const preserved = await page.content();
+      await assert.rejects(ui.verifyAuthorizedResend(unknown, unknown, '계속', false, true));
+      assert.equal(await page.content(), preserved, 'Explicit user input cannot bypass a provider refusal, activity or another draft');
+    }
     await assert.rejects(ui.verifyAuthorizedResend({ ...current, sessionId: 'other-owner' }, original, 'Original follow-up', true));
     assert.equal(requests, 1, 'Only the isolated initial route: no refresh, authentication probe, submit or navigation');
     assert.equal(registry.getBinding(binding.pageKey).sessionId, 'exact-session');

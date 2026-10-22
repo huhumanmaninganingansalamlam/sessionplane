@@ -350,13 +350,31 @@ export class SessionUiService {
   }
 
   /** Passive, exact-owner checks; this never dispatches or clears a draft. */
-  async verifyAuthorizedResend(current: SessionSnapshot, original: SessionSnapshot, prompt: string, allowPreparedDraft: boolean) {
+  async verifyAuthorizedResend(current: SessionSnapshot, original: SessionSnapshot, prompt: string, allowPreparedDraft: boolean, followup?: true, userTranscriptHash?: string) {
     const page = this.#requirePage(current);
     await inspectChatGptPageReady(page, current.pageKey!);
     const binding = this.#registry.refreshPage(current.pageKey!);
     const dom = await observeChatGptDom(page, original);
     const activity = await observeChatGptActivity(page, dom);
+    if (followup) {
+      // This is a new user message, not proof that the UNKNOWN attempt failed.
+      // Send-error notices are not access controls. The ordinary submission path
+      // still verifies authentication, Chat selection and provider acceptance.
+      const controls = await this.#capture(current);
+      const dialog = await observeChatGptDialog(page);
+      if (dialog.kind || controls.nodes.some(n => ['dialog', 'alertdialog'].includes(n.role) ||
+          (n.role === 'button' && /^(?:allow|always allow|allow once|deny|한 번만 허용|항상 허용|허용|거부)$/i.test(n.name.trim())))) {
+        throw new SessionPlaneDomainError('provider.preparation-required',
+          'A current verification or permission control requires resolution before the explicit follow-up',
+          { dialog, providerAlerts: dom.providerAlerts, providerMutation: false });
+      }
+      await requireIdleConversationPage(page, '계속');
+    }
     const messages = await readChatGptMessages(page);
+    const transcriptHash = createHash('sha256').update(JSON.stringify(messages.filter(m => m.role === 'user')
+      .map(m => ({ messageId: m.messageId, turnId: m.turnId, text: m.text })))).digest('hex');
+    if (followup && userTranscriptHash && transcriptHash !== userTranscriptHash) throw new SessionPlaneDomainError(
+      'provider.preparation-required', 'The user transcript changed after follow-up preparation; inspect and collect the new turn without sending');
     const matchingPromptFound = messages.some(message => message.role === 'user' &&
       message.text.replaceAll('\r\n', '\n') === prompt.replaceAll('\r\n', '\n'));
     const state = await page.evaluate((composerSelector) => {
@@ -376,10 +394,10 @@ export class SessionUiService {
         !await composerHasExactValue(page.locator(CHATGPT_COMPOSER_SELECTOR).nth(draft.index), prompt))))).some(Boolean);
     const blockingReasons = [
       dom.submittedUserFound && 'original-anchor', dom.candidate !== null && 'original-answer',
-      activity.strength !== 'none' && 'provider-activity', dom.actionableAlert && 'provider-alert',
+      activity.strength !== 'none' && 'provider-activity', !followup && dom.actionableAlert && 'provider-alert',
       !dom.conversationSurfaceAvailable && 'conversation-surface-unavailable', state.selection && 'user-selection',
       state.drafts.length !== 1 && 'composer-count', separateDraft && 'separate-draft',
-      matchingPromptFound && 'matching-user-message',
+      !followup && matchingPromptFound && 'matching-user-message',
     ].filter((reason): reason is string => typeof reason === 'string');
     if (blockingReasons.length > 0) {
       throw new SessionPlaneDomainError('provider.preparation-required',
@@ -393,6 +411,7 @@ export class SessionUiService {
     this.#requirePage(current);
     if (this.#registry.refreshPage(current.pageKey!).bindingEpoch !== binding.bindingEpoch) throw new SessionPlaneDomainError(
       'session.page-identity-unverified', 'Page changed during approved resend validation');
+    return followup ? transcriptHash : undefined;
   }
 
   reserveResendPage(original: SessionSnapshot, successor: SessionSnapshot) {

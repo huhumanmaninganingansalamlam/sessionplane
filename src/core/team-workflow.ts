@@ -164,7 +164,7 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName: string; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName: string; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
     if (input.decision === 'hostspan_permission') {
@@ -236,6 +236,21 @@ export class TeamWorkflow {
       });
     }
 
+    if (input.decision === 'followup') {
+      // Explicit new input has its own ACK; it never resolves or replays UNKNOWN.
+      const saved = this.services.receipts.get(request.clientId, `submission-configuration:${request.outboxId}`);
+      if (!saved) throw new SessionPlaneDomainError('provider.preparation-required',
+        'Preserved model/version/effort evidence is missing; the original UNKNOWN request is unchanged');
+      const prepared = await this.services.submissions.prepareAuthorizedResend({ ...owner,
+        decisionId: input.requestId, approvalRef: input.approvalRef, followup: true });
+      const successor = this.#outbox.requireById(prepared.requestRef as string);
+      if (successor.submissionState === 'prepared') {
+        const payload = JSON.parse(request.payloadJson);
+        await this.services.ui.prepareFailureContinuation(ownerOf(successor), JSON.parse(saved.resultJson).model, payload);
+      }
+      return { ...await this.#observe(successor), followupOf: request.outboxId,
+        originalDisposition: 'unresolved-preserved' };
+    }
     if (input.decision === 'prepare_resend') {
       const prepared = await this.services.submissions.prepareAuthorizedResend({ ...owner,
         decisionId: input.requestId, approvalRef: input.approvalRef, duplicateRiskAccepted: input.duplicateRiskAccepted });

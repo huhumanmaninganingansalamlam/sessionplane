@@ -228,8 +228,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       await thinkingFailureRecovery.validateContinuation(snapshot, continuation);
     },
     beforeContinuation: async (current, original, confirmation) => { await ui.verifyContinuation(current, original, confirmation); },
-    beforeAuthorizedResend: async (current, original, prompt, beforeDispatch) => {
-      await ui.verifyAuthorizedResend(current, original, prompt, beforeDispatch);
+    beforeAuthorizedResend: async (current, original, prompt, beforeDispatch, followup, userTranscriptHash) => {
+      return await ui.verifyAuthorizedResend(current, original, prompt, beforeDispatch, followup, userTranscriptHash);
       // Explicit duplicate-risk approval preserves the unresolved original.
       // Recovery GET pacing remains with its observer; it does not gate this UI dispatch.
     },

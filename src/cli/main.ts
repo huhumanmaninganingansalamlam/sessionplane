@@ -764,6 +764,9 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
     ...(parsed.options['user-confirmed-interruption'] === undefined ? {} : {
       userConfirmedInterruption: JSON.parse(readFileSync(parsed.options['user-confirmed-interruption'], 'utf8')) }),
   }, sessionSendRpcTimeoutMs(config), true);
+  if (action === 'followup') return await printRpc(io, parsed, config, 'workflow.decide', {
+    ...mutation, decision: 'followup', approvalRef: requirePositional(parsed.words, 4, 'exact user instruction reference'),
+  }, sessionSendRpcTimeoutMs(config), true);
   if (['discover', 'refresh', 'focus', 'latest', 'reconcile_failure'].includes(action ?? '')) {
     return await printRpc(io, parsed, config, 'workflow.decide', { ...mutation, decision: action,
       ...(action === 'reconcile_failure' && parsed.options['continuation-prompt'] !== undefined
@@ -1366,6 +1369,8 @@ Exact request flow (same request; no automatic resend):
   Recovery: request discover|refresh|focus|latest|reconcile_failure TEAM_ID REQUEST_REF
   Approved interrupted tool-turn continuation: request continue TEAM_ID REQUEST_REF --continuation-approved
   User-confirmed disconnected turn: add --user-confirmed-interruption FILE (conversationId, submittedUserMessageId, evidenceRef). Never infer user confirmation.
+  Explicit new literal 계속 after UNKNOWN: request followup TEAM_ID REQUEST_REF USER_INSTRUCTION_REF
+    Preserves original uncertainty; never automatically retries or bypasses provider errors/drafts/activity.
   Confirm an observed matching submission without resending:
     request acknowledge TEAM_ID REQUEST_REF --message-id ID --evidence-hash HASH
   Approved HostSpan tool permission: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow --app-name NAME --tool-name NAME [--allow-mode once|always] [--evidence-hash HASH]
