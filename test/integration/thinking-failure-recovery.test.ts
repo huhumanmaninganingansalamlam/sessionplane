@@ -252,7 +252,7 @@ test('closing the recovery owner during child preparation preserves its saved dr
   } finally { await f.close(); }
 });
 
-for (const trailingEmpty of [false, true]) test(`approved interrupted tool continuation${trailingEmpty ? ' after empty finished assistant through managed wait' : ''} preserves original ACK and uses one ordinary successor`, async () => {
+for (const trailingEmpty of [false, true]) test(`approved interrupted tool continuation${trailingEmpty ? ' after empty finished assistant through managed wait' : ''} preserves original ACK and uses one ordinary successor`, async t => {
   const f = await fixture();
   try {
     f.fake.surface = users => users;
@@ -297,7 +297,14 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
       await assert.rejects(f.rpc('decide', input), /draft|active|idle|cleanup/);
       assert.equal(f.core.teamDirectory.getSession(original.sessionId).terminal, false);
     }
-    await f.fake.page.setContent(body + '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div><textarea>계속</textarea><button data-testid="send-button">Send</button></main>');
+    const readServer = EventRepository.prototype.latestServerObservation;
+    t.mock.method(EventRepository.prototype, 'latestServerObservation', function (...args) {
+      const result = readServer.apply(this, args);
+      return result ? { ...result, observedAt: new Date(Date.now() - 20 * 60_000).toISOString() } : result;
+    });
+    await f.fake.page.setContent(body + '<textarea></textarea></main>');
+    await assert.rejects(f.rpc('decide', input), /Fresh exact server evidence/);
+    await f.fake.page.setContent(body + '<div data-message-author-role="assistant" data-message-id="partial">Preserved partial</div><div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div><textarea>계속</textarea><button data-testid="send-button">Send</button></main>');
     f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="continued-answer">Continued answer</div>';
     let prepared;
     if (trailingEmpty) {

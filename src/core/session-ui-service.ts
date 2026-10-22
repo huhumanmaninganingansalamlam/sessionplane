@@ -279,7 +279,8 @@ export class SessionUiService {
       const controls = await this.#capture(session);
       const after = this.#registry.refreshPage(session.pageKey!);
       if (binding.bindingEpoch !== after.bindingEpoch || !dom.conversationSurfaceAvailable ||
-          !dom.submittedUserFound || dom.laterUserFound || (!confirmedDisconnect && dom.candidate !== null) || dom.actionableAlert ||
+          !dom.submittedUserFound || dom.laterUserFound ||
+          (!confirmedDisconnect && dom.candidate !== null && !(disconnected && !dom.candidate.terminalMarker)) || dom.actionableAlert ||
           (!confirmedDisconnect && !disconnected && activity.strength !== 'none') || controls.nodesTruncated ||
           controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role)) ||
           !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
@@ -288,6 +289,7 @@ export class SessionUiService {
       }
       return { pageKey: session.pageKey!, conversationId: session.conversationId!, bindingEpoch: after.bindingEpoch,
         observedAt: controls.capturedAt, continuationPrompt: '계속',
+        disconnectedRecovery: disconnected && !dom.candidate?.terminalMarker,
         ...(confirmedDisconnect ? { userConfirmedInterruption: confirmation,
           ...(dom.candidate ? { interruptedResponseMessageId: dom.candidate.responseMessageId,
             interruptedResponseSha256: createHash('sha256').update(dom.candidate.answerText).digest('hex') } : {}) } : {}) };
