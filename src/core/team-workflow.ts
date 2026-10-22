@@ -465,27 +465,27 @@ export class TeamWorkflow {
             const dom = (result.submissionVerification as { dom?: {
               activityReason?: string; activity?: string; anchorPresent?: boolean; laterUserFound?: boolean;
             } } | undefined)?.dom;
+            const missingContinuation = this.services.submissions.missingContinuationAnchor(
+              this.services.directory.getSession(request.sessionId)) !== null;
             const interrupted = timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
-              dom.activity !== 'strong' && dom.anchorPresent === true && dom.laterUserFound === false);
+              dom.activity !== 'strong' && (dom.anchorPresent === true || missingContinuation) && dom.laterUserFound === false);
             const payload = JSON.parse(request.payloadJson);
             const parent = typeof payload.continuationOf === 'string' ? this.#outbox.getById(payload.continuationOf) : null;
-            const refresh = this.services.receipts.latestPageRefresh(request.clientId, request.sessionId, request.generation);
-            const hourDue = Date.now() - Date.parse(refresh?.status === 'complete' ? refresh.updatedAt : request.createdAt) >= 60 * 60_000;
-            const parentRefresh = parent === null ? null : this.services.receipts.get(request.clientId, `managed-refresh:${parent.outboxId}`);
-            if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || timeoutReady))) &&
-                (interrupted || freshServer) && (!interrupted || parent === null || hourDue || parentRefresh !== null) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
+            if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
+                (interrupted || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
                 result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
               this.#continuationReviews.set(request.outboxId, Date.now());
               try {
-                if (interrupted && parent !== null) {
-                  if (parentRefresh !== null) throw new SessionPlaneDomainError('provider.failure-unverified',
-                    'The same conversation is still interrupted after refresh and continuation; human review is required');
-                  if (refresh !== null && refresh.status !== 'complete') throw new SessionPlaneDomainError(
-                    'provider.failure-unverified', 'The previous refresh outcome is unknown; human review is required');
-                  await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
-                    requestId: `managed-refresh:${request.outboxId}`, decision: 'refresh' });
-                  result = await this.#observe(request);
-                  if (result.terminal === true) continue;
+                if (interrupted && parent !== null && !missingContinuation) {
+                  const viewed = await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
+                    requestId: `manual-refresh-view:${request.outboxId}`, decision: 'focus' });
+                  result = { ...result, status: 'recovery_required', recovery: {
+                    state: 'decision_required', decisionRequired: true, userActionRequired: true,
+                    reason: 'provider.manual-refresh-required', activated: 'activated' in viewed && viewed.activated === true,
+                    message: 'The approved continuation is still interrupted. Refresh this original tab in the browser; SessionPlane has not refreshed or sent another message.',
+                    url: `https://chatgpt.com/c/${result.conversationId}`,
+                  } };
+                  break;
                 }
                 result = await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
                   requestId: reviewId, decision: 'continue', continuationApproved: true });

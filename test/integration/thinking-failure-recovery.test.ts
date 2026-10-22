@@ -446,6 +446,45 @@ test('user-confirmed exact disconnected turn continues once despite deferred bac
   } finally { await f.close(); }
 });
 
+test('a lost continuation ACK uses proven server absence and the exact retained predecessor without replaying product work', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    const first = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const disconnected = '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>';
+    const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
+    const controls = '<textarea></textarea><button data-testid="stop-button">Stop</button></main>';
+    await f.fake.page.setContent(body + disconnected + controls);
+    const next = await f.rpc<any>('decide', { teamId: f.team.teamId, requestRef: first,
+      requestId: 'first-continue', decision: 'continue', continuationApproved: true,
+      userConfirmedInterruption: { conversationId: original.conversationId,
+        submittedUserMessageId: original.submittedUserMessageId, evidenceRef: 'User confirmed original interruption' } });
+    const current = f.core.teamDirectory.getSession(f.session.sessionId);
+    await f.fake.page.setContent(body + disconnected + controls);
+    const input = { teamId: f.team.teamId, requestRef: next.requestRef, requestId: `managed-continuation:${next.requestRef}`,
+      decision: 'continue', continuationApproved: true };
+    await assert.rejects(f.rpc('decide', input), /server evidence/);
+    await f.core.actorScheduler.updateGeneration(current.sessionId, 2, {}, 'generation.backend-unverified',
+      'backend-user-anchor-absent-from-mapping', { conversationId: current.conversationId, pageKey: 'previous-core-page',
+        submittedUserMessageId: current.submittedUserMessageId, submittedUserTurnId: current.submittedUserTurnId });
+    await f.fake.page.setContent(body + '<div data-message-author-role="user" data-message-id="later">Already sent</div>' + disconnected + controls);
+    await assert.rejects(f.rpc('decide', input), /idle original turn/);
+    await f.fake.page.setContent(body + disconnected + controls);
+    f.fake.failureCount = 2;
+    f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="recovered" data-end-turn="true">New work recovered</div>';
+    const recovered = await f.rpc<any>('decide', input);
+    assert.equal(recovered.generation, 3);
+    assert.ok(recovered.submittedUserMessageId);
+    assert.equal(recovered.reconciliation.evidence.missingContinuationAcknowledgement, current.submittedUserMessageId);
+    assert.equal(recovered.reconciliation.evidence.retainedPredecessorAcknowledgement, original.submittedUserMessageId);
+    assert.equal(f.fake.submitCount, 3, 'Each approved continuation is dispatched once; product prompt is never replayed');
+    const replay = await f.rpc<any>('decide', input);
+    assert.equal(replay.requestRef, recovered.requestRef);
+    assert.equal(f.fake.submitCount, 3);
+  } finally { await f.close(); }
+});
+
 test('managed wait resumes its already prepared continuation without another generation or send', async t => {
   const f = await fixture();
   try {

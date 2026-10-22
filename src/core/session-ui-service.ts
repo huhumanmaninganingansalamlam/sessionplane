@@ -260,15 +260,18 @@ export class SessionUiService {
       if (original.reason === 'message-timeout-reconciled') return await this.#failureEvidence(session, original, true, '계속');
       const page = this.#requirePage(session);
       const binding = this.#registry.refreshPage(session.pageKey!);
+      const missing = this.#submissions.missingContinuationAnchor(original);
       const dom = await observeChatGptDom(page, original);
-      const activity = await observeChatGptActivity(page, dom);
+      const retained = missing && !dom.submittedUserFound ? await observeChatGptDom(page, missing) : null;
+      const anchor = retained ?? dom;
+      const activity = await observeChatGptActivity(page, anchor);
       // The submission owner verifies the exact successful server tool turn.
       // Disconnected provider chrome can retain Stop; streaming/thinking and
       // draft guards still apply, and no Stop gesture is issued.
-      const disconnected = activity.reason === 'provider-stream-disconnected' && !dom.candidate?.streamingMarker;
+      const disconnected = activity.reason === 'provider-stream-disconnected' && !anchor.candidate?.streamingMarker;
       const confirmedDisconnect = confirmation !== undefined && confirmation.conversationId === original.conversationId &&
         confirmation.submittedUserMessageId === original.submittedUserMessageId &&
-        activity.reason === 'provider-stream-disconnected' && !dom.candidate?.streamingMarker && !dom.candidate?.terminalMarker;
+        activity.reason === 'provider-stream-disconnected' && !anchor.candidate?.streamingMarker && !anchor.candidate?.terminalMarker;
       if (confirmation && !confirmedDisconnect) throw new SessionPlaneDomainError('provider.preparation-required',
         'User-confirmed interruption requires the exact disconnected nonstreaming original page');
       try { await requireIdleConversationPage(page, '계속', confirmedDisconnect || disconnected); }
@@ -279,9 +282,9 @@ export class SessionUiService {
       }
       const controls = await this.#capture(session);
       const after = this.#registry.refreshPage(session.pageKey!);
-      if (binding.bindingEpoch !== after.bindingEpoch || !dom.conversationSurfaceAvailable ||
-          !dom.submittedUserFound || dom.laterUserFound ||
-          (!confirmedDisconnect && dom.candidate !== null && !(disconnected && !dom.candidate.terminalMarker)) || dom.actionableAlert ||
+      if (binding.bindingEpoch !== after.bindingEpoch || !anchor.conversationSurfaceAvailable ||
+          !anchor.submittedUserFound || anchor.laterUserFound ||
+          (!confirmedDisconnect && anchor.candidate !== null && !(disconnected && !anchor.candidate.terminalMarker)) || anchor.actionableAlert ||
           (!confirmedDisconnect && !disconnected && activity.strength !== 'none') || controls.nodesTruncated ||
           controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role)) ||
           !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
@@ -290,7 +293,9 @@ export class SessionUiService {
       }
       return { pageKey: session.pageKey!, conversationId: session.conversationId!, bindingEpoch: after.bindingEpoch,
         observedAt: controls.capturedAt, continuationPrompt: '계속',
-        disconnectedRecovery: disconnected && !dom.candidate?.terminalMarker,
+        disconnectedRecovery: disconnected && !anchor.candidate?.terminalMarker,
+        ...(retained ? { missingContinuationAcknowledgement: original.submittedUserMessageId,
+          retainedPredecessorAcknowledgement: missing!.submittedUserMessageId } : {}),
         ...(confirmedDisconnect ? { userConfirmedInterruption: confirmation,
           ...(dom.candidate ? { interruptedResponseMessageId: dom.candidate.responseMessageId,
             interruptedResponseSha256: createHash('sha256').update(dom.candidate.answerText).digest('hex') } : {}) } : {}) };

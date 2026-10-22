@@ -462,7 +462,7 @@ test('disconnected exact ACK with stale server evidence returns inability to con
 });
 
 
-test('an unresolved continuation uses one actual hourly refresh then escalates a rejected retry', async t => {
+test('an unresolved continuation activates the original tab for manual refresh without another mutation', async t => {
   const f = await fixture();
   try {
     await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
@@ -481,16 +481,19 @@ test('an unresolved continuation uses one actual hourly refresh then escalates a
         messageTimeout: false, responseCandidate: null } }, requested: {},
     })) as any);
     t.mock.method(EventRepository.prototype, 'latestServerObservation', () => null);
-    let refreshes = 0, reviews = 0;
+    let refreshes = 0, reviews = 0, focused = 0;
     t.mock.method(SessionUiService.prototype, 'refresh', async () => { refreshes++; return {} as any; });
     t.mock.method(SessionUiService.prototype, 'prepareContinuation', async () => {
-      reviews++; assert.equal(refreshes, 1, 'Actual refresh precedes the next continue');
+      reviews++;
       throw new SessionPlaneDomainError('provider.failure-unverified', 'Retry remains uncertain');
     });
+    t.mock.method(SessionUiService.prototype, 'focus', async () => { focused++; return { pageKey: 'exact-page', url: 'https://chatgpt.com/c/exact' }; });
     const outcome = (await f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef],
       waitMs: 600000, continuationApproved: true })).structuredContent;
-    assert.equal(refreshes, 1);
-    assert.equal(reviews, 1);
+    assert.equal(refreshes, 0);
+    assert.equal(reviews, 0);
+    assert.equal(focused, 1);
+    assert.equal((outcome.results as any[])[0].recovery.reason, 'provider.manual-refresh-required');
     assert.equal((outcome.results as any[])[0].recovery.userActionRequired, true);
     assert.equal(f.fake.submitCount, 2, 'Only the two preexisting submissions exist');
   } finally { t.mock.timers.reset(); t.mock.restoreAll(); await f.close(); }

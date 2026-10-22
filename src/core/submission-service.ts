@@ -1080,6 +1080,25 @@ export class SubmissionService {
     }
   }
 
+  /** Only a lost recovery message, never an uncertain product prompt, can use its retained predecessor. */
+  missingContinuationAnchor(original: SessionSnapshot): SessionSnapshot | null {
+    const request = this.#outbox.getByGeneration(original.sessionId, original.generation);
+    if (!request) return null;
+    const payload = parseOutboxPayload(request);
+    if (payload.prompt !== '계속' || !payload.continuationOf) return null;
+    const parent = this.#outbox.getById(payload.continuationOf);
+    const prior = parent && this.#sessions.getGenerationResult(parent.sessionId, parent.generation);
+    const proof = this.#events.latestAnchorRecovery(original.sessionId, original.generation);
+    const identity = proof?.recoveryIdentity as Record<string, unknown> | undefined;
+    if (!parent || !prior || parent.clientId !== request.clientId || parent.sessionId !== request.sessionId ||
+        parent.generation !== request.generation - 1 || prior.reason !== 'approved-continuation-prepared' ||
+        !prior.submittedUserMessageId || proof?.recoveryReason !== 'backend-user-anchor-absent-from-mapping' ||
+        Date.parse(String(proof.observedAt)) < Date.parse(request.createdAt) ||
+        identity?.conversationId !== original.conversationId || identity.submittedUserMessageId !== original.submittedUserMessageId ||
+        identity.submittedUserTurnId !== original.submittedUserTurnId) return null;
+    return { ...original, ...prior, generation: parent.generation };
+  }
+
   continuationContext(input: { readonly clientId: string; readonly requestId: string }) {
     const request = this.#outbox.getByRequest(input.clientId, input.requestId);
     const originalRef = request && parseOutboxPayload(request).continuationOf;
@@ -1130,7 +1149,7 @@ export class SubmissionService {
             last.endTurn === false && last.textLength === 0 && !last.hidden && last.channel !== 'final' &&
             previous?.role === 'tool' && previous.status === 'finished_successfully');
         // A tool end_turn closes that execution, not the assistant answer.
-        if (!timeout && !confirmation && (!identity || identity.conversationId !== snapshot.conversationId || identity.pageKey !== snapshot.pageKey ||
+        if (!timeout && !confirmation && !this.missingContinuationAnchor(snapshot) && (!identity || identity.conversationId !== snapshot.conversationId || identity.pageKey !== snapshot.pageKey ||
             identity.submittedUserMessageId !== snapshot.submittedUserMessageId ||
             identity.submittedUserTurnId !== snapshot.submittedUserTurnId || !recorded ||
             !server || server.nextUserFound || !returnedTool || last?.status !== 'finished_successfully' ||
