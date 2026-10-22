@@ -488,11 +488,11 @@ test('managed collection links an existing followup under unsubmitted continuati
     // Search groups now contain individually identified assistant renderers.
     await f.fake.page.setContent(`<main>${configuration}
       <div data-chatgpt-search-message-ids="user-message-1"><div data-user-message-bubble>Original</div></div>
-      <div data-chatgpt-search-message-ids="partial partial"><div data-dil-message-id="partial"><div data-markdown-text-style="assistant-message">Original partial</div></div></div>
+      <div data-chatgpt-search-unit-key="fallback-turn-1:2:assistant" data-chatgpt-search-message-ids="partial partial"><div data-dil-message-id="partial"><div data-d-component="text">Original partial</div></div></div>
       <div data-chatgpt-search-message-ids="manual-user"><div data-user-message-bubble>계속</div></div>
-      <div data-chatgpt-search-message-ids="checkpoint checkpoint final">
-        <div data-dil-message-id="checkpoint"><div data-markdown-text-style="assistant-message">Checking</div></div>
-        <div data-dil-message-id="final"><div data-markdown-text-style="assistant-message">RESULT: BLOCKED — VM SSH exit255</div></div>
+      <div data-chatgpt-search-unit-key="fallback-turn-2:2:assistant" data-chatgpt-search-message-ids="checkpoint checkpoint final">
+        <div data-dil-message-id="checkpoint"><div data-d-component="text">Checking</div></div>
+        <div data-dil-message-id="final"><div data-d-component="text">RESULT: BLOCKED — VM SSH exit255</div></div>
       </div><textarea>Preserved user draft</textarea></main>`);
     const result = await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000, continuationApproved: true });
     const recovered = result.results[0];

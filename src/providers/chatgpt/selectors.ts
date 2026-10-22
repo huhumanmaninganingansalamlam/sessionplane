@@ -35,7 +35,7 @@ export const CHATGPT_SELECTORS = {
     '[data-testid*="user-message-content"]',
   ],
   userMessageExpansionControls: 'button[aria-expanded="false"], button:text-is("더 보기"), button:text-is("… 더 보기"), button:text-is("Show more"), button:text-is("Read more")',
-  messages: '[data-message-author-role], [data-chatgpt-search-message-ids], [data-dil-message-id]:has([data-markdown-text-style="assistant-message"])',
+  messages: '[data-message-author-role], [data-chatgpt-search-message-ids], [data-dil-message-id]',
   stopControls: [
     '[data-testid="stop-button"]',
     'button[aria-label="Stop"]',

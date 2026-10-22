@@ -44,13 +44,16 @@ export async function readChatGptMessageObservation(page: Page, includeArtifacts
     for (const [elementIndex, node] of nodes.entries()) {
       // Search groups are not message identities. Read each renderer once;
       // preserve selector indices used by exact artifact collection.
-      if (!node.hasAttribute('data-dil-message-id') && node.querySelector('[data-dil-message-id]:has([data-markdown-text-style="assistant-message"])') !== null) continue;
+      if (!node.hasAttribute('data-dil-message-id') && node.querySelector('[data-dil-message-id]') !== null) continue;
       const renderedId = node.getAttribute('data-dil-message-id');
       if (renderedId !== null && !(node.closest('[data-chatgpt-search-message-ids]')?.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/).includes(renderedId)) continue;
       const identityNode = node.closest<HTMLElement>('[data-message-id], [data-turn-id], [data-dil-message-id]') ?? node;
       const legacyRole = node.getAttribute('data-message-author-role');
       const userBubble = node.querySelector<HTMLElement>('[data-user-message-bubble]');
-      const assistantContent = node.querySelector<HTMLElement>('[data-chatgpt-selection-message-id], [data-markdown-text-style="assistant-message"]');
+      const assistantGroup = node.closest('[data-chatgpt-search-unit-key]');
+      const renderedAssistant = renderedId !== null &&
+        assistantGroup?.getAttribute('data-chatgpt-search-unit-key')?.endsWith(':assistant') === true;
+      const assistantContent = renderedAssistant ? node : node.querySelector<HTMLElement>('[data-chatgpt-selection-message-id]');
       const role = legacyRole === 'user' || (legacyRole === null && userBubble !== null)
         ? 'user'
         : legacyRole === 'assistant' || (legacyRole === null && assistantContent !== null)
