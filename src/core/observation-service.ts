@@ -264,10 +264,19 @@ export class ObservationService {
             persisted.nextCheckAt !== null &&
             Number.isFinite(Date.parse(persisted.nextCheckAt)) &&
             Date.parse(persisted.nextCheckAt) > this.#now().getTime();
+          // Detached observers still collect DOM finals, but must not compete
+          // with an attached collector for the account's scarce backend slots.
+          const collectionWaiting = this.#scheduler.actorFor(current.sessionId).subscriberCount === 0 &&
+            [...this.#runtimes.keys()].some(sessionId => {
+              const actor = this.#scheduler.actorFor(sessionId);
+              return actor.snapshot().provider === current.provider && actor.subscriberCount > 0;
+            });
+          if (collectionWaiting) withdrawProbe();
           if (
             decision.kind !== 'blocked' &&
             decision.kind !== 'interstitial' &&
             !backendRecoveryPaced &&
+            !collectionWaiting &&
             this.#now().getTime() - lastExactProgressAtMs >= this.#backendRecoveryAfterMs
           ) {
             const recoveredResult = await this.#recover(persisted, probeCaller);

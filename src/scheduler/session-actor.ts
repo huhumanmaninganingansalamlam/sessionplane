@@ -29,6 +29,7 @@ export class SessionActor {
   #queueDepth = 0;
   #nextWaiterId = 1;
   readonly #waiters = new Map<number, Waiter>();
+  #collectors = 0;
   readonly #onIdleTerminal: (() => void) | null;
   #closed = false;
 
@@ -48,7 +49,19 @@ export class SessionActor {
   }
 
   get subscriberCount(): number {
-    return this.#waiters.size;
+    return this.#waiters.size + this.#collectors;
+  }
+
+  /** Keep collection interest between the managed wait's observation rounds. */
+  retainCollector(): () => void {
+    this.#collectors++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#collectors--;
+      this.#retireIfIdleTerminal();
+    };
   }
 
   snapshot(): SessionWaitSnapshot {
@@ -188,7 +201,7 @@ export class SessionActor {
       !this.#closed &&
       this.#snapshot.terminal &&
       this.#queueDepth === 0 &&
-      this.#waiters.size === 0
+      this.subscriberCount === 0
     ) {
       this.#onIdleTerminal?.();
     }

@@ -24,6 +24,48 @@ interface WaitSnapshot extends SessionSnapshot {
   readonly latestEventSequence: number;
 }
 
+test('detached observers retain DOM collection without taking backend slots from an attached collector', async () => {
+  const fixture = await createFixture('sessionplane-attached-collection-', new FakeProviderAdapter(),
+    { backendRecoveryAfterMs: 100 });
+  const { config, fake, service } = fixture;
+  const controller = new AbortController();
+  let releaseRecovery!: () => void;
+  const recoveryReleased = new Promise<void>(resolve => { releaseRecovery = resolve; });
+  let enteredRecovery!: () => void;
+  const recoveryEntered = new Promise<void>(resolve => { enteredRecovery = resolve; });
+  const calls: string[] = [];
+  try {
+    const active = await createSession(config.socketPath, 'main', 'active');
+    const detached = await createSession(config.socketPath, 'main', 'detached');
+    await send(config.socketPath, active.session.sessionId, 'active');
+    const waiting = service.actorScheduler.waitSession(active.session.sessionId, {
+      waitMs: 10_000, afterRevision: Number.MAX_SAFE_INTEGER, expectedGeneration: 1, signal: controller.signal,
+    });
+    fake.recover = async request => {
+      calls.push(request.session.sessionId);
+      enteredRecovery();
+      await recoveryReleased;
+      return { kind: 'complete', observationTransport: 'fresh', responseMessageId: 'active-final',
+        answerText: 'Recovered active result', reason: 'backend-exact-final', retryAfterMs: null, nextCheckAt: null };
+    };
+    await send(config.socketPath, detached.session.sessionId, 'detached');
+    await recoveryEntered;
+    // The detached page can finish while the attached backend request is in flight.
+    fake.emitObservation(detached.session.sessionId, { submittedUserFound: true, activity: 'none',
+      candidate: { responseMessageId: 'detached-dom-final', answerText: 'DOM final preserved',
+        terminalMarker: true, streamingMarker: false } });
+    const domFinal = await waitForSnapshot(config.socketPath, detached.session.sessionId, snapshot => snapshot.terminal);
+    assert.equal(domFinal.responseMessageId, 'detached-dom-final');
+    assert.deepEqual(calls, [active.session.sessionId]);
+    releaseRecovery();
+    const final = await waiting;
+    assert.equal(final.answerText, 'Recovered active result');
+    assert.equal(fake.submitCount, 2, 'collection never resubmits either original prompt');
+  } finally {
+    releaseRecovery(); controller.abort(); await service.close(); rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test('UNKNOWN reads expose durable canonical probe evidence without resending across restart', async () => {
   const fixture = await createFixture('sessionplane-ack-evidence-');
   let service = fixture.service;

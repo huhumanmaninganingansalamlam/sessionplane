@@ -406,8 +406,12 @@ export class TeamWorkflow {
     if (signal?.aborted) controller.abort();
     // One outcome wakes the caller; progress/pacing revisions remain in this process.
     const observed: Array<{ request: OutboxRecord | null; result: Record<string, unknown> }> = await Promise.all(requestRefs.map(async (requestRef) => {
+      let releaseCollector: (() => void) | undefined;
       try {
         let request = this.#request({ teamId: input.teamId, requestRef });
+        if (input.waitMs > 0 && !controller.signal.aborted) {
+          releaseCollector = this.services.scheduler.actorFor(request.sessionId).retainCollector();
+        }
         let result: Record<string, unknown> = await this.#observe(request, undefined, input.waitMs > 0 && input.continuationApproved === true);
         const followupTracker = new ExactFinalTracker(1500);
         let followupId = input.followupUserMessageId;
@@ -551,6 +555,7 @@ export class TeamWorkflow {
         }
         return { request, result: { ...result, waitExpired: !workflowWaitOutcome(result) && Date.now() >= deadline } };
       } catch (error) { controller.abort(); return { request: null, result: failure(error, requestRef) }; }
+      finally { releaseCollector?.(); }
     })).finally(() => {
       signal?.removeEventListener('abort', abort);
       controller.abort();
