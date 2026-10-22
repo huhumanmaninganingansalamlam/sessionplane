@@ -392,30 +392,38 @@ export class TeamWorkflow {
         let request = this.#request({ teamId: input.teamId, requestRef });
         let result: Record<string, unknown> = await this.#observe(request);
         const followupTracker = new ExactFinalTracker(1500);
+        let followupId = input.followupUserMessageId;
         for (;;) {
-          if (input.followupUserMessageId) {
-            const evidence = await this.services.ui.observeFollowup(ownerOf(request), input.followupUserMessageId).catch(error => {
+          if ((result.followup as { terminal?: boolean } | undefined)?.terminal) break;
+          const preparedContinuation = this.#outbox.getByRequest(request.clientId, `continue:managed-continuation:${request.outboxId}`);
+          const discoverFollowup = !followupId && preparedContinuation?.submissionState === 'prepared';
+          if (followupId || discoverFollowup) {
+            const evidence = await this.services.ui.observeFollowup(ownerOf(request), followupId).catch(error => {
               if (!(error instanceof SessionPlaneDomainError) || !['browser.snapshot-timeout', 'provider.observation-unavailable'].includes(error.errorCode)) throw error;
               const snapshot = this.services.directory.getSession(request.sessionId);
               return { provider: 'chatgpt', pageKey: snapshot.pageKey!, bindingEpoch: 0, observedAt: new Date().toISOString(),
                 conversationId: snapshot.conversationId, submittedUserFound: false, laterUserFound: false,
                 candidate: null, activity: 'unknown' as const, dialogKind: null, networkActivity: false,
-                observationTransport: 'unavailable' as const, reason: 'followup-observation-delayed', errorCode: undefined };
+                observationTransport: 'unavailable' as const, reason: 'followup-observation-delayed', errorCode: undefined,
+                followupUserMessageId: followupId ?? '' };
             });
-            const decision = followupTracker.evaluate({ ...evidence, candidate: evidence.candidate && evidence.activity !== 'none'
-              ? { ...evidence.candidate, terminalMarker: false } : evidence.candidate }, Date.now());
-            result = { ...result, errorCode: undefined, reason: 'followup-collecting', followup: { ...decision, terminal: decision.kind === 'complete',
-              userMessageId: input.followupUserMessageId, originalRequestRef: request.outboxId } };
-            if (decision.kind === 'complete') {
-              const reconciliation = await this.services.ui.reconcileFollowup({ ...ownerOf(request),
-                decisionId: `followup:${request.outboxId}:${input.followupUserMessageId}`,
-                followupUserMessageId: input.followupUserMessageId, responseMessageId: decision.responseMessageId!,
-                responseSha256: createHash('sha256').update(decision.answerText!).digest('hex'), followupCompleted: true });
-              result = { ...result, reconciliation }; controller.abort(); break;
+            if (evidence) {
+              followupId = evidence.followupUserMessageId || followupId;
+              const decision = followupTracker.evaluate({ ...evidence, candidate: evidence.candidate && evidence.activity !== 'none'
+                ? { ...evidence.candidate, terminalMarker: false } : evidence.candidate }, Date.now());
+              result = { ...result, errorCode: undefined, reason: 'followup-collecting', followup: { ...decision, terminal: decision.kind === 'complete',
+                userMessageId: followupId, originalRequestRef: request.outboxId } };
+              if (decision.kind === 'complete') {
+                const reconciliation = await this.services.ui.reconcileFollowup({ ...ownerOf(request),
+                  decisionId: `followup:${request.outboxId}:${followupId}`,
+                  followupUserMessageId: followupId!, responseMessageId: decision.responseMessageId!,
+                  responseSha256: createHash('sha256').update(decision.answerText!).digest('hex'), followupCompleted: true, answerText: decision.answerText! });
+                result = { ...result, reconciliation }; controller.abort(); break;
+              }
+              if (evidence.errorCode) { result = { ...result, errorCode: evidence.errorCode, reason: evidence.reason }; controller.abort(); break; }
             }
-            if (evidence.errorCode) { result = { ...result, errorCode: evidence.errorCode, reason: evidence.reason }; controller.abort(); break; }
           }
-          if (input.waitMs > 0 && input.continuationApproved && !input.followupUserMessageId && !controller.signal.aborted) {
+          if (input.waitMs > 0 && input.continuationApproved && !followupId && !controller.signal.aborted) {
             // Durable receipts own the single send. This clock only limits broad
             // reassessment; a disconnected banner is never evidence to continue.
             const reviewId = `managed-continuation:${request.outboxId}`;
@@ -496,18 +504,19 @@ export class TeamWorkflow {
               }
             }
           }
-          if (workflowWaitOutcome(result)) { controller.abort(); break; }
+          if (!followupId && workflowWaitOutcome(result)) { controller.abort(); break; }
           const remaining = deadline - Date.now();
           if (remaining <= 0 || controller.signal.aborted) break;
           const acknowledgementPending = workflowAcknowledgementPending(result) || workflowAnchorRecoveryPending(result);
           const nextAckCheck = Date.parse(String((result.acknowledgementRecovery as { nextCheckAt?: string } | undefined)?.nextCheckAt ?? result.nextCheckAt));
           const acknowledgementWait = Number.isFinite(nextAckCheck) ? Math.max(1_000, nextAckCheck - Date.now()) : 30_000;
           const waited = await this.services.scheduler.waitSession(request.sessionId, {
-            expectedGeneration: request.generation, waitMs: Math.min(remaining, input.continuationApproved ? 30 * 60_000 : remaining, input.followupUserMessageId ? 5_000 : workflowPreparationPending(result) ? 60_000 : acknowledgementPending ? acknowledgementWait : workflowWaitMs(input.waitMs)), signal: controller.signal,
+            expectedGeneration: followupId ? this.services.directory.getSession(request.sessionId).generation : request.generation,
+            ...(followupId ? { wakeOnTerminal: false } : {}), waitMs: Math.min(remaining, input.continuationApproved ? 30 * 60_000 : remaining, followupId ? 5_000 : workflowPreparationPending(result) ? 60_000 : acknowledgementPending ? acknowledgementWait : workflowWaitMs(input.waitMs)), signal: controller.signal,
           });
           if (controller.signal.aborted) break;
           result = await this.#observe(request);
-          if (waited.waitExpired && Date.now() >= deadline && !input.followupUserMessageId && !acknowledgementPending) break;
+          if (waited.waitExpired && Date.now() >= deadline && !followupId && !acknowledgementPending) break;
         }
         return { request, result: { ...result, waitExpired: !workflowWaitOutcome(result) && Date.now() >= deadline } };
       } catch (error) { controller.abort(); return { request: null, result: failure(error, requestRef) }; }
@@ -731,6 +740,20 @@ export class TeamWorkflow {
     let snapshot = this.services.directory.getSession(request.sessionId);
     const failureMessage = request.submissionState === 'failed_pre_submit'
       ? JSON.parse(request.resultJson ?? '{}').message as string | undefined : undefined;
+    const linked = new EventRepository(this.services.database.raw).followupReconciliation(request.sessionId, request.generation);
+    if (linked?.requestRef === request.outboxId && typeof linked.receiptId === 'string') {
+      const receipt = this.services.receipts.get(request.clientId, linked.receiptId);
+      if (receipt) {
+        const reconciliation = JSON.parse(receipt.resultJson);
+        const evidence = reconciliation.evidence;
+        return { requestOk: true, requestRef: request.outboxId, sessionId: request.sessionId, generation: request.generation,
+          ...this.#sessions.getGenerationResult(request.sessionId, request.generation),
+          historical: snapshot.generation !== request.generation, terminal: true, waitExpired: false,
+          followup: { kind: 'complete', terminal: true, originalRequestRef: request.outboxId,
+            userMessageId: evidence.followupUserMessageId, responseMessageId: evidence.responseMessageId,
+            answerText: reconciliation.answerText }, reconciliation };
+      }
+    }
     if (snapshot.generation !== request.generation) {
       const original = this.#sessions.getGenerationResult(request.sessionId, request.generation);
       const ack = JSON.parse(request.resultJson ?? '{}');

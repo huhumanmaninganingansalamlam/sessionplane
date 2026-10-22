@@ -460,6 +460,58 @@ test('managed wait resumes its already prepared continuation without another gen
   } finally { await f.close(); }
 });
 
+test('managed collection links an existing followup under unsubmitted continuation preserving both generations and draft', async t => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const identity = { conversationId: original.conversationId, pageKey: original.pageKey,
+      submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId };
+    await f.core.actorScheduler.updateGeneration(original.sessionId, 1, {}, 'generation.backend-pending',
+      'backend-assistant-not-final', identity, { anchorNodeId: original.submittedUserMessageId,
+        currentNodeId: 'tool-done', nextUserFound: false, assistantCount: 1,
+        messages: [{ messageId: 'tool-done', role: 'tool', channel: 'commentary',
+          status: 'finished_successfully', endTurn: true, hidden: false, textLength: 0 }] });
+    await f.fake.page.setContent('<main>' + configuration +
+      '<div data-message-author-role="user" data-message-id="user-message-1">Original</div><textarea></textarea><button data-testid="send-button">Send</button></main>');
+    const blocked = t.mock.method(SessionUiService.prototype, 'prepareFailureContinuation', async () => {
+      throw new SessionPlaneDomainError('provider.failure-unverified', 'Fresh configuration evidence is missing');
+    });
+    await assert.rejects(f.rpc('decide', { teamId: f.team.teamId, requestRef,
+      requestId: `managed-continuation:${requestRef}`, decision: 'continue', continuationApproved: true }), /configuration/);
+    blocked.mock.restore();
+    assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, 2);
+    assert.equal(f.fake.submitCount, 1);
+    const generations = () => f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(original.sessionId);
+    const before = generations();
+    // Search groups now contain individually identified assistant renderers.
+    await f.fake.page.setContent(`<main>${configuration}
+      <div data-chatgpt-search-message-ids="user-message-1"><div data-user-message-bubble>Original</div></div>
+      <div data-chatgpt-search-message-ids="partial partial"><div data-dil-message-id="partial"><div data-markdown-text-style="assistant-message">Original partial</div></div></div>
+      <div data-chatgpt-search-message-ids="manual-user"><div data-user-message-bubble>계속</div></div>
+      <div data-chatgpt-search-message-ids="checkpoint checkpoint final">
+        <div data-dil-message-id="checkpoint"><div data-markdown-text-style="assistant-message">Checking</div></div>
+        <div data-dil-message-id="final"><div data-markdown-text-style="assistant-message">RESULT: BLOCKED — VM SSH exit255</div></div>
+      </div><textarea>Preserved user draft</textarea></main>`);
+    const result = await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000, continuationApproved: true });
+    const recovered = result.results[0];
+    assert.equal(recovered.followup.userMessageId, 'manual-user', JSON.stringify(recovered));
+    assert.equal(recovered.followup.responseMessageId, 'final');
+    assert.equal(recovered.followup.answerText, 'RESULT: BLOCKED — VM SSH exit255');
+    assert.equal(recovered.reconciliation.disposition, 'historical-followup-linked');
+    assert.equal(recovered.reconciliation.evidence.originalUserMessageId, original.submittedUserMessageId);
+    assert.equal(recovered.reconciliation.providerMutation, false);
+    assert.deepEqual(generations(), before);
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved user draft');
+    assert.equal(f.fake.submitCount, 1);
+    const again = await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef });
+    assert.equal(again.request.followup.answerText, recovered.followup.answerText);
+    assert.equal(again.request.responseMessageId, null);
+    assert.equal((await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000 })).results[0].followup.responseMessageId, 'final');
+  } finally { await f.close(); }
+});
+
 test('confirmed manual follow-up releases only original tracking and permits new work without borrowing its answer', async () => {
   const f = await fixture();
   const { createHash } = await import('node:crypto');

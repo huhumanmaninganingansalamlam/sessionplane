@@ -221,20 +221,24 @@ export class SessionUiService {
       });
   }
 
-  async observeFollowup(input: PreparationOwner, followupUserMessageId: string): Promise<ProviderObservationEvidence> {
-    const read = await this.#submissions.inspectSubmission(input, async session => {
+  async observeFollowup(input: PreparationOwner, followupUserMessageId?: string): Promise<(ProviderObservationEvidence & { followupUserMessageId: string }) | null> {
+    const read = await this.#submissions.inspectSubmission({ ...input, followupInspection: true }, async (session, _submittedIds, owner) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try { return await Promise.race([(async () => {
-      const page = this.#requirePage(session);
+      const page = this.#requirePage(owner);
       const original = await observeChatGptDom(page, session);
+      const nextUser = original.turnBoundary.find(message => message.role === 'user' &&
+        message.messageId !== session.submittedUserMessageId);
+      const followupId = followupUserMessageId ?? (nextUser?.text.trim() === '계속' ? nextUser.messageId : null);
+      if (!followupId) return null;
       if (!original.submittedUserFound || !original.turnBoundary.some(message =>
-        message.role === 'user' && message.messageId === followupUserMessageId && message.messageId !== session.submittedUserMessageId)) {
+        message.role === 'user' && message.messageId === followupId && message.messageId !== session.submittedUserMessageId)) {
         throw new SessionPlaneDomainError('session.page-identity-unverified', 'Follow-up is not after the exact original ACK on this transcript');
       }
-      const dom = await observeChatGptDom(page, { submittedUserMessageId: followupUserMessageId, submittedUserTurnId: null });
+      const dom = await observeChatGptDom(page, { submittedUserMessageId: followupId, submittedUserTurnId: null });
       const activity = await observeChatGptActivity(page, dom);
       const binding = this.#registry.refreshPage(session.pageKey!);
-      return { provider: 'chatgpt', pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch,
+      return { followupUserMessageId: followupId, provider: 'chatgpt' as const, pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch,
         observedAt: dom.messageDiagnostics.observedAt, conversationId: session.conversationId,
         submittedUserFound: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
         candidate: dom.candidate, activity: activity.strength, dialogKind: null, networkActivity: false,
@@ -244,7 +248,7 @@ export class SessionUiService {
         'browser.snapshot-timeout', 'Follow-up observation delayed; preserve the original and later turn')), 5000); })]);
       } finally { clearTimeout(timer); }
     });
-    if (!read.evidence) throw new SessionPlaneDomainError('browser.unavailable', 'Original follow-up page is unavailable');
+    if (read.evidence === undefined) throw new SessionPlaneDomainError('browser.unavailable', 'Original follow-up page is unavailable');
     return read.evidence;
   }
 
@@ -290,9 +294,9 @@ export class SessionUiService {
   }
 
   async reconcileFollowup(input: PreparationOwner & { readonly decisionId: string; readonly followupUserMessageId: string;
-    readonly responseMessageId: string; readonly responseSha256: string; readonly followupCompleted: true }) {
-    return await this.#submissions.reconcileFollowup(input, async session => {
-      const page = this.#requirePage(session);
+    readonly responseMessageId: string; readonly responseSha256: string; readonly followupCompleted: true; readonly answerText?: string }) {
+    return await this.#submissions.reconcileFollowup(input, async (session, owner) => {
+      const page = this.#requirePage(owner);
       const binding = this.#registry.refreshPage(session.pageKey!);
       const transcript = await readChatGptMessages(page);
       const originals = transcript.filter(m => m.role === 'user' && m.messageId === session.submittedUserMessageId);
@@ -303,10 +307,10 @@ export class SessionUiService {
       const answer = messages.at(-1);
       // An interrupted checkpoint is evidence to retain, not a completed answer to discard.
       const partials = messages.slice(original + 1, user);
-      const controls = await this.#capture(session);
+      const controls = await this.#capture(owner);
       const dom = await observeChatGptDom(page, { submittedUserMessageId: input.followupUserMessageId, submittedUserTurnId: null });
       const activity = await observeChatGptActivity(page, dom);
-      this.#requirePage(session);
+      this.#requirePage(owner);
       const after = this.#registry.refreshPage(session.pageKey!);
       if (originals.length !== 1 || followups.length !== 1 || originals[0]?.rootIndex !== followups[0]?.rootIndex ||
           original < 0 || user <= original || user >= messages.length - 1 || messages.slice(user + 1, -1).some(message => message.role !== 'assistant' || message.terminalMarker) || answer?.role !== 'assistant' ||

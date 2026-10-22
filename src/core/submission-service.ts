@@ -877,22 +877,22 @@ export class SubmissionService {
   }
 
   async inspectSubmission<Result>(
-    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number },
-    observe: (snapshot: SessionSnapshot, submittedMessageIds: ReadonlySet<string>) => Promise<Result>,
+    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly followupInspection?: boolean },
+    observe: (snapshot: SessionSnapshot, submittedMessageIds: ReadonlySet<string>, owner: SessionSnapshot) => Promise<Result>,
   ) {
     const actor = this.#scheduler.actorFor(input.sessionId);
     const requireOwner = () => {
       const outbox = this.#outbox.getByRequest(input.clientId, input.requestId);
       const snapshot = this.#requireSnapshot(input.sessionId);
       if (outbox === null || outbox.sessionId !== input.sessionId ||
-          outbox.generation !== input.generation || snapshot.generation !== input.generation) {
+          outbox.generation !== input.generation || (!input.followupInspection && snapshot.generation !== input.generation)) {
         throw new SessionPlaneDomainError('session.generation-superseded', 'Exact caller-owned submission is no longer current');
       }
       this.#adapters.require(snapshot.provider);
       if (snapshot.provider !== 'chatgpt') {
         throw new SessionPlaneDomainError('capability.unsupported', 'Submission page inspection currently supports ChatGPT only');
       }
-      return { outbox, snapshot };
+      return { outbox, snapshot: input.followupInspection ? this.#followupAnchor(outbox, snapshot) : snapshot };
     };
     const initial = await actor.enqueue(requireOwner);
     if (!initial.snapshot.terminal) await this.recoverAcknowledgement(initial.snapshot);
@@ -910,7 +910,7 @@ export class SubmissionService {
       };
       if (snapshot.pageKey === null) return { ...result, evidence: null };
       return await this.#pageMutex.runExclusive(snapshot.pageKey, async () => ({
-        ...result, evidence: await observe(snapshot, this.#sessions.submittedMessageIds(snapshot.sessionId)),
+        ...result, evidence: await observe(snapshot, this.#sessions.submittedMessageIds(snapshot.sessionId), this.#requireSnapshot(input.sessionId)),
       }));
     });
   }
@@ -1170,11 +1170,31 @@ export class SubmissionService {
     });
   }
 
+  #followupAnchor(outbox: OutboxRecord, current: SessionSnapshot): SessionSnapshot {
+    if (outbox.generation === current.generation) return current;
+    const previous = this.#sessions.getGenerationResult(current.sessionId, outbox.generation);
+    const successor = this.#outbox.getByGeneration(current.sessionId, current.generation);
+    const ack = JSON.parse(outbox.resultJson ?? '{}');
+    if (current.generation !== outbox.generation + 1 || current.terminal ||
+        current.submissionState !== 'prepared' || current.promptSubmitted ||
+        current.submittedUserMessageId !== null || current.submittedUserTurnId !== null ||
+        current.responseMessageId !== null || successor?.submissionState !== 'prepared' || successor.promptSubmitted ||
+        previous?.reason !== 'approved-continuation-prepared' || !previous.promptSubmitted ||
+        previous.submissionState !== 'submitted' || previous.submittedUserMessageId === null ||
+        ack.sessionId !== current.sessionId || ack.generation !== outbox.generation ||
+        !current.conversationId || ack.conversationId !== current.conversationId ||
+        ack.submittedUserMessageId !== previous.submittedUserMessageId || ack.submittedUserTurnId !== previous.submittedUserTurnId) {
+      throw new SessionPlaneDomainError('session.generation-superseded',
+        'Follow-up recovery requires the exact original ACK and its never-submitted continuation');
+    }
+    return { ...current, ...previous, sessionState: 'cancelled', terminal: true };
+  }
+
   async reconcileFollowup(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number;
       readonly decisionId: string; readonly followupUserMessageId: string; readonly responseMessageId: string;
-      readonly responseSha256: string; readonly followupCompleted: true },
-    observe: (snapshot: SessionSnapshot) => Promise<{ readonly pageKey: string; readonly conversationId: string;
+      readonly responseSha256: string; readonly followupCompleted: true; readonly answerText?: string },
+    observe: (snapshot: SessionSnapshot, owner: SessionSnapshot) => Promise<{ readonly pageKey: string; readonly conversationId: string;
       readonly bindingEpoch: number; readonly observedAt: string;
       readonly followupPartialResponses?: readonly { readonly responseMessageId: string; readonly responseSha256: string }[];
       readonly originalPartialResponses: readonly { readonly responseMessageId: string; readonly responseSha256: string }[] }>,
@@ -1186,35 +1206,39 @@ export class SubmissionService {
       if (receipts.get(clientId, decisionId) !== null) return receipts.execute({ clientId, requestId: decisionId,
         method, payload, operation: () => { throw new Error('Existing receipt must replay'); } });
       const outbox = this.#outbox.getByRequest(clientId, input.requestId);
-      const snapshot = this.#requireSnapshot(input.sessionId);
-      if (!outbox || outbox.sessionId !== input.sessionId || outbox.generation !== input.generation ||
-          snapshot.generation !== input.generation) throw new SessionPlaneDomainError(
+      const current = this.#requireSnapshot(input.sessionId);
+      if (!outbox || outbox.sessionId !== input.sessionId || outbox.generation !== input.generation) throw new SessionPlaneDomainError(
         'session.generation-superseded', 'Follow-up reconciliation requires the exact current request');
-      this.#requireActiveRoleSession(snapshot);
-      if (input.followupCompleted !== true || snapshot.provider !== 'chatgpt' || snapshot.terminal ||
+      this.#requireActiveRoleSession(current);
+      const snapshot = this.#followupAnchor(outbox, current);
+      const historical = current.generation !== snapshot.generation;
+      if ((input.answerText !== undefined && createHash('sha256').update(input.answerText).digest('hex') !== input.responseSha256) ||
+          input.followupCompleted !== true || snapshot.provider !== 'chatgpt' || (!historical && snapshot.terminal) ||
           snapshot.submissionState !== 'submitted' || !snapshot.promptSubmitted || !snapshot.submittedUserMessageId ||
           !snapshot.pageKey || !snapshot.conversationId || snapshot.responseMessageId !== null || snapshot.answerText !== null) {
         throw new SessionPlaneDomainError('provider.failure-unverified', 'Requires an unresolved acknowledged request and explicitly confirmed manual follow-up');
       }
       return await this.#pageMutex.runExclusive(snapshot.pageKey, async () => {
-        const evidence = await observe(snapshot);
+        const evidence = await observe(snapshot, current);
         if (evidence.pageKey !== snapshot.pageKey || evidence.conversationId !== snapshot.conversationId) {
           throw new SessionPlaneDomainError('session.page-identity-unverified', 'Manual follow-up page changed');
         }
         const result = receipts.execute({ clientId, requestId: decisionId, method, payload, operation: () => {
           const timestamp = this.#now().toISOString();
-          if (!this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
+          if (!historical && !this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
             sessionState: 'cancelled', providerState: 'unknown', observationTransport: 'fresh', nextCheckAt: null,
             completedAt: timestamp, errorCode: null, reason: 'manual-followup-reconciled',
           }, timestamp)) throw new SessionPlaneDomainError('session.generation-superseded', 'Request changed during reconciliation');
           const proof = { ...evidence, originalUserMessageId: snapshot.submittedUserMessageId,
             followupUserMessageId: input.followupUserMessageId, responseMessageId: input.responseMessageId,
-            responseSha256: input.responseSha256, completionSource: 'explicit-user-confirmation' };
+            responseSha256: input.responseSha256, completionSource: 'exact-followup-observation' };
           this.#events.append({ teamId: snapshot.teamId, roleId: snapshot.roleId, sessionId: snapshot.sessionId,
             generation: snapshot.generation, eventType: 'generation.manual-followup-reconciled',
             payload: { requestRef: outbox.outboxId, receiptId: decisionId, evidence: proof }, createdAt: timestamp });
           return { requestOk: true, requestRef: outbox.outboxId, sessionId: snapshot.sessionId,
-            generation: snapshot.generation, disposition: 'tracking-cancelled', providerMutation: false, evidence: proof };
+            generation: snapshot.generation, disposition: historical ? 'historical-followup-linked' : 'tracking-cancelled',
+            providerMutation: false, ...(historical ? { historical: true } : {}),
+            ...(input.answerText === undefined ? {} : { answerText: input.answerText }), evidence: proof };
         } });
         this.#scheduler.refreshSession(snapshot.sessionId);
         return result;

@@ -85,6 +85,13 @@ export class EventRepository {
     return row ?? null;
   }
 
+  followupReconciliation(sessionId: string, generation: number): Readonly<Record<string, unknown>> | null {
+    const row = this.#database.prepare(`SELECT payload_json AS payloadJson FROM events
+      WHERE session_id=? AND generation=? AND event_type='generation.manual-followup-reconciled'
+      ORDER BY sequence DESC LIMIT 1`).get(sessionId, generation) as { payloadJson: string } | undefined;
+    return row ? parsePayload(row.payloadJson) : null;
+  }
+
   historicalFailureReconciliation(sessionId: string, generation: number): Readonly<Record<string, unknown>> | null {
     const row = this.#database.prepare(`SELECT payload_json AS payloadJson, created_at AS createdAt FROM events
       WHERE session_id=? AND generation=? AND event_type='generation.failure-reconciled'
