@@ -1080,6 +1080,25 @@ export class SubmissionService {
     }
   }
 
+  /** Only a lost recovery message, never an uncertain product prompt, can use its retained predecessor. */
+  missingContinuationAnchor(original: SessionSnapshot): SessionSnapshot | null {
+    const request = this.#outbox.getByGeneration(original.sessionId, original.generation);
+    if (!request) return null;
+    const payload = parseOutboxPayload(request);
+    if (payload.prompt !== '계속' || !payload.continuationOf) return null;
+    const parent = this.#outbox.getById(payload.continuationOf);
+    const prior = parent && this.#sessions.getGenerationResult(parent.sessionId, parent.generation);
+    const proof = this.#events.latestAnchorRecovery(original.sessionId, original.generation);
+    const identity = proof?.recoveryIdentity as Record<string, unknown> | undefined;
+    if (!parent || !prior || parent.clientId !== request.clientId || parent.sessionId !== request.sessionId ||
+        parent.generation !== request.generation - 1 || prior.reason !== 'approved-continuation-prepared' ||
+        !prior.submittedUserMessageId || proof?.recoveryReason !== 'backend-user-anchor-absent-from-mapping' ||
+        Date.parse(String(proof.observedAt)) < Date.parse(request.createdAt) ||
+        identity?.conversationId !== original.conversationId || identity.submittedUserMessageId !== original.submittedUserMessageId ||
+        identity.submittedUserTurnId !== original.submittedUserTurnId) return null;
+    return { ...original, ...prior, generation: parent.generation };
+  }
+
   continuationContext(input: { readonly clientId: string; readonly requestId: string }) {
     const request = this.#outbox.getByRequest(input.clientId, input.requestId);
     const originalRef = request && parseOutboxPayload(request).continuationOf;
@@ -1129,8 +1148,9 @@ export class SubmissionService {
           (last?.role === 'assistant' && last.status === 'finished_successfully' &&
             last.endTurn === false && last.textLength === 0 && !last.hidden && last.channel !== 'final' &&
             previous?.role === 'tool' && previous.status === 'finished_successfully');
+        const evidence = await observe(snapshot);
         // A tool end_turn closes that execution, not the assistant answer.
-        if (!timeout && !confirmation && (!identity || identity.conversationId !== snapshot.conversationId || identity.pageKey !== snapshot.pageKey ||
+        if (!timeout && !confirmation && evidence.disconnectedRecovery !== true && !this.missingContinuationAnchor(snapshot) && (!identity || identity.conversationId !== snapshot.conversationId || identity.pageKey !== snapshot.pageKey ||
             identity.submittedUserMessageId !== snapshot.submittedUserMessageId ||
             identity.submittedUserTurnId !== snapshot.submittedUserTurnId || !recorded ||
             !server || server.nextUserFound || !returnedTool || last?.status !== 'finished_successfully' ||
@@ -1140,7 +1160,7 @@ export class SubmissionService {
           throw new SessionPlaneDomainError('provider.failure-unverified',
             'Fresh exact server evidence of an unclosed successful tool turn is required; preserve active or uncertain work');
         }
-        if (confirmation && identity?.conversationId === snapshot.conversationId &&
+        if ((confirmation || evidence.disconnectedRecovery === true) && identity?.conversationId === snapshot.conversationId &&
             identity.submittedUserMessageId === snapshot.submittedUserMessageId && recorded &&
             this.#now().getTime() - Date.parse(String(recorded.observedAt)) <= 180_000 && server &&
             (server.nextUserFound || server.messages.some(message => message.status === 'in_progress' ||
@@ -1151,7 +1171,6 @@ export class SubmissionService {
         if (!configuration) throw new SessionPlaneDomainError('provider.preparation-required',
           'Preserved original model/mode/effort evidence is unavailable; do not guess a continuation configuration');
         const model = JSON.parse(configuration.resultJson).model;
-        const evidence = await observe(snapshot);
         // Pacing can age an exact successful tool receipt while the original
         // page freshly proves an idle interruption. Keep the identity/tool and
         // active-work checks above; a banner alone cannot authorize a send.

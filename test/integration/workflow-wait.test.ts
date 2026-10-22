@@ -383,6 +383,39 @@ test('authorized broad continuation review stays inside the wait and runs at thi
 });
 
 
+test('approved broad review recovers an exact idle unanswered turn while backend probes are paced', async t => {
+  const f = await fixture();
+  try {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+      snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
+      evidence: { submissionVerification: { anchorPresent: true, laterUserFound: false,
+        activity: 'none', messageTimeout: false, responseCandidate: null,
+        turnBoundary: [{ role: 'user', text: 'Wait for the existing answer' }] } }, requested: {},
+    })) as any);
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, {
+      providerState: 'unknown', observationTransport: 'deferred', reason: 'backend-conversation-probe-paced',
+      nextCheckAt: new Date(Date.now() + 3600000).toISOString() });
+    const reviews: any[] = [];
+    t.mock.method(SessionUiService.prototype, 'prepareContinuation', async input => {
+      reviews.push(input);
+      throw new SessionPlaneDomainError('provider.preparation-required', 'Actual fresh submit control unavailable');
+    });
+    const waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef],
+      waitMs: 3600000, untilResult: false, continuationApproved: true });
+    await f.untilSubscribed(f.sent.sessionId as string);
+    assert.equal(reviews.length, 0, 'A new ACK must not immediately trigger another continue');
+    t.mock.timers.tick(1800000);
+    for (let i = 0; i < 30; i++) await flush();
+    const result = (await waiting).structuredContent;
+    assert.equal(reviews.length, 1);
+    assert.equal(reviews[0].userConfirmedInterruption.submittedUserMessageId, f.sent.submittedUserMessageId);
+    assert.equal(result.results[0].recovery.userActionRequired, true, 'A real inability to submit is returned');
+    assert.equal(f.fake.submitCount, 1, 'A failed fresh control check never submits');
+  } finally { t.mock.timers.reset(); await f.close(); }
+});
+
 test('prepared load recovery stays inside wait and returns only the same ready-to-configure request', async t => {
   const f = await fixture();
   try {
@@ -429,10 +462,10 @@ test('prepared load recovery stays inside wait and returns only the same ready-t
 });
 
 
-test('disconnected exact ACK with stale server evidence returns inability to continue to the human', async t => {
+test('new approved wait observes a disconnected exact ACK immediately despite stale server evidence', async t => {
   const f = await fixture();
   try {
-    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() + 31 * 60_000 });
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
       snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
@@ -452,7 +485,7 @@ test('disconnected exact ACK with stale server evidence returns inability to con
       waitMs: 600000, continuationApproved: true })).structuredContent;
     const result = (outcome.results as any[])[0];
     assert.equal(reviews, 1, 'Stale/absent server evidence cannot suppress the provider recovery check');
-    assert.equal(result.recovery.userActionRequired, true);
+    assert.equal(result.recovery.userActionRequired, false);
     assert.equal(result.recovery.reason, 'provider.failure-unverified');
     assert.match(result.recovery.url, /chatgpt.com\/c\//);
     assert.equal(result.terminal, false);
@@ -462,17 +495,17 @@ test('disconnected exact ACK with stale server evidence returns inability to con
 });
 
 
-test('an unresolved continuation uses one actual hourly refresh then escalates a rejected retry', async t => {
+test('an interrupted continuation attempts existing recovery instead of assuming manual refresh is necessary', async t => {
   const f = await fixture();
   try {
     await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
       { sessionState: 'complete', providerState: 'complete', answerText: 'Retained checkpoint', responseMessageId: 'old' });
     const next = (await f.invoke('send', { teamId: f.team.teamId, roleRef: `${f.sent.sessionId}:1`,
-      requestId: 'existing-continuation', prompt: '계속' })).structuredContent;
+      requestId: `continue:managed-continuation:${f.sent.requestRef}`, prompt: '계속' })).structuredContent;
     // This fixture represents the existing durable same-chat continuation.
     f.core.database.raw.prepare("UPDATE outbox SET payload_json=json_set(payload_json, '$.continuationOf', ?) WHERE outbox_id=?")
       .run(f.sent.requestRef, next.requestRef);
-    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() + 61 * 60_000 });
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() + 31 * 60_000 });
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
       snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
@@ -481,17 +514,20 @@ test('an unresolved continuation uses one actual hourly refresh then escalates a
         messageTimeout: false, responseCandidate: null } }, requested: {},
     })) as any);
     t.mock.method(EventRepository.prototype, 'latestServerObservation', () => null);
-    let refreshes = 0, reviews = 0;
+    let refreshes = 0, reviews = 0, focused = 0;
     t.mock.method(SessionUiService.prototype, 'refresh', async () => { refreshes++; return {} as any; });
     t.mock.method(SessionUiService.prototype, 'prepareContinuation', async () => {
-      reviews++; assert.equal(refreshes, 1, 'Actual refresh precedes the next continue');
+      reviews++;
       throw new SessionPlaneDomainError('provider.failure-unverified', 'Retry remains uncertain');
     });
-    const outcome = (await f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef],
+    t.mock.method(SessionUiService.prototype, 'focus', async () => { focused++; return { pageKey: 'exact-page', url: 'https://chatgpt.com/c/exact' }; });
+    const outcome = (await f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef],
       waitMs: 600000, continuationApproved: true })).structuredContent;
-    assert.equal(refreshes, 1);
+    assert.equal(refreshes, 0);
     assert.equal(reviews, 1);
-    assert.equal((outcome.results as any[])[0].recovery.userActionRequired, true);
+    assert.equal(focused, 0);
+    assert.equal((outcome.results as any[])[0].recovery.reason, 'provider.failure-unverified');
+    assert.equal((outcome.results as any[])[0].recovery.userActionRequired, false);
     assert.equal(f.fake.submitCount, 2, 'Only the two preexisting submissions exist');
   } finally { t.mock.timers.reset(); t.mock.restoreAll(); await f.close(); }
 });

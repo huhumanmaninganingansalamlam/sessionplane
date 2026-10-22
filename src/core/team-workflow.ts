@@ -306,7 +306,7 @@ export class TeamWorkflow {
         ...(confirmation ? { userConfirmedInterruption: confirmation } : {}) };
       try { reconciliation = await this.services.ui.prepareContinuation(continuationInput); }
       catch (error) {
-        if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.failure-unverified') throw error;
+        if (!(error instanceof SessionPlaneDomainError) || !['provider.failure-unverified', 'provider.preparation-required'].includes(error.errorCode)) throw error;
         const inspected = await this.#observe(request, undefined, true);
         if ((inspected.submissionVerification as { nextAction?: string } | undefined)?.nextAction !== 'reconcile_failure') throw error;
         try { await this.services.ui.reconcileFailure({ ...owner, decisionId: `timeout:${input.requestId}`, allowMessageTimeout: true, continuationPrompt: '계속' }); }
@@ -390,7 +390,7 @@ export class TeamWorkflow {
     const observed: Array<{ request: OutboxRecord | null; result: Record<string, unknown> }> = await Promise.all(requestRefs.map(async (requestRef) => {
       try {
         let request = this.#request({ teamId: input.teamId, requestRef });
-        let result: Record<string, unknown> = await this.#observe(request);
+        let result: Record<string, unknown> = await this.#observe(request, undefined, input.waitMs > 0 && input.continuationApproved === true);
         const followupTracker = new ExactFinalTracker(1500);
         let followupId = input.followupUserMessageId;
         for (;;) {
@@ -447,7 +447,11 @@ export class TeamWorkflow {
                 }
               }
               request = successor;
-              result = await this.#observe(request);
+              // A carried banner is not a new interruption of a just-submitted
+              // successor. Reuse the normal broad review cadence for that ACK.
+              if (!this.#continuationReviews.has(request.outboxId))
+                this.#continuationReviews.set(request.outboxId, Date.parse(request.createdAt));
+              result = await this.#observe(request, undefined, true);
               continue;
             }
             const priorReview = this.#continuationReviews.get(request.outboxId);
@@ -464,32 +468,31 @@ export class TeamWorkflow {
               Date.now() - Date.parse(serverReview.observedAt) <= 180_000;
             const dom = (result.submissionVerification as { dom?: {
               activityReason?: string; activity?: string; anchorPresent?: boolean; laterUserFound?: boolean;
+              turnBoundary?: { role: string }[];
             } } | undefined)?.dom;
-            const interrupted = timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
-              dom.activity !== 'strong' && dom.anchorPresent === true && dom.laterUserFound === false);
-            const payload = JSON.parse(request.payloadJson);
-            const parent = typeof payload.continuationOf === 'string' ? this.#outbox.getById(payload.continuationOf) : null;
-            const refresh = this.services.receipts.latestPageRefresh(request.clientId, request.sessionId, request.generation);
-            const hourDue = Date.now() - Date.parse(refresh?.status === 'complete' ? refresh.updatedAt : request.createdAt) >= 60 * 60_000;
-            const parentRefresh = parent === null ? null : this.services.receipts.get(request.clientId, `managed-refresh:${parent.outboxId}`);
-            if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || timeoutReady))) &&
-                (interrupted || freshServer) && (!interrupted || parent === null || hourDue || parentRefresh !== null) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
+            const missingContinuation = this.services.submissions.missingContinuationAnchor(
+              this.services.directory.getSession(request.sessionId)) !== null;
+            // An approved broad review must also reach the existing exact idle
+            // recovery when provider chrome no longer carries its error banner.
+            const idleWithoutResponse = due && dom?.activity === 'none' && dom.anchorPresent === true &&
+              dom.laterUserFound === false && !!dom.turnBoundary?.length &&
+              dom.turnBoundary.every(turn => turn.role === 'user');
+            const interrupted = idleWithoutResponse || timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
+              dom.activity !== 'strong' && (dom.anchorPresent === true || missingContinuation) && dom.laterUserFound === false);
+            if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
+                (interrupted || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
                 result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
               this.#continuationReviews.set(request.outboxId, Date.now());
               try {
-                if (interrupted && parent !== null) {
-                  if (parentRefresh !== null) throw new SessionPlaneDomainError('provider.failure-unverified',
-                    'The same conversation is still interrupted after refresh and continuation; human review is required');
-                  if (refresh !== null && refresh.status !== 'complete') throw new SessionPlaneDomainError(
-                    'provider.failure-unverified', 'The previous refresh outcome is unknown; human review is required');
-                  await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
-                    requestId: `managed-refresh:${request.outboxId}`, decision: 'refresh' });
-                  result = await this.#observe(request);
-                  if (result.terminal === true) continue;
-                }
                 result = await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
-                  requestId: reviewId, decision: 'continue', continuationApproved: true });
+                  requestId: reviewId, decision: 'continue', continuationApproved: true,
+                  ...(idleWithoutResponse ? { userConfirmedInterruption: {
+                    conversationId: String(result.conversationId),
+                    submittedUserMessageId: String(result.submittedUserMessageId),
+                    evidenceRef: `Approved managed review of exact idle unanswered turn ${request.outboxId}`,
+                  } } : {}) });
                 request = this.#request({ teamId: input.teamId, requestRef: String(result.requestRef) });
+                this.#continuationReviews.set(request.outboxId, Date.now());
                 continue;
               } catch (error) {
                 if (!(error instanceof SessionPlaneDomainError) || (!interrupted &&
@@ -497,7 +500,7 @@ export class TeamWorkflow {
                 // Preserve uncertain work, but never swallow an inability to
                 // recover an observed interruption. The caller must see it now.
                 if (interrupted) result = { ...result, status: 'recovery_required', recovery: {
-                  state: 'decision_required', decisionRequired: true, userActionRequired: true,
+                  state: 'decision_required', decisionRequired: true, userActionRequired: !['provider.failure-unverified', 'session.busy'].includes(error.errorCode),
                   reason: error.errorCode, message: error.message,
                   url: `https://chatgpt.com/c/${result.conversationId}`,
                 } };
