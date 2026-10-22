@@ -242,7 +242,7 @@ export class ChatGptConfigurationMenu {
       throw new SessionPlaneDomainError('provider.configuration-stale',
         'Current version/effort does not match the original continuation; preserve preparation');
     }
-    return summary;
+    return await this.#closeSelection(nodes);
   }
 
   async discover(): Promise<ConfigurationCatalog> {
@@ -305,6 +305,10 @@ export class ChatGptConfigurationMenu {
     if (!summary || summary.text !== option.label) {
       throw new SessionPlaneDomainError('provider.configuration-stale', 'Configuration changed since discovery; discover current options before choosing again');
     }
+    return await this.#closeSelection(nodes);
+  }
+
+  async #closeSelection(nodes: readonly BrowserSnapshotNode[]): Promise<BrowserSnapshotNode> {
     // Keep the confirmed evidence visible when filling the composer closes menus.
     const opener = this.#opener(nodes)!;
     await this.#click(opener);

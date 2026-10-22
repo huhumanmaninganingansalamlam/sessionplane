@@ -685,7 +685,9 @@ test('continuation reobserves exact current model and effort without switching c
     await page.locator('#chooser').evaluate(node => { (node as HTMLElement).hidden = false; });
     const menu = new ChatGptConfigurationMenu(page, 'continuation-selection');
     const summary = await menu.reobserveSelection('Aurora-9 Thinking', 'Balanced');
-    assert.equal(summary.text, 'Aurora-9 / Balanced');
+    assert.equal(summary.text, 'Balanced');
+    assert.equal(summary.role, 'button');
+    assert.equal(summary.expanded, false);
     await assert.rejects(menu.reobserveSelection('Aurora-8', 'Balanced'), /does not match/);
     await assert.rejects(menu.reobserveSelection('Aurora-9', 'Deep'), /does not match/);
     assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');

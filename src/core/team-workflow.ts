@@ -416,6 +416,12 @@ export class TeamWorkflow {
             const reviewId = `managed-continuation:${request.outboxId}`;
             const successor = this.#outbox.getByRequest(request.clientId, `continue:${reviewId}`);
             if (successor) {
+              if (successor.submissionState === 'prepared') {
+                // Resume this durable, unsubmitted continuation; the original
+                // decision/send receipts keep it the same generation.
+                await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
+                  requestId: reviewId, decision: 'continue', continuationApproved: true });
+              }
               request = successor;
               result = await this.#observe(request);
               continue;
