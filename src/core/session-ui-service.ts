@@ -283,9 +283,15 @@ export class SessionUiService {
       if (!surface.present) return null;
       const dom = await observeChatGptDom(page, { submittedUserMessageId: anchor, submittedUserTurnId: null });
       const activity = await observeChatGptActivity(page, dom);
-      if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate !== null || activity.strength !== 'none' ||
+      // Exact enabled Retry chrome already rejects live Stop/thinking controls.
+      // A weak generic label (including the Thinking model menu) is not a live stream.
+      if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate !== null ||
+          activity.strength === 'strong' || activity.strength === 'unknown' ||
           surface.reason !== 'exact-stream-retry') throw new SessionPlaneDomainError('provider.preparation-required',
-        `Preserve the original turn before stream Retry: ${surface.reason}`);
+        `Preserve the original turn before stream Retry: ${surface.reason}`, {
+          anchorPresent: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
+          responseCandidatePresent: dom.candidate !== null, activity: activity.strength, activityReason: activity.reason,
+        });
       await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
       const requestId = `stream-retry:${session.sessionId}:${session.generation}`;
       const previous = receipts.get(input.clientId, requestId);

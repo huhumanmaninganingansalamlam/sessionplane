@@ -103,7 +103,7 @@ test('UNKNOWN Continue retries existing conversation chrome while preserving dra
     const markup = f.markup.replace('<aside', `<div data-message-author-role="user" data-message-id="continue-one">계속</div>
       <div data-chatgpt-search-message-ids="continue-two"><div data-user-message-bubble>계속</div></div>
       <div data-chatgpt-search-message-ids="continue-three"><div data-user-message-bubble>계속</div></div><aside`)
-      .replace('<textarea>', '<textarea id="prompt-textarea">');
+      .replace('<textarea>', '<button aria-label="GPT-6 Thinking">Model</button><textarea id="prompt-textarea">');
     await f.page.setContent(markup);
     await f.page.locator('textarea').fill('Unrelated human draft');
     assert.equal((await f.decide()).isError, true);
