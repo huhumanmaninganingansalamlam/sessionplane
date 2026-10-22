@@ -238,7 +238,7 @@ export class ChatGptConfigurationMenu {
     const summary = this.#summary(nodes);
     // ChatGPT's version list omits the Thinking suffix used by send hints.
     if (!version || (model !== version && model !== `${version} Thinking`) ||
-        !effort || !summary?.text.endsWith(effort)) {
+        !effort || summary?.text.replaceAll(/\s*\/\s*/g, ' ').replaceAll(/\s+/g, ' ').trim() !== `${version} ${effort}`) {
       throw new SessionPlaneDomainError('provider.configuration-stale',
         'Current version/effort does not match the original continuation; preserve preparation');
     }

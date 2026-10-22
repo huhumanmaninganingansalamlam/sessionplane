@@ -690,6 +690,7 @@ test('continuation reobserves exact current model and effort without switching c
     assert.equal(summary.expanded, false);
     await assert.rejects(menu.reobserveSelection('Aurora-8', 'Balanced'), /does not match/);
     await assert.rejects(menu.reobserveSelection('Aurora-9', 'Deep'), /does not match/);
+    await assert.rejects(menu.reobserveSelection('Aurora-9', 'lanced'), /does not match/);
     assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');
     assert.deepEqual(await page.evaluate(() => ({ version: (window as any).version,
       power: (window as any).powerValue, submits: (window as any).submits })),
