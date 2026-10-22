@@ -327,6 +327,48 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
   } finally { await f.close(); }
 });
 
+test('managed tool recovery retains a disconnected original with Stop instead of returning a cleanup error', async t => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    f.fake.idleToolTurn = true;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    f.core.database.raw.prepare('UPDATE outbox SET created_at=? WHERE outbox_id=?')
+      .run(new Date(Date.now() - 31 * 60_000).toISOString(), requestRef);
+    await f.core.actorScheduler.updateGeneration(original.sessionId, 1, {}, 'generation.backend-pending',
+      'backend-assistant-not-final', { conversationId: original.conversationId, pageKey: original.pageKey,
+        submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId },
+      { anchorNodeId: original.submittedUserMessageId, currentNodeId: 'tool-done', nextUserFound: false, assistantCount: 1,
+        messages: [{ messageId: 'tool-done', role: 'tool', channel: 'commentary',
+          status: 'finished_successfully', endTurn: true, hidden: false, textLength: 0 }] });
+    await f.fake.page.setContent('<main>' + configuration +
+      '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>' +
+      '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>' +
+      '<textarea></textarea><button data-testid="stop-button">Stop</button></main>');
+    const verify = SessionUiService.prototype.verifyContinuation;
+    let checked = false;
+    t.mock.method(SessionUiService.prototype, 'verifyContinuation', async function (...args) {
+      try { return await verify.apply(this, args); } finally { checked = true; }
+    });
+    let returned = false;
+    const waiting = f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
+      waitMs: 60000, continuationApproved: true }).then(result => { returned = true; return result; });
+    await until(() => checked);
+    await delay(100);
+    assert.equal(returned, false, 'An active-page refusal must stay inside managed collection');
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, 1);
+    assert.equal(await f.fake.page.locator('[data-testid="stop-button"]').count(), 1);
+    await f.fake.page.locator('[data-testid="stop-button"]').evaluate(node => node.remove());
+    await f.core.actorScheduler.updateGeneration(original.sessionId, 1, {
+      sessionState: 'complete', providerState: 'complete', answerText: 'Original final', responseMessageId: 'final' });
+    const result = await waiting;
+    assert.equal(result.results[0].responseMessageId, 'final');
+    assert.equal(f.fake.submitCount, 1);
+  } finally { await f.close(); }
+});
+
 test('managed wait resumes its already prepared continuation without another generation or send', async t => {
   const f = await fixture();
   try {
