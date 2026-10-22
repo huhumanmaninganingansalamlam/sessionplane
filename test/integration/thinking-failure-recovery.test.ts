@@ -259,11 +259,16 @@ test('approved interrupted tool continuation preserves original ACK and uses one
       submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId };
     const evidence = { anchorNodeId: original.submittedUserMessageId, currentNodeId: 'tool-done',
       nextUserFound: false, assistantCount: 1, messages: [{ messageId: 'tool-done', role: 'tool' as const,
-        channel: 'commentary', status: 'finished_successfully', endTurn: null, hidden: false, textLength: 0 }] };
+        channel: 'commentary', status: 'finished_successfully', endTurn: true, hidden: false, textLength: 0 }] };
     const record = async (patch = {}, scope = identity) => f.core.actorScheduler.updateGeneration(original.sessionId, 1,
       {}, 'generation.backend-pending', 'backend-assistant-not-final', scope, { ...evidence, ...patch });
     await assert.rejects(f.rpc('decide', input), /server evidence/);
-    for (const patch of [{ nextUserFound: true }, { messages: [{ ...evidence.messages[0]!, status: 'in_progress' }] }]) {
+    for (const patch of [{ nextUserFound: true }, { messages: [{ ...evidence.messages[0]!, status: 'in_progress' }] },
+      // Tool end_turn closes its execution, not the assistant response. An assistant
+      // final or a trailing empty assistant still blocks this tool-only recovery.
+      { messages: [{ ...evidence.messages[0]!, role: 'assistant', textLength: 42 }, evidence.messages[0]!] },
+      { currentNodeId: 'empty-assistant', messages: [evidence.messages[0]!, { ...evidence.messages[0]!,
+        messageId: 'empty-assistant', role: 'assistant', endTurn: false }] }]) {
       await record(patch); await assert.rejects(f.rpc('decide', input), /server evidence/);
     }
     await record({}, { ...identity, conversationId: 'different' });
