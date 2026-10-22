@@ -1,3 +1,6 @@
+import type { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
+import { streamRetrySurface } from '../providers/chatgpt/stream-retry.ts';
+import type { ReceiptRepository } from '../storage/receipt-repository.ts';
 import { observeChatGptSurface, type ChatGptSurface } from '../providers/chatgpt/surface.ts';
 import { controlHostSpanPermission, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
 import { createHash } from 'node:crypto';
@@ -250,6 +253,42 @@ export class SessionUiService {
     });
     if (read.evidence === undefined) throw new SessionPlaneDomainError('browser.unavailable', 'Original follow-up page is unavailable');
     return read.evidence;
+  }
+
+  async retryStream(input: PreparationOwner & { decisionId: string }, receipts: ReceiptRepository, budgets: ConversationLoadRecoveryRepository) {
+    const read = await this.#submissions.inspectSubmission(input, async session => {
+      if (session.terminal || session.submissionState !== 'submitted' || !session.promptSubmitted ||
+          !session.submittedUserMessageId || !session.conversationId || session.answerText !== null || session.responseMessageId !== null)
+        return null;
+      if (!this.#registry.listBindings({ includeClosed: false }).some(binding => binding.pageKey === session.pageKey)) return null;
+      const page = this.#requirePage(session);
+      const target = { origin: this.#chatgptOrigin, conversationId: session.conversationId,
+        anchor: session.submittedUserMessageId, click: false };
+      const surface = await page.evaluate(streamRetrySurface, target);
+      if (!surface.present) return null;
+      const dom = await observeChatGptDom(page, session);
+      const activity = await observeChatGptActivity(page, dom);
+      if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate !== null || activity.strength !== 'none' ||
+          surface.reason !== 'exact-stream-retry') throw new SessionPlaneDomainError('provider.preparation-required',
+        `Preserve the original turn before stream Retry: ${surface.reason}`);
+      await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
+      const requestId = `stream-retry:${session.sessionId}:${session.generation}`;
+      const previous = receipts.get(input.clientId, requestId);
+      if (previous !== null) throw new SessionPlaneDomainError('provider.action-unknown',
+        'Stream Retry was already attempted for this request; inspect its result without repeating the click');
+      const receipt = { clientId: input.clientId, requestId, method: 'session.stream-retry',
+        requestHash: createHash('sha256').update(JSON.stringify(target)).digest('hex') };
+      if (!budgets.reserveRefresh(new Date().toISOString(), 60_000, session.conversationId))
+        throw new SessionPlaneDomainError('provider.preparation-required', 'Stream Retry is paced by the existing provider/UI cooldown; preserve this request');
+      receipts.record({ ...receipt, status: 'attempted', result: { decisionId: input.decisionId, anchor: target.anchor } });
+      this.#requirePage(session);
+      const retried = await page.evaluate(streamRetrySurface, { ...target, click: true });
+      receipts.record({ ...receipt, status: 'complete', result: { ...retried, anchor: target.anchor } });
+      if (!retried.clicked) throw new SessionPlaneDomainError('provider.preparation-required',
+        `Stream Retry was not dispatched: ${retried.reason}`);
+      return { ...retried, submittedUserMessageId: target.anchor, generation: session.generation };
+    });
+    return read.evidence ?? null;
   }
 
   async prepareContinuation(input: PreparationOwner & { readonly decisionId: string; readonly userConfirmedInterruption?: UserConfirmedInterruption | undefined }) {

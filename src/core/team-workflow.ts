@@ -322,6 +322,9 @@ export class TeamWorkflow {
       try { reconciliation = await this.services.ui.prepareContinuation(continuationInput); }
       catch (error) {
         if (!(error instanceof SessionPlaneDomainError) || !['provider.failure-unverified', 'provider.preparation-required'].includes(error.errorCode)) throw error;
+        const providerRetry = await this.services.ui.retryStream({ ...owner, decisionId: input.requestId },
+          this.services.receipts, new ConversationLoadRecoveryRepository(this.services.database));
+        if (providerRetry) return { ...await this.#observe(request), providerRetry };
         const inspected = await this.#observe(request, undefined, true);
         if ((inspected.submissionVerification as { nextAction?: string } | undefined)?.nextAction !== 'reconcile_failure') throw error;
         try { await this.services.ui.reconcileFailure({ ...owner, decisionId: `timeout:${input.requestId}`, allowMessageTimeout: true, continuationPrompt: '계속' }); }
@@ -465,10 +468,16 @@ export class TeamWorkflow {
               // A carried banner is not a new interruption of a just-submitted
               // successor. Reuse the normal broad review cadence for that ACK.
               if (!this.#continuationReviews.has(request.outboxId))
-                this.#continuationReviews.set(request.outboxId, Date.parse(request.createdAt));
+                this.#continuationReviews.set(request.outboxId, Date.parse(request.updatedAt));
               result = await this.#observe(request, undefined, true);
               continue;
             }
+            // A client may attach directly to the successor returned by explicit
+            // continue, or reconnect after restart. Its carried banner is not a
+            // first interruption: retain the broad interval from acknowledgement.
+            if (!this.#continuationReviews.has(request.outboxId) &&
+                typeof JSON.parse(request.payloadJson).continuationOf === 'string')
+              this.#continuationReviews.set(request.outboxId, Date.parse(request.updatedAt));
             const priorReview = this.#continuationReviews.get(request.outboxId);
             const lastReview = priorReview ?? request.createdAt;
             const due = Date.now() - (typeof lastReview === 'number' ? lastReview : Date.parse(lastReview)) >= 30 * 60_000;
@@ -493,7 +502,10 @@ export class TeamWorkflow {
             const idleWithoutResponse = due && dom?.activity === 'none' && dom.anchorPresent === true &&
               dom.laterUserFound === false && !!dom.turnBoundary?.length &&
               dom.turnBoundary.every(turn => turn.role === 'user');
-            const interrupted = idleWithoutResponse || timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
+            const streamRetry = dom?.activity === 'none' && dom.anchorPresent === true && dom.laterUserFound === false &&
+              ((result.evidence as { providerAlerts?: string[] } | undefined)?.providerAlerts ?? []).some(alert =>
+                /^(메시지 스트림에 오류 발생|Error in message stream)[.!]?\s*(다시 시도|Retry|Try again)$/i.test(alert.trim()));
+            const interrupted = streamRetry || idleWithoutResponse || timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
               dom.activity !== 'strong' && (dom.anchorPresent === true || missingContinuation) && dom.laterUserFound === false);
             if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
                 (interrupted || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&

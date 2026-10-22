@@ -117,14 +117,22 @@ machine-readable results and diagnostics.
    using the displayed `request configure` command, then the fresh composer control.
    Inspect the input before explicitly choosing the submit control. Disabled or stale
    controls are not a fallback; inspect the same request again.
-4. Use the displayed `request wait` command to collect the answer. When same-conversation recovery is authorized, add `--continuation-approved`: the existing wait retains routine ACK/load delays, holds unavailable preparation until the composer is ready, reviews unresolved work about every 30 minutes, and uses exact idle timeout or interrupted-tool evidence for a single continuation. A disconnected banner or active generation never authorizes a send. Add `--out DIR`
-   to export captured files. A client wait timeout does not cancel generation.
-5. If delivery is unconfirmed, inspect the same request. Never repeat `send` as a
-   retry. If fresh evidence offers a single matching user message, `request acknowledge`
-   binds its message ID and evidence hash without sending. Never choose an ambiguous
-   candidate. `request refresh` reloads only the owned page; it does not resend or
-   recover a missing page with no known conversation. Provider cooldowns and human
-   verification remain in force.
+4. Keep one managed collection owner. When normal same-conversation recovery is
+   approved, use `sessplane request wait TEAM_ID REQUEST_REF --wait-ms 600000 --continuation-approved --json`
+   (MCP: `continuationApproved: true`). Omitting
+   the option leaves observation only. The existing client retains routine expiry,
+   pacing/429 and ACK/load delays, reviews unresolved work about every 30 minutes,
+   follows the continuation chain and collects the answer. Do not add a competing
+   wait or manual `계속`. Add `--out DIR` for files. Return actual successor/ACK/result
+   references to the owner; an ACK or alive collector is not product progress.
+5. Read the same request when delivery is unconfirmed; never retry the original
+   `send` or bind an ambiguous candidate. Report a returned recovery decision or
+   send failure immediately. If human review/refresh is needed, focus the exact
+   tab and state its current error and one required user action; do not refresh
+   automatically or silently repeat ineffective recovery. Preserve drafts, active
+   generation and provider pacing. After user recovery, resume the same chain.
+   A normal final answer ends recovery: read its results before the Coordinator
+   sends a contextual next-work follow-up, separately from managed literal `계속`.
 6. After retrieving outputs, `request delete TEAM_ID REQUEST_REF --outputs-retrieved`
    deletes the exact completed conversation. `request replace TEAM_ID ROLE_REF`
    attempts old-chat deletion and starts an empty successor; `--preserve-conversation`
@@ -148,7 +156,7 @@ Tagged releases attach a prebuilt npm package and SHA-256 checksum. Install the
 release package globally, then run the built-in doctor:
 
 ```bash
-VERSION=0.4.62
+VERSION=0.4.63
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz"
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz.sha256"
 sha256sum -c "sessionplane-$VERSION.tgz.sha256"

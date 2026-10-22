@@ -67,108 +67,84 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    only the original Coordinator performs this recovery; readiness-only work must
    have no saved Submit choice. Recheck current status before each such choose.
    Follow explicit user corrections when request hints conflict. Keep the same requestRef.
-   When the user requests a page refresh, or visible stream/history recovery
-   failure warrants one, call `sessionplane_decide` with decision `refresh`,
-   teamId, requestRef and a stable requestId. No snapshotId/ref/purpose is needed.
-   It reloads only the exact owned page, never resends the prompt or presses Retry.
-   Reinspect afterward; preparation requires fresh model/effort confirmation.
-   Do not refresh healthy long-running thinking on a timer or bypass verification.
-5. `sessionplane_wait` takes one or several requestRefs from this team. It returns
-   exact answers and captures generated files; outputDir exports stored bytes.
-   Inspect each result and file failure. Old requests can capture files from their
-   exact answer even after a newer send; unavailable provider content is a file error. A timeout does not stop provider work.
-   When terminal:false, backend-http-429, probe pacing and waitExpired are
-   observation delays, not failed generation. Wait outside the model with the same requestRef: positive `waitMs` rounds up to
-   whole minutes, minimum one minute and default ten minutes. Intermediate progress
-   and pacing do not wake the model; completion, actual errors and decisions return
-   immediately. Ten minutes to two hours or longer can be normal generation.
-   Zero explicitly reads a snapshot; use team_get for an immediate status check.
-   MCP clients must set their existing `tool_timeout_sec` above the desired wait
-   duration (Codex defaults to60s). If a client cannot keep a long tool call open,
-   run the existing CLI request wait in its external command process and use that
-   client's existing command-completion notification/resume path with the same
-   thread/task/requestRefs. Automatic same-thread wake and exactly-once delivery require an actually verified owning-host connection; task resume only restores context. Do not claim those from API schemas alone. Do not turn process status polling into short model
-   turns or add another scheduler. Wait expiration never stops or resends work.
-   Continue on the same requestRef, including before `nextCheckAt`.
-   At roughly30-minute reviews, use exact team_get activity (last observed generation
-   state change and stored artifact change) together with the owning project's existing
-   HostSpan execution/output references. A state timestamp is not proof of continuing
-   output growth; no available execution evidence means unknown, not stalled. Concrete
-   send/connection failures can be reviewed at about ten minutes or earlier when returned.
-   Never infer a stall or blame Extra High from elapsed time. On a real completion,
-   error or context/output limit, retrieve the original result and execution IDs first;
-   the owning coordinator continues unfinished acceptance work with the same expert
-   and existing handoff. Never send a continuation into active generation. Replacement
-   requires an actual supported signal and the existing lifecycle procedure.
-   `nextCheckAt` schedules the core's backend probes only, not result collection.
-   Do not sleep until it: DOM observation continues and `wait` can return completion
-   earlier. The core enforces probe cooldowns; do not bypass them with refresh or resend.
-   Do not ask the user to copy the answer merely
-   because observation is deferred. After an interrupted caller resumes, fetch
-   that request again: the core keeps observing and may already have its answer.
-   For provider-actionable-alert, inspect evidence or team_get on the same requestRef
-   and report the visible error. Active thinking/streaming needs waiting; a visible
-   stream/history recovery failure may need scoped refresh, then reinspection.
-   For an idle current-turn Thinking failed, or a message-send timeout with explicit
-   user authorization to continue in the same chat, the original Coordinator can use
-   decide with decision `reconcile_failure`, the same teamId/requestRef and a
-   stable requestId. The core freshly verifies the original submitted anchor,
-   actual failure header and composer, rejecting later user turns, answer candidates,
-   Stop/thinking/streaming, stale/missing evidence, generic alerts and refusals.
-   Compact textbox text/value are redacted, not proof of an empty composer; inspect draftPresent. For an explicitly authorized message-timeout continuation with an existing exact `계속` draft, pass `continuationPrompt: "계속"` to manual reconcile_failure; the draft stays unchanged and submission remains a separate owner action. Other drafts, attachments and activity still block. Success records failed/terminal with provider.execution-failed while keeping
-   submitted:true, original evidence and conversation; no Stop, deletion or replay
-   occurs. Message-timeout reconciliation does not enable automatic continuation;
-   once reconciled, the owner may send the authorized literal `계속` once in the
-   same conversation, keeping the failed original and successor ACK/answer separate.
-   Only then may the original Coordinator send an explicitly authorized
-   follow-up as the next generation in the same chat. This does not authorize tool
-   reexecution. For an explicitly recovery-authorized task, a **new** ChatGPT send
-   may set `thinkingFailureRecovery:true` to hand follow-up sending to the core.
-   Default is off; existing requests stay manual. While enabled, do not send in
-   parallel: the core reconciles only an exact idle Thinking failed, preserves the
-   actual combined model/effort and original deadline, and sends literal `계속`
-   once per failed generation with backoff. Follow
-   `thinkingFailureRecovery.successorRequestRef` to collect the successor; the
-   original failure remains separate. Normal final stops the chain. `state:paused`
-   returns its saved requestRef/reason and owner control; inspect it without
-   blindly resending. Missing/stale configuration, manual draft/follow-up, active
-   generation, ambiguous submit, other alerts or auth/refusal never auto-retry.
-   A later genuine Thinking failed in manual mode needs its own fresh reconciliation;
-   never repeat a live send or treat timeout/refusal as this failure.
-   Escalate persisting failures instead of polling indefinitely. A Retry control
-   alone does not imply human verification; Retry/resend is not read-only recovery.
-   Provider completion is not task completion. If a completed answer stops at a
-   checkpoint or leaves authorized work unfinished, read it and send a contextual
-   continuation to the same role with a fresh roleRef/requestId. Preserve the prior
-   result. Elapsed time alone does not justify a continuation while work is active.
+   Do not refresh automatically. When refresh is needed, focus the exact request
+   tab, report the current error and one required user action, and pause that
+   conversation's automation until the user reports completion. Preserve drafts.
+5. Keep one managed wait per request chain. When the user has approved normal
+   same-conversation `계속` recovery, pass `continuationApproved: true` on positive
+   MCP waits, or `--continuation-approved` on the existing CLI wait. Without it,
+   the wait only observes; an alive PID does not show managed continuation is enabled.
+
+   ```json
+   {"teamId":"TEAM_ID","requestRefs":["REQUEST_REF"],"waitMs":600000,"continuationApproved":true}
+   ```
+
+   ```sh
+   sessplane request wait TEAM_ID REQUEST_REF --wait-ms 600000 --continuation-approved --json
+   ```
+
+   The existing client retains routine wait expiry, ACK/load delays, backend 429
+   and probe pacing, follows the original request's continuation chain, and collects
+   its exact answer/files. Positive waits default to `untilResult: true`; zero reads
+   a snapshot. Keep the
+   original requestRef and actual returned successor/ACK/result references in the
+   existing task/handoff. Add `--out DIR` to export files; report capture failures.
+   If a user already submitted a follow-up, collect it using
+   `followupUserMessageId` (CLI `--followup-message-id`), without sending it again.
+
+   The core reviews unresolved work at broad, roughly 30-minute intervals and
+   handles supported continuation preparation/submission itself. Do not omit an
+   already approved option or delegate routine literal `계속` to the Coordinator
+   or user. Do not run a competing wait or manual continue beside that owner.
+   When transferring collection, retrieve the old handle/result first and end only
+   its local observer before another owner attaches; never stop product execution.
+
+   Current page activity, exact request evidence and actual new answer/tool/output
+   changes distinguish generation from an interrupted turn. Elapsed time, Stop,
+   ACK, PID survival or an old completed tool alone are not progress. Preserve active
+   generation, drafts, uncertain delivery, model/effort and provider pacing. The core
+   decides recovery from these observations; do not force a send past a refusal.
+   `nextCheckAt` paces backend probes, not collection or a new polling schedule.
+
+   A returned recovery decision, failed submission or repeated ineffective recovery
+   needs immediate delivery to the supervisor/user, not another silent wait. Read
+   the exact error and current controls; focus the original tab and report one
+   concrete user action when human review is needed. An ambiguous or persistent
+   send failure can require review even without a permission card. Never invent a
+   hidden button, infer completion from an empty assistant, or set a fixed retry
+   count as the sole stopping condition. Do not automatically refresh; the user
+   refreshes when required. After their completion, re-read the same request and
+   resume supported collection without replaying the original question.
+
+   Keep the long wait outside the model through the existing CLI command handle
+   when the MCP client's timeout cannot cover it; otherwise configure that client's
+   tool timeout above the wait. Collect that same handle on completion/error and
+   report it promptly. Do not poll process status in short model turns or add a
+   scheduler. Task resume restores context, not delivery of an external result.
+
+   A normal final answer ends recovery. Read it and its execution/file results;
+   if authorized product work remains, the owning Coordinator sends a **contextual
+   next-WP follow-up** using a fresh roleRef/requestId. That is separate from the
+   managed wait's literal `계속`; never restart the original question or use a
+   continuation ACK as proof of a product result.
 
 The caller chooses experts and context; SessionPlane does not automatically fan
 out prompts, infer consensus, or inject answers into other roles.
 
 ## Recovery and cleanup
 
-- The core automatically recovers an exact ChatGPT **conversation-load** error
-  by clicking only the page button immediately below that error (not a generation
-  Retry). All owned conversations share one durable fair queue: at most one attempt
-  per60s across the profile, up to100 attempts per conversation without resetting
-  on restart/rebind. Existing longer account cooldowns and Retry-After win; unknown
-  429/visible service limits wait15min. Drafts, generation, verification/permissions,
-  missing/ambiguous buttons and changed binding/surface hold the attempt. Each click
-  rechecks those guards atomically; this never submits, stops or terminalizes work.
-  Normal loaded history/composer ends recovery, including manual recovery. Inspect
-  `conversationLoadRecovery` in exact team_get and health for attempts, outcome,
-  holds and nextAllowedAt. Preserve UNKNOWN
-  submission and original anchors; do not start a competing refresh loop or replay.
-  This does not recover screenshot/compositor failures merely because DOM responds.
-
-- If the next normal get/wait returns `recovery.state: "exhausted"` and
-  `userActionRequired:true`, automatic conversation-load clicks stopped at100.
-  Read its message and original `recovery.url`, then report the required manual
-  review to the user. Team get also displays this state on the affected role.
-  Preserve submitted/UNKNOWN identities and stored results; do not reset the
-  counter, resend, replace or delete as a substitute. No terminal generation or
-  push alert is implied. Existing waits keep their normal wake/timeout behavior;
-  `notifiedAt` records the existing state event, not delivery/read acknowledgement.
+- Approved managed continuation also handles an exact idle acknowledged turn
+  with a standalone message-stream error and enabled Retry: the core clicks that
+  existing provider control once and collects the same request/ACK without sending
+  another prompt. A failed or ineffective Retry returns its actual outcome for
+  review; it does not authorize permission bypass or automatic refresh.
+- Existing core conversation-load recovery may click the exact load-error button;
+  this is not a page refresh, generation Retry or prompt replay. Let that existing
+  paced recovery run and inspect `conversationLoadRecovery` holds/outcome. Do not
+  create another retry/refresh loop. Returned `userActionRequired` or exhausted
+  recovery must be reported with its exact URL and current screen/action. A stored
+  notification event is not proof that the user received the report. Preserve
+  UNKNOWN requests and anchors; never reset recovery state to avoid human review.
 
 - When the user asks to view or manually control a conversation, call
   `sessionplane_decide` with `decision: "focus"`, its `teamId`, current `requestRef`
@@ -265,7 +241,3 @@ Search, context packaging, project-source management and special code ZIP flows
 are not SessionPlane tools. Use the agent's existing file/search tools and include
 needed text in the prompt. Uploads are disabled by default; send files only when
 the team's capabilities.uploadsEnabled is true. Downloads remain available.
-
-For an explicitly authorized continuation of an interrupted tool turn with no final and no current failure alert, use `decide` with `decision: "continue"`, `continuationApproved: true`, the original requestRef and a stable requestId. The core requires fresh exact canonical tool completion and an idle matching page, retains the original uncertain answer/ACK, and prepares one separate same-chat literal `계속` request. The existing client completes configuration/composer/submit and collects the successor internally; no manual browser send is needed. Existing later turns, active work, UNKNOWN delivery and separate drafts block dispatch. If a user already sent `계속`, use positive `wait` with `followupUserMessageId` (CLI `--followup-message-id`) to collect that distinct follow-up and reconcile it internally; never send it again.
-
-Positive CLI/MCP waits retain routine expired rounds and transient observation timeouts inside the existing client until an answer, actual error or required decision. Each core round stays bounded for normal handover. Explicit `untilResult: false` (CLI `--return-on-wait-expiry`) retains bounded return behavior; zero is a snapshot.
