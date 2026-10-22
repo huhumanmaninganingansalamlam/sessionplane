@@ -9,7 +9,7 @@ export interface HostSpanPermissionInput {
   evidenceHash?: string | undefined;
 }
 
-const once = /^(?:허용|이번만 허용|한 번 허용|Allow|Allow once|Allow this time)$/i;
+const once = /^(?:허용|이번만 허용|한 번 허용|한 번만 허용|Allow|Allow once|Allow this time)(?:\s*⏎)?$/i;
 
 /** Only an explicitly selected HostSpan tool permission, never a generic UI click. */
 export async function controlHostSpanPermission(page: Page, input: HostSpanPermissionInput) {
@@ -49,9 +49,13 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
     // Use only the nearest card with this single alert, never the page/main.
     while (await scope.getByRole('button', { name: once }).count() === 0) {
       const parent = scope.locator('..');
-      if (await parent.evaluate(element => element.matches('body, main, [role="main"]')) ||
+      if (await parent.evaluate(element => element.matches('body, main, [role="main"]') ||
+          element.querySelector('[data-message-author-role="user"]') !== null) ||
           await parent.locator('[role="alert"], [role="alertdialog"], [role="dialog"]').count() !== 1) break;
       scope = parent;
+    }
+    if (await scope.getByRole('button', { name: once }).count() !== 1) {
+      throw unavailable('The exact permission card must have one one-time Allow control');
     }
     return scope;
   };

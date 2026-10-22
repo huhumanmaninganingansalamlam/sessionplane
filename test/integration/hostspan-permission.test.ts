@@ -20,12 +20,13 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     const team = core.teamDirectory.createTeam({ clientId: 'fixture-owner' });
     const session = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
     const { page, binding } = await core.browserOwner!.createPage();
-    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: `<main>
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<main>
       <div data-message-author-role="user" data-message-id="user-message-1">Fixture question</div>
+      <span id="elapsed">1 hour 14 seconds working</span>
       <textarea id="prompt-textarea">Keep my draft</textarea><button data-testid="stop-button">Stop generating</button>
       <section id="permission"><div role="alert">hostspan-desktop Process Start
         <button aria-expanded="false" onclick="document.querySelector('#details').hidden=false">View details</button></div>
-        <button id="allow" aria-label="Allow once" onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove()"><svg></svg></button>
+        <button id="allow" onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove()"><span>한 번만 허용</span><kbd>⏎</kbd></button>
           <button onclick="throw Error('Must not click')">Always allow</button>
       </section>
       <section role="dialog" id="details" hidden>hostspan-desktop Process Start Command: original work
@@ -56,6 +57,11 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     assert.equal(prepare.mock.callCount(), 1, 'Use the existing exact-page background interaction lifecycle');
     const permission = inspected.structuredContent.permission as { evidenceHash: string; permissionText: string };
     assert.match(permission.permissionText, /Command: original work/);
+    assert.doesNotMatch(permission.permissionText, /Fixture question|working|Keep my draft/);
+    await page.locator('#elapsed').evaluate(element => { element.textContent = '1 hour 44 seconds working'; });
+    const reinspected = await decide('clock-only-change', { action: 'inspect' });
+    assert.equal((reinspected.structuredContent.permission as { evidenceHash: string }).evidenceHash, permission.evidenceHash,
+      'Only the exact permission card and command bind approval, never the changing transcript clock');
     assert.equal((await decide('foreign-app', { action: 'allow', appName: 'another-app', evidenceHash: permission.evidenceHash })).isError, true);
     await page.locator('#details').evaluate(element => element.prepend('Changed command '));
     assert.equal((await decide('changed', { action: 'allow', evidenceHash: permission.evidenceHash })).isError, true);
@@ -76,6 +82,9 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     assert.equal((second.structuredContent.permission as { permissionStillVisible: boolean }).permissionStillVisible, true,
       'A surviving permission alert is not reported as gone just because its actions are outside the alert');
     assert.equal(await page.evaluate(() => (window as unknown as { grants: number }).grants), 2);
+    await page.locator('section button').filter({ hasText: 'Allow once' }).evaluateAll(elements => elements.forEach(e => { e.textContent = 'Unverified action'; }));
+    assert.equal((await decide('unverified-card-action', { action: 'inspect' })).isError, true,
+      'An unknown card action cannot broaden evidence to the entire conversation');
     assert.equal(fake.submitCount, 1);
     assert.equal(fake.stopCount, 0);
     assert.equal(core.teamDirectory.getSession(session.sessionId).generation, 1);
