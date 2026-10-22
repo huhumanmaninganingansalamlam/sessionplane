@@ -806,6 +806,36 @@ export class SessionUiService {
         terminal: recovered.kind === 'complete', reason: recovered.reason } };
   }
 
+  /** Reading an exact work turn is independent of later recovery-message ACKs. */
+  async readOriginalWork(original: SessionSnapshot, owner: SessionSnapshot) {
+    const page = this.#requirePage(owner);
+    const binding = this.#registry.refreshPage(owner.pageKey!);
+    const messages = await readChatGptMessages(page);
+    const anchors = messages.filter(message => message.role === 'user' &&
+      ((original.submittedUserMessageId !== null && message.messageId === original.submittedUserMessageId) ||
+        (original.submittedUserTurnId !== null && message.turnId === original.submittedUserTurnId)));
+    if (anchors.length !== 1) return { originalAnchorPresent: false, terminal: false, reason: 'original-work-anchor-unverified' };
+    const anchor = anchors[0]!;
+    const following = [];
+    let lastUser = anchor;
+    for (const message of messages.slice(messages.indexOf(anchor) + 1)) {
+      if (message.rootIndex !== anchor.rootIndex) continue;
+      if (message.role === 'user') {
+        if (message.text.trim() !== '계속') break;
+        lastUser = message;
+      }
+      following.push(message);
+    }
+    const response = await this.recoverHistoricalAnswer({ ...original,
+      submittedUserMessageId: lastUser.messageId, submittedUserTurnId: lastUser.turnId }, owner, false);
+    const after = this.#registry.refreshPage(owner.pageKey!);
+    if (after.bindingEpoch !== binding.bindingEpoch) throw new SessionPlaneDomainError('browser.snapshot-stale', 'Work result page changed during read');
+    return { originalAnchorPresent: true, originalUserMessageId: anchor.messageId,
+      responseUserMessageId: lastUser.messageId, ...response.answerRecovery,
+      observedMessages: following.slice(-12), providerMutation: false,
+      association: 'exact-original-question-and-literal-continuations' };
+  }
+
   /** Passive registry evidence only; no renderer access or recovery side effects. */
   pageHealth(session: SessionSnapshot) {
     if (session.pageKey === null) return null;

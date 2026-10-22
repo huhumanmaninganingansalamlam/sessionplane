@@ -124,6 +124,28 @@ test('original quiet-final can be recovered through latest under an unsubmitted 
     assert.deepEqual(rows(), before);
     const sessions = new SessionRepository(core.database.raw);
     const timestamp = (core.database.raw.prepare('SELECT updated_at FROM sessions WHERE session_id=?').get(session.sessionId) as { updated_at: string }).updated_at;
+    await page.locator('#messages').evaluate(node => { node.innerHTML =
+      '<div data-message-author-role="user" data-message-id="user-message-1">Review</div>' +
+      '<div data-message-author-role="assistant" data-message-id="work-partial">Original work details</div>' +
+      '<div data-message-author-role="user" data-message-id="unclaimed-continue">계속</div>' +
+      '<div data-message-author-role="assistant" data-message-id="work-answer">Original work result proc_123</div>' +
+      '<div data-message-author-role="user" data-message-id="unrelated">Different work</div>' +
+      '<div data-message-author-role="assistant" data-message-id="wrong-answer">Unrelated answer</div>'; });
+    sessions.updateCurrentGeneration(session.sessionId, 2, { submissionState: 'submission_unknown', promptSubmitted: true }, timestamp);
+    const currentRows = rows();
+    const workRead = await invokeMcpTool({ name: 'sessionplane_team_get', arguments: {
+      teamId: team.teamId, requestRef: original.outbox_id }, socketPath: config.socketPath,
+      timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
+    const work = (workRead.structuredContent.request as any).workResult;
+    assert.equal(work.originalAnchorPresent, true);
+    assert.equal(work.responseUserMessageId, 'unclaimed-continue');
+    assert.equal(work.observedMessages.at(-1).text, 'Original work result proc_123');
+    assert.equal(work.observedMessages.some((message: any) => message.messageId === 'wrong-answer'), false);
+    assert.equal(work.providerMutation, false);
+    assert.deepEqual(rows(), currentRows, 'Historical read preserves UNKNOWN successor and immutable original');
+    await page.locator('#messages').evaluate(node => { node.innerHTML =
+      '<div data-message-author-role="user" data-message-id="user-message-1">Review</div>' +
+      '<div data-message-author-role="assistant" data-message-id="announcement">I will review the evidence.</div>'; });
     for (const submissionState of ['submitted', 'submission_unknown'] as const) {
       sessions.updateCurrentGeneration(session.sessionId, 2, { submissionState, promptSubmitted: true }, timestamp);
       assert.equal((await reconcile(`protect-${submissionState}`)).isError, true,

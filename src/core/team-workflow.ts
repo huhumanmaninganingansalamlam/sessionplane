@@ -790,6 +790,21 @@ export class TeamWorkflow {
           storedResult: reconciled.storedResult, reconciliation: reconciled };
       }
       let observed = {};
+      // Historical result reads do not inherit latest/submit mutation guards.
+      // Keep immutable generation results and UNKNOWN successors unchanged.
+      if (inspectCurrent && original?.promptSubmitted && original.submissionState === 'submitted' &&
+          original.submittedUserMessageId && conversationId === snapshot.conversationId && snapshot.pageKey !== null) {
+        try {
+          const workResult = await this.services.scheduler.actorFor(request.sessionId).enqueue(() =>
+            this.services.pageMutex.runExclusive(snapshot.pageKey!, () => this.services.ui.readOriginalWork(
+              { ...snapshot, ...original, generation: request.generation, conversationId }, snapshot)));
+          observed = { workResult: { originalRequestRef: request.outboxId, generation: request.generation, ...workResult } };
+        } catch (error) {
+          if (!(error instanceof SessionPlaneDomainError)) throw error;
+          observed = { workResult: { originalRequestRef: request.outboxId, terminal: false,
+            reason: error.errorCode, message: error.message } };
+        }
+      }
       // Recheck only the exact quiet-final immediately preceding an unsubmitted
       // preparation. Never rebind a page, restore scroll or rewrite either result.
       if (original?.reason === 'dom-quiet-stable-final' && snapshot.generation === request.generation + 1 &&
