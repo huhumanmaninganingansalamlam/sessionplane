@@ -124,8 +124,10 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
           browserPreference: config.browserPreference,
           browserExecutable: config.browserExecutable,
           launchTimeoutMs: config.browserLaunchTimeoutMs,
-          resolveTeam: sessionId => {
-            const session = new SessionRepository(database.raw).getSession(sessionId);
+          resolveTeam: (sessionId, conversationId) => {
+            const sessions = new SessionRepository(database.raw);
+            const session = sessionId ? sessions.getSession(sessionId)
+              : conversationId ? sessions.getUniqueConversationSession(conversationId) : null;
             if (!session) return null;
             const team = teamDirectory.getTeam(session.teamId);
             return { teamId: team.teamId, title: team.name?.trim() || team.teamId };

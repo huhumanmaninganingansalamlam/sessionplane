@@ -72,7 +72,7 @@ export interface ManualLoginResumeSnapshot {
 }
 
 export interface BrowserOwnerOptions {
-  readonly resolveTeam?: (sessionId: string) => { teamId: string; title: string } | null;
+  readonly resolveTeam?: (sessionId: string | null, conversationId: string | null) => { teamId: string; title: string } | null;
   readonly profileDir: string;
   readonly scopeProfileByBrowser?: boolean;
   readonly pageRegistry: PageRegistry;
@@ -276,8 +276,14 @@ export class BrowserOwner {
         const teams = new Map<string, { teamId: string; title: string; targetIds: string[] }>();
         const bindings = this.#pageRegistry.listBindings({ includeClosed: false });
         for (const binding of bindings) {
-          if (!binding.sessionId || !binding.targetId || !['owned', 'reserved'].includes(binding.state)) continue;
-          const owner = this.#resolveTeam!(binding.sessionId);
+          if (!binding.targetId) continue;
+          const owned = binding.sessionId && ['owned', 'reserved'].includes(binding.state);
+          // Grouping does not grant page mutation ownership. Restored unbound or
+          // duplicate tabs can still have an exact durable conversation owner.
+          const conversationId = !binding.sessionId && ['unbound', 'conflict'].includes(binding.state) && isChatGptUrl(binding.url)
+            ? parseProviderConversationId(binding.url) : null;
+          if (!owned && !conversationId) continue;
+          const owner = this.#resolveTeam!(owned ? binding.sessionId : null, conversationId);
           if (!owner) continue;
           const team = teams.get(owner.teamId) ?? { ...owner, targetIds: [] };
           team.targetIds.push(binding.targetId);

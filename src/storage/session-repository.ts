@@ -154,6 +154,12 @@ export class SessionRepository {
     return row ?? null;
   }
 
+  getUniqueConversationSession(conversationId: string): SessionRecord | null {
+    const rows = this.#database.prepare(`SELECT ${SESSION_COLUMNS} FROM sessions
+      WHERE conversation_id = ? AND provider = 'chatgpt' LIMIT 2`).all(conversationId) as unknown as SessionRow[];
+    return rows.length === 1 ? rows[0]! : null;
+  }
+
   listCurrentSessionsForTeam(teamId: string): ReadonlyMap<string, CurrentSessionSummary> {
     const rows = this.#database
       .prepare(`

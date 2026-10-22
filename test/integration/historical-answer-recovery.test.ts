@@ -123,6 +123,10 @@ test('original quiet-final can be recovered through latest under an unsubmitted 
     await page.locator('#running').evaluate(node => node.remove());
     assert.deepEqual(rows(), before);
     const sessions = new SessionRepository(core.database.raw);
+    assert.equal(sessions.getUniqueConversationSession(`conversation-${session.sessionId}`)?.sessionId, session.sessionId,
+      'Restored unbound tabs retain exact durable conversation ownership for grouping');
+    assert.equal(sessions.getUniqueConversationSession('unmanaged-conversation'), null,
+      'Unmanaged tabs cannot inherit a team from title or recency');
     const timestamp = (core.database.raw.prepare('SELECT updated_at FROM sessions WHERE session_id=?').get(session.sessionId) as { updated_at: string }).updated_at;
     await page.locator('#messages').evaluate(node => { node.innerHTML =
       '<div data-message-author-role="user" data-message-id="user-message-1">Review</div>' +
