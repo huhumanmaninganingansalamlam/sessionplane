@@ -1097,12 +1097,17 @@ export class SubmissionService {
         const identity = recorded?.recoveryIdentity as Record<string, unknown> | undefined;
         const server = recorded?.serverObservation as import('../providers/provider-adapter.ts').ProviderServerObservation | undefined;
         const last = server?.messages.at(-1);
+        const previous = server?.messages.at(-2);
+        const returnedTool = last?.role === 'tool' ||
+          (last?.role === 'assistant' && last.status === 'finished_successfully' &&
+            last.endTurn === false && last.textLength === 0 && !last.hidden && last.channel !== 'final' &&
+            previous?.role === 'tool' && previous.status === 'finished_successfully');
         // A tool end_turn closes that execution, not the assistant answer.
         if (!timeout && (!identity || identity.conversationId !== snapshot.conversationId || identity.pageKey !== snapshot.pageKey ||
             identity.submittedUserMessageId !== snapshot.submittedUserMessageId ||
             identity.submittedUserTurnId !== snapshot.submittedUserTurnId || !recorded ||
             this.#now().getTime() - Date.parse(String(recorded.observedAt)) > 180_000 ||
-            !server || server.nextUserFound || last?.role !== 'tool' || last.status !== 'finished_successfully' ||
+            !server || server.nextUserFound || !returnedTool || last?.status !== 'finished_successfully' ||
             last.messageId !== server.currentNodeId || !server.assistantCount ||
             server.messages.some(message => message.status === 'in_progress' ||
               (message.role === 'assistant' && message.endTurn === true)))) {

@@ -447,13 +447,20 @@ export class SessionUiService {
     } finally { await element.dispose(); }
   }
 
-  async prepareFailureContinuation(input: PreparationOwner, model: PreparationTarget) {
+  async prepareFailureContinuation(input: PreparationOwner, model: PreparationTarget, intended?: { model?: string; effort?: string }) {
     // These are ordinary durable preparation choices; provider mutation stays in resumePreparation.
     await this.inspect(input);
     for (const purpose of ['model', 'composer'] as const) {
       await this.#submissions.decidePreparation({ ...input, decisionId: `thinking-failure-${purpose}:${input.requestId}`,
         decision: 'configure', purpose }, async session => {
-        const snapshot = await this.#capture(session, 5_000);
+        let snapshot = await this.#capture(session, 5_000);
+        if (purpose === 'model' && !snapshot.nodesTruncated && !hasPreparationSelectionEvidence(snapshot.nodes, model) &&
+            intended?.model && intended.effort) {
+          const summary = await new ChatGptConfigurationMenu(this.#requirePage(session), session.pageKey!)
+            .reobserveSelection(intended.model, intended.effort);
+          model = toPreparationTarget('model', summary);
+          snapshot = await this.#capture(session, 5_000);
+        }
         if (snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, model)) throw new SessionPlaneDomainError(
           'provider.failure-unverified', 'Fresh configured model/version/effort evidence is missing');
         const composers = snapshot.nodes.filter(node => node.role === 'textbox' && node.editable && !node.disabled);

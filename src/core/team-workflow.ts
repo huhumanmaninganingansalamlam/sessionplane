@@ -319,7 +319,7 @@ export class TeamWorkflow {
       const successor = this.#outbox.getByRequest(request.clientId, `continue:${input.requestId}`)!;
       if (this.services.directory.getSession(successor.sessionId).generation === successor.generation &&
           this.services.directory.getSession(successor.sessionId).submissionState === 'prepared') {
-        await this.services.ui.prepareFailureContinuation(ownerOf(successor), reconciliation.model);
+        await this.services.ui.prepareFailureContinuation(ownerOf(successor), reconciliation.model, payload);
       }
       return { ...await this.#observe(successor), continuationOf: request.outboxId, reconciliation };
     }
@@ -422,10 +422,14 @@ export class TeamWorkflow {
             }
             const priorReview = this.#continuationReviews.get(request.outboxId);
             const timeoutReady = (result.submissionVerification as { nextAction?: string } | undefined)?.nextAction === 'reconcile_failure';
+            const serverReview = (result.submissionVerification as { serverObservation?: {
+              observedAt?: string; currentIdentityMatches?: boolean } } | undefined)?.serverObservation;
+            const freshServer = serverReview?.currentIdentityMatches === true && !!serverReview.observedAt &&
+              Date.now() - Date.parse(serverReview.observedAt) <= 180_000;
             const lastReview = priorReview ?? request.createdAt;
             const due = Date.now() - (typeof lastReview === 'number' ? lastReview : Date.parse(lastReview)) >= 30 * 60_000;
             if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || timeoutReady))) &&
-                result.submissionState === 'submitted' && result.promptSubmitted === true &&
+                (timeoutReady || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
                 result.terminal !== true && (result.status !== 'recovery_required' || timeoutReady)) {
               this.#continuationReviews.set(request.outboxId, Date.now());
               try {

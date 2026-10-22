@@ -247,7 +247,7 @@ test('closing the recovery owner during child preparation preserves its saved dr
   } finally { await f.close(); }
 });
 
-test('approved interrupted tool continuation preserves original ACK and uses one ordinary successor', async () => {
+for (const trailingEmpty of [false, true]) test(`approved interrupted tool continuation${trailingEmpty ? ' after empty finished assistant through managed wait' : ''} preserves original ACK and uses one ordinary successor`, async () => {
   const f = await fixture();
   try {
     f.fake.surface = users => users;
@@ -255,6 +255,7 @@ test('approved interrupted tool continuation preserves original ACK and uses one
     const original = f.core.teamDirectory.getSession(f.session.sessionId);
     const input = { teamId: f.team.teamId, requestRef, requestId: 'approved-continue',
       decision: 'continue', continuationApproved: true };
+    if (trailingEmpty) input.requestId = `managed-continuation:${requestRef}`;
     const identity = { conversationId: original.conversationId, pageKey: original.pageKey,
       submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId };
     const evidence = { anchorNodeId: original.submittedUserMessageId, currentNodeId: 'tool-done',
@@ -264,15 +265,20 @@ test('approved interrupted tool continuation preserves original ACK and uses one
       {}, 'generation.backend-pending', 'backend-assistant-not-final', scope, { ...evidence, ...patch });
     await assert.rejects(f.rpc('decide', input), /server evidence/);
     for (const patch of [{ nextUserFound: true }, { messages: [{ ...evidence.messages[0]!, status: 'in_progress' }] },
-      // Tool end_turn closes its execution, not the assistant response. An assistant
-      // final or a trailing empty assistant still blocks this tool-only recovery.
+      // Never confuse an actual final or live/meaningful assistant with the
+      // completed empty placeholder after a successful tool return.
       { messages: [{ ...evidence.messages[0]!, role: 'assistant', textLength: 42 }, evidence.messages[0]!] },
       { currentNodeId: 'empty-assistant', messages: [evidence.messages[0]!, { ...evidence.messages[0]!,
-        messageId: 'empty-assistant', role: 'assistant', endTurn: false }] }]) {
+        messageId: 'empty-assistant', role: 'assistant', endTurn: false, status: 'in_progress' }] },
+      { currentNodeId: 'nonempty', messages: [evidence.messages[0]!, { ...evidence.messages[0]!,
+        messageId: 'nonempty', role: 'assistant', endTurn: false, textLength: 3 }] }]) {
       await record(patch); await assert.rejects(f.rpc('decide', input), /server evidence/);
     }
     await record({}, { ...identity, conversationId: 'different' });
     await assert.rejects(f.rpc('decide', input), /server evidence/);
+    if (trailingEmpty) Object.assign(evidence, { currentNodeId: 'empty-assistant',
+      messages: [...evidence.messages, { ...evidence.messages[0]!, messageId: 'empty-assistant',
+        role: 'assistant', endTurn: false, textLength: 0 }] });
     await record();
     const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
     for (const unsafe of ['<textarea>Separate draft</textarea>',
@@ -285,7 +291,21 @@ test('approved interrupted tool continuation preserves original ACK and uses one
     }
     await f.fake.page.setContent(body + '<textarea>계속</textarea><button data-testid="send-button">Send</button></main>');
     f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="continued-answer">Continued answer</div>';
-    const prepared = await f.rpc<any>('decide', input);
+    let prepared;
+    if (trailingEmpty) {
+      f.core.database.raw.prepare('UPDATE outbox SET created_at=? WHERE outbox_id=?')
+        .run(new Date(Date.now() - 31 * 60_000).toISOString(), requestRef);
+      // Stale backend evidence must not spend the broad review interval.
+      f.core.database.raw.prepare("UPDATE events SET created_at=? WHERE session_id=? AND generation=1 AND event_type='generation.backend-pending'")
+        .run(new Date(Date.now() - 4 * 60_000).toISOString(), original.sessionId);
+      const waiting = f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
+        waitMs: 60000, continuationApproved: true });
+      await delay(100);
+      assert.equal(f.fake.submitCount, 1);
+      await record();
+      const waited = await waiting;
+      prepared = waited.results[0];
+    } else prepared = await f.rpc<any>('decide', input);
     assert.equal(prepared.generation, 2); assert.equal(prepared.promptSubmitted, true);
     assert.equal(prepared.continuationOf, requestRef); assert.equal(f.fake.submitCount, 2);
     const stored = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(original.sessionId)!;

@@ -228,6 +228,23 @@ export class ChatGptConfigurationMenu {
     return await this.#wait(ns => ns.some(n => n.role === 'slider' && Number(n.ariaValueNow) === value), 5000, 'power-value');
   }
 
+  async reobserveSelection(model: string, effort: string): Promise<BrowserSnapshotNode> {
+    // Reopen the existing chooser, without selecting another model or power.
+    const versions = await this.#versions();
+    const selected = versions.filter(node => node.role === 'menuitemradio' &&
+      (node.checked === true || node.selected === true));
+    const version = selected.length === 1 ? selected[0]!.text : '';
+    const nodes = await this.#mainMenu();
+    const summary = this.#summary(nodes);
+    // ChatGPT's version list omits the Thinking suffix used by send hints.
+    if (!version || (model !== version && model !== `${version} Thinking`) ||
+        !effort || !summary?.text.endsWith(effort)) {
+      throw new SessionPlaneDomainError('provider.configuration-stale',
+        'Current version/effort does not match the original continuation; preserve preparation');
+    }
+    return summary;
+  }
+
   async discover(): Promise<ConfigurationCatalog> {
     const initial = await this.#mainMenu();
     const initialPower = initial.find(n => n.role === 'slider')?.ariaValueNow;
