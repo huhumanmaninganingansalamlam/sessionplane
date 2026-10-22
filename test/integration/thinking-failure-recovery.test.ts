@@ -271,7 +271,7 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
         channel: 'commentary', status: 'finished_successfully', endTurn: true, hidden: false, textLength: 0 }] };
     const record = async (patch = {}, scope = identity) => f.core.actorScheduler.updateGeneration(original.sessionId, 1,
       {}, 'generation.backend-pending', 'backend-assistant-not-final', scope, { ...evidence, ...patch });
-    await assert.rejects(f.rpc('decide', input), /server evidence/);
+    await assert.rejects(f.rpc('decide', input), /server evidence|idle|draft|active/);
     for (const patch of [{ nextUserFound: true }, { messages: [{ ...evidence.messages[0]!, status: 'in_progress' }] },
       // Never confuse an actual final or live/meaningful assistant with the
       // completed empty placeholder after a successful tool return.
@@ -280,10 +280,10 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
         messageId: 'empty-assistant', role: 'assistant', endTurn: false, status: 'in_progress' }] },
       { currentNodeId: 'nonempty', messages: [evidence.messages[0]!, { ...evidence.messages[0]!,
         messageId: 'nonempty', role: 'assistant', endTurn: false, textLength: 3 }] }]) {
-      await record(patch); await assert.rejects(f.rpc('decide', input), /server evidence/);
+      await record(patch); await assert.rejects(f.rpc('decide', input), /server evidence|idle|draft|active/);
     }
     await record({}, { ...identity, conversationId: 'different' });
-    await assert.rejects(f.rpc('decide', input), /server evidence/);
+    await assert.rejects(f.rpc('decide', input), /server evidence|idle|draft|active/);
     if (trailingEmpty) Object.assign(evidence, { currentNodeId: 'empty-assistant',
       messages: [...evidence.messages, { ...evidence.messages[0]!, messageId: 'empty-assistant',
         role: 'assistant', endTurn: false, textLength: 0 }] });
@@ -328,7 +328,7 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
   } finally { await f.close(); }
 });
 
-test('approved managed wait resumes an exact disconnected tool turn despite stale Stop without human confirmation', async t => {
+test('approved managed wait resumes an exact disconnected tool turn despite stale Stop without server results or human confirmation', async t => {
   const f = await fixture();
   try {
     f.fake.surface = users => users;
@@ -337,12 +337,6 @@ test('approved managed wait resumes an exact disconnected tool turn despite stal
     const original = f.core.teamDirectory.getSession(f.session.sessionId);
     f.core.database.raw.prepare('UPDATE outbox SET created_at=? WHERE outbox_id=?')
       .run(new Date(Date.now() - 31 * 60_000).toISOString(), requestRef);
-    await f.core.actorScheduler.updateGeneration(original.sessionId, 1, {}, 'generation.backend-pending',
-      'backend-assistant-not-final', { conversationId: original.conversationId, pageKey: original.pageKey,
-        submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId },
-      { anchorNodeId: original.submittedUserMessageId, currentNodeId: 'tool-done', nextUserFound: false, assistantCount: 1,
-        messages: [{ messageId: 'tool-done', role: 'tool', channel: 'commentary',
-          status: 'finished_successfully', endTurn: true, hidden: false, textLength: 0 }] });
     await f.fake.page.setContent('<main>' + configuration +
       '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>' +
       '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>' +
@@ -426,7 +420,9 @@ test('user-confirmed exact disconnected turn continues once despite deferred bac
     const disconnected = '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>';
     const controls = '<textarea></textarea><button data-testid="stop-button">Stop</button></main>';
     await f.fake.page.setContent(body + partial + disconnected + controls);
-    await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: undefined }), /server evidence/);
+    await f.fake.page.setContent(body + partial + controls);
+    await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: undefined }), /idle|server evidence|active generation/);
+    await f.fake.page.setContent(body + partial + disconnected + controls);
     await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: { ...confirmation, conversationId: 'other-chat' } }), /exact acknowledged/);
     const scope = { conversationId: original.conversationId, pageKey: original.pageKey,
       submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId };
@@ -497,7 +493,7 @@ test('a lost continuation ACK uses proven server absence and the exact retained 
     await f.fake.page.setContent(body + disconnected + controls);
     const input = { teamId: f.team.teamId, requestRef: next.requestRef, requestId: `managed-continuation:${next.requestRef}`,
       decision: 'continue', continuationApproved: true };
-    await assert.rejects(f.rpc('decide', input), /server evidence/);
+    await assert.rejects(f.rpc('decide', input), /idle original turn/);
     await f.core.actorScheduler.updateGeneration(current.sessionId, 2, {}, 'generation.backend-unverified',
       'backend-user-anchor-absent-from-mapping', { conversationId: current.conversationId, pageKey: 'previous-core-page',
         submittedUserMessageId: current.submittedUserMessageId, submittedUserTurnId: current.submittedUserTurnId });
@@ -856,7 +852,7 @@ test('managed timeout recovery returns changed transcript evidence for agent jud
   } finally { await f.close(); }
 });
 
-test('approved managed wait preserves disconnected or actively generating original turns', async () => {
+test('approved managed wait preserves actively generating or separately drafted original turns', async () => {
   const f = await fixture();
   try {
     f.fake.surface = users => users;
@@ -864,7 +860,6 @@ test('approved managed wait preserves disconnected or actively generating origin
     const original = f.core.teamDirectory.getSession(f.session.sessionId);
     const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
     for (const surface of [
-      '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div><textarea></textarea>',
       '<div role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</div><textarea></textarea><button data-testid="stop-button">Stop</button>',
       '<div role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</div><textarea>Distinct draft</textarea>'
     ]) {

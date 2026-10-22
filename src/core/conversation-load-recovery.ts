@@ -85,21 +85,6 @@ export class ConversationLoadRecovery {
   #attach(page: Page, pageKey: string): void {
     if (this.#attached.has(page)) return;
     this.#attached.add(page);
-    page.on('framenavigated', frame => {
-      if (this.#closed || frame !== page.mainFrame()) return;
-      const recordNavigation = () => {
-        const binding = this.services.registry.getBinding(pageKey);
-        if (binding.state !== 'owned' || !binding.conversationId || page.url() !== `${this.#origin}/c/${binding.conversationId}`) return;
-        const record = this.repository.get(binding.conversationId);
-        if (record?.reason !== 'user-refresh-required' || record.pageKey !== pageKey || record.sessionId !== binding.sessionId) return;
-        // A real navigation releases this existing hold; a model lookup or
-        // background execution is not a browser refresh.
-        this.repository.save({ ...record, state: 'held', reason: 'user-refresh-observed',
-          lastCheckedAt: new Date(this.now()).toISOString() });
-      };
-      if (this.services.maintenance) this.services.maintenance.callback(recordNavigation);
-      else recordNavigation();
-    });
     page.on('response', response => {
       if (this.#closed || response.status() !== 429 || new URL(response.url()).origin !== this.#origin) return;
       const recordResponse = () => {
@@ -151,18 +136,16 @@ export class ConversationLoadRecovery {
       try {
         const page = this.services.registry.requireSessionPage(binding.pageKey, session);
         this.#attach(page, binding.pageKey);
-        const prior = this.repository.get(binding.conversationId);
-        if (prior?.reason === 'user-refresh-required') continue;
         const surface = await this.#surface(page, session, false);
-        if (this.repository.get(binding.conversationId)?.reason === 'user-refresh-required') continue;
         targets.set(binding.conversationId, session);
+        const prior = this.repository.get(binding.conversationId);
         if (!prior && !surface.loadError) continue;
         const record: LoadRecoveryRecord = prior ?? { conversationId: binding.conversationId, url: binding.url,
           sessionId: session.sessionId, pageKey: binding.pageKey, bindingEpoch: binding.bindingEpoch,
           attempts: 0, state: 'waiting', reason: surface.reason, lastOutcome: null,
           lastCheckedAt: new Date(0).toISOString(), lastAttemptAt: null, notifiedAt: null };
         Object.assign(record, { url: binding.url, sessionId: session.sessionId, pageKey: binding.pageKey, bindingEpoch: binding.bindingEpoch });
-        if (surface.kind === 'normal') this.#record(record, session, 'recovered', prior?.reason === 'user-refresh-observed' ? prior.reason : 'conversation-rendered');
+        if (surface.kind === 'normal') this.#record(record, session, 'recovered', 'conversation-rendered');
         else if (record.state !== 'exhausted') {
           this.#record(record, session, surface.kind === 'retry' ? 'waiting' : 'held', surface.reason);
         }
@@ -178,17 +161,15 @@ export class ConversationLoadRecovery {
     if (!this.repository.reserveTurn(record, new Date(this.now()).toISOString(), this.intervalMs)) return;
     const priorAttemptAt = record.lastAttemptAt;
     await this.services.scheduler.actorFor(session.sessionId).enqueue(async () => {
-      if (this.#closed || this.repository.get(record.conversationId)?.reason === 'user-refresh-required') return;
+      if (this.#closed) return;
       const current = this.#sessions.getSnapshot(session.sessionId);
       if (!current || current.pageKey !== session.pageKey || current.conversationId !== session.conversationId || current.generation !== session.generation ||
           ['submitting', 'queued'].includes(current.submissionState ?? '')) { this.#record(record, session, 'held', 'request-state-changed'); return; }
       await this.services.pageMutex.runExclusive(record.pageKey, async () => {
         try {
-          if (this.repository.get(record.conversationId)?.reason === 'user-refresh-required') return;
           const page = this.services.registry.requireSessionPage(record.pageKey, current);
           const surface = await this.#surface(page, current, false);
-          if (this.repository.get(record.conversationId)?.reason === 'user-refresh-required') return;
-          if (surface.kind === 'normal') { this.#record(record, current, 'recovered', record.reason === 'user-refresh-observed' ? record.reason : surface.reason); return; }
+          if (surface.kind === 'normal') { this.#record(record, current, 'recovered', surface.reason); return; }
           if (surface.kind !== 'retry') {
             this.#record(record, current, 'held', surface.reason); return;
           }

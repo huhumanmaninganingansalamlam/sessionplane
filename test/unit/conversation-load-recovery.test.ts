@@ -33,14 +33,14 @@ function fixture(count = 3) {
   const probes = new ProbeCoordinator({ database, now: () => new Date(clock), successIntervalMs: 30_000,
     min429BackoffMs: 60_000, max429BackoffMs: 900_000, jitterRatio: 0 });
   const clicks: string[] = [];
-  const controls: { id: string; sessionId: string; pageKey: string; surface: LoadSurface; beforeClick?: () => void; response?: (r: unknown) => void; navigated?: (r: unknown) => void }[] = [];
+  const controls: { id: string; sessionId: string; pageKey: string; surface: LoadSurface; beforeClick?: () => void; response?: (r: unknown) => void }[] = [];
   for (let n = 0; n < count; n++) {
     const team = directory.createTeam({ clientId: 'fixture' });
     const session = directory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
     const control = { id: `conversation-${n}`, sessionId: session.sessionId, pageKey: '',
       surface: { kind: 'retry', reason: 'conversation-load-retry', clicked: false, loadError: true } as LoadSurface } as typeof controls[number];
     const fake = { url: () => `https://chatgpt.com/c/${control.id}`, isClosed: () => false,
-      mainFrame: () => fake, on: (event: string, cb: (r: unknown) => void) => { if (event === 'response') control.response = cb; if (event === 'framenavigated') control.navigated = cb; },
+      mainFrame: () => ({}), on: (event: string, cb: (r: unknown) => void) => { if (event === 'response') control.response = cb; },
       off: () => {}, evaluate: async (_: unknown, input: { click: boolean }) => {
         if (input.click) control.beforeClick?.();
         const clicked = input.click && control.surface.kind === 'retry';
@@ -376,25 +376,4 @@ test('legacy list-only deadline is relocated with proof; unknown/broader holds a
     assert.deepEqual(f.database.raw.prepare('SELECT * FROM generations').all(),before);
     assert.equal(f.database.raw.prepare("SELECT count(*) AS n FROM events WHERE event_type='provider.rate-limit-scope-reclassified'").get()!.n,1);
   } finally {await f.dispose(first,...(resumed?[resumed]:[]));}
-});
-
- test('manual refresh handoff holds load clicks until actual original-page navigation', async () => {
-  const f = fixture(1), service = f.make();
-  try {
-    await service.sweep();
-    const control = f.controls[0]!, record = service.repository.get(control.id)!;
-    service.repository.save({ ...record, state: 'held', reason: 'user-refresh-required' });
-    const clicks = f.clicks.length;
-    f.advance(60_000); await service.sweep();
-    assert.equal(f.clicks.length, clicks);
-    assert.equal(service.repository.get(control.id)?.reason, 'user-refresh-required');
-    control.navigated?.({});
-    assert.equal(service.repository.get(control.id)?.reason, 'user-refresh-required', 'Subframe changes cannot release the hold');
-    control.navigated?.(f.registry.requireSessionPage(control.pageKey, { sessionId: control.sessionId, generation: 1, conversationId: control.id }));
-    control.surface = { kind: 'normal', reason: 'conversation-rendered', clicked: false, loadError: false };
-    await service.sweep();
-    assert.equal(service.repository.get(control.id)?.state, 'recovered');
-    assert.equal(service.repository.get(control.id)?.reason, 'user-refresh-observed');
-    assert.equal(f.clicks.length, clicks);
-  } finally { await f.dispose(service); }
 });

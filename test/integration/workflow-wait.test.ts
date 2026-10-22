@@ -452,7 +452,7 @@ test('new approved wait observes a disconnected exact ACK immediately despite st
       waitMs: 600000, continuationApproved: true })).structuredContent;
     const result = (outcome.results as any[])[0];
     assert.equal(reviews, 1, 'Stale/absent server evidence cannot suppress the provider recovery check');
-    assert.equal(result.recovery.userActionRequired, true);
+    assert.equal(result.recovery.userActionRequired, false);
     assert.equal(result.recovery.reason, 'provider.failure-unverified');
     assert.match(result.recovery.url, /chatgpt.com\/c\//);
     assert.equal(result.terminal, false);
@@ -462,7 +462,7 @@ test('new approved wait observes a disconnected exact ACK immediately despite st
 });
 
 
-test('an unresolved continuation activates the original tab for manual refresh without another mutation', async t => {
+test('an interrupted continuation attempts existing recovery instead of assuming manual refresh is necessary', async t => {
   const f = await fixture();
   try {
     await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
@@ -472,7 +472,7 @@ test('an unresolved continuation activates the original tab for manual refresh w
     // This fixture represents the existing durable same-chat continuation.
     f.core.database.raw.prepare("UPDATE outbox SET payload_json=json_set(payload_json, '$.continuationOf', ?) WHERE outbox_id=?")
       .run(f.sent.requestRef, next.requestRef);
-    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() + 31 * 60_000 });
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
       snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
@@ -491,10 +491,10 @@ test('an unresolved continuation activates the original tab for manual refresh w
     const outcome = (await f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef],
       waitMs: 600000, continuationApproved: true })).structuredContent;
     assert.equal(refreshes, 0);
-    assert.equal(reviews, 0);
-    assert.equal(focused, 1);
-    assert.equal((outcome.results as any[])[0].recovery.reason, 'provider.manual-refresh-required');
-    assert.equal((outcome.results as any[])[0].recovery.userActionRequired, true);
+    assert.equal(reviews, 1);
+    assert.equal(focused, 0);
+    assert.equal((outcome.results as any[])[0].recovery.reason, 'provider.failure-unverified');
+    assert.equal((outcome.results as any[])[0].recovery.userActionRequired, false);
     assert.equal(f.fake.submitCount, 2, 'Only the two preexisting submissions exist');
   } finally { t.mock.timers.reset(); t.mock.restoreAll(); await f.close(); }
 });

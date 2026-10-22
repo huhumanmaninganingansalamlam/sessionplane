@@ -447,6 +447,10 @@ export class TeamWorkflow {
                 }
               }
               request = successor;
+              // A carried banner is not a new interruption of a just-submitted
+              // successor. Reuse the normal broad review cadence for that ACK.
+              if (!this.#continuationReviews.has(request.outboxId))
+                this.#continuationReviews.set(request.outboxId, Date.parse(request.createdAt));
               result = await this.#observe(request, undefined, true);
               continue;
             }
@@ -469,35 +473,15 @@ export class TeamWorkflow {
               this.services.directory.getSession(request.sessionId)) !== null;
             const interrupted = timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
               dom.activity !== 'strong' && (dom.anchorPresent === true || missingContinuation) && dom.laterUserFound === false);
-            const payload = JSON.parse(request.payloadJson);
-            const parent = typeof payload.continuationOf === 'string' ? this.#outbox.getById(payload.continuationOf) : null;
             if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
                 (interrupted || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
                 result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
               this.#continuationReviews.set(request.outboxId, Date.now());
               try {
-                const load = typeof result.conversationId === 'string' ? this.#loadRecovery.get(result.conversationId) : null;
-                const userRefreshed = load?.reason === 'user-refresh-observed' && Date.parse(load.lastCheckedAt) > Date.parse(request.createdAt);
-                if (interrupted && parent !== null && !missingContinuation && !userRefreshed) {
-                  const session = this.services.directory.getSession(request.sessionId);
-                  this.#loadRecovery.save({ ...(load ?? { attempts: 0, lastOutcome: null, lastAttemptAt: null, notifiedAt: null }),
-                    conversationId: session.conversationId!, sessionId: session.sessionId, pageKey: session.pageKey!,
-                    bindingEpoch: (result.evidence as { bindingEpoch?: number } | undefined)?.bindingEpoch ?? load?.bindingEpoch ?? 0,
-                    url: `https://chatgpt.com/c/${session.conversationId}`, state: 'held', reason: 'user-refresh-required',
-                    lastCheckedAt: new Date().toISOString() });
-                  const viewed = await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
-                    requestId: `manual-refresh-view:${request.outboxId}`, decision: 'focus' });
-                  result = { ...result, status: 'recovery_required', recovery: {
-                    state: 'decision_required', decisionRequired: true, userActionRequired: true,
-                    reason: 'provider.manual-refresh-required', activated: 'activated' in viewed && viewed.activated === true,
-                    message: 'The approved continuation is still interrupted. Refresh this original tab in the browser; SessionPlane has not refreshed or sent another message.',
-                    url: `https://chatgpt.com/c/${result.conversationId}`,
-                  } };
-                  break;
-                }
                 result = await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
                   requestId: reviewId, decision: 'continue', continuationApproved: true });
                 request = this.#request({ teamId: input.teamId, requestRef: String(result.requestRef) });
+                this.#continuationReviews.set(request.outboxId, Date.now());
                 continue;
               } catch (error) {
                 if (!(error instanceof SessionPlaneDomainError) || (!interrupted &&
@@ -505,7 +489,7 @@ export class TeamWorkflow {
                 // Preserve uncertain work, but never swallow an inability to
                 // recover an observed interruption. The caller must see it now.
                 if (interrupted) result = { ...result, status: 'recovery_required', recovery: {
-                  state: 'decision_required', decisionRequired: true, userActionRequired: true,
+                  state: 'decision_required', decisionRequired: true, userActionRequired: !['provider.failure-unverified', 'session.busy'].includes(error.errorCode),
                   reason: error.errorCode, message: error.message,
                   url: `https://chatgpt.com/c/${result.conversationId}`,
                 } };
@@ -728,10 +712,6 @@ export class TeamWorkflow {
   #loadRecoveryRequired(snapshot: SessionSnapshot) {
     if (snapshot.terminal || snapshot.conversationId === null) return null;
     const record = this.#loadRecovery.get(snapshot.conversationId);
-    if (record?.reason === 'user-refresh-required') return { status: 'recovery_required',
-      recovery: { state: 'decision_required', decisionRequired: true, userActionRequired: true,
-        reason: 'provider.manual-refresh-required', url: record.url,
-        message: 'Refresh this original tab in the browser. Automatic recovery is paused; no refresh or message was sent.' } };
     if (record?.state !== 'exhausted') return null;
     return { status: 'recovery_required', userActionRequired: true,
       requestRef: this.#outbox.getByGeneration(snapshot.sessionId, snapshot.generation)?.outboxId ?? null,

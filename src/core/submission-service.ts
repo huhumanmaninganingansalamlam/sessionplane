@@ -1148,8 +1148,9 @@ export class SubmissionService {
           (last?.role === 'assistant' && last.status === 'finished_successfully' &&
             last.endTurn === false && last.textLength === 0 && !last.hidden && last.channel !== 'final' &&
             previous?.role === 'tool' && previous.status === 'finished_successfully');
+        const evidence = await observe(snapshot);
         // A tool end_turn closes that execution, not the assistant answer.
-        if (!timeout && !confirmation && !this.missingContinuationAnchor(snapshot) && (!identity || identity.conversationId !== snapshot.conversationId || identity.pageKey !== snapshot.pageKey ||
+        if (!timeout && !confirmation && evidence.disconnectedRecovery !== true && !this.missingContinuationAnchor(snapshot) && (!identity || identity.conversationId !== snapshot.conversationId || identity.pageKey !== snapshot.pageKey ||
             identity.submittedUserMessageId !== snapshot.submittedUserMessageId ||
             identity.submittedUserTurnId !== snapshot.submittedUserTurnId || !recorded ||
             !server || server.nextUserFound || !returnedTool || last?.status !== 'finished_successfully' ||
@@ -1159,7 +1160,7 @@ export class SubmissionService {
           throw new SessionPlaneDomainError('provider.failure-unverified',
             'Fresh exact server evidence of an unclosed successful tool turn is required; preserve active or uncertain work');
         }
-        if (confirmation && identity?.conversationId === snapshot.conversationId &&
+        if ((confirmation || evidence.disconnectedRecovery === true) && identity?.conversationId === snapshot.conversationId &&
             identity.submittedUserMessageId === snapshot.submittedUserMessageId && recorded &&
             this.#now().getTime() - Date.parse(String(recorded.observedAt)) <= 180_000 && server &&
             (server.nextUserFound || server.messages.some(message => message.status === 'in_progress' ||
@@ -1170,7 +1171,6 @@ export class SubmissionService {
         if (!configuration) throw new SessionPlaneDomainError('provider.preparation-required',
           'Preserved original model/mode/effort evidence is unavailable; do not guess a continuation configuration');
         const model = JSON.parse(configuration.resultJson).model;
-        const evidence = await observe(snapshot);
         // Pacing can age an exact successful tool receipt while the original
         // page freshly proves an idle interruption. Keep the identity/tool and
         // active-work checks above; a banner alone cannot authorize a send.
