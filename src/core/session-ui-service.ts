@@ -258,6 +258,9 @@ export class SessionUiService {
       const binding = this.#registry.refreshPage(session.pageKey!);
       const dom = await observeChatGptDom(page, original);
       const activity = await observeChatGptActivity(page, dom);
+      // A banner is not proof of stopped work. It permits the existing fresh
+      // server-turn check below the submission boundary; idle/draft/Stop guards remain.
+      const disconnected = activity.reason === 'provider-stream-disconnected' && !dom.candidate?.streamingMarker;
       const confirmedDisconnect = confirmation !== undefined && confirmation.conversationId === original.conversationId &&
         confirmation.submittedUserMessageId === original.submittedUserMessageId &&
         activity.reason === 'provider-stream-disconnected' && !dom.candidate?.streamingMarker && !dom.candidate?.terminalMarker;
@@ -273,7 +276,7 @@ export class SessionUiService {
       const after = this.#registry.refreshPage(session.pageKey!);
       if (binding.bindingEpoch !== after.bindingEpoch || !dom.conversationSurfaceAvailable ||
           !dom.submittedUserFound || dom.laterUserFound || (!confirmedDisconnect && dom.candidate !== null) || dom.actionableAlert ||
-          (!confirmedDisconnect && activity.strength !== 'none') || controls.nodesTruncated ||
+          (!confirmedDisconnect && !disconnected && activity.strength !== 'none') || controls.nodesTruncated ||
           controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role)) ||
           !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
         throw new SessionPlaneDomainError('provider.preparation-required',

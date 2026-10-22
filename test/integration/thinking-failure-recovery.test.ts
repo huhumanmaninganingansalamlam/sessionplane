@@ -297,20 +297,14 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
       await assert.rejects(f.rpc('decide', input), /draft|active|idle|cleanup/);
       assert.equal(f.core.teamDirectory.getSession(original.sessionId).terminal, false);
     }
-    await f.fake.page.setContent(body + '<textarea>계속</textarea><button data-testid="send-button">Send</button></main>');
+    await f.fake.page.setContent(body + '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div><textarea>계속</textarea><button data-testid="send-button">Send</button></main>');
     f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="continued-answer">Continued answer</div>';
     let prepared;
     if (trailingEmpty) {
       f.core.database.raw.prepare('UPDATE outbox SET created_at=? WHERE outbox_id=?')
         .run(new Date(Date.now() - 31 * 60_000).toISOString(), requestRef);
-      // Stale backend evidence must not spend the broad review interval.
-      f.core.database.raw.prepare("UPDATE events SET created_at=? WHERE session_id=? AND generation=1 AND event_type='generation.backend-pending'")
-        .run(new Date(Date.now() - 4 * 60_000).toISOString(), original.sessionId);
       const waiting = f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
         waitMs: 60000, continuationApproved: true });
-      await delay(100);
-      assert.equal(f.fake.submitCount, 1);
-      await record();
       const waited = await waiting;
       prepared = waited.results[0];
     } else prepared = await f.rpc<any>('decide', input);
@@ -327,7 +321,7 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
   } finally { await f.close(); }
 });
 
-test('managed tool recovery retains a disconnected original with Stop instead of returning a cleanup error', async t => {
+test('managed tool recovery preserves disconnected Stop and escalates inability to continue', async t => {
   const f = await fixture();
   try {
     f.fake.surface = users => users;
@@ -356,16 +350,13 @@ test('managed tool recovery retains a disconnected original with Stop instead of
       waitMs: 60000, continuationApproved: true }).then(result => { returned = true; return result; });
     await until(() => checked);
     await delay(100);
-    assert.equal(returned, false, 'An active-page refusal must stay inside managed collection');
+    assert.equal(returned, true, 'An interrupted recovery refusal must reach human review');
+    const result = await waiting;
+    assert.equal(result.results[0].recovery.userActionRequired, true);
+    assert.equal(result.results[0].terminal, false);
     assert.equal(f.fake.submitCount, 1);
     assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, 1);
     assert.equal(await f.fake.page.locator('[data-testid="stop-button"]').count(), 1);
-    await f.fake.page.locator('[data-testid="stop-button"]').evaluate(node => node.remove());
-    await f.core.actorScheduler.updateGeneration(original.sessionId, 1, {
-      sessionState: 'complete', providerState: 'complete', answerText: 'Original final', responseMessageId: 'final' });
-    const result = await waiting;
-    assert.equal(result.results[0].responseMessageId, 'final');
-    assert.equal(f.fake.submitCount, 1);
   } finally { await f.close(); }
 });
 
@@ -715,7 +706,7 @@ test('managed timeout recovery returns changed transcript evidence for agent jud
     const result = await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
       waitMs: 60000, continuationApproved: true });
     assert.equal(result.results[0].recovery.decisionRequired, true);
-    assert.equal(result.results[0].recovery.userActionRequired, false);
+    assert.equal(result.results[0].recovery.userActionRequired, true);
     assert.equal(f.fake.submitCount, 1);
     assert.equal(f.core.teamDirectory.getSession(f.session.sessionId).terminal, false);
   } finally { await f.close(); }

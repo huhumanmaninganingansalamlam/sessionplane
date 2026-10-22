@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import net from 'node:net';
+import { callRpc } from '../../src/cli/client.ts';
 import { setImmediate as flush } from 'node:timers/promises';
 import test from 'node:test';
 import { Readable, Writable } from 'node:stream';
@@ -350,6 +352,12 @@ test('authorized broad continuation review stays inside the wait and runs at thi
         submittedUserMessageId: current.submittedUserMessageId, submittedUserTurnId: current.submittedUserTurnId },
         serverObservation: {} };
     });
+    t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+      snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
+      evidence: { submissionVerification: { anchorPresent: true, laterUserFound: false,
+        activity: 'strong', activityReason: 'streaming', messageTimeout: false, responseCandidate: null } }, requested: {},
+    })) as any);
     let reviews = 0;
     t.mock.method(SessionUiService.prototype, 'prepareContinuation', async () => {
       reviews++;
@@ -418,4 +426,102 @@ test('prepared load recovery stays inside wait and returns only the same ready-t
       errorCode: 'provider.conversation-unavailable', conversationLoadRecovery: { state: 'exhausted' } }), true);
     assert.equal(workflowWaitOutcome({ ...result, terminal: true, sessionState: 'superseded' }), true);
   } finally { t.mock.timers.reset(); await f.close(); }
+});
+
+
+test('disconnected exact ACK with stale server evidence returns inability to continue to the human', async t => {
+  const f = await fixture();
+  try {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() + 31 * 60_000 });
+    t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+      snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
+      evidence: { submissionVerification: { anchorPresent: true, laterUserFound: false,
+        activity: 'unknown', activityReason: 'provider-stream-disconnected',
+        messageTimeout: false, responseCandidate: null } }, requested: {},
+    })) as any);
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
+      { reason: 'provider-stream-disconnected' });
+    t.mock.method(EventRepository.prototype, 'latestServerObservation', () => null);
+    let reviews = 0;
+    t.mock.method(SessionUiService.prototype, 'prepareContinuation', async () => {
+      reviews++;
+      throw new SessionPlaneDomainError('provider.failure-unverified', 'Fresh exact server evidence is required');
+    });
+    const outcome = (await f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef],
+      waitMs: 600000, continuationApproved: true })).structuredContent;
+    const result = (outcome.results as any[])[0];
+    assert.equal(reviews, 1, 'Stale/absent server evidence cannot suppress the provider recovery check');
+    assert.equal(result.recovery.userActionRequired, true);
+    assert.equal(result.recovery.reason, 'provider.failure-unverified');
+    assert.match(result.recovery.url, /chatgpt.com\/c\//);
+    assert.equal(result.terminal, false);
+    assert.equal(f.fake.submitCount, 1, 'A rejected continue never sends');
+    assert.equal(f.core.teamDirectory.getSession(f.sent.sessionId as string).generation, 1);
+  } finally { t.mock.timers.reset(); t.mock.restoreAll(); await f.close(); }
+});
+
+
+test('an unresolved continuation uses one actual hourly refresh then escalates a rejected retry', async t => {
+  const f = await fixture();
+  try {
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1,
+      { sessionState: 'complete', providerState: 'complete', answerText: 'Retained checkpoint', responseMessageId: 'old' });
+    const next = (await f.invoke('send', { teamId: f.team.teamId, roleRef: `${f.sent.sessionId}:1`,
+      requestId: 'existing-continuation', prompt: '계속' })).structuredContent;
+    // This fixture represents the existing durable same-chat continuation.
+    f.core.database.raw.prepare("UPDATE outbox SET payload_json=json_set(payload_json, '$.continuationOf', ?) WHERE outbox_id=?")
+      .run(f.sent.requestRef, next.requestRef);
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() + 61 * 60_000 });
+    t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+      snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
+      evidence: { submissionVerification: { anchorPresent: true, laterUserFound: false,
+        activity: 'unknown', activityReason: 'provider-stream-disconnected',
+        messageTimeout: false, responseCandidate: null } }, requested: {},
+    })) as any);
+    t.mock.method(EventRepository.prototype, 'latestServerObservation', () => null);
+    let refreshes = 0, reviews = 0;
+    t.mock.method(SessionUiService.prototype, 'refresh', async () => { refreshes++; return {} as any; });
+    t.mock.method(SessionUiService.prototype, 'prepareContinuation', async () => {
+      reviews++; assert.equal(refreshes, 1, 'Actual refresh precedes the next continue');
+      throw new SessionPlaneDomainError('provider.failure-unverified', 'Retry remains uncertain');
+    });
+    const outcome = (await f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef],
+      waitMs: 600000, continuationApproved: true })).structuredContent;
+    assert.equal(refreshes, 1);
+    assert.equal(reviews, 1);
+    assert.equal((outcome.results as any[])[0].recovery.userActionRequired, true);
+    assert.equal(f.fake.submitCount, 2, 'Only the two preexisting submissions exist');
+  } finally { t.mock.timers.reset(); t.mock.restoreAll(); await f.close(); }
+});
+
+
+test('successor collection retains explicit continuation approval without inventing it', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-approved-collection-'));
+  const socketPath = path.join(root, 'rpc.sock');
+  const observed: any[] = [];
+  const server = net.createServer(socket => {
+    let input = '';
+    socket.on('data', chunk => {
+      input += chunk;
+      if (!input.includes('\n')) return;
+      const request = JSON.parse(input.trim());
+      observed.push(request);
+      const result = request.method === 'workflow.wait'
+        ? { results: [{ terminal: true, answerText: 'Retained successor answer' }] }
+        : { teamId: 'team', requestRef: 'successor', promptSubmitted: true, terminal: false };
+      socket.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }) + '\n');
+    });
+  });
+  await new Promise<void>(resolve => server.listen(socketPath, resolve));
+  try {
+    for (const approved of [true, undefined]) {
+      observed.length = 0;
+      await callRpc({ socketPath, method: 'workflow.decide', collectContinuation: true,
+        params: { decision: 'continue', ...(approved ? { continuationApproved: true } : {}) } });
+      assert.equal(observed[1].method, 'workflow.wait');
+      assert.equal(observed[1].params.continuationApproved, approved);
+    }
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); rmSync(root, { recursive: true, force: true }); }
 });

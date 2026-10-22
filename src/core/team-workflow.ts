@@ -424,37 +424,74 @@ export class TeamWorkflow {
               if (successor.submissionState === 'prepared') {
                 // Resume this durable, unsubmitted continuation; the original
                 // decision/send receipts keep it the same generation.
-                await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
-                  requestId: reviewId, decision: 'continue', continuationApproved: true });
+                try {
+                  await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
+                    requestId: reviewId, decision: 'continue', continuationApproved: true });
+                } catch (error) {
+                  if (!(error instanceof SessionPlaneDomainError)) throw error;
+                  result = { ...await this.#observe(successor), status: 'recovery_required', recovery: {
+                    state: 'decision_required', decisionRequired: true, userActionRequired: true,
+                    reason: error.errorCode, message: error.message,
+                    url: `https://chatgpt.com/c/${result.conversationId}`,
+                  } };
+                  request = successor;
+                  break;
+                }
               }
               request = successor;
               result = await this.#observe(request);
               continue;
             }
             const priorReview = this.#continuationReviews.get(request.outboxId);
+            const lastReview = priorReview ?? request.createdAt;
+            const due = Date.now() - (typeof lastReview === 'number' ? lastReview : Date.parse(lastReview)) >= 30 * 60_000;
+            if (due) {
+              this.#continuationReviews.set(request.outboxId, Date.now());
+              result = await this.#observe(request, undefined, true);
+            }
             const timeoutReady = (result.submissionVerification as { nextAction?: string } | undefined)?.nextAction === 'reconcile_failure';
             const serverReview = (result.submissionVerification as { serverObservation?: {
               observedAt?: string; currentIdentityMatches?: boolean } } | undefined)?.serverObservation;
             const freshServer = serverReview?.currentIdentityMatches === true && !!serverReview.observedAt &&
               Date.now() - Date.parse(serverReview.observedAt) <= 180_000;
-            const lastReview = priorReview ?? request.createdAt;
-            const due = Date.now() - (typeof lastReview === 'number' ? lastReview : Date.parse(lastReview)) >= 30 * 60_000;
+            const dom = (result.submissionVerification as { dom?: {
+              activityReason?: string; activity?: string; anchorPresent?: boolean; laterUserFound?: boolean;
+            } } | undefined)?.dom;
+            const interrupted = timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
+              dom.activity !== 'strong' && dom.anchorPresent === true && dom.laterUserFound === false);
+            const payload = JSON.parse(request.payloadJson);
+            const parent = typeof payload.continuationOf === 'string' ? this.#outbox.getById(payload.continuationOf) : null;
+            const refresh = this.services.receipts.latestPageRefresh(request.clientId, request.sessionId, request.generation);
+            const hourDue = Date.now() - Date.parse(refresh?.status === 'complete' ? refresh.updatedAt : request.createdAt) >= 60 * 60_000;
+            const parentRefresh = parent === null ? null : this.services.receipts.get(request.clientId, `managed-refresh:${parent.outboxId}`);
             if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || timeoutReady))) &&
-                (timeoutReady || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
-                result.terminal !== true && (result.status !== 'recovery_required' || timeoutReady)) {
+                (interrupted || freshServer) && (!interrupted || parent === null || hourDue || parentRefresh !== null) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
+                result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
               this.#continuationReviews.set(request.outboxId, Date.now());
               try {
+                if (interrupted && parent !== null) {
+                  if (parentRefresh !== null) throw new SessionPlaneDomainError('provider.failure-unverified',
+                    'The same conversation is still interrupted after refresh and continuation; human review is required');
+                  if (refresh !== null && refresh.status !== 'complete') throw new SessionPlaneDomainError(
+                    'provider.failure-unverified', 'The previous refresh outcome is unknown; human review is required');
+                  await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
+                    requestId: `managed-refresh:${request.outboxId}`, decision: 'refresh' });
+                  result = await this.#observe(request);
+                  if (result.terminal === true) continue;
+                }
                 result = await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
                   requestId: reviewId, decision: 'continue', continuationApproved: true });
                 request = this.#request({ teamId: input.teamId, requestRef: String(result.requestRef) });
                 continue;
               } catch (error) {
-                if (!(error instanceof SessionPlaneDomainError) ||
-                    !['provider.failure-unverified', 'provider.preparation-required', 'session.busy'].includes(error.errorCode)) throw error;
-                // Live/uncertain generation or a distinct draft stays untouched.
-                if (timeoutReady) result = { ...result, status: 'recovery_required', recovery: {
-                  state: 'decision_required', decisionRequired: true, userActionRequired: false,
+                if (!(error instanceof SessionPlaneDomainError) || (!interrupted &&
+                    !['provider.failure-unverified', 'provider.preparation-required', 'session.busy'].includes(error.errorCode))) throw error;
+                // Preserve uncertain work, but never swallow an inability to
+                // recover an observed interruption. The caller must see it now.
+                if (interrupted) result = { ...result, status: 'recovery_required', recovery: {
+                  state: 'decision_required', decisionRequired: true, userActionRequired: true,
                   reason: error.errorCode, message: error.message,
+                  url: `https://chatgpt.com/c/${result.conversationId}`,
                 } };
               }
             }
