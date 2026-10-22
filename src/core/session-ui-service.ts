@@ -314,6 +314,8 @@ export class SessionUiService {
       const original = messages.findIndex(m => m.role === 'user' && m.messageId === session.submittedUserMessageId);
       const user = messages.findIndex(m => m.role === 'user' && m.messageId === input.followupUserMessageId);
       const answer = messages.at(-1);
+      const recoveryTracking = owner.generation > session.generation && owner.promptSubmitted;
+      if (recoveryTracking) await requireIdleConversationPage(page);
       // An interrupted checkpoint is evidence to retain, not a completed answer to discard.
       const partials = messages.slice(original + 1, user);
       const controls = await this.#capture(owner);
@@ -322,10 +324,10 @@ export class SessionUiService {
       this.#requirePage(owner);
       const after = this.#registry.refreshPage(session.pageKey!);
       if (originals.length !== 1 || followups.length !== 1 || originals[0]?.rootIndex !== followups[0]?.rootIndex ||
-          original < 0 || user <= original || user >= messages.length - 1 || messages.slice(user + 1, -1).some(message => message.role !== 'assistant' || message.terminalMarker) || answer?.role !== 'assistant' ||
+          original < 0 || (recoveryTracking ? user < original : user <= original) || user >= messages.length - 1 || messages.slice(user + 1, -1).some(message => message.role !== 'assistant' || message.terminalMarker) || answer?.role !== 'assistant' ||
           answer.messageId !== input.responseMessageId || !answer.text.trim() || answer.streamingMarker ||
           createHash('sha256').update(answer.text).digest('hex') !== input.responseSha256 ||
-          partials.some(m => m.role !== 'assistant' || !m.messageId || m.terminalMarker) ||
+          partials.some(m => recoveryTracking && m.role === 'user' ? m.text.trim() !== '계속' : m.role !== 'assistant' || !m.messageId || m.terminalMarker) ||
           transcript.some(m => m.streamingMarker) || activity.strength !== 'none' || dom.actionableAlert ||
           !dom.conversationSurfaceAvailable || !dom.submittedUserFound || dom.laterUserFound ||
           dom.candidate?.responseMessageId !== input.responseMessageId || dom.candidate.streamingMarker ||
@@ -804,6 +806,36 @@ export class SessionUiService {
         submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId,
         responseMessageId: recovered.responseMessageId, answerText: recovered.answerText,
         terminal: recovered.kind === 'complete', reason: recovered.reason } };
+  }
+
+  /** Reading an exact work turn is independent of later recovery-message ACKs. */
+  async readOriginalWork(original: SessionSnapshot, owner: SessionSnapshot) {
+    const page = this.#requirePage(owner);
+    const binding = this.#registry.refreshPage(owner.pageKey!);
+    const messages = await readChatGptMessages(page);
+    const anchors = messages.filter(message => message.role === 'user' &&
+      ((original.submittedUserMessageId !== null && message.messageId === original.submittedUserMessageId) ||
+        (original.submittedUserTurnId !== null && message.turnId === original.submittedUserTurnId)));
+    if (anchors.length !== 1) return { originalAnchorPresent: false, terminal: false, reason: 'original-work-anchor-unverified' };
+    const anchor = anchors[0]!;
+    const following = [];
+    let lastUser = anchor;
+    for (const message of messages.slice(messages.indexOf(anchor) + 1)) {
+      if (message.rootIndex !== anchor.rootIndex) continue;
+      if (message.role === 'user') {
+        if (message.text.trim() !== '계속') break;
+        lastUser = message;
+      }
+      following.push(message);
+    }
+    const response = await this.recoverHistoricalAnswer({ ...original,
+      submittedUserMessageId: lastUser.messageId, submittedUserTurnId: lastUser.turnId }, owner, false);
+    const after = this.#registry.refreshPage(owner.pageKey!);
+    if (after.bindingEpoch !== binding.bindingEpoch) throw new SessionPlaneDomainError('browser.snapshot-stale', 'Work result page changed during read');
+    return { originalAnchorPresent: true, originalUserMessageId: anchor.messageId,
+      responseUserMessageId: lastUser.messageId, ...response.answerRecovery,
+      observedMessages: following.slice(-12), providerMutation: false,
+      association: 'exact-original-question-and-literal-continuations' };
   }
 
   /** Passive registry evidence only; no renderer access or recovery side effects. */

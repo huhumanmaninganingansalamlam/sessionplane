@@ -495,33 +495,6 @@ export class TeamWorkflow {
               dom.turnBoundary.every(turn => turn.role === 'user');
             const interrupted = idleWithoutResponse || timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
               dom.activity !== 'strong' && (dom.anchorPresent === true || missingContinuation) && dom.laterUserFound === false);
-            const previousRef = (JSON.parse(request.payloadJson) as { continuationOf?: string }).continuationOf;
-            const previous = previousRef ? this.#outbox.getById(previousRef) : null;
-            const previousRecovery = previous && previous.clientId === request.clientId &&
-              previous.sessionId === request.sessionId && previous.generation === request.generation - 1
-              ? this.services.receipts.get(request.clientId, `managed-continuation:${previous.outboxId}`) : null;
-            const previousEvidence = previousRecovery?.method === 'session.continuation.prepare'
-              ? JSON.parse(previousRecovery.resultJson).evidence : null;
-            const observedProgress = dom?.activity === 'strong' || dom?.turnBoundary?.some(turn => turn.role === 'tool' ||
-              (turn.role === 'assistant' && !!turn.text?.trim())) ||
-              (serverReview?.currentIdentityMatches && serverReview.serverObservation?.messages?.some(message =>
-                message.role === 'tool' || (message.role === 'assistant' && message.textLength > 0) ||
-                (freshServer && message.status === 'in_progress'))) ||
-              Date.parse(String((result.activity as { latestStoredArtifactChangeAt?: string } | undefined)?.latestStoredArtifactChangeAt)) >= Date.parse(request.createdAt);
-            // A durable managed retry that still has the unresolved response and
-            // no observed answer/tool progress needs a human, not another send.
-            if (due && result.submissionState === 'submitted' && result.terminal !== true &&
-                dom?.anchorPresent === true && dom.laterUserFound === false &&
-                (previousEvidence?.disconnectedRecovery === true || previousEvidence?.userConfirmedInterruption) && !observedProgress) {
-              this.#continuationReviews.delete(request.outboxId);
-              result = { ...result, status: 'recovery_required', recovery: {
-                state: 'decision_required', decisionRequired: true, userActionRequired: true,
-                reason: 'provider.recovery-stalled',
-                message: 'The managed Continue was submitted, but the response remains unresolved without observed answer or tool progress. Check this exact conversation and refresh it manually; automatic continuation is paused. The request and any uncertain execution are preserved.',
-                url: `https://chatgpt.com/c/${result.conversationId}`,
-              } };
-              break;
-            }
             if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
                 (interrupted || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
                 result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
@@ -543,7 +516,7 @@ export class TeamWorkflow {
                 // Preserve uncertain work, but never swallow an inability to
                 // recover an observed interruption. The caller must see it now.
                 if (interrupted) result = { ...result, status: 'recovery_required', recovery: {
-                  state: 'decision_required', decisionRequired: true, userActionRequired: !['provider.failure-unverified', 'session.busy'].includes(error.errorCode),
+                  state: 'decision_required', decisionRequired: true, userActionRequired: error.errorCode !== 'session.busy',
                   reason: error.errorCode, message: error.message,
                   url: `https://chatgpt.com/c/${result.conversationId}`,
                 } };
@@ -817,6 +790,21 @@ export class TeamWorkflow {
           storedResult: reconciled.storedResult, reconciliation: reconciled };
       }
       let observed = {};
+      // Historical result reads do not inherit latest/submit mutation guards.
+      // Keep immutable generation results and UNKNOWN successors unchanged.
+      if (inspectCurrent && original?.promptSubmitted && original.submissionState === 'submitted' &&
+          original.submittedUserMessageId && conversationId === snapshot.conversationId && snapshot.pageKey !== null) {
+        try {
+          const workResult = await this.services.scheduler.actorFor(request.sessionId).enqueue(() =>
+            this.services.pageMutex.runExclusive(snapshot.pageKey!, () => this.services.ui.readOriginalWork(
+              { ...snapshot, ...original, generation: request.generation, conversationId }, snapshot)));
+          observed = { workResult: { originalRequestRef: request.outboxId, generation: request.generation, ...workResult } };
+        } catch (error) {
+          if (!(error instanceof SessionPlaneDomainError)) throw error;
+          observed = { workResult: { originalRequestRef: request.outboxId, terminal: false,
+            reason: error.errorCode, message: error.message } };
+        }
+      }
       // Recheck only the exact quiet-final immediately preceding an unsubmitted
       // preparation. Never rebind a page, restore scroll or rewrite either result.
       if (original?.reason === 'dom-quiet-stable-final' && snapshot.generation === request.generation + 1 &&

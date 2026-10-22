@@ -25,6 +25,7 @@ import {
 } from './browser-health.ts';
 import { isChatGptUrl, isProviderUrl, parseProviderConversationId, type PageBindingSnapshot } from './page-binding.ts';
 import { PageRegistry } from './page-registry.ts';
+import { syncNativeTeamGroups, teamGroupsManifest, TEAM_GROUPS_EXTENSION_ID, type TeamTabs } from './team-tab-groups.ts';
 import {
   assertDedicatedBrowserProfile,
   BrowserProfileError,
@@ -71,6 +72,7 @@ export interface ManualLoginResumeSnapshot {
 }
 
 export interface BrowserOwnerOptions {
+  readonly resolveTeam?: (sessionId: string | null, conversationId: string | null) => { teamId: string; title: string } | null;
   readonly profileDir: string;
   readonly scopeProfileByBrowser?: boolean;
   readonly pageRegistry: PageRegistry;
@@ -94,6 +96,11 @@ export class BrowserOwnerError extends Error {
 }
 
 export class BrowserOwner {
+  readonly #resolveTeam: BrowserOwnerOptions['resolveTeam'];
+  #groupSync: Promise<void> | null = null;
+  #groupsDirty = false;
+  #groupsFingerprint = '';
+  #groupsStatus: Record<string, unknown> = { state: 'not-started' };
   readonly #profileRoot: string;
   readonly #scopeProfileByBrowser: boolean;
   #profileDir: string;
@@ -124,6 +131,7 @@ export class BrowserOwner {
   #closing = false;
 
   constructor(options: BrowserOwnerOptions) {
+    this.#resolveTeam = options.resolveTeam;
     this.#profileRoot = path.resolve(options.profileDir);
     this.#scopeProfileByBrowser = options.scopeProfileByBrowser ?? false;
     this.#profileDir = this.#profileRoot;
@@ -136,9 +144,10 @@ export class BrowserOwner {
     this.#now = options.now ?? (() => new Date());
     this.#pid = options.pid ?? process.pid;
     this.#lockPath = path.join(this.#profileDir, '.sessionplane-profile.lock');
+    if (this.#resolveTeam) this.#pageRegistry.subscribe(() => this.#scheduleGroups());
   }
 
-  get status(): BrowserStatusSource {
+  get status(): BrowserStatusSource & { teamTabGroups: Record<string, unknown> } {
     return Object.freeze({
       state: this.#state,
       profileDir: this.#profileDir,
@@ -149,8 +158,11 @@ export class BrowserOwner {
       browserPid: this.#browserPid,
       debuggingPort: this.#debuggingPort,
       lastError: this.#lastError,
+      teamTabGroups: this.#groupsStatus,
     });
   }
+
+  get teamGroupsBusy(): boolean { return this.#groupSync !== null; }
 
   async start(): Promise<void> {
     if (this.#state === 'ready' || this.#state === 'manual') return;
@@ -203,6 +215,11 @@ export class BrowserOwner {
       }
       await verifyExpectedAutomationSurface(context, this.#headless);
       this.#context = context;
+      if (this.#resolveTeam) context.on('serviceworker', worker => {
+        if (worker.url() === `chrome-extension://${TEAM_GROUPS_EXTENSION_ID}/groups.js`) {
+          this.#groupsFingerprint = ''; this.#scheduleGroups();
+        }
+      });
       this.#pageRegistry.attach(context);
       for (const page of context.pages()) {
         try {
@@ -214,6 +231,7 @@ export class BrowserOwner {
       context.once('close', () => this.#handleDisconnect('BrowserContext closed'));
       browser.once('disconnected', () => this.#handleDisconnect('Browser disconnected'));
       this.#state = 'ready';
+      this.#scheduleGroups();
     } catch (error) {
       if (adopting) {
         // A failed successor must not destroy the predecessor's live browser.
@@ -246,6 +264,72 @@ export class BrowserOwner {
         { cause: error },
       );
     }
+  }
+
+  #scheduleGroups(): void {
+    if (!this.#resolveTeam || this.#state !== 'ready') return;
+    this.#groupsDirty = true;
+    if (this.#groupSync) return;
+    this.#groupSync = (async () => {
+      while (this.#groupsDirty && this.#state === 'ready') {
+        this.#groupsDirty = false;
+        const teams = new Map<string, { teamId: string; title: string; targetIds: string[] }>();
+        const bindings = this.#pageRegistry.listBindings({ includeClosed: false });
+        for (const binding of bindings) {
+          if (!binding.targetId) continue;
+          const owned = binding.sessionId && ['owned', 'reserved'].includes(binding.state);
+          // Grouping does not grant page mutation ownership. Restored unbound or
+          // duplicate tabs can still have an exact durable conversation owner.
+          const conversationId = !binding.sessionId && ['unbound', 'conflict'].includes(binding.state) && isChatGptUrl(binding.url)
+            ? parseProviderConversationId(binding.url) : null;
+          if (!owned && !conversationId) continue;
+          const owner = this.#resolveTeam!(owned ? binding.sessionId : null, conversationId);
+          if (!owner) continue;
+          const team = teams.get(owner.teamId) ?? { ...owner, targetIds: [] };
+          team.targetIds.push(binding.targetId);
+          teams.set(owner.teamId, team);
+        }
+        const desired: TeamTabs[] = [...teams.values()].sort((a, b) => a.teamId.localeCompare(b.teamId));
+        for (const team of desired) (team.targetIds as string[]).sort();
+        const fingerprint = JSON.stringify([desired, bindings.map(binding => [binding.targetId, binding.sessionId, binding.state, binding.url])]);
+        if (fingerprint === this.#groupsFingerprint) continue;
+        this.#groupsFingerprint = fingerprint;
+        try { await this.#syncGroups(desired); }
+        catch (error) { this.#groupsStatus = { state: 'unavailable', message: error instanceof Error ? error.message : String(error) }; }
+      }
+    })().finally(() => { this.#groupSync = null; });
+  }
+
+  async #syncGroups(teams: readonly TeamTabs[]): Promise<void> {
+    if (!teams.length) { this.#groupsStatus = { state: 'ready', groups: [] }; return; }
+    const directory = path.join(this.#profileDir, 'sessionplane-team-tabs');
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(directory, 'manifest.json'), JSON.stringify(teamGroupsManifest), { mode: 0o600 });
+    writeFileSync(path.join(directory, 'groups.js'), "chrome.runtime.onInstalled.addListener(() => {});\n", { mode: 0o600 });
+    writeFileSync(path.join(directory, 'groups.html'), '<!doctype html><title>SessionPlane Team Tabs</title>', { mode: 0o600 });
+    const control = await this.#browser!.newBrowserCDPSession();
+    try {
+      try {
+        const installed = await control.send('Extensions.getExtensions');
+        if (!installed.extensions.some(extension => extension.id === TEAM_GROUPS_EXTENSION_ID && extension.path === directory && extension.enabled))
+          await control.send('Extensions.loadUnpacked', { path: directory });
+      } catch { /* Existing Chrome may require the normal Load unpacked UI. */ }
+    } finally { await control.detach(); }
+    const url = `chrome-extension://${TEAM_GROUPS_EXTENSION_ID}/groups.html`;
+    let page = this.#requireContext().pages().find(page => page.url() === url);
+    if (!page) {
+      page = (await this.createPage()).page;
+      try { await page.goto(url); }
+      catch {
+        await page.close();
+        this.#groupsStatus = { state: 'extension-required', directory, extensionId: TEAM_GROUPS_EXTENSION_ID,
+          message: 'In this managed Chrome, open chrome://extensions, enable Developer mode, select Load unpacked and this directory. No browser restart or security flag change is needed.' };
+        return;
+      }
+    }
+    const native = await page.evaluate(syncNativeTeamGroups, teams);
+    this.#groupsStatus = { state: 'ready', extensionId: TEAM_GROUPS_EXTENSION_ID, ...native,
+      bindings: this.#pageRegistry.listBindings({ includeClosed: false }) };
   }
 
   async captureDownload(page: Page, name: string, activate: () => Promise<void>): Promise<Uint8Array> {

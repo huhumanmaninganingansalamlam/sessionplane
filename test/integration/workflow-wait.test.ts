@@ -49,7 +49,7 @@ test('CLI retains submitted missing-anchor pacing until the same ACK answer is r
     new EventRepository(f.core.database.raw).append({ teamId: f.team.teamId as string,
       sessionId: session.sessionId, generation: 1, eventType: 'generation.backend-unverified',
       createdAt: new Date().toISOString(), payload: { recoveryReason: 'backend-user-anchor-absent-from-mapping',
-        recoveryIdentity: { conversationId: session.conversationId, pageKey: session.pageKey,
+        recoveryIdentity: { conversationId: session.conversationId, pageKey: 'previous-owned-page',
           submittedUserMessageId: session.submittedUserMessageId, submittedUserTurnId: session.submittedUserTurnId } } });
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
@@ -69,12 +69,15 @@ test('CLI retains submitted missing-anchor pacing until the same ACK answer is r
     const pending = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef })).structuredContent.request as any;
     assert.equal(pending.status, 'recovery_required');
     assert.equal(workflowWaitOutcome(pending), false);
+    assert.equal(workflowWaitOutcome({ ...pending, observationTransport: 'fresh',
+      reason: 'unverified-stop-control' }), false);
     assert.equal(workflowWaitOutcome({ ...pending, errorCode: 'provider.actionable-alert' }), true);
     assert.equal(workflowWaitOutcome({ ...pending, recovery: { userActionRequired: true } }), true);
     for (const backend of [
       { currentIdentityMatches: false, recoveryReason: 'backend-user-anchor-absent-from-mapping' },
       { currentIdentityMatches: true, recoveryReason: 'backend-user-anchor-not-on-current-branch' },
     ]) assert.equal(workflowWaitOutcome({ ...pending,
+      reason: 'backend-user-anchor-absent-from-mapping', observationTransport: 'fresh',
       submissionVerification: { ...pending.submissionVerification, backend } }), true);
     await f.core.actorScheduler.updateGeneration(session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
       responseMessageId: 'original-ack-final', answerText: 'Original recovered answer' });
@@ -485,7 +488,7 @@ test('new approved wait observes a disconnected exact ACK immediately despite st
       waitMs: 600000, continuationApproved: true })).structuredContent;
     const result = (outcome.results as any[])[0];
     assert.equal(reviews, 1, 'Stale/absent server evidence cannot suppress the provider recovery check');
-    assert.equal(result.recovery.userActionRequired, false);
+    assert.equal(result.recovery.userActionRequired, true);
     assert.equal(result.recovery.reason, 'provider.failure-unverified');
     assert.match(result.recovery.url, /chatgpt.com\/c\//);
     assert.equal(result.terminal, false);
@@ -527,13 +530,13 @@ test('an interrupted continuation attempts existing recovery instead of assuming
     assert.equal(reviews, 1);
     assert.equal(focused, 0);
     assert.equal((outcome.results as any[])[0].recovery.reason, 'provider.failure-unverified');
-    assert.equal((outcome.results as any[])[0].recovery.userActionRequired, false);
+    assert.equal((outcome.results as any[])[0].recovery.userActionRequired, true);
     assert.equal(f.fake.submitCount, 2, 'Only the two preexisting submissions exist');
   } finally { t.mock.timers.reset(); t.mock.restoreAll(); await f.close(); }
 });
 
 
-test('managed retry without answer or tool progress returns human action without sending again', async t => {
+test('managed retry uses current recovery eligibility instead of a previous-Continue count', async t => {
   for (const previousEvidence of [{ disconnectedRecovery: true }, { userConfirmedInterruption: { evidenceRef: 'Approved managed idle review' } }]) {
   const f = await fixture();
   try {
@@ -548,13 +551,13 @@ test('managed retry without answer or tool progress returns human action without
       operation: () => ({ evidence: previousEvidence }) });
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() + 31 * 60_000 });
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
-    let progress = false, activityReason = 'provider-stream-disconnected';
+    const activityReason = 'provider-stream-disconnected';
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
       snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
       evidence: { submissionVerification: { anchorPresent: true, laterUserFound: false,
         activity: 'unknown', activityReason, messageTimeout: false,
         responseCandidate: null, turnBoundary: [{ role: 'user', text: '계속' },
-          { role: 'assistant', text: progress ? 'New tool result received' : '' }] } }, requested: {},
+          { role: 'assistant', text: '' }] } }, requested: {},
     })) as any);
     t.mock.method(EventRepository.prototype, 'latestServerObservation', () => null);
     let reviews = 0;
@@ -571,16 +574,11 @@ test('managed retry without answer or tool progress returns human action without
     assert.equal(result.submittedUserMessageId, next.submittedUserMessageId);
     assert.equal(result.terminal, false);
     assert.equal(result.recovery.userActionRequired, true);
-    assert.equal(result.recovery.reason, 'provider.recovery-stalled');
-    assert.match(result.recovery.url, /chatgpt.com\/c\//);
-    activityReason = 'unverified-stop-control';
-    assert.equal((await read())[0].recovery.reason, 'provider.recovery-stalled', 'Reconnecting the wait does not restart the loop');
-    assert.equal(reviews, 0);
-    progress = true;
-    activityReason = 'provider-stream-disconnected';
-    const [progressing] = await read();
-    assert.equal(reviews, 1, 'Observed answer/tool activity is not misclassified as repeated empty recovery');
-    assert.equal(progressing.recovery.reason, 'provider.failure-unverified');
+    assert.equal(result.recovery.reason, 'provider.failure-unverified');
+    assert.equal(reviews, 1, 'A previous Continue does not skip the currently eligible recovery attempt');
+    t.mock.timers.tick(31 * 60_000);
+    assert.equal((await read())[0].recovery.reason, 'provider.failure-unverified');
+    assert.equal(reviews, 2, 'The next broad review uses current controls, not a fixed retry count');
     assert.equal(refresh.mock.callCount(), 0);
     assert.equal(focus.mock.callCount(), 0);
     assert.equal(f.fake.submitCount, 2, 'Only the original and its existing Continue were submitted');
