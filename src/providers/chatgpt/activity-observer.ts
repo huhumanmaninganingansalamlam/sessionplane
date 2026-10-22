@@ -14,6 +14,12 @@ export async function observeChatGptActivity(
   dom: ChatGptDomObservation,
 ): Promise<ChatGptActivityObservation> {
   try {
+    if (dom.candidate?.streamingMarker === true) {
+      return { strength: 'strong', reason: 'assistant-streaming-marker' };
+    }
+    if (await anyVisible(page, CHATGPT_SELECTORS.thinkingIndicators)) {
+      return { strength: 'weak', reason: 'thinking-indicator' };
+    }
     // This is provider chrome, not authored answer text or proof of a live
     // backend generation. A disconnected stream cannot establish quiet finality.
     const disconnected = await page.locator('[role="status"]').evaluateAll(nodes => nodes.some(node =>
@@ -21,12 +27,6 @@ export async function observeChatGptActivity(
       node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
       /^(?:연결이 (?:해제되었습니다|끊어졌습니다)\.\s*전체 답변을 기다리는 중입니다\.?|Disconnected\.\s*Waiting for (?:the )?(?:full|complete) (?:answer|response)\.?)$/i.test((node.textContent ?? '').trim())));
     if (disconnected) return { strength: 'unknown', reason: 'provider-stream-disconnected' };
-    if (dom.candidate?.streamingMarker === true) {
-      return { strength: 'strong', reason: 'assistant-streaming-marker' };
-    }
-    if (await anyVisible(page, CHATGPT_SELECTORS.thinkingIndicators)) {
-      return { strength: 'weak', reason: 'thinking-indicator' };
-    }
     if (await anyVisible(page, CHATGPT_SELECTORS.stopControls)) {
       return { strength: 'weak', reason: 'unverified-stop-control' };
     }

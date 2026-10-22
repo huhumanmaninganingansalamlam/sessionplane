@@ -550,8 +550,10 @@ function cleanupErrorCode(error: unknown): string {
     ? String(error.errorCode) : 'browser.unavailable';
 }
 
-export async function requireIdleConversationPage(page: import('playwright-core').Page, preservedDraft?: '계속') {
-    const unsafe = await page.locator('textarea, [contenteditable="true"]:not(article *, [data-message-author-role] *, [data-chatgpt-search-message-ids] *), input[type="file"], button, [data-testid*="file-pill"], [data-testid*="attachment"]').evaluateAll((elements, allowedDraft) =>
+// The third argument is reserved for exact user-confirmed disconnected continuation.
+// Cleanup/deletion callers must retain the default Stop protection.
+export async function requireIdleConversationPage(page: import('playwright-core').Page, preservedDraft?: '계속', preserveDisconnectedStop = false) {
+    const unsafe = await page.locator('textarea, [contenteditable="true"]:not(article *, [data-message-author-role] *, [data-chatgpt-search-message-ids] *), input[type="file"], button, [data-testid*="file-pill"], [data-testid*="attachment"]').evaluateAll((elements, options) =>
       elements.some(element => {
         if (element instanceof HTMLInputElement && element.type === 'file') return (element.files?.length ?? 0) > 0;
         const testId = element.getAttribute('data-testid') ?? '';
@@ -562,12 +564,12 @@ export async function requireIdleConversationPage(page: import('playwright-core'
             (element.textContent ?? '').trim().length > 0 &&
             element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden';
         }
-        if (element instanceof HTMLButtonElement) return element.getClientRects().length > 0 && (
+        if (element instanceof HTMLButtonElement) return !options.preserveDisconnectedStop && element.getClientRects().length > 0 && (
           /^(?:stop|stop generating|stop streaming|stop response|응답 중지|생성 중지|중지)$/i.test(element.getAttribute('aria-label') ?? '') ||
           element.getAttribute('data-testid') === 'stop-button');
         const text = element instanceof HTMLTextAreaElement ? element.value : (element as HTMLElement).innerText ?? '';
-        return text.trim().length > 0 && text !== allowedDraft;
-      }), preservedDraft);
+        return text.trim().length > 0 && text !== options.preservedDraft;
+      }), { preservedDraft, preserveDisconnectedStop });
     if (unsafe) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve the page draft or active generation before cleanup');
   }
 

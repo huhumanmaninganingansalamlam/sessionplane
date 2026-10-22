@@ -17,7 +17,7 @@ import type { ArtifactService } from './artifact-service.ts';
 import type { ConversationCleanupService } from './conversation-cleanup-service.ts';
 import { latestDisplayTarget, type SessionUiService } from './session-ui-service.ts';
 import type { StopService } from './stop-service.ts';
-import type { SubmissionService } from './submission-service.ts';
+import type { SubmissionService, UserConfirmedInterruption } from './submission-service.ts';
 import type { TeamDirectory } from './team-directory.ts';
 
 type Identity = { teamId: string; requestRef: string };
@@ -164,7 +164,7 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName: string; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName: string; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
     if (input.decision === 'hostspan_permission') {
@@ -299,7 +299,12 @@ export class TeamWorkflow {
     }
     if (input.decision === 'continue') {
       let reconciliation;
-      try { reconciliation = await this.services.ui.prepareContinuation({ ...owner, decisionId: input.requestId }); }
+      const savedAuthorization = this.services.receipts.get(request.clientId, `continuation-authorization:${request.outboxId}`);
+      const confirmation: UserConfirmedInterruption | undefined = input.userConfirmedInterruption ??
+        (savedAuthorization ? JSON.parse(savedAuthorization.resultJson).userConfirmedInterruption : undefined);
+      const continuationInput = { ...owner, decisionId: input.requestId,
+        ...(confirmation ? { userConfirmedInterruption: confirmation } : {}) };
+      try { reconciliation = await this.services.ui.prepareContinuation(continuationInput); }
       catch (error) {
         if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.failure-unverified') throw error;
         const inspected = await this.#observe(request, undefined, true);
@@ -309,7 +314,7 @@ export class TeamWorkflow {
           if (failure instanceof SessionPlaneDomainError && failure.errorCode === 'provider.failure-unverified') throw error;
           throw failure;
         }
-        reconciliation = await this.services.ui.prepareContinuation({ ...owner, decisionId: input.requestId });
+        reconciliation = await this.services.ui.prepareContinuation(continuationInput);
       }
       const payload = JSON.parse(request.payloadJson);
       await this.send({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}`,

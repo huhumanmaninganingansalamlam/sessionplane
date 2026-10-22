@@ -22,7 +22,7 @@ import { observeChatGptActivity } from '../providers/chatgpt/activity-observer.t
 import { restoreLatestPosition } from '../providers/chatgpt/latest-position-recovery.ts';
 import { readChatGptMessages } from '../providers/chatgpt/message-dom.ts';
 import { observeChatGptDom, observeChatGptAlerts, isMessageTimeoutAlert } from '../providers/chatgpt/dom-observer.ts';
-import type { SubmissionService } from './submission-service.ts';
+import type { SubmissionService, UserConfirmedInterruption } from './submission-service.ts';
 
 export class SessionUiService {
   readonly #submissions: SubmissionService;
@@ -248,34 +248,42 @@ export class SessionUiService {
     return read.evidence;
   }
 
-  async prepareContinuation(input: PreparationOwner & { readonly decisionId: string }) {
-    return await this.#submissions.prepareContinuation(input, session => this.verifyContinuation(session, session));
+  async prepareContinuation(input: PreparationOwner & { readonly decisionId: string; readonly userConfirmedInterruption?: UserConfirmedInterruption | undefined }) {
+    return await this.#submissions.prepareContinuation(input, session => this.verifyContinuation(session, session, input.userConfirmedInterruption));
   }
 
-  async verifyContinuation(session: SessionSnapshot, original: SessionSnapshot) {
+  async verifyContinuation(session: SessionSnapshot, original: SessionSnapshot, confirmation?: UserConfirmedInterruption) {
       if (original.reason === 'message-timeout-reconciled') return await this.#failureEvidence(session, original, true, '계속');
       const page = this.#requirePage(session);
       const binding = this.#registry.refreshPage(session.pageKey!);
-      try { await requireIdleConversationPage(page, '계속'); }
+      const dom = await observeChatGptDom(page, original);
+      const activity = await observeChatGptActivity(page, dom);
+      const confirmedDisconnect = confirmation !== undefined && confirmation.conversationId === original.conversationId &&
+        confirmation.submittedUserMessageId === original.submittedUserMessageId &&
+        activity.reason === 'provider-stream-disconnected' && !dom.candidate?.streamingMarker && !dom.candidate?.terminalMarker;
+      if (confirmation && !confirmedDisconnect) throw new SessionPlaneDomainError('provider.preparation-required',
+        'User-confirmed interruption requires the exact disconnected nonstreaming original page');
+      try { await requireIdleConversationPage(page, '계속', confirmedDisconnect); }
       catch (error) {
         if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'session.cleanup-not-ready') throw error;
         throw new SessionPlaneDomainError('provider.preparation-required',
           'Preserve the current draft, attachment or active generation before continuation');
       }
-      const dom = await observeChatGptDom(page, original);
-      const activity = await observeChatGptActivity(page, dom);
       const controls = await this.#capture(session);
       const after = this.#registry.refreshPage(session.pageKey!);
       if (binding.bindingEpoch !== after.bindingEpoch || !dom.conversationSurfaceAvailable ||
-          !dom.submittedUserFound || dom.laterUserFound || dom.candidate !== null || dom.actionableAlert ||
-          activity.strength !== 'none' || controls.nodesTruncated ||
+          !dom.submittedUserFound || dom.laterUserFound || (!confirmedDisconnect && dom.candidate !== null) || dom.actionableAlert ||
+          (!confirmedDisconnect && activity.strength !== 'none') || controls.nodesTruncated ||
           controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role)) ||
           !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
         throw new SessionPlaneDomainError('provider.preparation-required',
           'Continuation requires the exact idle original turn with no answer, later user, alert or separate draft');
       }
       return { pageKey: session.pageKey!, conversationId: session.conversationId!, bindingEpoch: after.bindingEpoch,
-        observedAt: controls.capturedAt, continuationPrompt: '계속' };
+        observedAt: controls.capturedAt, continuationPrompt: '계속',
+        ...(confirmedDisconnect ? { userConfirmedInterruption: confirmation,
+          ...(dom.candidate ? { interruptedResponseMessageId: dom.candidate.responseMessageId,
+            interruptedResponseSha256: createHash('sha256').update(dom.candidate.answerText).digest('hex') } : {}) } : {}) };
   }
 
   async reconcileFollowup(input: PreparationOwner & { readonly decisionId: string; readonly followupUserMessageId: string;
