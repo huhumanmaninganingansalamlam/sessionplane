@@ -468,10 +468,16 @@ export class TeamWorkflow {
               Date.now() - Date.parse(serverReview.observedAt) <= 180_000;
             const dom = (result.submissionVerification as { dom?: {
               activityReason?: string; activity?: string; anchorPresent?: boolean; laterUserFound?: boolean;
+              turnBoundary?: { role: string }[];
             } } | undefined)?.dom;
             const missingContinuation = this.services.submissions.missingContinuationAnchor(
               this.services.directory.getSession(request.sessionId)) !== null;
-            const interrupted = timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
+            // An approved broad review must also reach the existing exact idle
+            // recovery when provider chrome no longer carries its error banner.
+            const idleWithoutResponse = due && dom?.activity === 'none' && dom.anchorPresent === true &&
+              dom.laterUserFound === false && !!dom.turnBoundary?.length &&
+              dom.turnBoundary.every(turn => turn.role === 'user');
+            const interrupted = idleWithoutResponse || timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
               dom.activity !== 'strong' && (dom.anchorPresent === true || missingContinuation) && dom.laterUserFound === false);
             if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
                 (interrupted || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
@@ -479,7 +485,12 @@ export class TeamWorkflow {
               this.#continuationReviews.set(request.outboxId, Date.now());
               try {
                 result = await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
-                  requestId: reviewId, decision: 'continue', continuationApproved: true });
+                  requestId: reviewId, decision: 'continue', continuationApproved: true,
+                  ...(idleWithoutResponse ? { userConfirmedInterruption: {
+                    conversationId: String(result.conversationId),
+                    submittedUserMessageId: String(result.submittedUserMessageId),
+                    evidenceRef: `Approved managed review of exact idle unanswered turn ${request.outboxId}`,
+                  } } : {}) });
                 request = this.#request({ teamId: input.teamId, requestRef: String(result.requestRef) });
                 this.#continuationReviews.set(request.outboxId, Date.now());
                 continue;

@@ -383,6 +383,39 @@ test('authorized broad continuation review stays inside the wait and runs at thi
 });
 
 
+test('approved broad review recovers an exact idle unanswered turn while backend probes are paced', async t => {
+  const f = await fixture();
+  try {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+    t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+      snapshot: f.core.teamDirectory.getSession(f.sent.sessionId as string),
+      evidence: { submissionVerification: { anchorPresent: true, laterUserFound: false,
+        activity: 'none', messageTimeout: false, responseCandidate: null,
+        turnBoundary: [{ role: 'user', text: 'Wait for the existing answer' }] } }, requested: {},
+    })) as any);
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, {
+      providerState: 'unknown', observationTransport: 'deferred', reason: 'backend-conversation-probe-paced',
+      nextCheckAt: new Date(Date.now() + 3600000).toISOString() });
+    const reviews: any[] = [];
+    t.mock.method(SessionUiService.prototype, 'prepareContinuation', async input => {
+      reviews.push(input);
+      throw new SessionPlaneDomainError('provider.preparation-required', 'Actual fresh submit control unavailable');
+    });
+    const waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef],
+      waitMs: 3600000, untilResult: false, continuationApproved: true });
+    await f.untilSubscribed(f.sent.sessionId as string);
+    assert.equal(reviews.length, 0, 'A new ACK must not immediately trigger another continue');
+    t.mock.timers.tick(1800000);
+    for (let i = 0; i < 30; i++) await flush();
+    const result = (await waiting).structuredContent;
+    assert.equal(reviews.length, 1);
+    assert.equal(reviews[0].userConfirmedInterruption.submittedUserMessageId, f.sent.submittedUserMessageId);
+    assert.equal(result.results[0].recovery.userActionRequired, true, 'A real inability to submit is returned');
+    assert.equal(f.fake.submitCount, 1, 'A failed fresh control check never submits');
+  } finally { t.mock.timers.reset(); await f.close(); }
+});
+
 test('prepared load recovery stays inside wait and returns only the same ready-to-configure request', async t => {
   const f = await fixture();
   try {
