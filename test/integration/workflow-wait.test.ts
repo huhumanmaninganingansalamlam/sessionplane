@@ -69,6 +69,8 @@ test('CLI retains submitted missing-anchor pacing until the same ACK answer is r
     const pending = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef })).structuredContent.request as any;
     assert.equal(pending.status, 'recovery_required');
     assert.equal(workflowWaitOutcome(pending), false);
+    assert.equal(workflowWaitOutcome({ ...pending, observationTransport: 'fresh',
+      reason: 'unverified-stop-control' }), false);
     assert.equal(workflowWaitOutcome({ ...pending, errorCode: 'provider.actionable-alert' }), true);
     assert.equal(workflowWaitOutcome({ ...pending, recovery: { userActionRequired: true } }), true);
     for (const backend of [

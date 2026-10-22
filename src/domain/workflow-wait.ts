@@ -16,7 +16,8 @@ export function workflowAcknowledgementPending(result: Record<string, unknown>):
 /** A retained ACK missing from a read surface still belongs to the paced observer. */
 export function workflowAnchorRecoveryPending(result: Record<string, unknown>): boolean {
   const verification = result.submissionVerification as { state?: string; nextAction?: string;
-    backend?: { currentIdentityMatches?: boolean; recoveryReason?: string } } | undefined;
+    backend?: { currentIdentityMatches?: boolean; recoveryReason?: string;
+      recoveryIdentity?: { conversationId?: string; submittedUserMessageId?: string } } } | undefined;
   const load = result.conversationLoadRecovery as { state?: string; conversationId?: string; sessionId?: string; pageKey?: string } | undefined;
   const loading = !!load && ['held', 'waiting', 'attempting'].includes(load.state ?? '') &&
     typeof result.conversationId === 'string' && load.conversationId === result.conversationId &&
@@ -27,11 +28,18 @@ export function workflowAnchorRecoveryPending(result: Record<string, unknown>): 
     Number.isFinite(Date.parse(String(result.nextCheckAt))) &&
     typeof result.conversationId === 'string' && typeof result.pageKey === 'string' &&
     typeof result.submittedUserMessageId === 'string';
+  // Page replacement does not change the retained conversation/ACK. This only
+  // keeps reading; it never validates a submission or authorizes another send.
+  const identity = verification?.backend?.recoveryIdentity;
+  const sameAnchor = typeof result.conversationId === 'string' &&
+    typeof result.submittedUserMessageId === 'string' &&
+    identity?.conversationId === result.conversationId &&
+    identity.submittedUserMessageId === result.submittedUserMessageId;
   return result.submissionState === 'submitted' && result.promptSubmitted === true && result.terminal !== true &&
     result.userActionRequired !== true &&
     verification?.state === 'anchor-unverified' && verification.nextAction === 'read_same_request' &&
-    (loading || paced || (verification.backend?.currentIdentityMatches === true &&
-      verification.backend.recoveryReason === 'backend-user-anchor-absent-from-mapping'));
+    (loading || paced || ((verification.backend?.currentIdentityMatches === true || sameAnchor) &&
+      verification.backend?.recoveryReason === 'backend-user-anchor-absent-from-mapping'));
 }
 
 /** A live preparation waiting for its owned conversation is not a model choice yet. */
