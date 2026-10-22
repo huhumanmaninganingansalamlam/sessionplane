@@ -17,10 +17,16 @@ export function workflowAcknowledgementPending(result: Record<string, unknown>):
 export function workflowAnchorRecoveryPending(result: Record<string, unknown>): boolean {
   const verification = result.submissionVerification as { state?: string; nextAction?: string;
     backend?: { currentIdentityMatches?: boolean; recoveryReason?: string } } | undefined;
+  const load = result.conversationLoadRecovery as { state?: string; conversationId?: string; sessionId?: string; pageKey?: string } | undefined;
+  const loading = !!load && ['held', 'waiting', 'attempting'].includes(load.state ?? '') &&
+    typeof result.conversationId === 'string' && load.conversationId === result.conversationId &&
+    typeof result.sessionId === 'string' && load.sessionId === result.sessionId &&
+    typeof result.pageKey === 'string' && load.pageKey === result.pageKey;
   return result.submissionState === 'submitted' && result.promptSubmitted === true && result.terminal !== true &&
+    result.userActionRequired !== true &&
     verification?.state === 'anchor-unverified' && verification.nextAction === 'read_same_request' &&
-    verification.backend?.currentIdentityMatches === true &&
-    verification.backend.recoveryReason === 'backend-user-anchor-absent-from-mapping';
+    (loading || (verification.backend?.currentIdentityMatches === true &&
+      verification.backend.recoveryReason === 'backend-user-anchor-absent-from-mapping'));
 }
 
 /** A live preparation waiting for its owned conversation is not a model choice yet. */

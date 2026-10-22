@@ -85,6 +85,52 @@ test('CLI retains submitted missing-anchor pacing until the same ACK answer is r
   } finally { t.mock.restoreAll(); await f.close(); }
 });
 
+test('CLI retains the original ACK through automatic load recovery without a backend anchor event', async t => {
+  const f = await fixture();
+  try {
+    const session = f.core.teamDirectory.getSession(f.sent.sessionId as string);
+    const load = { conversationId: session.conversationId!, sessionId: session.sessionId, pageKey: session.pageKey!,
+      bindingEpoch: 1, url: `https://chatgpt.com/c/${session.conversationId}`, attempts: 12, state: 'held' as const,
+      reason: 'load-retry-button-unavailable', lastOutcome: 'clicked' as const,
+      lastCheckedAt: new Date().toISOString(), lastAttemptAt: null, notifiedAt: null };
+    new ConversationLoadRecoveryRepository(f.core.database).save(load);
+    t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+      snapshot: f.core.teamDirectory.getSession(session.sessionId),
+      evidence: { submissionVerification: { anchorPresent: false, laterUserFound: false,
+        activity: 'none', messageTimeout: false, responseCandidate: null } }, requested: {},
+    })) as any);
+    await f.core.actorScheduler.updateGeneration(session.sessionId, 1,
+      { providerState: 'unknown', observationTransport: 'unavailable', reason: 'dom-user-anchor-missing' });
+    let stdout = '', stderr = '', returned = false;
+    const waiting = runCli(['request', 'wait', f.team.teamId as string, f.sent.requestRef as string,
+      '--wait-ms', '600000', '--socket', f.config.socketPath, '--json'], {
+      stdin: Readable.from([]), stdout: new Writable({ write(c, _e, done) { stdout += c; done(); } }),
+      stderr: new Writable({ write(c, _e, done) { stderr += c; done(); } }) })
+      .then(code => { returned = true; return code; });
+    await f.untilSubscribed(session.sessionId);
+    const pending = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef })).structuredContent.request as any;
+    assert.equal(pending.submissionVerification.backend, null);
+    assert.equal(pending.status, 'recovery_required');
+    assert.equal(returned, false, 'Automatic load recovery must remain inside the original CLI wait');
+    for (const changed of [
+      { conversationLoadRecovery: { ...pending.conversationLoadRecovery, conversationId: 'different-chat' } },
+      { conversationLoadRecovery: { ...pending.conversationLoadRecovery, sessionId: 'different-session' } },
+      { conversationLoadRecovery: { ...pending.conversationLoadRecovery, pageKey: 'different-page' } },
+      { conversationLoadRecovery: { ...pending.conversationLoadRecovery, state: 'exhausted' } },
+      { userActionRequired: true }, { errorCode: 'provider.actionable-alert' },
+      { recovery: { decisionRequired: true } }, { stopOutcome: { state: 'unknown' } },
+    ]) assert.equal(workflowWaitOutcome({ ...pending, ...changed }), true);
+    await f.core.actorScheduler.updateGeneration(session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
+      responseMessageId: 'same-ack-after-load', answerText: 'Recovered original answer' });
+    assert.equal(await waiting, 0, stderr);
+    const [result] = JSON.parse(stdout).results;
+    assert.equal(result.responseMessageId, 'same-ack-after-load');
+    assert.equal(result.submittedUserMessageId, session.submittedUserMessageId);
+    assert.equal(f.fake.submitCount, 1, 'Load recovery must never submit or continue');
+  } finally { t.mock.restoreAll(); await f.close(); }
+});
+
 test('short workflow wait holds progress/429 for a full minute and cancellation only releases its subscription', async t => {
   const f = await fixture();
   try {
