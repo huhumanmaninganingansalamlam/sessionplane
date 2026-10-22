@@ -290,7 +290,8 @@ export class SessionUiService {
           surface.reason !== 'exact-stream-retry') throw new SessionPlaneDomainError('provider.preparation-required',
         `Preserve the original turn before stream Retry: ${surface.reason}`, {
           anchorPresent: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
-          responseCandidatePresent: dom.candidate !== null, activity: activity.strength, activityReason: activity.reason,
+          responseCandidatePresent: dom.candidate !== null, observedUserMessageId: anchor, responseCandidate: dom.candidate,
+          activity: activity.strength, activityReason: activity.reason,
         });
       await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
       const requestId = `stream-retry:${session.sessionId}:${session.generation}`;
