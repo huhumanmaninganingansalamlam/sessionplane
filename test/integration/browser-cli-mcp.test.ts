@@ -667,7 +667,7 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
         <textarea>Exact pending draft https://example.test/plan</textarea>
         <div data-message-author-role="user" data-message-id="delayed-user">Exact pending draft https://example.test/plan</div>
         <div data-message-author-role="assistant" data-message-id="delayed-answer" data-message-status="completed">Recovered final</div>
-        <script>sessionStorage.setItem('refreshes', String(Number(sessionStorage.getItem('refreshes') || 0) + 1));</script>`);
+        <script>sessionStorage.setItem('refreshes', String(Number(sessionStorage.getItem('refreshes') || 0) + 1));</script>`, t);
     await page.close();
     const refreshArgs = { ...identity, requestId: 'refresh-provider-history', decision: 'refresh' };
     const refresh = (args = refreshArgs) => invokeMcpTool({ name: 'sessionplane_decide', arguments: args,
@@ -700,11 +700,11 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
   }
 });
 
-test('MCP preserves a lost ambiguous request after replacement without a conversation identity', async () => {
+test('MCP preserves a lost ambiguous request after replacement without a conversation identity', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-lost-page-'));
   const config = { ...resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), chatgptUrl: 'https://chatgpt.com/', submissionAckTimeoutMs: 100 };
   const service = await startCore({ config, browserHeadless: true, logger: silentLogger() });
-  installPreparationFixtureRoute(service, `<form onsubmit="event.preventDefault()"><textarea id="prompt-textarea"></textarea><button type="submit">Send</button></form>`);
+  installPreparationFixtureRoute(service, `<form onsubmit="event.preventDefault()"><textarea id="prompt-textarea"></textarea><button type="submit">Send</button></form>`, t);
   const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_' + name, arguments: args,
     socketPath: config.socketPath, timeoutMs: name === 'send' ? 45_000 : 15_000, maxLineBytes: config.rpcMaxLineBytes });
   try {
@@ -801,7 +801,7 @@ async function startFixtureServer(html?: string): Promise<{ readonly server: Ser
   return { server, url: `http://127.0.0.1:${address.port}/` };
 }
 
-function installPreparationFixtureRoute(service: CoreService, html: string, t?: TestContext): void {
+function installPreparationFixtureRoute(service: CoreService, html: string, t: TestContext): void {
   const owner = service.browserOwner;
   assert.notEqual(owner, null);
   if (owner === null) assert.fail('Expected the core-owned browser');
@@ -809,11 +809,13 @@ function installPreparationFixtureRoute(service: CoreService, html: string, t?: 
   owner.createPage = async () => {
     const created = await createPage();
     // APIRequestContext bypasses page.route; keep backend probes local too.
-    t?.mock.method(created.page.context().request, 'get', async () => ({
+    t.mock.method(created.page.context().request, 'get', async () => ({
       status: () => 404, headers: () => ({}), json: async () => null, dispose: async () => {},
     }));
     await created.page.route('https://chatgpt.com/**', async (route) => {
-      await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: html });
+      // These Chat fixtures exercise preparation/recovery, not unknown surface selection.
+      await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8',
+        body: html + '<div role="radio" aria-checked="true">Chat</div>' });
     });
     return created;
   };
