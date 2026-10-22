@@ -49,7 +49,7 @@ test('CLI retains submitted missing-anchor pacing until the same ACK answer is r
     new EventRepository(f.core.database.raw).append({ teamId: f.team.teamId as string,
       sessionId: session.sessionId, generation: 1, eventType: 'generation.backend-unverified',
       createdAt: new Date().toISOString(), payload: { recoveryReason: 'backend-user-anchor-absent-from-mapping',
-        recoveryIdentity: { conversationId: session.conversationId, pageKey: session.pageKey,
+        recoveryIdentity: { conversationId: session.conversationId, pageKey: 'previous-owned-page',
           submittedUserMessageId: session.submittedUserMessageId, submittedUserTurnId: session.submittedUserTurnId } } });
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
@@ -75,6 +75,7 @@ test('CLI retains submitted missing-anchor pacing until the same ACK answer is r
       { currentIdentityMatches: false, recoveryReason: 'backend-user-anchor-absent-from-mapping' },
       { currentIdentityMatches: true, recoveryReason: 'backend-user-anchor-not-on-current-branch' },
     ]) assert.equal(workflowWaitOutcome({ ...pending,
+      reason: 'backend-user-anchor-absent-from-mapping', observationTransport: 'fresh',
       submissionVerification: { ...pending.submissionVerification, backend } }), true);
     await f.core.actorScheduler.updateGeneration(session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
       responseMessageId: 'original-ack-final', answerText: 'Original recovered answer' });

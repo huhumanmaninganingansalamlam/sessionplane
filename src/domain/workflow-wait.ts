@@ -22,10 +22,15 @@ export function workflowAnchorRecoveryPending(result: Record<string, unknown>): 
     typeof result.conversationId === 'string' && load.conversationId === result.conversationId &&
     typeof result.sessionId === 'string' && load.sessionId === result.sessionId &&
     typeof result.pageKey === 'string' && load.pageKey === result.pageKey;
+  const paced = result.reason === 'backend-conversation-probe-paced' &&
+    result.observationTransport === 'deferred' &&
+    Number.isFinite(Date.parse(String(result.nextCheckAt))) &&
+    typeof result.conversationId === 'string' && typeof result.pageKey === 'string' &&
+    typeof result.submittedUserMessageId === 'string';
   return result.submissionState === 'submitted' && result.promptSubmitted === true && result.terminal !== true &&
     result.userActionRequired !== true &&
     verification?.state === 'anchor-unverified' && verification.nextAction === 'read_same_request' &&
-    (loading || (verification.backend?.currentIdentityMatches === true &&
+    (loading || paced || (verification.backend?.currentIdentityMatches === true &&
       verification.backend.recoveryReason === 'backend-user-anchor-absent-from-mapping'));
 }
 
