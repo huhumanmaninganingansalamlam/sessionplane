@@ -691,6 +691,19 @@ test('continuation reobserves exact current model and effort without switching c
     await assert.rejects(menu.reobserveSelection('Aurora-8', 'Balanced'), /does not match/);
     await assert.rejects(menu.reobserveSelection('Aurora-9', 'Deep'), /does not match/);
     await assert.rejects(menu.reobserveSelection('Aurora-9', 'lanced'), /does not match/);
+    // The current provider exposes version in the checked submenu and effort alone in its summary.
+    await page.evaluate(() => {
+      const combinedRender = (window as any).render;
+      (window as any).render = () => {
+        combinedRender();
+        document.querySelector('#summary')!.textContent = (window as any).labels[(window as any).powerValue];
+      };
+      (window as any).render();
+    });
+    assert.equal((await menu.reobserveSelection('Aurora-9 Thinking', 'Balanced')).text, 'Balanced');
+    await assert.rejects(menu.reobserveSelection('Aurora-8', 'Balanced'), /does not match/);
+    await assert.rejects(menu.reobserveSelection('Aurora-9', 'Deep'), /does not match/);
+    await assert.rejects(menu.reobserveSelection('Aurora-9', 'lanced'), /does not match/);
     assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');
     assert.deepEqual(await page.evaluate(() => ({ version: (window as any).version,
       power: (window as any).powerValue, submits: (window as any).submits })),
