@@ -46,7 +46,10 @@ export async function syncNativeTeamGroups(teams: readonly TeamTabs[]) {
   const verified = await chrome.tabs.query({});
   for (const team of result) if (!team.tabIds.every(id => verified.some((tab: any) => tab.id === id && tab.groupId === team.groupId)))
     throw new Error('Native group membership did not match exact owned tabs');
-  return result;
+  return { groups: result, tabs: verified.map((tab: any) => ({ tabId: tab.id,
+    targetId: targets.find(target => target.tabId === tab.id)?.id ?? null,
+    windowId: tab.windowId, groupId: tab.groupId, active: tab.active, incognito: tab.incognito,
+    title: tab.title ?? '', url: tab.url ?? '' })) };
 }
 
 // Public extension identity only; no signing key or website access is retained.

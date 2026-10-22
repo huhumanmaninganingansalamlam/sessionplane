@@ -36,7 +36,7 @@ test('native team groups follow create/replace/close/delete without changing unm
       { teamId: 'stable-a', title: 'Maetda', targetIds: ['target-1', 'target-2'] },
       { teamId: 'stable-b', title: 'Webturn', targetIds: ['target-3', 'target-5'] },
     ]);
-    assert.equal(first.length, 2);
+    assert.equal(first.groups.length, 2);
     assert.equal(tabs[0]!.groupId, tabs[1]!.groupId);
     assert.notEqual(tabs[0]!.groupId, tabs[2]!.groupId);
     assert.equal(tabs[4]!.groupId, -1, 'Incognito remains outside this owner');
@@ -51,6 +51,7 @@ test('native team groups follow create/replace/close/delete without changing unm
     await syncNativeTeamGroups([]);
     assert.deepEqual(saved.teams, {}, 'Team deletion retires native group tracking; normal tab closure removes empty groups');
     assert.equal(tabs[0]!.active, true, 'Current tab remains active throughout');
-    assert.equal(tabs.find(tab => tab.id === 3)!.groupId, first[1]!.groupId);
+    assert.equal(tabs.find(tab => tab.id === 3)!.groupId, first.groups[1]!.groupId);
+    assert.equal(first.tabs.find(tab => tab.tabId === 4)?.groupId, -1, 'Inventory retains ungrouped tabs for ownership review');
   } finally { (globalThis as any).chrome = original; }
 });

@@ -274,7 +274,8 @@ export class BrowserOwner {
       while (this.#groupsDirty && this.#state === 'ready') {
         this.#groupsDirty = false;
         const teams = new Map<string, { teamId: string; title: string; targetIds: string[] }>();
-        for (const binding of this.#pageRegistry.listBindings({ includeClosed: false })) {
+        const bindings = this.#pageRegistry.listBindings({ includeClosed: false });
+        for (const binding of bindings) {
           if (!binding.sessionId || !binding.targetId || !['owned', 'reserved'].includes(binding.state)) continue;
           const owner = this.#resolveTeam!(binding.sessionId);
           if (!owner) continue;
@@ -284,7 +285,7 @@ export class BrowserOwner {
         }
         const desired: TeamTabs[] = [...teams.values()].sort((a, b) => a.teamId.localeCompare(b.teamId));
         for (const team of desired) (team.targetIds as string[]).sort();
-        const fingerprint = JSON.stringify(desired);
+        const fingerprint = JSON.stringify([desired, bindings.map(binding => [binding.targetId, binding.sessionId, binding.state, binding.url])]);
         if (fingerprint === this.#groupsFingerprint) continue;
         this.#groupsFingerprint = fingerprint;
         try { await this.#syncGroups(desired); }
@@ -320,8 +321,9 @@ export class BrowserOwner {
         return;
       }
     }
-    const groups = await page.evaluate(syncNativeTeamGroups, teams);
-    this.#groupsStatus = { state: 'ready', extensionId: TEAM_GROUPS_EXTENSION_ID, groups };
+    const native = await page.evaluate(syncNativeTeamGroups, teams);
+    this.#groupsStatus = { state: 'ready', extensionId: TEAM_GROUPS_EXTENSION_ID, ...native,
+      bindings: this.#pageRegistry.listBindings({ includeClosed: false }) };
   }
 
   async captureDownload(page: Page, name: string, activate: () => Promise<void>): Promise<Uint8Array> {
