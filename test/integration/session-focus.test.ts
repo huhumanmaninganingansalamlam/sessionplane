@@ -102,6 +102,11 @@ test('explicit focus activates only the exact live request tab without reloading
     const bringToFront = page.bringToFront.bind(page);
     page.bringToFront = async () => { activations++; await bringToFront(); };
     decoy.page.bringToFront = async () => { assert.fail('Focused an unrelated tab'); };
+    // Team grouping may create its controller tab independently of explicit focus.
+    const groupsDeadline = Date.now() + 10_000;
+    while (service.browserOwner!.teamGroupsBusy && Date.now() < groupsDeadline)
+      await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(service.browserOwner!.teamGroupsBusy, false);
     const pageCount = service.pageRegistry.listBindings({ includeClosed: false }).length;
     const focus = { ...identity, requestId: 'focus-pending', decision: 'focus' };
     const focused = await invoke('decide', focus);
