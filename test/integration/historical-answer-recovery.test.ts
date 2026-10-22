@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -178,8 +179,47 @@ test('original quiet-final can be recovered through latest under an unsubmitted 
     assert.equal(fake.submitCount, 1);
     assert.equal(navigations, 1);
 
+    // A literal recovery attempt can remain UNKNOWN after the original work
+    // final is readable. Reconciliation releases tracking without inventing ACKs.
+    core.database.raw.prepare('UPDATE generations SET answer_text=NULL,response_message_id=NULL WHERE session_id=? AND generation=1').run(session.sessionId);
+    const successorPayload = JSON.parse(before.outbox[1]!.payload_json);
+    core.database.raw.prepare('UPDATE outbox SET payload_json=? WHERE session_id=? AND generation=2')
+      .run(JSON.stringify({ ...successorPayload, prompt: '계속', continuationOf: original.outbox_id }), session.sessionId);
+    sessions.updateCurrentGeneration(session.sessionId, 2, { sessionState: 'observing', submissionState: 'submission_unknown',
+      promptSubmitted: true, submittedUserMessageId: null, submittedUserTurnId: null, answerText: null,
+      responseMessageId: null }, timestamp);
+    await page.locator('#timeout').evaluate(node => node.remove());
+    await page.locator('#messages').evaluate(node => { node.innerHTML =
+      '<div data-message-author-role="user" data-message-id="user-message-1">Review</div>' +
+      '<div data-message-author-role="assistant" data-message-id="work-final">Completed original work</div>'; });
+    const finishWork = (id: string) => invokeMcpTool({ name: 'sessionplane_decide', arguments: {
+      teamId: team.teamId, requestRef: original.outbox_id, requestId: id, decision: 'reconcile_followup',
+      followupUserMessageId: 'user-message-1', responseMessageId: 'work-final', followupCompleted: true,
+      responseSha256: createHash('sha256').update('Completed original work').digest('hex') },
+      socketPath: config.socketPath, timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
+    await page.locator('textarea').fill('Preserve draft');
+    assert.equal((await finishWork('draft-protected')).isError, true);
+    await page.locator('textarea').fill('');
+    await page.locator('#messages').evaluate(node => { node.innerHTML +=
+      '<div data-message-author-role="user" data-message-id="new-work">Other work</div>'; });
+    assert.equal((await finishWork('new-work-protected')).isError, true);
+    await page.locator('[data-message-id="new-work"]').evaluate(node => node.remove());
+    const unknownOutbox = rows().outbox[1];
+    const released = await finishWork('release-work-tracking');
+    assert.equal(released.isError, false, JSON.stringify(released));
+    assert.equal((released.structuredContent.reconciliation as any).disposition, 'tracking-cancelled');
+    assert.equal(core.teamDirectory.getSession(session.sessionId).sessionState, 'cancelled');
+    assert.equal(core.teamDirectory.getSession(session.sessionId).submissionState, 'submission_unknown');
+    assert.equal(core.teamDirectory.getSession(session.sessionId).submittedUserMessageId, null);
+    assert.deepEqual(rows().outbox[1], unknownOutbox, 'Original delivery uncertainty is not acknowledged or rewritten');
+    t.mock.method(fake, 'openSubmission', async () => { throw new SessionPlaneDomainError('provider.preparation-required', 'Prepare next distinct work'); });
+    await assert.rejects(core.submissionService.send({ clientId: 'fixture-owner', requestId: 'next-distinct-work',
+      sessionId: session.sessionId, expectedGeneration: 2, prompt: 'Next authorized work', sessionDeadlineSec: 600 }),
+      /caller decision/);
+    assert.equal(core.teamDirectory.getSession(session.sessionId).generation, 3, 'Next work is admitted rather than session.busy');
+    const reconciledRows = rows();
     await page.goto('https://chatgpt.com/c/foreign-conversation');
     assert.equal((await latest('wrong-conversation')).structuredContent.requestOk, false);
-    assert.deepEqual(rows(), before);
+    assert.deepEqual(rows(), reconciledRows);
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });

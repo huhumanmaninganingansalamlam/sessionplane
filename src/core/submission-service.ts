@@ -1219,6 +1219,25 @@ export class SubmissionService {
     const previous = this.#sessions.getGenerationResult(current.sessionId, outbox.generation);
     const successor = this.#outbox.getByGeneration(current.sessionId, current.generation);
     const ack = JSON.parse(outbox.resultJson ?? '{}');
+    // A completed original work turn may outlive several literal recovery
+    // attempts, including UNKNOWN ones. Validate their durable ancestry rather
+    // than assigning one of the repeated visible messages as an ACK.
+    let parent = outbox;
+    for (let generation = outbox.generation + 1; generation <= current.generation; generation++) {
+      const next = this.#outbox.getByGeneration(current.sessionId, generation);
+      if (!next || next.clientId !== outbox.clientId) break;
+      const payload = parseOutboxPayload(next);
+      if (payload.prompt !== '계속' || (payload.continuationOf !== parent.outboxId &&
+          !(payload.authorizedResend?.followup && payload.authorizedResend.requestRef === parent.outboxId))) break;
+      parent = next;
+    }
+    if (parent.generation === current.generation && current.promptSubmitted && !current.terminal &&
+        previous?.promptSubmitted && previous.submissionState === 'submitted' && previous.submittedUserMessageId &&
+        ack.sessionId === current.sessionId && ack.generation === outbox.generation &&
+        ack.conversationId === current.conversationId && ack.submittedUserMessageId === previous.submittedUserMessageId &&
+        ack.submittedUserTurnId === previous.submittedUserTurnId) {
+      return { ...current, ...previous, sessionState: 'cancelled', terminal: true };
+    }
     if (current.generation !== outbox.generation + 1 || current.terminal ||
         current.submissionState !== 'prepared' || current.promptSubmitted ||
         current.submittedUserMessageId !== null || current.submittedUserTurnId !== null ||
@@ -1256,6 +1275,7 @@ export class SubmissionService {
       this.#requireActiveRoleSession(current);
       const snapshot = this.#followupAnchor(outbox, current);
       const historical = current.generation !== snapshot.generation;
+      const recoveryTracking = historical && current.promptSubmitted;
       if ((input.answerText !== undefined && createHash('sha256').update(input.answerText).digest('hex') !== input.responseSha256) ||
           input.followupCompleted !== true || snapshot.provider !== 'chatgpt' || (!historical && snapshot.terminal) ||
           snapshot.submissionState !== 'submitted' || !snapshot.promptSubmitted || !snapshot.submittedUserMessageId ||
@@ -1269,18 +1289,20 @@ export class SubmissionService {
         }
         const result = receipts.execute({ clientId, requestId: decisionId, method, payload, operation: () => {
           const timestamp = this.#now().toISOString();
-          if (!historical && !this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
+          if ((!historical || recoveryTracking) && !this.#sessions.updateCurrentGeneration(current.sessionId, current.generation, {
             sessionState: 'cancelled', providerState: 'unknown', observationTransport: 'fresh', nextCheckAt: null,
             completedAt: timestamp, errorCode: null, reason: 'manual-followup-reconciled',
           }, timestamp)) throw new SessionPlaneDomainError('session.generation-superseded', 'Request changed during reconciliation');
           const proof = { ...evidence, originalUserMessageId: snapshot.submittedUserMessageId,
             followupUserMessageId: input.followupUserMessageId, responseMessageId: input.responseMessageId,
-            responseSha256: input.responseSha256, completionSource: 'exact-followup-observation' };
+            responseSha256: input.responseSha256, completionSource: 'exact-followup-observation',
+            ...(recoveryTracking ? { originalRequestRef: outbox.outboxId, originalGeneration: snapshot.generation,
+              retiredRecoveryGeneration: current.generation, submissionEvidencePreserved: true } : {}) };
           this.#events.append({ teamId: snapshot.teamId, roleId: snapshot.roleId, sessionId: snapshot.sessionId,
-            generation: snapshot.generation, eventType: 'generation.manual-followup-reconciled',
+            generation: recoveryTracking ? current.generation : snapshot.generation, eventType: 'generation.manual-followup-reconciled',
             payload: { requestRef: outbox.outboxId, receiptId: decisionId, evidence: proof }, createdAt: timestamp });
           return { requestOk: true, requestRef: outbox.outboxId, sessionId: snapshot.sessionId,
-            generation: snapshot.generation, disposition: historical ? 'historical-followup-linked' : 'tracking-cancelled',
+            generation: snapshot.generation, disposition: historical && !recoveryTracking ? 'historical-followup-linked' : 'tracking-cancelled',
             providerMutation: false, ...(historical ? { historical: true } : {}),
             ...(input.answerText === undefined ? {} : { answerText: input.answerText }), evidence: proof };
         } });

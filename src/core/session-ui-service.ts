@@ -314,6 +314,8 @@ export class SessionUiService {
       const original = messages.findIndex(m => m.role === 'user' && m.messageId === session.submittedUserMessageId);
       const user = messages.findIndex(m => m.role === 'user' && m.messageId === input.followupUserMessageId);
       const answer = messages.at(-1);
+      const recoveryTracking = owner.generation > session.generation && owner.promptSubmitted;
+      if (recoveryTracking) await requireIdleConversationPage(page);
       // An interrupted checkpoint is evidence to retain, not a completed answer to discard.
       const partials = messages.slice(original + 1, user);
       const controls = await this.#capture(owner);
@@ -322,10 +324,10 @@ export class SessionUiService {
       this.#requirePage(owner);
       const after = this.#registry.refreshPage(session.pageKey!);
       if (originals.length !== 1 || followups.length !== 1 || originals[0]?.rootIndex !== followups[0]?.rootIndex ||
-          original < 0 || user <= original || user >= messages.length - 1 || messages.slice(user + 1, -1).some(message => message.role !== 'assistant' || message.terminalMarker) || answer?.role !== 'assistant' ||
+          original < 0 || (recoveryTracking ? user < original : user <= original) || user >= messages.length - 1 || messages.slice(user + 1, -1).some(message => message.role !== 'assistant' || message.terminalMarker) || answer?.role !== 'assistant' ||
           answer.messageId !== input.responseMessageId || !answer.text.trim() || answer.streamingMarker ||
           createHash('sha256').update(answer.text).digest('hex') !== input.responseSha256 ||
-          partials.some(m => m.role !== 'assistant' || !m.messageId || m.terminalMarker) ||
+          partials.some(m => recoveryTracking && m.role === 'user' ? m.text.trim() !== '계속' : m.role !== 'assistant' || !m.messageId || m.terminalMarker) ||
           transcript.some(m => m.streamingMarker) || activity.strength !== 'none' || dom.actionableAlert ||
           !dom.conversationSurfaceAvailable || !dom.submittedUserFound || dom.laterUserFound ||
           dom.candidate?.responseMessageId !== input.responseMessageId || dom.candidate.streamingMarker ||
