@@ -108,6 +108,21 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     assert.equal(await page.evaluate(() => (window as unknown as { alwaysGrants: number }).alwaysGrants), 1);
     assert.deepEqual((await decide('allow-persistent', { action: 'allow', allowMode: 'always',
       evidenceHash: persistent.evidenceHash })).structuredContent, alwaysAllowed.structuredContent);
+    await page.evaluate(() => document.querySelector('main')!.insertAdjacentHTML('beforeend',
+      `<section id="collapsed"><div role="alert">hostspan-desktop File Patch
+        <button onclick="document.querySelector('#grant-details').hidden=false">자세히 보기</button></div></section>
+      <section role="dialog" id="grant-details" hidden>hostspan-desktop File Patch Command: authorized existing task patch
+        <button onclick="window.patchGrants=(window.patchGrants||0)+1;document.querySelector('#collapsed').remove();document.querySelector('#grant-details').remove()">항상 허용</button></section>`));
+    const patch = await decide('inspect-collapsed-patch', { action: 'inspect', toolName: 'File Patch', allowMode: 'always' });
+    assert.equal(patch.isError, false, JSON.stringify(patch));
+    const patchEvidence = patch.structuredContent.permission as { evidenceHash: string; permissionText: string };
+    assert.match(patchEvidence.permissionText, /authorized existing task patch/);
+    assert.equal(await page.evaluate(() => (window as unknown as { patchGrants?: number }).patchGrants ?? 0), 0);
+    const patchAllowed = await decide('allow-collapsed-patch', { action: 'allow', toolName: 'File Patch', allowMode: 'always',
+      evidenceHash: patchEvidence.evidenceHash });
+    assert.equal(patchAllowed.isError, false, JSON.stringify(patchAllowed));
+    assert.equal((patchAllowed.structuredContent.permission as { permissionStillVisible: boolean }).permissionStillVisible, false);
+    assert.equal(await page.evaluate(() => (window as unknown as { patchGrants: number }).patchGrants), 1);
     assert.equal(fake.submitCount, 1);
     assert.equal(fake.stopCount, 0);
     assert.equal(core.teamDirectory.getSession(session.sessionId).generation, 1);

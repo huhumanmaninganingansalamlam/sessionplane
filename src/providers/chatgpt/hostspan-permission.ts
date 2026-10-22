@@ -47,7 +47,14 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
     return command;
   };
   const find = async () => {
-    const matches = await matching();
+    let matches = await matching();
+    if (matches.length === 2) {
+      // Details can expose the exact grant in a modal over its original alert.
+      const grants = [];
+      for (const match of matches) if (['dialog', 'alertdialog'].includes(await match.getAttribute('role') ?? '') &&
+          await match.getByRole('button', { name: allow }).count() === 1) grants.push(match);
+      if (grants.length === 1) matches = grants;
+    }
     if (matches.length !== 1) throw unavailable('The exact HostSpan tool permission is absent or ambiguous');
     let scope = matches[0]!;
     // The permission's action row can be a sibling of its ARIA alert.
@@ -65,13 +72,16 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
     return scope;
   };
   let command = await closeDetails();
-  let scope = await find();
-  const details = scope.getByRole('button', { name: /^(?:자세히 보기|View details|See details)$/i });
-  if (await details.count() === 1 && await details.getAttribute('aria-expanded') !== 'true') {
-    await details.click({ timeout: 5_000 });
-    command = await closeDetails() || command;
-    scope = await find();
+  const cards = await matching();
+  if (cards.length === 1) {
+    const details = cards[0]!.getByRole('button', { name: /^(?:자세히 보기|View details|See details)$/i });
+    if (await details.count() === 1 && await details.getAttribute('aria-expanded') !== 'true') {
+      // The current permission may expose only Details until its actions open.
+      await details.click({ timeout: 5_000 });
+      command = await closeDetails() || command;
+    }
   }
+  const scope = await find();
   const text = (await scope.innerText()).trim();
   const alertText = (await (await matching())[0]!.innerText()).trim();
   const buttons = await scope.getByRole('button').evaluateAll(elements => elements.map(element =>
