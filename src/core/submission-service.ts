@@ -1097,13 +1097,15 @@ export class SubmissionService {
         const identity = recorded?.recoveryIdentity as Record<string, unknown> | undefined;
         const server = recorded?.serverObservation as import('../providers/provider-adapter.ts').ProviderServerObservation | undefined;
         const last = server?.messages.at(-1);
+        // A tool end_turn closes that execution, not the assistant answer.
         if (!timeout && (!identity || identity.conversationId !== snapshot.conversationId || identity.pageKey !== snapshot.pageKey ||
             identity.submittedUserMessageId !== snapshot.submittedUserMessageId ||
             identity.submittedUserTurnId !== snapshot.submittedUserTurnId || !recorded ||
             this.#now().getTime() - Date.parse(String(recorded.observedAt)) > 180_000 ||
             !server || server.nextUserFound || last?.role !== 'tool' || last.status !== 'finished_successfully' ||
             last.messageId !== server.currentNodeId || !server.assistantCount ||
-            server.messages.some(message => message.status === 'in_progress' || message.endTurn === true))) {
+            server.messages.some(message => message.status === 'in_progress' ||
+              (message.role === 'assistant' && message.endTurn === true)))) {
           throw new SessionPlaneDomainError('provider.failure-unverified',
             'Fresh exact server evidence of an unclosed successful tool turn is required; preserve active or uncertain work');
         }
