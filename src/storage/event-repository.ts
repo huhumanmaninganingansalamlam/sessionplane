@@ -105,7 +105,19 @@ export class EventRepository {
       FROM events WHERE session_id=? AND generation=? AND event_type LIKE 'generation.backend-%'
         AND json_type(payload_json, '$.serverObservation')='object' ORDER BY sequence DESC LIMIT 1`)
       .get(sessionId, generation) as { sequence: number; observedAt: string; payloadJson: string } | undefined;
-    return row ? { sequence: Number(row.sequence), observedAt: row.observedAt, ...parsePayload(row.payloadJson) } : null;
+    if (!row) return null;
+    // Re-reading an unchanged response is not new execution progress. Retain
+    // the first observation of this trailing, exact-generation response shape.
+    const change = this.#database.prepare(`SELECT MIN(created_at) AS changedAt FROM events
+      WHERE session_id=? AND generation=? AND event_type LIKE 'generation.backend-%'
+        AND json_extract(payload_json, '$.serverObservation')=json_extract(?, '$.serverObservation')
+        AND sequence>COALESCE((SELECT MAX(sequence) FROM events
+          WHERE session_id=? AND generation=? AND event_type LIKE 'generation.backend-%'
+            AND json_type(payload_json, '$.serverObservation')='object'
+            AND json_extract(payload_json, '$.serverObservation')!=json_extract(?, '$.serverObservation')), 0)`)
+      .get(sessionId, generation, row.payloadJson, sessionId, generation, row.payloadJson) as { changedAt: string };
+    return { sequence: Number(row.sequence), observedAt: row.observedAt, ...parsePayload(row.payloadJson),
+      responseChangedAt: change.changedAt };
   }
 
   latestAnchorRecovery(sessionId: string, generation: number): (Readonly<Record<string, unknown>> & { sequence: number; observedAt: string }) | null {

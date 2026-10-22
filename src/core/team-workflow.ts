@@ -478,7 +478,7 @@ export class TeamWorkflow {
             }
             const timeoutReady = (result.submissionVerification as { nextAction?: string } | undefined)?.nextAction === 'reconcile_failure';
             const serverReview = (result.submissionVerification as { serverObservation?: {
-              observedAt?: string; currentIdentityMatches?: boolean;
+              observedAt?: string; responseChangedAt?: string; currentIdentityMatches?: boolean;
               serverObservation?: { messages?: { role: string; textLength: number; status?: string }[] } } } | undefined)?.serverObservation;
             const freshServer = serverReview?.currentIdentityMatches === true && !!serverReview.observedAt &&
               Date.now() - Date.parse(serverReview.observedAt) <= 180_000;
@@ -502,10 +502,13 @@ export class TeamWorkflow {
               ? this.services.receipts.get(request.clientId, `managed-continuation:${previous.outboxId}`) : null;
             const previousEvidence = previousRecovery?.method === 'session.continuation.prepare'
               ? JSON.parse(previousRecovery.resultJson).evidence : null;
-            const observedProgress = dom?.activity === 'strong' || dom?.turnBoundary?.some(turn => turn.role === 'tool' ||
+            const changedServerResponse = !!serverReview?.responseChangedAt &&
+              Date.parse(serverReview.responseChangedAt) >= Date.parse(request.createdAt) &&
+              Date.now() - Date.parse(serverReview.responseChangedAt) < 30 * 60_000;
+            const observedProgress = dom?.activity === 'strong' || dom?.turnBoundary?.some(turn =>
               (turn.role === 'assistant' && !!turn.text?.trim())) ||
               (serverReview?.currentIdentityMatches && serverReview.serverObservation?.messages?.some(message =>
-                message.role === 'tool' || (message.role === 'assistant' && message.textLength > 0) ||
+                (changedServerResponse && (message.role === 'tool' || (message.role === 'assistant' && message.textLength > 0))) ||
                 (freshServer && message.status === 'in_progress'))) ||
               Date.parse(String((result.activity as { latestStoredArtifactChangeAt?: string } | undefined)?.latestStoredArtifactChangeAt)) >= Date.parse(request.createdAt);
             // A durable managed retry that still has the unresolved response and
