@@ -868,11 +868,12 @@ export class TeamWorkflow {
     const required = snapshot.generation === request.generation ? this.#loadRecoveryRequired(snapshot) : null;
     const result = required === null ? storedOnly ? this.#storedRequest(request) : await this.#observeRequest(request, maxNodes, inspectCurrent)
       : { ...snapshot, ...required, requestRef: request.outboxId, roleRef: roleRef(snapshot) };
+    const verification = this.#submissionVerification(request, result);
     // A lost literal recovery ACK cannot hide work under its retained original
     // ACK. Read that lineage without assigning the later answer to the lost turn.
     if (!storedOnly && required === null && snapshot.generation === request.generation &&
-        !result.followup && (inspectCurrent || (result.evidence as { submissionVerification?: { anchorPresent?: boolean } } | undefined)
-          ?.submissionVerification?.anchorPresent === false)) {
+        result.terminal !== true && !result.followup &&
+        (verification as { submissionVerification?: { state: string } }).submissionVerification?.state === 'anchor-unverified') {
       const original = this.#continuationOriginal(request);
       if (original.outboxId !== request.outboxId) {
         const observed = await this.#observeRequest(original, maxNodes, true);
@@ -896,7 +897,6 @@ export class TeamWorkflow {
       (current.generation === tail.generation && current.terminal && !complete && current.reason !== 'thinking-failed-reconciled');
     const loadRecovery = typeof result.conversationId === 'string' ? this.#loadRecovery.get(result.conversationId) : null;
     const refresh = this.services.receipts.latestPageRefresh(request.clientId, request.sessionId, request.generation);
-    const verification = this.#submissionVerification(request, result);
     const acknowledgementEvents = new EventRepository(this.services.database.raw);
     const acknowledgementRecovery = result.submissionState === 'submission_unknown'
       ? acknowledgementEvents.latestAcknowledgementRecovery(request.sessionId, request.generation) : null;
