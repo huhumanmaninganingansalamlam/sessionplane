@@ -110,7 +110,7 @@ export async function runDoctor(config: SessionPlaneConfig): Promise<DoctorRepor
 
   try {
     const database = SessionPlaneDatabase.open(config.databasePath);
-    const health = database.health();
+    const health = database.health({ checkIntegrity: true });
     database.close();
     checks.push({
       name: 'database',

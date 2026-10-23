@@ -85,6 +85,14 @@ export class EventRepository {
     return row ?? null;
   }
 
+  submissionTimeline(sessionId: string, generation: number): { attemptedAt: string | null; acknowledgedAt: string | null } {
+    return this.#database.prepare(`SELECT
+      MIN(CASE WHEN event_type='generation.submit-attempted' THEN created_at END) AS attemptedAt,
+      MIN(CASE WHEN event_type IN ('generation.submitted','generation.acknowledgement-recovered') THEN created_at END) AS acknowledgedAt
+      FROM events WHERE session_id=? AND generation=?`).get(sessionId, generation) as
+      { attemptedAt: string | null; acknowledgedAt: string | null };
+  }
+
   followupReconciliation(sessionId: string, generation: number): Readonly<Record<string, unknown>> | null {
     const row = this.#database.prepare(`SELECT payload_json AS payloadJson FROM events
       WHERE session_id=? AND generation=? AND event_type='generation.manual-followup-reconciled'

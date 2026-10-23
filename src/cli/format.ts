@@ -108,7 +108,7 @@ function humanResult(value: unknown): string {
     const answer = typeof r.answerText === 'string' ? r.answerText : null;
     const input = state === 'prepared' || state === 'composer_filled';
     const unknown = state === 'submission_unknown' || state === 'submit_attempted';
-    const collected = !unknown && answer !== null && (typeof r.completedAt === 'string' ||
+    const collected = !unknown && (answer !== null || isRecord(r.answer)) && (typeof r.completedAt === 'string' ||
       r.sessionState === 'complete' || r.providerState === 'complete' && typeof r.responseMessageId === 'string');
     const delivery = unknown ? 'Unconfirmed — do not resend' : state === 'submitted' ? 'Confirmed' : 'Not confirmed sent';
     const phase = collected ? 'Answer collected' : unknown ? 'Delivery needs recovery' : input ? 'Waiting for your preparation choice' : r.terminal === true ? 'Ended without a collected answer' : 'Waiting for provider / observing';
@@ -123,7 +123,11 @@ function humanResult(value: unknown): string {
       ? `sessplane request` : null;
     const identity = `${String(r.teamId)} ${String(r.requestRef)}`;
     if (command) {
-      lines.push(`Inspect: ${command} show ${identity}`);
+      lines.push(`Inspect: ${command} show ${identity} --view evidence`);
+      if (collected && answer === null) lines.push(`Read answer: ${command} show ${identity} --view result`);
+      if (isRecord(r.collection)) lines.push(`Connected collection calls: ${records(r.collection.waits).length} (not provider execution).`);
+      if (isRecord(r.managedContinuation) && r.managedContinuation.nextReviewAt)
+        lines.push(`Managed review: ${String(r.managedContinuation.nextReviewAt)}; submission still requires current evidence.`);
       const observed = isRecord(r.evidence) ? r.evidence : {};
       if (observed.providerAlerts) lines.push(`Provider notice: ${JSON.stringify(observed.providerAlerts)}`);
       const candidates = records(observed.submissionCandidates);
@@ -151,7 +155,7 @@ function humanResult(value: unknown): string {
         lines.push('If choices are unavailable: inspect this same request again; do not send a new prompt.');
       }
     }
-    if (collected) lines.push(`\nAnswer\n${answer}`);
+    if (collected && answer !== null) lines.push(`\nAnswer\n${answer}`);
     if (isRecord(r.files)) {
       lines.push(`File collection: ${r.files.requestOk === false ? 'failed' : 'result available'}.`);
       if (r.files.errorCode) lines.push(`File error: ${String(r.files.errorCode)}`);
@@ -162,6 +166,6 @@ function humanResult(value: unknown): string {
   }
   if (Array.isArray(r.teams)) return records(r.teams).map(t => `${String(t.name ?? 'Unnamed team')} — ${String(t.teamState ?? 'available')}\n  sessplane team show ${String(t.teamId)}`).join('\n') || 'No teams for this caller. For existing native MCP work: sessplane team list --client-id sessionplane-mcp\nCreate a team only for new work: sessplane team create --name NAME';
   if (Array.isArray(r.roles)) return [`Team: ${String(r.name ?? r.teamId)}`, ...records(r.roles).map(role => `${String(role.roleKey)}: ${String(role.sessionState ?? 'no session')}\n  Role: ${String(role.roleRef ?? (role.currentSessionId && role.generation !== null ? `${role.currentSessionId}:${role.generation}` : 'not initialized'))}`), ...records(r.requests).map(req => `Request (${String(req.submissionState)}): sessplane request show ${String(r.teamId)} ${String(req.requestRef)}`), `Prepare: sessplane request send ${String(r.teamId)} ROLE_REF --prompt-file FILE\nFor a role without a session: sessplane session create ${String(r.teamId)} ROLE_KEY`].join('\n');
-  if (r.version && isRecord(r.browser) && isRecord(r.database)) return `SessionPlane ${String(r.version)}\nBrowser: ${String(r.browser.state)}. Database: ${String(r.database.integrity)}.\nFind work: sessplane team list\nUse --json for runtime diagnostics.`;
+  if (r.version && isRecord(r.browser) && isRecord(r.database)) return `SessionPlane ${String(r.version)}\nBrowser: ${String(r.browser.state)}. Database: ${r.database.integrity === null ? 'readable (integrity: run doctor)' : String(r.database.integrity)}.\nFind work: sessplane team list\nUse --json for runtime diagnostics.`;
   return JSON.stringify(value, null, 2);
 }

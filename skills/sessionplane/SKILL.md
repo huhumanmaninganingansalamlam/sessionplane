@@ -10,6 +10,10 @@ Use the registered SessionPlane MCP tools. Keep `teamId`; start or resume with
 observation and recovery. Do not launch another core or control its pages with
 external browser tools. General website work belongs to separate browser tools.
 
+If the client's cached wait schema lacks continuationApproved, reconnect that client's
+MCP after updating the installed package; do not silently omit approval. Preserve
+any current CLI wait owner while reconnecting. The existing CLI option is equivalent.
+
 If native tools are absent, configure the stdio server as `sessplane mcp` and
 reload the client's MCP connection. Installing a skill alone does not register
 MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
@@ -19,8 +23,12 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
 1. `sessionplane_team_create` creates the team and main conversation.
    `sessionplane_role_create` adds an expert and its conversation.
 2. `sessionplane_team_get` returns roleRefs and requestRefs. Copy references from
-   results; do not reconstruct them. Include a requestRef for its exact result or
-   fresh UI evidence. Retired/replaced conversations remain individually addressable.
+   results; do not reconstruct them. Include a requestRef for compact stored status without a provider probe or bodies.
+   Use view:result to recover its exact answer and view:evidence for fresh UI,
+   original prompt/candidates and controls. CLI: request show TEAM REF --view result
+   or --view evidence. Summary collection reports connected Core calls, not OS PID
+   survival or product execution; managedContinuation.nextReviewAt is a review
+   eligibility time, not a promise to submit. Backend nextCheckAt is separate. Retired/replaced conversations remain individually addressable.
    To rediscover older requestRefs, use history:true and continue with nextRequestRef
    as beforeRequestRef until null.
 3. `sessionplane_send` takes teamId, a fresh roleRef, prompt and intended model/
@@ -54,7 +62,7 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    purpose and snapshotId/ref. Choose submit last. Raw choose/reveal remain available
    for diagnostics; do not reconstruct model combinations from partial menus.
    After a configuration click timeout, the original Coordinator must first read
-   `team_get` on the same requestRef and check `promptSubmitted`, submissionState
+   `team_get` with view:evidence on the same requestRef and check `promptSubmitted`, submissionState
    and terminal. Submitted, ambiguous or terminal requests are not preparation work.
    If still prepared/unsubmitted, use fresh exact-page evidence: when the current
    combined model/version/effort summary matches the user's intent, record that
@@ -165,7 +173,7 @@ out prompts, infer consensus, or inject answers into other roles.
   versions; do not substitute or infer Pro from an account badge or High effort.
   Use Chat only, never Work. Do not bypass access controls.
 - `submission_unknown` means acknowledgement is ambiguous. Use team_get with the
-  same requestRef for read-only recovery; never automatically resend it.
+  same requestRef and view:evidence for read-only recovery; never automatically resend it.
   If `evidence.submissionCandidates` contains the matching submitted message,
   compare it with `requested.prompt` and call decide with `decision: "acknowledge"`,
   its `messageId` and `evidenceHash`. This connects the existing answer without

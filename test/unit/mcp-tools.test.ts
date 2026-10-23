@@ -6,7 +6,7 @@ import net from 'node:net';
 import test from 'node:test';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
-import { invokeMcpTool } from '../../src/mcp/tools.ts';
+import { invokeMcpTool, MCP_TOOLS } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 test('MCP distinguishes an unreachable core from lost responses without claiming submit failure', async () => {
@@ -92,6 +92,18 @@ test('team MCP deduplicates sends, rejects stale/cross-team refs and keeps concu
       if (results.every((r) => r.terminal)) break;
     }
     assert.deepEqual(results.map((r) => r.answerText), ['Result 0', 'Result 1']);
+    const count = fake.acknowledgementRecoveryCount;
+    const summary = (await invoke('team_get', { teamId, requestRef: first.requestRef })).structuredContent.request as any;
+    assert.equal(summary.view, 'summary');
+    assert.equal(summary.answerText, undefined);
+    assert.equal(summary.evidence, undefined);
+    assert.equal(summary.answer.characters, 'Result 0'.length);
+    assert.equal(summary.submittedUserMessageId, first.submittedUserMessageId);
+    assert.equal(fake.acknowledgementRecoveryCount, count, 'Status reads do not dispatch provider recovery');
+    const exact = (await invoke('team_get', { teamId, requestRef: first.requestRef, view: 'result' })).structuredContent.request as any;
+    assert.equal(exact.answerText, 'Result 0');
+    assert.equal(exact.evidence, undefined);
+    assert.equal((MCP_TOOLS.find(tool => tool.name === 'sessionplane_wait')!.inputSchema.properties as any).continuationApproved.const, true);
     const refreshed = await invoke('team_get', { teamId });
     const nextRole = (refreshed.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef;
     const next = await invoke('send', { teamId, roleRef: nextRole, requestId: 'next', prompt: 'Next review' });

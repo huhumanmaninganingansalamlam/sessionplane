@@ -9,7 +9,8 @@ export interface DatabaseHealth {
   readonly schemaVersion: number;
   readonly journalMode: string;
   readonly foreignKeys: boolean;
-  readonly integrity: string;
+  readonly readable: boolean;
+  readonly integrity: string | null;
 }
 
 export class SessionPlaneDatabase {
@@ -49,18 +50,23 @@ export class SessionPlaneDatabase {
     }
   }
 
-  health(): DatabaseHealth {
+  health(options: { readonly checkIntegrity?: boolean } = {}): DatabaseHealth {
     this.assertOpen();
     const journalRow = this.raw.prepare('PRAGMA journal_mode').get() as Record<string, unknown>;
     const foreignKeysRow = this.raw.prepare('PRAGMA foreign_keys').get() as Record<string, unknown>;
-    const integrityRow = this.raw.prepare('PRAGMA quick_check').get() as Record<string, unknown>;
+    // Runtime health must not scan the growing receipt/event history on the
+    // Core event loop. The explicit doctor check still verifies integrity.
+    const readable = this.raw.prepare('SELECT version FROM schema_migrations LIMIT 1').get() !== undefined;
+    const integrity = options.checkIntegrity
+      ? String(firstValue(this.raw.prepare('PRAGMA quick_check').get() as Record<string, unknown>)) : null;
 
     return {
       path: this.path,
       schemaVersion: this.schemaVersion,
       journalMode: String(firstValue(journalRow)),
       foreignKeys: Number(firstValue(foreignKeysRow)) === 1,
-      integrity: String(firstValue(integrityRow)),
+      readable,
+      integrity,
     };
   }
 

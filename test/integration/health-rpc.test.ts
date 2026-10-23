@@ -24,6 +24,9 @@ test('system.health is served over an owner-only Unix socket and durable SQLite 
   });
 
   try {
+    const prepare = service.database.raw.prepare.bind(service.database.raw);
+    const statements: string[] = [];
+    service.database.raw.prepare = ((sql: string) => { statements.push(sql); return prepare(sql); });
     const result = await callRpc<Record<string, unknown>>({
       socketPath: config.socketPath,
       method: 'system.health',
@@ -35,7 +38,12 @@ test('system.health is served over an owner-only Unix socket and durable SQLite 
     assert.equal((result.database as Record<string, unknown>).schemaVersion, migrations.at(-1)!.version);
     assert.equal((result.database as Record<string, unknown>).journalMode, 'wal');
     assert.equal((result.database as Record<string, unknown>).foreignKeys, true);
-    assert.equal((result.database as Record<string, unknown>).integrity, 'ok');
+    assert.equal((result.database as Record<string, unknown>).readable, true);
+    assert.equal((result.database as Record<string, unknown>).integrity, null);
+    assert.equal(statements.some(sql => /quick_check|integrity_check/i.test(sql)), false,
+      'Routine health must not block the Core event loop by scanning all stored receipts');
+    assert.equal(service.database.health({ checkIntegrity: true }).integrity, 'ok',
+      'Explicit doctor diagnostics retain the real integrity check');
     assert.equal(statSync(config.socketPath).mode & 0o777, 0o600);
     assert.equal(statSync(config.databasePath).mode & 0o777, 0o600);
 

@@ -84,7 +84,7 @@ test('original quiet-final can be recovered through latest under an unsubmitted 
 
     await page.evaluate(() => { const stop = document.createElement('button'); stop.id = 'active'; stop.setAttribute('aria-label', '중지'); document.querySelector('main')!.append(stop); });
     const get = await invokeMcpTool({ name: 'sessionplane_team_get',
-      arguments: { teamId: team.teamId, requestRef: original.outbox_id },
+      arguments: { teamId: team.teamId, requestRef: original.outbox_id, view: 'evidence' },
       socketPath: config.socketPath, timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
     const observed = get.structuredContent.request as any;
     assert.equal(observed.terminal, false);
@@ -138,7 +138,7 @@ test('original quiet-final can be recovered through latest under an unsubmitted 
       '<div data-message-author-role="assistant" data-message-id="wrong-answer">Unrelated answer</div>'; });
     sessions.updateCurrentGeneration(session.sessionId, 2, { submissionState: 'submission_unknown', promptSubmitted: true }, timestamp);
     const currentRows = rows();
-    const workRead = await invokeMcpTool({ name: 'sessionplane_team_get', arguments: {
+    const workRead = await invokeMcpTool({ name: 'sessionplane_team_get', arguments: { view: 'evidence',
       teamId: team.teamId, requestRef: original.outbox_id }, socketPath: config.socketPath,
       timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
     const work = (workRead.structuredContent.request as any).workResult;
@@ -168,7 +168,7 @@ test('original quiet-final can be recovered through latest under an unsubmitted 
     assert.equal(closure.successorRequestRef, before.outbox[1]!.outbox_id);
     assert.deepEqual(rows(), before, 'Closure preserves the original result and unsubmitted successor');
     assert.deepEqual((await reconcile('close-historical-timeout')).structuredContent.reconciliation, closure);
-    const read = await invokeMcpTool({ name: 'sessionplane_team_get', arguments: {
+    const read = await invokeMcpTool({ name: 'sessionplane_team_get', arguments: { view: 'evidence',
       teamId: team.teamId, requestRef: original.outbox_id }, socketPath: config.socketPath,
       timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
     const failed = read.structuredContent.request as any;

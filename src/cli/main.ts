@@ -54,6 +54,7 @@ const FLAG_OPTIONS = new Set([
 ]);
 const MULTI_VALUE_OPTIONS = new Set(['file', 'skill']);
 const VALUE_OPTIONS = new Set([
+  'view',
   'user-confirmed-interruption',
   'followup-message-id', 'remote', 'remote-executable', 'remote-socket', 'remote-control-path',
   'state-dir',
@@ -714,7 +715,10 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   const request = { teamId, requestRef: ref };
   const requestId = parsed.options['request-id'] ?? randomUUID();
   const mutation = { ...request, requestId };
-  if (action === 'show') return await printRpc(io, parsed, config, 'workflow.team_get', request);
+  if (action === 'show') return await printRpc(io, parsed, config, 'workflow.team_get', {
+    ...request, ...optionalParam('view', parsed.options.view),
+    ...(parsed.options['max-nodes'] === undefined ? {} : { maxNodes: integerOption(parsed, 'max-nodes', 250, 1, 5000) }),
+  });
   if (action === 'wait') {
     const waitMs = workflowWaitMs(integerOption(parsed, 'wait-ms', DEFAULT_WORKFLOW_WAIT_MS, 0, MAX_WORKFLOW_WAIT_MS));
     return await printRpc(io, parsed, config, 'workflow.wait', { teamId, requestRefs: [ref], waitMs,
@@ -1364,7 +1368,9 @@ Exact request flow (same request; no automatic resend):
   1. Find your team and role: team list, then team show TEAM_ID
   2. Start: request send TEAM_ID ROLE_REF --prompt-file FILE [--request-id ID]
      May submit immediately when ready; otherwise pauses for preparation.
-  3. Inspect: request show TEAM_ID REQUEST_REF
+  3. Status: request show TEAM_ID REQUEST_REF
+     Fresh controls: request show TEAM_ID REQUEST_REF --view evidence
+     Exact answer: request show TEAM_ID REQUEST_REF --view result
   4. Select model: request configure TEAM_ID REQUEST_REF CONFIGURATION_ID
   5. Choose fresh controls: request choose TEAM_ID REQUEST_REF PURPOSE REF --snapshot-id ID
      PURPOSE is model, effort, composer or submit. Submit only after checking the input.

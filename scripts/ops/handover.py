@@ -161,7 +161,7 @@ def no_writer(dbpath):
         raise LockActivityError(report)
 
 def guard_state(h, expected, require_idle=True, recovery_handover=False):
-    assert h['requestOk'] and h['browser']['state']=='ready' and h['database']['integrity']=='ok'
+    assert h['requestOk'] and h['browser']['state']=='ready' and (h['database'].get('readable') is True or h['database']['integrity']=='ok')
     assert h['database']['path'] == expected['database']['path'], 'Database path changed'
     for key in ['pid','startedAt']: assert h['process'][key]==expected['process'][key], 'Core owner changed'
     for key in ['browserPid','profileDir','debuggingPort']: assert h['browser'][key]==expected['browser'][key], 'Browser identity changed'
@@ -440,7 +440,7 @@ def rollback_exited(h, old_pid, successor, chrome_ticks, installed, stage, recei
     restored = launch_core(cmd, cwd, env, receipt, 'rollback-core')
     save(receipt/'rollback-core.json', {'pid': restored.pid, 'startedAtUnix': time.time()})
     after = await_ready(restored)
-    assert after['database']['path'] == h['database']['path'] and after['database']['integrity'] == 'ok'
+    assert after['database']['path'] == h['database']['path'] and (after['database'].get('readable') is True or after['database']['integrity'] == 'ok')
     assert after['database']['schemaVersion'] == h['database']['schemaVersion']
     for key in ['browserPid', 'profileDir', 'debuggingPort']:
         assert after['browser'][key] == h['browser'][key]
@@ -689,7 +689,7 @@ def main():
             save(receipt/'rollback-blocked.json', {'error': str(recovery_error), 'action': 'preserve browser/DB and inspect; do not retry'})
             raise RuntimeError('Handover failed; recovery not confirmed; inspect receipts') from recovery_error
         raise RuntimeError('Handover failed; original core restored; release issuer hold, do not repeat') from error
-    assert after['database']['integrity']=='ok' and after['database']['path']==h['database']['path']
+    assert (after['database'].get('readable') is True or after['database']['integrity']=='ok') and after['database']['path']==h['database']['path']
     assert after['database']['schemaVersion']==h['database']['schemaVersion']
     assert after['providers']['enabled']==h['providers']['enabled']
     for key in ['browserPid','profileDir','debuggingPort']: assert after['browser'][key]==h['browser'][key]
