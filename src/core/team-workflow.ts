@@ -210,7 +210,7 @@ export class TeamWorkflow {
           if (prior.status === 'complete') return JSON.parse(prior.resultJson) as Record<string, unknown>;
           throw new SessionPlaneDomainError('provider.action-unknown', 'Permission action was attempted; inspect without repeating the grant');
         }
-        const { current: session, original, permissionRequest } = this.#permissionRequest(request);
+        const { current: session, original, permissionRequest } = this.#requestPageOwner(request);
         if (!session.pageKey) throw new SessionPlaneDomainError('browser.unavailable', 'No connected request page');
         return await this.services.pageMutex.runExclusive(session.pageKey, async () => {
           this.services.receipts.record({ ...receipt, status: 'attempted', result: { requestRef: input.requestRef } });
@@ -451,8 +451,9 @@ export class TeamWorkflow {
           if ((result.followup as { terminal?: boolean } | undefined)?.terminal) break;
           const userReview = this.#userReview(request);
           if (userReview) { result = userReview; break; }
+          const collectingOriginal = typeof (result.workResult as { ownerRequestRef?: string } | undefined)?.ownerRequestRef === 'string';
           const preparedContinuation = this.#outbox.getByRequest(request.clientId, `continue:managed-continuation:${request.outboxId}`);
-          const discoverFollowup = !followupId && preparedContinuation?.submissionState === 'prepared';
+          const discoverFollowup = !collectingOriginal && !followupId && preparedContinuation?.submissionState === 'prepared';
           if (followupId || discoverFollowup) {
             const evidence = await this.services.ui.observeFollowup(ownerOf(request), followupId).catch(error => {
               if (!(error instanceof SessionPlaneDomainError) || !['browser.snapshot-timeout', 'provider.observation-unavailable'].includes(error.errorCode)) throw error;
@@ -479,7 +480,7 @@ export class TeamWorkflow {
               if (evidence.errorCode) { result = { ...result, errorCode: evidence.errorCode, reason: evidence.reason }; controller.abort(); break; }
             }
           }
-          if (input.waitMs > 0 && input.continuationApproved && !followupId && !controller.signal.aborted) {
+          if (input.waitMs > 0 && input.continuationApproved && !followupId && !collectingOriginal && !controller.signal.aborted) {
             // Durable receipts own the single send. This clock only limits broad
             // reassessment; a disconnected banner is never evidence to continue.
             const reviewId = `managed-continuation:${request.outboxId}`;
@@ -618,8 +619,8 @@ export class TeamWorkflow {
           const nextAckCheck = Date.parse(String((result.acknowledgementRecovery as { nextCheckAt?: string } | undefined)?.nextCheckAt ?? result.nextCheckAt));
           const acknowledgementWait = Number.isFinite(nextAckCheck) ? Math.max(1_000, nextAckCheck - Date.now()) : 30_000;
           const waited = await this.services.scheduler.waitSession(request.sessionId, {
-            expectedGeneration: followupId ? this.services.directory.getSession(request.sessionId).generation : request.generation,
-            ...(followupId ? { wakeOnTerminal: false } : {}), waitMs: Math.min(remaining, input.continuationApproved ? 30 * 60_000 : remaining, followupId ? 5_000 : workflowPreparationPending(result) ? 60_000 : acknowledgementPending ? acknowledgementWait : workflowWaitMs(input.waitMs)), signal: controller.signal,
+            expectedGeneration: followupId || collectingOriginal ? this.services.directory.getSession(request.sessionId).generation : request.generation,
+            ...(followupId || collectingOriginal ? { wakeOnTerminal: false } : {}), waitMs: Math.min(remaining, input.continuationApproved ? 30 * 60_000 : remaining, followupId ? 5_000 : collectingOriginal || workflowPreparationPending(result) ? 60_000 : acknowledgementPending ? acknowledgementWait : workflowWaitMs(input.waitMs)), signal: controller.signal,
           });
           if (controller.signal.aborted) break;
           result = await this.#observe(request);
@@ -685,7 +686,7 @@ export class TeamWorkflow {
       discardRetiredObservation: input.discardRetiredObservation });
   }
 
-  #permissionRequest(request: OutboxRecord) {
+  #requestPageOwner(request: OutboxRecord) {
     const snapshot = this.services.directory.getSession(request.sessionId);
     const current = this.#role({ teamId: request.teamId, roleRef: roleRef(snapshot) });
     if (current.generation === request.generation && current.submissionState !== 'prepared')
@@ -919,19 +920,39 @@ export class TeamWorkflow {
           storedResult: reconciled.storedResult, reconciliation: reconciled };
       }
       let observed = {};
+      let collectionOwner: string | undefined;
+      if (snapshot.submissionState === 'prepared' && original?.reason === 'approved-continuation-prepared') {
+        try {
+          const owner = this.#requestPageOwner(request);
+          if (owner.original.generation === request.generation)
+            collectionOwner = this.#outbox.getByGeneration(snapshot.sessionId, snapshot.generation)!.outboxId;
+        } catch (error) {
+          if (!(error instanceof SessionPlaneDomainError) || !['provider.permission-unverified', 'session.generation-superseded'].includes(error.errorCode)) throw error;
+        }
+      }
       // Historical result reads do not inherit latest/submit mutation guards.
       // Keep immutable generation results and UNKNOWN successors unchanged.
-      if (inspectCurrent && original?.promptSubmitted && original.submissionState === 'submitted' &&
+      if ((inspectCurrent || collectionOwner) && original?.promptSubmitted && original.submissionState === 'submitted' &&
           original.submittedUserMessageId && conversationId === snapshot.conversationId && snapshot.pageKey !== null) {
         try {
           const workResult = await this.services.scheduler.actorFor(request.sessionId).enqueue(() =>
             this.services.pageMutex.runExclusive(snapshot.pageKey!, () => this.services.ui.readOriginalWork(
               { ...snapshot, ...original, generation: request.generation, conversationId }, snapshot)));
-          observed = { workResult: { originalRequestRef: request.outboxId, generation: request.generation, ...workResult } };
+          const collectOriginal = collectionOwner && 'submittedUserMessageId' in workResult &&
+            workResult.submittedUserMessageId === original.submittedUserMessageId && !workResult.laterUserFound &&
+            (workResult.terminal || workResult.errorCode === 'provider.actionable-alert' ||
+              (workResult.activity !== 'none' && workResult.activityReason !== 'provider-stream-disconnected'));
+          observed = { workResult: { originalRequestRef: request.outboxId, generation: request.generation, ...workResult,
+            ...(collectOriginal ? { ownerRequestRef: collectionOwner, bindingGeneration: snapshot.generation } : {}) },
+            ...(collectOriginal ? { terminal: workResult.terminal, completedAt: workResult.terminal && 'observedAt' in workResult ? workResult.observedAt : null,
+              reason: workResult.reason, errorCode: 'errorCode' in workResult ? workResult.errorCode : null,
+              responseMessageId: 'responseMessageId' in workResult ? workResult.responseMessageId : null,
+              answerText: 'answerText' in workResult ? workResult.answerText : null } : {}) };
         } catch (error) {
           if (!(error instanceof SessionPlaneDomainError)) throw error;
           observed = { workResult: { originalRequestRef: request.outboxId, terminal: false,
-            reason: error.errorCode, message: error.message } };
+            reason: error.errorCode, message: error.message },
+            ...(collectionOwner ? { terminal: false, status: 'recovery_required', errorCode: error.errorCode } : {}) };
         }
       }
       // Recheck only the exact quiet-final immediately preceding an unsubmitted

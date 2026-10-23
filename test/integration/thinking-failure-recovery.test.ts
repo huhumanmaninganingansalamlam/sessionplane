@@ -436,6 +436,26 @@ test('original HostSpan grant remains controllable after an approved continuatio
     assert.equal(original.submittedUserMessageId, history.submitted_user_message_id);
     assert.equal(f.fake.submitCount, 1);
     assert.equal(f.fake.stopCount, 0);
+    let returned = false;
+    const waiting = f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
+      waitMs: 60000, continuationApproved: true }).then(result => { returned = true; return result; });
+    await delay(2000);
+    assert.equal(returned, false, 'Historical tracking cancellation must not complete the original work wait');
+    await f.fake.page.setContent(`<main>${configuration}${question}
+      <div data-message-author-role="assistant" data-message-id="original-review-final" data-end-turn="true">Original review complete; git status exit0</div>
+      <textarea>Preserved user draft</textarea></main>`);
+    new EventRepository(f.core.database.raw).append({ teamId: f.team.teamId,
+      sessionId: f.session.sessionId, generation: 2, eventType: 'fixture.final-rendered', payload: {}, createdAt: new Date().toISOString() });
+    f.core.actorScheduler.refreshSession(f.session.sessionId);
+    const collected = (await waiting).results[0];
+    assert.equal(collected.generation, 1);
+    assert.equal(collected.terminal, true);
+    assert.equal(collected.workResult.responseMessageId, 'original-review-final');
+    assert.match(collected.workResult.answerText, /git status exit0/);
+    assert.equal(collected.workResult.ownerRequestRef, pending.outbox_id);
+    assert.equal(f.fake.submitCount, 1);
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(f.session.sessionId), history);
+    assert.equal(f.core.teamDirectory.getSession(f.session.sessionId).submittedUserMessageId, null);
   } finally { await f.close(); }
 });
 

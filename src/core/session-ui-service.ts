@@ -856,10 +856,13 @@ export class SessionUiService {
     const page = this.#requirePage(owner);
     const binding = this.#registry.refreshPage(owner.pageKey!);
     const tracker = new ExactFinalTracker(this.#quietWindowMs);
+    let currentActivity: { activity: string; activityReason: string | null; laterUserFound: boolean; providerAlerts: readonly string[]; errorCode: string | null } | undefined;
     const observe = async () => {
       this.#requirePage(owner);
       const dom = await observeChatGptDom(page, original);
       const activity = await observeChatGptActivity(page, dom);
+      currentActivity = { activity: activity.strength, activityReason: activity.reason, laterUserFound: dom.laterUserFound,
+        providerAlerts: dom.providerAlerts, errorCode: dom.actionableAlert ? 'provider.actionable-alert' : null };
       const dialog = await observeChatGptDialog(page);
       this.#requirePage(owner);
       const after = this.#registry.refreshPage(owner.pageKey!);
@@ -886,7 +889,7 @@ export class SessionUiService {
       answerRecovery: { observedAt: new Date().toISOString(), conversationId: original.conversationId,
         submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId,
         responseMessageId: recovered.responseMessageId, answerText: recovered.answerText,
-        terminal: recovered.kind === 'complete', reason: recovered.reason } };
+        terminal: recovered.kind === 'complete', reason: recovered.reason, ...currentActivity } };
   }
 
   /** Reading an exact work turn is independent of later recovery-message ACKs. */
