@@ -40,7 +40,7 @@ test('explicit focus shows the unique retained UNKNOWN target without accepting 
     target.page.bringToFront = async () => { activations++; await activate(); };
     const requestRef = service.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=?').get(session.sessionId)!.outbox_id;
     const inspected = await invokeMcpTool({ name: 'sessionplane_team_get', socketPath: config.socketPath,
-      timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes, arguments: { teamId: team.teamId, requestRef } });
+      timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes, arguments: { teamId: team.teamId, requestRef, view: 'evidence' } });
     const evidence = (inspected.structuredContent.request as { evidence: { conversationRecovery: { activityReason: string } } }).evidence;
     assert.equal(evidence.conversationRecovery.activityReason, 'unverified-stop-control');
     assert.equal(activations, 0, 'Read-only inspection does not focus the target');

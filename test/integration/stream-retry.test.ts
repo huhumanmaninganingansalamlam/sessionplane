@@ -124,7 +124,7 @@ test('UNKNOWN Continue retries existing conversation chrome while preserving dra
     assert.equal(retry.requestAcknowledgementVerified, false);
     assert.equal(await f.page.locator('textarea').inputValue(), '계속');
     assert.equal(await f.page.evaluate(() => (window as any).clicks), 1);
-    const observed = await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef });
+    const observed = await f.invoke('team_get', { view: 'evidence', teamId: f.team.teamId, requestRef: f.sent.requestRef });
     const request = observed.structuredContent.request as any;
     const candidate = request.evidence.submissionCandidates.find((entry: any) => entry.messageId === 'continue-three');
     assert.equal(candidate.responseCandidate.answerText, 'Existing work resumed');

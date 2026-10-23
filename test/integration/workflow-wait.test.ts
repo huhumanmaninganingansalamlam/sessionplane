@@ -66,7 +66,7 @@ test('CLI retains submitted missing-anchor pacing until the same ACK answer is r
       stdin: Readable.from([]), stdout: new Writable({ write(c, _e, done) { stdout += c; done(); } }),
       stderr: new Writable({ write(c, _e, done) { stderr += c; done(); } }) });
     await f.untilSubscribed(session.sessionId);
-    const pending = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef })).structuredContent.request as any;
+    const pending = (await f.invoke('team_get', { view: 'evidence', teamId: f.team.teamId, requestRef: f.sent.requestRef })).structuredContent.request as any;
     assert.equal(pending.status, 'recovery_required');
     assert.equal(workflowWaitOutcome(pending), false);
     assert.equal(workflowWaitOutcome({ ...pending, observationTransport: 'fresh',
@@ -114,7 +114,7 @@ test('CLI retains the original ACK through automatic load recovery without a bac
       stderr: new Writable({ write(c, _e, done) { stderr += c; done(); } }) })
       .then(code => { returned = true; return code; });
     await f.untilSubscribed(session.sessionId);
-    const pending = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef })).structuredContent.request as any;
+    const pending = (await f.invoke('team_get', { view: 'evidence', teamId: f.team.teamId, requestRef: f.sent.requestRef })).structuredContent.request as any;
     assert.equal(pending.submissionVerification.backend, null);
     assert.equal(pending.status, 'recovery_required');
     assert.equal(returned, false, 'Automatic load recovery must remain inside the original CLI wait');
@@ -170,7 +170,7 @@ test('short workflow wait holds progress/429 for a full minute and cancellation 
     assert.equal(result[0].submittedUserMessageId, f.sent.submittedUserMessageId);
     assert.equal(result[0].conversationUsage, undefined);
     assert.equal(result[0].evidence, undefined);
-    const view = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef })).structuredContent.request as any;
+    const view = (await f.invoke('team_get', { view: 'evidence', teamId: f.team.teamId, requestRef: f.sent.requestRef })).structuredContent.request as any;
     assert.notEqual(view.activity.lastGenerationStateChange?.eventType, 'generation.backend-deferred');
     assert.equal(view.activity.latestStoredArtifactChangeAt, null);
 
@@ -371,10 +371,21 @@ test('authorized broad continuation review stays inside the wait and runs at thi
       untilResult: false, continuationApproved: true }).then(value => { returned = true; return value; });
     await f.untilSubscribed(f.sent.sessionId as string);
     assert.equal(reviews, 0);
+    const status = async () => (await f.invoke('team_get', {
+      teamId: f.team.teamId, requestRef: f.sent.requestRef,
+    })).structuredContent.request as any;
+    const before = await status();
+    assert.deepEqual(before.collection.waits, [{ requestRef: f.sent.requestRef, continuationApproved: true }]);
+    assert.equal(before.managedContinuation.active, true);
+    assert.ok(Date.parse(before.managedContinuation.nextReviewAt) > Date.now());
     t.mock.timers.tick(1800000);
     for (let i = 0; i < 20; i++) await flush();
     assert.equal(reviews, 1);
     assert.equal(returned, false);
+    const reviewed = await status();
+    assert.equal(reviewed.managedContinuation.lastReviewReason, 'provider.failure-unverified');
+    assert.equal(Date.parse(reviewed.managedContinuation.nextReviewAt) -
+      Date.parse(reviewed.managedContinuation.lastReviewAt), 1800000);
     await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, { reason: 'provider-stream-disconnected' });
     for (let i = 0; i < 20; i++) await flush();
     assert.equal(reviews, 1, 'Progress cannot cause rapid broad reviews');
@@ -382,6 +393,7 @@ test('authorized broad continuation review stays inside the wait and runs at thi
       { sessionState: 'complete', providerState: 'complete', answerText: 'Original final', responseMessageId: 'final' });
     await waiting;
     assert.equal(f.fake.submitCount, 1);
+    assert.deepEqual((await status()).collection.waits, []);
   } finally { t.mock.timers.reset(); await f.close(); }
 });
 

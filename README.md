@@ -12,7 +12,7 @@ and one runtime contract.
 ## ChatGPT mode
 
 ChatGPT sends require an observed Chat selection, independently of model and effort.
-`session show` and exact-request `team_get` return `observedSurface` with `mode`,
+`session show` and exact-request `team_get` with `view:evidence` return `observedSurface` with `mode`,
 `source` and `observedAt`; `requested.surface` is caller intent, not observation.
 The provider reads an explicit selected control or the mounted composer's explicit
 Work-conversation state. During preparation, temporary missing or conflicting
@@ -113,7 +113,12 @@ machine-readable results and diagnostics.
 2. Start one request with `sessplane request send TEAM_ID ROLE_REF --prompt-file FILE`.
    This can submit immediately when the provider is ready, or pause for preparation.
    Keep its operation reference and read the reported delivery status.
-3. Follow `request show` for that exact request. Select an available combined model
+3. `request show TEAM_ID REQUEST_REF` reads compact stored status without probing
+   the provider. It separates ACK, answer availability, connected collectors and
+   the managed chain's next review from backend pacing. `--view result` recovers
+   the exact answer; `--view evidence` also reads fresh UI, prompt/candidates and
+   controls (MCP: `team_get` with the same `view`). Use evidence for preparation.
+   Select an available combined model
    using the displayed `request configure` command, then the fresh composer control.
    Inspect the input before explicitly choosing the submit control. Disabled or stale
    controls are not a fallback; inspect the same request again.
@@ -125,7 +130,7 @@ machine-readable results and diagnostics.
    follows the continuation chain and collects the answer. Do not add a competing
    wait or manual `계속`. Add `--out DIR` for files. Return actual successor/ACK/result
    references to the owner; an ACK or alive collector is not product progress.
-5. Read the same request when delivery is unconfirmed; never retry the original
+5. Read the same request with `--view evidence` when delivery is unconfirmed; never retry the original
    `send` or bind an ambiguous candidate. Report a returned recovery decision or
    send failure immediately. If human review/refresh is needed, focus the exact
    tab and state its current error and one required user action; do not refresh
@@ -156,7 +161,7 @@ Tagged releases attach a prebuilt npm package and SHA-256 checksum. Install the
 release package globally, then run the built-in doctor:
 
 ```bash
-VERSION=0.4.66
+VERSION=0.4.67
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz"
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz.sha256"
 sha256sum -c "sessionplane-$VERSION.tgz.sha256"
@@ -289,6 +294,10 @@ sessplane serve --providers chatgpt,gemini
 SESSIONPLANE_ENABLED_PROVIDERS=chatgpt sessplane serve
 ```
 
+`system.health` performs a small database read and reports integrity as null (not checked);
+`sessplane doctor` retains the explicit full integrity check outside Core. Routine health
+does not scan stored receipts or block provider observation.
+
 `system.health` reports `providers.supported`, `providers.enabled`, and
 `providers.disabled`. Disabled providers are not registered in the running core,
 new sessions for them fail with `provider.disabled`, and restart recovery does not
@@ -354,5 +363,5 @@ Search, context packaging, project-source management and code ZIP orchestration
 are outside SessionPlane's chat-session scope; use existing agent tools.
 
 Long operator CLI prompts support --prompt-file or --prompt-stdin. Agents use
-structured MCP arguments. An ambiguous request is inspected with team_get and its
-requestRef; inspection never resends a prompt.
+structured MCP arguments. An ambiguous request is inspected with team_get, its
+requestRef and view:evidence; inspection never resends a prompt.

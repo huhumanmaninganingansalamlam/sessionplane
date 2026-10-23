@@ -46,7 +46,7 @@ test('failed exact request remains inspectable and displayable without reopening
     t.mock.method(page, 'bringToFront', async () => { throw new Error('No focus'); });
     await page.locator('#retry').evaluate(button => button.addEventListener('click', () => { button.setAttribute('data-clicked', 'true'); }));
 
-    const read = await invoke('sessionplane_team_get', {});
+    const read = await invoke('sessionplane_team_get', { view: 'evidence' });
     assert.equal(read.isError, false, JSON.stringify(read));
     const result = read.structuredContent.request as Record<string, any>;
     assert.equal(result.terminal, true);
@@ -77,7 +77,7 @@ test('failed exact request remains inspectable and displayable without reopening
     assert.equal(latestDisplayTarget({ ...failed, submittedUserMessageId: null, submittedUserTurnId: null }), null);
     await page.close();
     const pageCount = core.browserOwner!.status.pageCount;
-    const missing = await invoke('sessionplane_team_get', {});
+    const missing = await invoke('sessionplane_team_get', { view: 'evidence' });
     assert.equal(missing.isError, false, JSON.stringify(missing));
     const missingResult = missing.structuredContent.request as Record<string, any>;
     assert.equal(missingResult.terminal, true);

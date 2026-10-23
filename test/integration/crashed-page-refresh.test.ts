@@ -66,7 +66,7 @@ test('native crash refresh reconnects only the original unsubmitted request with
     // The separate HTTP-backed controller test kills a real renderer (routes
     // attached to a dead controller cannot serve its subsequent navigation).
     page.emit('crash');
-    const read = await invoke('sessionplane_team_get', { teamId: team.teamId, requestRef: row.outbox_id });
+    const read = await invoke('sessionplane_team_get', { view: 'evidence', teamId: team.teamId, requestRef: row.outbox_id });
     const request = read.structuredContent.request as Record<string, any>;
     assert.equal(request.pageHealth.pageKey, binding.pageKey);
     assert.equal(request.pageHealth.identityMatches, true);
@@ -111,7 +111,7 @@ test('native crash refresh reconnects only the original unsubmitted request with
       'Native refresh returns fresh UI inspection before any explicit preparation continuation');
     assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation<? ORDER BY generation').all(session.sessionId, original.generation),
       generations.filter(g => Number(g.generation) < original.generation));
-    const prepared = await invoke('sessionplane_team_get', { teamId: team.teamId, requestRef: row.outbox_id });
+    const prepared = await invoke('sessionplane_team_get', { view: 'evidence', teamId: team.teamId, requestRef: row.outbox_id });
     assert.equal((prepared.structuredContent.request as Record<string, any>).promptSubmitted, false);
     assert.equal((prepared.structuredContent.request as Record<string, any>).submissionState, 'prepared');
     assert.equal(fake.submitCount, 1, 'Recovery and inspection never send');

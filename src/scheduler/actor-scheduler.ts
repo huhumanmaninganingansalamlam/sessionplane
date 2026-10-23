@@ -53,6 +53,10 @@ export class ActorScheduler {
     return total;
   }
 
+  collectors(sessionId: string) {
+    return this.#actors.get(sessionId)?.collectors ?? [];
+  }
+
   restore(): number {
     const snapshots = this.#sessions.listNonterminalSnapshots();
     const revisions = this.#events.latestSequencesForSessions(snapshots.map((snapshot) => snapshot.sessionId));

@@ -169,7 +169,7 @@ test('isolated MCP get/wait displays required user review without terminalizing 
     const required = (teamResult.structuredContent.roles as Record<string, any>[])[0]!;
     assert.equal(required.requestRef, request.outboxId); assert.equal(required.recovery.url, record.url);
     assert.match(JSON.stringify(teamResult.structuredContent), /User review required/);
-    const exact = await invoke('team_get', { teamId: team.teamId, requestRef: request.outboxId });
+    const exact = await invoke('team_get', { view: 'evidence', teamId: team.teamId, requestRef: request.outboxId });
     const waited = await invoke('wait', { teamId: team.teamId, requestRefs: [request.outboxId], waitMs: 30_000 });
     for (const result of [exact.structuredContent.request, (waited.structuredContent.results as Record<string, unknown>[])[0]!]) {
       const value = result as Record<string, any>;
@@ -189,7 +189,7 @@ test('isolated MCP get/wait displays required user review without terminalizing 
     const server = runMcpServer({ config, input, output, error });
     input.end([
       { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } },
-      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sessionplane_team_get', arguments: { teamId: team.teamId, requestRef: request.outboxId } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sessionplane_team_get', arguments: { view: 'evidence', teamId: team.teamId, requestRef: request.outboxId } } },
     ].map(value => JSON.stringify(value) + '\n').join(''));
     await server;
     const response = wire.trim().split('\n').map(line => JSON.parse(line)).find(value => value.id === 2);

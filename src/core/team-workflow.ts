@@ -26,7 +26,7 @@ type RoleInput = Mutation & { roleRef: string };
 
 export class TeamWorkflow {
   readonly #outbox: OutboxRepository;
-  readonly #continuationReviews = new Map<string, number>();
+  readonly #continuationReviews = new Map<string, { at: number; reviewed: boolean; reason: string | null }>();
   readonly #sessions: SessionRepository;
   readonly #loadRecovery: ConversationLoadRecoveryRepository;
   readonly services: {
@@ -58,17 +58,20 @@ export class TeamWorkflow {
     return this.getTeam({ teamId: team.teamId });
   }
 
-  async getTeam(input: { teamId: string; requestRef?: string | undefined; maxNodes?: number | undefined; history?: boolean | undefined; beforeRequestRef?: string | undefined }) {
+  async getTeam(input: { teamId: string; requestRef?: string | undefined; view?: 'summary' | 'result' | 'evidence' | undefined; maxNodes?: number | undefined; history?: boolean | undefined; beforeRequestRef?: string | undefined }) {
     const team = this.services.directory.getTeam(input.teamId);
     const selected = input.requestRef === undefined ? undefined : this.#request({ teamId: input.teamId, requestRef: input.requestRef });
     const before = input.beforeRequestRef === undefined ? undefined : this.#request({ teamId: input.teamId, requestRef: input.beforeRequestRef });
+    const view = input.view ?? (input.maxNodes === undefined ? 'summary' : 'evidence');
     const history = input.history === true || before !== undefined
       ? this.#outbox.historyForTeam(team.teamId, before)
       : { requests: selected === undefined ? this.#outbox.listForTeam(team.teamId) : [], nextRequestRef: null };
     return {
       ...(selected === undefined ? team : {
         requestOk: true,
-        request: { ...await this.#observe(selected, input.maxNodes, true),
+        request: { ...requestView(await this.#observe(selected, input.maxNodes, view === 'evidence', view === 'summary'), view),
+          collection: { scope: 'session', waits: this.services.scheduler.collectors(selected.sessionId) },
+          managedContinuation: this.#managedContinuationStatus(selected),
           activity: {
             lastGenerationStateChange: new EventRepository(this.services.database.raw)
               .latestGenerationActivity(selected.sessionId, selected.generation),
@@ -442,7 +445,7 @@ export class TeamWorkflow {
       try {
         let request = this.#request({ teamId: input.teamId, requestRef });
         if (input.waitMs > 0 && !controller.signal.aborted) {
-          releaseCollector = this.services.scheduler.actorFor(request.sessionId).retainCollector();
+          releaseCollector = this.services.scheduler.actorFor(request.sessionId).retainCollector(requestRef, input.continuationApproved === true);
         }
         let result: Record<string, unknown> = await this.#observe(request, undefined, input.waitMs > 0 && input.continuationApproved === true);
         const followupTracker = new ExactFinalTracker(1500);
@@ -507,7 +510,7 @@ export class TeamWorkflow {
               // A carried banner is not a new interruption of a just-submitted
               // successor. Reuse the normal broad review cadence for that ACK.
               if (!this.#continuationReviews.has(request.outboxId))
-                this.#continuationReviews.set(request.outboxId, Date.parse(request.updatedAt));
+                this.#continuationReviews.set(request.outboxId, { at: Date.parse(request.updatedAt), reviewed: false, reason: null });
               result = await this.#observe(request, undefined, true);
               continue;
             }
@@ -516,13 +519,15 @@ export class TeamWorkflow {
             // first interruption: retain the broad interval from acknowledgement.
             if (!this.#continuationReviews.has(request.outboxId) &&
                 typeof JSON.parse(request.payloadJson).continuationOf === 'string')
-              this.#continuationReviews.set(request.outboxId, Date.parse(request.updatedAt));
+              this.#continuationReviews.set(request.outboxId, { at: Date.parse(request.updatedAt), reviewed: false, reason: null });
             const priorReview = this.#continuationReviews.get(request.outboxId);
-            const lastReview = priorReview ?? request.createdAt;
+            const lastReview = priorReview?.at ?? request.createdAt;
             const due = Date.now() - (typeof lastReview === 'number' ? lastReview : Date.parse(lastReview)) >= 30 * 60_000;
             if (due) {
-              this.#continuationReviews.set(request.outboxId, Date.now());
+              const review = { at: Date.now(), reviewed: true, reason: null };
+              this.#continuationReviews.set(request.outboxId, review);
               result = await this.#observe(request, undefined, true);
+              this.#continuationReviews.set(request.outboxId, { ...review, reason: String(result.reason ?? 'unverified') });
             }
             const timeoutReady = (result.submissionVerification as { nextAction?: string } | undefined)?.nextAction === 'reconcile_failure';
             const serverReview = (result.submissionVerification as { serverObservation?: {
@@ -587,7 +592,7 @@ export class TeamWorkflow {
             if ((due || timeoutDue || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
                 (interrupted || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
                 result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
-              this.#continuationReviews.set(request.outboxId, Date.now());
+              this.#continuationReviews.set(request.outboxId, { at: Date.now(), reviewed: true, reason: String(result.reason ?? 'unverified') });
               try {
                 result = await this.decide({ teamId: input.teamId, requestRef: request.outboxId,
                   requestId: reviewId, decision: 'continue', continuationApproved: true,
@@ -597,11 +602,13 @@ export class TeamWorkflow {
                     evidenceRef: `Approved managed review of exact idle unanswered turn ${request.outboxId}`,
                   } } : {}) });
                 request = this.#request({ teamId: input.teamId, requestRef: String(result.requestRef) });
-                this.#continuationReviews.set(request.outboxId, Date.now());
+                this.#continuationReviews.set(request.outboxId, { at: Date.now(), reviewed: false, reason: null });
                 continue;
               } catch (error) {
                 if (!(error instanceof SessionPlaneDomainError) || (!interrupted &&
                     !['provider.failure-unverified', 'provider.preparation-required', 'session.busy'].includes(error.errorCode))) throw error;
+                const review = this.#continuationReviews.get(request.outboxId);
+                if (review) this.#continuationReviews.set(request.outboxId, { ...review, reason: error.errorCode });
                 // Preserve uncertain work, but never swallow an inability to
                 // recover an observed interruption. The caller must see it now.
                 if (interrupted) result = { ...result, status: 'recovery_required', recovery: {
@@ -769,12 +776,67 @@ export class TeamWorkflow {
     };
   }
 
-  async #observe(request: OutboxRecord, maxNodes?: number, inspectCurrent = false): Promise<Record<string, unknown>> {
+  #managedContinuationStatus(original: OutboxRecord) {
+    const waits = this.services.scheduler.collectors(original.sessionId);
+    let current = original;
+    for (;;) {
+      const child = this.#outbox.getByRequest(current.clientId, `continue:managed-continuation:${current.outboxId}`);
+      if (!child) break;
+      current = child;
+    }
+    const snapshot = this.services.directory.getSession(current.sessionId);
+    const stored = this.#sessions.getGenerationResult(current.sessionId, current.generation);
+    const lastReview = this.#continuationReviews.get(current.outboxId);
+    const baseline = lastReview?.at ?? Date.parse(typeof JSON.parse(current.payloadJson).continuationOf === 'string'
+      ? current.updatedAt : current.createdAt);
+    const held = this.#loadRecovery.isUserHeld(snapshot.conversationId);
+    const active = waits.some(wait => {
+      if (!wait.continuationApproved) return false;
+      let ancestor: OutboxRecord | null = current;
+      while (ancestor) {
+        if (ancestor.outboxId === wait.requestRef) return true;
+        const parent: unknown = JSON.parse(ancestor.payloadJson).continuationOf;
+        const prior = typeof parent === 'string' ? this.#outbox.getById(parent) : null;
+        if (prior && (prior.sessionId !== current.sessionId || prior.generation >= ancestor.generation)) return false;
+        ancestor = prior;
+      }
+      return false;
+    });
+    const terminal = snapshot.generation === current.generation ? snapshot.terminal : stored?.completedAt != null;
+    return { active, observationHeld: held, requestRef: current.outboxId, generation: current.generation,
+      submittedUserMessageId: stored?.submittedUserMessageId ?? null,
+      ...new EventRepository(this.services.database.raw).submissionTimeline(current.sessionId, current.generation),
+      lastReviewAt: lastReview?.reviewed ? new Date(lastReview.at).toISOString() : null,
+      lastReviewReason: lastReview?.reviewed ? lastReview.reason : null,
+      nextReviewAt: active && !held && !terminal && snapshot.generation === current.generation
+        ? new Date(baseline + 30 * 60_000).toISOString() : null,
+      backendNextCheckAt: snapshot.generation === current.generation ? snapshot.nextCheckAt : null,
+      reason: held ? 'human-review' : !active ? 'no-approved-collector' : terminal ? 'terminal'
+        : snapshot.generation !== current.generation ? 'generation-superseded' : snapshot.reason,
+    };
+  }
+
+  #storedRequest(request: OutboxRecord): Record<string, unknown> {
+    const snapshot = this.services.directory.getSession(request.sessionId);
+    const receipt = JSON.parse(request.resultJson ?? '{}');
+    const failure = request.submissionState === 'failed_pre_submit' ? { message: receipt.message } : {};
+    if (snapshot.generation === request.generation)
+      return { ...snapshot, ...failure, requestRef: request.outboxId, roleRef: roleRef(snapshot),
+        ...(needsDecision(snapshot) ? { status: 'needs_decision' } : {}) };
+    const original = this.#sessions.getGenerationResult(request.sessionId, request.generation);
+    return { requestOk: true, requestRef: request.outboxId, teamId: request.teamId, sessionId: request.sessionId,
+      generation: request.generation, ...original, ...failure, historical: true,
+      terminal: original?.completedAt != null, waitExpired: false,
+      conversationId: receipt.sessionId === request.sessionId && receipt.generation === request.generation
+        ? receipt.conversationId ?? null : null };
+  }
+
+  async #observe(request: OutboxRecord, maxNodes?: number, inspectCurrent = false, storedOnly = false): Promise<Record<string, unknown>> {
     const userReview = this.#userReview(request);
     if (userReview) return userReview;
     const snapshot = this.#sessions.getSnapshot(request.sessionId)!;
     const required = snapshot.generation === request.generation ? this.#loadRecoveryRequired(snapshot) : null;
-    const result = required === null ? await this.#observeRequest(request, maxNodes, inspectCurrent)
+    const result = required === null ? storedOnly ? this.#storedRequest(request) : await this.#observeRequest(request, maxNodes, inspectCurrent)
       : { ...snapshot, ...required, requestRef: request.outboxId, roleRef: roleRef(snapshot) };
     const payload = JSON.parse(request.payloadJson);
     const optedIn = payload.thinkingFailureRecovery === true;
@@ -1044,6 +1106,24 @@ export class TeamWorkflow {
     return { ...snapshot, requestRef: request.outboxId, roleRef: roleRef(snapshot),
       ...(failureMessage === undefined ? {} : { message: failureMessage }) };
   }
+}
+
+function requestView(result: Record<string, unknown>, view: 'summary' | 'result' | 'evidence'): Record<string, unknown> {
+  if (view === 'evidence') return { ...result, view };
+  const { evidence, requested, configurationCatalog, choices, ...rest } = result;
+  if (view === 'result') return { ...rest, view };
+  const { answerText, ...summary } = rest;
+  const verification = summary.submissionVerification as Record<string, unknown> | undefined;
+  const server = verification?.serverObservation as Record<string, unknown> | undefined;
+  const observed = server?.serverObservation as { messages?: { role: string }[] } | undefined;
+  return { ...summary, ...(observed ? { submissionVerification: { ...verification,
+    serverObservation: { ...server, serverObservation: { ...observed, messages: undefined,
+      messageCount: observed.messages?.length ?? 0,
+      lastAssistant: observed.messages?.findLast(message => message.role === 'assistant') ?? null,
+      lastTool: observed.messages?.findLast(message => message.role === 'tool') ?? null } } } } : {}),
+    view, answer: typeof answerText === 'string' ? {
+    characters: answerText.length, sha256: createHash('sha256').update(answerText).digest('hex'),
+  } : null };
 }
 
 function roleRef(snapshot: SessionSnapshot) { return `${snapshot.sessionId}:${snapshot.generation}`; }

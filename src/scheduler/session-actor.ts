@@ -29,7 +29,7 @@ export class SessionActor {
   #queueDepth = 0;
   #nextWaiterId = 1;
   readonly #waiters = new Map<number, Waiter>();
-  #collectors = 0;
+  readonly #collectors = new Map<symbol, { requestRef: string; continuationApproved: boolean }>();
   readonly #onIdleTerminal: (() => void) | null;
   #closed = false;
 
@@ -49,17 +49,22 @@ export class SessionActor {
   }
 
   get subscriberCount(): number {
-    return this.#waiters.size + this.#collectors;
+    return this.#waiters.size + this.#collectors.size;
+  }
+
+  get collectors(): readonly { requestRef: string; continuationApproved: boolean }[] {
+    return [...this.#collectors.values()];
   }
 
   /** Keep collection interest between the managed wait's observation rounds. */
-  retainCollector(): () => void {
-    this.#collectors++;
+  retainCollector(requestRef: string, continuationApproved: boolean): () => void {
+    const key = Symbol();
+    this.#collectors.set(key, { requestRef, continuationApproved });
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      this.#collectors--;
+      this.#collectors.delete(key);
       this.#retireIfIdleTerminal();
     };
   }

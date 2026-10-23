@@ -78,7 +78,7 @@ test('unavailable preparation never offers Retry as submit and preserves the sam
       requestId: 'unavailable-send', prompt: 'Preserve this exact request', model: 'Aurora-8 / Deep' })).structuredContent;
     const identity = { teamId: team.teamId, requestRef: pending.requestRef };
     const inspect = async () => {
-      const response = await invoke('team_get', identity);
+      const response = await invoke('team_get', { ...identity, view: 'evidence' });
       assert.equal(response.isError, false, JSON.stringify(response));
       return response.structuredContent.request as Record<string, any>;
     };
@@ -325,7 +325,7 @@ test('a failed discovery stays on its request and does not poison another reques
     const repeated = await invoke('decide', { teamId: failedTeam.teamId, requestRef: failed.requestRef,
       requestId: 'isolation-failed-again', decision: 'discover' });
     assert.equal(repeated.configurationCatalog.status, 'unavailable');
-    const healthyAgain = await invoke('team_get', { teamId: healthyTeam.teamId, requestRef: healthy.requestRef });
+    const healthyAgain = await invoke('team_get', { view: 'evidence', teamId: healthyTeam.teamId, requestRef: healthy.requestRef });
     assert.equal(healthyAgain.request.configurationCatalog.status, 'available', 'another page failure must preserve a successful catalog');
     const option = healthyAgain.request.configurationCatalog.options.find((o: any) => o.label === 'Aurora-9 / Deep');
     t.mock.method(ChatGptConfigurationMenu.prototype, 'select', async () => {
@@ -337,7 +337,7 @@ test('a failed discovery stays on its request and does not poison another reques
     assert.equal(timedOut.isError, true);
     assert.equal(timedOut.structuredContent.errorCode, 'browser.unavailable');
     assert.match(String(timedOut.structuredContent.message), /Configuration click timed out/);
-    const afterTimeout = await invoke('team_get', { teamId: healthyTeam.teamId, requestRef: healthy.requestRef });
+    const afterTimeout = await invoke('team_get', { view: 'evidence', teamId: healthyTeam.teamId, requestRef: healthy.requestRef });
     assert.equal(afterTimeout.request.configurationCatalog.status, 'available', 'local click failure must not discard shared observations');
     const selected = await invoke('decide', { teamId: healthyTeam.teamId, requestRef: healthy.requestRef,
       requestId: 'isolation-healthy-select', ...afterTimeout.request.configurationCatalog.options.find((o: any) => o.id === option.id).selection });
@@ -389,7 +389,7 @@ test('timeout recovery validates fresh summaries, rejects closed-menu evidence a
     const pending = await success('send', { teamId: team.teamId, roleRef: team.roles[0].roleRef,
       requestId: 'summary-send', prompt, model: '5.5 Pro' });
     const identity = { teamId: team.teamId, requestRef: pending.requestRef };
-    const inspect = async () => (await success('team_get', identity)).request as Record<string, any>;
+    const inspect = async () => (await success('team_get', { ...identity, view: 'evidence' })).request as Record<string, any>;
     // Each recovery decision reads current request state first, as the skill requires.
     const prepared = async () => {
       const q = await inspect();

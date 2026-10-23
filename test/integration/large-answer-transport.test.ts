@@ -248,7 +248,7 @@ async function callMcpStatus(
         method: 'tools/call',
         params: {
           name: 'sessionplane_team_get',
-          arguments: { teamId, requestRef },
+          arguments: { teamId, requestRef, view: 'result' },
           _meta: {
             'io.modelcontextprotocol/protocolVersion': MCP_MODERN_PROTOCOL_VERSION,
             'io.modelcontextprotocol/clientCapabilities': {},

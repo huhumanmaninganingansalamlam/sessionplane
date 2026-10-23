@@ -89,7 +89,7 @@ test('UNKNOWN reads expose durable canonical probe evidence without resending ac
     fake.recoverAcknowledgement = async input => { input.onRecoveryObservation?.(probe); return null; };
     const read = async () => {
       await service.submissionService.recoverAcknowledgement(service.teamDirectory.getSession(session.sessionId));
-      return (await rpc<{ request: any }>(fixture.config.socketPath, 'workflow.team_get', {
+      return (await rpc<{ request: any }>(fixture.config.socketPath, 'workflow.team_get', { view: 'evidence',
         teamId, requestRef: request.outbox_id })).request;
     };
     const deferred = await read();
@@ -179,7 +179,7 @@ test('legacy submitted reads revalidate missing original anchor without adopting
     await service.actorScheduler.updateGeneration(session.sessionId, 1, {}, 'generation.backend-pending',
       'backend-user-anchor-absent-from-mapping', { pageKey: page.binding.pageKey, conversationId: original.conversationId,
         submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId }, serverObservation);
-    const read = async () => (await rpc<{ request: Record<string, any> }>(config.socketPath, 'workflow.team_get', { teamId, requestRef })).request;
+    const read = async () => (await rpc<{ request: Record<string, any> }>(config.socketPath, 'workflow.team_get', { view: 'evidence', teamId, requestRef })).request;
     const missing = await read();
     assert.equal(missing.status, 'recovery_required'); assert.equal(missing.terminal, false);
     assert.equal(missing.submissionState, 'submitted'); assert.equal(missing.responseMessageId, null);
@@ -308,7 +308,7 @@ test('workflow reads expose provider alert text separately from backend 429 and 
     ).get(session.sessionId) as { payload_json: string };
     assert.equal(JSON.parse(deferredEvent.payload_json).recoveryReason, 'backend-http-429');
     const read = await workflow<{ request: SessionSnapshot & { evidence: { providerAlerts: string[] } } }>(
-      'team_get', { teamId, requestRef });
+      'team_get', { view: 'evidence', teamId, requestRef });
     assert.equal(read.request.errorCode, 'provider.actionable-alert');
     assert.equal(read.request.reason, 'provider-actionable-alert');
     assert.equal(read.request.terminal, false);

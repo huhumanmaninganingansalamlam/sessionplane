@@ -147,7 +147,7 @@ test('core restart reconnects prepared request to its exact live target, not an 
     assert.equal(pending.isError, false, JSON.stringify(pending));
     const identity = { teamId: team.teamId, requestRef: pending.structuredContent.requestRef };
     const inspect = async () => {
-      const response = await invoke('team_get', identity);
+      const response = await invoke('team_get', { ...identity, view: 'evidence' });
       assert.equal(response.isError, false, JSON.stringify(response));
       return response.structuredContent.request as Record<string, any>;
     };

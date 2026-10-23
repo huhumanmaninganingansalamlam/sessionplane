@@ -360,7 +360,7 @@ test('MCP team decisions continue the same generation across restart, UI drift a
     writeFileSync(attachmentPath, 'Caller edited the original after acceptance.');
 
     const inspect = async () => {
-      const result = await invoke('sessionplane_team_get', identity);
+      const result = await invoke('sessionplane_team_get', { ...identity, view: 'evidence' });
       assert.equal(result.isError, false, JSON.stringify(result));
       const request = result.structuredContent.request as { pageKey: string; evidence: { snapshotId: string; pageKey: string; nodes: Array<{ ref: string; role: string; name: string; actions: { choose: string[]; reveal: string[] } }> } };
       assert.ok(request.evidence, JSON.stringify(result.structuredContent));
@@ -559,7 +559,7 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
     const page = service.pageRegistry.pageForObservation(sent.pageKey!);
     const view = await callRpc<{ requests: Array<{ requestRef: string }> }>({ socketPath: config.socketPath, method: 'workflow.team_get', params: { teamId: team.teamId } });
     const identity = { teamId: team.teamId, requestRef: view.requests[0]!.requestRef };
-    const inspect = () => invokeMcpTool({ name: 'sessionplane_team_get', arguments: identity,
+    const inspect = () => invokeMcpTool({ name: 'sessionplane_team_get', arguments: { ...identity, view: 'evidence' },
       socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
     const pending = await inspect();
     assert.equal(pending.isError, false);
@@ -713,7 +713,7 @@ test('MCP preserves a lost ambiguous request after replacement without a convers
     const role = (created.roles as Array<{ roleRef: string }>)[0]!;
     const sent = await invoke('send', { teamId, roleRef: role.roleRef, requestId: 'lost-send', prompt: 'Uncertain request' });
     const identity = { teamId, requestRef: sent.structuredContent.requestRef };
-    const inspect = async () => (await invoke('team_get', identity)).structuredContent.request as Record<string, unknown>;
+    const inspect = async () => (await invoke('team_get', { ...identity, view: 'evidence' })).structuredContent.request as Record<string, unknown>;
     for (const purpose of ['composer', 'submit']) {
       const evidence = (await inspect()).evidence as { snapshotId: string; nodes: Array<{ ref: string; role: string; editable: boolean }> };
       const target = evidence.nodes.find((n) => purpose === 'composer' ? n.editable && n.role === 'textbox' : n.role === 'button')!;

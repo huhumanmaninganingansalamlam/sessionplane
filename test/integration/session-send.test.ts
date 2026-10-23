@@ -726,7 +726,7 @@ test('account cooldown parks the same request, blocks preparation, and rechecks 
     let decisions = 0;
     await assert.rejects(service.submissionService.decidePreparation({ ...owner, decisionId: 'cooldown-choice',
       decision: 'discover', purpose: 'model' }, async () => { decisions++; return { choice: null, result: {} }; }), /cooldown/);
-    const observed = await rpc<any>(config.socketPath, 'workflow.team_get', { teamId: team.teamId, requestRef: pending.id });
+    const observed = await rpc<any>(config.socketPath, 'workflow.team_get', { view: 'evidence', teamId: team.teamId, requestRef: pending.id });
     assert.equal(observed.request.nextCheckAt, until);
     assert.equal(observed.request.reason, 'account-cooldown');
     assert.equal(observed.request.generation, pending.generation);
