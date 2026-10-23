@@ -371,6 +371,94 @@ test('approved managed wait resumes an exact disconnected tool turn despite stal
   } finally { await f.close(); }
 });
 
+test('original HostSpan grant remains controllable after an approved continuation is prepared but not sent', async t => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    f.fake.idleToolTurn = true;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const question = '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
+    await f.fake.page.setContent(`<main>${configuration}${question}
+      <div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div><textarea></textarea></main>`);
+    t.mock.method(SessionUiService.prototype, 'prepareFailureContinuation', async () => {
+      // The original tool asks permission after continuation preparation has
+      // moved page ownership, but before the new user message is dispatched.
+      await f.fake.page.setContent(`<main>${configuration}${question}
+        <section id="permission"><div role="alert">hostspan-desktop Process Start Command: original review</div>
+        <button onclick="throw Error('Do not choose once')">Allow once</button>
+        <button onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove()">Always allow</button></section>
+        <textarea>Preserved user draft</textarea><button data-testid="stop-button">Stop</button></main>`);
+      throw new SessionPlaneDomainError('provider.preparation-required', 'Original tool permission requires resolution');
+    });
+    await assert.rejects(f.rpc('decide', { teamId: f.team.teamId, requestRef,
+      requestId: 'approved-continue', decision: 'continue', continuationApproved: true }), /permission/);
+    const pending = f.core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(f.session.sessionId)!;
+    assert.equal(pending.submission_state, 'prepared');
+    const current = f.core.teamDirectory.getSession(f.session.sessionId);
+    const history = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(f.session.sessionId)!;
+    const permission = (ref: string, requestId: string, extra: object = {}) => f.rpc<any>('decide', {
+      teamId: f.team.teamId, requestRef: ref, requestId, decision: 'hostspan_permission',
+      action: 'inspect', appName: 'hostspan-desktop', toolName: 'Process Start', allowMode: 'always', ...extra });
+    const inspected = await permission(requestRef, 'inspect-original');
+    assert.equal(inspected.permissionRequestRef, requestRef);
+    assert.equal(inspected.permissionGeneration, 1);
+    assert.equal(inspected.generation, 2);
+    assert.equal(inspected.permission.requestAcknowledgementVerified, true);
+    const viaPending = await permission(String(pending.outbox_id), 'inspect-pending');
+    assert.equal(viaPending.permission.evidenceHash, inspected.permission.evidenceHash);
+    assert.equal(viaPending.permissionRequestRef, requestRef);
+    // An unrelated preparation must not acquire the previous turn's permission.
+    const payload = String(pending.payload_json);
+    f.core.database.raw.prepare('UPDATE outbox SET payload_json=? WHERE outbox_id=?')
+      .run(JSON.stringify({ ...JSON.parse(payload), prompt: 'Unrelated work' }), pending.outbox_id);
+    await assert.rejects(permission(String(pending.outbox_id), 'unrelated'), /permission|continuation|ACK/i);
+    f.core.database.raw.prepare('UPDATE outbox SET payload_json=? WHERE outbox_id=?').run(payload, pending.outbox_id);
+    const receipt = f.core.database.raw.prepare('SELECT result_json FROM outbox WHERE outbox_id=?').get(requestRef)!;
+    f.core.database.raw.prepare('UPDATE outbox SET result_json=? WHERE outbox_id=?')
+      .run(JSON.stringify({ ...JSON.parse(String(receipt.result_json)), submittedUserMessageId: 'different-ack' }), requestRef);
+    await assert.rejects(permission(requestRef, 'different-ack'), /ACK/i);
+    f.core.database.raw.prepare('UPDATE outbox SET result_json=? WHERE outbox_id=?').run(receipt.result_json!, requestRef);
+    await f.fake.page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend',
+      '<div id="later" data-message-author-role="user" data-message-id="later-user">New user</div>'));
+    await assert.rejects(permission(requestRef, 'later-user'), /anchor|current turn/i);
+    await f.fake.page.locator('#later').evaluate(node => node.remove());
+    const allowed = await permission(requestRef, 'allow-original', { action: 'allow', evidenceHash: inspected.permission.evidenceHash });
+    assert.equal(allowed.permission.outcome, 'clicked');
+    assert.equal(allowed.permission.allowMode, 'always');
+    assert.equal(allowed.permission.permissionStillVisible, false);
+    await permission(requestRef, 'allow-original', { action: 'allow', evidenceHash: inspected.permission.evidenceHash });
+    assert.equal(await f.fake.page.evaluate(() => (window as any).grants), 1);
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved user draft');
+    assert.equal(await f.fake.page.locator('[data-testid="stop-button"]').count(), 1);
+    assert.deepEqual(f.core.teamDirectory.getSession(f.session.sessionId), current);
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(f.session.sessionId), history);
+    assert.equal(original.submittedUserMessageId, history.submitted_user_message_id);
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(f.fake.stopCount, 0);
+    let returned = false;
+    const waiting = f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
+      waitMs: 60000, continuationApproved: true }).then(result => { returned = true; return result; });
+    await delay(2000);
+    assert.equal(returned, false, 'Historical tracking cancellation must not complete the original work wait');
+    await f.fake.page.setContent(`<main>${configuration}${question}
+      <div data-message-author-role="assistant" data-message-id="original-review-final" data-end-turn="true">Original review complete; git status exit0</div>
+      <textarea>Preserved user draft</textarea></main>`);
+    new EventRepository(f.core.database.raw).append({ teamId: f.team.teamId,
+      sessionId: f.session.sessionId, generation: 2, eventType: 'fixture.final-rendered', payload: {}, createdAt: new Date().toISOString() });
+    f.core.actorScheduler.refreshSession(f.session.sessionId);
+    const collected = (await waiting).results[0];
+    assert.equal(collected.generation, 1);
+    assert.equal(collected.terminal, true);
+    assert.equal(collected.workResult.responseMessageId, 'original-review-final');
+    assert.match(collected.workResult.answerText, /git status exit0/);
+    assert.equal(collected.workResult.ownerRequestRef, pending.outbox_id);
+    assert.equal(f.fake.submitCount, 1);
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(f.session.sessionId), history);
+    assert.equal(f.core.teamDirectory.getSession(f.session.sessionId).submittedUserMessageId, null);
+  } finally { await f.close(); }
+});
+
 test('explicitly confirmed idle acknowledged turn with no response continues once without replaying product input', async () => {
   const f = await fixture();
   try {

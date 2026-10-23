@@ -781,9 +781,10 @@ export class SessionUiService {
   }
 
   /** Caller holds the exact current request actor and page mutation lock. */
-  async hostspanPermission(session: SessionSnapshot, input: HostSpanPermissionInput) {
+  async hostspanPermission(session: SessionSnapshot, input: HostSpanPermissionInput, original = session) {
     if (session.provider !== 'chatgpt' || session.terminal ||
-        (session.submissionState !== 'submitted' && session.submissionState !== 'submission_unknown') ||
+        (original.submissionState !== 'submitted' && original.submissionState !== 'submission_unknown') ||
+        original.sessionId !== session.sessionId || original.conversationId !== session.conversationId ||
         !session.conversationId) throw new SessionPlaneDomainError(
       'provider.permission-unverified', 'Recover the original ACK before controlling its tool permission');
     try {
@@ -792,14 +793,14 @@ export class SessionUiService {
       const messages = (await readChatGptMessages(page)).filter(message => message.role === 'user');
       // A visible exact grant belongs to this owned conversation independently of
       // an uncertain outgoing message. Never turn controlling that grant into ACK.
-      const anchor = session.submittedUserMessageId ??
-        (session.submissionState === 'submission_unknown' ? messages.at(-1)?.messageId : null);
+      const anchor = original.submittedUserMessageId ??
+        (original.submissionState === 'submission_unknown' ? messages.at(-1)?.messageId : null);
       if (!anchor || messages.at(-1)?.messageId !== anchor) throw new SessionPlaneDomainError(
         'provider.permission-unverified', 'The original user anchor must be the current turn');
       const result = await controlHostSpanPermission(page, input, anchor);
       this.#requirePage(session);
-      return { ...result, requestAcknowledgementVerified: session.submissionState === 'submitted' &&
-        session.submittedUserMessageId !== null };
+      return { ...result, requestAcknowledgementVerified: original.submissionState === 'submitted' &&
+        original.submittedUserMessageId !== null };
     } catch (error) { throw typedUiError(error); }
   }
 
@@ -855,10 +856,13 @@ export class SessionUiService {
     const page = this.#requirePage(owner);
     const binding = this.#registry.refreshPage(owner.pageKey!);
     const tracker = new ExactFinalTracker(this.#quietWindowMs);
+    let currentActivity: { activity: string; activityReason: string | null; laterUserFound: boolean; providerAlerts: readonly string[]; errorCode: string | null } | undefined;
     const observe = async () => {
       this.#requirePage(owner);
       const dom = await observeChatGptDom(page, original);
       const activity = await observeChatGptActivity(page, dom);
+      currentActivity = { activity: activity.strength, activityReason: activity.reason, laterUserFound: dom.laterUserFound,
+        providerAlerts: dom.providerAlerts, errorCode: dom.actionableAlert ? 'provider.actionable-alert' : null };
       const dialog = await observeChatGptDialog(page);
       this.#requirePage(owner);
       const after = this.#registry.refreshPage(owner.pageKey!);
@@ -885,7 +889,7 @@ export class SessionUiService {
       answerRecovery: { observedAt: new Date().toISOString(), conversationId: original.conversationId,
         submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId,
         responseMessageId: recovered.responseMessageId, answerText: recovered.answerText,
-        terminal: recovered.kind === 'complete', reason: recovered.reason } };
+        terminal: recovered.kind === 'complete', reason: recovered.reason, ...currentActivity } };
   }
 
   /** Reading an exact work turn is independent of later recovery-message ACKs. */
