@@ -392,7 +392,7 @@ export class TeamWorkflow {
       return { ...await this.#observe(request), reconciliation };
     }
     if (input.decision === 'discover') {
-      await this.services.ui.inspect(owner);
+      await this.services.ui.inspect({ ...owner, recoverBrowserFailure: true });
       await this.services.ui.discover({ ...owner, decisionId: input.requestId });
       return await this.#observe(this.#request(input));
     }

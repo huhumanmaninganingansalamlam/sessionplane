@@ -1522,12 +1522,12 @@ export class SubmissionService {
   }
 
   async withPendingPreparation<Result>(
-    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number },
+    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly recoverBrowserFailure?: true },
     operation: (snapshot: SessionSnapshot) => Promise<Result>,
   ): Promise<Result> {
     const actor = this.#scheduler.actorFor(input.sessionId);
     return await actor.enqueue(async () => {
-      const pending = this.#requirePreparationOwner(input);
+      const pending = this.#requirePreparationOwner(input, input.recoverBrowserFailure === true);
       let snapshot = this.#requireSnapshot(input.sessionId);
       this.#requireAccountReady(snapshot);
       this.#adapters.require(snapshot.provider);
@@ -1538,7 +1538,7 @@ export class SubmissionService {
       const pageKey = snapshot.pageKey;
       if (pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'Exact preparation page is unavailable');
       return await this.#pageMutex.runExclusive(pageKey, async () => {
-        this.#requirePreparationOwner(input);
+        this.#requirePreparationOwner(input, input.recoverBrowserFailure === true);
         this.#requireAccountReady(this.#requireSnapshot(input.sessionId));
         snapshot = this.#requireSnapshot(input.sessionId);
         if (snapshot.pageKey !== pageKey || pending.sessionId !== snapshot.sessionId) {
@@ -1546,6 +1546,28 @@ export class SubmissionService {
         }
         const result = await operation(snapshot);
         const current = this.#outbox.requireById(pending.outboxId);
+        if (current.submissionState === 'failed_pre_submit') {
+          this.#requirePreparationOwner(input, true);
+          const timestamp = this.#now().toISOString();
+          const sequence = this.#database.transaction(() => {
+            if (!this.#sessions.updateCurrentGeneration(snapshot.sessionId, snapshot.generation, {
+              sessionState: 'submitting', providerState: 'pending', observationTransport: 'fresh',
+              submissionState: 'prepared', reason: 'browser-preparation-recovered',
+              errorCode: 'provider.preparation-required', nextCheckAt: null, promptSubmitted: false,
+            }, timestamp) || !this.#outbox.transition(current.outboxId, ['failed_pre_submit'], 'prepared', {
+              updatedAt: timestamp, errorCode: 'provider.preparation-required', promptSubmitted: false,
+              resultJson: JSON.stringify({ kind: 'pending-preparation', choices: {}, requiresInspection: false }),
+            })) throw new SessionPlaneDomainError('session.generation-superseded', 'Recovered preparation ownership changed');
+            return this.#events.append({ teamId: current.teamId, roleId: current.roleId,
+              sessionId: snapshot.sessionId, generation: snapshot.generation,
+              eventType: 'generation.preparation-required', createdAt: timestamp,
+              payload: { reason: 'browser-preparation-recovered', providerMutation: false,
+                promptSubmitted: false, priorFailure: { reason: snapshot.reason, errorCode: current.errorCode,
+                  recordedAt: current.updatedAt, resultHash: hashCanonical(JSON.parse(current.resultJson ?? 'null')) } } });
+          });
+          actor.publishResumedPreparation(this.#requireSnapshot(input.sessionId), sequence);
+          return result;
+        }
         const state = parsePreparationState(current);
         if (state.requiresInspection === true) {
           this.#outbox.transition(current.outboxId, ['prepared'], 'prepared', {
@@ -1681,14 +1703,19 @@ export class SubmissionService {
 
   #requirePreparationOwner(input: {
     readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number;
-  }): OutboxRecord {
+  }, recoverBrowserFailure = false): OutboxRecord {
     const outbox = this.#outbox.getByRequest(input.clientId, input.requestId);
     const snapshot = this.#requireSnapshot(input.sessionId);
+    const recoverable = recoverBrowserFailure && outbox?.submissionState === 'failed_pre_submit' &&
+      outbox.errorCode === 'browser.unavailable' && !outbox.promptSubmitted &&
+      snapshot.submissionState === 'failed_pre_submit' && snapshot.sessionState === 'ready' && snapshot.terminal &&
+      !snapshot.promptSubmitted && snapshot.submittedUserMessageId === null && snapshot.submittedUserTurnId === null &&
+      snapshot.responseMessageId === null && snapshot.answerText === null;
     if (
       outbox === null || outbox.sessionId !== input.sessionId || outbox.generation !== input.generation ||
-      outbox.submissionState !== 'prepared' || outbox.errorCode !== 'provider.preparation-required' ||
       snapshot.generation !== input.generation ||
-      snapshot.sessionState !== 'submitting' || snapshot.submissionState !== 'prepared' || snapshot.promptSubmitted
+      (!recoverable && (outbox.submissionState !== 'prepared' || outbox.errorCode !== 'provider.preparation-required' ||
+        snapshot.sessionState !== 'submitting' || snapshot.submissionState !== 'prepared' || snapshot.promptSubmitted))
     ) {
       throw new SessionPlaneDomainError('session.generation-superseded', 'Exact caller-owned preparation is no longer current');
     }
