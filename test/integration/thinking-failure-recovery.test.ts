@@ -678,6 +678,15 @@ test('user review pauses the existing managed collector and observation without 
     f.core.observationService.start(original, { force: true });
     await assert.rejects(f.rpc('decide', { teamId: f.team.teamId, requestRef, requestId: 'held-continue',
       decision: 'continue', continuationApproved: true }), /paused/);
+    await assert.rejects(f.rpc('send', { teamId: f.team.teamId, roleRef: `${original.sessionId}:${original.generation}`,
+      requestId: 'held-new-review', prompt: 'Read-only review' }), error => {
+        assert.ok(error instanceof RpcClientError);
+        assert.equal((error.data as { errorCode: string }).errorCode, 'provider.preparation-required');
+        assert.match(error.message, /new submissions are paused/);
+        return true;
+      });
+    assert.equal(f.core.database.raw.prepare('SELECT COUNT(*) AS n FROM outbox WHERE request_id=?').get('held-new-review')!.n, 0);
+    assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, original.generation);
     assert.equal(reads.mock.callCount(), 0, 'Stored reads and reattachment must not observe the user-controlled page');
     assert.equal(f.fake.observationOpenCount, opened);
     assert.equal(f.fake.submitCount, 1);
