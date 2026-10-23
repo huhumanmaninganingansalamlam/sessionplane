@@ -24,7 +24,7 @@ test('approved resend display guard preserves drafts/selection and stops origina
     const current = { sessionId: 'exact-session', generation: 2, pageKey: binding.pageKey,
       conversationId: 'resend-owned-conversation', submittedUserMessageId: null, submittedUserTurnId: null } as SessionSnapshot;
     const original = { ...current, generation: 1, submittedUserMessageId: 'original-user', submittedUserTurnId: 'original-user' };
-    const ui = new SessionUiService({ submissions: {} as SubmissionService, registry, chatgptUrl: 'https://chatgpt.com/' });
+    const ui = new SessionUiService({ submissions: { isObservationHeld: () => false } as SubmissionService, registry, chatgptUrl: 'https://chatgpt.com/' });
     await page.locator('textarea').fill('Original follow-up');
     await assert.rejects(ui.verifyAuthorizedResend(original, original, 'Original follow-up', false));
     await page.locator('textarea').fill('');
