@@ -111,6 +111,7 @@ export interface ProviderAcknowledgementRecoveryEvidence {
     readonly decodedTextLength: number;
     readonly decodedFirstDifference: number;
     readonly decodedActualCodePoint: number | null;
+    readonly decodedActualCodePoints: readonly number[];
   };
 }
 

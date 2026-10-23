@@ -162,7 +162,8 @@ export class ChatGptBackendRecovery {
           firstDifference, expectedCodePoint: expected.codePointAt(firstDifference) ?? null,
           actualCodePoint: text.codePointAt(firstDifference) ?? null,
           decodedTextLength: decoded!.length, decodedFirstDifference,
-          decodedActualCodePoint: decoded!.codePointAt(decodedFirstDifference) ?? null } }) });
+          decodedActualCodePoint: decoded!.codePointAt(decodedFirstDifference) ?? null,
+          decodedActualCodePoints: Array.from(decoded!.slice(decodedFirstDifference, decodedFirstDifference + 8), c => c.codePointAt(0)!) } }) });
     }
     return acknowledgement;
   }
