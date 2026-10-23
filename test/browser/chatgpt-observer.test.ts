@@ -31,13 +31,14 @@ test('actual observation reveals current collapsed HostSpan work and reports its
       acknowledgementTimeoutMs: 500, canRestoreLatestPosition: () => !held });
     const source = await adapter.openObservation({ session, generation: 1 });
     try {
-      for (const label of ['작업 중입니다', '53초 동안 작업함']) {
+      for (const label of ['작업 중입니다', '1분 32초 동안 작업함']) {
         held = true;
         await page.setContent(`<main><button aria-expanded="false" onclick="throw Error('Past work')">작업 중입니다</button>
-          <div data-chatgpt-search-message-ids="user-message-1"><div data-user-message-bubble>Original question</div></div>
+          <div data-chatgpt-search-message-ids="earlier-user"><div data-user-message-bubble>Original question</div></div>
           <button id="work" aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');window.opens=(window.opens||0)+1;document.querySelector('#grant').hidden=false">${label}</button>
           <section id="grant" hidden><div role="alert">hostspan-desktop ChatGPT가 hostspan-desktop의 File Patch 도구를 호출합니다. 자세히 보기</div>
-          <button onclick="window.grants=(window.grants||0)+1">한 번만 허용</button></section><textarea>Original draft</textarea></main>`);
+          <button onclick="window.grants=(window.grants||0)+1">한 번만 허용</button></section>
+          <div data-chatgpt-search-message-ids="user-message-1"><div data-user-message-bubble>계속</div></div><textarea>Original draft</textarea></main>`);
         assert.notEqual((await source.observe()).reason, 'provider-actionable-alert', 'Human hold must preserve collapsed display');
         assert.equal(await page.locator('#work').getAttribute('aria-expanded'), 'false');
         held = false;

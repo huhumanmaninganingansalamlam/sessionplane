@@ -16,15 +16,15 @@ const once = /^(?:허용|이번만 허용|한 번 허용|한 번만 허용|Allow
 
 const always = /^(?:항상 허용|Always allow)(?:\s*⏎)?$/i;
 
-/** Reveal only current provider work chrome; never grants permission or submits. */
-export async function revealCurrentWorkPermission(page: Page, submittedUserMessageId: string, includeEarlierWork = false) {
+/** Reveal provider work in the exact owned conversation; never grants or submits. */
+export async function revealCurrentWorkPermission(page: Page, submittedUserMessageId: string) {
   const users = (await readChatGptMessages(page, true)).filter(message => message.role === 'user');
   const anchor = users.filter(message => message.messageId === submittedUserMessageId);
   if (anchor.length !== 1 || users.at(-1) !== anchor[0] || anchor[0]!.elementIndex === undefined) {
     return false;
   }
-  // Permission cards can be inside the current turn's collapsed work transcript,
-  // including a completed-work disclosure. Opening it is not a permission grant.
+  // A pending permission can remain in earlier work after a literal Continue.
+  // Opening provider disclosures does not attribute their answer to that Continue.
   let opened = false;
   const work = page.getByRole('button', { name: /^(?:작업 중입니다|(?:[\d\s시간분초.]+ 동안 )?작업함|Working(?:…|\.\.\.)?|Worked for .+)$/i });
   for (const button of await work.all()) {
@@ -33,7 +33,7 @@ export async function revealCurrentWorkPermission(page: Page, submittedUserMessa
     if (await visibleGrant.count() > 0) break;
     if (!await button.isVisible() || (await button.getAttribute('aria-expanded') !== 'false' &&
         await button.getAttribute('data-state') !== 'closed')) continue;
-    const start = includeEarlierWork ? users[0]! : anchor[0]!;
+    const start = users[0]!;
     const anchorElement = await page.locator(CHATGPT_SELECTORS.messages).nth(start.elementIndex!).elementHandle();
     if (!anchorElement) throw unavailable('The original user anchor is no longer mounted');
     const current = await button.evaluate((element, user) =>
@@ -50,7 +50,7 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
   const allowMode = input.allowMode ?? 'once';
   const allow = allowMode === 'always' ? always : once;
   if (input.action === 'allow' && !input.toolName) throw unavailable('Select the observed tool name before allowing it');
-  await revealCurrentWorkPermission(page, submittedUserMessageId, true);
+  await revealCurrentWorkPermission(page, submittedUserMessageId);
   const app = new RegExp(`(^|[^\\w-])${input.appName}($|[^\\w-])`, 'i');
   const scopes = page.locator('[role="dialog"], [role="alertdialog"], [role="alert"]');
   const matching = async () => {
