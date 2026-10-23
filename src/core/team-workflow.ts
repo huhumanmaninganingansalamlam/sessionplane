@@ -198,7 +198,7 @@ export class TeamWorkflow {
       if (input.action === 'resume') await this.services.ensurePage(request.sessionId, request.generation);
       return result;
     }
-    if (this.#userReview(request)) throw new SessionPlaneDomainError('provider.preparation-required',
+    if (input.decision !== 'focus' && this.#userReview(request)) throw new SessionPlaneDomainError('provider.preparation-required',
       'Observation and controls are paused for user review; resume only after the user reports completion');
     const owner = ownerOf(request);
     if (input.decision === 'hostspan_permission') {
