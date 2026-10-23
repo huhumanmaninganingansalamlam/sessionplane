@@ -13,7 +13,7 @@ def save(path, value):
     path.write_text(json.dumps(value, indent=2)); path.chmod(0o600)
 
 def health(timeout=15):
-    return json.loads(subprocess.check_output(['sessplane', 'health', '--json'], text=True, timeout=timeout))
+    return json.loads(subprocess.check_output(['sessplane', 'health', '--json'], text=True, timeout=timeout, stderr=subprocess.PIPE))
 
 def maintenance_rpc(h, method, params, allow_commit_eof=False):
     """Existing Unix socket only; no alternate transport or credentials."""
@@ -407,17 +407,24 @@ def launch_core(cmd, cwd, env, receipt, name):
     return process
 
 
-def await_ready(process, timeout=60):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline and process.poll() is None:
+def await_ready(process):
+    # Browser adoption/recovery can outlast a sampled readiness window. Keep this
+    # same launch handle until readiness or actual exit; elapsed time is neither
+    # startup failure nor permission to roll back a living successor.
+    print(json.dumps({'phase': 'awaiting-readiness', 'pid': process.pid,
+                      'action': 'retain this handle; no restart or rollback while live'}), flush=True)
+    while process.poll() is None:
         try:
             result = health()
-            if result['requestOk'] and result['process']['pid'] == process.pid and result['browser']['state'] == 'ready':
-                return result
+            if result['requestOk']:
+                assert result['process']['pid'] == process.pid, 'Socket has a different core owner; preserve successor and inspect'
+                assert result['browser']['state'] != 'error', 'Successor reports browser failure; preserve it and inspect core.log'
+                if result['browser']['state'] == 'ready':
+                    return result
         except (subprocess.SubprocessError, ValueError):
             pass
         time.sleep(1)
-    raise RuntimeError('Core not ready; live successors must not be killed or replaced')
+    raise RuntimeError(f'Core exited before readiness (exit {process.returncode}); inspect startup output')
 
 
 def rollback_exited(h, old_pid, successor, chrome_ticks, installed, stage, receipt, cmd, cwd, env, target, identity):

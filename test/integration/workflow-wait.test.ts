@@ -599,6 +599,64 @@ test('managed retry uses current recovery eligibility instead of a previous-Cont
 });
 
 
+test('CLI and MCP keep one exact wait through connection loss and the successor socket gap', async t => {
+  for (const client of ['cli', 'mcp', 'cursor'] as const) await t.test(client, async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-wait-reconnect-'));
+    const socketPath = path.join(root, 'rpc.sock'), observed: any[] = [];
+    const params = client === 'cursor'
+      ? { clientId: 'owner', teamId: 'team', afterEventSequence: 42, waitMs: 60000 }
+      : { teamId: 'team', requestRefs: ['original'], waitMs: 60000, continuationApproved: true, untilResult: false };
+    const final = { requestOk: true, results: [{ requestRef: 'original', submittedUserMessageId: 'original-ack',
+      terminal: true, answerText: 'Recovered original result' }], afterEventSequence: 43 };
+    let reconnecting: Promise<void> | undefined;
+    const server = net.createServer(socket => {
+      let input = '';
+      socket.on('data', chunk => {
+        input += chunk;
+        if (!input.includes('\n')) return;
+        const request = JSON.parse(input.trim()); observed.push(request);
+        // One caller sees maintenance; another races commit without that response.
+        if (client === 'mcp' && observed.length === 1) {
+          socket.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { code: -32000, message: 'draining',
+            data: { errorCode: 'core.maintenance', details: { operationStarted: false } } } }) + '\n');
+        } else if (observed.length === (client === 'mcp' ? 2 : 1)) {
+          socket.destroy();
+          reconnecting = new Promise<void>(resolve => server.close(() => {
+            setTimeout(() => server.listen(socketPath, resolve), 500);
+          }));
+        } else socket.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: final }) + '\n');
+      });
+    });
+    await new Promise<void>(resolve => server.listen(socketPath, resolve));
+    try {
+      let result: unknown;
+      if (client === 'mcp') {
+        const response = await invokeMcpTool({ name: 'sessionplane_wait', arguments: { ...params, untilResult: true },
+          socketPath, timeoutMs: 5000, maxLineBytes: 4096 });
+        assert.equal(response.isError, false, JSON.stringify(response.structuredContent));
+        result = response.structuredContent;
+      } else if (client === 'cli') {
+        let stdout = '', stderr = '';
+        const code = await runCli(['request', 'wait', 'team', 'original', '--wait-ms', '60000',
+          '--continuation-approved', '--socket', socketPath, '--json'], { stdin: Readable.from([]),
+          stdout: new Writable({ write(chunk, _encoding, done) { stdout += chunk; done(); } }),
+          stderr: new Writable({ write(chunk, _encoding, done) { stderr += chunk; done(); } }) });
+        assert.equal(code, 0, stderr); result = JSON.parse(stdout);
+      } else result = await callRpc({ socketPath, method: 'team.wait', params, timeoutMs: 5000 });
+      assert.deepEqual((result as any).results, final.results);
+      assert.ok(observed.length >= 2);
+      for (const request of observed) {
+        assert.equal(request.method, client === 'cursor' ? 'team.wait' : 'workflow.wait');
+        assert.deepEqual(request.params, params, 'Same request, ACK chain, approval and cursor; no send or control replay');
+      }
+    } finally {
+      await reconnecting;
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 test('successor collection retains explicit continuation approval without inventing it', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-approved-collection-'));
   const socketPath = path.join(root, 'rpc.sock');
