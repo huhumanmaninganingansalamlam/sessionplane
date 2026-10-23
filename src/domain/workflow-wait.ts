@@ -16,6 +16,9 @@ export function workflowAcknowledgementPending(result: Record<string, unknown>):
 /** A retained ACK missing from a read surface still belongs to the paced observer. */
 export function workflowAnchorRecoveryPending(result: Record<string, unknown>): boolean {
   const verification = result.submissionVerification as { state?: string; nextAction?: string;
+    serverObservation?: { currentIdentityMatches?: boolean; recoveryReason?: string;
+      recoveryIdentity?: { conversationId?: string; submittedUserMessageId?: string; submittedUserTurnId?: string };
+      serverObservation?: { nextUserFound?: boolean } };
     backend?: { currentIdentityMatches?: boolean; recoveryReason?: string;
       recoveryIdentity?: { conversationId?: string; submittedUserMessageId?: string } } } | undefined;
   const load = result.conversationLoadRecovery as { state?: string; conversationId?: string; sessionId?: string; pageKey?: string } | undefined;
@@ -35,10 +38,23 @@ export function workflowAnchorRecoveryPending(result: Record<string, unknown>): 
     typeof result.submittedUserMessageId === 'string' &&
     identity?.conversationId === result.conversationId &&
     identity.submittedUserMessageId === result.submittedUserMessageId;
+  // Canonical work can advance while the renderer still shows an older turn.
+  // Keep collecting that exact ACK; this is no proof of live progress or consent
+  // to send, and never associates the older rendered answer with this request.
+  const server = verification?.serverObservation;
+  const canonicalIdentity = server?.recoveryIdentity;
+  const sameCanonicalAnchor = typeof result.conversationId === 'string' &&
+    typeof result.submittedUserMessageId === 'string' &&
+    canonicalIdentity?.conversationId === result.conversationId &&
+    canonicalIdentity.submittedUserMessageId === result.submittedUserMessageId &&
+    canonicalIdentity.submittedUserTurnId === result.submittedUserTurnId;
+  const canonicalPending = (server?.currentIdentityMatches === true || sameCanonicalAnchor) &&
+    server?.serverObservation?.nextUserFound === false &&
+    ['backend-assistant-not-final', 'backend-assistant-missing'].includes(server.recoveryReason ?? '');
   return result.submissionState === 'submitted' && result.promptSubmitted === true && result.terminal !== true &&
     result.userActionRequired !== true &&
     verification?.state === 'anchor-unverified' && verification.nextAction === 'read_same_request' &&
-    (loading || paced || ((verification.backend?.currentIdentityMatches === true || sameAnchor) &&
+    (loading || paced || canonicalPending || ((verification.backend?.currentIdentityMatches === true || sameAnchor) &&
       verification.backend?.recoveryReason === 'backend-user-anchor-absent-from-mapping'));
 }
 
