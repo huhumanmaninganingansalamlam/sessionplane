@@ -23,7 +23,7 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<main>
       <button aria-expanded="false" onclick="throw Error('Old work must stay closed')">작업 중입니다</button>
       <div data-message-author-role="user" data-message-id="user-message-1">Fixture question</div>
-      <button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#work').hidden=false">53초 동안 작업함</button>
+      <div class="group/activity-header"><button aria-expanded="false" aria-labelledby="work-label" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#work').hidden=false"></button><span id="work-label">이전 활동</span></div>
       <span id="elapsed">1 hour 14 seconds working</span>
       <textarea id="prompt-textarea">Keep my draft</textarea><button data-testid="stop-button">Stop generating</button>
       <div id="work" hidden><section id="permission"><div role="alert">hostspan-desktop Process Start

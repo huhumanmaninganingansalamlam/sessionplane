@@ -31,11 +31,11 @@ test('actual observation reveals current collapsed HostSpan work and reports its
       acknowledgementTimeoutMs: 500, canRestoreLatestPosition: () => !held });
     const source = await adapter.openObservation({ session, generation: 1 });
     try {
-      for (const label of ['작업 중입니다', '1분 32초 동안 작업함']) {
+      for (const label of ['작업 중입니다', '1분 32초 동안 작업함', '이전 활동']) {
         held = true;
         await page.setContent(`<main><button aria-expanded="false" onclick="throw Error('Past work')">작업 중입니다</button>
           <div data-chatgpt-search-message-ids="earlier-user"><div data-user-message-bubble>Original question</div></div>
-          <button id="work" aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');window.opens=(window.opens||0)+1;document.querySelector('#grant').hidden=false">${label}</button>
+          <div class="group/activity-header"><button id="work" aria-expanded="false" aria-labelledby="work-label" onclick="this.setAttribute('aria-expanded','true');window.opens=(window.opens||0)+1;document.querySelector('#grant').hidden=false"></button><span id="work-label">${label}</span></div>
           <section id="grant" hidden><div role="alert">hostspan-desktop ChatGPT가 hostspan-desktop의 File Patch 도구를 호출합니다. 자세히 보기</div>
           <button onclick="window.grants=(window.grants||0)+1">한 번만 허용</button></section>
           <div data-chatgpt-search-message-ids="user-message-1"><div data-user-message-bubble>계속</div></div><textarea>Original draft</textarea></main>`);
@@ -48,7 +48,7 @@ test('actual observation reveals current collapsed HostSpan work and reports its
         assert.equal(await page.locator('textarea').inputValue(), 'Original draft');
         assert.equal(session.submittedUserMessageId, 'user-message-1');
       }
-      assert.equal(await page.evaluate(() => (window as any).opens), 2, 'Each current disclosure opens once; no old work toggled');
+      assert.equal(await page.evaluate(() => (window as any).opens), 3, 'Each current disclosure opens once; no old work toggled');
     } finally { source.close(); }
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
