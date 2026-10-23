@@ -1,7 +1,45 @@
+import { isChatGptUrl, parseProviderConversationId, type PageBindingSnapshot } from './page-binding.ts';
+
 export interface TeamTabs {
   readonly teamId: string;
   readonly title: string;
   readonly targetIds: readonly string[];
+}
+
+/** Group identity never grants page mutation ownership. */
+export function resolveNativeTeamTabs(
+  bindings: readonly Pick<PageBindingSnapshot, 'targetId' | 'sessionId' | 'state' | 'url'>[],
+  nativeTargets: readonly { targetId: string; type: string; url: string; browserContextId?: string }[],
+  otherContexts: readonly string[],
+  resolveTeam: (sessionId: string | null, conversationId: string | null) => { teamId: string; title: string } | null,
+): TeamTabs[] {
+  const teams = new Map<string, { teamId: string; title: string; targetIds: string[] }>();
+  for (const binding of bindings) {
+    if (!binding.targetId) continue;
+    const owned = binding.sessionId && ['owned', 'reserved'].includes(binding.state);
+    const conversationId = !binding.sessionId && ['unbound', 'conflict'].includes(binding.state) && isChatGptUrl(binding.url)
+      ? parseProviderConversationId(binding.url) : null;
+    if (!owned && !conversationId) continue;
+    const owner = resolveTeam(owned ? binding.sessionId : null, conversationId);
+    if (!owner) continue;
+    const team = teams.get(owner.teamId) ?? { ...owner, targetIds: [] };
+    team.targetIds.push(binding.targetId);
+    teams.set(owner.teamId, team);
+  }
+  // A crashed/restored Chrome tab may never become a Playwright Page after
+  // adoption. Its exact durable conversation still determines grouping only.
+  for (const target of nativeTargets) {
+    if (target.type !== 'page' || bindings.some(binding => binding.targetId === target.targetId) ||
+        (target.browserContextId !== undefined && otherContexts.includes(target.browserContextId)) ||
+        !isChatGptUrl(target.url)) continue;
+    const conversationId = parseProviderConversationId(target.url);
+    const owner = conversationId ? resolveTeam(null, conversationId) : null;
+    if (!owner) continue;
+    const team = teams.get(owner.teamId) ?? { ...owner, targetIds: [] };
+    team.targetIds.push(target.targetId);
+    teams.set(owner.teamId, team);
+  }
+  return [...teams.values()].sort((a, b) => a.teamId.localeCompare(b.teamId));
 }
 
 // Runs only in our local extension. No host permissions, page content access,

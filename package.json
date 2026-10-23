@@ -1,6 +1,6 @@
 {
   "name": "sessionplane",
-  "version": "0.4.71",
+  "version": "0.4.72",
   "description": "Durable local runtime for role-addressed browser-backed AI chat sessions",
   "private": true,
   "type": "module",
@@ -36,7 +36,7 @@
   },
   "dependencies": {
     "playwright-core": "1.64.0",
-    "zod": "4.6.5"
+    "zod": "4.6.7"
   },
   "devDependencies": {
     "@types/node": "24.13.5",
