@@ -17,8 +17,8 @@ import {
 const CONVERSATION_ID = 'conversation-backend-1';
 
 test('explicit retained message ACK compares the full literal editor text, preserving whitespace and POST evidence', () => {
-  const prompt = 'Required response:\n1) Keep **all** code: `a_b` and \\path\nURL https://example.test/a\\b vs literal <https://example.test/>\n[Brave 검색](https://search.brave.com/search?q=Android+tablet)과 [GitHub](https://api.github.com/search?q=receiver&sort=updated)\n\nFinal.';
-  const serialized = 'Required response:\n1\\) Keep \\*\\*all\\*\\* code: \\`a\\_b\\` and \\\\path\nURL <https://example.test/a\\b> vs literal \\<https://example.test/\\>\n\\[Brave 검색\\]\\([https://search.brave.com/search?q=Android+tablet)과](https://search.brave.com/search?q=Android+tablet\\)과) \\[GitHub\\]\\([https://api.github.com/search?q=receiver&sort=updated](https://api.github.com/search?q=receiver\\&sort=updated))\n\nFinal\\.';
+  const prompt = 'Required response:\n1) Keep **all** code: `a_b` and \\path\nURL https://example.test/a\\b vs literal <https://example.test/>\n[Brave 검색](https://search.brave.com/search?q=Android+tablet)과 [GitHub](https://api.github.com/search?q=receiver&sort=updated)\n  blocking defect\nLiteral entity &#x20;\n\nFinal.';
+  const serialized = 'Required response:\n1\\) Keep \\*\\*all\\*\\* code: \\`a\\_b\\` and \\\\path\nURL <https://example.test/a\\b> vs literal \\<https://example.test/\\>\n\\[Brave 검색\\]\\([https://search.brave.com/search?q=Android+tablet)과](https://search.brave.com/search?q=Android+tablet\\)과) \\[GitHub\\]\\([https://api.github.com/search?q=receiver&sort=updated](https://api.github.com/search?q=receiver\\&sort=updated))\n&#x20; blocking defect\nLiteral entity \\&#x20;\n\nFinal\\.';
   const payload = conversationPayload([node('root', null, null),
     node('user-node', 'root', { ...userMessage('selected-user', 'selected-turn'), content: { content_type: 'text', parts: [serialized] } }),
     node('answer', 'user-node', finalAssistant('answer', 'Original PLAN'))], 'answer');
@@ -38,6 +38,7 @@ test('explicit retained message ACK compares the full literal editor text, prese
   assert.equal(recoverExactServerFinal(payload, ack!).answerText, 'Original PLAN');
   assert.equal(recover(prompt.replace('Keep', 'Delete'), 'selected-user'), null);
   assert.equal(recover(prompt.replace('\n\n', '\n'), 'selected-user'), null, 'Blank lines are not collapsed');
+  assert.equal(recover(prompt.replace('  blocking', ' blocking'), 'selected-user'), null, 'Encoded indentation retains its exact space count');
   const wrongTarget = JSON.parse(JSON.stringify(payload));
   wrongTarget.mapping['user-node'].message.content.parts[0] = serialized.replace('tablet\\)과)', 'tablet\\)evil)');
   assert.equal(recoverExactServerAcknowledgement(wrongTarget, CONVERSATION_ID, prompt, undefined, 'selected-user'), null,
