@@ -511,7 +511,10 @@ export class TeamWorkflow {
                 /^(메시지 스트림에 오류 발생|Error in message stream)[.!]?\s*(다시 시도|Retry|Try again)$/i.test(alert.trim()));
             const interrupted = streamRetry || idleWithoutResponse || timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
               dom.activity !== 'strong' && (dom.anchorPresent === true || missingContinuation) && dom.laterUserFound === false);
-            if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
+            // Reviewing a live turn is not a new submission. Its later exact
+            // timeout may use the existing approval after the ACK's broad interval.
+            const timeoutDue = timeoutReady && Date.now() - Date.parse(request.updatedAt) >= 30 * 60_000;
+            if ((due || timeoutDue || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
                 (interrupted || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
                 result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
               this.#continuationReviews.set(request.outboxId, Date.now());
