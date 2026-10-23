@@ -42,14 +42,93 @@ async function fixture() {
     close: async () => { await core.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
+test('managed collection recovers only a literal continuation lineage without rebinding a lost ACK', async t => {
+  for (const { complete, continuation } of [
+    { complete: false, continuation: true }, { complete: true, continuation: true },
+    { complete: true, continuation: false },
+  ]) {
+    const f = await fixture();
+    const controller = new AbortController();
+    let waiting: Promise<any> | undefined;
+    try {
+      const sessionId = f.sent.sessionId as string;
+      await f.core.actorScheduler.updateGeneration(sessionId, 1, {
+        sessionState: 'complete', providerState: 'complete', answerText: 'Checkpoint', responseMessageId: 'checkpoint' });
+      const next = (await f.invoke('send', { teamId: f.team.teamId, roleRef: `${sessionId}:1`,
+        requestId: `continue:managed-continuation:${f.sent.requestRef}`,
+        prompt: continuation ? '계속' : 'Execute the next distinct product WP' })).structuredContent;
+      if (continuation) f.core.database.raw.prepare("UPDATE outbox SET payload_json=json_set(payload_json, '$.continuationOf', ?) WHERE outbox_id=?")
+        .run(f.sent.requestRef, next.requestRef);
+      f.core.database.raw.prepare("UPDATE generations SET answer_text=NULL,response_message_id=NULL,reason='approved-continuation-prepared' WHERE session_id=? AND generation=1")
+        .run(sessionId);
+      const current = f.core.teamDirectory.getSession(sessionId);
+      new EventRepository(f.core.database.raw).append({ teamId: f.team.teamId as string, sessionId, generation: 2,
+        eventType: 'generation.backend-unverified', createdAt: new Date().toISOString(),
+        payload: { recoveryReason: 'backend-user-anchor-absent-from-mapping', recoveryIdentity: {
+          conversationId: current.conversationId, pageKey: current.pageKey,
+          submittedUserMessageId: current.submittedUserMessageId, submittedUserTurnId: current.submittedUserTurnId } } });
+      t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+      t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+        snapshot: f.core.teamDirectory.getSession(sessionId), requested: {},
+        evidence: { submissionVerification: { anchorPresent: false, laterUserFound: false,
+          activity: 'none', messageTimeout: false, responseCandidate: null } },
+      })) as any);
+      let reads = 0, reconciliations = 0;
+      t.mock.method(SessionUiService.prototype, 'readOriginalWork', (async (original: any, owner: any) => {
+        reads++; assert.equal(original.generation, 1); assert.equal(owner.generation, 2);
+        return { originalAnchorPresent: true, originalUserMessageId: f.sent.submittedUserMessageId,
+          responseUserMessageId: 'visible-literal-continue', submittedUserMessageId: 'visible-literal-continue',
+          terminal: complete, responseMessageId: complete ? 'actual-followup-final' : null,
+          answerText: complete ? 'Actual collected answer' : null,
+          activity: complete ? 'none' : 'weak', activityReason: complete ? null : 'unverified-stop-control' };
+      }) as any);
+      t.mock.method(SessionUiService.prototype, 'reconcileFollowup', (async (input: any) => {
+        reconciliations++;
+        assert.equal(input.requestId, 'send'); assert.equal(input.generation, 1);
+        assert.equal(input.followupUserMessageId, 'visible-literal-continue');
+        assert.equal(input.responseMessageId, 'actual-followup-final');
+        return await f.core.submissionService.reconcileFollowup(input, async (original: any) => ({
+          pageKey: original.pageKey, conversationId: original.conversationId, bindingEpoch: 1,
+          observedAt: new Date().toISOString(), originalPartialResponses: [],
+        }));
+      }) as any);
+      let returned = false;
+      waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef],
+        waitMs: 600000, continuationApproved: true }, controller.signal).then(x => { returned = true; return x; });
+      for (let i = 0; i < 50; i++) await flush();
+      assert.equal(reads > 0, continuation, 'A distinct product request must never inherit the previous WP final');
+      if (complete && continuation) {
+        const [result] = (await waiting).structuredContent.results;
+        assert.equal(result.followup.originalRequestRef, f.sent.requestRef);
+        assert.equal(result.followup.responseMessageId, 'actual-followup-final');
+        assert.equal(result.followup.answerText, 'Actual collected answer');
+        assert.equal(reconciliations, 1);
+      } else {
+        if (continuation) assert.equal(returned, false, 'A Stop control or backend pacing is neither a final nor proof of fresh tool progress');
+        assert.equal(reconciliations, 0);
+      }
+      assert.equal(f.core.teamDirectory.getSession(sessionId).submittedUserMessageId, next.submittedUserMessageId);
+      assert.equal(f.fake.submitCount, 2, 'Collection never sends a replacement prompt');
+    } finally {
+      controller.abort(); await waiting?.catch(() => undefined);
+      t.mock.restoreAll(); await f.close();
+    }
+  }
+});
+
 test('CLI retains submitted missing-anchor pacing until the same ACK answer is recovered', async t => {
+  for (const canonical of [false, true]) {
   const f = await fixture();
   try {
     const session = f.core.teamDirectory.getSession(f.sent.sessionId as string);
     new EventRepository(f.core.database.raw).append({ teamId: f.team.teamId as string,
       sessionId: session.sessionId, generation: 1, eventType: 'generation.backend-unverified',
-      createdAt: new Date().toISOString(), payload: { recoveryReason: 'backend-user-anchor-absent-from-mapping',
-        recoveryIdentity: { conversationId: session.conversationId, pageKey: 'previous-owned-page',
+      createdAt: new Date().toISOString(), payload: {
+        recoveryReason: canonical ? 'backend-assistant-not-final' : 'backend-user-anchor-absent-from-mapping',
+        ...(canonical ? { serverObservation: { anchorNodeId: session.submittedUserMessageId,
+          currentNodeId: 'last-tool-result', nextUserFound: false, assistantCount: 1,
+          messages: [{ messageId: 'last-tool-result', role: 'tool', status: 'finished_successfully', textLength: 0 }] } } : {}),
+        recoveryIdentity: { conversationId: session.conversationId, pageKey: canonical ? session.pageKey : 'previous-owned-page',
           submittedUserMessageId: session.submittedUserMessageId, submittedUserTurnId: session.submittedUserTurnId } } });
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
@@ -58,7 +137,8 @@ test('CLI retains submitted missing-anchor pacing until the same ACK answer is r
         activity: 'unknown', messageTimeout: false, responseCandidate: null } }, requested: {},
     })) as any);
     await f.core.actorScheduler.updateGeneration(session.sessionId, 1, {
-      providerState: 'unknown', observationTransport: 'deferred', reason: 'backend-conversation-probe-paced',
+      providerState: 'unknown', observationTransport: canonical ? 'fresh' : 'deferred',
+      reason: canonical ? 'dom-user-anchor-missing' : 'backend-conversation-probe-paced',
       nextCheckAt: new Date(Date.now() + 60_000).toISOString() });
     let stdout = '', stderr = '';
     const waiting = runCli(['request', 'wait', f.team.teamId as string, f.sent.requestRef as string,
@@ -73,7 +153,13 @@ test('CLI retains submitted missing-anchor pacing until the same ACK answer is r
       reason: 'unverified-stop-control' }), false);
     assert.equal(workflowWaitOutcome({ ...pending, errorCode: 'provider.actionable-alert' }), true);
     assert.equal(workflowWaitOutcome({ ...pending, recovery: { userActionRequired: true } }), true);
-    for (const backend of [
+    if (canonical) {
+      for (const change of [{ currentIdentityMatches: false }, { serverObservation: { nextUserFound: true } }]) {
+        assert.equal(workflowWaitOutcome({ ...pending, submissionVerification: { ...pending.submissionVerification,
+          serverObservation: { ...pending.submissionVerification.serverObservation, ...change } } }), true);
+      }
+    }
+    if (!canonical) for (const backend of [
       { currentIdentityMatches: false, recoveryReason: 'backend-user-anchor-absent-from-mapping' },
       { currentIdentityMatches: true, recoveryReason: 'backend-user-anchor-not-on-current-branch' },
     ]) assert.equal(workflowWaitOutcome({ ...pending,
@@ -88,6 +174,7 @@ test('CLI retains submitted missing-anchor pacing until the same ACK answer is r
     assert.equal(result.terminal, true);
     assert.equal(f.fake.submitCount, 1, 'No continuation into unknown/disconnected generation');
   } finally { t.mock.restoreAll(); await f.close(); }
+  }
 });
 
 test('CLI retains the original ACK through automatic load recovery without a backend anchor event', async t => {

@@ -455,6 +455,23 @@ export class TeamWorkflow {
           const userReview = this.#userReview(request);
           if (userReview) { result = userReview; break; }
           const collectingOriginal = typeof (result.workResult as { ownerRequestRef?: string } | undefined)?.ownerRequestRef === 'string';
+          const work = result.workResult as { originalRequestRef?: string; originalAnchorPresent?: boolean;
+            responseUserMessageId?: string; responseMessageId?: string; answerText?: string; terminal?: boolean } | undefined;
+          if (input.continuationApproved && work?.terminal && work.originalAnchorPresent &&
+              work.originalRequestRef && work.responseUserMessageId && work.responseMessageId && work.answerText) {
+            const original = this.#request({ teamId: input.teamId, requestRef: work.originalRequestRef });
+            if (original.outboxId !== request.outboxId) {
+              const reconciliation = await this.services.ui.reconcileFollowup({ ...ownerOf(original),
+                decisionId: `followup:${original.outboxId}:${work.responseUserMessageId}`,
+                followupUserMessageId: work.responseUserMessageId, responseMessageId: work.responseMessageId,
+                responseSha256: createHash('sha256').update(work.answerText).digest('hex'),
+                followupCompleted: true, answerText: work.answerText });
+              result = { ...await this.#observe(request), reconciliation, followup: { kind: 'complete', terminal: true,
+                originalRequestRef: original.outboxId, userMessageId: work.responseUserMessageId,
+                responseMessageId: work.responseMessageId, answerText: work.answerText } };
+              break;
+            }
+          }
           const preparedContinuation = this.#outbox.getByRequest(request.clientId, `continue:managed-continuation:${request.outboxId}`);
           const discoverFollowup = !collectingOriginal && !followupId && preparedContinuation?.submissionState === 'prepared';
           if (followupId || discoverFollowup) {
@@ -747,6 +764,19 @@ export class TeamWorkflow {
     return request;
   }
 
+  #continuationOriginal(request: OutboxRecord): OutboxRecord {
+    let current = request;
+    for (;;) {
+      const payload = JSON.parse(current.payloadJson);
+      const parentRef = payload.continuationOf ?? (payload.authorizedResend?.followup ? payload.authorizedResend.requestRef : undefined);
+      if (payload.prompt !== '계속' || typeof parentRef !== 'string') return current;
+      const parent = this.#outbox.getById(parentRef);
+      if (!parent || parent.teamId !== request.teamId || parent.clientId !== request.clientId ||
+          parent.sessionId !== request.sessionId || parent.generation !== current.generation - 1) return request;
+      current = parent;
+    }
+  }
+
   #role(input: { teamId: string; roleRef: string }) {
     const [sessionId, generation] = parseRoleRef(input.roleRef);
     const session = this.services.directory.getSession(sessionId);
@@ -838,6 +868,17 @@ export class TeamWorkflow {
     const required = snapshot.generation === request.generation ? this.#loadRecoveryRequired(snapshot) : null;
     const result = required === null ? storedOnly ? this.#storedRequest(request) : await this.#observeRequest(request, maxNodes, inspectCurrent)
       : { ...snapshot, ...required, requestRef: request.outboxId, roleRef: roleRef(snapshot) };
+    // A lost literal recovery ACK cannot hide work under its retained original
+    // ACK. Read that lineage without assigning the later answer to the lost turn.
+    if (!storedOnly && required === null && snapshot.generation === request.generation &&
+        (inspectCurrent || (result.evidence as { submissionVerification?: { anchorPresent?: boolean } } | undefined)
+          ?.submissionVerification?.anchorPresent === false)) {
+      const original = this.#continuationOriginal(request);
+      if (original.outboxId !== request.outboxId) {
+        const observed = await this.#observeRequest(original, maxNodes, true);
+        if (observed.workResult) result.workResult = observed.workResult;
+      }
+    }
     const payload = JSON.parse(request.payloadJson);
     const optedIn = payload.thinkingFailureRecovery === true;
     const rootRequestRef = payload.failureContinuation?.rootRequestRef ?? request.outboxId;
