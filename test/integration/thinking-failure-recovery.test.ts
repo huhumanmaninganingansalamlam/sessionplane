@@ -673,6 +673,16 @@ test('user review pauses the existing managed collector and observation without 
     assert.equal(get.request.observationHeld, true);
     assert.equal(held.observationHeld, true);
     assert.equal(held.recovery.automaticContinuation, false);
+    const focused = t.mock.method(f.fake.page, 'bringToFront', async () => {});
+    const focusInput = { teamId: f.team.teamId, requestRef, requestId: 'held-focus', decision: 'focus' };
+    const focus = await f.rpc<any>('decide', focusInput);
+    assert.equal(focus.activated, true);
+    assert.equal(focus.requestRef, requestRef);
+    assert.equal(focus.pageKey, original.pageKey);
+    assert.equal(focus.url, f.fake.page.url());
+    assert.equal(f.core.submissionService.isObservationHeld(original.conversationId), true);
+    assert.equal((await f.rpc<any>('decide', focusInput)).activated, true);
+    assert.equal(focused.mock.callCount(), 1, 'Replaying focus does not activate another tab');
     await f.core.recoveryService.ensurePage(original.sessionId, original.generation);
     await f.core.recoveryService.restore({ forceObservers: true });
     f.core.observationService.start(original, { force: true });
