@@ -378,6 +378,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   registerArtifactMethods(router, artifactService);
   const cleanup = new ConversationCleanupService({
     directory: teamDirectory, onDeleted: sessionId => recovery.forgetSession(sessionId),
+    verifyPreservingReplacement: session => ui.verifyPreservingReplacement(session),
     isFailedConversationPage: async (pageKey, session) => session.conversationId !== null && browserOwner !== null &&
       await browserOwner.isFailedConversationPage(pageKey, session.provider, session.conversationId),
     closeCrashedPages: async (session, canClose) => session.conversationId === null || browserOwner === null

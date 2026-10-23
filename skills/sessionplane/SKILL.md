@@ -197,18 +197,22 @@ out prompts, infer consensus, or inject answers into other roles.
   stop with another ID. Get/wait retain `stopOutcome.state:"unknown"` across restart.
   `provider.actionable-alert` identifies a visible provider error separately from
   conversation/read unavailability and backend 429. Inspect `evidence.providerAlerts`.
-- For an explicitly authorized recovery of an unreadable bound conversation with
-  a current prepared/unsubmitted request, use `sessionplane_session_replace` with
+- For explicitly authorized context renewal that must retain the old conversation,
+  use `sessionplane_session_replace` with
   `preserveConversation:true`, its fresh roleRef and a distinct stable requestId.
   It keeps the same role ID/key and provider; preserves the old chat/pages,
   request/draft and evidence; and creates an empty successor with predecessorSessionId.
-  Only predecessor routing becomes superseded. Inspect cleanup.outcome `preserved`,
+  Only role routing moves to the successor. Inspect cleanup.outcome `preserved`,
   then use the successor's fresh roleRef for separately authorized current work,
   with fresh model/effort and once-only submission. No original stop is needed.
-  Submitted/UNKNOWN states, anchors, inconsistent evidence, stale references and
-  prior deletion attempts are rejected. This is not an access/security bypass or
-  automatic recovery; do not duplicate or migrate an active continuation without
-  its current coordinator's routing decision.
+  A bound prepared/unsubmitted request may retain an unreadable page. A submitted
+  request requires its exact ACK mounted on an idle owned page with no later user,
+  draft, active generation, permission or human verification. This also supports
+  actual conversation-length exhaustion without claiming a final answer; retrieve
+  available results and preserve the handoff first. UNKNOWN delivery, inconsistent
+  evidence, stale references and prior deletion attempts remain rejected. This is
+  not automatic recovery or an access/security bypass. The original Coordinator
+  owns the routing decision and the separately authorized next prompt.
 - For authorized context renewal, use `sessionplane_session_replace` on the same
   stable role with its fresh `roleRef` and the same provider. Keep the role ID/key;
   do not create dated continuation roles for the same responsibility.

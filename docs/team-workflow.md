@@ -125,25 +125,28 @@ and confirm the final active controls; unavailable intent requires a user decisi
   Recover an uncertain deletion acknowledgement with the same request identity;
   cleanup never automatically repeats a provider DELETE.
 
-For an explicitly authorized recovery of an unreadable bound chat whose current
-request is provably prepared and unsubmitted, use `session_replace` with
+For explicitly authorized nondeleting context renewal, use `session_replace` with
 `preserveConversation:true`, a fresh `roleRef`, and a distinct stable `requestId`.
 This keeps the **same role ID/key and provider**, creates an empty successor session
 with `predecessorSessionId`, and returns `replacement.cleanup.outcome:"preserved"`.
-The old session's routing state becomes `superseded`; its generation/outbox draft,
+The old session's routing is displaced; its generation/outbox draft,
 request IDs, conversation, page bindings, answers and evidence remain retained.
 No provider deletion, tab close, Stop, refresh or prompt replay occurs. Old requests
 remain readable but cannot be submitted after routing has moved. Confirm the new
 session/roleRef, then separately prepare current work and verify model/effort; the
 replacement itself does not send or adopt the old draft.
 
-This mode rejects submitted/UNKNOWN work, non-null submission/response anchors,
-non-prepared states, inconsistent outbox evidence, prior conversation deletion
-attempts, changed provider and stale roleRefs. Guards run in the original session's
-actor queue, after any in-flight mutation. It is not an automatic page-error
-handler or permission to route around an access/security restriction. No original
-preparation cancellation is needed. Do not migrate an already active continuation
-without its coordinator's explicit routing decision.
+An unreadable bound prepared/unsubmitted request retains its existing recovery path.
+An acknowledged submitted request also permits renewal after fresh exact-page
+verification: its ACK is mounted without a later user turn, activity is absent,
+and no draft, permission or human-verification control is pending. This covers
+an exhausted provider conversation without fabricating a final answer. Retrieve
+available outputs and preserve the handoff before renewal; unresolved generation
+evidence remains unresolved and independently readable on the predecessor.
+UNKNOWN delivery, inconsistent outbox evidence, prior deletion attempts, changed
+provider and stale roleRefs remain rejected. The actor queue and page lock guard
+the observation and routing change. This is an explicit coordinator decision,
+not automatic error recovery or an access/security bypass.
 
 For normal authorized context renewal, keep the same stable role ID/key and
 provider. Resolve the current request, retrieve required answers/files, save the
@@ -156,8 +159,8 @@ deletion attempt and independently closes verified idle owned tabs. Check
 old target is closed without claiming deletion succeeded. Use existing cleanup
 authorization; the 10-turn cue grants no new authority. Preserve active/UNKNOWN
 work, uncollected results, shared pages and drafts. Raw occupied-role
-`session.create` uses the same default replacement path; preserving recovery above
-remains limited to its prepared/unsubmitted case.
+`session.create` uses the same default replacement path; select
+`preserveConversation:true` explicitly when the old conversation must remain.
 
 An explicit user-approved, duplicate-risk-accepted resend of a legacy unresolved
 ChatGPT submission uses `decide` with the **original** `requestRef`,

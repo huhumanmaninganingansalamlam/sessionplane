@@ -2,7 +2,7 @@ import type { ConversationLoadRecoveryRepository } from '../storage/conversation
 import { streamRetrySurface } from '../providers/chatgpt/stream-retry.ts';
 import type { ReceiptRepository } from '../storage/receipt-repository.ts';
 import { observeChatGptSurface, type ChatGptSurface } from '../providers/chatgpt/surface.ts';
-import { controlHostSpanPermission, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
+import { controlHostSpanPermission, revealCurrentWorkPermission, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
 import { createHash } from 'node:crypto';
 import { requireIdleConversationPage } from './conversation-cleanup-service.ts';
 import { conversationLoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
@@ -373,6 +373,35 @@ export class SessionUiService {
         ...(confirmedInterruption ? { userConfirmedInterruption: confirmation,
           ...(dom.candidate ? { interruptedResponseMessageId: dom.candidate.responseMessageId,
             interruptedResponseSha256: createHash('sha256').update(dom.candidate.answerText).digest('hex') } : {}) } : {}) };
+  }
+
+  async verifyPreservingReplacement(session: SessionSnapshot) {
+    if (session.provider !== 'chatgpt') throw new SessionPlaneDomainError(
+      'capability.unsupported', 'Acknowledged preserving renewal requires supported exact-page verification');
+    const page = this.#requirePage(session);
+    const binding = this.#registry.refreshPage(session.pageKey!);
+    await inspectChatGptPageReady(page, session.pageKey!);
+    await requireIdleConversationPage(page);
+    await revealCurrentWorkPermission(page, session.submittedUserMessageId!);
+    const dom = await observeChatGptDom(page, session);
+    const activity = await observeChatGptActivity(page, dom);
+    const controls = await this.#capture(session);
+    const dialog = await observeChatGptDialog(page);
+    if (!dom.submittedUserFound || dom.laterUserFound || !dom.conversationSurfaceAvailable ||
+        activity.strength !== 'none' || dialog.kind || controls.nodesTruncated ||
+        controls.nodes.some(n => ['dialog', 'alertdialog'].includes(n.role) ||
+          (n.role === 'button' && /^(?:allow|always allow|allow once|deny|한 번만 허용|항상 허용|허용|거부)$/i.test(n.name.trim())))) {
+      throw new SessionPlaneDomainError('session.preservation-not-ready',
+        'Preserve active, ambiguous or permission-held work on its original conversation',
+        { anchorPresent: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
+          activity: activity.strength, activityReason: activity.reason, dialog, providerMutation: false });
+    }
+    this.#requirePage(session);
+    if (this.#registry.refreshPage(session.pageKey!).bindingEpoch !== binding.bindingEpoch) throw new SessionPlaneDomainError(
+      'session.page-identity-unverified', 'Page changed during preserving replacement verification');
+    return { pageKey: session.pageKey, conversationId: session.conversationId,
+      submittedUserMessageId: session.submittedUserMessageId, bindingEpoch: binding.bindingEpoch,
+      observedAt: controls.capturedAt, activity: activity.strength };
   }
 
   async reconcileFollowup(input: PreparationOwner & { readonly decisionId: string; readonly followupUserMessageId: string;

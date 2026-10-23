@@ -33,6 +33,64 @@ class DeletingProvider extends FakeProviderAdapter {
   }
 }
 
+test('explicit preserving renewal accepts an idle acknowledged turn without deleting its unresolved result or tab', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-preserving-submitted-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', observationActiveSweepMs: 60_000 });
+  const adapter = new DeletingProvider();
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [adapter],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const rpc = <T>(method: string, params: object) => callRpc<T>({ socketPath: config.socketPath,
+    method, params, timeoutMs: 10_000 });
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'preserving-submitted' });
+    const old = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    const sent = await rpc<SessionSnapshot>('session.send', { clientId: 'preserving-submitted', requestId: 'original',
+      sessionId: old.sessionId, prompt: 'Original product question and source evidence' });
+    const { page, binding } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main></main>' }));
+    await page.goto('https://chatgpt.com/c/' + sent.conversationId);
+    core.pageRegistry.bindPage(binding.pageKey, { sessionId: old.sessionId, generation: 1, conversationId: sent.conversationId! });
+    core.database.raw.prepare('UPDATE sessions SET page_key=? WHERE session_id=?').run(binding.pageKey, old.sessionId);
+    const html = `<main><div data-message-author-role="user" data-message-id="${sent.submittedUserMessageId}">Original product question</div>
+      <div role="alert">이 대화의 최대 길이에 도달했으나, 새 채팅을 시작해 계속 이야기할 수 있습니다.<button>새 대화 시작</button></div>
+      <textarea id="prompt-textarea"></textarea></main>`;
+    const input = { teamId: team.teamId, roleRef: old.sessionId + ':1', requestId: 'preserve-idle', preserveConversation: true };
+    for (const extra of ['<button data-testid="stop-button">Stop</button>',
+      '<div role="dialog">HostSpan <button>Always allow</button></div>', '<div data-testid="thinking-indicator">Thinking</div>']) {
+      await page.setContent(html + extra);
+      await assert.rejects(rpc('workflow.session_replace', input));
+      assert.equal(core.teamDirectory.getCurrentSession(team.teamId, 'main').sessionId, old.sessionId);
+    }
+    await page.setContent(html);
+    await page.locator('textarea').fill('Unsent user draft');
+    await assert.rejects(rpc('workflow.session_replace', input));
+    assert.equal(await page.locator('textarea').inputValue(), 'Unsent user draft');
+    await page.locator('textarea').fill('');
+    await page.setContent(html.replace(sent.submittedUserMessageId!, 'unrelated-user'));
+    await assert.rejects(rpc('workflow.session_replace', input));
+    await page.setContent(html);
+    const outbox = new OutboxRepository(core.database).getByRequest('preserving-submitted', 'original')!;
+    const generation = core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').get(old.sessionId);
+    const result = await rpc<{ replacement: { sessionId: string; cleanup: ReplacementCleanup } }>('workflow.session_replace', input);
+    assert.equal(result.replacement.cleanup.outcome, 'preserved');
+    assert.equal(result.replacement.cleanup.deletionRequestId, null);
+    const next = core.teamDirectory.getCurrentSession(team.teamId, 'main');
+    assert.equal(next.sessionId, result.replacement.sessionId);
+    assert.equal(next.roleId, old.roleId);
+    assert.equal(next.predecessorSessionId, old.sessionId);
+    assert.equal(next.generation, 0);
+    assert.equal(next.promptSubmitted, false);
+    assert.deepEqual(new OutboxRepository(core.database).getById(outbox.outboxId), outbox);
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').get(old.sessionId), generation);
+    assert.equal(core.pageRegistry.getBinding(binding.pageKey).sessionId, old.sessionId);
+    assert.equal(page.isClosed(), false);
+    assert.equal(adapter.submitCount, 1);
+    assert.equal(adapter.stopCount, 0);
+    assert.equal(adapter.deleteCount, 0);
+    assert.deepEqual((await rpc<typeof result>('workflow.session_replace', input)).replacement, result.replacement);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('explicit preserving replacement retains the stable role, unsent draft and chat across restart', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-preserving-replacement-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
