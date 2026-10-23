@@ -960,7 +960,7 @@ test('explicit message-timeout reconciliation preserves original ACK, rejects li
     await f.fake.page.locator('button[aria-label="Stop"]').evaluate(node => node.remove());
     let inspected = '';
     const inspectCode = await runCli(['request', 'show', f.team.teamId, requestRef,
-      '--socket', f.config.socketPath, '--json'], {
+      '--view', 'evidence', '--socket', f.config.socketPath, '--json'], {
       stdin: Readable.from([]),
       stdout: new Writable({ write(chunk, _encoding, done) { inspected += chunk; done(); } }),
       stderr: new Writable({ write(_chunk, _encoding, done) { done(); } }),
