@@ -181,7 +181,7 @@ export class ConversationCleanupService {
             const previous = sessions.getSnapshot(result.cleanup.predecessorSessionId);
             if (previous !== null && previous.generation === result.cleanup.predecessorGeneration &&
                 previous.conversationId === result.cleanup.conversationId &&
-                (result.cleanup.outcome === 'confirmed' || previous.conversationId === null ||
+                (result.cleanup.outcome === 'confirmed' || previous.conversationId === null || hasCollectedFinal(previous) ||
                   !sessions.conversationCleanupBlocker(previous.sessionId, previous.conversationId))) {
               const pages = await this.#closeSessionPages(previous);
               result.cleanup.pageCleanup = { closedPages: (result.cleanup.pageCleanup?.closedPages ?? 0) + pages.closedPages, pageErrors: pages.pageErrors };
@@ -307,7 +307,7 @@ export class ConversationCleanupService {
         const successor = create();
         scheduler.refreshSession(previous.sessionId);
         this.#options.onDeleted(previous.sessionId);
-        if (cleanup.pageCleanup === undefined && (cleanup.outcome === 'confirmed' || previous.conversationId === null ||
+        if (cleanup.pageCleanup === undefined && (cleanup.outcome === 'confirmed' || previous.conversationId === null || hasCollectedFinal(previous) ||
             !sessions.conversationCleanupBlocker(previous.sessionId, previous.conversationId))) {
           const pages = await this.#closeSessionPages(previous);
           cleanup.pageCleanup = pages;
@@ -548,6 +548,14 @@ function cleanupProviderErrorDetails(error: unknown) {
 function cleanupErrorCode(error: unknown): string {
   return error !== null && typeof error === 'object' && 'errorCode' in error
     ? String(error.errorCode) : 'browser.unavailable';
+}
+
+// Replacement owns tab cleanup separately from deletion of uncertain history.
+// The shared-conversation, exact page identity and live idle guards still apply.
+function hasCollectedFinal(session: SessionSnapshot): boolean {
+  return session.terminal && session.submissionState === 'submitted' && session.promptSubmitted &&
+    session.submittedUserMessageId !== null && session.responseMessageId !== null &&
+    session.answerText !== null && session.errorCode === null;
 }
 
 // The third argument is reserved for exact user-confirmed disconnected continuation.
