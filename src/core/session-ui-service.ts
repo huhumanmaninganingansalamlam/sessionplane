@@ -378,7 +378,9 @@ export class SessionUiService {
       const user = messages.findIndex(m => m.role === 'user' && m.messageId === input.followupUserMessageId);
       const answer = messages.at(-1);
       const recoveryTracking = owner.generation > session.generation && owner.promptSubmitted;
-      if (recoveryTracking) await requireIdleConversationPage(page);
+      // The durable ancestry already proves these successors are literal Continue.
+      // Retire only their tracking; preserve an unsent Continue draft unchanged.
+      if (recoveryTracking) await requireIdleConversationPage(page, '계속');
       // An interrupted checkpoint is evidence to retain, not a completed answer to discard.
       const partials = messages.slice(original + 1, user);
       const controls = await this.#capture(owner);
