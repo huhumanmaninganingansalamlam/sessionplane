@@ -175,12 +175,15 @@ export class ChatGptBackendRecovery {
     for (const [id, entry] of this.#conversationWaiting) {
       if (now > entry.expiresAt) this.#conversationWaiting.delete(id);
     }
-    this.#conversationWaiting.set(conversationId, { expiresAt: Math.max(now, this.#conversationRetryAt) + graceMs,
-      selected: selected || this.#conversationWaiting.get(conversationId)?.selected === true });
+    const waiting = this.#conversationWaiting.get(conversationId);
+    if (selected || !waiting?.selected) {
+      this.#conversationWaiting.set(conversationId, { expiresAt: Math.max(now, this.#conversationRetryAt) + graceMs, selected });
+    }
     // A user-selected ACK gets the next legal slot ahead of repeated background
     // UNKNOWN polling. It still obeys the same Retry-After and in-flight guard.
     const nextSelected = [...this.#conversationWaiting].find(([, entry]) => entry.selected)?.[0];
-    const queued = (nextSelected ?? this.#conversationWaiting.keys().next().value) !== conversationId;
+    const queued = (nextSelected ?? this.#conversationWaiting.keys().next().value) !== conversationId ||
+      (!selected && waiting?.selected === true);
     if (now < this.#conversationRetryAt || queued || this.#conversationInFlight) {
       const next = Math.max(now + 5_000, this.#conversationRetryAt);
       return { pacing: true, recovery: { ...unavailable(acknowledgement
@@ -195,6 +198,9 @@ export class ChatGptBackendRecovery {
       const result = await this.#readConversation(conversationId, client, origin, observe);
       if ('recovery' in result && result.recovery.kind === 'deferred') {
         this.#conversationRetryAt = this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0);
+        if (selected) this.#conversationWaiting.set(conversationId, {
+          expiresAt: this.#conversationRetryAt + graceMs, selected: true,
+        });
       }
       // A caller honoring Retry-After must not expire before its allowed turn.
       for (const entry of this.#conversationWaiting.values()) {

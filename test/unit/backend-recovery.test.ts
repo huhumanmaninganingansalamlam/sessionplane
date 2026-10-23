@@ -465,8 +465,21 @@ test('explicit selected ACK gets the next permitted read ahead of background UNK
   now = 50001;
   await ack('background');
   assert.deepEqual(reads, ['background'], 'Repeated background no-match recovery must leave the interactive read available');
+  await ack('selected');
+  assert.deepEqual(reads, ['background'], 'The same conversation cannot spend an explicit selection with an unselected background read');
   await ack('selected', 'original-user');
   assert.deepEqual(reads, ['background', 'selected']);
+  now = 100002;
+  await ack('selected');
+  assert.deepEqual(reads, ['background', 'selected'], 'A server 429 preserves the explicit caller next legal turn');
+  await ack('selected', 'original-user');
+  assert.deepEqual(reads, ['background', 'selected', 'selected']);
+  now = 150003;
+  await ack('selected');
+  assert.equal(reads.length, 3);
+  now = 160003;
+  await ack('selected');
+  assert.equal(reads.length, 4, 'Background reads cannot renew an abandoned explicit selection indefinitely');
 });
 
 test('canonical ACK evidence separates no match and access rejection from a recovered original answer', async () => {
