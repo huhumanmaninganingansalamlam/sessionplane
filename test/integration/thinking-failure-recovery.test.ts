@@ -514,6 +514,56 @@ test('a lost continuation ACK uses proven server absence and the exact retained 
   } finally { await f.close(); }
 });
 
+test('an explicitly approved followup recovers several lost literal continuations without replaying product work or changing old ACKs', async () => {
+  const f = await fixture();
+  try {
+    f.fake.idleToolTurn = true;
+    f.fake.failureCount = 10;
+    f.fake.missingTimeoutAnchor = true;
+    const disconnected = '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>';
+    f.fake.surface = users => users + disconnected;
+    let requestRef = await f.submit(false);
+    for (let i = 0; i < 3; i++) {
+      const next = await f.rpc<any>('decide', { teamId: f.team.teamId, requestRef,
+        requestId: `before-refresh-${i}`, decision: 'continue', continuationApproved: true });
+      requestRef = next.requestRef;
+    }
+    const current = f.core.teamDirectory.getSession(f.session.sessionId);
+    assert.equal(current.generation, 4);
+    const originalRows = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(current.sessionId);
+    const body = `<main>${configuration}<div data-message-author-role="user" data-message-id="user-message-1">Original</div>` +
+      '<div data-message-author-role="assistant" data-message-id="old-product-answer" data-end-turn="true">Previous product result</div>' +
+      '<div data-message-author-role="user" data-message-id="user-message-2">계속</div>';
+    const controls = '<textarea id="prompt-textarea">계속</textarea><button data-testid="send-button">Send</button></main>';
+    await f.fake.page.setContent(body + controls);
+    const input = { teamId: f.team.teamId, requestRef, requestId: 'explicit-after-refresh',
+      decision: 'followup', approvalRef: 'User confirmed refresh complete and explicitly approved continuing the original work' };
+    await assert.rejects(f.rpc('decide', input), /UNKNOWN|lost literal/);
+    await f.core.actorScheduler.updateGeneration(current.sessionId, 4, {}, 'generation.backend-unverified',
+      'backend-user-anchor-absent-from-mapping', { conversationId: current.conversationId, pageKey: current.pageKey,
+        submittedUserMessageId: current.submittedUserMessageId, submittedUserTurnId: current.submittedUserTurnId });
+    await f.fake.page.locator('textarea').fill('Preserve this unrelated draft');
+    await assert.rejects(f.rpc('decide', input), /draft|page/);
+    assert.equal(f.fake.submitCount, 4);
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserve this unrelated draft');
+    await f.fake.page.locator('textarea').fill('계속');
+    f.fake.failureCount = 4;
+    f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="new-result" data-end-turn="true">Resumed original work</div>';
+    const resumed = await f.rpc<any>('decide', input);
+    assert.equal(resumed.generation, 5);
+    assert.ok(resumed.submittedUserMessageId);
+    assert.equal(f.fake.submitCount, 5);
+    assert.equal(f.fake.submissionRequests.at(-1)!.prompt, '계속');
+    const preserved = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation<=4 ORDER BY generation').all(current.sessionId);
+    assert.deepEqual(preserved.map(row => [row.generation, row.submission_state, row.submitted_user_message_id, row.answer_text]),
+      originalRows.map(row => [row.generation, row.submission_state, row.submitted_user_message_id, row.answer_text]));
+    const replay = await f.rpc<any>('decide', input);
+    assert.equal(replay.requestRef, resumed.requestRef);
+    assert.equal(f.fake.submitCount, 5);
+    assert.equal(f.fake.stopCount, 0);
+  } finally { await f.close(); }
+});
+
 test('user review pauses the existing managed collector and observation without stopping execution, then resumes the same request', async t => {
   const f = await fixture();
   try {

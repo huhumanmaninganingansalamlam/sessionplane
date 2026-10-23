@@ -1062,8 +1062,10 @@ export class SubmissionService {
         (!unknownWithoutAnchor && (original.submissionState !== 'submitted' ||
           (original.submittedUserMessageId === null && original.submittedUserTurnId === null)))) throw new SessionPlaneDomainError(
       'provider.preparation-required', 'Approved resend requires the exact unresolved original request');
-    if (authorization.followup && (!unknownWithoutAnchor || current.conversationId === null)) throw new SessionPlaneDomainError(
-      'provider.preparation-required', 'Explicit follow-up requires the exact bound UNKNOWN request; collect a recovered ACK normally');
+    const lostContinuation = authorization.followup && this.missingContinuationAnchor({
+      ...current, ...original, generation: source.generation }) !== null;
+    if (authorization.followup && ((!unknownWithoutAnchor && !lostContinuation) || current.conversationId === null)) throw new SessionPlaneDomainError(
+      'provider.preparation-required', 'Explicit follow-up requires the exact bound UNKNOWN request or a backend-proven lost literal continuation; collect a recovered ACK normally');
     const identity = proof?.recoveryIdentity as Record<string, unknown> | undefined;
     if (proof && (!identity || identity.conversationId !== current.conversationId ||
         identity.submittedUserMessageId !== original.submittedUserMessageId ||
