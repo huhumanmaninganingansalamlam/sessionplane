@@ -162,7 +162,8 @@ export class ChatGptBackendRecovery {
           firstDifference, expectedCodePoint: expected.codePointAt(firstDifference) ?? null,
           actualCodePoint: text.codePointAt(firstDifference) ?? null,
           decodedTextLength: decoded!.length, decodedFirstDifference,
-          decodedActualCodePoint: decoded!.codePointAt(decodedFirstDifference) ?? null } }) });
+          decodedActualCodePoint: decoded!.codePointAt(decodedFirstDifference) ?? null,
+          decodedActualCodePoints: Array.from(decoded!.slice(decodedFirstDifference, decodedFirstDifference + 8), c => c.codePointAt(0)!) } }) });
     }
     return acknowledgement;
   }
@@ -175,12 +176,15 @@ export class ChatGptBackendRecovery {
     for (const [id, entry] of this.#conversationWaiting) {
       if (now > entry.expiresAt) this.#conversationWaiting.delete(id);
     }
-    this.#conversationWaiting.set(conversationId, { expiresAt: Math.max(now, this.#conversationRetryAt) + graceMs,
-      selected: selected || this.#conversationWaiting.get(conversationId)?.selected === true });
+    const waiting = this.#conversationWaiting.get(conversationId);
+    if (selected || !waiting?.selected) {
+      this.#conversationWaiting.set(conversationId, { expiresAt: Math.max(now, this.#conversationRetryAt) + graceMs, selected });
+    }
     // A user-selected ACK gets the next legal slot ahead of repeated background
     // UNKNOWN polling. It still obeys the same Retry-After and in-flight guard.
     const nextSelected = [...this.#conversationWaiting].find(([, entry]) => entry.selected)?.[0];
-    const queued = (nextSelected ?? this.#conversationWaiting.keys().next().value) !== conversationId;
+    const queued = (nextSelected ?? this.#conversationWaiting.keys().next().value) !== conversationId ||
+      (!selected && waiting?.selected === true);
     if (now < this.#conversationRetryAt || queued || this.#conversationInFlight) {
       const next = Math.max(now + 5_000, this.#conversationRetryAt);
       return { pacing: true, recovery: { ...unavailable(acknowledgement
@@ -195,6 +199,9 @@ export class ChatGptBackendRecovery {
       const result = await this.#readConversation(conversationId, client, origin, observe);
       if ('recovery' in result && result.recovery.kind === 'deferred') {
         this.#conversationRetryAt = this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0);
+        if (selected) this.#conversationWaiting.set(conversationId, {
+          expiresAt: this.#conversationRetryAt + graceMs, selected: true,
+        });
       }
       // A caller honoring Retry-After must not expire before its allowed turn.
       for (const entry of this.#conversationWaiting.values()) {
@@ -356,14 +363,18 @@ function matchesLiteralEditorText(text: string, prompt: string): boolean {
     !prompt.endsWith('\n\n') && decoded === prompt.slice(0, -1));
 }
 
-// The ChatGPT editor serializes literal punctuation as CommonMark escapes
-// and bare URLs as autolinks or same-URL links. Parse these together so escaped
-// angle brackets and literal backslashes within URLs retain their meaning.
+// The ChatGPT editor serializes literal punctuation as CommonMark escapes,
+// indentation as numeric character references, and URLs as autolinks or same-URL
+// links. Parse together so escaped references are not decoded a second time.
 // Decode only that representation: never collapse internal whitespace, strip markup or
 // relax a recorded POST identity/hash. Callers must explicitly select the user.
 function decodeLiteralMarkdown(text: string): string {
-  return text.replace(/\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])|<(https?:\/\/[^\s<>]+)>|\[(https?:\/\/[^\s[\]<>]+)\]\(((?:\\[\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]|[^\\()\s])+)\)/g,
-    (match, punctuation: string | undefined, url: string | undefined, label: string | undefined, target: string | undefined) => {
+  return text.replace(/\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])|<(https?:\/\/[^\s<>]+)>|\[(https?:\/\/[^\s[\]<>]+)\]\(((?:\\[\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]|[^\\()\s])+)\)|&#([xX][0-9a-fA-F]{1,6}|[0-9]{1,7});/g,
+    (match, punctuation: string | undefined, url: string | undefined, label: string | undefined, target: string | undefined, numeric: string | undefined) => {
+      if (numeric !== undefined) {
+        const value = /^[xX]/.test(numeric) ? Number.parseInt(numeric.slice(1), 16) : Number(numeric);
+        return value > 0 && value <= 0x10ffff && !(value >= 0xd800 && value <= 0xdfff) ? String.fromCodePoint(value) : match;
+      }
       if (label !== undefined) return target!.replace(/\\([\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e])/g, '$1') === label ? label : match;
       return punctuation ?? url!;
     });
