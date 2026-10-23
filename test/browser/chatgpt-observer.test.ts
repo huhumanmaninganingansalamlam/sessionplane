@@ -15,7 +15,7 @@ import { inspectChatGptSubmissionCandidates, recoverChatGptAcknowledgement } fro
 
 const CONVERSATION_ID = 'conversation-observer-123456';
 
-test('actual observation reveals current collapsed HostSpan work and reports its alert without granting', async () => {
+test('actual observation reveals current collapsed HostSpan work and reports its alert without granting', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-work-permission-observer-'));
   const registry = new PageRegistry();
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
@@ -49,6 +49,25 @@ test('actual observation reveals current collapsed HostSpan work and reports its
         assert.equal(session.submittedUserMessageId, 'user-message-1');
       }
       assert.equal(await page.evaluate(() => (window as any).opens), 3, 'Each current disclosure opens once; no old work toggled');
+      await page.setContent(`<main>
+        <div data-message-author-role="user" data-message-id="user-message-1">Original question</div>
+        ${'<div class="group/activity-header"><button aria-expanded="true">이전 활동</button></div>'.repeat(102)}
+        <div data-message-author-role="assistant" data-message-id="retained-answer">Actual retained answer</div><textarea></textarea></main>`);
+      const prototype = Object.getPrototypeOf(page.locator('button'));
+      const getAttribute = prototype.getAttribute;
+      let attributeReads = 0;
+      t.mock.method(prototype, 'getAttribute', function (this: unknown, name: string, ...args: unknown[]) {
+        if (name === 'aria-expanded' || name === 'data-state') attributeReads++;
+        return getAttribute.call(this, name, ...args);
+      });
+      const started = performance.now();
+      const observed = await source.observe();
+      t.diagnostic(JSON.stringify({ openHeaders: 102, attributeReads, observationMs: performance.now() - started }));
+      assert.equal(attributeReads, 0, 'Already-open work must not incur per-header protocol reads on every observation');
+      assert.equal(observed.candidate?.responseMessageId, 'retained-answer');
+      const tracker = new ExactFinalTracker(10);
+      tracker.evaluate(observed, 0);
+      assert.equal(tracker.evaluate(await source.observe(), 10).kind, 'complete');
     } finally { source.close(); }
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
