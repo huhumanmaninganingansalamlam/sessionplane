@@ -994,6 +994,8 @@ export class SessionUiService {
   }
 
   #requirePage(session: { readonly sessionId: string; readonly generation: number; readonly pageKey: string | null; readonly conversationId: string | null }): Page {
+    if (this.#submissions.isObservationHeld(session.conversationId))
+      throw new SessionPlaneDomainError('provider.preparation-required', 'The user is reviewing this conversation; observation and controls are paused');
     if (session.pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'Exact preparation page is unavailable');
     try {
       const page = this.#registry.requireSessionPage(session.pageKey, {

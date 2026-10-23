@@ -164,8 +164,39 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName?: string | undefined; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName?: string | undefined; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'human_review'; action: 'pause' | 'resume' } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
+    if (input.decision === 'human_review') {
+      const result = await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
+        const current = this.services.directory.getSession(request.sessionId);
+        if (current.generation !== request.generation || current.provider !== 'chatgpt' || !current.conversationId || !current.pageKey)
+          throw new SessionPlaneDomainError('provider.preparation-required', 'Human review requires the exact current owned conversation');
+        return await this.services.pageMutex.runExclusive(current.pageKey, async () => this.services.receipts.execute({
+          clientId: request.clientId, requestId: input.requestId, method: 'workflow.human_review', payload: input,
+          operation: () => {
+            const now = new Date().toISOString();
+            const prior = this.#loadRecovery.get(current.conversationId!);
+            this.#loadRecovery.save({ conversationId: current.conversationId!,
+              url: `https://chatgpt.com/c/${current.conversationId}`, sessionId: current.sessionId,
+              pageKey: current.pageKey!, bindingEpoch: this.services.ui.pageHealth(current)?.bindingEpoch ?? 0,
+              attempts: prior?.attempts ?? 0, lastAttemptAt: prior?.lastAttemptAt ?? null,
+              lastOutcome: prior?.lastOutcome ?? null, notifiedAt: prior?.notifiedAt ?? null,
+              lastCheckedAt: now, state: input.action === 'pause' ? 'held' : 'recovered',
+              reason: input.action === 'pause' ? 'user-review' : 'user-review-completed' });
+            if (input.action === 'pause') this.services.retireObservation(current.sessionId);
+            new EventRepository(this.services.database.raw).append({ teamId: current.teamId,
+              sessionId: current.sessionId, generation: current.generation, eventType: 'generation.human-review',
+              payload: { action: input.action, requestRef: request.outboxId, providerMutation: false }, createdAt: now });
+            this.services.scheduler.refreshSession(current.sessionId);
+            return { requestOk: true, requestRef: request.outboxId, sessionId: current.sessionId,
+              generation: current.generation, observationHeld: input.action === 'pause', providerMutation: false };
+          } }));
+      });
+      if (input.action === 'resume') await this.services.ensurePage(request.sessionId, request.generation);
+      return result;
+    }
+    if (this.#userReview(request)) throw new SessionPlaneDomainError('provider.preparation-required',
+      'Observation and controls are paused for user review; resume only after the user reports completion');
     const owner = ownerOf(request);
     if (input.decision === 'hostspan_permission') {
       return await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
@@ -417,6 +448,8 @@ export class TeamWorkflow {
         let followupId = input.followupUserMessageId;
         for (;;) {
           if ((result.followup as { terminal?: boolean } | undefined)?.terminal) break;
+          const userReview = this.#userReview(request);
+          if (userReview) { result = userReview; break; }
           const preparedContinuation = this.#outbox.getByRequest(request.clientId, `continue:managed-continuation:${request.outboxId}`);
           const discoverFollowup = !followupId && preparedContinuation?.submissionState === 'prepared';
           if (followupId || discoverFollowup) {
@@ -492,7 +525,7 @@ export class TeamWorkflow {
             const timeoutReady = (result.submissionVerification as { nextAction?: string } | undefined)?.nextAction === 'reconcile_failure';
             const serverReview = (result.submissionVerification as { serverObservation?: {
               observedAt?: string; currentIdentityMatches?: boolean;
-              serverObservation?: { messages?: { role: string; textLength: number; status?: string }[] } } } | undefined)?.serverObservation;
+              serverObservation?: { messages?: { role: string; textLength: number; status?: string; endTurn?: boolean | null }[] } } } | undefined)?.serverObservation;
             const freshServer = serverReview?.currentIdentityMatches === true && !!serverReview.observedAt &&
               Date.now() - Date.parse(serverReview.observedAt) <= 180_000;
             const dom = (result.submissionVerification as { dom?: {
@@ -511,6 +544,41 @@ export class TeamWorkflow {
                 /^(메시지 스트림에 오류 발생|Error in message stream)[.!]?\s*(다시 시도|Retry|Try again)$/i.test(alert.trim()));
             const interrupted = streamRetry || idleWithoutResponse || timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
               dom.activity !== 'strong' && (dom.anchorPresent === true || missingContinuation) && dom.laterUserFound === false);
+            const parentRef = JSON.parse(request.payloadJson).continuationOf;
+            const priorRecovery = typeof parentRef === 'string' && request.requestId === `continue:managed-continuation:${parentRef}`
+              ? this.services.receipts.get(request.clientId, `managed-continuation:${parentRef}`) : null;
+            const proof = priorRecovery?.method === 'session.continuation.prepare'
+              ? JSON.parse(priorRecovery.resultJson).evidence : undefined;
+            // An accepted Continue is delivery, not recovery. Reuse the ACK's
+            // broad interval and exact progress evidence, never a retry count.
+            const serverProgress = serverReview?.currentIdentityMatches === true &&
+              serverReview.serverObservation?.messages?.some(message => message.role === 'tool' || message.textLength > 0 ||
+                (freshServer && (message.status === 'in_progress' || message.endTurn === true)));
+            if (proof?.disconnectedRecovery === true && proof.conversationId === result.conversationId &&
+                Date.now() - Date.parse(request.updatedAt) >= 30 * 60_000 &&
+                dom?.activityReason === 'provider-stream-disconnected' && dom.activity !== 'strong' &&
+                dom.anchorPresent === true && dom.laterUserFound === false &&
+                !dom.turnBoundary?.some(turn => turn.role !== 'user' && !!turn.text?.trim()) && !serverProgress &&
+                !this.services.artifacts.list({ sessionId: request.sessionId, generation: request.generation })
+                  .artifacts.some(artifact => artifact.artifactState === 'downloaded') &&
+                !((result.evidence as { providerAlerts?: string[] } | undefined)?.providerAlerts?.length) &&
+                result.terminal !== true && result.errorCode !== 'provider.actionable-alert') {
+              const recovery = this.services.receipts.execute({ clientId: request.clientId,
+                requestId: `managed-recovery-review:${request.outboxId}`, method: 'workflow.managed_recovery_review',
+                payload: { requestRef: request.outboxId }, operation: () => {
+                  const recovery = { state: 'decision_required', decisionRequired: true, userActionRequired: true,
+                    reason: 'provider.failure-unverified', automaticContinuation: false,
+                    nextAction: 'human_review_original_conversation', url: `https://chatgpt.com/c/${result.conversationId}`,
+                    lastContinuationAt: request.updatedAt,
+                    message: 'The same empty disconnection remains after the approved continuation and its broad review interval, without new exact answer, tool or output evidence. Review the original conversation; preserve the request and do not resend or refresh automatically. Backend deferral does not prove execution failure.' };
+                  new EventRepository(this.services.database.raw).append({ teamId: request.teamId,
+                    sessionId: request.sessionId, generation: request.generation, eventType: 'generation.recovery-review-required',
+                    payload: { requestRef: request.outboxId, recovery, providerMutation: false }, createdAt: new Date().toISOString() });
+                  return recovery;
+                } });
+              result = { ...result, status: 'recovery_required', recovery };
+              break;
+            }
             // Reviewing a live turn is not a new submission. Its later exact
             // timeout may use the existing approval after the ACK's broad interval.
             const timeoutDue = timeoutReady && Date.now() - Date.parse(request.updatedAt) >= 30 * 60_000;
@@ -672,6 +740,8 @@ export class TeamWorkflow {
   }
 
   async #observe(request: OutboxRecord, maxNodes?: number, inspectCurrent = false): Promise<Record<string, unknown>> {
+    const userReview = this.#userReview(request);
+    if (userReview) return userReview;
     const snapshot = this.#sessions.getSnapshot(request.sessionId)!;
     const required = snapshot.generation === request.generation ? this.#loadRecoveryRequired(snapshot) : null;
     const result = required === null ? await this.#observeRequest(request, maxNodes, inspectCurrent)
@@ -773,6 +843,16 @@ export class TeamWorkflow {
       ...(confirmedTurnCount < 10 ? {} : {
         recommendation: 'This conversation has at least 10 confirmed user turns; this is a handoff cue, not a cutoff. Resolve the current request and retrieve required answers/files first. Save a concise handoff with the objective, decisions, evidence/artifacts, unresolved work, next step and model/effort. For authorized context renewal, use sessionplane_session_replace with the same team, stable role and provider plus its fresh roleRef; the role ID/key stays unchanged. Do not create a continuation role for the same responsibility. Carry the handoff into the successor using its returned roleRef and fresh preparation; replacement never sends or replays work. Provider conversation deletion is attempted once, independently of verified idle owned-tab closure: inspect replacement.cleanup and pageCleanup, and confirm tab closure even when deletion fails. Preserve active work, UNKNOWN submissions, uncollected results and drafts.',
       }) };
+  }
+
+  #userReview(request: OutboxRecord): Record<string, unknown> | null {
+    const current = this.services.directory.getSession(request.sessionId);
+    if (!this.#loadRecovery.isUserHeld(current.conversationId)) return null;
+    return { ...current, requestOk: true, requestRef: this.#outbox.getByGeneration(current.sessionId, current.generation)?.outboxId,
+      originalRequestRef: request.outboxId, observationHeld: true, status: 'recovery_required',
+      recovery: { state: 'decision_required', decisionRequired: true, userActionRequired: true,
+        reason: 'user-review', automaticContinuation: false, url: `https://chatgpt.com/c/${current.conversationId}`,
+        nextAction: 'Resume human_review only after the user reports completion; preserve the request and draft.' } };
   }
 
   async #observeRequest(request: OutboxRecord, maxNodes?: number, inspectCurrent = false): Promise<Record<string, unknown>> {

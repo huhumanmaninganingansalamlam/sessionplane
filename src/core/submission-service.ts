@@ -357,6 +357,7 @@ export class SubmissionService {
     const actor = this.#scheduler.actorFor(snapshot.sessionId);
     return await actor.enqueue(async () => {
       const current = this.#requireSnapshot(snapshot.sessionId);
+      if (this.isObservationHeld(current.conversationId)) return current;
       const currentConversationId = current.conversationId;
       if (
         current.generation !== snapshot.generation || current.terminal ||
@@ -578,6 +579,8 @@ export class SubmissionService {
     requestHash: string,
     attachments: readonly ProviderAttachment[],
   ): Promise<SessionSnapshot> {
+    if (new ConversationLoadRecoveryRepository(this.#database).isUserHeld(this.#requireSnapshot(sessionId).conversationId))
+      throw new SessionPlaneDomainError('provider.preparation-required', 'The user is reviewing this conversation; new submissions are paused');
     const existing = this.#outbox.getByRequest(input.clientId, input.requestId);
     if (existing !== null) {
       if (existing.requestHash !== requestHash || existing.sessionId !== sessionId) {
@@ -886,6 +889,8 @@ export class SubmissionService {
     const requireOwner = () => {
       const outbox = this.#outbox.getByRequest(input.clientId, input.requestId);
       const snapshot = this.#requireSnapshot(input.sessionId);
+      if (new ConversationLoadRecoveryRepository(this.#database).isUserHeld(snapshot.conversationId))
+        throw new SessionPlaneDomainError('provider.preparation-required', 'The user is reviewing this conversation; observation and controls are paused');
       if (outbox === null || outbox.sessionId !== input.sessionId ||
           outbox.generation !== input.generation || (!input.followupInspection && snapshot.generation !== input.generation)) {
         throw new SessionPlaneDomainError('session.generation-superseded', 'Exact caller-owned submission is no longer current');
@@ -1133,6 +1138,10 @@ export class SubmissionService {
       confirmation: receipt ? JSON.parse(receipt.resultJson).userConfirmedInterruption as UserConfirmedInterruption : undefined };
   }
 
+  isObservationHeld(conversationId: string | null): boolean {
+    return new ConversationLoadRecoveryRepository(this.#database).isUserHeld(conversationId);
+  }
+
   async prepareContinuation(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string;
       readonly generation: number; readonly decisionId: string; readonly userConfirmedInterruption?: UserConfirmedInterruption | undefined },
@@ -1147,6 +1156,8 @@ export class SubmissionService {
       const original = this.#outbox.getByRequest(clientId, input.requestId);
       const snapshot = this.#requireSnapshot(input.sessionId);
       this.#requireActiveRoleSession(snapshot);
+      if (this.isObservationHeld(snapshot.conversationId)) throw new SessionPlaneDomainError(
+        'provider.preparation-required', 'The user is reviewing this conversation; continuation is paused');
       const timeout = snapshot.reason === 'message-timeout-reconciled' && snapshot.errorCode === 'provider.execution-failed';
       if (!original || original.sessionId !== input.sessionId || original.generation !== input.generation ||
           snapshot.generation !== input.generation || (snapshot.terminal && !timeout) || snapshot.provider !== 'chatgpt' ||

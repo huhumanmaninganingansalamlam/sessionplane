@@ -121,6 +121,7 @@ export class RecoveryService {
       if (snapshot === null || snapshot.generation !== generation) {
         throw new SessionPlaneDomainError('session.generation-superseded', 'Exact request page ownership changed');
       }
+      if (this.#loadRecovery.isUserHeld(snapshot.conversationId)) return;
       this.#adapters.require(snapshot.provider);
       if (snapshot.pageKey !== null) {
         try {
@@ -161,6 +162,7 @@ export class RecoveryService {
   ): void {
     if (
       this.#closed ||
+      this.#loadRecovery.isUserHeld(snapshot.conversationId) ||
       !needsAcknowledgementRecovery(snapshot) ||
       !this.#adapters.has(snapshot.provider)
     ) {
@@ -227,6 +229,7 @@ export class RecoveryService {
     const snapshots = this.#sessions.listRecoverableSnapshots();
 
     for (const original of snapshots) {
+      if (this.#loadRecovery.isUserHeld(original.conversationId)) continue;
       if (options.forceObservers === true) {
         this.#observations.stop(original.sessionId, original.generation);
       }
@@ -337,6 +340,7 @@ export class RecoveryService {
       if (this.maintenance && !release) continue;
       try {
         const snapshot = this.#sessions.getSnapshot(initial.sessionId);
+        if (snapshot && this.#loadRecovery.isUserHeld(snapshot.conversationId)) return;
         if (
           snapshot === null ||
           snapshot.generation !== initial.generation ||

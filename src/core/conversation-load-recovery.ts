@@ -131,12 +131,14 @@ export class ConversationLoadRecovery {
     for (const binding of this.services.registry.listBindings()) {
       if (this.#closed || binding.state !== 'owned' || !binding.sessionId || !binding.conversationId || this.services.pageMutex.isBusy(binding.pageKey)) continue;
       const session = this.#sessions.getSnapshot(binding.sessionId);
+      if (this.repository.isUserHeld(binding.conversationId)) continue;
       if (!session || session.provider !== 'chatgpt' || session.pageKey !== binding.pageKey || session.conversationId !== binding.conversationId ||
           session.generation !== binding.generation || ['submitting', 'queued'].includes(session.submissionState ?? '')) continue;
       try {
         const page = this.services.registry.requireSessionPage(binding.pageKey, session);
         this.#attach(page, binding.pageKey);
         const surface = await this.#surface(page, session, false);
+        if (this.repository.isUserHeld(binding.conversationId)) continue;
         targets.set(binding.conversationId, session);
         const prior = this.repository.get(binding.conversationId);
         if (!prior && !surface.loadError) continue;
@@ -163,6 +165,7 @@ export class ConversationLoadRecovery {
     await this.services.scheduler.actorFor(session.sessionId).enqueue(async () => {
       if (this.#closed) return;
       const current = this.#sessions.getSnapshot(session.sessionId);
+      if (current && this.repository.isUserHeld(current.conversationId)) return;
       if (!current || current.pageKey !== session.pageKey || current.conversationId !== session.conversationId || current.generation !== session.generation ||
           ['submitting', 'queued'].includes(current.submissionState ?? '')) { this.#record(record, session, 'held', 'request-state-changed'); return; }
       await this.services.pageMutex.runExclusive(record.pageKey, async () => {

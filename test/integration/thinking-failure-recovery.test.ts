@@ -514,6 +514,97 @@ test('a lost continuation ACK uses proven server absence and the exact retained 
   } finally { await f.close(); }
 });
 
+test('user review pauses the existing managed collector and observation without stopping execution, then resumes the same request', async t => {
+  const f = await fixture();
+  try {
+    f.fake.idleToolTurn = true;
+    f.fake.surface = users => users;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    await f.fake.page.locator('textarea').fill('Preserved user draft');
+    const input = { teamId: f.team.teamId, requestRef, decision: 'human_review' };
+    const waiting = f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
+      waitMs: 60000, continuationApproved: true });
+    await until(() => f.core.actorScheduler.actorFor(original.sessionId).subscriberCount > 0);
+    const pause = await f.rpc<any>('decide', { ...input, requestId: 'user-pause', action: 'pause' });
+    assert.equal(pause.observationHeld, true);
+    const reads = t.mock.method(f.fake.page, 'evaluate');
+    const opened = f.fake.observationOpenCount;
+    const get = await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef });
+    const held = (await waiting).results[0];
+    assert.equal(get.request.observationHeld, true);
+    assert.equal(held.observationHeld, true);
+    assert.equal(held.recovery.automaticContinuation, false);
+    await f.core.recoveryService.ensurePage(original.sessionId, original.generation);
+    await f.core.recoveryService.restore({ forceObservers: true });
+    f.core.observationService.start(original, { force: true });
+    await assert.rejects(f.rpc('decide', { teamId: f.team.teamId, requestRef, requestId: 'held-continue',
+      decision: 'continue', continuationApproved: true }), /paused/);
+    assert.equal(reads.mock.callCount(), 0, 'Stored reads and reattachment must not observe the user-controlled page');
+    assert.equal(f.fake.observationOpenCount, opened);
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(f.fake.stopCount, 0);
+    assert.equal(f.core.teamDirectory.getSession(original.sessionId).submittedUserMessageId, original.submittedUserMessageId);
+    assert.equal(f.core.submissionService.isObservationHeld('unrelated-conversation'), false);
+    reads.mock.restore();
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved user draft');
+    const resumed = await f.rpc<any>('decide', { ...input, requestId: 'user-resume', action: 'resume' });
+    assert.equal(resumed.observationHeld, false);
+    await until(() => f.fake.observationOpenCount > opened);
+    const replay = await f.rpc<any>('decide', { ...input, requestId: 'user-pause', action: 'pause' });
+    assert.equal(replay.observationHeld, true, 'Receipt replay returns its original result');
+    assert.equal(f.core.submissionService.isObservationHeld(original.conversationId), false, 'Replaying an old pause cannot pause resumed work');
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(f.fake.stopCount, 0);
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved user draft');
+  } finally { await f.close(); }
+});
+
+for (const newTool of [false, true]) test(`managed recovery reviews a persistent empty disconnection${newTool ? ' while preserving new exact tool progress' : ' without treating old tools or its ACK as progress'}`, async () => {
+  const f = await fixture();
+  try {
+    f.fake.idleToolTurn = true;
+    f.fake.missingTimeoutAnchor = true;
+    const disconnected = '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>';
+    f.fake.surface = users => users + disconnected;
+    const originalRef = await f.submit(false);
+    const next = await f.rpc<any>('decide', { teamId: f.team.teamId, requestRef: originalRef,
+      requestId: `managed-continuation:${originalRef}`, decision: 'continue', continuationApproved: true });
+    assert.equal(next.generation, 2);
+    const current = f.core.teamDirectory.getSession(f.session.sessionId);
+    const old = new Date(Date.now() - 31 * 60_000).toISOString();
+    f.core.database.raw.prepare('UPDATE outbox SET updated_at=? WHERE outbox_id=?').run(old, next.requestRef);
+    // A completed tool from the predecessor cannot hide this successor's lack
+    // of results. Only an exact post-ACK tool belongs to the current recovery.
+    new EventRepository(f.core.database.raw).append({ teamId: f.team.teamId, sessionId: current.sessionId,
+      generation: newTool ? 2 : 1, eventType: 'generation.backend-pending', createdAt: new Date().toISOString(),
+      payload: { recoveryIdentity: { conversationId: current.conversationId, pageKey: current.pageKey,
+        submittedUserMessageId: newTool ? current.submittedUserMessageId : 'user-message-1',
+        submittedUserTurnId: newTool ? current.submittedUserTurnId : 'user-message-1' },
+        serverObservation: { anchorNodeId: newTool ? current.submittedUserMessageId : 'user-message-1',
+          currentNodeId: 'returned-tool', nextUserFound: false, assistantCount: 1,
+          messages: [{ messageId: 'returned-tool', role: 'tool', channel: 'commentary',
+            status: 'finished_successfully', endTurn: null, hidden: false, textLength: 0 }] } } });
+    f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="final" data-end-turn="true">Recovered work</div>';
+    const result = (await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [originalRef],
+      waitMs: 60000, continuationApproved: true })).results[0];
+    if (newTool) {
+      assert.equal(result.generation, 3);
+      assert.equal(result.terminal, true);
+      assert.equal(result.recovery?.userActionRequired, undefined);
+      assert.equal(f.fake.submitCount, 3);
+    } else {
+      assert.equal(result.generation, 2);
+      assert.equal(result.terminal, false);
+      assert.equal(result.recovery?.decisionRequired, true);
+      assert.equal(result.recovery?.userActionRequired, true);
+      assert.equal(result.recovery?.url, `https://chatgpt.com/c/${current.conversationId}`);
+      assert.equal(f.fake.submitCount, 2, 'An ACK alone must not restart another ineffective recovery');
+      assert.equal(f.core.teamDirectory.getSession(current.sessionId).terminal, false);
+    }
+  } finally { await f.close(); }
+});
+
 test('managed wait resumes its already prepared continuation without another generation or send', async t => {
   const f = await fixture();
   try {

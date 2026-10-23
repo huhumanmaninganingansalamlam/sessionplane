@@ -22,6 +22,10 @@ export class ConversationLoadRecoveryRepository {
       .get(conversationId) as unknown as LoadRecoveryRecord | undefined;
     return row ? { ...row } : null;
   }
+  isUserHeld(conversationId: string | null): boolean {
+    const record = conversationId === null ? null : this.get(conversationId);
+    return record?.state === 'held' && record.reason === 'user-review';
+  }
   list(): LoadRecoveryRecord[] {
     return this.database.raw.prepare(`SELECT ${columns} FROM conversation_load_recovery ORDER BY last_checked_at, conversation_id`)
       .all() as unknown as LoadRecoveryRecord[];

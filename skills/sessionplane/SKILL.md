@@ -67,9 +67,12 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    only the original Coordinator performs this recovery; readiness-only work must
    have no saved Submit choice. Recheck current status before each such choose.
    Follow explicit user corrections when request hints conflict. Keep the same requestRef.
-   Do not refresh automatically. When refresh is needed, focus the exact request
-   tab, report the current error and one required user action, and pause that
-   conversation's automation until the user reports completion. Preserve drafts.
+   Do not refresh automatically. When user control is needed, focus the exact
+   request tab and report the current error and one required action. Use decide
+   `decision:"human_review", action:"pause"` on its current requestRef to pause
+   observation and Continue without stopping provider work or changing drafts.
+   A human-wait report alone does not pause Core. After user completion, use
+   `action:"resume"` with a new requestId and resume the same managed chain.
 5. Keep one managed wait per request chain. When the user has approved normal
    same-conversation `계속` recovery, pass `continuationApproved: true` on positive
    MCP waits, or `--continuation-approved` on the existing CLI wait. Without it,
