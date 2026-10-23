@@ -559,7 +559,7 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
     const page = service.pageRegistry.pageForObservation(sent.pageKey!);
     const view = await callRpc<{ requests: Array<{ requestRef: string }> }>({ socketPath: config.socketPath, method: 'workflow.team_get', params: { teamId: team.teamId } });
     const identity = { teamId: team.teamId, requestRef: view.requests[0]!.requestRef };
-    const inspect = () => invokeMcpTool({ name: 'sessionplane_team_get', arguments: identity,
+    const inspect = () => invokeMcpTool({ name: 'sessionplane_team_get', arguments: { ...identity, view: 'evidence' },
       socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
     const pending = await inspect();
     assert.equal(pending.isError, false);

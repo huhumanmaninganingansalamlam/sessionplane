@@ -818,13 +818,14 @@ export class TeamWorkflow {
 
   #storedRequest(request: OutboxRecord): Record<string, unknown> {
     const snapshot = this.services.directory.getSession(request.sessionId);
+    const receipt = JSON.parse(request.resultJson ?? '{}');
+    const failure = request.submissionState === 'failed_pre_submit' ? { message: receipt.message } : {};
     if (snapshot.generation === request.generation)
-      return { ...snapshot, requestRef: request.outboxId, roleRef: roleRef(snapshot),
+      return { ...snapshot, ...failure, requestRef: request.outboxId, roleRef: roleRef(snapshot),
         ...(needsDecision(snapshot) ? { status: 'needs_decision' } : {}) };
     const original = this.#sessions.getGenerationResult(request.sessionId, request.generation);
-    const receipt = JSON.parse(request.resultJson ?? '{}');
     return { requestOk: true, requestRef: request.outboxId, teamId: request.teamId, sessionId: request.sessionId,
-      generation: request.generation, ...original, historical: true,
+      generation: request.generation, ...original, ...failure, historical: true,
       terminal: original?.completedAt != null, waitExpired: false,
       conversationId: receipt.sessionId === request.sessionId && receipt.generation === request.generation
         ? receipt.conversationId ?? null : null };

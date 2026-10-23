@@ -96,7 +96,7 @@ async function fixture() {
     } catch (error) { assert.match(String(error), /preparation|decision/i); }
     const requestRef = (core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=?').get(session.sessionId) as { outbox_id: string }).outbox_id;
     for (const purpose of ['model', 'composer', 'submit']) {
-      const observed = await rpc<{ request: { evidence: BrowserSnapshot } }>('team_get', { teamId: team.teamId, requestRef });
+      const observed = await rpc<{ request: { evidence: BrowserSnapshot } }>('team_get', { view: 'evidence', teamId: team.teamId, requestRef });
       const evidence = observed.request.evidence;
       const node = evidence.nodes.find(n => purpose === 'model' ? n.id === 'configuration' :
         purpose === 'composer' ? n.role === 'textbox' : n.submitControl === true)!;
@@ -142,7 +142,7 @@ test('opt-in continues once per proven failure, backs off, preserves 5.5 Pro/dea
     assert.equal(generations[1]!.error_code, 'provider.execution-failed');
     assert.equal(generations[2]!.answer_text, 'Normal final');
     assert.equal(f.core.database.raw.prepare("SELECT count(*) AS n FROM events WHERE event_type='generation.failure-reconciled'").get()!.n, 2);
-    const get = await f.rpc<{ request: { thinkingFailureRecovery: { successorRequestRef: string; enabled: boolean; state: string; sender: string } } }>('team_get', { teamId: f.team.teamId, requestRef: rootRef });
+    const get = await f.rpc<{ request: { thinkingFailureRecovery: { successorRequestRef: string; enabled: boolean; state: string; sender: string } } }>('team_get', { view: 'evidence', teamId: f.team.teamId, requestRef: rootRef });
     assert.ok(get.request.thinkingFailureRecovery.successorRequestRef);
     assert.equal(get.request.thinkingFailureRecovery.enabled, false);
     assert.equal(get.request.thinkingFailureRecovery.state, 'complete');
@@ -187,7 +187,7 @@ test('fresh backoff reinspection preserves human follow-up/draft/model changes a
       await Promise.all([f.core.thinkingFailureRecovery.observe(failed), f.core.thinkingFailureRecovery.observe(failed)]);
       await delay(1_300); assert.equal(f.fake.submitCount, 1); assert.equal(f.core.teamDirectory.getSession(f.session.sessionId).generation, 1);
       assert.equal(f.core.teamDirectory.getSession(f.session.sessionId).submittedUserMessageId, 'user-message-1');
-      const paused = await f.rpc<{ request: { thinkingFailureRecovery: { enabled: boolean; state: string } } }>('team_get', {
+      const paused = await f.rpc<{ request: { thinkingFailureRecovery: { enabled: boolean; state: string } } }>('team_get', { view: 'evidence',
         teamId: f.team.teamId, requestRef: (f.core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=?').get(f.session.sessionId) as { outbox_id: string }).outbox_id });
       assert.equal(paused.request.thinkingFailureRecovery.enabled, false);
       assert.equal(paused.request.thinkingFailureRecovery.state, 'paused');
@@ -668,7 +668,7 @@ test('user review pauses the existing managed collector and observation without 
     assert.equal(pause.observationHeld, true);
     const reads = t.mock.method(f.fake.page, 'evaluate');
     const opened = f.fake.observationOpenCount;
-    const get = await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef });
+    const get = await f.rpc<any>('team_get', { view: 'evidence', teamId: f.team.teamId, requestRef });
     const held = (await waiting).results[0];
     assert.equal(get.request.observationHeld, true);
     assert.equal(held.observationHeld, true);
@@ -831,7 +831,7 @@ test('managed collection links an existing followup under unsubmitted continuati
     assert.deepEqual(generations(), before);
     assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved user draft');
     assert.equal(f.fake.submitCount, 1);
-    const again = await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef });
+    const again = await f.rpc<any>('team_get', { view: 'evidence', teamId: f.team.teamId, requestRef });
     assert.equal(again.request.followup.answerText, recovered.followup.answerText);
     assert.equal(again.request.responseMessageId, null);
     assert.equal((await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000 })).results[0].followup.responseMessageId, 'final');
@@ -955,7 +955,7 @@ test('explicit message-timeout reconciliation preserves original ACK, rejects li
     await f.fake.page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend', '<button aria-label="Stop">Stop</button>'));
     await assert.rejects(f.rpc('decide', { ...input, continuationPrompt: '계속' }), /active generation/);
     assert.equal(f.fake.submitCount, 1);
-    const active = await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef });
+    const active = await f.rpc<any>('team_get', { view: 'evidence', teamId: f.team.teamId, requestRef });
     assert.equal(active.request.submissionVerification.nextAction, 'read_same_request');
     await f.fake.page.locator('button[aria-label="Stop"]').evaluate(node => node.remove());
     let inspected = '';
@@ -1015,7 +1015,7 @@ test('explicit message-timeout reconciliation preserves original ACK, rejects li
     assert.equal(f.fake.submitCount, 1);
     const childRef = f.core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=? AND generation=2').get(child.sessionId)!.outbox_id;
     for (const purpose of ['model', 'composer', 'submit']) {
-      const observed = await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef: childRef });
+      const observed = await f.rpc<any>('team_get', { view: 'evidence', teamId: f.team.teamId, requestRef: childRef });
       const evidence = observed.request.evidence;
       const node = evidence.nodes.find((n: BrowserSnapshot['nodes'][number]) => purpose === 'model' ? n.id === 'configuration' :
         purpose === 'composer' ? n.role === 'textbox' : n.submitControl === true)!;
@@ -1045,7 +1045,7 @@ test('managed wait recovers an idle conversation timeout with missing ACK and st
       payload: { recoveryReason: 'backend-user-anchor-absent-from-mapping', recoveryIdentity: {
         conversationId: original.conversationId, pageKey: original.pageKey,
         submittedUserMessageId: original.submittedUserMessageId, submittedUserTurnId: original.submittedUserTurnId } } });
-    const inspect = await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef });
+    const inspect = await f.rpc<any>('team_get', { view: 'evidence', teamId: f.team.teamId, requestRef });
     assert.equal(inspect.request.errorCode, null, 'Stored observation has not classified this real UI failure');
     assert.equal(inspect.request.submissionVerification.dom.anchorPresent, false);
     assert.equal(inspect.request.submissionVerification.nextAction, 'reconcile_failure');
