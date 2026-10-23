@@ -25,7 +25,7 @@ import {
 } from './browser-health.ts';
 import { isChatGptUrl, isProviderUrl, parseProviderConversationId, type PageBindingSnapshot } from './page-binding.ts';
 import { PageRegistry } from './page-registry.ts';
-import { syncNativeTeamGroups, teamGroupsManifest, TEAM_GROUPS_EXTENSION_ID, type TeamTabs } from './team-tab-groups.ts';
+import { syncNativeTeamGroups, teamGroupsManifest, TEAM_GROUPS_EXTENSION_ID, resolveNativeTeamTabs, type TeamTabs } from './team-tab-groups.ts';
 import {
   assertDedicatedBrowserProfile,
   BrowserProfileError,
@@ -273,29 +273,21 @@ export class BrowserOwner {
     this.#groupSync = (async () => {
       while (this.#groupsDirty && this.#state === 'ready') {
         this.#groupsDirty = false;
-        const teams = new Map<string, { teamId: string; title: string; targetIds: string[] }>();
-        const bindings = this.#pageRegistry.listBindings({ includeClosed: false });
-        for (const binding of bindings) {
-          if (!binding.targetId) continue;
-          const owned = binding.sessionId && ['owned', 'reserved'].includes(binding.state);
-          // Grouping does not grant page mutation ownership. Restored unbound or
-          // duplicate tabs can still have an exact durable conversation owner.
-          const conversationId = !binding.sessionId && ['unbound', 'conflict'].includes(binding.state) && isChatGptUrl(binding.url)
-            ? parseProviderConversationId(binding.url) : null;
-          if (!owned && !conversationId) continue;
-          const owner = this.#resolveTeam!(owned ? binding.sessionId : null, conversationId);
-          if (!owner) continue;
-          const team = teams.get(owner.teamId) ?? { ...owner, targetIds: [] };
-          team.targetIds.push(binding.targetId);
-          teams.set(owner.teamId, team);
-        }
-        const desired: TeamTabs[] = [...teams.values()].sort((a, b) => a.teamId.localeCompare(b.teamId));
-        for (const team of desired) (team.targetIds as string[]).sort();
-        const fingerprint = JSON.stringify([desired, bindings.map(binding => [binding.targetId, binding.sessionId, binding.state, binding.url])]);
-        if (fingerprint === this.#groupsFingerprint) continue;
-        this.#groupsFingerprint = fingerprint;
-        try { await this.#syncGroups(desired); }
-        catch (error) { this.#groupsStatus = { state: 'unavailable', message: error instanceof Error ? error.message : String(error) }; }
+        try {
+          const bindings = this.#pageRegistry.listBindings({ includeClosed: false });
+          const control = await this.#browser!.newBrowserCDPSession();
+          let desired: TeamTabs[];
+          try {
+            const { targetInfos } = await control.send('Target.getTargets');
+            const { browserContextIds } = await control.send('Target.getBrowserContexts');
+            desired = resolveNativeTeamTabs(bindings, targetInfos, browserContextIds, this.#resolveTeam!);
+          } finally { await control.detach(); }
+          for (const team of desired) (team.targetIds as string[]).sort();
+          const fingerprint = JSON.stringify([desired, bindings.map(binding => [binding.targetId, binding.sessionId, binding.state, binding.url])]);
+          if (fingerprint === this.#groupsFingerprint) continue;
+          this.#groupsFingerprint = fingerprint;
+          await this.#syncGroups(desired);
+        } catch (error) { this.#groupsStatus = { state: 'unavailable', message: error instanceof Error ? error.message : String(error) }; }
       }
     })().finally(() => { this.#groupSync = null; });
   }
