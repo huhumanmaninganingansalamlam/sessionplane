@@ -69,7 +69,9 @@ async function callRpcOnce<Result>(options: RpcCallOptions): Promise<Result> {
 }
 
 async function callTransport<Result>(options: RpcCallOptions, connection?: { socket: Duplex; ready: boolean; error: Error | undefined }): Promise<Result> {
-  let deadline = Date.now() + (options.timeoutMs ?? 10_000);
+  const readWait = ['workflow.wait', 'session.wait', 'team.wait'].includes(options.method) &&
+    Number((options.params as { waitMs?: number } | undefined)?.waitMs) > 0;
+  let deadline: number | undefined;
   let deferred = false;
   while (true) {
     try { return await callTransportOnce<Result>(options, connection); }
@@ -79,7 +81,12 @@ async function callTransport<Result>(options: RpcCallOptions, connection?: { soc
         deferred = true;
         deadline = Date.now() + (options.timeoutMs ?? 10_000);
       }
-      else if (!(deferred && data?.errorCode === 'core.unavailable' && data.details?.requestDispatched === false)) throw error;
+      // Commit may close a wait before the client receives maintenance. Reattach
+      // only reads with their unchanged identity/cursor; never replay a mutation
+      // whose response was lost. Use the existing timeout for this reconnect gap.
+      else if (!((deferred || readWait) && data?.errorCode === 'core.unavailable' && data.details?.requestDispatched === false) &&
+          !(readWait && data?.errorCode === 'core.connection-lost')) throw error;
+      deadline ??= Date.now() + (options.timeoutMs ?? 10_000);
       if (Date.now() >= deadline) throw error;
       await delay(Math.min(250, deadline - Date.now()), undefined, { signal: options.signal });
       if (connection?.socket.destroyed && options.remote) {

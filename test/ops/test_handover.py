@@ -25,6 +25,29 @@ spec.loader.exec_module(handover)
 
 
 class HandoverTests(unittest.TestCase):
+    def test_late_live_successor_is_collected_until_ready_but_exit_is_failure(self):
+        process = MagicMock(pid=33)
+        process.poll.return_value = None
+        elapsed = [0]
+        expected = {'requestOk': True, 'process': {'pid': 33}, 'browser': {'state': 'ready'}}
+        def health():
+            if elapsed[0] < 98:
+                raise subprocess.CalledProcessError(1, 'sessplane health')
+            return expected
+        with patch.object(handover.time, 'monotonic', side_effect=lambda: elapsed[0]), \
+                patch.object(handover.time, 'sleep', side_effect=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)), \
+                patch.object(handover, 'health', side_effect=health):
+            self.assertEqual(handover.await_ready(process), expected)
+        self.assertEqual(elapsed[0], 98)
+        for result in [dict(expected, process={'pid': 44}), dict(expected, browser={'state': 'error'})]:
+            with patch.object(handover, 'health', return_value=result), self.assertRaises(AssertionError):
+                handover.await_ready(process)
+        process.poll.return_value = 1
+        with self.assertRaisesRegex(RuntimeError, 'exited'):
+            handover.await_ready(process)
+        process.terminate.assert_not_called()
+        process.kill.assert_not_called()
+
     def test_coordinated_drain_renews_short_lease_until_existing_calls_return(self):
         current = {'process': {'pid': 11, 'startedAt': 'original'},
                    'maintenance': {'phase': 'running', 'coordinatedDrain': True}}

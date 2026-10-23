@@ -29,10 +29,16 @@ actor or persist state. External coordination alone does not prove they stopped.
 If activity or a writer appears, abort and inspect its owner; do not weaken the
 guard or force-stop it. This is not a permanent global pause or rate-limit rule.
 
-An existing wait transport may close during the core outage. Its durable request
-remains; the owner resumes that same request afterward. Browser-side generation
-is not stopped or resent. The script reuses the existing DB, profile and runtime
-environment. Environment values stay in memory and are not printed or saved.
+An existing wait transport may close during the core outage. Updated CLI/MCP
+clients reconnect positive read waits on the same request/generation or event
+cursor, including a reset before a maintenance response. The existing RPC timeout
+bounds the reconnect gap; cancellation and actual errors still return. Mutation
+responses lost after dispatch are never replayed. Older loaded clients can exit
+with ECONNRESET: collect that return, then let the original owner attach exactly
+one wait with the same request/cursor and existing continuation authorization.
+No client reconnect is proof of a provider answer; collect that result separately.
+The script reuses the existing DB, profile and runtime environment. Browser-side
+generation is not stopped or resent; environment values stay only in memory.
 
 The candidate below includes the B20 load-notice fix and bounded maintenance,
 as well as `e38df5b`'s preservation of an existing browser when endpoint verification or
@@ -143,6 +149,14 @@ to a third process, DB integrity/schema and request identities must match, and
 writer checks must pass. Rollback retains the **current DB**, verifies adoption
 and request/binding preservation, and records `rollback-health.json`. It still
 returns failure so issuers can be released without treating deployment as success.
+
+A live successor remains in the same helper's `awaiting-readiness` phase until
+its exact PID answers health with a ready browser or actually exits. There is no
+elapsed-time transition to rollback or success. Retain that original helper
+handle and inspect its existing `core.log` for a stalled startup. Interrupting the
+helper leaves the candidate and browser intact; it does not authorize another
+launch. Completion still requires the subsequent DB/request/ACK/browser identity
+checks. An actual exited successor can enter the guarded rollback path above.
 
 A live but unhealthy successor is preserved, not killed or overwritten. Changed
 Chrome/schema/foreign ownership also blocks automatic rollback. Receipt or helper
