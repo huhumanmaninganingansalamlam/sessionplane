@@ -26,7 +26,8 @@ export async function revealCurrentWorkPermission(page: Page, submittedUserMessa
   // A pending permission can remain in earlier work after a literal Continue.
   // Opening provider disclosures does not attribute their answer to that Continue.
   let opened = false;
-  const work = page.getByRole('button', { name: /^(?:작업 중입니다|(?:[\d\s시간분초.]+ 동안 )?작업함|Working(?:…|\.\.\.)?|Worked for .+)$/i });
+  const work = page.locator('[class~="group/activity-header"] > button[aria-expanded]').or(
+    page.getByRole('button', { name: /^(?:작업 중입니다|(?:[\d\s시간분초.]+ 동안 )?작업함|Working(?:…|\.\.\.)?|Worked for .+)$/i }));
   for (const button of await work.all()) {
     const visibleGrant = page.locator('[role="alert"], [role="alertdialog"], [role="dialog"]')
       .filter({ hasText: /hostspan(?:-[a-z0-9_-]+)?/i }).filter({ visible: true });
