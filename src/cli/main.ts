@@ -746,7 +746,7 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   }, sessionSendRpcTimeoutMs(config));
   if (action === 'hostspan_permission') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'hostspan_permission', action: requireOption(parsed, 'action'),
-    appName: requireOption(parsed, 'app-name'), toolName: requireOption(parsed, 'tool-name'),
+    appName: requireOption(parsed, 'app-name'), ...optionalParam('toolName', parsed.options['tool-name']),
     ...(parsed.options['allow-mode'] === undefined ? {} : { allowMode: parsed.options['allow-mode'] }),
     ...(parsed.options['evidence-hash'] === undefined ? {} : { evidenceHash: parsed.options['evidence-hash'] }),
   }, sessionSendRpcTimeoutMs(config));
@@ -1373,7 +1373,7 @@ Exact request flow (same request; no automatic resend):
     Preserves original uncertainty; never automatically retries or bypasses provider errors/drafts/activity.
   Confirm an observed matching submission without resending:
     request acknowledge TEAM_ID REQUEST_REF --message-id ID --evidence-hash HASH
-  Approved HostSpan tool permission: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow --app-name NAME --tool-name NAME [--allow-mode once|always] [--evidence-hash HASH]
+  Approved HostSpan tool permission: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow --app-name NAME [--tool-name NAME] [--allow-mode once|always] [--evidence-hash HASH]
   Cancel: request stop TEAM_ID REQUEST_REF
   Delete a collected conversation: request delete TEAM_ID REQUEST_REF --outputs-retrieved
   Replace: request replace TEAM_ID ROLE_REF [--preserve-conversation]

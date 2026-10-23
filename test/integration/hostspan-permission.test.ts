@@ -148,5 +148,34 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     assert.equal(fake.stopCount, 0);
     assert.equal(core.teamDirectory.getSession(session.sessionId).generation, 1);
     assert.equal(core.teamDirectory.getSession(session.sessionId).terminal, false);
+    await page.setContent(`<main>
+      <div data-message-author-role="user" data-message-id="older-work-user">Existing implementation question</div>
+      <button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#earlier').hidden=false">작업함</button>
+      <section id="earlier" hidden><div role="alert">hostspan-desktop File Patch</div>
+        <button onclick="throw Error('Must not choose once')">Allow once</button>
+        <button onclick="window.earlierGrants=(window.earlierGrants||0)+1;document.querySelector('#earlier').remove()">Always allow</button></section>
+      <div data-message-author-role="user" data-message-id="user-message-1">계속</div><textarea>Preserved draft</textarea></main>`);
+    output = '';
+    assert.equal(await runCli(['request', 'hostspan_permission', team.teamId, String(row.outbox_id), '--action', 'inspect',
+      '--app-name', 'hostspan-desktop', '--allow-mode', 'always', '--request-id', 'discover-earlier-card',
+      '--socket', config.socketPath, '--json'], { stdin: Readable.from([]), stdout: stream, stderr: stream }), 0, output);
+    const discovery = JSON.parse(output).permission;
+    assert.equal(discovery.outcome, 'discovered');
+    assert.equal(discovery.cards.length, 1);
+    assert.match(discovery.cards[0].permissionText, /File Patch/);
+    assert.equal(discovery.cards[0].submittedUserMessageId, 'older-work-user');
+    assert.equal(await page.evaluate(() => (window as any).earlierGrants ?? 0), 0);
+    assert.equal((await decide('grant-without-tool', { action: 'allow', toolName: undefined, allowMode: 'always' })).isError, true);
+    const earlier = await decide('inspect-earlier-exact', { action: 'inspect', toolName: 'File Patch', allowMode: 'always' });
+    const earlierPermission = earlier.structuredContent.permission as { evidenceHash: string; permissionUserMessageId: string };
+    assert.equal(earlierPermission.permissionUserMessageId, 'older-work-user');
+    const granted = await decide('grant-earlier-exact', { action: 'allow', toolName: 'File Patch', allowMode: 'always', evidenceHash: earlierPermission.evidenceHash });
+    assert.equal(granted.isError, false, JSON.stringify(granted));
+    assert.equal((granted.structuredContent.permission as any).permissionStillVisible, false);
+    assert.equal(await page.evaluate(() => (window as any).earlierGrants), 1);
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
+    assert.equal(core.teamDirectory.getSession(session.sessionId).submittedUserMessageId, null);
+    assert.equal(fake.submitCount, 1);
+
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
