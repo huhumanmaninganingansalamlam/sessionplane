@@ -871,7 +871,7 @@ export class TeamWorkflow {
     // A lost literal recovery ACK cannot hide work under its retained original
     // ACK. Read that lineage without assigning the later answer to the lost turn.
     if (!storedOnly && required === null && snapshot.generation === request.generation &&
-        (inspectCurrent || (result.evidence as { submissionVerification?: { anchorPresent?: boolean } } | undefined)
+        !result.followup && (inspectCurrent || (result.evidence as { submissionVerification?: { anchorPresent?: boolean } } | undefined)
           ?.submissionVerification?.anchorPresent === false)) {
       const original = this.#continuationOriginal(request);
       if (original.outboxId !== request.outboxId) {
@@ -993,7 +993,8 @@ export class TeamWorkflow {
     const failureMessage = request.submissionState === 'failed_pre_submit'
       ? JSON.parse(request.resultJson ?? '{}').message as string | undefined : undefined;
     const linked = new EventRepository(this.services.database.raw).followupReconciliation(request.sessionId, request.generation);
-    if (linked?.requestRef === request.outboxId && typeof linked.receiptId === 'string') {
+    if (linked && (linked.requestRef === request.outboxId ||
+        linked.requestRef === this.#continuationOriginal(request).outboxId) && typeof linked.receiptId === 'string') {
       const receipt = this.services.receipts.get(request.clientId, linked.receiptId);
       if (receipt) {
         const reconciliation = JSON.parse(receipt.resultJson);
@@ -1001,7 +1002,7 @@ export class TeamWorkflow {
         return { requestOk: true, requestRef: request.outboxId, sessionId: request.sessionId, generation: request.generation,
           ...this.#sessions.getGenerationResult(request.sessionId, request.generation),
           historical: snapshot.generation !== request.generation, terminal: true, waitExpired: false,
-          followup: { kind: 'complete', terminal: true, originalRequestRef: request.outboxId,
+          followup: { kind: 'complete', terminal: true, originalRequestRef: linked.requestRef,
             userMessageId: evidence.followupUserMessageId, responseMessageId: evidence.responseMessageId,
             answerText: reconciliation.answerText }, reconciliation };
       }

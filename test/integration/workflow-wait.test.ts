@@ -103,6 +103,10 @@ test('managed collection recovers only a literal continuation lineage without re
         assert.equal(result.followup.responseMessageId, 'actual-followup-final');
         assert.equal(result.followup.answerText, 'Actual collected answer');
         assert.equal(reconciliations, 1);
+        const [reconnected] = (await f.invoke('wait', { teamId: f.team.teamId,
+          requestRefs: [next.requestRef], waitMs: 0 })).structuredContent.results;
+        assert.deepEqual(reconnected.followup, result.followup, 'Reconnect returns the separate durable follow-up without reconciling again');
+        assert.equal(reconciliations, 1);
       } else {
         if (continuation) assert.equal(returned, false, 'A Stop control or backend pacing is neither a final nor proof of fresh tool progress');
         assert.equal(reconciliations, 0);
