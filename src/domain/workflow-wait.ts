@@ -17,6 +17,7 @@ export function workflowAcknowledgementPending(result: Record<string, unknown>):
 export function workflowAnchorRecoveryPending(result: Record<string, unknown>): boolean {
   const verification = result.submissionVerification as { state?: string; nextAction?: string;
     serverObservation?: { currentIdentityMatches?: boolean; recoveryReason?: string;
+      recoveryIdentity?: { conversationId?: string; submittedUserMessageId?: string; submittedUserTurnId?: string };
       serverObservation?: { nextUserFound?: boolean } };
     backend?: { currentIdentityMatches?: boolean; recoveryReason?: string;
       recoveryIdentity?: { conversationId?: string; submittedUserMessageId?: string } } } | undefined;
@@ -41,8 +42,14 @@ export function workflowAnchorRecoveryPending(result: Record<string, unknown>): 
   // Keep collecting that exact ACK; this is no proof of live progress or consent
   // to send, and never associates the older rendered answer with this request.
   const server = verification?.serverObservation;
-  const canonicalPending = server?.currentIdentityMatches === true &&
-    server.serverObservation?.nextUserFound === false &&
+  const canonicalIdentity = server?.recoveryIdentity;
+  const sameCanonicalAnchor = typeof result.conversationId === 'string' &&
+    typeof result.submittedUserMessageId === 'string' &&
+    canonicalIdentity?.conversationId === result.conversationId &&
+    canonicalIdentity.submittedUserMessageId === result.submittedUserMessageId &&
+    canonicalIdentity.submittedUserTurnId === result.submittedUserTurnId;
+  const canonicalPending = (server?.currentIdentityMatches === true || sameCanonicalAnchor) &&
+    server?.serverObservation?.nextUserFound === false &&
     ['backend-assistant-not-final', 'backend-assistant-missing'].includes(server.recoveryReason ?? '');
   return result.submissionState === 'submitted' && result.promptSubmitted === true && result.terminal !== true &&
     result.userActionRequired !== true &&

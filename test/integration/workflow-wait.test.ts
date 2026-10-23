@@ -128,7 +128,7 @@ test('CLI retains submitted missing-anchor pacing until the same ACK answer is r
         ...(canonical ? { serverObservation: { anchorNodeId: session.submittedUserMessageId,
           currentNodeId: 'last-tool-result', nextUserFound: false, assistantCount: 1,
           messages: [{ messageId: 'last-tool-result', role: 'tool', status: 'finished_successfully', textLength: 0 }] } } : {}),
-        recoveryIdentity: { conversationId: session.conversationId, pageKey: canonical ? session.pageKey : 'previous-owned-page',
+        recoveryIdentity: { conversationId: session.conversationId, pageKey: 'previous-owned-page',
           submittedUserMessageId: session.submittedUserMessageId, submittedUserTurnId: session.submittedUserTurnId } } });
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
@@ -154,7 +154,8 @@ test('CLI retains submitted missing-anchor pacing until the same ACK answer is r
     assert.equal(workflowWaitOutcome({ ...pending, errorCode: 'provider.actionable-alert' }), true);
     assert.equal(workflowWaitOutcome({ ...pending, recovery: { userActionRequired: true } }), true);
     if (canonical) {
-      for (const change of [{ currentIdentityMatches: false }, { serverObservation: { nextUserFound: true } }]) {
+      for (const change of [{ recoveryIdentity: { conversationId: session.conversationId,
+        submittedUserMessageId: 'different-ack' } }, { serverObservation: { nextUserFound: true } }]) {
         assert.equal(workflowWaitOutcome({ ...pending, submissionVerification: { ...pending.submissionVerification,
           serverObservation: { ...pending.submissionVerification.serverObservation, ...change } } }), true);
       }
