@@ -104,7 +104,7 @@ export class SessionUiService {
     }
   }
 
-  async inspect(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
+  async inspect(input: PreparationOwner & { readonly maxNodes?: number | undefined; readonly recoverBrowserFailure?: true }) {
     return await this.#submissions.withPendingPreparation(input,
       async (session) => {
         // A service deferral can precede openSubmission's same-session reservation.
@@ -122,6 +122,16 @@ export class SessionUiService {
         await inspectChatGptPageReady(this.#requirePage(session), session.pageKey!);
         const snapshot = await this.#capture(session, input.maxNodes);
         const composerAvailable = snapshot.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled);
+        if (session.submissionState === 'failed_pre_submit') {
+          const page = this.#requirePage(session);
+          const dom = await observeChatGptDom(page, session);
+          const activity = await observeChatGptActivity(page, dom);
+          if (!composerAvailable || activity.strength !== 'none' || dom.actionableAlert) {
+            throw new SessionPlaneDomainError('provider.preparation-unavailable',
+              'Preserve the failed request until its exact page has an idle usable composer');
+          }
+          this.#requirePage(session);
+        }
         const catalog = this.#discoveryFailures.get(`${session.sessionId}:${session.generation}`) ?? this.#catalog;
         const menuIds = new Set(snapshot.nodes.filter((node) => node.role === 'menu' && node.id !== '').map((node) => node.id));
         this.#configurationRefs.set(snapshot.pageKey, { snapshotId: snapshot.snapshotId,

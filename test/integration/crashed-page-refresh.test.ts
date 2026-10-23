@@ -9,6 +9,69 @@ import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
+test('explicit discover restores a manually recovered pre-submit page without reload or submission', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-manual-preparation-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'manual-recovery' });
+    const session = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    const { page, binding } = await core.browserOwner!.createPage();
+    const conversationId = `conversation-${session.sessionId}`;
+    let navigations = 0;
+    await page.route('https://chatgpt.com/**', route => {
+      navigations++;
+      return route.fulfill({ contentType: 'text/html', body: '<main>Page unavailable</main>' });
+    });
+    await page.goto(`https://chatgpt.com/c/${conversationId}`);
+    const open = fake.openSubmission.bind(fake);
+    t.mock.method(fake, 'openSubmission', async request => {
+      core.pageRegistry.reservePage(binding.pageKey, { sessionId: session.sessionId,
+        generation: request.generation, conversationId });
+      return { ...await open(request), conversationId, pageKey: binding.pageKey, bindAcknowledgement() {} };
+    });
+    fake.autoFinalText = 'Retained earlier answer';
+    await core.submissionService.send({ clientId: 'manual-recovery', requestId: 'prior',
+      sessionId: session.sessionId, prompt: 'Earlier review', sessionDeadlineSec: 600 });
+    for (let i = 0; i < 100 && !core.teamDirectory.getSession(session.sessionId).terminal; i++)
+      await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(core.teamDirectory.getSession(session.sessionId).terminal, true);
+    fake.prepareError = new ProviderSubmissionError('browser.unavailable', 'page.waitForTimeout: Page crashed');
+    await assert.rejects(core.submissionService.send({ clientId: 'manual-recovery', requestId: 'original',
+      sessionId: session.sessionId, prompt: 'Preserved original review', sessionDeadlineSec: 600 }));
+    const row = core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? ORDER BY generation DESC LIMIT 1').get(session.sessionId)!;
+    const invoke = (requestId: string) => invokeMcpTool({ name: 'sessionplane_decide',
+      arguments: { teamId: team.teamId, requestRef: row.outbox_id, requestId, decision: 'discover' },
+      socketPath: config.socketPath, timeoutMs: 40000, maxLineBytes: config.rpcMaxLineBytes });
+    assert.equal((await invoke('missing-composer')).isError, true);
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(row.outbox_id), row);
+    // The user restores the document; discovery must not reload it or erase its draft.
+    await page.setContent('<main><textarea id="prompt-textarea">Retained user draft</textarea><button data-testid="stop-button">Stop</button></main>');
+    assert.equal((await invoke('active-generation')).isError, true);
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(row.outbox_id), row);
+    await page.locator('button').evaluate(node => node.remove());
+    const result = await invoke('manual-recovery-discover');
+    assert.equal(result.isError, false, JSON.stringify(result.structuredContent));
+    assert.equal(result.structuredContent.submissionState, 'prepared');
+    assert.equal(result.structuredContent.terminal, false);
+    assert.equal(result.structuredContent.promptSubmitted, false);
+    assert.equal(result.structuredContent.submittedUserMessageId, null);
+    assert.equal(fake.submitCount, 1, 'Only the earlier review was submitted');
+    assert.equal(navigations, 1);
+    assert.equal(await page.locator('textarea').inputValue(), 'Retained user draft');
+    const recovered = core.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(row.outbox_id)!;
+    for (const key of ['outbox_id', 'client_id', 'request_id', 'session_id', 'generation', 'payload_json', 'request_hash'])
+      assert.deepEqual(recovered[key], row[key], `Preserve ${key}`);
+    assert.deepEqual(JSON.parse(String(recovered.result_json)).choices, {});
+    assert.equal((await invoke('manual-recovery-discover')).isError, false);
+    assert.equal(fake.submitCount, 1);
+    assert.equal(core.database.raw.prepare('SELECT answer_text FROM generations WHERE session_id=? AND generation=1').get(session.sessionId)!.answer_text, 'Retained earlier answer');
+    assert.equal(navigations, 1);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('native crash refresh reconnects only the original unsubmitted request without replay', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-crashed-refresh-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
