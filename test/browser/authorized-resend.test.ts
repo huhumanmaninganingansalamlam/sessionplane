@@ -81,6 +81,22 @@ test('approved resend display guard preserves drafts/selection and stops origina
     const followupHtml = await page.content();
     const transcriptHash = await ui.verifyAuthorizedResend(unknown, unknown, '계속', false, true);
     assert.equal(await page.content(), followupHtml, 'A new explicit follow-up neither borrows an older ACK nor clears its exact draft');
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="older-continue">계속</div><div id="prompt-textarea" role="textbox" contenteditable="true">계속</div></main>');
+    await page.locator('[data-message-id="older-continue"]').evaluate(element => {
+      const range = document.createRange(); range.selectNodeContents(element);
+      window.getSelection()!.removeAllRanges(); window.getSelection()!.addRange(range);
+    });
+    await assert.rejects(ui.verifyAuthorizedResend(unknown, unknown, '계속', false), /user-selection/);
+    await ui.verifyAuthorizedResend(unknown, unknown, '계속', false, true);
+    assert.equal(await page.locator('#prompt-textarea').innerText(), '계속');
+    assert.equal(await page.evaluate(() => window.getSelection()?.isCollapsed), true);
+    await page.locator('#prompt-textarea').evaluate(element => {
+      const range = document.createRange(); range.selectNodeContents(element);
+      window.getSelection()!.removeAllRanges(); window.getSelection()!.addRange(range);
+    });
+    await assert.rejects(ui.verifyAuthorizedResend(unknown, unknown, '계속', false, true), /user-selection/);
+    assert.equal(await page.evaluate(() => window.getSelection()?.toString()), '계속', 'An actual draft selection is preserved');
+    await page.setContent(followupHtml);
     await assert.rejects(ui.verifyAuthorizedResend(unknown, unknown, '계속', false), /matching-user-message/);
     await page.locator('main').evaluate(e => e.insertAdjacentHTML('afterbegin',
       '<aside role="alert">Refresh and check whether the message was processed before sending again</aside>'));

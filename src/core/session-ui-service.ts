@@ -416,7 +416,7 @@ export class SessionUiService {
     return await this.#submissions.reconcileFailure(input, (owner, anchor) => this.#failureEvidence(owner, anchor, input.allowMessageTimeout, input.continuationPrompt));
   }
 
-  /** Passive, exact-owner checks; this never dispatches or clears a draft. */
+  /** Exact-owner checks; explicit follow-up may focus its composer, never clear a draft or dispatch. */
   async verifyAuthorizedResend(current: SessionSnapshot, original: SessionSnapshot, prompt: string, allowPreparedDraft: boolean, followup?: true, userTranscriptHash?: string) {
     const page = this.#requirePage(current);
     await inspectChatGptPageReady(page, current.pageKey!);
@@ -448,9 +448,12 @@ export class SessionUiService {
       const editors = [...document.querySelectorAll(composerSelector)]
         .map((element, index) => ({ element, index }))
         .filter(({ element }) => element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
+      const selection = window.getSelection();
       return { drafts: editors.map(({ element, index }) => ({ index,
         text: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
-          ? element.value : (element as HTMLElement).innerText })), selection: window.getSelection()?.isCollapsed === false };
+          ? element.value : (element as HTMLElement).innerText })), selection: selection?.isCollapsed === false,
+        editorSelection: editors.some(({ element }) => element.contains(selection?.anchorNode ?? null) ||
+          element.contains(selection?.focusNode ?? null)) };
     }, CHATGPT_COMPOSER_SELECTOR);
     // The same exact-text contract as preparation: ProseMirror innerText can
     // contain layout-only newlines absent from the authored paragraph text.
@@ -466,6 +469,12 @@ export class SessionUiService {
       state.drafts.length !== 1 && 'composer-count', separateDraft && 'separate-draft',
       !followup && matchingPromptFound && 'matching-user-message',
     ].filter((reason): reason is string => typeof reason === 'string');
+    if (followup && blockingReasons.length === 1 && blockingReasons[0] === 'user-selection' && !state.editorSelection) {
+      // Normal preparation of the explicitly requested new input. Preserve an
+      // editor selection/draft; never remove ranges or force a provider control.
+      await page.locator(CHATGPT_COMPOSER_SELECTOR).nth(state.drafts[0]!.index).focus();
+      if (await page.evaluate(() => window.getSelection()?.isCollapsed !== false)) blockingReasons.pop();
+    }
     if (blockingReasons.length > 0) {
       throw new SessionPlaneDomainError('provider.preparation-required',
         `Approved resend paused: ${blockingReasons.join(', ')}; do not send`,
