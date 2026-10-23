@@ -1,5 +1,5 @@
 import type { CoreMaintenance } from './maintenance.ts';
-import { conversationLimitScope } from '../storage/conversation-load-recovery-repository.ts';
+import { conversationLimitScope, ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
 import type { CurrentGenerationUpdate } from '../domain/generation.ts';
 import { isTerminalSessionState, type SessionSnapshot } from '../domain/session.ts';
 import type { Logger } from '../logging.ts';
@@ -53,11 +53,13 @@ export class ObservationService {
   readonly #now: () => Date;
   readonly #metrics: RuntimeMetrics | null;
   readonly #runtimes = new Map<string, ObserverRuntime>();
+  readonly #loadRecovery: ConversationLoadRecoveryRepository;
   #closed = false;
   readonly #onActionableAlert: ObservationServiceOptions['onActionableAlert'];
 
   readonly maintenance: CoreMaintenance | undefined;
   constructor(options: ObservationServiceOptions) {
+    this.#loadRecovery = new ConversationLoadRecoveryRepository(options.database);
     this.maintenance = options.maintenance;
     this.#onActionableAlert = options.onActionableAlert;
     this.#scheduler = options.scheduler;
@@ -92,7 +94,7 @@ export class ObservationService {
   }
 
   start(snapshot: SessionSnapshot, options: { readonly force?: boolean } = {}): void {
-    if (this.#closed || !isObservable(snapshot)) {
+    if (this.#closed || !isObservable(snapshot) || this.#loadRecovery.isUserHeld(snapshot.conversationId)) {
       return;
     }
     const existing = this.#runtimes.get(snapshot.sessionId);
@@ -155,6 +157,7 @@ export class ObservationService {
         if (this.maintenance && !release) continue;
         try {
           const current = this.#sessions.getSnapshot(initial.sessionId);
+          if (current && this.#loadRecovery.isUserHeld(current.conversationId)) return;
           if (
             current === null ||
             current.generation !== initial.generation ||

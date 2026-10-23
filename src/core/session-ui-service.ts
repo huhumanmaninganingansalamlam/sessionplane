@@ -460,7 +460,7 @@ export class SessionUiService {
     // An approved unacknowledged attempt may still have its exact original prompt
     // in the composer. Keep it; a changed or unrelated draft still blocks recovery.
     const separateDraft = (await Promise.all(state.drafts.map(async draft => draft.text.trim() !== '' &&
-      ((!allowPreparedDraft && current.generation === original.generation && original.submissionState !== 'submission_unknown') ||
+      ((!followup && !allowPreparedDraft && current.generation === original.generation && original.submissionState !== 'submission_unknown') ||
         !await composerHasExactValue(page.locator(CHATGPT_COMPOSER_SELECTOR).nth(draft.index), prompt))))).some(Boolean);
     const blockingReasons = [
       dom.submittedUserFound && 'original-anchor', dom.candidate !== null && 'original-answer',
@@ -994,6 +994,8 @@ export class SessionUiService {
   }
 
   #requirePage(session: { readonly sessionId: string; readonly generation: number; readonly pageKey: string | null; readonly conversationId: string | null }): Page {
+    if (this.#submissions.isObservationHeld(session.conversationId))
+      throw new SessionPlaneDomainError('provider.preparation-required', 'The user is reviewing this conversation; observation and controls are paused');
     if (session.pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'Exact preparation page is unavailable');
     try {
       const page = this.#registry.requireSessionPage(session.pageKey, {

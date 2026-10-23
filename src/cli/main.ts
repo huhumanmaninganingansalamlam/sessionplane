@@ -744,6 +744,9 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   if (action === 'configure') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'configure', configurationId: requirePositional(parsed.words, 4, 'configurationId'),
   }, sessionSendRpcTimeoutMs(config));
+  if (action === 'human_review') return await printRpc(io, parsed, config, 'workflow.decide', {
+    ...mutation, decision: 'human_review', action: requireOption(parsed, 'action'),
+  }, sessionSendRpcTimeoutMs(config));
   if (action === 'hostspan_permission') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'hostspan_permission', action: requireOption(parsed, 'action'),
     appName: requireOption(parsed, 'app-name'), ...optionalParam('toolName', parsed.options['tool-name']),
@@ -1369,11 +1372,12 @@ Exact request flow (same request; no automatic resend):
   Recovery: request discover|refresh|focus|latest|reconcile_failure TEAM_ID REQUEST_REF
   Approved interrupted tool-turn continuation: request continue TEAM_ID REQUEST_REF --continuation-approved
   User-confirmed disconnected turn: add --user-confirmed-interruption FILE (conversationId, submittedUserMessageId, evidenceRef). Never infer user confirmation.
-  Explicit new literal 계속 after UNKNOWN: request followup TEAM_ID REQUEST_REF USER_INSTRUCTION_REF
+  Explicit new literal 계속 after UNKNOWN or a backend-proven lost continuation: request followup TEAM_ID REQUEST_REF USER_INSTRUCTION_REF
     Preserves original uncertainty; never automatically retries or bypasses provider errors/drafts/activity.
   Confirm an observed matching submission without resending:
     request acknowledge TEAM_ID REQUEST_REF --message-id ID --evidence-hash HASH
   Approved HostSpan tool permission: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow --app-name NAME [--tool-name NAME] [--allow-mode once|always] [--evidence-hash HASH]
+  User-controlled review: request human_review TEAM_ID CURRENT_REQUEST_REF --action pause|resume
   Cancel: request stop TEAM_ID REQUEST_REF
   Delete a collected conversation: request delete TEAM_ID REQUEST_REF --outputs-retrieved
   Replace: request replace TEAM_ID ROLE_REF [--preserve-conversation]
