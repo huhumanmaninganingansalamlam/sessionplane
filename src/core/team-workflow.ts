@@ -210,13 +210,14 @@ export class TeamWorkflow {
           if (prior.status === 'complete') return JSON.parse(prior.resultJson) as Record<string, unknown>;
           throw new SessionPlaneDomainError('provider.action-unknown', 'Permission action was attempted; inspect without repeating the grant');
         }
-        const session = this.#role({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}` });
+        const { current: session, original, permissionRequest } = this.#permissionRequest(request);
         if (!session.pageKey) throw new SessionPlaneDomainError('browser.unavailable', 'No connected request page');
         return await this.services.pageMutex.runExclusive(session.pageKey, async () => {
           this.services.receipts.record({ ...receipt, status: 'attempted', result: { requestRef: input.requestRef } });
-          const permission = await this.services.ui.hostspanPermission(session, input);
+          const permission = await this.services.ui.hostspanPermission(session, input, original);
           const result = { requestOk: true, requestRef: input.requestRef, sessionId: session.sessionId,
-            generation: session.generation, permission };
+            generation: session.generation, permissionRequestRef: permissionRequest.outboxId,
+            permissionGeneration: original.generation, permission };
           this.services.receipts.record({ ...receipt, status: 'complete', result });
           return result;
         });
@@ -682,6 +683,34 @@ export class TeamWorkflow {
     return await this.services.cleanup.delete({ ...ownerOf(request), requestId: input.requestId,
       conversationId: session.conversationId, outputsRetrieved: input.outputsRetrieved,
       discardRetiredObservation: input.discardRetiredObservation });
+  }
+
+  #permissionRequest(request: OutboxRecord) {
+    const snapshot = this.services.directory.getSession(request.sessionId);
+    const current = this.#role({ teamId: request.teamId, roleRef: roleRef(snapshot) });
+    if (current.generation === request.generation && current.submissionState !== 'prepared')
+      return { current, original: current, permissionRequest: request };
+    const pending = this.#outbox.getByGeneration(current.sessionId, current.generation);
+    const context = pending && this.services.submissions.continuationContext(ownerOf(pending));
+    const original = context?.original;
+    const permissionRequest = original && this.#outbox.getByGeneration(original.sessionId, original.generation);
+    const ack = JSON.parse(permissionRequest?.resultJson ?? '{}');
+    // A prepared Continue has no provider turn yet. Keep current actor/page
+    // ownership, but verify the permission against its exact retained ACK.
+    if (!pending || pending.submissionState !== 'prepared' || current.submissionState !== 'prepared' ||
+        current.promptSubmitted || current.submittedUserMessageId !== null || current.submittedUserTurnId !== null ||
+        current.responseMessageId !== null || JSON.parse(pending.payloadJson).prompt !== '계속' ||
+        !original || !permissionRequest || pending.clientId !== request.clientId ||
+        ![pending.outboxId, permissionRequest.outboxId].includes(request.outboxId) ||
+        permissionRequest.submissionState !== 'submitted' || !permissionRequest.promptSubmitted ||
+        original.submissionState !== 'submitted' || !original.promptSubmitted || !original.submittedUserMessageId ||
+        ack.sessionId !== current.sessionId || ack.generation !== original.generation ||
+        ack.conversationId !== current.conversationId ||
+        ack.submittedUserMessageId !== original.submittedUserMessageId || ack.submittedUserTurnId !== original.submittedUserTurnId) {
+      throw new SessionPlaneDomainError('provider.permission-unverified',
+        'Permission requires the current request or the exact ACK preceding its unsubmitted continuation');
+    }
+    return { current, original, permissionRequest };
   }
 
   #latestRequest(request: OutboxRecord): { current: SessionSnapshot; original: SessionSnapshot | null } {
