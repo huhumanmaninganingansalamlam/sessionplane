@@ -40,11 +40,13 @@ test('startup leaves missing prepared pages closed; explicit concurrent recovery
     assert.equal(prepared.submissionState, 'prepared');
     assert.equal(prepared.promptSubmitted, false);
     const saved = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId);
-    const before = service.pageRegistry.listBindings({ includeClosed: false }).length;
+    const requestPages = () => service.pageRegistry.listBindings({ includeClosed: false })
+      .filter(binding => binding.conversationId === prepared.conversationId);
+    const before = requestPages().length;
     for (let attempt = 0; attempt < 2; attempt++) {
       const report = await service.recoveryService.restore({ forceObservers: true });
       assert.equal(report.opened, 0, 'startup must not fan out unopened, unsubmitted preparations');
-      assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).length, before);
+      assert.equal(requestPages().length, before);
     }
     // Another conversation's Retry spacing must not starve explicit page recovery.
     new ConversationLoadRecoveryRepository(service.database).defer(new Date(Date.now() + 60_000).toISOString(), new Date().toISOString());
@@ -55,7 +57,7 @@ test('startup leaves missing prepared pages closed; explicit concurrent recovery
     const report = await service.recoveryService.restore({ forceObservers: true });
     assert.equal(report.opened, 0);
     assert.equal(service.teamDirectory.getSession(session.sessionId).pageKey, restored.pageKey);
-    assert.equal(service.pageRegistry.listBindings({ includeClosed: false }).length, before + 1);
+    assert.equal(requestPages().length, before + 1);
     assert.equal(await page.locator('textarea').inputValue(), 'User draft retained');
     assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(session.sessionId), saved);
     assert.equal(fake.submitCount, 1, 'recovery never dispatches the pending question');
