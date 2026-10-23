@@ -1035,7 +1035,14 @@ export class SubmissionService {
     if (authorization === undefined) return;
     const receipts = new ReceiptRepository(this.#database);
     const stopId = `authorized-resend-stopped:${authorization.requestRef}`;
-    if (receipts.get(`team:${current.teamId}`, stopId) !== null) throw new SessionPlaneDomainError(
+    const stopped = receipts.get(`team:${current.teamId}`, stopId);
+    const stoppedEvidence = stopped === null ? null : JSON.parse(stopped.resultJson).evidence;
+    // Older follow-up validation latched an unrelated literal Continue match as
+    // progress. Retain that receipt, but revalidate this known non-progress case.
+    const unrelatedMatch = authorization.followup && stoppedEvidence?.originalAnchorFound === false &&
+      stoppedEvidence.responseMessageId === null && stoppedEvidence.matchingPromptFound === true &&
+      stoppedEvidence.activity === 'none';
+    if (stopped !== null && !unrelatedMatch) throw new SessionPlaneDomainError(
       'provider.preparation-required', 'This approved resend was stopped after original progress/answer discovery; preserve and collect the original request');
     const source = this.#outbox.getById(authorization.requestRef);
     const original = source === null ? null : this.#sessions.getGenerationResult(source.sessionId, source.generation);
@@ -1083,7 +1090,7 @@ export class SubmissionService {
       return transcriptHash;
     } catch (error) {
       const detail = error instanceof SessionPlaneDomainError ? preSubmitDetails(error.details) : {};
-      if (detail.originalAnchorFound === true || detail.matchingPromptFound === true ||
+      if (detail.originalAnchorFound === true || (!authorization.followup && detail.matchingPromptFound === true) ||
           typeof detail.responseMessageId === 'string' || detail.activity === 'strong') {
         receipts.execute({ clientId: `team:${current.teamId}`, requestId: stopId,
           method: 'session.resend.dispatch-stopped', payload: { originalRequestRef: source.outboxId },

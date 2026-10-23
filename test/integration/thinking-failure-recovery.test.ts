@@ -870,3 +870,26 @@ test('approved managed wait preserves actively generating or separately drafted 
     }
   } finally { await f.close(); }
 });
+
+
+test('approved managed timeout after an earlier broad review still recovers the aged request', async () => {
+  const f = await fixture();
+  try {
+    const timeout = '<aside role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</aside>';
+    f.fake.surface = users => users + timeout;
+    const requestRef = await f.submit(false);
+    const old = new Date(Date.now() - 40 * 60_000).toISOString();
+    f.core.database.raw.prepare('UPDATE outbox SET created_at=?,updated_at=? WHERE outbox_id=?').run(old, old, requestRef);
+    const input = { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000, continuationApproved: true };
+    await f.fake.page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend', '<button data-testid="stop-button">Stop</button>'));
+    await f.rpc('wait', input);
+    assert.equal(f.fake.submitCount, 1, 'A broad review must preserve active generation');
+    await f.fake.page.locator('[data-testid="stop-button"]').evaluate(node => node.remove());
+    f.fake.failureCount = 2;
+    f.fake.surface = users => users + timeout;
+    const result = await f.rpc<any>('wait', input);
+    assert.equal(f.fake.submitCount, 2, 'A prior review cannot send an already-approved idle timeout back to the Coordinator');
+    assert.equal(result.results[0].generation, 2);
+    assert.equal(f.core.teamDirectory.getSession(f.session.sessionId).generation, 2, 'Carried successor timeout cannot trigger another immediate Continue');
+  } finally { await f.close(); }
+});

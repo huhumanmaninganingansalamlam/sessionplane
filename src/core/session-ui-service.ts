@@ -207,8 +207,17 @@ export class SessionUiService {
                 })(),
               }),
               ...(session.submissionState !== 'submission_unknown' || session.conversationId === null ? {} : {
-                submissionCandidates: (await inspectChatGptSubmissionCandidates(this.#requirePage(session), session.conversationId))
-                  .filter((candidate) => !submittedMessageIds.has(candidate.messageId)),
+                submissionCandidates: await Promise.all((await inspectChatGptSubmissionCandidates(this.#requirePage(session), session.conversationId))
+                  .filter((candidate) => !submittedMessageIds.has(candidate.messageId)).map(async message => {
+                    const dom = await observeChatGptDom(this.#requirePage(session), {
+                      submittedUserMessageId: message.messageId, submittedUserTurnId: null,
+                    });
+                    return { ...message, responseCandidate: dom.candidate === null ? null : {
+                      ...dom.candidate, submissionVerified: false as const,
+                      scope: 'mounted-dom-unverified-submission' as const,
+                      observedAt: dom.messageDiagnostics.observedAt,
+                    } };
+                  })),
               }),
               };
             })(),
@@ -257,20 +266,33 @@ export class SessionUiService {
 
   async retryStream(input: PreparationOwner & { decisionId: string }, receipts: ReceiptRepository, budgets: ConversationLoadRecoveryRepository) {
     const read = await this.#submissions.inspectSubmission(input, async session => {
-      if (session.terminal || session.submissionState !== 'submitted' || !session.promptSubmitted ||
-          !session.submittedUserMessageId || !session.conversationId || session.answerText !== null || session.responseMessageId !== null)
+      const unknown = session.submissionState === 'submission_unknown';
+      if (session.terminal || (session.submissionState !== 'submitted' && !unknown) || !session.promptSubmitted ||
+          (!unknown && !session.submittedUserMessageId) || !session.conversationId || session.answerText !== null || session.responseMessageId !== null)
         return null;
       if (!this.#registry.listBindings({ includeClosed: false }).some(binding => binding.pageKey === session.pageKey)) return null;
       const page = this.#requirePage(session);
+      // Retry acts on the provider's existing conversation turn, not the uncertain
+      // outgoing Continue. This observed identity must never become its ACK.
+      const anchor = session.submittedUserMessageId ?? (unknown
+        ? (await readChatGptMessages(page)).filter(message => message.role === 'user').at(-1)?.messageId : null);
+      if (!anchor) return null;
       const target = { origin: this.#chatgptOrigin, conversationId: session.conversationId,
-        anchor: session.submittedUserMessageId, click: false };
+        anchor, click: false, preserveContinuationDraft: unknown };
       const surface = await page.evaluate(streamRetrySurface, target);
       if (!surface.present) return null;
-      const dom = await observeChatGptDom(page, session);
+      const dom = await observeChatGptDom(page, { submittedUserMessageId: anchor, submittedUserTurnId: null });
       const activity = await observeChatGptActivity(page, dom);
-      if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate !== null || activity.strength !== 'none' ||
+      // Exact enabled Retry chrome already rejects live Stop/thinking controls.
+      // A weak generic label (including the Thinking model menu) is not a live stream.
+      if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate?.terminalMarker || dom.candidate?.streamingMarker ||
+          activity.strength === 'strong' || activity.strength === 'unknown' ||
           surface.reason !== 'exact-stream-retry') throw new SessionPlaneDomainError('provider.preparation-required',
-        `Preserve the original turn before stream Retry: ${surface.reason}`);
+        `Preserve the original turn before stream Retry: ${surface.reason}`, {
+          anchorPresent: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
+          responseCandidatePresent: dom.candidate !== null, observedUserMessageId: anchor, responseCandidate: dom.candidate,
+          activity: activity.strength, activityReason: activity.reason,
+        });
       await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
       const requestId = `stream-retry:${session.sessionId}:${session.generation}`;
       const previous = receipts.get(input.clientId, requestId);
@@ -286,7 +308,9 @@ export class SessionUiService {
       receipts.record({ ...receipt, status: 'complete', result: { ...retried, anchor: target.anchor } });
       if (!retried.clicked) throw new SessionPlaneDomainError('provider.preparation-required',
         `Stream Retry was not dispatched: ${retried.reason}`);
-      return { ...retried, submittedUserMessageId: target.anchor, generation: session.generation };
+      return { ...retried, observedUserMessageId: target.anchor,
+        ...(unknown ? {} : { submittedUserMessageId: target.anchor }),
+        requestAcknowledgementVerified: !unknown, generation: session.generation };
     });
     return read.evidence ?? null;
   }
@@ -354,7 +378,9 @@ export class SessionUiService {
       const user = messages.findIndex(m => m.role === 'user' && m.messageId === input.followupUserMessageId);
       const answer = messages.at(-1);
       const recoveryTracking = owner.generation > session.generation && owner.promptSubmitted;
-      if (recoveryTracking) await requireIdleConversationPage(page);
+      // The durable ancestry already proves these successors are literal Continue.
+      // Retire only their tracking; preserve an unsent Continue draft unchanged.
+      if (recoveryTracking) await requireIdleConversationPage(page, '계속');
       // An interrupted checkpoint is evidence to retain, not a completed answer to discard.
       const partials = messages.slice(original + 1, user);
       const controls = await this.#capture(owner);
@@ -390,7 +416,7 @@ export class SessionUiService {
     return await this.#submissions.reconcileFailure(input, (owner, anchor) => this.#failureEvidence(owner, anchor, input.allowMessageTimeout, input.continuationPrompt));
   }
 
-  /** Passive, exact-owner checks; this never dispatches or clears a draft. */
+  /** Exact-owner checks; explicit follow-up may focus its composer, never clear a draft or dispatch. */
   async verifyAuthorizedResend(current: SessionSnapshot, original: SessionSnapshot, prompt: string, allowPreparedDraft: boolean, followup?: true, userTranscriptHash?: string) {
     const page = this.#requirePage(current);
     await inspectChatGptPageReady(page, current.pageKey!);
@@ -422,9 +448,12 @@ export class SessionUiService {
       const editors = [...document.querySelectorAll(composerSelector)]
         .map((element, index) => ({ element, index }))
         .filter(({ element }) => element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
+      const selection = window.getSelection();
       return { drafts: editors.map(({ element, index }) => ({ index,
         text: element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
-          ? element.value : (element as HTMLElement).innerText })), selection: window.getSelection()?.isCollapsed === false };
+          ? element.value : (element as HTMLElement).innerText })), selection: selection?.isCollapsed === false,
+        editorSelection: editors.some(({ element }) => element.contains(selection?.anchorNode ?? null) ||
+          element.contains(selection?.focusNode ?? null)) };
     }, CHATGPT_COMPOSER_SELECTOR);
     // The same exact-text contract as preparation: ProseMirror innerText can
     // contain layout-only newlines absent from the authored paragraph text.
@@ -440,6 +469,12 @@ export class SessionUiService {
       state.drafts.length !== 1 && 'composer-count', separateDraft && 'separate-draft',
       !followup && matchingPromptFound && 'matching-user-message',
     ].filter((reason): reason is string => typeof reason === 'string');
+    if (followup && blockingReasons.length === 1 && blockingReasons[0] === 'user-selection' && !state.editorSelection) {
+      // Normal preparation of the explicitly requested new input. Preserve an
+      // editor selection/draft; never remove ranges or force a provider control.
+      await page.locator(CHATGPT_COMPOSER_SELECTOR).nth(state.drafts[0]!.index).focus();
+      if (await page.evaluate(() => window.getSelection()?.isCollapsed !== false)) blockingReasons.pop();
+    }
     if (blockingReasons.length > 0) {
       throw new SessionPlaneDomainError('provider.preparation-required',
         `Approved resend paused: ${blockingReasons.join(', ')}; do not send`,
@@ -747,18 +782,24 @@ export class SessionUiService {
 
   /** Caller holds the exact current request actor and page mutation lock. */
   async hostspanPermission(session: SessionSnapshot, input: HostSpanPermissionInput) {
-    if (session.provider !== 'chatgpt' || session.terminal || session.submissionState !== 'submitted' ||
-        !session.submittedUserMessageId || !session.conversationId) throw new SessionPlaneDomainError(
+    if (session.provider !== 'chatgpt' || session.terminal ||
+        (session.submissionState !== 'submitted' && session.submissionState !== 'submission_unknown') ||
+        !session.conversationId) throw new SessionPlaneDomainError(
       'provider.permission-unverified', 'Recover the original ACK before controlling its tool permission');
     try {
       const page = await this.#interactionPage(session);
       await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
       const messages = (await readChatGptMessages(page)).filter(message => message.role === 'user');
-      if (messages.at(-1)?.messageId !== session.submittedUserMessageId) throw new SessionPlaneDomainError(
+      // A visible exact grant belongs to this owned conversation independently of
+      // an uncertain outgoing message. Never turn controlling that grant into ACK.
+      const anchor = session.submittedUserMessageId ??
+        (session.submissionState === 'submission_unknown' ? messages.at(-1)?.messageId : null);
+      if (!anchor || messages.at(-1)?.messageId !== anchor) throw new SessionPlaneDomainError(
         'provider.permission-unverified', 'The original user anchor must be the current turn');
-      const result = await controlHostSpanPermission(page, input);
+      const result = await controlHostSpanPermission(page, input, anchor);
       this.#requirePage(session);
-      return result;
+      return { ...result, requestAcknowledgementVerified: session.submissionState === 'submitted' &&
+        session.submittedUserMessageId !== null };
     } catch (error) { throw typedUiError(error); }
   }
 

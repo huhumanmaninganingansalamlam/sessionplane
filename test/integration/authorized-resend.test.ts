@@ -503,6 +503,14 @@ test('explicit new follow-up preserves UNKNOWN and sends only its own literal on
     await assert.rejects(callRpc(config.socketPath, 'workflow.decide', followup), /Provider requires message processing review/);
     assert.equal(service.teamDirectory.getSession(session.sessionId).generation, 2);
     assert.equal(fake.submitCount, 2, 'Provider refusal did not send or reserve a successor');
+    // A previous version mistook any older literal Continue for original progress
+    // when the actual rejection was only a selection in the page.
+    new ReceiptRepository(service.database).execute({ clientId,
+      requestId: `authorized-resend-stopped:${original.outbox_id}`, method: 'session.resend.dispatch-stopped',
+      payload: { originalRequestRef: original.outbox_id }, operation: () => ({ evidence: {
+        originalAnchorFound: false, responseMessageId: null, matchingPromptFound: true,
+        activity: 'none', selectionPresent: true, blockingReasons: ['user-selection'],
+      } }) });
     refused = false;
     fake.acknowledgementMode = 'success';
     fake.autoFinalText = 'New follow-up answer';

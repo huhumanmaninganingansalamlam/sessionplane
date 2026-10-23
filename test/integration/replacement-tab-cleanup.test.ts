@@ -11,6 +11,49 @@ import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 import type { ReplacementCleanup } from '../../src/core/conversation-cleanup-service.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 
+test('collected replacement closes idle predecessor tab while preserving historical UNKNOWN and deletion guard', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-history-tabs-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', observationActiveSweepMs: 5, observationQuietSweepMs: 5 });
+  const fake = new FakeProviderAdapter(); fake.autoFinalText = 'Collected final';
+  let deletes = 0;
+  t.mock.method(fake, 'openDeletion', async () => { deletes++; throw new Error('Must retain UNKNOWN conversation'); });
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const rpc = <T>(method: string, params: object) => callRpc<T>({ socketPath: config.socketPath,
+    method, params: { clientId: 'history-tabs', ...params }, timeoutMs: 10000 });
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'history-tabs' });
+    const old = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    for (const generation of [1, 2]) {
+      await rpc('session.send', { sessionId: old.sessionId, requestId: `send-${generation}`, prompt: 'Fixture work' });
+      assert.equal((await rpc<SessionSnapshot>('session.wait', { sessionId: old.sessionId, generation, waitMs: 3000 })).terminal, true);
+    }
+    // Reproduce persisted earlier uncertain delivery followed by a collected final.
+    core.database.raw.prepare("UPDATE generations SET submission_state='submission_unknown', completed_at=NULL, response_message_id=NULL, answer_text=NULL, error_code='session.submission-unknown' WHERE session_id=? AND generation=1").run(old.sessionId);
+    const history = () => core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(old.sessionId);
+    const preserved = history();
+    const before = core.teamDirectory.getSession(old.sessionId);
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<textarea>Preserve draft</textarea>' }));
+    await page.goto('https://chatgpt.com/c/' + before.conversationId);
+    const input = { requestId: 'replace', teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' };
+    const next = await rpc<SessionSnapshot & { cleanup: ReplacementCleanup }>('session.create', input);
+    assert.equal(next.cleanup.outcome, 'not-attempted');
+    assert.equal(page.isClosed(), false, 'Even a collected final must preserve the current draft');
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserve draft');
+    await page.setContent('<main>Idle collected final</main>');
+    const replay = await rpc<typeof next>('session.create', input);
+    assert.equal(replay.sessionId, next.sessionId);
+    assert.equal(page.isClosed(), true);
+    assert.deepEqual(replay.cleanup.pageCleanup, { closedPages: 1, pageErrors: [] });
+    await assert.rejects(rpc('session.delete', { requestId: 'delete', sessionId: old.sessionId,
+      generation: 2, conversationId: before.conversationId, outputsRetrieved: true }),
+      error => JSON.stringify(error).includes('session.cleanup-not-ready'));
+    assert.equal(deletes, 0);
+    assert.deepEqual(history(), preserved, 'Tab cleanup must not change UNKNOWN or collected generation evidence');
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('replacement reports and resumes predecessor tab closure without another successor or deletion', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-replacement-tabs-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', observationActiveSweepMs: 5, observationQuietSweepMs: 5 });

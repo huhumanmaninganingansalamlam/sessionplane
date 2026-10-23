@@ -130,6 +130,23 @@ export async function observeChatGptAlerts(page: Page, identity: SubmittedUserId
         if (!thinkingFailuresOnly && alert.matches('[role="alert"]') &&
             !alert.closest('[data-message-id], [data-turn-id], [data-message-author-role], [data-message-content], .markdown') &&
             new RegExp(messageTimeoutPattern, 'i').test(alert.innerText.trim())) return true;
+        // A still-actionable HostSpan grant belongs to this conversation even if
+        // a later Continue was submitted. Never treat quoted or historical text
+        // without a live provider control as a pending permission.
+        if (!thinkingFailuresOnly && anchor !== undefined && nextUser === undefined &&
+            alert.matches('[role="alert"], [role="alertdialog"]') &&
+            alert.closest('.markdown, [data-message-content], [data-message-author-role="user"], [data-user-message-bubble]') === null &&
+            /^hostspan(?:-[a-z0-9_-]+)?\b/i.test(alert.innerText.trim())) {
+          let card: HTMLElement | null = alert;
+          while (card && !card.matches('body, main, [role="main"]') &&
+              card.querySelectorAll('[role="alert"], [role="alertdialog"]').length <= 1) {
+            if ([...card.querySelectorAll('button, [role="button"]')].some(button =>
+                button instanceof HTMLElement && button.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+                !button.hasAttribute('disabled') && button.getAttribute('aria-disabled') !== 'true' &&
+                /^(?:항상 허용|한 번만 허용|허용|Always allow|Allow once|Allow|자세히 보기|View details|See details)(?:\s*⏎)?$/i.test((button.getAttribute('aria-label') ?? button.textContent ?? '').trim()))) return true;
+            card = card.parentElement;
+          }
+        }
         if (!hasMessages) return !thinkingFailuresOnly;
         return anchor !== undefined && anchor.getRootNode() === alert.getRootNode() &&
           !alert.closest('[data-message-author-role="user"], [data-user-message-bubble]') &&

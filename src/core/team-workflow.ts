@@ -164,7 +164,7 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName: string; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName?: string | undefined; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     const owner = ownerOf(request);
     if (input.decision === 'hostspan_permission') {
@@ -406,8 +406,12 @@ export class TeamWorkflow {
     if (signal?.aborted) controller.abort();
     // One outcome wakes the caller; progress/pacing revisions remain in this process.
     const observed: Array<{ request: OutboxRecord | null; result: Record<string, unknown> }> = await Promise.all(requestRefs.map(async (requestRef) => {
+      let releaseCollector: (() => void) | undefined;
       try {
         let request = this.#request({ teamId: input.teamId, requestRef });
+        if (input.waitMs > 0 && !controller.signal.aborted) {
+          releaseCollector = this.services.scheduler.actorFor(request.sessionId).retainCollector();
+        }
         let result: Record<string, unknown> = await this.#observe(request, undefined, input.waitMs > 0 && input.continuationApproved === true);
         const followupTracker = new ExactFinalTracker(1500);
         let followupId = input.followupUserMessageId;
@@ -507,7 +511,10 @@ export class TeamWorkflow {
                 /^(메시지 스트림에 오류 발생|Error in message stream)[.!]?\s*(다시 시도|Retry|Try again)$/i.test(alert.trim()));
             const interrupted = streamRetry || idleWithoutResponse || timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
               dom.activity !== 'strong' && (dom.anchorPresent === true || missingContinuation) && dom.laterUserFound === false);
-            if ((due || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
+            // Reviewing a live turn is not a new submission. Its later exact
+            // timeout may use the existing approval after the ACK's broad interval.
+            const timeoutDue = timeoutReady && Date.now() - Date.parse(request.updatedAt) >= 30 * 60_000;
+            if ((due || timeoutDue || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
                 (interrupted || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
                 result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
               this.#continuationReviews.set(request.outboxId, Date.now());
@@ -551,6 +558,7 @@ export class TeamWorkflow {
         }
         return { request, result: { ...result, waitExpired: !workflowWaitOutcome(result) && Date.now() >= deadline } };
       } catch (error) { controller.abort(); return { request: null, result: failure(error, requestRef) }; }
+      finally { releaseCollector?.(); }
     })).finally(() => {
       signal?.removeEventListener('abort', abort);
       controller.abort();

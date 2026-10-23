@@ -205,9 +205,11 @@ test('original quiet-final can be recovered through latest under an unsubmitted 
     assert.equal((await finishWork('new-work-protected')).isError, true);
     await page.locator('[data-message-id="new-work"]').evaluate(node => node.remove());
     const unknownOutbox = rows().outbox[1];
+    await page.locator('textarea').fill('계속');
     const released = await finishWork('release-work-tracking');
     assert.equal(released.isError, false, JSON.stringify(released));
     assert.equal((released.structuredContent.reconciliation as any).disposition, 'tracking-cancelled');
+    assert.equal(await page.locator('textarea').inputValue(), '계속', 'Retiring tracking preserves the unsent recovery draft');
     assert.equal(core.teamDirectory.getSession(session.sessionId).sessionState, 'cancelled');
     assert.equal(core.teamDirectory.getSession(session.sessionId).submissionState, 'submission_unknown');
     assert.equal(core.teamDirectory.getSession(session.sessionId).submittedUserMessageId, null);
