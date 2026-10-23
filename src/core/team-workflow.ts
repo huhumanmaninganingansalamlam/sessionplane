@@ -149,9 +149,9 @@ export class TeamWorkflow {
       });
     } catch (error) {
       if (!(error instanceof SessionPlaneDomainError)) throw error;
+      const accepted = this.#outbox.getByRequest(clientId, input.requestId);
+      if (accepted === null) throw error;
       if (error.errorCode !== 'provider.preparation-required') {
-        const accepted = this.#outbox.getByRequest(clientId, input.requestId);
-        if (accepted === null) throw error;
         throw new SessionPlaneDomainError(error.errorCode, error.message,
           { ...(error.details !== null && typeof error.details === 'object' ? error.details : { cause: error.details }), requestRef: accepted.outboxId, teamId: input.teamId });
       }
