@@ -120,6 +120,11 @@ machine-readable results and diagnostics.
    controls (MCP: `team_get` with the same `view`). Use evidence for preparation.
    For an already-submitted later turn, `request show TEAM_ID REQUEST_REF
    --followup-message-id MESSAGE_ID` reads one exact snapshot without adding a collector.
+   If that exact later turn is interrupted while the next product draft remains prepared,
+   `request continue TEAM_ID REQUEST_REF --followup-message-id MESSAGE_ID
+   --continuation-approved --wait-ms 0` sends only `계속`, restores the prepared draft,
+   and returns its separate ACK without a collector. Keep the original request/followup
+   when attaching the sole owner wait; the recovery receipt connects its response.
    Select an available combined model
    using the displayed `request configure` command, then the fresh composer control.
    Inspect the input before explicitly choosing the submit control. Disabled or stale
@@ -163,7 +168,7 @@ Tagged releases attach a prebuilt npm package and SHA-256 checksum. Install the
 release package globally, then run the built-in doctor:
 
 ```bash
-VERSION=0.4.81
+VERSION=0.4.82
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz"
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz.sha256"
 sha256sum -c "sessionplane-$VERSION.tgz.sha256"

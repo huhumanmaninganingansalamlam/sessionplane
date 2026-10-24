@@ -10,6 +10,7 @@ import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { SessionRepository } from '../../src/storage/session-repository.ts';
+import { ReceiptRepository } from '../../src/storage/receipt-repository.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
@@ -120,6 +121,100 @@ test('explicit later responses preserve a completed original and an optional pre
       assert.equal(core.actorScheduler.collectors(session.sessionId).length, 0);
       assert.equal(fake.submitCount, 1);
       assert.equal(navigations, 1);
+      if (prepared) {
+        await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend',
+          '<div role="radiogroup"><button role="radio" aria-checked="true">Chat</button></div>' +
+          '<button id="model" aria-haspopup="menu">Extra High</button><button data-testid="send-button">Send</button>'));
+        const pendingRef = before.outbox[1]!.outbox_id;
+        const pending = (await invokeMcpTool({ name: 'sessionplane_team_get', arguments: {
+          teamId: team.teamId, requestRef: pendingRef, view: 'evidence' }, socketPath: config.socketPath,
+          timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes })).structuredContent as any;
+        const model = { ...pending.request.evidence.nodes.find((n: any) => n.id === 'model'), purpose: 'model', selectedValue: null };
+        const receipts = new ReceiptRepository(core.database);
+        receipts.execute({ clientId: 'fixture-owner', requestId: `submission-configuration:${requestRef}`,
+          method: 'session.submission.configuration', payload: { model }, operation: () => ({ model }) });
+        await page.route('https://chatgpt.com/backend-api/conversation', route => route.fulfill({
+          status: 200, contentType: 'application/json', body: '{}' }));
+        await page.evaluate(conversationId => {
+          (window as any).sends = 0;
+          document.querySelector('[data-testid="send-button"]')!.addEventListener('click', async () => {
+            const editor = document.querySelector('textarea')!;
+            if (editor.value !== '계속') throw new Error('Never submit the product draft');
+            (window as any).sends++;
+            await fetch('/backend-api/conversation', { method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ action: 'next', conversation_id: conversationId, parent_message_id: 'answer-c',
+                messages: [{ id: 'recovery-user', author: { role: 'user' }, content: { content_type: 'text', parts: ['계속'] } }] }) });
+            editor.value = '';
+            document.querySelector('#timeout')?.remove();
+            document.querySelector('#messages')!.insertAdjacentHTML('beforeend',
+              '<div data-message-author-role="user" data-message-id="recovery-user">계속</div>' +
+              '<div data-message-author-role="assistant" data-message-id="recovery-final">Recovered exact work</div>');
+          });
+        }, `conversation-${session.sessionId}`);
+        await page.locator('#messages').evaluate(node => node.insertAdjacentHTML('beforeend',
+          '<div data-message-author-role="user" data-message-id="manual-c">Finish the original work</div>' +
+          '<div data-message-author-role="assistant" data-message-id="answer-c">Partial response</div>'));
+        await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend',
+          '<div id="timeout" role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</div>'));
+        const recover = async (followup = 'manual-c', id = 'recover-exact-followup') => {
+          let stdout = '', stderr = '';
+          const code = await runCli(['request', 'continue', team.teamId, requestRef, '--followup-message-id', followup,
+            '--continuation-approved', '--wait-ms', '0', '--request-id', id, '--socket', config.socketPath, '--json'], {
+            stdin: Readable.from([]),
+            stdout: new Writable({ write(chunk, _encoding, done) { stdout += String(chunk); done(); } }),
+            stderr: new Writable({ write(chunk, _encoding, done) { stderr += String(chunk); done(); } }),
+          });
+          return { code, value: JSON.parse(stdout || stderr) };
+        };
+        assert.equal((await recover('manual-a', 'wrong-followup')).code, 1, 'Do not recover a different historical turn');
+        for (const control of ['<button id="guard" data-testid="stop-button">Stop</button>',
+          '<button id="guard">항상 허용</button>']) {
+          await page.locator('main').evaluate((node, html) => node.insertAdjacentHTML('beforeend', html), control);
+          assert.equal((await recover('manual-c', `guard-${control}`)).code, 1);
+          assert.equal(await page.locator('textarea').inputValue(), 'Preserved pending prompt');
+          await page.locator('#guard').evaluate(node => node.remove());
+        }
+        assert.equal(await page.evaluate(() => (window as any).sends), 0);
+        await page.locator('textarea').fill('A new human edit');
+        assert.equal((await recover('manual-c', 'preserve-human-edit')).code, 1);
+        assert.equal(await page.locator('textarea').inputValue(), 'A new human edit');
+        await page.locator('textarea').fill('Preserved pending prompt');
+        const recovered = await recover();
+        assert.equal(recovered.code, 0, JSON.stringify(recovered));
+        assert.equal(recovered.value.followupUserMessageId, 'recovery-user');
+        assert.equal(recovered.value.draftPreservation.restored, true);
+        assert.equal(await page.locator('textarea').inputValue(), 'Preserved pending prompt');
+        assert.deepEqual(rows(), before, 'A recovery ACK must not become the product generation ACK');
+        assert.equal(core.actorScheduler.collectors(session.sessionId).length, 0, 'ACK-only continue never starts a competing wait');
+        assert.equal((await recover('manual-c', 'new-id-same-followup')).value.followupUserMessageId, 'recovery-user');
+        assert.equal(await page.evaluate(() => (window as any).sends), 1, 'An alternate decision ID cannot resend the same recovery');
+        // Simulate interruption after the send/ACK receipt, before draft restoration.
+        const key = `followup-continue:${requestRef}:manual-c`;
+        const receipt = receipts.get('fixture-owner', key)!;
+        receipts.record({ ...receipt, status: 'attempted', result: JSON.parse(receipt.resultJson) });
+        await page.locator('textarea').fill('계속');
+        assert.equal((await recover()).value.draftPreservation.restored, true);
+        assert.equal(await page.locator('textarea').inputValue(), 'Preserved pending prompt');
+        assert.equal(await page.evaluate(() => (window as any).sends), 1);
+        const exact = (await wait('manual-c', 5000)).results[0];
+        assert.equal(exact.followup.userMessageId, 'recovery-user');
+        assert.equal(exact.followup.recoveredFromUserMessageId, 'manual-c');
+        assert.equal(exact.followup.responseMessageId, 'recovery-final');
+        assert.equal(exact.followup.answerText, 'Recovered exact work');
+        assert.equal((await show('manual-c')).results[0].followup.recoveredFromUserMessageId, 'manual-c');
+        // An interrupted dispatch without an ACK must restore the draft, never resend.
+        const uncertain = JSON.parse(receipt.resultJson);
+        uncertain.backup.acknowledgement = null;
+        receipts.record({ ...receipt, status: 'attempted', result: uncertain });
+        await page.locator('textarea').fill('계속');
+        const unknown = (await recover('manual-c', 'recover-uncertain-send')).value;
+        assert.equal(unknown.requestOk, false);
+        assert.equal(unknown.errorCode, 'session.submission-unknown');
+        assert.equal(unknown.draftPreservation.restored, true);
+        assert.equal(await page.evaluate(() => (window as any).sends), 1);
+        assert.deepEqual(rows(), before);
+        assert.equal(fake.submitCount, 1);
+      }
     } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
   });
 });

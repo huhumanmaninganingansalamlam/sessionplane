@@ -775,9 +775,10 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   }, sessionSendRpcTimeoutMs(config));
   if (action === 'continue') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'continue', continuationApproved: parsed.options['continuation-approved'] === 'true',
+    ...optionalParam('followupUserMessageId', parsed.options['followup-message-id']),
     ...(parsed.options['user-confirmed-interruption'] === undefined ? {} : {
       userConfirmedInterruption: JSON.parse(readFileSync(parsed.options['user-confirmed-interruption'], 'utf8')) }),
-  }, sessionSendRpcTimeoutMs(config), true);
+  }, sessionSendRpcTimeoutMs(config), parsed.options['wait-ms'] !== '0');
   if (action === 'followup') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'followup', approvalRef: requirePositional(parsed.words, 4, 'exact user instruction reference'),
   }, sessionSendRpcTimeoutMs(config), true);

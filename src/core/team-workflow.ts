@@ -168,7 +168,7 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName?: string | undefined; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'human_review'; action: 'pause' | 'resume' } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'reopen' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; followupUserMessageId?: string | undefined; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName?: string | undefined; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'human_review'; action: 'pause' | 'resume' } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'reopen' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     if (input.decision === 'human_review') {
       const result = await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
@@ -392,6 +392,21 @@ export class TeamWorkflow {
         return result;
       });
     }
+    if (input.decision === 'continue' && input.followupUserMessageId) {
+      const key = `followup-continue:${request.outboxId}:${input.followupUserMessageId}`;
+      const previous = this.services.receipts.get(request.clientId, key);
+      if (previous?.status === 'complete') return { ...JSON.parse(previous.resultJson).outcome, teamId: input.teamId };
+      const current = this.services.directory.getSession(request.sessionId);
+      const pending = this.#outbox.getByGeneration(request.sessionId, current.generation);
+      const saved = this.services.receipts.get(request.clientId, `submission-configuration:${request.outboxId}`);
+      if (!pending || !saved || pending.submissionState !== 'prepared' || pending.promptSubmitted) throw new SessionPlaneDomainError(
+        'provider.preparation-required', 'Exact follow-up recovery requires its retained preparation and verified configuration');
+      const result = await this.services.ui.continueFollowup({ ...owner, decisionId: input.requestId,
+        originalRequestRef: request.outboxId, followupUserMessageId: input.followupUserMessageId,
+        preparedGeneration: pending.generation, preparedPrompt: JSON.parse(pending.payloadJson).prompt,
+        model: JSON.parse(saved.resultJson).model }, this.services.receipts);
+      return { ...result, teamId: input.teamId };
+    }
     if (input.decision === 'continue') {
       let reconciliation;
       const savedAuthorization = this.services.receipts.get(request.clientId, `continuation-authorization:${request.outboxId}`);
@@ -495,9 +510,22 @@ export class TeamWorkflow {
         let result: Record<string, unknown> = await this.#observe(request, undefined, input.waitMs > 0 && input.continuationApproved === true);
         const followupTracker = new ExactFinalTracker(1500);
         let followupId = input.followupUserMessageId;
+        const followed = new Set<string>();
+        while (followupId) {
+          if (followed.has(followupId)) throw new SessionPlaneDomainError('internal.invariant-violation', 'Cyclic follow-up recovery receipt');
+          followed.add(followupId);
+          const receipt = this.services.receipts.get(request.clientId, `followup-continue:${request.outboxId}:${followupId}`);
+          const outcome = receipt?.status === 'complete' ? JSON.parse(receipt.resultJson).outcome : null;
+          if (!outcome?.requestOk || typeof outcome.followupUserMessageId !== 'string') break;
+          followupId = outcome.followupUserMessageId;
+        }
         for (;;) {
           const collectedFollowup = result.followup as { terminal?: boolean; userMessageId?: string } | undefined;
-          if (collectedFollowup?.terminal && (!followupId || collectedFollowup.userMessageId === followupId)) break;
+          if (collectedFollowup?.terminal && (!followupId || collectedFollowup.userMessageId === followupId)) {
+            if (input.followupUserMessageId && input.followupUserMessageId !== followupId) result = { ...result,
+              followup: { ...collectedFollowup, recoveredFromUserMessageId: input.followupUserMessageId } };
+            break;
+          }
           const userReview = this.#userReview(request);
           if (userReview) { result = userReview; break; }
           const collectingOriginal = typeof (result.workResult as { ownerRequestRef?: string } | undefined)?.ownerRequestRef === 'string';
@@ -536,6 +564,8 @@ export class TeamWorkflow {
                 ? { ...evidence.candidate, terminalMarker: false } : evidence.candidate }, Date.now());
               result = { ...result, errorCode: undefined, reason: 'followup-collecting', followup: { ...decision, terminal: decision.kind === 'complete',
                 observedAt: evidence.observedAt, activity: evidence.activity,
+                ...(input.followupUserMessageId && input.followupUserMessageId !== followupId
+                  ? { recoveredFromUserMessageId: input.followupUserMessageId } : {}),
                 userMessageId: followupId, originalRequestRef: request.outboxId } };
               if (decision.kind === 'complete') {
                 const reconciliation = await this.services.ui.reconcileFollowup({ ...ownerOf(request),
