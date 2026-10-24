@@ -1239,6 +1239,8 @@ export class SubmissionService {
     const previous = this.#sessions.getGenerationResult(current.sessionId, outbox.generation);
     const successor = this.#outbox.getByGeneration(current.sessionId, current.generation);
     const ack = JSON.parse(outbox.resultJson ?? '{}');
+    const completedOriginal = previous?.reason === 'dom-quiet-stable-final' && previous.completedAt !== null &&
+      previous.errorCode === null && previous.responseMessageId !== null && previous.answerText !== null;
     // A completed original work turn may outlive several literal recovery
     // attempts, including UNKNOWN ones. Validate their durable ancestry rather
     // than assigning one of the repeated visible messages as an ACK.
@@ -1262,7 +1264,7 @@ export class SubmissionService {
         current.submissionState !== 'prepared' || current.promptSubmitted ||
         current.submittedUserMessageId !== null || current.submittedUserTurnId !== null ||
         current.responseMessageId !== null || successor?.submissionState !== 'prepared' || successor.promptSubmitted ||
-        previous?.reason !== 'approved-continuation-prepared' || !previous.promptSubmitted ||
+        (previous?.reason !== 'approved-continuation-prepared' && !completedOriginal) || !previous?.promptSubmitted ||
         previous.submissionState !== 'submitted' || previous.submittedUserMessageId === null ||
         ack.sessionId !== current.sessionId || ack.generation !== outbox.generation ||
         !current.conversationId || ack.conversationId !== current.conversationId ||
@@ -1270,7 +1272,7 @@ export class SubmissionService {
       throw new SessionPlaneDomainError('session.generation-superseded',
         'Follow-up recovery requires the exact original ACK and its never-submitted continuation');
     }
-    return { ...current, ...previous, sessionState: 'cancelled', terminal: true };
+    return { ...current, ...previous, sessionState: completedOriginal ? 'complete' : 'cancelled', terminal: true };
   }
 
   async reconcileFollowup(
@@ -1296,10 +1298,13 @@ export class SubmissionService {
       const snapshot = this.#followupAnchor(outbox, current);
       const historical = current.generation !== snapshot.generation;
       const recoveryTracking = historical && current.promptSubmitted;
+      const linkOnly = snapshot.terminal && snapshot.reason === 'dom-quiet-stable-final' &&
+        snapshot.errorCode === null && snapshot.responseMessageId !== null && snapshot.answerText !== null &&
+        (!historical || !current.promptSubmitted);
       if ((input.answerText !== undefined && createHash('sha256').update(input.answerText).digest('hex') !== input.responseSha256) ||
-          input.followupCompleted !== true || snapshot.provider !== 'chatgpt' || (!historical && snapshot.terminal) ||
+          input.followupCompleted !== true || snapshot.provider !== 'chatgpt' || (!linkOnly && !historical && snapshot.terminal) ||
           snapshot.submissionState !== 'submitted' || !snapshot.promptSubmitted || !snapshot.submittedUserMessageId ||
-          !snapshot.pageKey || !snapshot.conversationId || snapshot.responseMessageId !== null || snapshot.answerText !== null) {
+          !snapshot.pageKey || !snapshot.conversationId || (!linkOnly && (snapshot.responseMessageId !== null || snapshot.answerText !== null))) {
         throw new SessionPlaneDomainError('provider.failure-unverified', 'Requires an unresolved acknowledged request and explicitly confirmed manual follow-up');
       }
       return await this.#pageMutex.runExclusive(snapshot.pageKey, async () => {
@@ -1309,20 +1314,22 @@ export class SubmissionService {
         }
         const result = receipts.execute({ clientId, requestId: decisionId, method, payload, operation: () => {
           const timestamp = this.#now().toISOString();
-          if ((!historical || recoveryTracking) && !this.#sessions.updateCurrentGeneration(current.sessionId, current.generation, {
+          if (!linkOnly && (!historical || recoveryTracking) && !this.#sessions.updateCurrentGeneration(current.sessionId, current.generation, {
             sessionState: 'cancelled', providerState: 'unknown', observationTransport: 'fresh', nextCheckAt: null,
             completedAt: timestamp, errorCode: null, reason: 'manual-followup-reconciled',
           }, timestamp)) throw new SessionPlaneDomainError('session.generation-superseded', 'Request changed during reconciliation');
           const proof = { ...evidence, originalUserMessageId: snapshot.submittedUserMessageId,
             followupUserMessageId: input.followupUserMessageId, responseMessageId: input.responseMessageId,
             responseSha256: input.responseSha256, completionSource: 'exact-followup-observation',
+            ...(linkOnly ? { originalResponseMessageId: snapshot.responseMessageId } : {}),
             ...(recoveryTracking ? { originalRequestRef: outbox.outboxId, originalGeneration: snapshot.generation,
               retiredRecoveryGeneration: current.generation, submissionEvidencePreserved: true } : {}) };
           this.#events.append({ teamId: snapshot.teamId, roleId: snapshot.roleId, sessionId: snapshot.sessionId,
             generation: recoveryTracking ? current.generation : snapshot.generation, eventType: 'generation.manual-followup-reconciled',
             payload: { requestRef: outbox.outboxId, receiptId: decisionId, evidence: proof }, createdAt: timestamp });
           return { requestOk: true, requestRef: outbox.outboxId, sessionId: snapshot.sessionId,
-            generation: snapshot.generation, disposition: historical && !recoveryTracking ? 'historical-followup-linked' : 'tracking-cancelled',
+            generation: snapshot.generation, disposition: historical && !recoveryTracking ? 'historical-followup-linked'
+              : linkOnly ? 'completed-followup-linked' : 'tracking-cancelled',
             providerMutation: false, ...(historical ? { historical: true } : {}),
             ...(input.answerText === undefined ? {} : { answerText: input.answerText }), evidence: proof };
         } });

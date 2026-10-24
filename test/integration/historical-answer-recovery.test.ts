@@ -11,6 +11,93 @@ import { SessionRepository } from '../../src/storage/session-repository.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
+test('explicit later responses preserve a completed original and an optional prepared successor', async t => {
+  for (const prepared of [false, true]) await t.test(prepared ? 'prepared successor' : 'completed current request', async t => {
+    const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-completed-followup-'));
+    const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state',
+      observationQuietWindowMs: 25, observationQuietSweepMs: 25, observationActiveSweepMs: 25 });
+    const fake = new FakeProviderAdapter();
+    const core = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+      logger: { debug() {}, info() {}, warn() {}, error() {} } });
+    try {
+      const team = core.teamDirectory.createTeam({ clientId: 'fixture-owner' });
+      const session = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+      const { page, binding } = await core.browserOwner!.createPage();
+      let navigations = 0;
+      await page.route('https://chatgpt.com/**', route => {
+        navigations++;
+        return route.fulfill({ contentType: 'text/html', body: '<main><section id="messages"></section><textarea id="prompt-textarea"></textarea></main>' });
+      });
+      await page.goto(`https://chatgpt.com/c/conversation-${session.sessionId}`);
+      const open = fake.openSubmission.bind(fake);
+      t.mock.method(fake, 'openSubmission', async request => {
+        if (request.generation === 2) throw new SessionPlaneDomainError('provider.preparation-required', 'Prepare only');
+        return { ...await open(request), pageKey: binding.pageKey, bindAcknowledgement() {
+          core.pageRegistry.reservePage(binding.pageKey, { sessionId: session.sessionId, generation: 1,
+            conversationId: `conversation-${session.sessionId}` });
+        } };
+      });
+      const observe = fake.openObservation.bind(fake);
+      t.mock.method(fake, 'openObservation', async request => {
+        const source = await observe(request);
+        t.mock.method(source, 'observe', async () => ({ submittedUserFound: true, laterUserFound: false,
+          candidate: { responseMessageId: 'original-answer', answerText: 'Stored original answer', terminalMarker: true, streamingMarker: false },
+          activity: 'none' as const, dialogKind: null, networkActivity: false, observationTransport: 'fresh' as const }));
+        return source;
+      });
+      await core.submissionService.send({ clientId: 'fixture-owner', requestId: 'original', sessionId: session.sessionId, prompt: 'Original work', sessionDeadlineSec: 600 });
+      const deadline = Date.now() + 2000;
+      while (!core.teamDirectory.getSession(session.sessionId).terminal && Date.now() < deadline)
+        await core.actorScheduler.waitSession(session.sessionId, { expectedGeneration: 1, waitMs: 100 });
+      const timestamp = new Date().toISOString();
+      new SessionRepository(core.database.raw).updateCurrentGeneration(session.sessionId, 1, { reason: 'dom-quiet-stable-final' }, timestamp);
+      if (prepared) await assert.rejects(core.submissionService.send({ clientId: 'fixture-owner', requestId: 'pending-distinct-work',
+        sessionId: session.sessionId, prompt: 'Preserved pending prompt', sessionDeadlineSec: 600 }), /caller decision/);
+      core.pageRegistry.reservePage(binding.pageKey, core.teamDirectory.getSession(session.sessionId));
+      await page.locator('#messages').evaluate(node => { node.innerHTML =
+        '<div data-message-author-role="user" data-message-id="user-message-1">Original work</div>' +
+        '<div data-message-author-role="assistant" data-message-id="original-answer">Stored original answer</div>' +
+        '<div data-message-author-role="user" data-message-id="manual-a">Open the existing terminal</div>' +
+        '<div data-message-author-role="assistant" data-message-id="answer-a">Terminal ready</div>' +
+        '<div data-message-author-role="user" data-message-id="manual-b">Connection is ready</div>' +
+        '<div data-message-author-role="assistant" data-message-id="answer-b">Exact later response</div>'; });
+      await page.locator('textarea').fill('Preserved pending prompt');
+      t.mock.method(page, 'bringToFront', async () => { throw new Error('No focus permitted'); });
+      const rows = () => ({ session: core.teamDirectory.getSession(session.sessionId),
+        outbox: core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? ORDER BY generation').all(session.sessionId),
+        generations: core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(session.sessionId) });
+      const before = rows();
+      const requestRef = before.outbox[0]!.outbox_id;
+      const wait = async (followupUserMessageId: string, waitMs: number) => (await invokeMcpTool({ name: 'sessionplane_wait',
+        arguments: { teamId: team.teamId, requestRefs: [requestRef], followupUserMessageId, waitMs },
+        socketPath: config.socketPath, timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes })).structuredContent as any;
+      const wrong = (await wait('manual-a', 0)).results[0];
+      assert.notEqual(wrong.followup?.terminal, true, 'A later user must prevent collecting an earlier follow-up as current');
+      await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend', '<button id="active" aria-label="Stop">Stop</button>'));
+      const active = (await wait('manual-b', 0)).results[0] as any;
+      assert.equal(active.requestOk, true, JSON.stringify(active));
+      assert.notEqual(active.followup?.terminal, true, 'Stop preserves the active turn');
+      assert.deepEqual(rows(), before);
+      await page.locator('#active').evaluate(node => node.remove());
+      const result = (await wait('manual-b', 5000)).results[0] as any;
+      assert.equal(result.requestOk, true, JSON.stringify(result));
+      assert.equal(result.followup.terminal, true, JSON.stringify(result));
+      assert.equal(result.followup.userMessageId, 'manual-b');
+      assert.equal(result.followup.responseMessageId, 'answer-b');
+      assert.equal(result.followup.answerText, 'Exact later response');
+      assert.equal(result.reconciliation.providerMutation, false);
+      assert.equal(result.reconciliation.evidence.originalResponseMessageId, 'original-answer');
+      assert.notEqual((await wait('manual-a', 0)).results[0].followup?.terminal, true,
+        'A cached later response must not answer an explicitly different follow-up');
+      assert.deepEqual(rows(), before, 'Neither the completed answer nor unsubmitted successor is rewritten');
+      assert.equal(await page.locator('textarea').inputValue(), 'Preserved pending prompt');
+      assert.equal(core.actorScheduler.collectors(session.sessionId).length, 0);
+      assert.equal(fake.submitCount, 1);
+      assert.equal(navigations, 1);
+    } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
 test('original quiet-final can be recovered through latest under an unsubmitted successor without altering either request', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-historical-answer-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state',

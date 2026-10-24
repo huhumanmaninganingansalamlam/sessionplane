@@ -265,8 +265,11 @@ export class SessionUiService {
         message.messageId !== session.submittedUserMessageId);
       const followupId = followupUserMessageId ?? (nextUser?.text.trim() === '계속' ? nextUser.messageId : null);
       if (!followupId) return null;
-      if (!original.submittedUserFound || !original.turnBoundary.some(message =>
-        message.role === 'user' && message.messageId === followupId && message.messageId !== session.submittedUserMessageId)) {
+      const transcript = followupUserMessageId === undefined ? original.turnBoundary : await readChatGptMessages(page);
+      const anchor = transcript.findIndex(message => message.role === 'user' && message.messageId === session.submittedUserMessageId);
+      const followups = transcript.filter(message => message.role === 'user' && message.messageId === followupId);
+      if (!original.submittedUserFound || anchor < 0 || followups.length !== 1 ||
+          followups[0]!.rootIndex !== transcript[anchor]!.rootIndex || transcript.indexOf(followups[0]!) <= anchor) {
         throw new SessionPlaneDomainError('session.page-identity-unverified', 'Follow-up is not after the exact original ACK on this transcript');
       }
       const dom = await observeChatGptDom(page, { submittedUserMessageId: followupId, submittedUserTurnId: null });
@@ -428,6 +431,8 @@ export class SessionUiService {
       const user = messages.findIndex(m => m.role === 'user' && m.messageId === input.followupUserMessageId);
       const answer = messages.at(-1);
       const recoveryTracking = owner.generation > session.generation && owner.promptSubmitted;
+      const completedOriginal = session.terminal && session.reason === 'dom-quiet-stable-final' && session.errorCode === null &&
+        session.responseMessageId !== null && session.answerText !== null;
       // The durable ancestry already proves these successors are literal Continue.
       // Retire only their tracking; preserve an unsent Continue draft unchanged.
       if (recoveryTracking) await requireIdleConversationPage(page, '계속');
@@ -442,7 +447,8 @@ export class SessionUiService {
           original < 0 || (recoveryTracking ? user < original : user <= original) || user >= messages.length - 1 || messages.slice(user + 1, -1).some(message => message.role !== 'assistant' || message.terminalMarker) || answer?.role !== 'assistant' ||
           answer.messageId !== input.responseMessageId || !answer.text.trim() || answer.streamingMarker ||
           createHash('sha256').update(answer.text).digest('hex') !== input.responseSha256 ||
-          partials.some(m => recoveryTracking && m.role === 'user' ? m.text.trim() !== '계속' : m.role !== 'assistant' || !m.messageId || m.terminalMarker) ||
+          partials.some(m => completedOriginal ? !m.messageId
+            : recoveryTracking && m.role === 'user' ? m.text.trim() !== '계속' : m.role !== 'assistant' || !m.messageId || m.terminalMarker) ||
           transcript.some(m => m.streamingMarker) || activity.strength !== 'none' || dom.actionableAlert ||
           !dom.conversationSurfaceAvailable || !dom.submittedUserFound || dom.laterUserFound ||
           dom.candidate?.responseMessageId !== input.responseMessageId || dom.candidate.streamingMarker ||
@@ -457,7 +463,7 @@ export class SessionUiService {
         bindingEpoch: after.bindingEpoch, observedAt: controls.capturedAt,
         followupPartialResponses: messages.slice(user + 1, -1).map(m => ({ responseMessageId: m.messageId!,
           responseSha256: createHash('sha256').update(m.text).digest('hex') })),
-        originalPartialResponses: partials.map(m => ({ responseMessageId: m.messageId!,
+        originalPartialResponses: partials.filter(m => m.role === 'assistant').map(m => ({ responseMessageId: m.messageId!,
           responseSha256: createHash('sha256').update(m.text).digest('hex') })) };
     });
   }
