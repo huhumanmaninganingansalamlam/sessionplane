@@ -518,6 +518,21 @@ test('configuration selection waits for a closing version menu and preserves the
       id: 'fixture', version: 'Aurora-8', power: 2, label: 'Aurora-8 / Deep',
     });
     assert.equal(again.text, selected.text, 'already selected configuration also survives popup closure');
+    await page.evaluate(() => {
+      const chooser = document.querySelector('#chooser') as HTMLElement;
+      const click = chooser.onclick!;
+      chooser.onclick = event => {
+        click.call(chooser, event);
+        if (chooser.getAttribute('aria-expanded') !== 'false') return;
+        // Popup removal and persistent summary hydration are separate UI updates.
+        setTimeout(() => { chooser.textContent = ''; }, 130);
+        setTimeout(() => { (window as any).render(); }, 350);
+      };
+    });
+    const hydrated = await new ChatGptConfigurationMenu(page, 'closing-menu').select({
+      id: 'fixture', version: 'Aurora-8', power: 2, label: 'Aurora-8 / Deep',
+    });
+    assert.equal(hydrated.text, 'Aurora-8 / Deep', 'Configure returns persistent verified evidence, never a blank closing label');
     await page.locator('#configuration').waitFor({ state: 'hidden' });
     const opens = await page.evaluate(() => (window as any).opens);
     await page.evaluate(() => { (document.querySelector('#configuration') as HTMLElement).hidden = false; });

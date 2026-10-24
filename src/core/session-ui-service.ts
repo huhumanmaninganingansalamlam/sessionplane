@@ -155,6 +155,17 @@ export class SessionUiService {
   async inspectSubmission(input: PreparationOwner & { readonly maxNodes?: number | undefined; readonly readOnly?: boolean }) {
     return await this.#submissions.inspectSubmission(input,
       async (session, submittedMessageIds) => {
+        if (input.readOnly && this.#submissions.isObservationHeld(session.conversationId) && session.conversationId !== null) {
+          try { this.#registry.requireSessionPage(session.pageKey!, session); }
+          catch (error) {
+            if (!(error instanceof PageRegistryError) || error.errorCode !== 'browser.unavailable') throw typedUiError(error);
+            const matches = this.#registry.findByConversation(session.conversationId);
+            if (matches.length !== 1 || matches[0]!.state !== 'unbound') throw typedUiError(error);
+            // Observe a reopened conversation without rebinding the original
+            // request, adopting its messages or changing the human hold.
+            session = { ...session, pageKey: matches[0]!.pageKey };
+          }
+        }
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           const evidence = await Promise.race([
@@ -1041,7 +1052,11 @@ export class SessionUiService {
       throw new SessionPlaneDomainError('provider.preparation-required', 'The user is reviewing this conversation; observation and controls are paused');
     if (session.pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'Exact preparation page is unavailable');
     try {
-      const page = this.#registry.requireSessionPage(session.pageKey, {
+      const binding = this.#registry.getBinding(session.pageKey);
+      const passiveConversation = readOnly && this.#submissions.isObservationHeld(session.conversationId) &&
+        session.conversationId !== null && binding.state === 'unbound' && binding.sessionId === null &&
+        binding.conversationId === session.conversationId && this.#registry.findByConversation(session.conversationId).length === 1;
+      const page = passiveConversation ? this.#registry.pageForObservation(session.pageKey) : this.#registry.requireSessionPage(session.pageKey, {
         sessionId: session.sessionId, generation: session.generation, conversationId: session.conversationId,
       });
       if (new URL(page.url()).origin !== this.#chatgptOrigin) {

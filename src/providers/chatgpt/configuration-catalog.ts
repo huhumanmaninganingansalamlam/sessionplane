@@ -255,7 +255,7 @@ export class ChatGptConfigurationMenu {
       throw new SessionPlaneDomainError('provider.configuration-stale',
         'Current version/effort does not match the original continuation; preserve preparation');
     }
-    return await this.#closeSelection(nodes);
+    return await this.#closeSelection(nodes, version);
   }
 
   async discover(): Promise<ConfigurationCatalog> {
@@ -318,10 +318,14 @@ export class ChatGptConfigurationMenu {
     if (!summary || summary.text !== option.label) {
       throw new SessionPlaneDomainError('provider.configuration-stale', 'Configuration changed since discovery; discover current options before choosing again');
     }
-    return await this.#closeSelection(nodes);
+    return await this.#closeSelection(nodes, option.version);
   }
 
-  async #closeSelection(nodes: readonly BrowserSnapshotNode[]): Promise<BrowserSnapshotNode> {
+  async #closeSelection(nodes: readonly BrowserSnapshotNode[], version: string): Promise<BrowserSnapshotNode> {
+    const normalize = (label: string) => label.replaceAll(/\s*\/\s*/g, ' ').replaceAll(/\s+/g, ' ').trim();
+    const label = normalize(this.#summary(nodes)!.text);
+    const effort = label.startsWith(version + ' ') ? label.slice(version.length + 1) : label;
+    const expected = new Set([label, effort, version + ' ' + effort]);
     // Keep the confirmed evidence visible when filling the composer closes menus.
     const opener = this.#opener(nodes)!;
     await this.#click(opener);
@@ -331,7 +335,10 @@ export class ChatGptConfigurationMenu {
     for (const id of opener.controls) {
       await this.#wait(() => this.#page.evaluate(id => !document.getElementById(id)?.checkVisibility({ visibilityProperty: true }), id));
     }
-    nodes = await this.#capture();
+    nodes = await this.#wait(ns => {
+      const chooser = this.#opener(ns);
+      return chooser?.expanded === false && chooser.text.trim() !== '' && expected.has(normalize(chooser.text));
+    }, 5000, 'closed-selection-label');
     return this.#opener(nodes)!;
   }
 }

@@ -15,6 +15,7 @@ import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { ConversationLoadRecoveryRepository } from '../../src/storage/conversation-load-recovery-repository.ts';
 
 test('core handover reattaches a held request to its retained target for explicit reads only', async t => {
+  for (const reopened of [false, true]) {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-held-target-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const fake = new FakeProviderAdapter();
@@ -44,7 +45,15 @@ test('core handover reattaches a held request to its retained target for explici
     const before = service.teamDirectory.getSession(sent.sessionId as string);
     const hold = new ConversationLoadRecoveryRepository(service.database).get(conversationId);
     const outbox = service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(sent.requestRef);
-    const target = service.pageRegistry.getBinding(before.pageKey!).targetId;
+    let target = service.pageRegistry.getBinding(before.pageKey!).targetId;
+    if (reopened) {
+      const body = await page.content();
+      const replacement = await firstOwner.createPage();
+      await replacement.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body }));
+      await replacement.page.goto('https://chatgpt.com/c/' + conversationId);
+      await page.close();
+      target = replacement.binding.targetId;
+    }
     const browserPid = firstOwner.status.browserPid, registry = service.pageRegistry;
     firstOwner.close = async () => registry.detach();
     await service.close();
@@ -58,9 +67,13 @@ test('core handover reattaches a held request to its retained target for explici
     assert.equal(after.inspectionError, undefined);
     assert.equal(after.evidence.submissionVerification.anchorPresent, true);
     assert.equal(after.evidence.submissionVerification.responseCandidate.answerText, 'Current response');
-    assert.notEqual(after.pageKey, before.pageKey);
-    assert.equal(service.pageRegistry.getBinding(after.pageKey).targetId, target);
-    assert.equal(await service.pageRegistry.pageForObservation(after.pageKey).locator('textarea').inputValue(), 'Preserved human draft');
+    const observedPageKey = after.evidence.pageKey;
+    if (reopened) {
+      assert.equal(after.pageKey, before.pageKey, 'Passive reads do not rebind the original closed target');
+      assert.equal(service.pageRegistry.getBinding(observedPageKey).sessionId, null);
+    } else assert.notEqual(after.pageKey, before.pageKey);
+    assert.equal(service.pageRegistry.getBinding(observedPageKey).targetId, target);
+    assert.equal(await service.pageRegistry.pageForObservation(observedPageKey).locator('textarea').inputValue(), 'Preserved human draft');
     assert.deepEqual(after.collection.waits, []);
     assert.equal(after.managedContinuation.active, false);
     assert.equal(after.submittedUserMessageId, before.submittedUserMessageId);
@@ -70,6 +83,7 @@ test('core handover reattaches a held request to its retained target for explici
     assert.equal(fake.submitCount, 1);
     assert.equal(fake.acknowledgementRecoveryCount, 0);
   } finally { await service.close(); await closeFirst(); rmSync(root, { recursive: true, force: true }); }
+  }
 });
 
 test('explicit completed display and deferred preparation preserve exact ownership, drafts and one submission', async t => {
