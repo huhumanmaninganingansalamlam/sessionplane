@@ -22,6 +22,8 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
   const allowMode = input.allowMode ?? 'once';
   const allow = allowMode === 'always' ? always : once;
   if (input.action === 'allow' && !input.toolName) throw unavailable('Select the observed tool name before allowing it');
+  if (input.action === 'allow' && !input.evidenceHash) throw unavailable(
+    'Inspect the exact tool with the same allowMode, then pass its evidenceHash to allow');
   const users = (await readChatGptMessages(page, true)).filter(message => message.role === 'user');
   if (users.at(-1)?.messageId !== submittedUserMessageId ||
       users.filter(message => message.messageId === submittedUserMessageId).length !== 1) {
@@ -50,17 +52,14 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
     }
     return matches;
   };
-  let workDisclosure: string | null = null;
-  if ((await matching()).length === 0) {
-    const hidden = [];
+  const disclosures = page.locator('button[aria-expanded], button[data-state="closed"], button[data-state="open"]');
+  const linkedDisclosures = async () => {
+    const indices = new Set<number>();
     for (const scope of await matching(true)) {
-      if (await scope.getAttribute('role') === 'alert') hidden.push(scope);
-    }
-    if (hidden.length === 1) {
-      const card = await hidden[0]!.elementHandle();
-      if (!card) throw unavailable('The exact hidden permission is no longer mounted');
-      const disclosures = page.locator('button[aria-expanded="false"], button[data-state="closed"]');
-      const indices = await disclosures.evaluateAll((buttons, target) => buttons.flatMap((button, index) => {
+      if (await scope.getAttribute('role') !== 'alert') continue;
+      const card = await scope.elementHandle();
+      if (!card) continue;
+      const linked = await disclosures.evaluateAll((buttons, target) => buttons.flatMap((button, index) => {
         const root = button.getRootNode() as Document | ShadowRoot;
         const controlled = (button.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean)
           .map(id => root.getElementById(id));
@@ -69,14 +68,29 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
           activity.querySelectorAll('[class~="group/activity-header"] > button[aria-expanded]').length === 1);
         return ownsCard ? [index] : [];
       }), card).finally(() => card.dispose());
-      if (indices.length === 1) {
-        const button = disclosures.nth(indices[0]!);
-        if (await inWork(button) && await button.isVisible() && await button.isEnabled()) {
-          workDisclosure = await button.evaluate(element => element.getAttribute('aria-label') ||
-            (element.getAttribute('aria-labelledby') ?? '').split(/\s+/).map(id =>
-              (element.getRootNode() as Document | ShadowRoot).getElementById(id)?.textContent ?? '').join(' ') || element.textContent || '');
-          await button.click({ timeout: 5_000 });
-        }
+      for (const index of linked) if (await inWork(disclosures.nth(index))) indices.add(index);
+    }
+    return [...indices];
+  };
+  const disclosureDetails = async (index: number) => await disclosures.nth(index).evaluate(element => ({
+    name: element.getAttribute('aria-label') || (element.getAttribute('aria-labelledby') ?? '').split(/\s+/)
+      .map(id => (element.getRootNode() as Document | ShadowRoot).getElementById(id)?.textContent ?? '').join(' ') || element.textContent || '',
+    expanded: element.getAttribute('aria-expanded'), state: element.getAttribute('data-state'),
+    visible: element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }),
+  }));
+  let workDisclosure: string | null = null;
+  const hiddenAlerts = [];
+  if ((await matching()).length === 0) {
+    for (const scope of await matching(true)) if (await scope.getAttribute('role') === 'alert') hiddenAlerts.push(scope);
+  }
+  if (hiddenAlerts.length === 1) {
+    const indices = await linkedDisclosures();
+    if (indices.length === 1) {
+      const button = disclosures.nth(indices[0]!);
+      const details = await disclosureDetails(indices[0]!);
+      if ((details.expanded === 'false' || details.state === 'closed') && details.visible && await button.isEnabled()) {
+        workDisclosure = details.name;
+        await button.click({ timeout: 5_000 });
       }
     }
   }
@@ -96,10 +110,7 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
       submittedUserMessageId: await permissionAnchor(scope),
       buttons: await scope.getByRole('button').allTextContents() });
     return { outcome: 'discovered', allowMode, appName: input.appName, cards, workDisclosure,
-      workDisclosures: await page.getByRole('button', { name: /작업|Working|Worked for/i, includeHidden: true })
-        .evaluateAll(elements => elements.map(element => ({ name: element.getAttribute('aria-label') ?? element.textContent,
-          expanded: element.getAttribute('aria-expanded'), state: element.getAttribute('data-state'),
-          visible: element.getClientRects().length > 0 }))) };
+      workDisclosures: await Promise.all((await linkedDisclosures()).map(disclosureDetails)) };
   }
   // ChatGPT opens command details in a separate modal over the permission alert.
   // Inspect and close only that exact modal, then act on the original permission.

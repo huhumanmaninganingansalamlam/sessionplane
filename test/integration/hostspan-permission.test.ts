@@ -62,6 +62,20 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     assert.equal(await page.evaluate(() => (window as any).unrelatedClicks ?? 0), 0,
       'Explicit permission inspection opens only the card-linked disclosure, never integration controls or another work question');
     assert.equal(prepare.mock.callCount(), 1, 'Use the existing exact-page background interaction lifecycle');
+    await page.evaluate(() => document.querySelector('main')!.insertAdjacentHTML('beforeend',
+      '<button aria-expanded="false" data-state="closed" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">채팅 및 작업 필터링</button>'));
+    const discoveryCurrent = await decide('discover-current-card', { action: 'inspect', toolName: undefined, allowMode: 'always' });
+    const discovered = discoveryCurrent.structuredContent.permission as { outcome: string; evidenceHash?: string; workDisclosures: { name: string; expanded: string }[] };
+    assert.equal(discovered.outcome, 'discovered');
+    assert.equal(discovered.evidenceHash, undefined, 'Discovery does not authorize a tool grant');
+    assert.deepEqual(discovered.workDisclosures.map(({ name, expanded }) => ({ name, expanded })),
+      [{ name: '이전 활동', expanded: 'true' }], 'Report only the disclosure structurally owning the actual card, including its labelled title');
+    const detailsClicks = t.mock.method(Object.getPrototypeOf(page.locator('button')), 'click');
+    const missingEvidence = await decide('allow-discovery-without-evidence', { action: 'allow', allowMode: 'always' });
+    assert.equal(missingEvidence.isError, true);
+    assert.match(JSON.stringify(missingEvidence), /same allowMode.*evidenceHash/);
+    assert.equal(detailsClicks.mock.callCount(), 0, 'An allow without exact inspection evidence must not reveal or click anything');
+    detailsClicks.mock.restore();
     const permission = inspected.structuredContent.permission as { evidenceHash: string; permissionText: string };
     assert.match(permission.permissionText, /Command: original work/);
     assert.doesNotMatch(permission.permissionText, /Fixture question|working|Keep my draft/);
