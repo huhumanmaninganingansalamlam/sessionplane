@@ -27,6 +27,7 @@ export const workflowSchemas = {
       userConfirmedInterruption: z.object({ conversationId: z.string().min(1).max(300), submittedUserMessageId: z.string().min(1).max(300),
         evidenceRef: z.string().trim().min(1).max(2000) }).strict().optional().describe('Only after the user directly confirms this exact disconnected turn and explicitly requests one continue. Not for automated inference; active streaming, final answers, later users, permissions and separate drafts remain protected.') }).strict(),
     z.object({ ...request, requestId, decision: z.literal('hostspan_permission'), action: z.enum(['inspect', 'allow']),
+      followupUserMessageId: z.string().min(1).max(300).optional().describe('Source of an acknowledged exact recovery chain under a separate unsubmitted preparation.'),
       appName: z.string().regex(/^hostspan(?:-[a-z0-9_-]+)?$/i), toolName: z.string().trim().min(1).max(200).optional().describe('Omit only for inspect to discover actual HostSpan cards in this owned conversation; allow requires the observed tool name.'),
       allowMode: z.enum(['once', 'always']).optional().describe('Select the exact observed ChatGPT HostSpan permission option; always requires explicit user authorization. Defaults to once.'),
       evidenceHash: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict(),

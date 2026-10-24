@@ -168,7 +168,7 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; followupUserMessageId?: string | undefined; manageOnly?: true | undefined; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName?: string | undefined; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'human_review'; action: 'pause' | 'resume' } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'reopen' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; followupUserMessageId?: string | undefined; manageOnly?: true | undefined; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; followupUserMessageId?: string | undefined; toolName?: string | undefined; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'human_review'; action: 'pause' | 'resume' } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'reopen' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     if (input.decision === 'human_review') {
       const result = await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
@@ -234,9 +234,10 @@ export class TeamWorkflow {
           if (prior.status === 'complete') return JSON.parse(prior.resultJson) as Record<string, unknown>;
           throw new SessionPlaneDomainError('provider.action-unknown', 'Permission action was attempted; inspect without repeating the grant');
         }
-        const pageOwner = this.#requestPageOwner(request, input.action === 'inspect');
+        const pageOwner = this.#requestPageOwner(request, input.action === 'inspect', input.followupUserMessageId);
         const { current: session, original, permissionRequest } = pageOwner;
         const passiveInspection = 'passiveInspection' in pageOwner;
+        const exactFollowup = 'exactFollowup' in pageOwner ? pageOwner.exactFollowup : undefined;
         if (this.#userReview(request) && !passiveInspection) {
           throw new SessionPlaneDomainError('provider.preparation-required',
             'Observation and controls are paused for user review; resume only after the user reports completion');
@@ -244,7 +245,7 @@ export class TeamWorkflow {
         if (!session.pageKey) throw new SessionPlaneDomainError('browser.unavailable', 'No connected request page');
         return await this.services.pageMutex.runExclusive(session.pageKey, async () => {
           this.services.receipts.record({ ...receipt, status: 'attempted', result: { requestRef: input.requestRef } });
-          const workRequest = !passiveInspection && original.generation === request.generation
+          const workRequest = !exactFollowup && !passiveInspection && original.generation === request.generation
             ? this.#continuationOriginal(request) : request;
           let workOriginal: SessionSnapshot | undefined;
           if (workRequest.outboxId !== request.outboxId) {
@@ -258,10 +259,21 @@ export class TeamWorkflow {
               throw new SessionPlaneDomainError('provider.permission-unverified', 'The original work ACK and continuation lineage must agree');
             workOriginal = { ...session, ...work, generation: workRequest.generation };
           }
-          const permission = await this.services.ui.hostspanPermission(session, input, original, passiveInspection, workOriginal);
+          const permission = await this.services.ui.hostspanPermission(session, input, original, passiveInspection, workOriginal, exactFollowup);
+          if (exactFollowup && input.action === 'allow' && permission.outcome === 'clicked' &&
+              'permissionStillVisible' in permission && permission.permissionStillVisible === false) {
+            const review = this.services.receipts.get(request.clientId, `followup-review:${request.outboxId}:${exactFollowup.userMessageId}`);
+            const last = review && JSON.parse(review.resultJson);
+            if (review?.method === 'workflow.followup.review' && last?.decisionRequired &&
+                ['provider.failure-unverified', 'provider.preparation-required'].includes(last.reason))
+              this.services.receipts.record({ ...review, status: 'complete', result: { ...last, decisionRequired: false,
+                reason: 'exact-permission-resolved', nextReviewAt: new Date().toISOString() } });
+          }
           const result = { requestOk: true, requestRef: input.requestRef, sessionId: session.sessionId,
             generation: session.generation, permissionRequestRef: permissionRequest.outboxId,
             permissionGeneration: original.generation, permission,
+            ...(exactFollowup ? { followup: { sourceFollowupUserMessageId: exactFollowup.sourceUserMessageId,
+              userMessageId: exactFollowup.userMessageId, managedContinuation: this.#exactManagement(request, exactFollowup.sourceUserMessageId, false) } } : {}),
             ...('workUserMessageId' in permission ? { workRequestRef: workRequest.outboxId,
               workGeneration: workRequest.generation } : {}) };
           this.services.receipts.record({ ...receipt, status: 'complete', result });
@@ -809,9 +821,27 @@ export class TeamWorkflow {
       discardRetiredObservation: input.discardRetiredObservation });
   }
 
-  #requestPageOwner(request: OutboxRecord, inspect = false) {
+  #requestPageOwner(request: OutboxRecord, inspect = false, followupSource?: string) {
     const snapshot = this.services.directory.getSession(request.sessionId);
     const current = this.#role({ teamId: request.teamId, roleRef: roleRef(snapshot) });
+    if (followupSource) {
+      const exact = this.#exactFollowup(request, followupSource);
+      const original = this.#sessions.getGenerationResult(request.sessionId, request.generation);
+      const pending = this.#outbox.getByGeneration(current.sessionId, current.generation);
+      const ack = JSON.parse(request.resultJson ?? '{}');
+      if (!exact.acknowledgedAt || !pending || pending.clientId !== request.clientId ||
+          current.generation !== request.generation + 1 || current.submissionState !== 'prepared' ||
+          pending.submissionState !== 'prepared' || current.promptSubmitted || pending.promptSubmitted ||
+          current.submittedUserMessageId !== null || current.submittedUserTurnId !== null || current.responseMessageId !== null ||
+          request.submissionState !== 'submitted' || !request.promptSubmitted || !original?.submittedUserMessageId ||
+          original.submissionState !== 'submitted' || !original.promptSubmitted ||
+          ack.sessionId !== current.sessionId || ack.generation !== request.generation ||
+          !current.conversationId || ack.conversationId !== current.conversationId ||
+          ack.submittedUserMessageId !== original.submittedUserMessageId || ack.submittedUserTurnId !== original.submittedUserTurnId)
+        throw new SessionPlaneDomainError('provider.permission-unverified', 'Preserve the exact recovery receipt, original ACK and separate unsubmitted preparation');
+      return { current, original: { ...current, ...original, generation: request.generation }, permissionRequest: request,
+        exactFollowup: { sourceUserMessageId: followupSource, userMessageId: exact.userMessageId } };
+    }
     if (current.generation === request.generation && current.submissionState !== 'prepared')
       return { current, original: current, permissionRequest: request };
     const pending = this.#outbox.getByGeneration(current.sessionId, current.generation);

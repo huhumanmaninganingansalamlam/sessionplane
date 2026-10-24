@@ -959,7 +959,8 @@ export class SessionUiService {
 
   /** Caller holds the exact current request actor and page mutation lock. */
   async hostspanPermission(session: SessionSnapshot, input: HostSpanPermissionInput, original = session,
-    passiveInspection = false, workOriginal?: SessionSnapshot) {
+    passiveInspection = false, workOriginal?: SessionSnapshot,
+    exactFollowup?: { sourceUserMessageId: string; userMessageId: string }) {
     if (session.provider !== 'chatgpt' ||
         (original.submissionState !== 'submitted' && original.submissionState !== 'submission_unknown') ||
         original.sessionId !== session.sessionId || original.conversationId !== session.conversationId ||
@@ -991,6 +992,20 @@ export class SessionUiService {
       const acknowledgementVerified = original.submissionState === 'submitted' &&
         messages.filter(message => message.messageId === original.submittedUserMessageId).length === 1;
       let association;
+      if (exactFollowup) {
+        const roots = messages.filter(m => m.messageId === original.submittedUserMessageId);
+        const sources = messages.filter(m => m.messageId === exactFollowup.sourceUserMessageId);
+        const current = messages.filter(m => m.messageId === exactFollowup.userMessageId);
+        const source = sources[0], last = current[0], root = roots[0];
+        if (roots.length !== 1 || sources.length !== 1 || current.length !== 1 || !root || !source || !last ||
+            root.rootIndex !== source.rootIndex || source.rootIndex !== last.rootIndex ||
+            messages.indexOf(source) <= messages.indexOf(root) || messages.indexOf(last) < messages.indexOf(source) ||
+            messages.at(-1) !== last || messages.slice(messages.indexOf(source) + 1).some(m => m.text.trim() !== '계속'))
+          throw new SessionPlaneDomainError('provider.permission-unverified', 'Verify the original, source follow-up and acknowledged latest recovery on the same transcript');
+        anchor = last.messageId;
+        association = { association: 'acknowledged-exact-followup-chain', originalUserMessageId: root.messageId,
+          sourceFollowupUserMessageId: source.messageId, currentUserMessageId: last.messageId, followupAcknowledgementVerified: true };
+      }
       if (!anchor || messages.at(-1)?.messageId !== anchor) {
         // A recovery Continue's missing ACK must not hide a card belonging to
         // its exact retained work. This associates controls, never rewrites ACKs.
