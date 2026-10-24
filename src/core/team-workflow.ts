@@ -961,6 +961,10 @@ export class TeamWorkflow {
     const authorization = this.services.receipts.get(request.clientId, `followup-management:${request.outboxId}:${source}`);
     const review = this.services.receipts.get(request.clientId, `followup-review:${request.outboxId}:${exact.userMessageId}`);
     const last = review ? JSON.parse(review.resultJson) : null;
+    // A paced probe has not completed the broad review. Also read the provider
+    // deadline from existing receipts written before deferred reviews retained it.
+    const deferredAt = last?.server?.kind === 'deferred' ? last.server.nextCheckAt : null;
+    const nextReviewAt = Number.isFinite(Date.parse(deferredAt)) ? deferredAt : last?.nextReviewAt;
     const snapshot = this.services.directory.getSession(request.sessionId);
     const held = this.#loadRecovery.isUserHeld(snapshot.conversationId);
     const collectors = this.services.scheduler.collectors(request.sessionId).filter(c => c.requestRef === request.outboxId && c.followupUserMessageId === source);
@@ -970,7 +974,7 @@ export class TeamWorkflow {
       submittedUserMessageId: exact.userMessageId, acknowledgedAt: exact.acknowledgedAt, approved, active,
       observationHeld: held, collectorCount: collectors.length, lastReviewAt: last?.lastReviewAt ?? null,
       lastReviewReason: last?.reason ?? null, nextReviewAt: active && !held && !terminal && !last?.decisionRequired
-        ? last?.nextReviewAt ?? new Date(Date.parse(exact.acknowledgedAt!) + 30 * 60000).toISOString() : null,
+        ? nextReviewAt ?? new Date(Date.parse(exact.acknowledgedAt!) + 30 * 60000).toISOString() : null,
       reason: held ? 'human-review' : !approved ? 'not-approved' : !active ? 'no-exact-collector' : terminal ? 'terminal' : last?.reason ?? 'awaiting-broad-review' };
   }
 
@@ -1007,6 +1011,7 @@ export class TeamWorkflow {
         review.reason = 'provider-generation-activity'; save(); return {};
       }
       if (server?.kind === 'deferred') {
+        if (server.nextCheckAt && Number.isFinite(Date.parse(server.nextCheckAt))) review.nextReviewAt = server.nextCheckAt;
         review.reason = server.reason; save(); return {};
       }
       const state = server?.serverObservation;

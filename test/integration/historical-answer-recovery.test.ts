@@ -222,7 +222,9 @@ test('explicit later responses preserve a completed original and an optional pre
         core.database.raw.prepare('UPDATE request_receipts SET updated_at=? WHERE client_id=? AND request_id=?')
           .run(new Date(Date.now() - 31 * 60000).toISOString(), 'fixture-owner', managedKey);
         let backend: 'active' | 'paced' | 'empty' = 'active';
+        const backendReviews: number[] = [];
         t.mock.method(fake, 'recover', async request => {
+          backendReviews.push(Date.now());
           assert.equal(request.session.submittedUserMessageId, 'managed-user');
           assert.equal(request.generation, 1);
           assert.equal(request.bindingGeneration, 2);
@@ -273,8 +275,18 @@ test('explicit later responses preserve a completed original and an optional pre
           backend = 'paced'; dueAgain();
           await eventually(async () => !!reason() && JSON.parse(reason()!).reason === 'backend-http-429');
           assert.equal(await page.evaluate(() => (window as any).sends), 1, '429 never authorizes a send');
-          backend = 'empty'; dueAgain();
+          const deferred = JSON.parse(reason()!);
+          assert.equal(deferred.nextReviewAt, deferred.server.nextCheckAt, 'A deferred review resumes at provider pacing, not another broad interval');
+          // Previously saved .83 deferrals must recover without editing a live receipt.
+          const savedReview = receipts.get('fixture-owner', reviewKey)!;
+          receipts.record({ ...savedReview, status: 'complete', result: { ...deferred,
+            nextReviewAt: new Date(Date.now() + 30 * 60000).toISOString() } });
+          const deferredRead = (await show('manual-managed')).results[0].followup.managedContinuation;
+          assert.equal(deferredRead.nextReviewAt, deferred.server.nextCheckAt);
+          const reviewsBeforeResume = backendReviews.length;
+          backend = 'empty';
           const done = (await pendingWait).results[0];
+          assert.ok(backendReviews[reviewsBeforeResume]! >= Date.parse(deferred.server.nextCheckAt), 'The same collector honors pacing before resuming');
           assert.equal(done.followup.userMessageId, 'recovery-user-2');
           assert.equal(done.followup.recoveredFromUserMessageId, 'manual-managed');
           assert.equal(done.followup.responseMessageId, 'recovery-final-2');
