@@ -174,3 +174,18 @@ test('a superseded conversation retains its collected original answer without pr
   assert.match(unknown.result().stdout, /Unconfirmed — do not resend/);
   assert.doesNotMatch(unknown.result().stdout, /Answer collected|The retained original answer\./);
 });
+
+test('exact follow-up display never presents the completed original as its result', () => {
+  const original = { teamId: 'team', requestRef: 'original', submissionState: 'submitted', terminal: true,
+    completedAt: '2026-10-24T16:16:00.519Z', answerText: 'Old original final', responseMessageId: 'old-answer' };
+  for (const terminal of [false, true]) {
+    const output = capture();
+    writeCliResult(output.io, false, { ...original, followup: { userMessageId: 'later-user', terminal,
+      reason: terminal ? 'dom-terminal-marker' : 'provider-stream-disconnected', answerText: terminal ? 'Exact later answer' : null } });
+    assert.match(output.result().stdout, /Exact follow-up later-user:/);
+    assert.doesNotMatch(output.result().stdout, /Old original final/);
+    assert.match(output.result().stdout, /--followup-message-id later-user/);
+    if (terminal) assert.match(output.result().stdout, /Answer collected[\s\S]*Exact later answer/);
+    else assert.match(output.result().stdout, /No final answer collected[\s\S]*provider-stream-disconnected/);
+  }
+});

@@ -3,7 +3,9 @@ import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { Readable, Writable } from 'node:stream';
 import test from 'node:test';
+import { runCli } from '../../src/cli/main.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
@@ -68,6 +70,17 @@ test('explicit later responses preserve a completed original and an optional pre
         generations: core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(session.sessionId) });
       const before = rows();
       const requestRef = before.outbox[0]!.outbox_id;
+      const show = async (followupId?: string) => {
+        let stdout = '', stderr = '';
+        const code = await runCli(['request', 'show', team.teamId, requestRef, '--view', 'result', '--json',
+          '--socket', config.socketPath, ...(followupId ? ['--followup-message-id', followupId] : [])], {
+          stdin: Readable.from([]),
+          stdout: new Writable({ write(chunk, _encoding, done) { stdout += String(chunk); done(); } }),
+          stderr: new Writable({ write(chunk, _encoding, done) { stderr += String(chunk); done(); } }),
+        });
+        assert.equal(code, 0, stderr);
+        return JSON.parse(stdout);
+      };
       const wait = async (followupUserMessageId: string, waitMs: number) => (await invokeMcpTool({ name: 'sessionplane_wait',
         arguments: { teamId: team.teamId, requestRefs: [requestRef], followupUserMessageId, waitMs },
         socketPath: config.socketPath, timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes })).structuredContent as any;
@@ -79,6 +92,17 @@ test('explicit later responses preserve a completed original and an optional pre
       assert.notEqual(active.followup?.terminal, true, 'Stop preserves the active turn');
       assert.deepEqual(rows(), before);
       await page.locator('#active').evaluate(node => node.remove());
+      await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend',
+        '<div id="disconnected" role="status">Disconnected. Waiting for the full answer.</div>'));
+      const disconnected = (await show('manual-b')).results[0];
+      assert.equal(disconnected.followup.userMessageId, 'manual-b');
+      assert.equal(disconnected.followup.reason, 'provider-stream-disconnected');
+      assert.equal(disconnected.followup.activity, 'unknown');
+      assert.equal(disconnected.followup.terminal, false);
+      assert.ok(Number.isFinite(Date.parse(disconnected.followup.observedAt)));
+      assert.equal(core.actorScheduler.collectors(session.sessionId).length, 0, 'show never adds a collector');
+      assert.deepEqual(rows(), before, 'A disconnected read preserves original result and pending draft');
+      await page.locator('#disconnected').evaluate(node => node.remove());
       const result = (await wait('manual-b', 5000)).results[0] as any;
       assert.equal(result.requestOk, true, JSON.stringify(result));
       assert.equal(result.followup.terminal, true, JSON.stringify(result));
@@ -89,6 +113,8 @@ test('explicit later responses preserve a completed original and an optional pre
       assert.equal(result.reconciliation.evidence.originalResponseMessageId, 'original-answer');
       assert.notEqual((await wait('manual-a', 0)).results[0].followup?.terminal, true,
         'A cached later response must not answer an explicitly different follow-up');
+      assert.equal((await show('manual-b')).results[0].followup.responseMessageId, 'answer-b');
+      assert.equal((await show()).request.submittedUserMessageId, 'user-message-1', 'Unqualified show keeps the original anchor');
       assert.deepEqual(rows(), before, 'Neither the completed answer nor unsubmitted successor is rewritten');
       assert.equal(await page.locator('textarea').inputValue(), 'Preserved pending prompt');
       assert.equal(core.actorScheduler.collectors(session.sessionId).length, 0);

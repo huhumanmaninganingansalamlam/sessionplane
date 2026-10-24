@@ -102,6 +102,12 @@ function humanResult(value: unknown): string {
   }
   if (Array.isArray(r.results)) return records(r.results).map(row => humanResult({ teamId: r.teamId, ...row })).join('\n\n');
   if (r.requestOk === false && typeof r.errorCode === 'string') return `Failed: ${String(r.message ?? r.errorCode)}\n${recoveryAdvice(r.errorCode)}\nError: ${r.errorCode}${typeof r.teamId === 'string' && typeof r.requestRef === 'string' ? `\nInspect: sessplane request show ${r.teamId} ${r.requestRef}` : ''}`;
+  if (isRecord(r.followup)) {
+    const f = r.followup;
+    return `Exact follow-up ${String(f.userMessageId)}: ${f.terminal === true ? 'Answer collected' : 'No final answer collected'}.\nObservation: ${String(f.reason ?? f.kind)}${f.observedAt ? ` at ${String(f.observedAt)}` : ''}.${
+      f.terminal === true && typeof f.answerText === 'string' ? `\n\nAnswer\n${f.answerText}` : ''
+    }\nInspect: sessplane request show ${String(r.teamId)} ${String(r.requestRef)} --followup-message-id ${String(f.userMessageId)} --view result`;
+  }
   if (r.submissionState === null && (r.sessionState === 'created' || r.sessionState === 'ready')) return `${String(r.roleKey ?? 'Session')}: ready for a new request. Nothing has been submitted.\nStart: sessplane request send ${String(r.teamId)} ${String(r.sessionId)}:${String(r.generation)} --prompt-file FILE`;
   if (r.submissionState !== undefined || r.requestRef !== undefined && r.terminal !== undefined) {
     const state = r.submissionState;
