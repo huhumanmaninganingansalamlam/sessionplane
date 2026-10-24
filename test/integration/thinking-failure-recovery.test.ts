@@ -668,7 +668,7 @@ test('user review pauses the existing managed collector and observation without 
     assert.equal(pause.observationHeld, true);
     const reads = t.mock.method(f.fake.page, 'evaluate');
     const opened = f.fake.observationOpenCount;
-    const get = await f.rpc<any>('team_get', { view: 'evidence', teamId: f.team.teamId, requestRef });
+    const get = await f.rpc<any>('team_get', { view: 'summary', teamId: f.team.teamId, requestRef });
     const held = (await waiting).results[0];
     assert.equal(get.request.observationHeld, true);
     assert.equal(held.observationHeld, true);
