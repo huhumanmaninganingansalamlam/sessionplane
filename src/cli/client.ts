@@ -45,10 +45,11 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
   }
   const result = await callRpcOnce<Result>(options);
   const continuation = result as Record<string, unknown>;
-  if (options.collectContinuation && continuation && typeof continuation === 'object' && continuation.promptSubmitted === true && continuation.terminal !== true &&
+  if (options.collectContinuation && continuation && typeof continuation === 'object' && continuation.requestOk !== false && continuation.promptSubmitted === true && continuation.terminal !== true &&
       typeof continuation.requestRef === 'string') {
     const collection = await callRpc({ ...options, collectContinuation: false, method: 'workflow.wait',
       params: { teamId: continuation.teamId, requestRefs: [continuation.requestRef], waitMs: 600_000, untilResult: true,
+        ...(typeof continuation.followupUserMessageId === 'string' ? { followupUserMessageId: continuation.followupUserMessageId } : {}),
         ...(params?.continuationApproved === true ? { continuationApproved: true } : {}) } });
     return { ...continuation, collection } as Result;
   }

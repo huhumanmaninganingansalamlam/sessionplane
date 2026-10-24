@@ -601,7 +601,7 @@ function hasCollectedFinal(session: SessionSnapshot): boolean {
 
 // The third argument is reserved for exact user-confirmed disconnected continuation.
 // Cleanup/deletion callers must retain the default Stop protection.
-export async function requireIdleConversationPage(page: import('playwright-core').Page, preservedDraft?: '계속', preserveDisconnectedStop = false) {
+export async function requireIdleConversationPage(page: import('playwright-core').Page, preservedDraft?: string, preserveDisconnectedStop = false) {
     const unsafe = await page.locator('textarea, [contenteditable="true"]:not(article *, [data-message-author-role] *, [data-chatgpt-search-message-ids] *), input[type="file"], button, [data-testid*="file-pill"], [data-testid*="attachment"]').evaluateAll((elements, options) =>
       elements.some(element => {
         if (element instanceof HTMLInputElement && element.type === 'file') return (element.files?.length ?? 0) > 0;

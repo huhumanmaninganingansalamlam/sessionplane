@@ -817,7 +817,7 @@ async function messageHasExactPrompt(page: Page, identity: ChatGptMessage, expec
   return matched;
 }
 
-async function writeExactComposerValue(
+export async function writeExactComposerValue(
   page: Page,
   composer: PreparationElement,
   expected: string,

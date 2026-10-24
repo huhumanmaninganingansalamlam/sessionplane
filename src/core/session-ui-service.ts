@@ -18,7 +18,7 @@ import { SessionPlaneDomainError } from '../domain/errors.ts';
 import { ProviderSubmissionError, type ProviderObservationEvidence, type PreparationPurpose, type PreparationTarget } from '../providers/provider-adapter.ts';
 import { assertNoHumanVerification } from '../providers/human-verification.ts';
 import { CHATGPT_PREPARATION_SNAPSHOT, CHATGPT_COMPOSER_SELECTOR } from '../providers/chatgpt/selectors.ts';
-import { composerHasExactValue, inspectChatGptSubmissionCandidates, inspectChatGptPageReady, prepareChatGptObservation } from '../providers/chatgpt/submission.ts';
+import { ChatGptSubmission, writeExactComposerValue, composerHasExactValue, inspectChatGptSubmissionCandidates, inspectChatGptPageReady, prepareChatGptObservation } from '../providers/chatgpt/submission.ts';
 import { observeChatGptDialog } from '../providers/chatgpt/dialog-observer.ts';
 import { ExactFinalTracker } from '../providers/chatgpt/exact-final.ts';
 import { observeChatGptActivity } from '../providers/chatgpt/activity-observer.ts';
@@ -286,6 +286,109 @@ export class SessionUiService {
       } finally { clearTimeout(timer); }
     });
     if (read.evidence === undefined) throw new SessionPlaneDomainError('browser.unavailable', 'Original follow-up page is unavailable');
+    return read.evidence;
+  }
+
+  async continueFollowup(input: PreparationOwner & { decisionId: string; originalRequestRef: string;
+    followupUserMessageId: string; preparedGeneration: number; preparedPrompt: string; model: PreparationTarget }, receipts: ReceiptRepository) {
+    const read = await this.#submissions.inspectSubmission({ ...input, followupInspection: true }, async (original, _ids, owner) => {
+      const key = `followup-continue:${input.originalRequestRef}:${input.followupUserMessageId}`;
+      const method = 'session.followup-continue';
+      const requestHash = createHash('sha256').update(JSON.stringify({ originalRequestRef: input.originalRequestRef,
+        followupUserMessageId: input.followupUserMessageId, generation: input.preparedGeneration,
+        promptHash: createHash('sha256').update(input.preparedPrompt).digest('hex') })).digest('hex');
+      const receipt = { clientId: input.clientId, requestId: key, method, requestHash };
+      const previous = receipts.get(input.clientId, key);
+      if (previous && (previous.method !== method || previous.requestHash !== requestHash)) throw new SessionPlaneDomainError(
+        'input.idempotency-conflict', 'The exact follow-up recovery belongs to a different prepared request');
+      if (previous?.status === 'complete') return JSON.parse(previous.resultJson).outcome;
+      if (owner.generation !== input.preparedGeneration || owner.generation !== original.generation + 1 ||
+          owner.submissionState !== 'prepared' || owner.promptSubmitted || owner.submittedUserMessageId || owner.responseMessageId)
+        throw new SessionPlaneDomainError('session.generation-superseded', 'Preserving follow-up recovery requires its never-submitted preparation');
+      const page = this.#requirePage(owner);
+      await inspectChatGptPageReady(page, owner.pageKey!);
+      const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
+      if (await composer.count() !== 1 || !await composer.isEditable()) throw new SessionPlaneDomainError(
+        'provider.preparation-required', 'No unique editable original composer');
+      const verify = async () => {
+        const transcript = await readChatGptMessages(page);
+        const anchors = transcript.filter(m => m.role === 'user' && m.messageId === original.submittedUserMessageId);
+        const followups = transcript.filter(m => m.role === 'user' && m.messageId === input.followupUserMessageId);
+        if (anchors.length !== 1 || followups.length !== 1 || anchors[0]!.rootIndex !== followups[0]!.rootIndex ||
+            transcript.indexOf(followups[0]!) <= transcript.indexOf(anchors[0]!) ||
+            transcript.filter(m => m.role === 'user').at(-1)?.messageId !== input.followupUserMessageId)
+          throw new SessionPlaneDomainError('session.page-identity-unverified', 'Recovery requires the exact latest follow-up after the original ACK');
+        const dom = await observeChatGptDom(page, { submittedUserMessageId: input.followupUserMessageId, submittedUserTurnId: null });
+        const activity = await observeChatGptActivity(page, dom);
+        const disconnected = activity.reason === 'provider-stream-disconnected' && !dom.candidate?.streamingMarker;
+        const timeout = dom.providerAlerts.length > 0 && dom.providerAlerts.every(isMessageTimeoutAlert);
+        const snapshot = await this.#capture(owner, 5000);
+        if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate?.terminalMarker || dom.candidate?.streamingMarker ||
+            (!disconnected && activity.strength !== 'none') || (!disconnected && !timeout) ||
+            dom.providerAlerts.some(a => !isMessageTimeoutAlert(a)) || snapshot.nodesTruncated ||
+            snapshot.nodes.some(n => ['dialog', 'alertdialog'].includes(n.role) || n.role === 'button' &&
+              /^(?:allow|always allow|allow once|deny|한 번만 허용|항상 허용|허용|거부)$/i.test(n.name.trim())) ||
+            !hasPreparationSelectionEvidence(snapshot.nodes, input.model)) throw new SessionPlaneDomainError(
+          'provider.preparation-required', 'Preserve active work, final answers, permissions and configuration; no exact interrupted follow-up');
+        const submits = snapshot.nodes.filter(n => n.submitControl && !n.disabled);
+        const composers = snapshot.nodes.filter(n => n.role === 'textbox' && n.editable && !n.disabled);
+        if (submits.length !== 1 || composers.length !== 1) throw new SessionPlaneDomainError(
+          'provider.preparation-required', 'The exact composer has no unique enabled send control');
+        return { composers, submits, disconnected };
+      };
+      const ready = previous ? null : await verify();
+      const state = previous ? JSON.parse(previous.resultJson).backup : {
+        draft: await composer.evaluate(e => e instanceof HTMLTextAreaElement ? e.value : (e as HTMLElement).innerText),
+        dispatched: false, acknowledgement: null, attempt: null,
+      } as { draft: string; dispatched: boolean;
+        acknowledgement: import('../providers/provider-adapter.ts').ProviderSubmissionAcknowledgement | null;
+        attempt: import('../providers/provider-adapter.ts').ProviderSubmissionAttempt | null };
+      if (!previous && !await composerHasExactValue(composer, input.preparedPrompt)) throw new SessionPlaneDomainError(
+        'provider.preparation-required', 'The current draft differs from its retained prepared prompt; preserve it');
+      if (!previous) await requireIdleConversationPage(page, state.draft, ready!.disconnected);
+      const save = () => receipts.record({ ...receipt, status: 'attempted', result: { backup: state, decisionId: input.decisionId } });
+      // The existing receipt retains the draft before the first editor mutation.
+      // A lost response can restore it, but can never replay a possibly issued send.
+      save();
+      const submission = new ChatGptSubmission({ page, pageKey: owner.pageKey!, pageRegistry: this.#registry,
+        acknowledgementTimeoutMs: 5000, request: { session: owner, generation: owner.generation,
+          prompt: '계속', model: null, onSubmissionAttempt: attempt => { state.attempt = attempt; save(); } } });
+      let error: SessionPlaneDomainError | undefined;
+      let restored = false;
+      try {
+        if (!previous) {
+          await submission.prepare({ model: input.model, composer: toPreparationTarget('composer', ready!.composers[0]!),
+            submit: toPreparationTarget('submit', ready!.submits[0]!) });
+          const current = await verify();
+          await requireIdleConversationPage(page, '계속', current.disconnected);
+          this.#requirePage(owner);
+          state.dispatched = true; save();
+          await submission.submitOnce();
+          state.acknowledgement = await submission.captureAcknowledgement(); save();
+        }
+      } catch (failure) { error = typedUiError(failure); }
+      finally {
+        submission.abandon();
+        this.#requirePage(owner);
+        // Never overwrite a human edit made while the operation was in flight.
+        if (await composerHasExactValue(composer, state.draft)) restored = true;
+        else if (await composerHasExactValue(composer, '') || await composerHasExactValue(composer, '계속'))
+          restored = await writeExactComposerValue(page, composer, state.draft, () => composer.elementHandle(), () => { this.#requirePage(owner); });
+      }
+      const acknowledged = state.acknowledgement;
+      const outcome = { requestOk: restored && acknowledged !== null, requestRef: input.originalRequestRef,
+        sessionId: owner.sessionId, generation: original.generation, terminal: false, promptSubmitted: state.dispatched,
+        ...(acknowledged ? { followupUserMessageId: acknowledged.submittedUserMessageId } : {}),
+        recoveredFromUserMessageId: input.followupUserMessageId, acknowledgement: acknowledged,
+        draftPreservation: { requestGeneration: owner.generation, restored, characters: state.draft.length,
+          sha256: createHash('sha256').update(state.draft).digest('hex') }, receiptId: key,
+        errorCode: !restored ? 'provider.preparation-required' : !acknowledged ? state.dispatched
+          ? 'session.submission-unknown' : error?.errorCode ?? 'provider.preparation-required' : null,
+        reason: !restored ? 'preserved-draft-restoration-required' : acknowledged ? 'followup-continuation-acknowledged'
+          : state.dispatched ? 'followup-continuation-acknowledgement-unverified' : error?.message ?? 'followup-continuation-not-dispatched' };
+      receipts.record({ ...receipt, status: 'complete', result: { backup: state, outcome } });
+      return outcome;
+    });
     return read.evidence;
   }
 
