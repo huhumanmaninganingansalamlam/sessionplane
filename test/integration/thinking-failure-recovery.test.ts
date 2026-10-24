@@ -15,6 +15,7 @@ import { workflowSchemas } from '../../src/rpc/methods/workflow.ts';
 import { SessionUiService } from '../../src/core/session-ui-service.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { ThinkingFailureRecovery } from '../../src/core/thinking-failure-recovery.ts';
+import { ChatGptConfigurationMenu } from '../../src/providers/chatgpt/configuration-catalog.ts';
 import type { BrowserSnapshot } from '../../src/browser/ref-snapshot.ts';
 import type { PreparationChoices, ProviderSubmissionRequest, ProviderObservationRequest } from '../../src/providers/provider-adapter.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
@@ -587,6 +588,76 @@ test('missing recovery ACK controls only the exact retained work permission acro
     assert.equal(f.core.teamDirectory.getSession(current.sessionId).submittedUserMessageId, 'user-message-3');
     assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(current.sessionId), history);
     assert.equal(f.fake.submitCount, 3);
+    assert.equal(f.fake.stopCount, 0);
+  } finally { await f.close(); }
+});
+
+test('continuation reobserves the configured version after chooser identity changes despite a generic model hint', async t => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    f.fake.idleToolTurn = true;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const observed = await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef, view: 'evidence' });
+    const currentModel = observed.request.evidence.nodes.find((node: any) => node.id === 'configuration');
+    const receiptId = `submission-configuration:${requestRef}`;
+    const receipt = f.core.database.raw.prepare('SELECT result_json FROM request_receipts WHERE request_id=?').get(receiptId)!;
+    const saved = JSON.parse(String(receipt.result_json));
+    saved.model = { ...saved.model, id: 'radix-old-chooser', configurationVersion: '5.5 Pro' };
+    f.core.database.raw.prepare('UPDATE request_receipts SET result_json=? WHERE request_id=?').run(JSON.stringify(saved), receiptId);
+    const row = f.core.database.raw.prepare('SELECT payload_json FROM outbox WHERE outbox_id=?').get(requestRef)!;
+    f.core.database.raw.prepare('UPDATE outbox SET payload_json=? WHERE outbox_id=?')
+      .run(JSON.stringify({ ...JSON.parse(String(row.payload_json)), model: 'Thinking' }), requestRef);
+    const reobserve = t.mock.method(ChatGptConfigurationMenu.prototype, 'reobserveSelection', async (model, effort) => {
+      if (model !== '5.5 Pro') throw new SessionPlaneDomainError('provider.configuration-stale',
+        'Current version/effort does not match the original continuation');
+      assert.equal(effort, 'Extra High');
+      return currentModel;
+    });
+    f.fake.failureCount = 1;
+    const result = await f.rpc<any>('decide', { teamId: f.team.teamId, requestRef, requestId: 'configured-version-continue',
+      decision: 'continue', continuationApproved: true, userConfirmedInterruption: {
+        conversationId: original.conversationId, submittedUserMessageId: original.submittedUserMessageId,
+        evidenceRef: 'Exact idle original inspected by user' } });
+    assert.equal(result.generation, 2);
+    assert.equal(result.promptSubmitted, true);
+    assert.equal(result.submittedUserMessageId, 'user-message-2');
+    assert.equal(reobserve.mock.callCount(), 1);
+    const next = f.core.database.raw.prepare('SELECT result_json FROM request_receipts WHERE request_id=?')
+      .get(`submission-configuration:${result.requestRef}`)!;
+    assert.equal(JSON.parse(String(next.result_json)).model.configurationVersion, '5.5 Pro');
+    assert.equal(f.fake.submitCount, 2);
+    assert.deepEqual(f.fake.submissionRequests.filter((r, i, all) => all.findIndex(x => x.generation === r.generation) === i).map(r => r.prompt),
+      ['Original operation snapshot', '계속']);
+  } finally { await f.close(); }
+});
+
+test('managed configuration failure returns the exact prepared successor and normal caller action without a human requirement', async t => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    f.fake.idleToolTurn = true;
+    const requestRef = await f.submit(false);
+    f.core.database.raw.prepare('UPDATE outbox SET created_at=? WHERE outbox_id=?')
+      .run(new Date(Date.now() - 31 * 60_000).toISOString(), requestRef);
+    t.mock.method(SessionUiService.prototype, 'prepareFailureContinuation', async () => {
+      throw new SessionPlaneDomainError('provider.configuration-stale', 'Current version/effort does not match the original continuation');
+    });
+    const result = (await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef],
+      waitMs: 60000, continuationApproved: true })).results[0];
+    const pending = f.core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=2').get(f.session.sessionId)!;
+    assert.equal(result.requestRef, pending.outbox_id);
+    assert.equal(result.generation, 2);
+    assert.equal(result.submissionState, 'prepared');
+    assert.equal(result.promptSubmitted, false);
+    assert.equal(result.terminal, false);
+    assert.equal(result.recovery.reason, 'provider.configuration-stale');
+    assert.equal(result.recovery.originalRequestRef, requestRef);
+    assert.equal(result.recovery.nextAction, 'configure_same_request');
+    assert.equal(result.recovery.userActionRequired, false);
+    assert.equal(result.recovery.decisionRequired, true);
+    assert.equal(f.fake.submitCount, 1);
     assert.equal(f.fake.stopCount, 0);
   } finally { await f.close(); }
 });

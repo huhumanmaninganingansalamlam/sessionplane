@@ -76,7 +76,8 @@ export class SessionUiService {
       if (!option) throw new SessionPlaneDomainError('provider.configuration-stale', 'Discover current configurations and choose an observed configurationId');
       try {
         const summary = await new ChatGptConfigurationMenu(await this.#interactionPage(session), session.pageKey!).select(option);
-        return { choice: toPreparationTarget('model', summary), result: { configurationId: option.id, label: option.label } };
+        return { choice: { ...toPreparationTarget('model', summary), configurationVersion: option.version },
+          result: { configurationId: option.id, label: option.label } };
       } catch (error) {
         if (error instanceof SessionPlaneDomainError &&
             ['provider.configuration-stale', 'provider.model-unavailable'].includes(error.errorCode)) this.#catalog = null;
@@ -628,11 +629,14 @@ export class SessionUiService {
       await this.#submissions.decidePreparation({ ...input, decisionId: `thinking-failure-${purpose}:${input.requestId}:${preparationId}`,
         decision: 'configure', purpose }, async session => {
         let snapshot = await this.#capture(session, 5_000);
-        if (purpose === 'model' && !snapshot.nodesTruncated && !hasPreparationSelectionEvidence(snapshot.nodes, model) &&
-            intended?.model && intended.effort) {
+        const version = model.configurationVersion ?? intended?.model;
+        if (purpose === 'model' && !snapshot.nodesTruncated &&
+            (model.configurationVersion !== undefined || !hasPreparationSelectionEvidence(snapshot.nodes, model)) &&
+            version && intended?.effort) {
           const summary = await new ChatGptConfigurationMenu(this.#requirePage(session), session.pageKey!)
-            .reobserveSelection(intended.model, intended.effort);
-          model = toPreparationTarget('model', summary);
+            .reobserveSelection(version, intended.effort);
+          model = { ...toPreparationTarget('model', summary),
+            ...(model.configurationVersion === undefined ? {} : { configurationVersion: model.configurationVersion }) };
           snapshot = await this.#capture(session, 5_000);
         }
         if (snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, model)) throw new SessionPlaneDomainError(
