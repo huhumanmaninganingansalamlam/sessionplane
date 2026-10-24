@@ -13,6 +13,7 @@ import type { ReplacementCleanup } from '../../src/core/conversation-cleanup-ser
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { ReceiptRepository } from '../../src/storage/receipt-repository.ts';
 import { OutboxRepository } from '../../src/storage/outbox-repository.ts';
+import { ConversationLoadRecoveryRepository } from '../../src/storage/conversation-load-recovery-repository.ts';
 
 class DeletingProvider extends FakeProviderAdapter {
   readonly deleted = new Set<string>();
@@ -32,6 +33,65 @@ class DeletingProvider extends FakeProviderAdapter {
     };
   }
 }
+
+test('explicit unresolved handoff moves only held same-role routing and survives restart without stopping or replaying', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-unresolved-handoff-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const adapter = new DeletingProvider();
+  const options = { config, startBrowser: false, providerAdapters: [adapter],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } };
+  let core = await startCore(options);
+  const rpc = <T>(method: string, params: object) => callRpc<T>({ socketPath: config.socketPath, method, params, timeoutMs: 5000 });
+  try {
+    for (const submissionState of ['submitted', 'submission_unknown']) {
+      const team = core.teamDirectory.createTeam({ clientId: 'unresolved-handoff' });
+      const old = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+      await rpc('session.send', { clientId: `team:${team.teamId}`, requestId: 'original', sessionId: old.sessionId,
+        prompt: 'Unretrieved product question; preserve exactly' });
+      if (submissionState === 'submission_unknown') {
+        core.database.raw.prepare("UPDATE generations SET submission_state=?, submitted_user_message_id=NULL, submitted_user_turn_id=NULL WHERE session_id=?").run(submissionState, old.sessionId);
+        core.database.raw.prepare('UPDATE outbox SET submission_state=? WHERE session_id=?').run(submissionState, old.sessionId);
+      }
+      const original = core.teamDirectory.getSession(old.sessionId);
+      const outbox = new OutboxRepository(core.database).getByGeneration(old.sessionId, 1)!;
+      const input = { teamId: team.teamId, roleRef: old.sessionId + ':1', requestId: 'handoff', preserveConversation: true,
+        unresolvedHandoff: { requestRef: outbox.outboxId, approvalRef: 'User: open a new conversation for this broken Expert' } };
+      await assert.rejects(rpc('workflow.session_replace', input), (e: unknown) => JSON.stringify(e).includes('session.preservation-not-ready'));
+      await rpc('workflow.decide', { teamId: team.teamId, requestRef: outbox.outboxId,
+        requestId: 'hold', decision: 'human_review', action: 'pause' });
+      await assert.rejects(rpc('workflow.session_replace', { ...input, preserveConversation: undefined }), (e: unknown) => JSON.stringify(e).includes('input.invalid'));
+      await assert.rejects(rpc('workflow.session_replace', { ...input,
+        unresolvedHandoff: { ...input.unresolvedHandoff, requestRef: team.teamId } }), (e: unknown) => JSON.stringify(e).includes('session.preservation-not-ready'));
+      const release = core.actorScheduler.actorFor(old.sessionId).retainCollector(outbox.outboxId, false);
+      try { await assert.rejects(rpc('workflow.session_replace', input), (e: unknown) => JSON.stringify(e).includes('session.preservation-not-ready')); }
+      finally { release(); }
+      const generation = core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').get(old.sessionId);
+      const result = await rpc<{ replacement: { sessionId: string; cleanup: ReplacementCleanup } }>('workflow.session_replace', input);
+      const successor = core.teamDirectory.getCurrentSession(team.teamId, 'main');
+      assert.equal(successor.sessionId, result.replacement.sessionId);
+      assert.equal(successor.roleId, old.roleId);
+      assert.equal(successor.predecessorSessionId, old.sessionId);
+      assert.equal(successor.generation, 0);
+      assert.equal(successor.promptSubmitted, false);
+      assert.equal(successor.conversationId, null);
+      assert.equal(result.replacement.cleanup.outcome, 'preserved');
+      assert.equal(result.replacement.cleanup.unresolvedRequestRef, outbox.outboxId);
+      assert.equal(result.replacement.cleanup.deletionRequestId, null);
+      assert.deepEqual(core.teamDirectory.getSession(old.sessionId), original);
+      assert.deepEqual(new OutboxRepository(core.database).getById(outbox.outboxId), outbox);
+      assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').get(old.sessionId), generation);
+      assert.equal(new ConversationLoadRecoveryRepository(core.database).isUserHeld(original.conversationId), true);
+      await core.close();
+      core = await startCore(options);
+      assert.deepEqual((await rpc<typeof result>('workflow.session_replace', input)).replacement, result.replacement);
+      assert.equal(core.teamDirectory.getSession(old.sessionId).terminal, false);
+      assert.equal(new ConversationLoadRecoveryRepository(core.database).isUserHeld(original.conversationId), true);
+    }
+    assert.equal(adapter.submitCount, 2);
+    assert.equal(adapter.stopCount, 0);
+    assert.equal(adapter.deleteCount, 0);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('explicit preserving renewal accepts an idle acknowledged turn without deleting its unresolved result or tab', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-preserving-submitted-'));

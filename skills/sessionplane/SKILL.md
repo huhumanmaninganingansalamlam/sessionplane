@@ -210,7 +210,13 @@ out prompts, infer consensus, or inject answers into other roles.
   draft, active generation, permission or human verification. This also supports
   actual conversation-length exhaustion without claiming a final answer; retrieve
   available results and preserve the handoff first. UNKNOWN delivery, inconsistent
-  evidence, stale references and prior deletion attempts remain rejected. This is
+  evidence, stale references and prior deletion attempts remain rejected. When the
+  user explicitly requests a new context despite unresolved work, add
+  `unresolvedHandoff:{requestRef,approvalRef}` to preserving replacement after
+  holding that exact request and transferring its collectors. This moves only
+  same-role routing; the original request/ACK/draft/hold and nonterminal or UNKNOWN
+  state remain available. No idle-page claim, stop, replay or completion is implied.
+  CLI: add `--unresolved-handoff FILE` containing those two fields. This is
   not automatic recovery or an access/security bypass. The original Coordinator
   owns the routing decision and the separately authorized next prompt.
 - For authorized context renewal, use `sessionplane_session_replace` on the same

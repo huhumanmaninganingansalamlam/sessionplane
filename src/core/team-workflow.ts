@@ -14,7 +14,7 @@ import { EventRepository } from '../storage/event-repository.ts';
 import { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import type { ArtifactService } from './artifact-service.ts';
-import type { ConversationCleanupService } from './conversation-cleanup-service.ts';
+import type { ConversationCleanupService, UnresolvedHandoff } from './conversation-cleanup-service.ts';
 import { latestDisplayTarget, type SessionUiService } from './session-ui-service.ts';
 import type { StopService } from './stop-service.ts';
 import type { SubmissionService, UserConfirmedInterruption } from './submission-service.ts';
@@ -110,7 +110,7 @@ export class TeamWorkflow {
     return this.getTeam(input);
   }
 
-  async replaceSession(input: Mutation & { roleRef?: string | undefined; roleKey?: string | undefined; provider?: ProviderName | undefined; preserveConversation?: true | undefined }) {
+  async replaceSession(input: Mutation & { roleRef?: string | undefined; roleKey?: string | undefined; provider?: ProviderName | undefined; preserveConversation?: true | undefined; unresolvedHandoff?: UnresolvedHandoff | undefined }) {
     if ((input.roleRef === undefined) === (input.roleKey === undefined) || (input.roleRef !== undefined && input.provider !== undefined)) {
       throw new SessionPlaneDomainError('input.invalid', 'Use either a fresh roleRef, or an empty roleKey with an optional provider');
     }
@@ -125,6 +125,7 @@ export class TeamWorkflow {
       expectedSessionId: session?.sessionId ?? null,
       ...(identity === null ? {} : { expectedGeneration: identity[1] }),
       ...(input.preserveConversation === true ? { preserveConversation: true as const } : {}),
+      ...(input.unresolvedHandoff === undefined ? {} : { unresolvedHandoff: input.unresolvedHandoff }),
     });
     return { ...await this.getTeam(input), replacement: {
       requestId: input.requestId, sessionId: replacement.sessionId, cleanup: replacement.cleanup,

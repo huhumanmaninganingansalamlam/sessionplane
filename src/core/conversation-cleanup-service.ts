@@ -14,6 +14,12 @@ import { TeamRepository } from '../storage/team-repository.ts';
 import { OutboxRepository } from '../storage/outbox-repository.ts';
 import type { StopService } from './stop-service.ts';
 import { isProviderUrl } from '../browser/page-binding.ts';
+import { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
+
+export interface UnresolvedHandoff {
+  requestRef: string;
+  approvalRef: string;
+}
 
 export interface ConversationDeleteInput {
   readonly clientId: string;
@@ -33,6 +39,7 @@ export interface ReplacementCleanup {
   deletionReceipt: { clientId: string; requestId: string; status: string } | null;
   outcome: 'confirmed' | 'refused' | 'uncertain' | 'not-attempted' | 'unknown' | 'preserved';
   errorCode: string | null;
+  unresolvedRequestRef?: string;
   pageCleanup?: { closedPages: number; pageErrors: string[] };
 }
 
@@ -137,11 +144,15 @@ export class ConversationCleanupService {
     teamId: string; roleKey: string; provider: string;
     expectedSessionId?: string | null; expectedGeneration?: number;
     preserveConversation?: true | undefined;
+    unresolvedHandoff?: UnresolvedHandoff | undefined;
   }): Promise<ReplacementResult> {
     const { database, directory, scheduler } = this.#options;
     const receipts = new ReceiptRepository(database);
     const sessions = new SessionRepository(database.raw);
     const requestHash = hashCanonical({ method: input.method, payload: input.payload });
+    if (input.unresolvedHandoff && input.preserveConversation !== true) {
+      throw new SessionPlaneDomainError('input.invalid', 'Unresolved handoff requires preserveConversation:true');
+    }
     return await this.#replacements.runExclusive(input.teamId + ':' + input.roleKey, async () => {
       const receipt = receipts.get(input.clientId, input.requestId);
       if (receipt !== null) {
@@ -236,7 +247,17 @@ export class ConversationCleanupService {
             !outbox.promptSubmitted && outbox.errorCode === 'provider.preparation-required';
           const acknowledged = current.submissionState === 'submitted' && current.promptSubmitted &&
             current.submittedUserMessageId !== null && outbox?.submissionState === 'submitted' && outbox.promptSubmitted;
-          if (current.conversationId === null || (!unsubmitted && !acknowledged)) {
+          const handoff = input.unresolvedHandoff;
+          if (handoff && (handoff.requestRef !== outbox?.outboxId || !handoff.approvalRef.trim() ||
+              current.terminal || !current.promptSubmitted || !outbox.promptSubmitted ||
+              !['submitted', 'submission_unknown'].includes(current.submissionState ?? '') ||
+              current.submissionState !== outbox.submissionState ||
+              !new ConversationLoadRecoveryRepository(database).isUserHeld(current.conversationId) ||
+              scheduler.collectors(current.sessionId).length > 0)) {
+            throw new SessionPlaneDomainError('session.preservation-not-ready',
+              'Unresolved handoff requires explicit user authorization for this exact held request and transfer of its existing collectors; provider work remains unresolved');
+          }
+          if (current.conversationId === null || (!unsubmitted && !acknowledged && !handoff)) {
             throw new SessionPlaneDomainError('session.preservation-not-ready',
               'Preserving replacement requires a bound unsubmitted preparation or an acknowledged request with a freshly verified idle owned page; uncertain work remains on its original session');
           }
@@ -256,7 +277,11 @@ export class ConversationCleanupService {
           // Keep the acknowledged generation/outbox and its owned page intact.
           // Explicit context renewal moves only role routing; it never cancels provider work.
           let successor: ReplacementResult;
-          if (unsubmitted) successor = replace();
+          if (handoff) {
+            cleanup.unresolvedRequestRef = handoff.requestRef;
+            successor = replace({ unresolvedHandoff: handoff, providerMutation: false,
+              originalTerminal: current.terminal, originalSubmissionState: current.submissionState });
+          } else if (unsubmitted) successor = replace();
           else {
             if (current.pageKey === null || this.#options.verifyPreservingReplacement === undefined) {
               throw new SessionPlaneDomainError('session.preservation-not-ready', 'Exact idle page verification is unavailable');
