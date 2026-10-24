@@ -229,7 +229,14 @@ export class RecoveryService {
     const snapshots = this.#sessions.listRecoverableSnapshots();
 
     for (const original of snapshots) {
-      if (this.#loadRecovery.isUserHeld(original.conversationId)) continue;
+      if (this.#loadRecovery.isUserHeld(original.conversationId)) {
+        if (this.#browserOwner !== null) {
+          const retained = await this.#reconcilePage(original, false);
+          rebound += retained.rebound ? 1 : 0;
+          unavailable += retained.unavailable ? 1 : 0;
+        }
+        continue;
+      }
       if (options.forceObservers === true) {
         this.#observations.stop(original.sessionId, original.generation);
       }
@@ -477,9 +484,10 @@ export class RecoveryService {
     }
     // Reads/startup may only reattach the exact retained target. An explicit
     // missing-page recovery may reopen the stored conversation, never the submit.
-    if (snapshot.submissionState === 'failed_pre_submit' && !explicitFailedPreparation) {
+    const held = this.#loadRecovery.isUserHeld(snapshot.conversationId);
+    if (held || (snapshot.submissionState === 'failed_pre_submit' && !explicitFailedPreparation)) {
       const stored = snapshot.pageKey === null ? null : this.#pageBindings.get(snapshot.pageKey);
-      if (snapshot.promptSubmitted || stored?.targetId == null ||
+      if ((!held && snapshot.promptSubmitted) || stored?.targetId == null ||
           stored.sessionId !== snapshot.sessionId || stored.generation !== snapshot.generation ||
           stored.conversationId !== snapshot.conversationId) return result(snapshot, { unavailable: true });
       const matches = this.#pageRegistry.listBindings({ includeClosed: false })
@@ -494,7 +502,8 @@ export class RecoveryService {
           conversationId: snapshot.conversationId };
         if (snapshot.conversationId === null) this.#pageRegistry.reservePage(match.pageKey, identity);
         else this.#pageRegistry.bindPage(match.pageKey, { ...identity, conversationId: snapshot.conversationId });
-        const updated = await this.#recordPageState(snapshot, {
+        const updated = held ? await this.#scheduler.updateGeneration(snapshot.sessionId, snapshot.generation,
+          { pageKey: match.pageKey }, 'generation.restart-page-rebound') : await this.#recordPageState(snapshot, {
           pageKey: match.pageKey, observationTransport: 'fresh',
           reason: 'restart-failed-preparation-rebound', errorCode: null,
         }, 'generation.restart-failed-preparation-rebound');
