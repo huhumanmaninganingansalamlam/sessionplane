@@ -440,7 +440,7 @@ function updateForDecision(
     case 'progress':
       return {
         sessionState: 'observing',
-        providerState: 'generating',
+        providerState: decision.reason === 'provider-network-activity' ? 'unknown' : 'generating',
         observationTransport: evidence.observationTransport,
         reason: decision.reason,
         errorCode: null,

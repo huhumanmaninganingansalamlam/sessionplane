@@ -90,8 +90,27 @@ test('core-owned observation continues after wait expiry and publishes exact fin
     });
     assert.equal(networkProgress.waitExpired, false);
     assert.equal(networkProgress.terminal, false);
-    assert.equal(networkProgress.providerState, 'generating');
+    assert.equal(networkProgress.providerState, 'unknown');
+    assert.equal(networkProgress.reason, 'provider-network-activity');
+    assert.equal(networkProgress.errorCode, null);
+    assert.equal(networkProgress.submittedUserMessageId, submitted.submittedUserMessageId);
     assert.equal(networkProgress.responseMessageId, null);
+
+    fake.emitObservation(session.sessionId, {
+      networkActivity: false,
+      candidate: null,
+      activity: 'strong',
+    });
+    const generating = await rpc<WaitSnapshot>(config.socketPath, 'session.wait', {
+      clientId: 'observer-client',
+      sessionId: session.sessionId,
+      generation: 1,
+      afterEventSequence: networkProgress.latestEventSequence,
+      waitMs: 2_000,
+    });
+    assert.equal(generating.providerState, 'generating');
+    assert.equal(generating.reason, 'provider-generation-activity');
+    assert.equal(generating.terminal, false);
 
     fake.emitObservation(session.sessionId, {
       dialogKind: 'rate_limit',
@@ -101,7 +120,7 @@ test('core-owned observation continues after wait expiry and publishes exact fin
       clientId: 'observer-client',
       sessionId: session.sessionId,
       generation: 1,
-      afterEventSequence: networkProgress.latestEventSequence,
+      afterEventSequence: generating.latestEventSequence,
       waitMs: 2_000,
     });
     assert.equal(blocked.providerState, 'blocked');
