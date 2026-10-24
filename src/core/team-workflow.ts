@@ -496,7 +496,8 @@ export class TeamWorkflow {
         const followupTracker = new ExactFinalTracker(1500);
         let followupId = input.followupUserMessageId;
         for (;;) {
-          if ((result.followup as { terminal?: boolean } | undefined)?.terminal) break;
+          const collectedFollowup = result.followup as { terminal?: boolean; userMessageId?: string } | undefined;
+          if (collectedFollowup?.terminal && (!followupId || collectedFollowup.userMessageId === followupId)) break;
           const userReview = this.#userReview(request);
           if (userReview) { result = userReview; break; }
           const collectingOriginal = typeof (result.workResult as { ownerRequestRef?: string } | undefined)?.ownerRequestRef === 'string';
