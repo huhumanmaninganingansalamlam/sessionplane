@@ -244,10 +244,26 @@ export class TeamWorkflow {
         if (!session.pageKey) throw new SessionPlaneDomainError('browser.unavailable', 'No connected request page');
         return await this.services.pageMutex.runExclusive(session.pageKey, async () => {
           this.services.receipts.record({ ...receipt, status: 'attempted', result: { requestRef: input.requestRef } });
-          const permission = await this.services.ui.hostspanPermission(session, input, original, passiveInspection);
+          const workRequest = !passiveInspection && original.generation === request.generation
+            ? this.#continuationOriginal(request) : request;
+          let workOriginal: SessionSnapshot | undefined;
+          if (workRequest.outboxId !== request.outboxId) {
+            const work = this.#sessions.getGenerationResult(workRequest.sessionId, workRequest.generation);
+            const ack = JSON.parse(workRequest.resultJson ?? '{}');
+            if (work?.submissionState !== 'submitted' || !work.promptSubmitted || !work.submittedUserMessageId ||
+                workRequest.submissionState !== 'submitted' || !workRequest.promptSubmitted ||
+                ack.sessionId !== session.sessionId || ack.generation !== workRequest.generation ||
+                ack.conversationId !== session.conversationId ||
+                ack.submittedUserMessageId !== work.submittedUserMessageId || ack.submittedUserTurnId !== work.submittedUserTurnId)
+              throw new SessionPlaneDomainError('provider.permission-unverified', 'The original work ACK and continuation lineage must agree');
+            workOriginal = { ...session, ...work, generation: workRequest.generation };
+          }
+          const permission = await this.services.ui.hostspanPermission(session, input, original, passiveInspection, workOriginal);
           const result = { requestOk: true, requestRef: input.requestRef, sessionId: session.sessionId,
             generation: session.generation, permissionRequestRef: permissionRequest.outboxId,
-            permissionGeneration: original.generation, permission };
+            permissionGeneration: original.generation, permission,
+            ...('workUserMessageId' in permission ? { workRequestRef: workRequest.outboxId,
+              workGeneration: workRequest.generation } : {}) };
           this.services.receipts.record({ ...receipt, status: 'complete', result });
           return result;
         });
