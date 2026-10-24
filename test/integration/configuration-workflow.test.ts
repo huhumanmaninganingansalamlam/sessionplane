@@ -687,14 +687,20 @@ test('failed discovery reports the original transition and restoration failure w
     const { page } = await service.browserOwner!.createPage();
     await page.setContent(fixture);
     await page.evaluate(() => {
-      // The selected version stops responding. Both enumeration and restoring
-      // that selection fail; the second failure must not overwrite the first.
+      // Neither the chooser nor the checked version dismisses this submenu.
+      // Both discovery and restoration fail without exposing the draft.
       (document.querySelector('#versions [aria-checked="true"]') as HTMLElement).onclick = () => {};
+      const chooser = document.querySelector('#chooser') as HTMLElement;
+      const toggle = chooser.onclick!;
+      chooser.onclick = event => {
+        if (!(document.querySelector('#versions') as HTMLElement).hidden) return;
+        return toggle.call(chooser, event);
+      };
     });
     await assert.rejects(new ChatGptConfigurationMenu(page, 'failure-details').discover(), (error: any) => {
       assert.ok(error instanceof AggregateError);
       assert.equal(error.errors.length, 2);
-      assert.match(error.message, /Discovery failed:.*version-menu-return/);
+      assert.match(error.message, /Discovery failed:.*configuration-state/);
       assert.match(error.message, /restoring original selection failed:/);
       assert.doesNotMatch(error.message, /Untouched draft/);
       return true;
