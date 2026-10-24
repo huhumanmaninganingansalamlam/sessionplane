@@ -882,14 +882,14 @@ export class SubmissionService {
   }
 
   async inspectSubmission<Result>(
-    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly followupInspection?: boolean },
+    input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly followupInspection?: boolean; readonly readOnly?: boolean },
     observe: (snapshot: SessionSnapshot, submittedMessageIds: ReadonlySet<string>, owner: SessionSnapshot) => Promise<Result>,
   ) {
     const actor = this.#scheduler.actorFor(input.sessionId);
     const requireOwner = () => {
       const outbox = this.#outbox.getByRequest(input.clientId, input.requestId);
       const snapshot = this.#requireSnapshot(input.sessionId);
-      if (new ConversationLoadRecoveryRepository(this.#database).isUserHeld(snapshot.conversationId))
+      if (!input.readOnly && new ConversationLoadRecoveryRepository(this.#database).isUserHeld(snapshot.conversationId))
         throw new SessionPlaneDomainError('provider.preparation-required', 'The user is reviewing this conversation; observation and controls are paused');
       if (outbox === null || outbox.sessionId !== input.sessionId ||
           outbox.generation !== input.generation || (!input.followupInspection && snapshot.generation !== input.generation)) {
@@ -902,7 +902,7 @@ export class SubmissionService {
       return { outbox, snapshot: input.followupInspection ? this.#followupAnchor(outbox, snapshot) : snapshot };
     };
     const initial = await actor.enqueue(requireOwner);
-    if (!initial.snapshot.terminal) await this.recoverAcknowledgement(initial.snapshot);
+    if (!input.readOnly && !initial.snapshot.terminal) await this.recoverAcknowledgement(initial.snapshot);
     return await this.#scheduler.actorFor(input.sessionId).enqueue(async () => {
       const { outbox, snapshot } = requireOwner();
       const requested = parseOutboxPayload(outbox);

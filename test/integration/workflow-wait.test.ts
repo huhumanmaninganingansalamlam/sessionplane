@@ -42,6 +42,58 @@ async function fixture() {
     close: async () => { await core.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
+test('explicit evidence reads a held request without resuming observation or acknowledgement recovery', async t => {
+  const f = await fixture();
+  try {
+    const sessionId = f.sent.sessionId as string;
+    const before = f.core.teamDirectory.getSession(sessionId);
+    const loads = new ConversationLoadRecoveryRepository(f.core.database);
+    loads.save({ conversationId: before.conversationId!, sessionId, pageKey: before.pageKey!, bindingEpoch: 1,
+      url: `https://chatgpt.com/c/${before.conversationId}`, attempts: 12, state: 'held', reason: 'user-review',
+      lastOutcome: null, lastCheckedAt: new Date().toISOString(), lastAttemptAt: null, notifiedAt: null });
+    const hold = loads.get(before.conversationId!);
+    const owner = { clientId: 'sessionplane-mcp', requestId: 'send', sessionId, generation: 1 };
+    const forbidden = () => assert.fail('A held evidence read must not recover, rebind or navigate');
+    t.mock.method(f.core.submissionService, 'recoverAcknowledgement', forbidden);
+    t.mock.method(f.core.recoveryService, 'ensurePage', forbidden);
+    let reads = 0, unavailable = false;
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async (input: any) => {
+      assert.equal(input.readOnly, true);
+      return await f.core.submissionService.inspectSubmission(input, async snapshot => {
+        reads++;
+        if (unavailable) throw new SessionPlaneDomainError('browser.unavailable', 'Original tab unavailable');
+        assert.equal(snapshot.submittedUserMessageId, before.submittedUserMessageId);
+        return { nodes: [{ text: 'Current unsent draft and connection error' }], providerAlerts: ['connection-error'],
+          submissionVerification: { anchorPresent: true, laterUserFound: false, activity: 'none',
+            messageTimeout: false, responseCandidate: { text: 'Current response', streamingMarker: false } } };
+      });
+    }) as any);
+    await assert.rejects(f.core.submissionService.inspectSubmission(owner, async () => null),
+      (error: any) => error.errorCode === 'provider.preparation-required');
+    await assert.rejects(f.core.submissionService.inspectSubmission({ ...owner, readOnly: true, requestId: 'wrong-owner' }, async () => null),
+      (error: any) => error.errorCode === 'session.generation-superseded');
+    for (const view of ['summary', 'result']) await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view });
+    await f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef], waitMs: 1, continuationApproved: true });
+    assert.equal(reads, 0, 'Stored reads and managed wait still respect the hold');
+    const result = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view: 'evidence' })).structuredContent.request;
+    assert.equal(reads, 1);
+    assert.equal(result.requestRef, f.sent.requestRef);
+    assert.equal(result.observationHeld, true);
+    assert.equal(result.evidence.submissionVerification.responseCandidate.text, 'Current response');
+    assert.equal(result.submissionVerification.state, 'anchor-observed');
+    assert.equal(result.terminal, false, 'A visible response is evidence, not an assigned final');
+    assert.deepEqual(result.collection.waits, []);
+    assert.equal(result.managedContinuation.active, false);
+    unavailable = true;
+    const failed = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view: 'evidence' })).structuredContent.request;
+    assert.equal(failed.inspectionError.errorCode, 'browser.unavailable');
+    assert.equal(failed.observationHeld, true);
+    assert.deepEqual(loads.get(before.conversationId!), hold);
+    assert.deepEqual(f.core.teamDirectory.getSession(sessionId), before);
+    assert.equal(f.fake.submitCount, 1, 'Reads never submit or continue');
+  } finally { t.mock.restoreAll(); await f.close(); }
+});
+
 test('managed collection recovers only a literal continuation lineage without rebinding a lost ACK', async t => {
   for (const { complete, continuation } of [
     { complete: false, continuation: true }, { complete: true, continuation: true },

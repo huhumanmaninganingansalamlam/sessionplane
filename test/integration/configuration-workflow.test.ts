@@ -578,6 +578,37 @@ test('configuration selection verifies menu state without waiting for scheduled 
   }
 });
 
+test('discovery leaves a version submenu through its chooser when the checked radio has no navigation action', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-selected-radio-'));
+  const service = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }),
+    browserHeadless: true, logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await service.browserOwner!.createPage();
+    await page.setContent(fixture);
+    await page.locator('textarea').focus();
+    await page.locator('#chooser').click();
+    await page.locator('#summary').click();
+    await page.evaluate(() => {
+      (window as any).checkedClicks = 0;
+      document.querySelector('#versions')!.addEventListener('click', event => {
+        if ((event.target as Element).getAttribute('aria-checked') === 'true') {
+          (window as any).checkedClicks++;
+          event.stopImmediatePropagation();
+        }
+      }, true);
+    });
+    const catalog = await new ChatGptConfigurationMenu(page, 'selected-radio').discover();
+    assert.equal(catalog.status, 'available');
+    assert.equal(catalog.options.length, 6);
+    assert.equal(await page.evaluate(() => (window as any).checkedClicks), 0);
+    assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+    assert.equal(await page.evaluate(() => (window as any).version), 'Aurora-9');
+    assert.equal(await page.evaluate(() => (window as any).powerValue), 1);
+    assert.equal(await page.locator('#chooser').getAttribute('aria-expanded'), 'false');
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('discovery exits a persistent version submenu and rejects an unconfirmed version without losing the original draft', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-persistent-version-menu-'));
   const service = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }),

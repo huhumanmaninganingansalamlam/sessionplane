@@ -69,7 +69,7 @@ export class TeamWorkflow {
     return {
       ...(selected === undefined ? team : {
         requestOk: true,
-        request: { ...requestView(await this.#observe(selected, input.maxNodes, view === 'evidence', view === 'summary'), view),
+        request: { ...requestView(await this.#observe(selected, input.maxNodes, view === 'evidence', view === 'summary', view === 'evidence'), view),
           collection: { scope: 'session', waits: this.services.scheduler.collectors(selected.sessionId) },
           managedContinuation: this.#managedContinuationStatus(selected),
           activity: {
@@ -861,9 +861,24 @@ export class TeamWorkflow {
         ? receipt.conversationId ?? null : null };
   }
 
-  async #observe(request: OutboxRecord, maxNodes?: number, inspectCurrent = false, storedOnly = false): Promise<Record<string, unknown>> {
+  async #observe(request: OutboxRecord, maxNodes?: number, inspectCurrent = false, storedOnly = false, inspectHeld = false): Promise<Record<string, unknown>> {
     const userReview = this.#userReview(request);
-    if (userReview) return userReview;
+    if (userReview) {
+      if (!inspectHeld || userReview.generation !== request.generation) return userReview;
+      // Explicit evidence reads use the existing tab without resuming recovery,
+      // acknowledgement probing, navigation or managed continuation.
+      try {
+        const inspected = await this.services.ui.inspectSubmission({ ...ownerOf(request), readOnly: true,
+          ...(maxNodes === undefined ? {} : { maxNodes }) });
+        return { ...userReview, evidence: inspected.evidence, requested: inspected.requested,
+          ...this.#submissionVerification(request, { ...userReview, evidence: inspected.evidence }),
+          pageHealth: this.services.ui.pageHealth(inspected.snapshot) };
+      } catch (error) {
+        if (!(error instanceof SessionPlaneDomainError)) throw error;
+        return { ...userReview, evidence: null,
+          inspectionError: { errorCode: error.errorCode, message: error.message } };
+      }
+    }
     const snapshot = this.#sessions.getSnapshot(request.sessionId)!;
     const required = snapshot.generation === request.generation ? this.#loadRecoveryRequired(snapshot) : null;
     const result = required === null ? storedOnly ? this.#storedRequest(request) : await this.#observeRequest(request, maxNodes, inspectCurrent)

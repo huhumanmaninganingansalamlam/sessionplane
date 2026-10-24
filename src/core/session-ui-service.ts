@@ -152,7 +152,7 @@ export class SessionUiService {
       });
   }
 
-  async inspectSubmission(input: PreparationOwner & { readonly maxNodes?: number | undefined }) {
+  async inspectSubmission(input: PreparationOwner & { readonly maxNodes?: number | undefined; readonly readOnly?: boolean }) {
     return await this.#submissions.inspectSubmission(input,
       async (session, submittedMessageIds) => {
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -193,12 +193,12 @@ export class SessionUiService {
                 }
               }
               return {
-              ...await this.#capture(session, input.maxNodes),
-              providerAlerts: await observeChatGptAlerts(this.#requirePage(session), session),
+              ...await this.#capture(session, input.maxNodes, input.readOnly),
+              providerAlerts: await observeChatGptAlerts(this.#requirePage(session, input.readOnly), session),
               ...(session.submissionState !== 'submitted' ? {} : {
                 submissionVerification: await (async () => {
-                  const dom = await observeChatGptDom(this.#requirePage(session), session);
-                  const activity = await observeChatGptActivity(this.#requirePage(session), dom);
+                  const dom = await observeChatGptDom(this.#requirePage(session, input.readOnly), session);
+                  const activity = await observeChatGptActivity(this.#requirePage(session, input.readOnly), dom);
                   return {
                     observedAt: dom.messageDiagnostics.observedAt, pageKey: session.pageKey,
                     conversationId: session.conversationId,
@@ -217,9 +217,9 @@ export class SessionUiService {
                 })(),
               }),
               ...(session.submissionState !== 'submission_unknown' || session.conversationId === null ? {} : {
-                submissionCandidates: await Promise.all((await inspectChatGptSubmissionCandidates(this.#requirePage(session), session.conversationId))
+                submissionCandidates: await Promise.all((await inspectChatGptSubmissionCandidates(this.#requirePage(session, input.readOnly), session.conversationId))
                   .filter((candidate) => !submittedMessageIds.has(candidate.messageId)).map(async message => {
-                    const dom = await observeChatGptDom(this.#requirePage(session), {
+                    const dom = await observeChatGptDom(this.#requirePage(session, input.readOnly), {
                       submittedUserMessageId: message.messageId, submittedUserTurnId: null,
                     });
                     return { ...message, responseCandidate: dom.candidate === null ? null : {
@@ -236,7 +236,7 @@ export class SessionUiService {
                 'The provider page did not respond to request inspection; submission and stop outcomes remain unchanged.')), 5_000);
             }),
           ]);
-          if (!('conversationRecovery' in evidence)) this.#requirePage(session);
+          if (!('conversationRecovery' in evidence)) this.#requirePage(session, input.readOnly);
           return evidence;
         } catch (error) { throw typedUiError(error); }
         finally { clearTimeout(timer); }
@@ -663,26 +663,26 @@ export class SessionUiService {
     return result;
   }
 
-  async inspectSurface(session: SessionSnapshot): Promise<ChatGptSurface> {
+  async inspectSurface(session: SessionSnapshot, readOnly = false): Promise<ChatGptSurface> {
     try {
       if (session.provider !== 'chatgpt') throw new Error('Not ChatGPT');
-      const page = this.#requirePage(session);
+      const page = this.#requirePage(session, readOnly);
       const observed = await observeChatGptSurface(page);
-      this.#requirePage(session);
+      this.#requirePage(session, readOnly);
       return observed;
     } catch {
       return { mode: 'unknown', source: 'unavailable', observedAt: new Date().toISOString() };
     }
   }
 
-  async #capture(session: SessionSnapshot, maxNodes?: number) {
-    const page = this.#requirePage(session);
+  async #capture(session: SessionSnapshot, maxNodes?: number, readOnly = false) {
+    const page = this.#requirePage(session, readOnly);
     const binding = this.#registry.refreshPage(session.pageKey!);
     try {
       return { ...await this.#refs.capture({
         pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch, page,
         ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: Math.max(1, Math.min(5_000, maxNodes ?? 1_000)),
-      }), observedSurface: await this.inspectSurface(session) };
+      }), observedSurface: await this.inspectSurface(session, readOnly) };
     } catch (error) {
       throw typedUiError(error);
     }
@@ -1036,8 +1036,8 @@ export class SessionUiService {
     return this.#browserOwner === null ? page : await this.#browserOwner.preparePageInteraction(session.pageKey!, session);
   }
 
-  #requirePage(session: { readonly sessionId: string; readonly generation: number; readonly pageKey: string | null; readonly conversationId: string | null }): Page {
-    if (this.#submissions.isObservationHeld(session.conversationId))
+  #requirePage(session: { readonly sessionId: string; readonly generation: number; readonly pageKey: string | null; readonly conversationId: string | null }, readOnly = false): Page {
+    if (!readOnly && this.#submissions.isObservationHeld(session.conversationId))
       throw new SessionPlaneDomainError('provider.preparation-required', 'The user is reviewing this conversation; observation and controls are paused');
     if (session.pageKey === null) throw new SessionPlaneDomainError('browser.unavailable', 'Exact preparation page is unavailable');
     try {
