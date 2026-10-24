@@ -221,8 +221,6 @@ export class TeamWorkflow {
       this.services.receipts.record({ ...receipt, status: 'complete', result });
       return result;
     }
-    if (input.decision !== 'focus' && this.#userReview(request)) throw new SessionPlaneDomainError('provider.preparation-required',
-      'Observation and controls are paused for user review; resume only after the user reports completion');
     const owner = ownerOf(request);
     if (input.decision === 'hostspan_permission') {
       return await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
@@ -236,11 +234,17 @@ export class TeamWorkflow {
           if (prior.status === 'complete') return JSON.parse(prior.resultJson) as Record<string, unknown>;
           throw new SessionPlaneDomainError('provider.action-unknown', 'Permission action was attempted; inspect without repeating the grant');
         }
-        const { current: session, original, permissionRequest } = this.#requestPageOwner(request);
+        const pageOwner = this.#requestPageOwner(request, input.action === 'inspect');
+        const { current: session, original, permissionRequest } = pageOwner;
+        const passiveInspection = 'passiveInspection' in pageOwner;
+        if (this.#userReview(request) && !passiveInspection) {
+          throw new SessionPlaneDomainError('provider.preparation-required',
+            'Observation and controls are paused for user review; resume only after the user reports completion');
+        }
         if (!session.pageKey) throw new SessionPlaneDomainError('browser.unavailable', 'No connected request page');
         return await this.services.pageMutex.runExclusive(session.pageKey, async () => {
           this.services.receipts.record({ ...receipt, status: 'attempted', result: { requestRef: input.requestRef } });
-          const permission = await this.services.ui.hostspanPermission(session, input, original);
+          const permission = await this.services.ui.hostspanPermission(session, input, original, passiveInspection);
           const result = { requestOk: true, requestRef: input.requestRef, sessionId: session.sessionId,
             generation: session.generation, permissionRequestRef: permissionRequest.outboxId,
             permissionGeneration: original.generation, permission };
@@ -249,6 +253,8 @@ export class TeamWorkflow {
         });
       });
     }
+    if (input.decision !== 'focus' && this.#userReview(request)) throw new SessionPlaneDomainError('provider.preparation-required',
+      'Observation and controls are paused for user review; resume only after the user reports completion');
     if (input.decision === 'retire_observation') {
       return await this.services.scheduler.actorFor(request.sessionId).enqueue(() => {
         const result = this.services.receipts.execute({ clientId: request.clientId, requestId: input.requestId,
@@ -733,7 +739,7 @@ export class TeamWorkflow {
       discardRetiredObservation: input.discardRetiredObservation });
   }
 
-  #requestPageOwner(request: OutboxRecord) {
+  #requestPageOwner(request: OutboxRecord, inspect = false) {
     const snapshot = this.services.directory.getSession(request.sessionId);
     const current = this.#role({ teamId: request.teamId, roleRef: roleRef(snapshot) });
     if (current.generation === request.generation && current.submissionState !== 'prepared')
@@ -755,6 +761,18 @@ export class TeamWorkflow {
         ack.sessionId !== current.sessionId || ack.generation !== original.generation ||
         ack.conversationId !== current.conversationId ||
         ack.submittedUserMessageId !== original.submittedUserMessageId || ack.submittedUserTurnId !== original.submittedUserTurnId) {
+      if (inspect && current.generation > request.generation) {
+        const original = this.#sessions.getGenerationResult(request.sessionId, request.generation);
+        const ack = JSON.parse(request.resultJson ?? '{}');
+        if (original?.completedAt && original.errorCode === null && original.submissionState === 'submitted' &&
+            original.promptSubmitted && original.submittedUserMessageId && request.submissionState === 'submitted' &&
+            request.promptSubmitted && ack.sessionId === current.sessionId && ack.generation === request.generation &&
+            ack.conversationId === current.conversationId && ack.submittedUserMessageId === original.submittedUserMessageId &&
+            ack.submittedUserTurnId === original.submittedUserTurnId) {
+          return { current, original: { ...current, ...original, sessionState: 'complete' as const,
+            providerState: 'complete' as const, terminal: true }, permissionRequest: request, passiveInspection: true as const };
+        }
+      }
       throw new SessionPlaneDomainError('provider.permission-unverified',
         'Permission requires the current request or the exact ACK preceding its unsubmitted continuation');
     }
@@ -887,7 +905,9 @@ export class TeamWorkflow {
   async #observe(request: OutboxRecord, maxNodes?: number, inspectCurrent = false, storedOnly = false, inspectHeld = false): Promise<Record<string, unknown>> {
     const userReview = this.#userReview(request);
     if (userReview) {
-      if (!inspectHeld || userReview.generation !== request.generation) return userReview;
+      if (userReview.generation !== request.generation) return { ...this.#storedRequest(request),
+        observationHeld: true, recovery: userReview.recovery };
+      if (!inspectHeld) return userReview;
       // Explicit evidence reads use the existing tab without resuming recovery,
       // acknowledgement probing, navigation or managed continuation.
       try {

@@ -830,12 +830,27 @@ export class SessionUiService {
   }
 
   /** Caller holds the exact current request actor and page mutation lock. */
-  async hostspanPermission(session: SessionSnapshot, input: HostSpanPermissionInput, original = session) {
-    if (session.provider !== 'chatgpt' || session.terminal ||
+  async hostspanPermission(session: SessionSnapshot, input: HostSpanPermissionInput, original = session, passiveInspection = false) {
+    if (session.provider !== 'chatgpt' ||
         (original.submissionState !== 'submitted' && original.submissionState !== 'submission_unknown') ||
         original.sessionId !== session.sessionId || original.conversationId !== session.conversationId ||
         !session.conversationId) throw new SessionPlaneDomainError(
       'provider.permission-unverified', 'Recover the original ACK before controlling its tool permission');
+    if (input.action === 'allow' && session.terminal) throw new SessionPlaneDomainError(
+      'provider.permission-unverified', 'A completed turn permits inspection only, not another permission grant');
+    if (passiveInspection && input.action === 'inspect' && original.generation < session.generation && original.terminal) {
+      const page = this.#requirePage(session, true);
+      const users = (await readChatGptMessages(page)).filter(message => message.role === 'user');
+      const anchors = users.filter(message => message.messageId === original.submittedUserMessageId &&
+        (original.submittedUserTurnId === null || message.turnId === original.submittedUserTurnId));
+      if (anchors.length !== 1) throw new SessionPlaneDomainError(
+        'provider.permission-unverified', 'The completed original ACK is not uniquely mounted');
+      // Later work owns the controls. Reading its predecessor must neither reveal nor grant an old card.
+      return { outcome: 'not-current', appName: input.appName,
+        originalUserMessageId: anchors[0]!.messageId, currentUserMessageId: users.at(-1)?.messageId ?? null,
+        requestAcknowledgementVerified: true, permissionControlAvailable: false,
+        reason: 'completed-original-has-successor', providerMutation: false };
+    }
     try {
       const page = await this.#interactionPage(session);
       await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });

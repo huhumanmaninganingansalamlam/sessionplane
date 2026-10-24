@@ -371,6 +371,65 @@ test('approved managed wait resumes an exact disconnected tool turn despite stal
   } finally { await f.close(); }
 });
 
+test('completed original permission inspection verifies its ACK and never inherits a held successor control', async () => {
+  const f = await fixture();
+  try {
+    f.fake.idleToolTurn = true;
+    f.fake.surface = users => users;
+    const requestRef = await f.submit(false);
+    f.core.observationService.stop(f.session.sessionId, 1);
+    await f.fake.page.setContent(`<main>${configuration}
+      <div data-message-author-role="user" data-message-id="user-message-1" data-turn-id="user-turn-1">Original</div>
+      <div data-message-author-role="assistant" data-message-id="original-final">Retained final</div>
+      <section><div role="alert">hostspan-desktop Process Start Command: original review</div>
+      <button onclick="window.grants=(window.grants||0)+1">Always allow</button></section>
+      <textarea>Preserved original draft</textarea></main>`);
+    await f.core.actorScheduler.updateGeneration(f.session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
+      completedAt: new Date().toISOString(), responseMessageId: 'original-final', answerText: 'Retained final', reason: 'dom-quiet-stable-final' });
+    const permission = (requestId: string, extra: object = {}) => f.rpc<any>('decide', { teamId: f.team.teamId, requestRef,
+      requestId, decision: 'hostspan_permission', action: 'inspect', appName: 'hostspan-desktop',
+      toolName: 'Process Start', allowMode: 'always', ...extra });
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const history = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(f.session.sessionId);
+    const inspected = await permission('completed-inspect');
+    assert.equal(inspected.permission.outcome, 'inspected');
+    assert.equal(inspected.permission.requestAcknowledgementVerified, true);
+    await assert.rejects(permission('completed-grant', { action: 'allow', evidenceHash: inspected.permission.evidenceHash }), /completed turn permits inspection only/i);
+    assert.deepEqual(f.core.teamDirectory.getSession(f.session.sessionId), original);
+    await assert.rejects(f.core.submissionService.send({ clientId: `team:${f.team.teamId}`, requestId: 'new-observation',
+      sessionId: f.session.sessionId, expectedGeneration: 1, prompt: 'Observe a new screen, no input', sessionDeadlineSec: 600 }), { errorCode: 'provider.preparation-required' });
+    const pending = f.core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=? AND generation=2').get(f.session.sessionId)!;
+    await f.fake.page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="successor-user">Observe a new screen, no input</div>'));
+    await f.rpc('decide', { teamId: f.team.teamId, requestRef: pending.outbox_id,
+      requestId: 'real-human-consent', decision: 'human_review', action: 'pause' });
+    const held = f.core.teamDirectory.getSession(f.session.sessionId);
+    const inspectedOriginal = await permission('historical-inspect');
+    assert.equal(inspectedOriginal.generation, 2);
+    assert.equal(inspectedOriginal.permissionGeneration, 1);
+    assert.equal(inspectedOriginal.permission.outcome, 'not-current');
+    assert.equal(inspectedOriginal.permission.requestAcknowledgementVerified, true);
+    assert.equal(inspectedOriginal.permission.originalUserMessageId, 'user-message-1');
+    assert.equal(inspectedOriginal.permission.currentUserMessageId, 'successor-user');
+    assert.equal(inspectedOriginal.permission.permissionControlAvailable, false);
+    const retrieved = (await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef, view: 'result' })).request;
+    assert.equal(retrieved.generation, 1);
+    assert.equal(retrieved.requestRef, requestRef);
+    assert.equal(retrieved.responseMessageId, 'original-final');
+    assert.equal(retrieved.answerText, 'Retained final');
+    assert.equal(retrieved.observationHeld, true);
+    await assert.rejects(permission('historical-grant', { action: 'allow', evidenceHash: inspected.permission.evidenceHash }), /permission|review/i);
+    await f.fake.page.locator('[data-message-id="user-message-1"]').evaluate(node => node.remove());
+    await assert.rejects(permission('missing-original'), /original ACK is not uniquely mounted/);
+    assert.equal(await f.fake.page.evaluate(() => (window as any).grants ?? 0), 0);
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved original draft');
+    assert.deepEqual(f.core.teamDirectory.getSession(f.session.sessionId), held);
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? AND generation=1').get(f.session.sessionId), history);
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(f.fake.stopCount, 0);
+  } finally { await f.close(); }
+});
+
 test('original HostSpan grant remains controllable after an approved continuation is prepared but not sent', async t => {
   const f = await fixture();
   try {
