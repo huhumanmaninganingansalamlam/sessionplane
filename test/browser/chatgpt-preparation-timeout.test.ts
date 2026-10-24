@@ -8,6 +8,46 @@ import { PageRegistry } from '../../src/browser/page-registry.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ChatGptSubmission } from '../../src/providers/chatgpt/submission.ts';
 import { prepareFixture } from '../helpers/preparation-fixture.ts';
+import { SessionUiService } from '../../src/core/session-ui-service.ts';
+import type { SubmissionService } from '../../src/core/submission-service.ts';
+
+test('held evidence reads the exact rendered response and draft without controls or navigation', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-held-evidence-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    let navigations = 0;
+    await page.route('https://chatgpt.com/**', route => {
+      navigations++;
+      return route.fulfill({ contentType: 'text/html', body: '<main>' +
+        '<article data-message-author-role="user" data-message-id="original-user">Original WP</article>' +
+        '<article data-message-author-role="assistant" data-message-id="current-answer"><div class="markdown">Current response</div></article>' +
+        '<textarea id="prompt-textarea">Preserved draft</textarea><button onclick="document.body.dataset.clicked=1">Retry</button></main>' });
+    });
+    await page.goto('https://chatgpt.com/c/held-original');
+    registry.refreshPage(binding.pageKey);
+    registry.reservePage(binding.pageKey, { sessionId: 'held-session', generation: 3, conversationId: 'held-original' });
+    const session = { sessionId: 'held-session', generation: 3, provider: 'chatgpt', pageKey: binding.pageKey,
+      conversationId: 'held-original', submissionState: 'submitted', terminal: false,
+      submittedUserMessageId: 'original-user', submittedUserTurnId: null } as SessionSnapshot;
+    const submissions = { isObservationHeld: () => true,
+      inspectSubmission: async (_input: unknown, observe: (s: SessionSnapshot, ids: Set<string>) => Promise<unknown>) =>
+        ({ snapshot: session, evidence: await observe(session, new Set()), requested: {} }),
+    } as unknown as SubmissionService;
+    const ui = new SessionUiService({ submissions, registry, chatgptUrl: 'https://chatgpt.com/' });
+    const input = { clientId: 'owner', requestId: 'original', sessionId: session.sessionId, generation: 3 };
+    await assert.rejects(ui.inspectSubmission(input), /user is reviewing/);
+    const result = await ui.inspectSubmission({ ...input, readOnly: true });
+    assert.equal(result.evidence.submissionVerification?.anchorPresent, true);
+    assert.equal(result.evidence.submissionVerification?.responseCandidate?.responseMessageId, 'current-answer');
+    assert.equal(result.evidence.submissionVerification?.responseCandidate?.answerText, 'Current response');
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
+    assert.equal(await page.locator('body').getAttribute('data-clicked'), null);
+    assert.equal(navigations, 1);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('abandoned preparation preserves the owned page/draft and cannot resume input or submit after a stalled command', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-preparation-abandon-'));

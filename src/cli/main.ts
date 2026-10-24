@@ -56,6 +56,7 @@ const MULTI_VALUE_OPTIONS = new Set(['file', 'skill']);
 const VALUE_OPTIONS = new Set([
   'view',
   'user-confirmed-interruption',
+  'unresolved-handoff',
   'followup-message-id', 'remote', 'remote-executable', 'remote-socket', 'remote-control-path',
   'state-dir',
   'browser',
@@ -739,6 +740,8 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   if (action === 'replace') return await printRpc(io, parsed, config, 'workflow.session_replace', {
     teamId, roleRef: ref, requestId,
     ...(parsed.options['preserve-conversation'] === 'true' ? { preserveConversation: true } : {}),
+    ...(parsed.options['unresolved-handoff'] === undefined ? {} : {
+      unresolvedHandoff: JSON.parse(readFileSync(parsed.options['unresolved-handoff'], 'utf8')) }),
   }, sessionSendRpcTimeoutMs(config));
   if (action === 'delete') {
     if (parsed.options['outputs-retrieved'] !== 'true') throw new Error('Retrieve the original answer/files first, then pass --outputs-retrieved to authorize conversation deletion.');
@@ -1386,7 +1389,8 @@ Exact request flow (same request; no automatic resend):
   User-controlled review: request human_review TEAM_ID CURRENT_REQUEST_REF --action pause|resume
   Cancel: request stop TEAM_ID REQUEST_REF
   Delete a collected conversation: request delete TEAM_ID REQUEST_REF --outputs-retrieved
-  Replace: request replace TEAM_ID ROLE_REF [--preserve-conversation]
+  Replace: request replace TEAM_ID ROLE_REF [--preserve-conversation] [--unresolved-handoff FILE]
+    Unresolved handoff JSON: exact requestRef and explicit user approvalRef; requires hold and no collectors.
     Default replacement attempts old-chat deletion. Preserve mode retains the old conversation.
     Replacement is not a resend. Check chat and tab cleanup separately.
   For unconfirmed delivery, inspect the same request; never run send again as a retry.

@@ -12,6 +12,79 @@ import { callRpc, RpcClientError } from '../../src/cli/client.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
+import { ConversationLoadRecoveryRepository } from '../../src/storage/conversation-load-recovery-repository.ts';
+
+test('core handover reattaches a held request to its retained target for explicit reads only', async t => {
+  for (const reopened of [false, true]) {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-held-target-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const start = () => startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  let service = await start();
+  const firstOwner = service.browserOwner!, closeFirst = firstOwner.close.bind(firstOwner);
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_' + name,
+    arguments: args, socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+  try {
+    const team = (await invoke('team_create', { requestId: 'held-team' })).structuredContent;
+    const role = (team.roles as any[])[0];
+    const { page, binding } = await firstOwner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body:
+      '<main><article data-message-author-role="user" data-message-id="user-message-1">Original question</article>' +
+      '<article data-message-author-role="assistant" data-message-id="held-response"><div class="markdown">Current response</div></article>' +
+      '<textarea id="prompt-textarea">Preserved human draft</textarea><button>Retry</button></main>' }));
+    const conversationId = 'conversation-' + role.currentSessionId;
+    await page.goto('https://chatgpt.com/c/' + conversationId);
+    const open = fake.openSubmission.bind(fake);
+    t.mock.method(fake, 'openSubmission', async request => ({ ...await open(request), pageKey: binding.pageKey,
+      bindAcknowledgement() { service.pageRegistry.bindPage(binding.pageKey, {
+        sessionId: request.session.sessionId, generation: request.generation, conversationId }); } }));
+    const sent = (await invoke('send', { teamId: team.teamId, roleRef: role.roleRef, requestId: 'held-send', prompt: 'Original question' })).structuredContent;
+    const identity = { teamId: team.teamId, requestRef: sent.requestRef };
+    await invoke('decide', { ...identity, requestId: 'held-pause', decision: 'human_review', action: 'pause' });
+    const before = service.teamDirectory.getSession(sent.sessionId as string);
+    const hold = new ConversationLoadRecoveryRepository(service.database).get(conversationId);
+    const outbox = service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(sent.requestRef);
+    let target = service.pageRegistry.getBinding(before.pageKey!).targetId;
+    if (reopened) {
+      const body = await page.content();
+      const replacement = await firstOwner.createPage();
+      await replacement.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body }));
+      await replacement.page.goto('https://chatgpt.com/c/' + conversationId);
+      await page.close();
+      target = replacement.binding.targetId;
+    }
+    const browserPid = firstOwner.status.browserPid, registry = service.pageRegistry;
+    firstOwner.close = async () => registry.detach();
+    await service.close();
+    const lockPath = path.join(firstOwner.status.profileDir, '.sessionplane-profile.lock');
+    const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+    writeFileSync(lockPath, JSON.stringify({ ...lock, pid: 99_999_999 }));
+    service = await start();
+    assert.equal(service.browserOwner!.status.browserPid, browserPid);
+    const after = (await invoke('team_get', { ...identity, view: 'evidence' })).structuredContent.request as any;
+    assert.equal(after.observationHeld, true);
+    assert.equal(after.inspectionError, undefined);
+    assert.equal(after.evidence.submissionVerification.anchorPresent, true);
+    assert.equal(after.evidence.submissionVerification.responseCandidate.answerText, 'Current response');
+    const observedPageKey = after.evidence.pageKey;
+    if (reopened) {
+      assert.equal(after.pageKey, before.pageKey, 'Passive reads do not rebind the original closed target');
+      assert.equal(service.pageRegistry.getBinding(observedPageKey).sessionId, null);
+    } else assert.notEqual(after.pageKey, before.pageKey);
+    assert.equal(service.pageRegistry.getBinding(observedPageKey).targetId, target);
+    assert.equal(await service.pageRegistry.pageForObservation(observedPageKey).locator('textarea').inputValue(), 'Preserved human draft');
+    assert.deepEqual(after.collection.waits, []);
+    assert.equal(after.managedContinuation.active, false);
+    assert.equal(after.submittedUserMessageId, before.submittedUserMessageId);
+    assert.equal(after.terminal, false);
+    assert.deepEqual(new ConversationLoadRecoveryRepository(service.database).get(conversationId), hold);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE outbox_id=?').get(sent.requestRef), outbox);
+    assert.equal(fake.submitCount, 1);
+    assert.equal(fake.acknowledgementRecoveryCount, 0);
+  } finally { await service.close(); await closeFirst(); rmSync(root, { recursive: true, force: true }); }
+  }
+});
 
 test('explicit completed display and deferred preparation preserve exact ownership, drafts and one submission', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-deferred-binding-'));

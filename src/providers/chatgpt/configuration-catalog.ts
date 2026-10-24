@@ -122,16 +122,11 @@ export class ChatGptConfigurationMenu {
 
   async #mainMenu() {
     let nodes = await this.#capture();
-    // Selecting the checked version navigates out of its submenu without
-    // substituting a model. Closing/reopening can retain that submenu route.
+    // A checked version is selection evidence, not a submenu back control.
+    // Close through the chooser and wait for the outgoing menu to leave.
     const selectedVersion = nodes.find(n => n.role === 'menuitemradio' && (n.checked === true || n.selected === true));
     const versionMenus = nodes.filter(n => n.role === 'menu' && n.id !== '' &&
       selectedVersion?.ancestorIds.includes(n.id)).map(n => n.id);
-    if (selectedVersion && this.#opener(nodes)?.expanded !== false) {
-      await this.#click(selectedVersion);
-      nodes = await this.#wait(ns => this.#opener(ns)?.expanded === false ||
-        this.#summary(ns) !== undefined, 5000, 'version-menu-return');
-    }
     // A closing trigger can already have dropped aria-controls. Retain the
     // observed submenu identity until it exits before reopening the chooser.
     if (this.#opener(nodes)?.expanded === false) {
@@ -182,6 +177,22 @@ export class ChatGptConfigurationMenu {
     nodes = await this.#capture();
     opener = this.#opener(nodes)!;
     await this.#click(opener);
+    nodes = await this.#wait(ns => this.#summary(ns) !== undefined ||
+      ns.some(n => n.role === 'menuitemradio' && (n.checked === true || n.selected === true)));
+    // Older menus retain their route across a full close. Only that observed
+    // route needs the checked radio's dismissal behavior.
+    if (!this.#summary(nodes)) {
+      const selected = nodes.find(n => n.role === 'menuitemradio' && (n.checked === true || n.selected === true))!;
+      const menus = nodes.filter(n => n.role === 'menu' && n.id !== '' && selected.ancestorIds.includes(n.id));
+      await this.#click(selected);
+      nodes = await this.#wait(ns => this.#opener(ns)?.expanded === false || this.#summary(ns) !== undefined, 5000, 'version-menu-return');
+      if (this.#opener(nodes)?.expanded === false) {
+        for (const menu of menus) await this.#wait(() => this.#page.evaluate(id =>
+          !document.getElementById(id)?.checkVisibility({ visibilityProperty: true }), menu.id), 5000, 'version-menu-exit');
+        nodes = await this.#capture();
+        await this.#click(this.#opener(nodes)!);
+      }
+    }
     return await this.#readyMainMenu();
   }
 
@@ -244,7 +255,7 @@ export class ChatGptConfigurationMenu {
       throw new SessionPlaneDomainError('provider.configuration-stale',
         'Current version/effort does not match the original continuation; preserve preparation');
     }
-    return await this.#closeSelection(nodes);
+    return await this.#closeSelection(nodes, version);
   }
 
   async discover(): Promise<ConfigurationCatalog> {
@@ -307,10 +318,14 @@ export class ChatGptConfigurationMenu {
     if (!summary || summary.text !== option.label) {
       throw new SessionPlaneDomainError('provider.configuration-stale', 'Configuration changed since discovery; discover current options before choosing again');
     }
-    return await this.#closeSelection(nodes);
+    return await this.#closeSelection(nodes, option.version);
   }
 
-  async #closeSelection(nodes: readonly BrowserSnapshotNode[]): Promise<BrowserSnapshotNode> {
+  async #closeSelection(nodes: readonly BrowserSnapshotNode[], version: string): Promise<BrowserSnapshotNode> {
+    const normalize = (label: string) => label.replaceAll(/\s*\/\s*/g, ' ').replaceAll(/\s+/g, ' ').trim();
+    const label = normalize(this.#summary(nodes)!.text);
+    const effort = label.startsWith(version + ' ') ? label.slice(version.length + 1) : label;
+    const expected = new Set([label, effort, version + ' ' + effort]);
     // Keep the confirmed evidence visible when filling the composer closes menus.
     const opener = this.#opener(nodes)!;
     await this.#click(opener);
@@ -320,7 +335,10 @@ export class ChatGptConfigurationMenu {
     for (const id of opener.controls) {
       await this.#wait(() => this.#page.evaluate(id => !document.getElementById(id)?.checkVisibility({ visibilityProperty: true }), id));
     }
-    nodes = await this.#capture();
+    nodes = await this.#wait(ns => {
+      const chooser = this.#opener(ns);
+      return chooser?.expanded === false && chooser.text.trim() !== '' && expected.has(normalize(chooser.text));
+    }, 5000, 'closed-selection-label');
     return this.#opener(nodes)!;
   }
 }

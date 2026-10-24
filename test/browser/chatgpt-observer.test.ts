@@ -12,10 +12,11 @@ import { observeChatGptAlerts, observeChatGptDom } from '../../src/providers/cha
 import { observeChatGptActivity } from '../../src/providers/chatgpt/activity-observer.ts';
 import { ExactFinalTracker } from '../../src/providers/chatgpt/exact-final.ts';
 import { inspectChatGptSubmissionCandidates, recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submission.ts';
+import { restoreLatestPosition } from '../../src/providers/chatgpt/latest-position-recovery.ts';
 
 const CONVERSATION_ID = 'conversation-observer-123456';
 
-test('actual observation reveals current collapsed HostSpan work and reports its alert without granting', async t => {
+test('observation never clicks activity or integration disclosures and still collects the exact answer', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-work-permission-observer-'));
   const registry = new PageRegistry();
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
@@ -31,7 +32,7 @@ test('actual observation reveals current collapsed HostSpan work and reports its
       acknowledgementTimeoutMs: 500, canRestoreLatestPosition: () => !held });
     const source = await adapter.openObservation({ session, generation: 1 });
     try {
-      for (const label of ['작업 중입니다', '1분 32초 동안 작업함', '이전 활동']) {
+      for (const label of ['작업 중입니다', '1분 32초 동안 작업함', '이전 활동', 'hostspan-desktop 통합 사용함']) {
         held = true;
         await page.setContent(`<main><button aria-expanded="false" onclick="throw Error('Past work')">작업 중입니다</button>
           <div data-chatgpt-search-message-ids="earlier-user"><div data-user-message-bubble>Original question</div></div>
@@ -39,16 +40,19 @@ test('actual observation reveals current collapsed HostSpan work and reports its
           <section id="grant" hidden><div role="alert">hostspan-desktop ChatGPT가 hostspan-desktop의 File Patch 도구를 호출합니다. 자세히 보기</div>
           <button onclick="window.grants=(window.grants||0)+1">한 번만 허용</button></section>
           <div data-chatgpt-search-message-ids="user-message-1"><div data-user-message-bubble>계속</div></div><textarea>Original draft</textarea></main>`);
-        assert.notEqual((await source.observe()).reason, 'provider-actionable-alert', 'Human hold must preserve collapsed display');
+        assert.notEqual((await source.observe()).reason, 'provider-actionable-alert');
         assert.equal(await page.locator('#work').getAttribute('aria-expanded'), 'false');
         held = false;
+        assert.notEqual((await source.observe()).reason, 'provider-actionable-alert', 'An observer does not open hidden controls');
+        assert.equal(await page.locator('#work').getAttribute('aria-expanded'), 'false');
+        await page.locator('#grant').evaluate(element => { (element as HTMLElement).hidden = false; });
         assert.equal((await source.observe()).reason, 'provider-actionable-alert');
         assert.equal((await source.observe()).reason, 'provider-actionable-alert');
         assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0);
         assert.equal(await page.locator('textarea').inputValue(), 'Original draft');
         assert.equal(session.submittedUserMessageId, 'user-message-1');
       }
-      assert.equal(await page.evaluate(() => (window as any).opens), 3, 'Each current disclosure opens once; no old work toggled');
+      assert.equal(await page.evaluate(() => (window as any).opens ?? 0), 0, 'All observation rounds remain click-free');
       await page.setContent(`<main>
         <div data-message-author-role="user" data-message-id="user-message-1">Original question</div>
         ${'<div class="group/activity-header"><button aria-expanded="true">이전 활동</button></div>'.repeat(102)}
@@ -177,7 +181,7 @@ test('completed exact artifact discovery restores a virtualized answer through t
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test('virtualized submitted anchor/final is restored once through same-chat display UI, preserving human holds and identity', async () => {
+test('observation leaves virtualized display unchanged until an explicit same-chat latest control', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-virtualized-final-'));
   const registry = new PageRegistry();
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
@@ -217,6 +221,10 @@ test('virtualized submitted anchor/final is restored once through same-chat disp
       await page.evaluate(() => Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' }));
       assert.equal((await source.observe()).submittedUserFound, false, 'Visible user tab is preserved');
       await page.evaluate(() => Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' }));
+      assert.equal((await source.observe()).submittedUserFound, false, 'Background observation does not click latest either');
+      assert.equal(await page.locator('button').getAttribute('data-clicks'), null);
+      assert.equal(await page.evaluate(restoreLatestPosition, { origin: 'https://chatgpt.com',
+        conversationId: CONVERSATION_ID, anchorIds: ['user-message-1'], expiresAt: Date.now() + 5_000, explicit: true }), true);
       const observed = await source.observe();
       assert.equal(observed.submittedUserFound, true);
       assert.equal(observed.candidate?.responseMessageId, 'original-final');

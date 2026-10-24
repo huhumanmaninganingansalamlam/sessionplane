@@ -16,54 +16,70 @@ const once = /^(?:허용|이번만 허용|한 번 허용|한 번만 허용|Allow
 
 const always = /^(?:항상 허용|Always allow)(?:\s*⏎)?$/i;
 
-/** Reveal provider work in the exact owned conversation; never grants or submits. */
-export async function revealCurrentWorkPermission(page: Page, submittedUserMessageId: string) {
-  const users = (await readChatGptMessages(page, true)).filter(message => message.role === 'user');
-  const anchor = users.filter(message => message.messageId === submittedUserMessageId);
-  if (anchor.length !== 1 || users.at(-1) !== anchor[0] || anchor[0]!.elementIndex === undefined) {
-    return false;
-  }
-  // A pending permission can remain in earlier work after a literal Continue.
-  // Opening provider disclosures does not attribute their answer to that Continue.
-  let opened = false;
-  const work = page.locator('[class~="group/activity-header"] > button[aria-expanded]').or(
-    page.getByRole('button', { name: /^(?:작업 중입니다|(?:[\d\s시간분초.]+ 동안 )?작업함|Working(?:…|\.\.\.)?|Worked for .+)$/i }))
-    .and(page.locator('[aria-expanded="false"], [data-state="closed"]'));
-  for (const button of await work.all()) {
-    const visibleGrant = page.locator('[role="alert"], [role="alertdialog"], [role="dialog"]')
-      .filter({ hasText: /hostspan(?:-[a-z0-9_-]+)?/i }).filter({ visible: true });
-    if (await visibleGrant.count() > 0) break;
-    if (!await button.isVisible() || (await button.getAttribute('aria-expanded') !== 'false' &&
-        await button.getAttribute('data-state') !== 'closed')) continue;
-    const start = users[0]!;
-    const anchorElement = await page.locator(CHATGPT_SELECTORS.messages).nth(start.elementIndex!).elementHandle();
-    if (!anchorElement) throw unavailable('The original user anchor is no longer mounted');
-    const current = await button.evaluate((element, user) =>
-      !!(user.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) &&
-      !element.closest('nav, aside, [role="navigation"], .markdown, [data-message-author-role="user"], [data-user-message-bubble]'), anchorElement).finally(() => anchorElement.dispose());
-    if (current) { await button.click({ timeout: 5_000 }); opened = true; }
-  }
-  return opened;
-}
-
 /** Only an explicitly selected HostSpan tool permission, never a generic UI click. */
 export async function controlHostSpanPermission(page: Page, input: HostSpanPermissionInput, submittedUserMessageId: string) {
   if (!/^hostspan(?:-[a-z0-9_-]+)?$/i.test(input.appName)) throw unavailable('Only HostSpan permissions are supported');
   const allowMode = input.allowMode ?? 'once';
   const allow = allowMode === 'always' ? always : once;
   if (input.action === 'allow' && !input.toolName) throw unavailable('Select the observed tool name before allowing it');
-  await revealCurrentWorkPermission(page, submittedUserMessageId);
+  const users = (await readChatGptMessages(page, true)).filter(message => message.role === 'user');
+  if (users.at(-1)?.messageId !== submittedUserMessageId ||
+      users.filter(message => message.messageId === submittedUserMessageId).length !== 1) {
+    throw unavailable('The exact current user anchor is no longer mounted');
+  }
+  // A permission may precede literal Continues, but never another work question.
+  let start = users.length - 1;
+  while (start > 0 && users[start]!.text.trim() === '계속' && users[start - 1]!.rootIndex === users[start]!.rootIndex) start--;
+  const inWork = async (scope: ReturnType<Page['locator']>) => {
+    if (users[start]!.elementIndex === undefined) return false;
+    const anchor = await page.locator(CHATGPT_SELECTORS.messages).nth(users[start]!.elementIndex!).elementHandle();
+    if (!anchor) throw unavailable('The original work anchor is no longer mounted');
+    return await scope.evaluate((element, user) => {
+      const position = user.compareDocumentPosition(element);
+      return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING);
+    }, anchor).finally(() => anchor.dispose());
+  };
   const app = new RegExp(`(^|[^\\w-])${input.appName}($|[^\\w-])`, 'i');
   const scopes = page.locator('[role="dialog"], [role="alertdialog"], [role="alert"]');
-  const matching = async () => {
+  const matching = async (includeHidden = false) => {
     const matches = [];
     for (const scope of await scopes.all()) {
-      if (!await scope.isVisible()) continue;
-      const text = (await scope.innerText()).trim();
-      if (app.test(text) && (input.toolName === undefined || text.includes(input.toolName))) matches.push(scope);
+      if (!includeHidden && !await scope.isVisible()) continue;
+      const text = (await scope.textContent() ?? '').trim();
+      if (app.test(text) && (input.toolName === undefined || text.includes(input.toolName)) && await inWork(scope)) matches.push(scope);
     }
     return matches;
   };
+  let workDisclosure: string | null = null;
+  if ((await matching()).length === 0) {
+    const hidden = [];
+    for (const scope of await matching(true)) {
+      if (await scope.getAttribute('role') === 'alert') hidden.push(scope);
+    }
+    if (hidden.length === 1) {
+      const card = await hidden[0]!.elementHandle();
+      if (!card) throw unavailable('The exact hidden permission is no longer mounted');
+      const disclosures = page.locator('button[aria-expanded="false"], button[data-state="closed"]');
+      const indices = await disclosures.evaluateAll((buttons, target) => buttons.flatMap((button, index) => {
+        const root = button.getRootNode() as Document | ShadowRoot;
+        const controlled = (button.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean)
+          .map(id => root.getElementById(id));
+        const activity = button.closest('[class~="group/activity-header"]')?.parentElement;
+        const ownsCard = controlled.some(panel => panel?.contains(target)) || (activity?.contains(target) &&
+          activity.querySelectorAll('[class~="group/activity-header"] > button[aria-expanded]').length === 1);
+        return ownsCard ? [index] : [];
+      }), card).finally(() => card.dispose());
+      if (indices.length === 1) {
+        const button = disclosures.nth(indices[0]!);
+        if (await inWork(button) && await button.isVisible() && await button.isEnabled()) {
+          workDisclosure = await button.evaluate(element => element.getAttribute('aria-label') ||
+            (element.getAttribute('aria-labelledby') ?? '').split(/\s+/).map(id =>
+              (element.getRootNode() as Document | ShadowRoot).getElementById(id)?.textContent ?? '').join(' ') || element.textContent || '');
+          await button.click({ timeout: 5_000 });
+        }
+      }
+    }
+  }
   const permissionAnchor = async (scope: ReturnType<Page['locator']>) => {
     const users = (await readChatGptMessages(page, true)).filter(message => message.role === 'user');
     for (const user of users.toReversed()) {
@@ -79,7 +95,7 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
     for (const scope of await matching()) cards.push({ permissionText: (await scope.innerText()).trim(),
       submittedUserMessageId: await permissionAnchor(scope),
       buttons: await scope.getByRole('button').allTextContents() });
-    return { outcome: 'discovered', allowMode, appName: input.appName, cards,
+    return { outcome: 'discovered', allowMode, appName: input.appName, cards, workDisclosure,
       workDisclosures: await page.getByRole('button', { name: /작업|Working|Worked for/i, includeHidden: true })
         .evaluateAll(elements => elements.map(element => ({ name: element.getAttribute('aria-label') ?? element.textContent,
           expanded: element.getAttribute('aria-expanded'), state: element.getAttribute('data-state'),
@@ -145,7 +161,7 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
   const permissionUserMessageId = await permissionAnchor(scope);
   const evidenceHash = createHash('sha256').update(JSON.stringify([page.url(), input.appName, input.toolName, allowMode, permissionUserMessageId, permissionText])).digest('hex');
   if (input.action === 'inspect') return { outcome: 'inspected', allowMode, appName: input.appName, toolName: input.toolName,
-    evidenceHash, permissionUserMessageId, permissionText, buttons: buttons.map(name => name.trim()) };
+    evidenceHash, permissionUserMessageId, permissionText, workDisclosure, buttons: buttons.map(name => name.trim()) };
   if (input.evidenceHash !== evidenceHash) throw unavailable('Inspect the current exact permission before allowing it');
   // Recheck the command/details and explicitly selected button in the same DOM operation.
   const clicked = await scope.evaluate((element, expected) => {
@@ -162,7 +178,7 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
   await page.waitForFunction(expected => ![...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="alert"]')]
     .some(element => element instanceof HTMLElement && element.getClientRects().length > 0 &&
       element.innerText.trim() === expected), alertText, { timeout: 5_000 }).catch(() => undefined);
-  return { outcome: 'clicked', allowMode, appName: input.appName, toolName: input.toolName, evidenceHash, permissionUserMessageId,
+  return { outcome: 'clicked', allowMode, appName: input.appName, toolName: input.toolName, evidenceHash, permissionUserMessageId, workDisclosure,
     permissionStillVisible: await scopes.evaluateAll((elements, expected) => elements.some(element =>
       element instanceof HTMLElement && element.getClientRects().length > 0 && element.innerText.trim() === expected), alertText) };
 }

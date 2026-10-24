@@ -518,6 +518,21 @@ test('configuration selection waits for a closing version menu and preserves the
       id: 'fixture', version: 'Aurora-8', power: 2, label: 'Aurora-8 / Deep',
     });
     assert.equal(again.text, selected.text, 'already selected configuration also survives popup closure');
+    await page.evaluate(() => {
+      const chooser = document.querySelector('#chooser') as HTMLElement;
+      const click = chooser.onclick!;
+      chooser.onclick = event => {
+        click.call(chooser, event);
+        if (chooser.getAttribute('aria-expanded') !== 'false') return;
+        // Popup removal and persistent summary hydration are separate UI updates.
+        setTimeout(() => { chooser.textContent = ''; }, 130);
+        setTimeout(() => { (window as any).render(); }, 350);
+      };
+    });
+    const hydrated = await new ChatGptConfigurationMenu(page, 'closing-menu').select({
+      id: 'fixture', version: 'Aurora-8', power: 2, label: 'Aurora-8 / Deep',
+    });
+    assert.equal(hydrated.text, 'Aurora-8 / Deep', 'Configure returns persistent verified evidence, never a blank closing label');
     await page.locator('#configuration').waitFor({ state: 'hidden' });
     const opens = await page.evaluate(() => (window as any).opens);
     await page.evaluate(() => { (document.querySelector('#configuration') as HTMLElement).hidden = false; });
@@ -576,6 +591,37 @@ test('configuration selection verifies menu state without waiting for scheduled 
     await service.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('discovery leaves a version submenu through its chooser when the checked radio has no navigation action', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-selected-radio-'));
+  const service = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }),
+    browserHeadless: true, logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await service.browserOwner!.createPage();
+    await page.setContent(fixture);
+    await page.locator('textarea').focus();
+    await page.locator('#chooser').click();
+    await page.locator('#summary').click();
+    await page.evaluate(() => {
+      (window as any).checkedClicks = 0;
+      document.querySelector('#versions')!.addEventListener('click', event => {
+        if ((event.target as Element).getAttribute('aria-checked') === 'true') {
+          (window as any).checkedClicks++;
+          event.stopImmediatePropagation();
+        }
+      }, true);
+    });
+    const catalog = await new ChatGptConfigurationMenu(page, 'selected-radio').discover();
+    assert.equal(catalog.status, 'available');
+    assert.equal(catalog.options.length, 6);
+    assert.equal(await page.evaluate(() => (window as any).checkedClicks), 0);
+    assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+    assert.equal(await page.evaluate(() => (window as any).version), 'Aurora-9');
+    assert.equal(await page.evaluate(() => (window as any).powerValue), 1);
+    assert.equal(await page.locator('#chooser').getAttribute('aria-expanded'), 'false');
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test('discovery exits a persistent version submenu and rejects an unconfirmed version without losing the original draft', async () => {
@@ -656,14 +702,20 @@ test('failed discovery reports the original transition and restoration failure w
     const { page } = await service.browserOwner!.createPage();
     await page.setContent(fixture);
     await page.evaluate(() => {
-      // The selected version stops responding. Both enumeration and restoring
-      // that selection fail; the second failure must not overwrite the first.
+      // Neither the chooser nor the checked version dismisses this submenu.
+      // Both discovery and restoration fail without exposing the draft.
       (document.querySelector('#versions [aria-checked="true"]') as HTMLElement).onclick = () => {};
+      const chooser = document.querySelector('#chooser') as HTMLElement;
+      const toggle = chooser.onclick!;
+      chooser.onclick = event => {
+        if (!(document.querySelector('#versions') as HTMLElement).hidden) return;
+        return toggle.call(chooser, event);
+      };
     });
     await assert.rejects(new ChatGptConfigurationMenu(page, 'failure-details').discover(), (error: any) => {
       assert.ok(error instanceof AggregateError);
       assert.equal(error.errors.length, 2);
-      assert.match(error.message, /Discovery failed:.*version-menu-return/);
+      assert.match(error.message, /Discovery failed:.*configuration-state/);
       assert.match(error.message, /restoring original selection failed:/);
       assert.doesNotMatch(error.message, /Untouched draft/);
       return true;
