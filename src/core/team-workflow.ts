@@ -168,7 +168,7 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; followupUserMessageId?: string | undefined; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName?: string | undefined; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'human_review'; action: 'pause' | 'resume' } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'reopen' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; followupUserMessageId?: string | undefined; manageOnly?: true | undefined; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow'; appName: string; toolName?: string | undefined; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'human_review'; action: 'pause' | 'resume' } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'reopen' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     if (input.decision === 'human_review') {
       const result = await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
@@ -392,21 +392,28 @@ export class TeamWorkflow {
         return result;
       });
     }
-    if (input.decision === 'continue' && input.followupUserMessageId) {
-      const key = `followup-continue:${request.outboxId}:${input.followupUserMessageId}`;
-      const previous = this.services.receipts.get(request.clientId, key);
-      if (previous?.status === 'complete') return { ...JSON.parse(previous.resultJson).outcome, teamId: input.teamId };
-      const current = this.services.directory.getSession(request.sessionId);
-      const pending = this.#outbox.getByGeneration(request.sessionId, current.generation);
-      const saved = this.services.receipts.get(request.clientId, `submission-configuration:${request.outboxId}`);
-      if (!pending || !saved || pending.submissionState !== 'prepared' || pending.promptSubmitted) throw new SessionPlaneDomainError(
-        'provider.preparation-required', 'Exact follow-up recovery requires its retained preparation and verified configuration');
-      const result = await this.services.ui.continueFollowup({ ...owner, decisionId: input.requestId,
-        originalRequestRef: request.outboxId, followupUserMessageId: input.followupUserMessageId,
-        preparedGeneration: pending.generation, preparedPrompt: JSON.parse(pending.payloadJson).prompt,
-        model: JSON.parse(saved.resultJson).model }, this.services.receipts);
-      return { ...result, teamId: input.teamId };
+    if (input.decision === 'continue' && input.manageOnly) {
+      if (!input.followupUserMessageId) throw new SessionPlaneDomainError('input.invalid', 'Management requires an exact follow-up');
+      const source = input.followupUserMessageId;
+      const exact = this.#exactFollowup(request, source);
+      if (!exact.acknowledgedAt) throw new SessionPlaneDomainError('provider.preparation-required', 'No acknowledged exact recovery chain');
+      const evidence = await this.services.ui.observeFollowup(owner, exact.userMessageId);
+      if (!evidence?.submittedUserFound || evidence.laterUserFound) throw new SessionPlaneDomainError(
+        'session.page-identity-unverified', 'The current exact acknowledged follow-up must remain on its original transcript');
+      await this.services.scheduler.actorFor(request.sessionId).enqueue(() => {
+        this.services.receipts.execute({ clientId: request.clientId, requestId: input.requestId,
+          method: 'workflow.followup.manage', payload: input, operation: () => {
+            this.#approveExactFollowup(request, source);
+            return { approved: true };
+          } });
+        this.services.scheduler.actorFor(request.sessionId).approveFollowupCollector(request.outboxId, source);
+      });
+      return { requestOk: true, teamId: input.teamId, requestRef: request.outboxId, providerMutation: false,
+        followup: { kind: 'management-approved', reason: 'management-approved-no-send', terminal: false, userMessageId: exact.userMessageId, recoveredFromUserMessageId: source,
+          managedContinuation: this.#exactManagement(request, source, false) } };
     }
+    if (input.decision === 'continue' && input.followupUserMessageId)
+      return { ...await this.#continueExactFollowup(request, input.followupUserMessageId, input.requestId), teamId: input.teamId };
     if (input.decision === 'continue') {
       let reconciliation;
       const savedAuthorization = this.services.receipts.get(request.clientId, `continuation-authorization:${request.outboxId}`);
@@ -505,25 +512,23 @@ export class TeamWorkflow {
       try {
         let request = this.#request({ teamId: input.teamId, requestRef });
         if (input.waitMs > 0 && !controller.signal.aborted) {
-          releaseCollector = this.services.scheduler.actorFor(request.sessionId).retainCollector(requestRef, input.continuationApproved === true);
+          releaseCollector = this.services.scheduler.actorFor(request.sessionId).retainCollector(requestRef, input.continuationApproved === true, input.followupUserMessageId);
         }
         let result: Record<string, unknown> = await this.#observe(request, undefined, input.waitMs > 0 && input.continuationApproved === true);
         const followupTracker = new ExactFinalTracker(1500);
         let followupId = input.followupUserMessageId;
-        const followed = new Set<string>();
-        while (followupId) {
-          if (followed.has(followupId)) throw new SessionPlaneDomainError('internal.invariant-violation', 'Cyclic follow-up recovery receipt');
-          followed.add(followupId);
-          const receipt = this.services.receipts.get(request.clientId, `followup-continue:${request.outboxId}:${followupId}`);
-          const outcome = receipt?.status === 'complete' ? JSON.parse(receipt.resultJson).outcome : null;
-          if (!outcome?.requestOk || typeof outcome.followupUserMessageId !== 'string') break;
-          followupId = outcome.followupUserMessageId;
-        }
+        if (input.followupUserMessageId && input.continuationApproved) this.#approveExactFollowup(request, input.followupUserMessageId);
         for (;;) {
+          if (input.followupUserMessageId) {
+            followupId = this.#exactFollowup(request, input.followupUserMessageId).userMessageId;
+            if (this.#exactManagement(request, input.followupUserMessageId, false).approved)
+              this.services.scheduler.actorFor(request.sessionId).approveFollowupCollector(request.outboxId, input.followupUserMessageId);
+          }
           const collectedFollowup = result.followup as { terminal?: boolean; userMessageId?: string } | undefined;
           if (collectedFollowup?.terminal && (!followupId || collectedFollowup.userMessageId === followupId)) {
-            if (input.followupUserMessageId && input.followupUserMessageId !== followupId) result = { ...result,
-              followup: { ...collectedFollowup, recoveredFromUserMessageId: input.followupUserMessageId } };
+            if (input.followupUserMessageId) result = { ...result, followup: { ...collectedFollowup,
+              ...(input.followupUserMessageId !== followupId ? { recoveredFromUserMessageId: input.followupUserMessageId } : {}),
+              managedContinuation: this.#exactManagement(request, input.followupUserMessageId, true) } };
             break;
           }
           const userReview = this.#userReview(request);
@@ -566,13 +571,24 @@ export class TeamWorkflow {
                 observedAt: evidence.observedAt, activity: evidence.activity,
                 ...(input.followupUserMessageId && input.followupUserMessageId !== followupId
                   ? { recoveredFromUserMessageId: input.followupUserMessageId } : {}),
-                userMessageId: followupId, originalRequestRef: request.outboxId } };
+                userMessageId: followupId, originalRequestRef: request.outboxId,
+                ...(input.followupUserMessageId ? { managedContinuation: this.#exactManagement(request, input.followupUserMessageId, decision.kind === 'complete') } : {}) } };
               if (decision.kind === 'complete') {
                 const reconciliation = await this.services.ui.reconcileFollowup({ ...ownerOf(request),
                   decisionId: `followup:${request.outboxId}:${followupId}`,
                   followupUserMessageId: followupId!, responseMessageId: decision.responseMessageId!,
                   responseSha256: createHash('sha256').update(decision.answerText!).digest('hex'), followupCompleted: true, answerText: decision.answerText! });
                 result = { ...result, reconciliation }; controller.abort(); break;
+              }
+              if (input.waitMs > 0 && input.followupUserMessageId && !controller.signal.aborted) {
+                const managed = this.#exactManagement(request, input.followupUserMessageId, false);
+                if (managed.active && managed.nextReviewAt && Date.now() >= Date.parse(managed.nextReviewAt)) {
+                  const review = await this.#reviewExactFollowup(request, input.followupUserMessageId, followupId!, controller.signal);
+                  result = { ...result, ...review, followup: { ...(result.followup as object),
+                    managedContinuation: this.#exactManagement(request, input.followupUserMessageId, false) } };
+                  if (review.recovery) { controller.abort(); break; }
+                  if (this.#exactFollowup(request, input.followupUserMessageId).userMessageId !== followupId) continue;
+                }
               }
               if (evidence.errorCode) { result = { ...result, errorCode: evidence.errorCode, reason: evidence.reason }; controller.abort(); break; }
             }
@@ -914,6 +930,116 @@ export class TeamWorkflow {
     } };
   }
 
+  #exactFollowup(request: OutboxRecord, source: string) {
+    let userMessageId = source, acknowledgedAt: string | null = null, reviewedEmptyAt: string | undefined;
+    const seen = new Set<string>();
+    for (;;) {
+      if (seen.has(userMessageId)) throw new SessionPlaneDomainError('internal.invariant-violation', 'Cyclic follow-up recovery receipt');
+      seen.add(userMessageId);
+      const receipt = this.services.receipts.get(request.clientId, `followup-continue:${request.outboxId}:${userMessageId}`);
+      const saved = receipt?.status === 'complete' ? JSON.parse(receipt.resultJson) : null;
+      if (!saved?.outcome?.requestOk || typeof saved.outcome.followupUserMessageId !== 'string') break;
+      if (saved.outcome.requestRef !== request.outboxId || saved.outcome.acknowledgement?.submittedUserMessageId !== saved.outcome.followupUserMessageId)
+        throw new SessionPlaneDomainError('session.page-identity-unverified', 'Exact continuation receipt and acknowledged message must agree');
+      userMessageId = saved.outcome.followupUserMessageId;
+      acknowledgedAt = receipt!.updatedAt;
+      reviewedEmptyAt = saved.outcome.reviewedEmptyAt;
+    }
+    return { userMessageId, acknowledgedAt, reviewedEmptyAt };
+  }
+
+  #approveExactFollowup(request: OutboxRecord, source: string) {
+    const requestId = `followup-management:${request.outboxId}:${source}`;
+    if (this.services.receipts.get(request.clientId, requestId)) return;
+    this.services.receipts.record({ clientId: request.clientId, requestId, method: 'workflow.followup.management',
+      requestHash: hashCanonical({ requestRef: request.outboxId, source }), status: 'complete',
+      result: { approved: true, sourceFollowupUserMessageId: source, approvedAt: new Date().toISOString() } });
+  }
+
+  #exactManagement(request: OutboxRecord, source: string, terminal: boolean) {
+    const exact = this.#exactFollowup(request, source);
+    const authorization = this.services.receipts.get(request.clientId, `followup-management:${request.outboxId}:${source}`);
+    const review = this.services.receipts.get(request.clientId, `followup-review:${request.outboxId}:${exact.userMessageId}`);
+    const last = review ? JSON.parse(review.resultJson) : null;
+    const snapshot = this.services.directory.getSession(request.sessionId);
+    const held = this.#loadRecovery.isUserHeld(snapshot.conversationId);
+    const collectors = this.services.scheduler.collectors(request.sessionId).filter(c => c.requestRef === request.outboxId && c.followupUserMessageId === source);
+    const approved = authorization?.status === 'complete' && JSON.parse(authorization.resultJson).approved === true;
+    const active = approved && collectors.length > 0 && !!exact.acknowledgedAt;
+    return { scope: 'exact-followup', originalRequestRef: request.outboxId, sourceFollowupUserMessageId: source,
+      submittedUserMessageId: exact.userMessageId, acknowledgedAt: exact.acknowledgedAt, approved, active,
+      observationHeld: held, collectorCount: collectors.length, lastReviewAt: last?.lastReviewAt ?? null,
+      lastReviewReason: last?.reason ?? null, nextReviewAt: active && !held && !terminal && !last?.decisionRequired
+        ? last?.nextReviewAt ?? new Date(Date.parse(exact.acknowledgedAt!) + 30 * 60000).toISOString() : null,
+      reason: held ? 'human-review' : !approved ? 'not-approved' : !active ? 'no-exact-collector' : terminal ? 'terminal' : last?.reason ?? 'awaiting-broad-review' };
+  }
+
+  async #continueExactFollowup(request: OutboxRecord, followup: string, decisionId: string, reviewedEmptyAt?: string, signal?: AbortSignal) {
+    const prior = this.services.receipts.get(request.clientId, `followup-continue:${request.outboxId}:${followup}`);
+    if (prior?.status === 'complete') return JSON.parse(prior.resultJson).outcome;
+    const current = this.services.directory.getSession(request.sessionId);
+    const pending = this.#outbox.getByGeneration(request.sessionId, current.generation);
+    const saved = this.services.receipts.get(request.clientId, `submission-configuration:${request.outboxId}`);
+    if (!pending || !saved || pending.submissionState !== 'prepared' || pending.promptSubmitted) throw new SessionPlaneDomainError(
+      'provider.preparation-required', 'Exact follow-up recovery requires its retained preparation and verified configuration');
+    return await this.services.ui.continueFollowup({ ...ownerOf(request), decisionId,
+      originalRequestRef: request.outboxId, followupUserMessageId: followup,
+      preparedGeneration: pending.generation, preparedPrompt: JSON.parse(pending.payloadJson).prompt,
+      model: JSON.parse(saved.resultJson).model, ...(reviewedEmptyAt ? { reviewedEmptyAt } : {}), ...(signal ? { signal } : {}) }, this.services.receipts);
+  }
+
+  async #reviewExactFollowup(request: OutboxRecord, source: string, followup: string, signal: AbortSignal): Promise<Record<string, unknown>> {
+    const requestId = `followup-review:${request.outboxId}:${followup}`;
+    const receipt = { clientId: request.clientId, requestId, method: 'workflow.followup.review',
+      requestHash: hashCanonical({ requestRef: request.outboxId, followup }) };
+    const now = new Date().toISOString();
+    let review: Record<string, unknown> = { lastReviewAt: now, nextReviewAt: new Date(Date.now() + 30 * 60000).toISOString(), reason: 'reviewing' };
+    const save = () => this.services.receipts.record({ ...receipt, status: 'complete', result: review });
+    save();
+    try {
+      const evidence = await this.services.ui.observeFollowup(ownerOf(request), followup, true);
+      if (signal.aborted) return {};
+      const server = evidence?.serverRecovery;
+      review = { ...review, observedAt: evidence?.observedAt, reason: evidence?.reason ?? 'exact-observation-unavailable',
+        server: server ? { kind: server.kind, reason: server.reason, nextCheckAt: server.nextCheckAt,
+          serverObservation: server.serverObservation } : undefined };
+      if (evidence?.activity === 'strong' || evidence?.activity === 'weak') {
+        review.reason = 'provider-generation-activity'; save(); return {};
+      }
+      if (server?.kind === 'deferred') {
+        review.reason = server.reason; save(); return {};
+      }
+      const state = server?.serverObservation;
+      if (state?.messages.some(m => m.status === 'in_progress')) {
+        review.reason = 'backend-generation-in-progress'; save(); return {};
+      }
+      if (!evidence?.submittedUserFound || evidence.laterUserFound || evidence.dialogKind ||
+          evidence.observationTransport !== 'fresh' || evidence.activity !== 'none' && evidence.reason !== 'provider-stream-disconnected')
+        throw new SessionPlaneDomainError('provider.failure-unverified', 'Preserve unknown, later, permission-held or active exact work');
+      const empty = !evidence.candidate && server?.kind === 'pending' && state?.anchorNodeId &&
+        !state.nextUserFound && state.messages.length === 0 && state.currentNodeId === state.anchorNodeId;
+      if (server?.kind === 'complete') throw new SessionPlaneDomainError('provider.failure-unverified',
+        'An exact backend final is awaiting DOM recovery; preserve it without another Continue',
+        { followupUserMessageId: followup, responseMessageId: server.responseMessageId, answerText: server.answerText });
+      if (!empty && evidence.reason !== 'provider-actionable-alert' && evidence.reason !== 'provider-stream-disconnected')
+        throw new SessionPlaneDomainError('provider.failure-unverified', 'No fresh exact interruption or empty backend turn; do not resend');
+      if (empty && this.#exactFollowup(request, source).reviewedEmptyAt) throw new SessionPlaneDomainError(
+        'provider.failure-unverified', 'The approved empty-turn continuation still has no exact assistant or tool progress after its broad review');
+      if (signal.aborted) return {};
+      const outcome = await this.#continueExactFollowup(request, followup, requestId, empty ? evidence.observedAt : undefined, signal);
+      review.reason = outcome.reason; save();
+      if (!outcome.requestOk) throw new SessionPlaneDomainError(outcome.errorCode ?? 'provider.preparation-required', outcome.reason);
+      return {};
+    } catch (error) {
+      if (!(error instanceof SessionPlaneDomainError)) throw error;
+      review = { ...review, reason: error.errorCode, decisionRequired: true, nextReviewAt: null }; save();
+      return { recovery: { state: 'decision_required', decisionRequired: true, userActionRequired: false,
+        automaticContinuation: false, reason: error.errorCode, message: error.message,
+        originalRequestRef: request.outboxId, followupUserMessageId: followup,
+        ...(error.details ? { evidence: error.details } : {}) } };
+    }
+  }
+
   #managedContinuationStatus(original: OutboxRecord) {
     const waits = this.services.scheduler.collectors(original.sessionId);
     let current = original;
@@ -929,7 +1055,7 @@ export class TeamWorkflow {
       ? current.updatedAt : current.createdAt);
     const held = this.#loadRecovery.isUserHeld(snapshot.conversationId);
     const active = waits.some(wait => {
-      if (!wait.continuationApproved) return false;
+      if (!wait.continuationApproved || wait.followupUserMessageId) return false;
       let ancestor: OutboxRecord | null = current;
       while (ancestor) {
         if (ancestor.outboxId === wait.requestRef) return true;
@@ -941,7 +1067,7 @@ export class TeamWorkflow {
       return false;
     });
     const terminal = snapshot.generation === current.generation ? snapshot.terminal : stored?.completedAt != null;
-    return { active, observationHeld: held, requestRef: current.outboxId, generation: current.generation,
+    return { scope: 'original-generation', active, observationHeld: held, requestRef: current.outboxId, generation: current.generation,
       submittedUserMessageId: stored?.submittedUserMessageId ?? null,
       ...new EventRepository(this.services.database.raw).submissionTimeline(current.sessionId, current.generation),
       lastReviewAt: lastReview?.reviewed ? new Date(lastReview.at).toISOString() : null,

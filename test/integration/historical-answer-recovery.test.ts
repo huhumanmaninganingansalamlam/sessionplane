@@ -6,6 +6,7 @@ import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import test from 'node:test';
 import { runCli } from '../../src/cli/main.ts';
+import { callRpc } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
@@ -140,15 +141,17 @@ test('explicit later responses preserve a completed original and an optional pre
           document.querySelector('[data-testid="send-button"]')!.addEventListener('click', async () => {
             const editor = document.querySelector('textarea')!;
             if (editor.value !== '계속') throw new Error('Never submit the product draft');
-            (window as any).sends++;
+            const send = ++(window as any).sends;
+            const user = send === 1 ? 'recovery-user' : `recovery-user-${send}`;
+            const answer = send === 1 ? 'recovery-final' : `recovery-final-${send}`;
             await fetch('/backend-api/conversation', { method: 'POST', headers: { 'content-type': 'application/json' },
               body: JSON.stringify({ action: 'next', conversation_id: conversationId, parent_message_id: 'answer-c',
-                messages: [{ id: 'recovery-user', author: { role: 'user' }, content: { content_type: 'text', parts: ['계속'] } }] }) });
+                messages: [{ id: user, author: { role: 'user' }, content: { content_type: 'text', parts: ['계속'] } }] }) });
             editor.value = '';
             document.querySelector('#timeout')?.remove();
             document.querySelector('#messages')!.insertAdjacentHTML('beforeend',
-              '<div data-message-author-role="user" data-message-id="recovery-user">계속</div>' +
-              '<div data-message-author-role="assistant" data-message-id="recovery-final">Recovered exact work</div>');
+              `<div data-message-author-role="user" data-message-id="${user}">계속</div>` +
+              `<div data-message-author-role="assistant" data-message-id="${answer}">Recovered exact work</div>`);
           });
         }, `conversation-${session.sessionId}`);
         await page.locator('#messages').evaluate(node => node.insertAdjacentHTML('beforeend',
@@ -156,10 +159,10 @@ test('explicit later responses preserve a completed original and an optional pre
           '<div data-message-author-role="assistant" data-message-id="answer-c">Partial response</div>'));
         await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend',
           '<div id="timeout" role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</div>'));
-        const recover = async (followup = 'manual-c', id = 'recover-exact-followup') => {
+        const recover = async (followup = 'manual-c', id = 'recover-exact-followup', manageOnly = false) => {
           let stdout = '', stderr = '';
           const code = await runCli(['request', 'continue', team.teamId, requestRef, '--followup-message-id', followup,
-            '--continuation-approved', '--wait-ms', '0', '--request-id', id, '--socket', config.socketPath, '--json'], {
+            '--continuation-approved', '--wait-ms', '0', '--request-id', id, '--socket', config.socketPath, '--json', ...(manageOnly ? ['--manage-only'] : [])], {
             stdin: Readable.from([]),
             stdout: new Writable({ write(chunk, _encoding, done) { stdout += String(chunk); done(); } }),
             stderr: new Writable({ write(chunk, _encoding, done) { stderr += String(chunk); done(); } }),
@@ -202,6 +205,84 @@ test('explicit later responses preserve a completed original and an optional pre
         assert.equal(exact.followup.responseMessageId, 'recovery-final');
         assert.equal(exact.followup.answerText, 'Recovered exact work');
         assert.equal((await show('manual-c')).results[0].followup.recoveredFromUserMessageId, 'manual-c');
+        // Promote the existing read-only exact collector, then use its existing loop.
+        // A distinct recorded chain models the real accepted-but-empty Continue.
+        await page.locator('#messages').evaluate(node => node.insertAdjacentHTML('beforeend',
+          '<div data-message-author-role="user" data-message-id="manual-managed">Complete the existing work</div>' +
+          '<div data-message-author-role="assistant" data-message-id="partial-managed">Partial work</div>' +
+          '<div data-message-author-role="user" data-message-id="managed-user">계속</div>'));
+        const managedKey = `followup-continue:${requestRef}:manual-managed`;
+        const managed = JSON.parse(receipt.resultJson);
+        managed.outcome.followupUserMessageId = 'managed-user';
+        managed.outcome.recoveredFromUserMessageId = 'manual-managed';
+        managed.outcome.acknowledgement.submittedUserMessageId = 'managed-user';
+        managed.outcome.acknowledgement.submittedUserTurnId = 'managed-user';
+        managed.backup.acknowledgement = managed.outcome.acknowledgement;
+        receipts.record({ ...receipt, requestId: managedKey, requestHash: 'fixture-managed-chain', status: 'complete', result: managed });
+        core.database.raw.prepare('UPDATE request_receipts SET updated_at=? WHERE client_id=? AND request_id=?')
+          .run(new Date(Date.now() - 31 * 60000).toISOString(), 'fixture-owner', managedKey);
+        let backend: 'active' | 'paced' | 'empty' = 'active';
+        t.mock.method(fake, 'recover', async request => {
+          assert.equal(request.session.submittedUserMessageId, 'managed-user');
+          assert.equal(request.generation, 1);
+          assert.equal(request.bindingGeneration, 2);
+          return { kind: backend === 'paced' ? 'deferred' : 'pending', observationTransport: 'fresh',
+            responseMessageId: null, answerText: null, reason: backend === 'paced' ? 'backend-http-429' : 'backend-assistant-missing',
+            retryAfterMs: backend === 'paced' ? 13000 : null, nextCheckAt: backend === 'paced' ? new Date(Date.now() + 13000).toISOString() : null,
+            ...(backend === 'paced' ? {} : { serverObservation: { anchorNodeId: 'managed-user', currentNodeId: 'managed-user',
+              nextUserFound: false, assistantCount: 0, messages: backend === 'active' ? [{ messageId: 'running', role: 'assistant',
+                channel: 'analysis', status: 'in_progress', endTurn: false, hidden: true, textLength: 0 }] : [] } }) };
+        });
+        const collectorAbort = new AbortController();
+        const pendingWait = callRpc<any>({ socketPath: config.socketPath, method: 'workflow.wait',
+          params: { teamId: team.teamId, requestRefs: [requestRef], followupUserMessageId: 'manual-managed', waitMs: 60000, untilResult: false },
+          timeoutMs: 65000, maxLineBytes: config.rpcMaxLineBytes, signal: collectorAbort.signal });
+        const eventually = async (check: () => Promise<boolean>) => {
+          const deadline = Date.now() + 15000;
+          while (!await check()) {
+            assert.ok(Date.now() < deadline, 'Expected progress from the original collector');
+            await new Promise(r => setTimeout(r, 50));
+          }
+        };
+        try {
+          await eventually(async () => core.actorScheduler.collectors(session.sessionId).length === 1);
+          assert.equal(core.actorScheduler.collectors(session.sessionId)[0]!.continuationApproved, false);
+          const promotion = await recover('manual-managed', 'manage-existing-exact-collector', true);
+          assert.equal(promotion.code, 0, JSON.stringify(promotion));
+          assert.equal(promotion.value.providerMutation, false);
+          assert.equal(promotion.value.followup.managedContinuation.active, true);
+          assert.equal(promotion.value.followup.managedContinuation.submittedUserMessageId, 'managed-user');
+          assert.equal(core.actorScheduler.collectors(session.sessionId).length, 1);
+          assert.equal(core.actorScheduler.collectors(session.sessionId)[0]!.continuationApproved, true);
+          assert.equal(await page.evaluate(() => (window as any).sends), 1, 'Approval itself never sends');
+          const reviewKey = `followup-review:${requestRef}:managed-user`;
+          const reason = () => receipts.get('fixture-owner', reviewKey)?.resultJson;
+          await eventually(async () => !!reason() && JSON.parse(reason()!).reason === 'backend-generation-in-progress');
+          const originalSummary = (await show()).request.managedContinuation;
+          assert.equal(originalSummary.scope, 'original-generation');
+          assert.equal(originalSummary.active, false, 'Exact approval is not management of the old ACK');
+          const current = (await show('manual-managed')).results[0].followup.managedContinuation;
+          assert.ok(current.lastReviewAt && current.nextReviewAt);
+          assert.equal(current.submittedUserMessageId, 'managed-user');
+          assert.equal(await page.evaluate(() => (window as any).sends), 1, 'A live backend generation is preserved');
+          const dueAgain = () => {
+            const saved = receipts.get('fixture-owner', reviewKey)!;
+            receipts.record({ ...saved, status: 'complete', result: { ...JSON.parse(saved.resultJson),
+              nextReviewAt: new Date(Date.now() - 1000).toISOString() } });
+          };
+          backend = 'paced'; dueAgain();
+          await eventually(async () => !!reason() && JSON.parse(reason()!).reason === 'backend-http-429');
+          assert.equal(await page.evaluate(() => (window as any).sends), 1, '429 never authorizes a send');
+          backend = 'empty'; dueAgain();
+          const done = (await pendingWait).results[0];
+          assert.equal(done.followup.userMessageId, 'recovery-user-2');
+          assert.equal(done.followup.recoveredFromUserMessageId, 'manual-managed');
+          assert.equal(done.followup.responseMessageId, 'recovery-final-2');
+          assert.equal(await page.evaluate(() => (window as any).sends), 2);
+          assert.equal(await page.locator('textarea').inputValue(), 'Preserved pending prompt');
+          assert.deepEqual(rows(), before);
+          assert.equal(core.actorScheduler.collectors(session.sessionId).length, 0);
+        } finally { collectorAbort.abort(); await pendingWait.catch(() => {}); }
         // An interrupted dispatch without an ACK must restore the draft, never resend.
         const uncertain = JSON.parse(receipt.resultJson);
         uncertain.backup.acknowledgement = null;
@@ -211,7 +292,7 @@ test('explicit later responses preserve a completed original and an optional pre
         assert.equal(unknown.requestOk, false);
         assert.equal(unknown.errorCode, 'session.submission-unknown');
         assert.equal(unknown.draftPreservation.restored, true);
-        assert.equal(await page.evaluate(() => (window as any).sends), 1);
+        assert.equal(await page.evaluate(() => (window as any).sends), 2);
         assert.deepEqual(rows(), before);
         assert.equal(fake.submitCount, 1);
       }

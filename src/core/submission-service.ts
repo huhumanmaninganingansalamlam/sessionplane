@@ -883,7 +883,8 @@ export class SubmissionService {
 
   async inspectSubmission<Result>(
     input: { readonly clientId: string; readonly requestId: string; readonly sessionId: string; readonly generation: number; readonly followupInspection?: boolean; readonly readOnly?: boolean },
-    observe: (snapshot: SessionSnapshot, submittedMessageIds: ReadonlySet<string>, owner: SessionSnapshot) => Promise<Result>,
+    observe: (snapshot: SessionSnapshot, submittedMessageIds: ReadonlySet<string>, owner: SessionSnapshot,
+      adapter: import('../providers/provider-adapter.ts').ProviderAdapter) => Promise<Result>,
   ) {
     const actor = this.#scheduler.actorFor(input.sessionId);
     const requireOwner = () => {
@@ -917,7 +918,7 @@ export class SubmissionService {
       };
       if (snapshot.pageKey === null) return { ...result, evidence: null };
       return await this.#pageMutex.runExclusive(snapshot.pageKey, async () => ({
-        ...result, evidence: await observe(snapshot, this.#sessions.submittedMessageIds(snapshot.sessionId), this.#requireSnapshot(input.sessionId)),
+        ...result, evidence: await observe(snapshot, this.#sessions.submittedMessageIds(snapshot.sessionId), this.#requireSnapshot(input.sessionId), this.#adapters.require(snapshot.provider)),
       }));
     });
   }

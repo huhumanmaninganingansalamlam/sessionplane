@@ -405,7 +405,7 @@ export class ChatGptAdapter implements ProviderAdapter {
     try {
       page = this.#pageRegistry.requireOwnedPage(pageKey, {
         sessionId: request.session.sessionId,
-        generation: request.generation,
+        generation: request.bindingGeneration ?? request.generation,
         conversationId,
       });
     } catch (error) {

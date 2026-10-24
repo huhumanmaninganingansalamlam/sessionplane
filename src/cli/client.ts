@@ -49,7 +49,8 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
       typeof continuation.requestRef === 'string') {
     const collection = await callRpc({ ...options, collectContinuation: false, method: 'workflow.wait',
       params: { teamId: continuation.teamId, requestRefs: [continuation.requestRef], waitMs: 600_000, untilResult: true,
-        ...(typeof continuation.followupUserMessageId === 'string' ? { followupUserMessageId: continuation.followupUserMessageId } : {}),
+        ...(typeof continuation.followupUserMessageId === 'string' ? { followupUserMessageId: typeof continuation.recoveredFromUserMessageId === 'string'
+          ? continuation.recoveredFromUserMessageId : continuation.followupUserMessageId } : {}),
         ...(params?.continuationApproved === true ? { continuationApproved: true } : {}) } });
     return { ...continuation, collection } as Result;
   }
