@@ -168,6 +168,12 @@ out prompts, infer consensus, or inject answers into other roles.
   automatically. Do not resend or require a separate adoption decision. Completed
   results remain unchanged; new SessionPlane sends start the next generation.
 
+- If the original conversation tab is missing, explicitly decide `decision:"reopen"`
+  on its exact current requestRef (CLI `request reopen TEAM_ID REQUEST_REF`). This
+  opens only the stored original URL or rebinds its unique existing tab. It keeps
+  human hold, ACK, drafts and results; it never reloads, clicks, submits or starts
+  observation. Use focus separately when the user asks to see the recovered tab.
+
 - Select the requested combined model/effort label from the observed catalog.
   Preserve requested model/mode through cancellation and replacement. Honor exact
   versions; do not substitute or infer Pro from an account badge or High effort.

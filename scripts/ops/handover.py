@@ -368,12 +368,17 @@ def frozen_core(fd, pid, ticks, timeout=10):
 
 def verify_staged_resume(prior, h, installed, target):
     assert (prior/'staging.json').is_file(), 'Not a staging-only abort'
-    assert all(not (prior/n).exists() for n in ['handover.json', 'successor.json', 'promotion.json']), 'Transition history ambiguous; do not reenter'
+    assert all(not (prior/n).exists() for n in ['successor.json', 'promotion.json']), 'Transition history ambiguous; do not reenter'
     before = json.loads((prior/'before-health.json').read_text())
     for key in ['pid', 'startedAt']:
         assert before['process'][key] == h['process'][key], 'Original core lifetime changed'
     for key in ['browserPid', 'profileDir', 'debuggingPort']:
         assert before['browser'][key] == h['browser'][key], 'Browser identity changed'
+    if (prior/'handover.json').exists():
+        transition = json.loads((prior/'handover.json').read_text())
+        # This records commit intent, not exit. A refused commit can leave the exact old core live.
+        assert transition.get('oldPid') == h['process']['pid'] and transition.get('oldStartTicks') == procstat(h['process']['pid'])[19], 'Transition history ambiguous: original process lifetime unverified'
+        assert h.get('maintenance', {}).get('phase') == 'running', 'Prior commit lease is still active; preserve it'
     saved = json.loads((prior/'before-identity.json').read_text())
     current = request_identity(h, target)
     for key in ['request', 'anchor']:

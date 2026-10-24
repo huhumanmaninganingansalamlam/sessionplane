@@ -777,7 +777,7 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   if (action === 'followup') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'followup', approvalRef: requirePositional(parsed.words, 4, 'exact user instruction reference'),
   }, sessionSendRpcTimeoutMs(config), true);
-  if (['discover', 'refresh', 'focus', 'latest', 'reconcile_failure'].includes(action ?? '')) {
+  if (['discover', 'refresh', 'focus', 'latest', 'reopen', 'reconcile_failure'].includes(action ?? '')) {
     return await printRpc(io, parsed, config, 'workflow.decide', { ...mutation, decision: action,
       ...(action === 'reconcile_failure' && parsed.options['continuation-prompt'] !== undefined
         ? { continuationPrompt: parsed.options['continuation-prompt'] } : {}) }, sessionSendRpcTimeoutMs(config));
@@ -1378,7 +1378,7 @@ Exact request flow (same request; no automatic resend):
   5. Choose fresh controls: request choose TEAM_ID REQUEST_REF PURPOSE REF --snapshot-id ID
      PURPOSE is model, effort, composer or submit. Submit only after checking the input.
   6. Collect: request wait TEAM_ID REQUEST_REF [--wait-ms N] [--out DIRECTORY]
-  Recovery: request discover|refresh|focus|latest|reconcile_failure TEAM_ID REQUEST_REF
+  Recovery: request discover|refresh|focus|latest|reopen|reconcile_failure TEAM_ID REQUEST_REF
   Approved interrupted tool-turn continuation: request continue TEAM_ID REQUEST_REF --continuation-approved
   User-confirmed disconnected turn: add --user-confirmed-interruption FILE (conversationId, submittedUserMessageId, evidenceRef). Never infer user confirmation.
   Explicit new literal 계속 after UNKNOWN or a backend-proven lost continuation: request followup TEAM_ID REQUEST_REF USER_INSTRUCTION_REF

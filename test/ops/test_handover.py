@@ -532,6 +532,21 @@ class HandoverTests(unittest.TestCase):
                 (prior/'handover.json').write_text('{}')
                 with self.assertRaisesRegex(AssertionError, 'ambiguous'):
                     handover.verify_staged_resume(prior, h, installed, None)
+                (prior/'handover.json').write_text(json.dumps({'oldPid': 11, 'oldStartTicks': 'original-ticks'}))
+                h['maintenance'] = {'phase': 'running'}
+                with patch.object(handover, 'procstat', return_value=[''] * 19 + ['original-ticks']):
+                    handover.verify_staged_resume(prior, h, installed, None)
+                    h['maintenance']['phase'] = 'ready'
+                    with self.assertRaisesRegex(AssertionError, 'lease is still active'):
+                        handover.verify_staged_resume(prior, h, installed, None)
+                    h['maintenance']['phase'] = 'running'
+                    (prior/'promotion.json').write_text('{}')
+                    with self.assertRaisesRegex(AssertionError, 'ambiguous'):
+                        handover.verify_staged_resume(prior, h, installed, None)
+                (prior/'promotion.json').unlink()
+                with patch.object(handover, 'procstat', return_value=[''] * 19 + ['reused-pid']):
+                    with self.assertRaisesRegex(AssertionError, 'lifetime unverified'):
+                        handover.verify_staged_resume(prior, h, installed, None)
 
     def test_post_exit_rollback_preserves_db_and_refuses_live_successor(self):
         with tempfile.TemporaryDirectory() as directory:

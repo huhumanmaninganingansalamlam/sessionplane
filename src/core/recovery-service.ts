@@ -115,20 +115,23 @@ export class RecoveryService {
     return operation;
   }
 
-  async ensurePage(sessionId: string, generation: number, options: { openMissing?: boolean } = {}): Promise<void> {
+  async ensurePage(sessionId: string, generation: number, options: { openMissing?: boolean; passive?: boolean } = {}): Promise<void> {
     const operation = this.#tail.then(async () => {
       const snapshot = this.#sessions.getSnapshot(sessionId);
       if (snapshot === null || snapshot.generation !== generation) {
         throw new SessionPlaneDomainError('session.generation-superseded', 'Exact request page ownership changed');
       }
-      if (this.#loadRecovery.isUserHeld(snapshot.conversationId)) return;
+      if (this.#loadRecovery.isUserHeld(snapshot.conversationId) && !options.passive) return;
+      if (options.passive && (snapshot.conversationId === null || snapshot.conversationId.startsWith('WEB:'))) {
+        throw new SessionPlaneDomainError('session.recovery-unavailable', 'Opening the original page requires a verified conversation URL');
+      }
       this.#adapters.require(snapshot.provider);
       if (snapshot.pageKey !== null) {
         try {
           this.#pageRegistry.requireSessionPage(snapshot.pageKey, {
             sessionId, generation, conversationId: snapshot.conversationId,
           });
-          if (isObservationReady(snapshot)) this.#observations.start(snapshot);
+          if (!options.passive && isObservationReady(snapshot)) this.#observations.start(snapshot);
           return;
         } catch (error) {
           if (!(error instanceof PageRegistryError) || (error.errorCode !== 'browser.unavailable' &&
@@ -145,12 +148,15 @@ export class RecoveryService {
             `Missing-page recovery was not dispatched: shared ChatGPT pacing requires waiting until ${nextAllowedAt}`);
         }
       }
-      const recovered = await this.#reconcilePage(snapshot, options.openMissing === true, options.openMissing === true);
+      const recovered = await this.#reconcilePage(snapshot, options.openMissing === true,
+        options.openMissing === true && !options.passive, options.passive === true);
       if (recovered.unavailable || recovered.conflict || recovered.snapshot.pageKey === null) {
         throw new SessionPlaneDomainError('browser.unavailable', 'Exact request conversation page could not be recovered');
       }
-      if (isObservationReady(recovered.snapshot)) this.#observations.start(recovered.snapshot, { force: true });
-      if (needsAcknowledgementRecovery(recovered.snapshot)) this.watchAcknowledgementRecovery(recovered.snapshot);
+      if (!options.passive) {
+        if (isObservationReady(recovered.snapshot)) this.#observations.start(recovered.snapshot, { force: true });
+        if (needsAcknowledgementRecovery(recovered.snapshot)) this.watchAcknowledgementRecovery(recovered.snapshot);
+      }
     });
     this.#tail = operation.then(() => emptyReport(), () => emptyReport());
     await operation;
@@ -469,7 +475,7 @@ export class RecoveryService {
       reason: 'duplicate-page-preparation-recovered', errorCode: null }, 'generation.duplicate-pages-reconciled');
   }
 
-  async #reconcilePage(snapshot: SessionSnapshot, openMissing = true, reopenFailedPreparation = false): Promise<{
+  async #reconcilePage(snapshot: SessionSnapshot, openMissing = true, reopenFailedPreparation = false, passive = false): Promise<{
     readonly snapshot: SessionSnapshot;
     readonly rebound: boolean;
     readonly opened: boolean;
@@ -485,7 +491,7 @@ export class RecoveryService {
     // Reads/startup may only reattach the exact retained target. An explicit
     // missing-page recovery may reopen the stored conversation, never the submit.
     const held = this.#loadRecovery.isUserHeld(snapshot.conversationId);
-    if (held || (snapshot.submissionState === 'failed_pre_submit' && !explicitFailedPreparation)) {
+    if (!passive && (held || (snapshot.submissionState === 'failed_pre_submit' && !explicitFailedPreparation))) {
       const stored = snapshot.pageKey === null ? null : this.#pageBindings.get(snapshot.pageKey);
       if ((!held && snapshot.promptSubmitted) || stored?.targetId == null ||
           stored.sessionId !== snapshot.sessionId || stored.generation !== snapshot.generation ||
@@ -530,6 +536,7 @@ export class RecoveryService {
         matches = [...this.#pageRegistry.findByConversation(conversationId)];
       }
       if (matches.length > 1) {
+        if (passive) throw new SessionPlaneDomainError('session.page-identity-unverified', 'Multiple original conversation pages exist; none was changed');
         const updated = await this.#recordPageState(snapshot, {
           pageKey: null, observationTransport: 'stale', reason: 'duplicate-conversation-pages',
           errorCode: 'session.page-identity-unverified',
@@ -549,7 +556,8 @@ export class RecoveryService {
           generation: snapshot.generation,
           conversationId,
         });
-        const updated = await this.#recordPageState(snapshot, {
+        const updated = passive ? await this.#scheduler.updateGeneration(snapshot.sessionId, snapshot.generation,
+          { pageKey: match.pageKey }, 'generation.original-page-reopened') : await this.#recordPageState(snapshot, {
           pageKey: match.pageKey,
           observationTransport: 'fresh',
           reason: snapshot.reason === 'duplicate-page-preparation-recovered' ? snapshot.reason : 'restart-page-rebound',
@@ -557,6 +565,7 @@ export class RecoveryService {
         }, 'generation.restart-page-rebound');
         return result(updated, { rebound: true });
       } catch (error) {
+        if (passive) throw error;
         if (explicitFailedPreparation) throw explicitPageRecoveryError(error, 'bind-existing-page');
         return await this.#recordUnavailable(snapshot, classifyPageFailure(error));
       }
@@ -625,6 +634,13 @@ export class RecoveryService {
       await this.#navigatePage(created.page, target);
       stage = 'verify-page';
       const navigated = this.#pageRegistry.refreshPage(created.binding.pageKey);
+      if (passive) {
+        const current = this.#sessions.getSnapshot(snapshot.sessionId);
+        if (current === null || current.generation !== snapshot.generation ||
+            current.conversationId !== snapshot.conversationId || current.pageKey !== snapshot.pageKey) {
+          throw new SessionPlaneDomainError('session.generation-superseded', 'Request changed while opening its original page');
+        }
+      }
       if (explicitFailedPreparation) {
         const current = this.#sessions.getSnapshot(snapshot.sessionId);
         if (current === null || current.generation !== snapshot.generation ||
@@ -656,7 +672,8 @@ export class RecoveryService {
         conversationId,
       });
       stage = 'record-page';
-      const updated = await this.#recordPageState(snapshot, {
+      const updated = passive ? await this.#scheduler.updateGeneration(snapshot.sessionId, snapshot.generation,
+        { pageKey: created.binding.pageKey }, 'generation.original-page-reopened') : await this.#recordPageState(snapshot, {
         pageKey: created.binding.pageKey,
         observationTransport: 'fresh',
         reason: 'restart-page-opened',
@@ -666,6 +683,7 @@ export class RecoveryService {
       return result(updated, { opened: true, rebound: true });
     } catch (error) {
       await createdPage?.close().catch(() => undefined);
+      if (passive) throw error;
       if (explicitFailedPreparation) {
         const failure = explicitPageRecoveryError(error, stage);
         this.#logger?.warn('recovery.explicit-page-failed', {
