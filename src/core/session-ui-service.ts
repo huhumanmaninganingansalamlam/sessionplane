@@ -255,8 +255,9 @@ export class SessionUiService {
       });
   }
 
-  async observeFollowup(input: PreparationOwner, followupUserMessageId?: string): Promise<(ProviderObservationEvidence & { followupUserMessageId: string }) | null> {
-    const read = await this.#submissions.inspectSubmission({ ...input, followupInspection: true }, async (session, _submittedIds, owner) => {
+  async observeFollowup(input: PreparationOwner, followupUserMessageId?: string, review = false): Promise<(ProviderObservationEvidence & {
+    followupUserMessageId: string; serverRecovery?: import('../providers/provider-adapter.ts').ProviderRecoveryResult }) | null> {
+    const read = await this.#submissions.inspectSubmission({ ...input, followupInspection: true }, async (session, _submittedIds, owner, adapter) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try { return await Promise.race([(async () => {
       const page = this.#requirePage(owner);
@@ -274,15 +275,20 @@ export class SessionUiService {
       }
       const dom = await observeChatGptDom(page, { submittedUserMessageId: followupId, submittedUserTurnId: null });
       const activity = await observeChatGptActivity(page, dom);
+      const dialog = await observeChatGptDialog(page);
       const binding = this.#registry.refreshPage(session.pageKey!);
+      const serverRecovery = review && dom.submittedUserFound && !dom.laterUserFound && activity.strength === 'none' && !dialog.kind
+        ? await adapter.recover({ session: { ...session, submittedUserMessageId: followupId, submittedUserTurnId: followupId,
+          answerText: null, responseMessageId: null }, generation: session.generation, bindingGeneration: owner.generation }) : undefined;
       return { followupUserMessageId: followupId, provider: 'chatgpt' as const, pageKey: session.pageKey!, bindingEpoch: binding.bindingEpoch,
-        observedAt: dom.messageDiagnostics.observedAt, conversationId: session.conversationId,
+        observedAt: new Date().toISOString(), conversationId: session.conversationId,
         submittedUserFound: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
-        candidate: dom.candidate, activity: activity.strength, dialogKind: null, networkActivity: false,
+        candidate: dom.candidate, activity: activity.strength, dialogKind: dialog.kind, networkActivity: false,
+        ...(serverRecovery ? { serverRecovery } : {}),
         observationTransport: 'fresh' as const, reason: dom.actionableAlert ? 'provider-actionable-alert' : activity.reason,
         ...(dom.actionableAlert ? { errorCode: 'provider.actionable-alert' } : {}) };
       })(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new SessionPlaneDomainError(
-        'browser.snapshot-timeout', 'Follow-up observation delayed; preserve the original and later turn')), 5000); })]);
+        'browser.snapshot-timeout', 'Follow-up observation delayed; preserve the original and later turn')), review ? 20000 : 5000); })]);
       } finally { clearTimeout(timer); }
     });
     if (read.evidence === undefined) throw new SessionPlaneDomainError('browser.unavailable', 'Original follow-up page is unavailable');
@@ -290,7 +296,8 @@ export class SessionUiService {
   }
 
   async continueFollowup(input: PreparationOwner & { decisionId: string; originalRequestRef: string;
-    followupUserMessageId: string; preparedGeneration: number; preparedPrompt: string; model: PreparationTarget }, receipts: ReceiptRepository) {
+    followupUserMessageId: string; preparedGeneration: number; preparedPrompt: string; model: PreparationTarget;
+    reviewedEmptyAt?: string; signal?: AbortSignal }, receipts: ReceiptRepository) {
     const read = await this.#submissions.inspectSubmission({ ...input, followupInspection: true }, async (original, _ids, owner) => {
       const key = `followup-continue:${input.originalRequestRef}:${input.followupUserMessageId}`;
       const method = 'session.followup-continue';
@@ -322,9 +329,11 @@ export class SessionUiService {
         const activity = await observeChatGptActivity(page, dom);
         const disconnected = activity.reason === 'provider-stream-disconnected' && !dom.candidate?.streamingMarker;
         const timeout = dom.providerAlerts.length > 0 && dom.providerAlerts.every(isMessageTimeoutAlert);
+        const reviewedEmpty = !!input.reviewedEmptyAt && Date.now() - Date.parse(input.reviewedEmptyAt) <= 180000 &&
+          activity.strength === 'none' && dom.candidate === null && dom.providerAlerts.length === 0;
         const snapshot = await this.#capture(owner, 5000);
         if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate?.terminalMarker || dom.candidate?.streamingMarker ||
-            (!disconnected && activity.strength !== 'none') || (!disconnected && !timeout) ||
+            (!disconnected && activity.strength !== 'none') || (!disconnected && !timeout && !reviewedEmpty) ||
             dom.providerAlerts.some(a => !isMessageTimeoutAlert(a)) || snapshot.nodesTruncated ||
             snapshot.nodes.some(n => ['dialog', 'alertdialog'].includes(n.role) || n.role === 'button' &&
               /^(?:allow|always allow|allow once|deny|한 번만 허용|항상 허용|허용|거부)$/i.test(n.name.trim())) ||
@@ -353,6 +362,9 @@ export class SessionUiService {
       const submission = new ChatGptSubmission({ page, pageKey: owner.pageKey!, pageRegistry: this.#registry,
         acknowledgementTimeoutMs: 5000, request: { session: owner, generation: owner.generation,
           prompt: '계속', model: null, onSubmissionAttempt: attempt => { state.attempt = attempt; save(); } } });
+      const abandon = () => submission.abandon();
+      input.signal?.addEventListener('abort', abandon, { once: true });
+      if (input.signal?.aborted) abandon();
       let error: SessionPlaneDomainError | undefined;
       let restored = false;
       try {
@@ -362,12 +374,14 @@ export class SessionUiService {
           const current = await verify();
           await requireIdleConversationPage(page, '계속', current.disconnected);
           this.#requirePage(owner);
+          if (input.signal?.aborted) throw new SessionPlaneDomainError('provider.preparation-required', 'Collector stopped; preserve the draft');
           state.dispatched = true; save();
           await submission.submitOnce();
           state.acknowledgement = await submission.captureAcknowledgement(); save();
         }
       } catch (failure) { error = typedUiError(failure); }
       finally {
+        input.signal?.removeEventListener('abort', abandon);
         submission.abandon();
         this.#requirePage(owner);
         // Never overwrite a human edit made while the operation was in flight.
@@ -380,6 +394,7 @@ export class SessionUiService {
         sessionId: owner.sessionId, generation: original.generation, terminal: false, promptSubmitted: state.dispatched,
         ...(acknowledged ? { followupUserMessageId: acknowledged.submittedUserMessageId } : {}),
         recoveredFromUserMessageId: input.followupUserMessageId, acknowledgement: acknowledged,
+        ...(input.reviewedEmptyAt ? { reviewedEmptyAt: input.reviewedEmptyAt } : {}),
         draftPreservation: { requestGeneration: owner.generation, restored, characters: state.draft.length,
           sha256: createHash('sha256').update(state.draft).digest('hex') }, receiptId: key,
         errorCode: !restored ? 'provider.preparation-required' : !acknowledged ? state.dispatched

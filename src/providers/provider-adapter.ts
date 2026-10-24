@@ -204,6 +204,7 @@ export interface ProviderRecoveryResult {
 export interface ProviderRecoveryRequest {
   readonly session: SessionSnapshot;
   readonly generation: number;
+  readonly bindingGeneration?: number;
 }
 
 export interface ProviderArtifactCandidate {

@@ -29,7 +29,7 @@ export class SessionActor {
   #queueDepth = 0;
   #nextWaiterId = 1;
   readonly #waiters = new Map<number, Waiter>();
-  readonly #collectors = new Map<symbol, { requestRef: string; continuationApproved: boolean }>();
+  readonly #collectors = new Map<symbol, { requestRef: string; continuationApproved: boolean; followupUserMessageId?: string }>();
   readonly #onIdleTerminal: (() => void) | null;
   #closed = false;
 
@@ -52,14 +52,15 @@ export class SessionActor {
     return this.#waiters.size + this.#collectors.size;
   }
 
-  get collectors(): readonly { requestRef: string; continuationApproved: boolean }[] {
+  get collectors(): readonly { requestRef: string; continuationApproved: boolean; followupUserMessageId?: string }[] {
     return [...this.#collectors.values()];
   }
 
   /** Keep collection interest between the managed wait's observation rounds. */
-  retainCollector(requestRef: string, continuationApproved: boolean): () => void {
+  retainCollector(requestRef: string, continuationApproved: boolean, followupUserMessageId?: string): () => void {
     const key = Symbol();
-    this.#collectors.set(key, { requestRef, continuationApproved });
+    this.#collectors.set(key, { requestRef, continuationApproved,
+      ...(followupUserMessageId ? { followupUserMessageId } : {}) });
     let released = false;
     return () => {
       if (released) return;
@@ -67,6 +68,13 @@ export class SessionActor {
       this.#collectors.delete(key);
       this.#retireIfIdleTerminal();
     };
+  }
+
+  approveFollowupCollector(requestRef: string, followupUserMessageId: string): void {
+    for (const collector of this.#collectors.values()) {
+      if (collector.requestRef === requestRef && collector.followupUserMessageId === followupUserMessageId)
+        collector.continuationApproved = true;
+    }
   }
 
   snapshot(): SessionWaitSnapshot {

@@ -49,6 +49,7 @@ const FLAG_OPTIONS = new Set([
   'no-activate',
   'outputs-retrieved',
   'continuation-approved',
+  'manage-only',
   'return-on-wait-expiry',
   'preserve-conversation',
 ]);
@@ -775,10 +776,11 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   }, sessionSendRpcTimeoutMs(config));
   if (action === 'continue') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'continue', continuationApproved: parsed.options['continuation-approved'] === 'true',
+    ...(parsed.options['manage-only'] === 'true' ? { manageOnly: true } : {}),
     ...optionalParam('followupUserMessageId', parsed.options['followup-message-id']),
     ...(parsed.options['user-confirmed-interruption'] === undefined ? {} : {
       userConfirmedInterruption: JSON.parse(readFileSync(parsed.options['user-confirmed-interruption'], 'utf8')) }),
-  }, sessionSendRpcTimeoutMs(config), parsed.options['wait-ms'] !== '0');
+  }, sessionSendRpcTimeoutMs(config), parsed.options['wait-ms'] !== '0' && parsed.options['manage-only'] !== 'true');
   if (action === 'followup') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'followup', approvalRef: requirePositional(parsed.words, 4, 'exact user instruction reference'),
   }, sessionSendRpcTimeoutMs(config), true);
@@ -1385,6 +1387,7 @@ Exact request flow (same request; no automatic resend):
   6. Collect: request wait TEAM_ID REQUEST_REF [--wait-ms N] [--out DIRECTORY]
   Recovery: request discover|refresh|focus|latest|reopen|reconcile_failure TEAM_ID REQUEST_REF
   Approved interrupted tool-turn continuation: request continue TEAM_ID REQUEST_REF --continuation-approved
+  Approve existing exact collector without sending: request continue TEAM_ID REQUEST_REF --followup-message-id SOURCE_ID --continuation-approved --manage-only
   User-confirmed disconnected turn: add --user-confirmed-interruption FILE (conversationId, submittedUserMessageId, evidenceRef). Never infer user confirmation.
   Explicit new literal 계속 after UNKNOWN or a backend-proven lost continuation: request followup TEAM_ID REQUEST_REF USER_INSTRUCTION_REF
     Preserves original uncertainty; never automatically retries or bypasses provider errors/drafts/activity.
