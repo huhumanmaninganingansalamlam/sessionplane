@@ -18,6 +18,72 @@ interface TeamSnapshot {
   readonly teamId: string;
 }
 
+test('explicit reopen restores a held original page without clicks, collection, replay or state loss', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-held-original-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  let navigations = 0;
+  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    recoveryNavigatePage: async (page, url) => {
+      navigations++;
+      await navigateFixture(page, url);
+      await page.evaluate(() => {
+        document.body.dataset.clicks = '0';
+        document.addEventListener('click', () => { document.body.dataset.clicks = String(Number(document.body.dataset.clicks) + 1); });
+      });
+    }, logger: silentLogger() });
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'held-original' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: team.primaryRoleKey, provider: 'chatgpt' });
+    const clientId = `team:${team.teamId}`;
+    await service.submissionService.send({ clientId, requestId: 'original-question', sessionId: session.sessionId,
+      prompt: 'Original substantive question', sessionDeadlineSec: 600 });
+    service.observationService.stop(session.sessionId, 1);
+    await service.recoveryService.ensurePage(session.sessionId, 1, { openMissing: true, passive: true });
+    await service.actorScheduler.updateGeneration(session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
+      completedAt: new Date().toISOString(), responseMessageId: 'original-answer', answerText: 'Original final', reason: 'dom-quiet-stable-final' });
+    const request = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=1').get(session.sessionId) as { outbox_id: string };
+    const identity = { teamId: team.teamId, requestRef: request.outbox_id };
+    await rpc(config.socketPath, 'workflow.decide', { ...identity, requestId: 'human-hold', decision: 'human_review', action: 'pause' });
+    const held = service.teamDirectory.getSession(session.sessionId);
+    const recovery = new ConversationLoadRecoveryRepository(service.database);
+    const hold = recovery.get(held.conversationId!);
+    await service.pageRegistry.pageForObservation(held.pageKey!).close();
+    const unrelated = service.pageRegistry.listBindings({ includeClosed: false })[0]!;
+    const unrelatedPage = service.pageRegistry.pageForObservation(unrelated.pageKey);
+    await unrelatedPage.evaluate(() => { const draft = document.createElement('textarea'); draft.value = 'Keep this unrelated draft'; document.body.append(draft); });
+    let starts = 0;
+    service.observationService.start = () => { starts++; };
+    // Held reads/startup still cannot create a tab implicitly.
+    await service.recoveryService.ensurePage(session.sessionId, 1);
+    assert.equal(navigations, 1);
+    const results = await Promise.all(['open-original', 'concurrent-open'].map(requestId => rpc<Record<string, unknown>>(
+      config.socketPath, 'workflow.decide', { ...identity, requestId, decision: 'reopen' })));
+    const restored = service.teamDirectory.getSession(session.sessionId);
+    assert.notEqual(restored.pageKey, held.pageKey);
+    assert.ok(results.every(result => result.pageKey === restored.pageKey && result.observationHeld === true));
+    const reopened = service.pageRegistry.getBinding(restored.pageKey!);
+    assert.equal(reopened.url, `https://chatgpt.com/c/${held.conversationId}`);
+    assert.equal(reopened.sessionId, held.sessionId);
+    assert.equal(reopened.generation, held.generation);
+    assert.equal(reopened.state, 'owned');
+    const { pageKey: oldPage, updatedAt: oldTime, ...before } = held;
+    const { pageKey: newPage, updatedAt: newTime, ...after } = restored;
+    assert.deepEqual(after, before, 'only the page binding and update timestamp may change');
+    assert.deepEqual(recovery.get(held.conversationId!), hold);
+    assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? AND generation=1').get(session.sessionId), request);
+    await rpc(config.socketPath, 'workflow.decide', { ...identity, requestId: 'open-original', decision: 'reopen' });
+    assert.equal(navigations, 2, 'concurrent calls and receipt replay never reload or duplicate the original tab');
+    assert.equal(starts, 0);
+    assert.equal(fake.submitCount, 1);
+    assert.equal(await service.pageRegistry.pageForObservation(restored.pageKey!).locator('body').getAttribute('data-clicks'), '0');
+    assert.equal(await unrelatedPage.locator('textarea').inputValue(), 'Keep this unrelated draft');
+    assert.equal(service.pageRegistry.getBinding(unrelated.pageKey).url, unrelated.url);
+    await assert.rejects(rpc(config.socketPath, 'workflow.decide', { ...identity, requestId: 'open-original', decision: 'focus' }),
+      (error: unknown) => error instanceof RpcClientError && (error.data as { errorCode?: string }).errorCode === 'input.idempotency-conflict');
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('startup leaves missing prepared pages closed; explicit concurrent recovery reuses one page', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-prepared-fanout-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
