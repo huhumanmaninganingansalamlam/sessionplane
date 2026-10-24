@@ -262,12 +262,7 @@ export class TeamWorkflow {
           const permission = await this.services.ui.hostspanPermission(session, input, original, passiveInspection, workOriginal, exactFollowup);
           if (exactFollowup && input.action === 'allow' && permission.outcome === 'clicked' &&
               'permissionStillVisible' in permission && permission.permissionStillVisible === false) {
-            const review = this.services.receipts.get(request.clientId, `followup-review:${request.outboxId}:${exactFollowup.userMessageId}`);
-            const last = review && JSON.parse(review.resultJson);
-            if (review?.method === 'workflow.followup.review' && last?.decisionRequired &&
-                ['provider.failure-unverified', 'provider.preparation-required'].includes(last.reason))
-              this.services.receipts.record({ ...review, status: 'complete', result: { ...last, decisionRequired: false,
-                reason: 'exact-permission-resolved', nextReviewAt: new Date().toISOString() } });
+            this.#rearmExactReview(request, exactFollowup.sourceUserMessageId, 'exact-permission-resolved');
           }
           const result = { requestOk: true, requestRef: input.requestRef, sessionId: session.sessionId,
             generation: session.generation, permissionRequestRef: permissionRequest.outboxId,
@@ -416,6 +411,7 @@ export class TeamWorkflow {
         this.services.receipts.execute({ clientId: request.clientId, requestId: input.requestId,
           method: 'workflow.followup.manage', payload: input, operation: () => {
             this.#approveExactFollowup(request, source);
+            this.#rearmExactReview(request, source, 'management-reapproved');
             return { approved: true };
           } });
         this.services.scheduler.actorFor(request.sessionId).approveFollowupCollector(request.outboxId, source);
@@ -984,6 +980,16 @@ export class TeamWorkflow {
     this.services.receipts.record({ clientId: request.clientId, requestId, method: 'workflow.followup.management',
       requestHash: hashCanonical({ requestRef: request.outboxId, source }), status: 'complete',
       result: { approved: true, sourceFollowupUserMessageId: source, approvedAt: new Date().toISOString() } });
+  }
+
+  #rearmExactReview(request: OutboxRecord, source: string, reason: string) {
+    const exact = this.#exactFollowup(request, source);
+    const review = this.services.receipts.get(request.clientId, `followup-review:${request.outboxId}:${exact.userMessageId}`);
+    const last = review && JSON.parse(review.resultJson);
+    if (review?.method === 'workflow.followup.review' && last?.decisionRequired &&
+        ['provider.failure-unverified', 'provider.preparation-required'].includes(last.reason))
+      this.services.receipts.record({ ...review, status: 'complete', result: { ...last, decisionRequired: false,
+        reason, nextReviewAt: new Date().toISOString() } });
   }
 
   #exactManagement(request: OutboxRecord, source: string, terminal: boolean) {

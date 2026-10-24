@@ -271,6 +271,11 @@ test('explicit later responses preserve a completed original and an optional pre
               nextUserFound: false, assistantCount: 0, messages: backend === 'active' ? [{ messageId: 'running', role: 'assistant',
                 channel: 'analysis', status: 'in_progress', endTurn: false, hidden: true, textLength: 0 }] : [] } }) };
         });
+        // A caller can also resume management after handling the exact card in
+        // the provider UI: approval-only must rearm, without another grant/send.
+        const paused = receipts.get('fixture-owner', reviewKey)!;
+        receipts.record({ ...paused, status: 'complete', result: { reason: 'provider.failure-unverified',
+          decisionRequired: true, nextReviewAt: null } });
         const collectorAbort = new AbortController();
         const pendingWait = callRpc<any>({ socketPath: config.socketPath, method: 'workflow.wait',
           params: { teamId: team.teamId, requestRefs: [requestRef], followupUserMessageId: 'manual-managed', waitMs: 60000, untilResult: false },
