@@ -518,6 +518,79 @@ test('original HostSpan grant remains controllable after an approved continuatio
   } finally { await f.close(); }
 });
 
+test('missing recovery ACK controls only the exact retained work permission across literal Continues', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    f.fake.idleToolTurn = true;
+    f.fake.failureCount = 10;
+    const workRef = await f.submit(false);
+    let requestRef = workRef;
+    for (let i = 0; i < 2; i++) {
+      const current = f.core.teamDirectory.getSession(f.session.sessionId);
+      const result = await f.rpc<any>('decide', { teamId: f.team.teamId, requestRef,
+        requestId: `approved-continue-${i}`, decision: 'continue', continuationApproved: true,
+        userConfirmedInterruption: { conversationId: current.conversationId,
+          submittedUserMessageId: current.submittedUserMessageId, evidenceRef: 'Exact idle original inspected by user' } });
+      requestRef = result.requestRef;
+    }
+    const current = f.core.teamDirectory.getSession(f.session.sessionId);
+    assert.equal(current.generation, 3);
+    assert.equal(current.submittedUserMessageId, 'user-message-3');
+    const history = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(current.sessionId);
+    const users = '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>' +
+      '<div data-message-author-role="user" data-message-id="user-message-2">계속</div>' +
+      '<div data-message-author-role="user" data-message-id="mounted-continue">계속</div>';
+    await f.fake.page.setContent(`<main>${configuration}${users}
+      <div class="group/activity-header"><button aria-expanded="false" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">hostspan-desktop 통합 사용함</button></div>
+      <div class="group/activity-header"><button aria-expanded="false" aria-controls="work" onclick="window.reveals=(window.reveals||0)+1;this.setAttribute('aria-expanded','true');document.querySelector('#work').hidden=false">이전 활동</button></div>
+      <div id="work" hidden><section id="permission"><div role="alert">hostspan-desktop File Patch target: original workspace/source.ts</div>
+        <button onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove();document.querySelector('main').insertAdjacentHTML('beforeend','<div data-message-author-role=assistant data-message-id=work-final data-end-turn=true>Original work patch applied</div>')">Always allow</button></section></div>
+      <textarea>Preserved user draft</textarea></main>`);
+    const permission = (requestId: string, extra: object = {}) => f.rpc<any>('decide', {
+      teamId: f.team.teamId, requestRef, requestId, decision: 'hostspan_permission',
+      action: 'inspect', appName: 'hostspan-desktop', toolName: 'File Patch', allowMode: 'always', ...extra });
+    await f.rpc('team_get', { teamId: f.team.teamId, requestRef, view: 'evidence' });
+    assert.equal(await f.fake.page.evaluate(() => (window as any).reveals ?? 0), 0, 'Passive observation remains click0');
+    const payload = f.core.database.raw.prepare('SELECT payload_json FROM outbox WHERE outbox_id=?').get(requestRef)!;
+    f.core.database.raw.prepare('UPDATE outbox SET payload_json=? WHERE outbox_id=?')
+      .run(JSON.stringify({ ...JSON.parse(String(payload.payload_json)), continuationOf: 'foreign-request' }), requestRef);
+    await assert.rejects(permission('foreign-lineage'), /anchor|current turn/i);
+    f.core.database.raw.prepare('UPDATE outbox SET payload_json=? WHERE outbox_id=?').run(payload.payload_json!, requestRef);
+    for (const [index, html] of [
+      '<div data-message-author-role="user" data-message-id="other-wp">Different work</div>',
+      '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>',
+    ].entries()) {
+      await f.fake.page.locator('main').evaluate((node, html) => node.insertAdjacentHTML('beforeend', '<aside id="unsafe">' + html + '</aside>'), html);
+      await assert.rejects(permission('unsafe-' + index), /anchor|current turn/i);
+      await f.fake.page.locator('#unsafe').evaluate(node => node.remove());
+    }
+    const inspected = await permission('inspect-exact-work');
+    assert.equal(inspected.requestRef, requestRef);
+    assert.equal(inspected.permissionRequestRef, requestRef);
+    assert.equal(inspected.workRequestRef, workRef);
+    assert.equal(inspected.workGeneration, 1);
+    assert.equal(inspected.permission.requestAcknowledgementVerified, false);
+    assert.equal(inspected.permission.workAcknowledgementVerified, true);
+    assert.equal(inspected.permission.currentUserMessageId, 'mounted-continue');
+    assert.equal(inspected.permission.workUserMessageId, 'user-message-1');
+    assert.ok(inspected.permission.evidenceHash);
+    assert.equal(await f.fake.page.evaluate(() => (window as any).unrelatedClicks ?? 0), 0);
+    const allowed = await permission('allow-exact-work', { action: 'allow', evidenceHash: inspected.permission.evidenceHash });
+    assert.equal(allowed.permission.outcome, 'clicked');
+    assert.equal(allowed.permission.permissionStillVisible, false);
+    assert.equal(await f.fake.page.evaluate(() => (window as any).grants), 1);
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved user draft');
+    const recovered = await f.rpc<any>('team_get', { teamId: f.team.teamId, requestRef, view: 'evidence' });
+    assert.equal(recovered.request.workResult.responseMessageId, 'work-final');
+    assert.equal(recovered.request.workResult.originalRequestRef, workRef);
+    assert.equal(f.core.teamDirectory.getSession(current.sessionId).submittedUserMessageId, 'user-message-3');
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(current.sessionId), history);
+    assert.equal(f.fake.submitCount, 3);
+    assert.equal(f.fake.stopCount, 0);
+  } finally { await f.close(); }
+});
+
 test('explicitly confirmed idle acknowledged turn with no response continues once without replaying product input', async () => {
   const f = await fixture();
   try {

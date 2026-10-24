@@ -830,7 +830,8 @@ export class SessionUiService {
   }
 
   /** Caller holds the exact current request actor and page mutation lock. */
-  async hostspanPermission(session: SessionSnapshot, input: HostSpanPermissionInput, original = session, passiveInspection = false) {
+  async hostspanPermission(session: SessionSnapshot, input: HostSpanPermissionInput, original = session,
+    passiveInspection = false, workOriginal?: SessionSnapshot) {
     if (session.provider !== 'chatgpt' ||
         (original.submissionState !== 'submitted' && original.submissionState !== 'submission_unknown') ||
         original.sessionId !== session.sessionId || original.conversationId !== session.conversationId ||
@@ -857,14 +858,30 @@ export class SessionUiService {
       const messages = (await readChatGptMessages(page)).filter(message => message.role === 'user');
       // A visible exact grant belongs to this owned conversation independently of
       // an uncertain outgoing message. Never turn controlling that grant into ACK.
-      const anchor = original.submittedUserMessageId ??
+      let anchor = original.submittedUserMessageId ??
         (original.submissionState === 'submission_unknown' ? messages.at(-1)?.messageId : null);
-      if (!anchor || messages.at(-1)?.messageId !== anchor) throw new SessionPlaneDomainError(
-        'provider.permission-unverified', 'The original user anchor must be the current turn');
+      const acknowledgementVerified = original.submissionState === 'submitted' &&
+        messages.filter(message => message.messageId === original.submittedUserMessageId).length === 1;
+      let association;
+      if (!anchor || messages.at(-1)?.messageId !== anchor) {
+        // A recovery Continue's missing ACK must not hide a card belonging to
+        // its exact retained work. This associates controls, never rewrites ACKs.
+        const roots = workOriginal && messages.filter(message => message.messageId === workOriginal.submittedUserMessageId);
+        const root = roots?.length === 1 ? roots[0] : undefined;
+        const following = root && messages.slice(messages.indexOf(root) + 1);
+        const currentAnchor = messages.at(-1)?.messageId;
+        if (!root || !following?.length || following.some(message =>
+            message.rootIndex !== root.rootIndex || message.text.trim() !== '계속') ||
+            messages.filter(message => message.messageId === original.submittedUserMessageId).length > 1 ||
+            !currentAnchor) throw new SessionPlaneDomainError(
+          'provider.permission-unverified', 'The original user anchor must be the current turn or a verified same-work continuation');
+        anchor = currentAnchor;
+        association = { association: 'exact-original-question-and-literal-continuations',
+          workUserMessageId: root.messageId, currentUserMessageId: anchor, workAcknowledgementVerified: true };
+      }
       const result = await controlHostSpanPermission(page, input, anchor);
       this.#requirePage(session);
-      return { ...result, requestAcknowledgementVerified: original.submissionState === 'submitted' &&
-        original.submittedUserMessageId !== null };
+      return { ...result, ...association, requestAcknowledgementVerified: acknowledgementVerified };
     } catch (error) { throw typedUiError(error); }
   }
 
