@@ -279,7 +279,7 @@ export class SessionUiService {
         observedAt: dom.messageDiagnostics.observedAt, conversationId: session.conversationId,
         submittedUserFound: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
         candidate: dom.candidate, activity: activity.strength, dialogKind: null, networkActivity: false,
-        observationTransport: 'fresh' as const, reason: dom.actionableAlert ? 'provider-actionable-alert' : null,
+        observationTransport: 'fresh' as const, reason: dom.actionableAlert ? 'provider-actionable-alert' : activity.reason,
         ...(dom.actionableAlert ? { errorCode: 'provider.actionable-alert' } : {}) };
       })(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new SessionPlaneDomainError(
         'browser.snapshot-timeout', 'Follow-up observation delayed; preserve the original and later turn')), 5000); })]);

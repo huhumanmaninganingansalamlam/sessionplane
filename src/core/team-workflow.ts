@@ -535,6 +535,7 @@ export class TeamWorkflow {
               const decision = followupTracker.evaluate({ ...evidence, candidate: evidence.candidate && evidence.activity !== 'none'
                 ? { ...evidence.candidate, terminalMarker: false } : evidence.candidate }, Date.now());
               result = { ...result, errorCode: undefined, reason: 'followup-collecting', followup: { ...decision, terminal: decision.kind === 'complete',
+                observedAt: evidence.observedAt, activity: evidence.activity,
                 userMessageId: followupId, originalRequestRef: request.outboxId } };
               if (decision.kind === 'complete') {
                 const reconciliation = await this.services.ui.reconcileFollowup({ ...ownerOf(request),

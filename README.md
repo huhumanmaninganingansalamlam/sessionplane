@@ -118,6 +118,8 @@ machine-readable results and diagnostics.
    the managed chain's next review from backend pacing. `--view result` recovers
    the exact answer; `--view evidence` also reads fresh UI, prompt/candidates and
    controls (MCP: `team_get` with the same `view`). Use evidence for preparation.
+   For an already-submitted later turn, `request show TEAM_ID REQUEST_REF
+   --followup-message-id MESSAGE_ID` reads one exact snapshot without adding a collector.
    Select an available combined model
    using the displayed `request configure` command, then the fresh composer control.
    Inspect the input before explicitly choosing the submit control. Disabled or stale
@@ -161,7 +163,7 @@ Tagged releases attach a prebuilt npm package and SHA-256 checksum. Install the
 release package globally, then run the built-in doctor:
 
 ```bash
-VERSION=0.4.80
+VERSION=0.4.81
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz"
 curl -fLO "https://github.com/huhumanmaninganingansalamlam/sessionplane/releases/download/v$VERSION/sessionplane-$VERSION.tgz.sha256"
 sha256sum -c "sessionplane-$VERSION.tgz.sha256"

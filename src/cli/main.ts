@@ -716,6 +716,10 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   const request = { teamId, requestRef: ref };
   const requestId = parsed.options['request-id'] ?? randomUUID();
   const mutation = { ...request, requestId };
+  if (action === 'show' && parsed.options['followup-message-id'] !== undefined) return await printRpc(io, parsed, config, 'workflow.wait', {
+    teamId, requestRefs: [ref], waitMs: 0, untilResult: false,
+    followupUserMessageId: parsed.options['followup-message-id'],
+  });
   if (action === 'show') return await printRpc(io, parsed, config, 'workflow.team_get', {
     ...request, ...optionalParam('view', parsed.options.view),
     ...(parsed.options['max-nodes'] === undefined ? {} : { maxNodes: integerOption(parsed, 'max-nodes', 250, 1, 5000) }),
