@@ -22,8 +22,11 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     const { page, binding } = await core.browserOwner!.createPage();
     await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<main>
       <button aria-expanded="false" onclick="throw Error('Old work must stay closed')">작업 중입니다</button>
+      <div data-message-author-role="user" data-message-id="old-question">Unrelated earlier work</div>
+      <section role="alert" hidden>hostspan-desktop Process Start Old permission</section>
       <div data-message-author-role="user" data-message-id="user-message-1">Fixture question</div>
-      <div class="group/activity-header"><button aria-expanded="false" aria-labelledby="work-label" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#work').hidden=false"></button><span id="work-label">이전 활동</span></div>
+      <div class="group/activity-header"><button aria-expanded="false" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">hostspan-desktop 통합 사용함</button></div>
+      <div class="group/activity-header"><button aria-expanded="false" aria-controls="work" aria-labelledby="work-label" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#work').hidden=false"></button><span id="work-label">이전 활동</span></div>
       <span id="elapsed">1 hour 14 seconds working</span>
       <textarea id="prompt-textarea">Keep my draft</textarea><button data-testid="stop-button">Stop generating</button>
       <div id="work" hidden><section id="permission"><div role="alert">hostspan-desktop Process Start
@@ -56,6 +59,8 @@ test('explicit HostSpan permission controls only the current exact grant, preser
       { stdin: Readable.from([]), stdout: stream, stderr: stream }), 0, output);
     const inspected = { structuredContent: JSON.parse(output) };
     assert.equal(inspected.structuredContent.requestOk, true, JSON.stringify(inspected));
+    assert.equal(await page.evaluate(() => (window as any).unrelatedClicks ?? 0), 0,
+      'Explicit permission inspection opens only the card-linked disclosure, never integration controls or another work question');
     assert.equal(prepare.mock.callCount(), 1, 'Use the existing exact-page background interaction lifecycle');
     const permission = inspected.structuredContent.permission as { evidenceHash: string; permissionText: string };
     assert.match(permission.permissionText, /Command: original work/);
@@ -129,10 +134,10 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     // unreadable, nor may granting it fabricate an ACK for that Continue.
     core.database.raw.prepare("UPDATE generations SET submission_state='submission_unknown', submitted_user_message_id=NULL, submitted_user_turn_id=NULL WHERE session_id=?").run(session.sessionId);
     await page.evaluate(() => {
-      document.querySelector('[data-message-author-role="user"]')!.outerHTML =
+      document.querySelector('[data-message-id="user-message-1"]')!.outerHTML =
         '<div data-chatgpt-search-message-ids="user-message-1"><div data-user-message-bubble>Fixture question</div></div>';
       document.querySelector('main')!.insertAdjacentHTML('beforeend',
-        `<button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#pending-work').hidden=false">작업 중입니다</button>
+        `<button aria-expanded="false" aria-controls="pending-work" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#pending-work').hidden=false">작업 중입니다</button>
         <section id="pending-work" hidden><div role="alert">hostspan-desktop Process Cancel</div>
         <button onclick="document.querySelector('#pending-work').remove()">Allow once</button></section>`);
     });
@@ -150,7 +155,7 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     assert.equal(core.teamDirectory.getSession(session.sessionId).terminal, false);
     await page.setContent(`<main>
       <div data-message-author-role="user" data-message-id="older-work-user">Existing implementation question</div>
-      <button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#earlier').hidden=false">작업함</button>
+      <button aria-expanded="false" aria-controls="earlier" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#earlier').hidden=false">작업함</button>
       <section id="earlier" hidden><div role="alert">hostspan-desktop File Patch</div>
         <button onclick="throw Error('Must not choose once')">Allow once</button>
         <button onclick="window.earlierGrants=(window.earlierGrants||0)+1;document.querySelector('#earlier').remove()">Always allow</button></section>

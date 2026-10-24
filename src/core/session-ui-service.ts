@@ -2,7 +2,7 @@ import type { ConversationLoadRecoveryRepository } from '../storage/conversation
 import { streamRetrySurface } from '../providers/chatgpt/stream-retry.ts';
 import type { ReceiptRepository } from '../storage/receipt-repository.ts';
 import { observeChatGptSurface, type ChatGptSurface } from '../providers/chatgpt/surface.ts';
-import { controlHostSpanPermission, revealCurrentWorkPermission, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
+import { controlHostSpanPermission, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
 import { createHash } from 'node:crypto';
 import { requireIdleConversationPage } from './conversation-cleanup-service.ts';
 import { conversationLoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
@@ -393,7 +393,6 @@ export class SessionUiService {
     const binding = this.#registry.refreshPage(session.pageKey!);
     await inspectChatGptPageReady(page, session.pageKey!);
     await requireIdleConversationPage(page);
-    await revealCurrentWorkPermission(page, session.submittedUserMessageId!);
     const dom = await observeChatGptDom(page, session);
     const activity = await observeChatGptActivity(page, dom);
     const controls = await this.#capture(session);
