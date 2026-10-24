@@ -559,7 +559,7 @@ export class TeamWorkflow {
                     requestId: reviewId, decision: 'continue', continuationApproved: true });
                 } catch (error) {
                   if (!(error instanceof SessionPlaneDomainError)) throw error;
-                  result = { ...await this.#observe(successor), status: 'recovery_required', recovery: {
+                  result = await this.#continuationConfigurationFailure(request, error) ?? { ...await this.#observe(successor), status: 'recovery_required', recovery: {
                     state: 'decision_required', decisionRequired: true, userActionRequired: true,
                     reason: error.errorCode, message: error.message,
                     url: `https://chatgpt.com/c/${result.conversationId}`,
@@ -671,6 +671,12 @@ export class TeamWorkflow {
                     !['provider.failure-unverified', 'provider.preparation-required', 'session.busy'].includes(error.errorCode))) throw error;
                 const review = this.#continuationReviews.get(request.outboxId);
                 if (review) this.#continuationReviews.set(request.outboxId, { ...review, reason: error.errorCode });
+                const configurationFailure = await this.#continuationConfigurationFailure(request, error);
+                if (configurationFailure) {
+                  result = configurationFailure;
+                  request = this.#request({ teamId: input.teamId, requestRef: configurationFailure.requestRef });
+                  break;
+                }
                 // Preserve uncertain work, but never swallow an inability to
                 // recover an observed interruption. The caller must see it now.
                 if (interrupted) result = { ...result, status: 'recovery_required', recovery: {
@@ -861,6 +867,19 @@ export class TeamWorkflow {
       recovery: { state: 'unavailable', reason: 'page-lost-without-conversation', nextAction: 'sessionplane_session_replace' },
       message: 'Submission acknowledgement is unknown and neither an owned page nor a durable conversation ID remains. Waiting or refreshing cannot recover this request. promptSubmitted records an attempt, not confirmed provider acceptance. Explicitly decide whether to replace the role session and continue with new work, accounting for possible duplicate processing. Replacement does not resend or delete this request.',
     };
+  }
+
+  async #continuationConfigurationFailure(original: OutboxRecord, error: SessionPlaneDomainError) {
+    if (error.errorCode !== 'provider.configuration-stale') return null;
+    const pending = this.#outbox.getByRequest(original.clientId, `continue:managed-continuation:${original.outboxId}`);
+    if (pending?.submissionState !== 'prepared' || pending.promptSubmitted) return null;
+    const observed = await this.#observe(pending);
+    if (observed.submissionState !== 'prepared' || observed.promptSubmitted !== false || observed.terminal === true) return null;
+    return { ...observed, requestRef: pending.outboxId, status: 'needs_decision', recovery: {
+      state: 'decision_required', decisionRequired: true, userActionRequired: false,
+      reason: error.errorCode, message: error.message, nextAction: 'configure_same_request',
+      originalRequestRef: original.outboxId,
+    } };
   }
 
   #managedContinuationStatus(original: OutboxRecord) {
