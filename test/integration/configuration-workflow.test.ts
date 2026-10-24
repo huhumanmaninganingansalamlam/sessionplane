@@ -241,6 +241,7 @@ test('first send returns observed combinations; subsequent requests select an ID
     const selected = await invoke('decide', { teamId: team.teamId, requestRef: first.requestRef,
       requestId: 'catalog-select', decision: 'configure', configurationId: option.id });
     assert.equal((selected.choices as { model: { text: string } }).model.text, option.label);
+    assert.equal((selected.choices as { model: { configurationVersion?: string } }).model.configurationVersion, option.version);
     assert.equal(selected.promptSubmitted, false);
     assert.equal(await page.evaluate(() => (window as any).submits), 0);
     const evidence = selected.evidence as { snapshotId: string; nodes: { ref: string; role: string }[] };
