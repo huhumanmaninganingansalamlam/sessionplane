@@ -282,7 +282,10 @@ export class SessionRepository {
     const rows = this.#database
       .prepare(`
         ${SNAPSHOT_SELECT}
-        WHERE s.session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
+        WHERE (s.session_state NOT IN ('complete', 'cancelled', 'superseded', 'failed')
+          OR (s.session_state = 'complete' AND EXISTS (
+            SELECT 1 FROM conversation_load_recovery hold WHERE hold.conversation_id = s.conversation_id
+              AND hold.state = 'held' AND hold.reason = 'user-review')))
           AND s.team_id IN (SELECT team_id FROM teams WHERE team_state != 'archived')
           AND s.current_generation > 0
         ORDER BY s.created_at, s.session_id

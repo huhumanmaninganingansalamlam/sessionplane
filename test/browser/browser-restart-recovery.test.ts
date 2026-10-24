@@ -11,6 +11,8 @@ import { ConversationLoadRecoveryRepository } from '../../src/storage/conversati
 import { resolveConfig } from '../../src/config.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
+import { PageRegistry } from '../../src/browser/page-registry.ts';
+import { RecoveryService } from '../../src/core/recovery-service.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 
@@ -81,6 +83,30 @@ test('explicit reopen restores a held original page without clicks, collection, 
     assert.equal(service.pageRegistry.getBinding(unrelated.pageKey).url, unrelated.url);
     await assert.rejects(rpc(config.socketPath, 'workflow.decide', { ...identity, requestId: 'open-original', decision: 'focus' }),
       (error: unknown) => error instanceof RpcClientError && (error.data as { errorCode?: string }).errorCode === 'input.idempotency-conflict');
+    // A Core-only renewal discovers the same live target under a fresh registry key.
+    const adoptedRegistry = new PageRegistry();
+    adoptedRegistry.subscribe(binding => service.pageBindings.upsert(binding));
+    const retainedPage = service.pageRegistry.pageForObservation(restored.pageKey!);
+    const adopted = adoptedRegistry.identifyPage(retainedPage, reopened.targetId!);
+    const adoptedRecovery = new RecoveryService({ database: service.database, pageMutex: service.pageMutationMutex,
+      browserOwner: service.browserOwner, pageRegistry: adoptedRegistry, scheduler: service.actorScheduler,
+      observations: service.observationService, adapters: service.providerAdapters, submissions: service.submissionService,
+      chatgptUrl: config.chatgptUrl, geminiUrl: config.geminiUrl, grokUrl: config.grokUrl });
+    try {
+      const report = await adoptedRecovery.restore();
+      assert.equal(report.rebound, 1, 'Completed human-held pages must retain exact target ownership on Core renewal');
+      assert.equal(report.opened, 0);
+      assert.equal(report.observersStarted, 0);
+      const rebound = service.teamDirectory.getSession(session.sessionId);
+      assert.equal(rebound.pageKey, adopted.pageKey);
+      const { pageKey: reboundKey, updatedAt: reboundTime, ...retained } = rebound;
+      assert.deepEqual(retained, before);
+      assert.deepEqual(new ConversationLoadRecoveryRepository(service.database).get(held.conversationId!), hold);
+      assert.equal(navigations, 2);
+      assert.equal(await retainedPage.locator('body').getAttribute('data-clicks'), '0');
+      await retainedPage.close();
+      assert.equal((await adoptedRecovery.restore()).opened, 0, 'Completed holds never reopen a missing target implicitly');
+    } finally { await adoptedRecovery.close(); }
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
