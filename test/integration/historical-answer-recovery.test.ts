@@ -11,7 +11,7 @@ import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { SessionRepository } from '../../src/storage/session-repository.ts';
-import { ReceiptRepository } from '../../src/storage/receipt-repository.ts';
+import { hashCanonical, ReceiptRepository } from '../../src/storage/receipt-repository.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
@@ -221,6 +221,42 @@ test('explicit later responses preserve a completed original and an optional pre
         receipts.record({ ...receipt, requestId: managedKey, requestHash: 'fixture-managed-chain', status: 'complete', result: managed });
         core.database.raw.prepare('UPDATE request_receipts SET updated_at=? WHERE client_id=? AND request_id=?')
           .run(new Date(Date.now() - 31 * 60000).toISOString(), 'fixture-owner', managedKey);
+        const reviewKey = `followup-review:${requestRef}:managed-user`;
+        receipts.record({ clientId: 'fixture-owner', requestId: reviewKey, method: 'workflow.followup.review',
+          requestHash: hashCanonical({ requestRef, followup: 'managed-user' }), status: 'complete',
+          result: { reason: 'provider.failure-unverified', decisionRequired: true, nextReviewAt: null } });
+        await page.locator('#messages').evaluate(node => node.insertAdjacentHTML('beforeend',
+          '<button aria-expanded="false" aria-controls="exact-permission" onclick="this.setAttribute(\'aria-expanded\',\'true\');document.querySelector(\'#exact-permission\').hidden=false">이전 활동</button>' +
+          '<section id="exact-permission" hidden><div role="alert">hostspan-desktop Process Start Command: original exact read</div>' +
+          '<button onclick="window.exactGrants=(window.exactGrants||0)+1;document.querySelector(\'#exact-permission\').remove()">Always allow</button></section>'));
+        const exactPermission = async (action: string, id: string, evidenceHash?: string, followup = 'manual-managed') => {
+          let output = '';
+          const stream = new Writable({ write(chunk, _encoding, done) { output += String(chunk); done(); } });
+          const code = await runCli(['request', 'hostspan_permission', team.teamId, requestRef, '--action', action,
+            '--followup-message-id', followup, '--app-name', 'hostspan-desktop', '--tool-name', 'Process Start',
+            '--allow-mode', 'always', '--request-id', id, '--socket', config.socketPath, '--json',
+            ...(evidenceHash ? ['--evidence-hash', evidenceHash] : [])], { stdin: Readable.from([]), stdout: stream, stderr: stream });
+          return { code, value: JSON.parse(output) };
+        };
+        assert.equal((await exactPermission('inspect', 'wrong-exact-card', undefined, 'manual-a')).code, 1);
+        await page.locator('#messages').evaluate(node => node.insertAdjacentHTML('beforeend',
+          '<div data-message-author-role="user" data-message-id="foreign-work">Unrelated newer work</div>'));
+        assert.equal((await exactPermission('inspect', 'later-work-card')).code, 1);
+        await page.locator('[data-message-id="foreign-work"]').evaluate(node => node.remove());
+        const card = await exactPermission('inspect', 'inspect-exact-card');
+        assert.equal(card.code, 0, JSON.stringify(card));
+        assert.equal(card.value.permission.followupAcknowledgementVerified, true);
+        assert.equal(card.value.permission.currentUserMessageId, 'managed-user');
+        assert.equal(await page.evaluate(() => (window as any).exactGrants ?? 0), 0);
+        const grant = await exactPermission('allow', 'allow-exact-card', card.value.permission.evidenceHash);
+        assert.equal(grant.code, 0, JSON.stringify(grant));
+        assert.equal(grant.value.permission.permissionStillVisible, false);
+        assert.equal(await page.evaluate(() => (window as any).exactGrants), 1);
+        assert.equal(JSON.parse(receipts.get('fixture-owner', reviewKey)!.resultJson).decisionRequired, false,
+          'Verified exact grant rearms only that chain through its official control');
+        assert.equal(core.actorScheduler.collectors(session.sessionId).length, 0);
+        assert.equal(await page.locator('textarea').inputValue(), 'Preserved pending prompt');
+        assert.deepEqual(rows(), before);
         let backend: 'active' | 'paced' | 'empty' = 'active';
         const backendReviews: number[] = [];
         t.mock.method(fake, 'recover', async request => {
@@ -235,6 +271,11 @@ test('explicit later responses preserve a completed original and an optional pre
               nextUserFound: false, assistantCount: 0, messages: backend === 'active' ? [{ messageId: 'running', role: 'assistant',
                 channel: 'analysis', status: 'in_progress', endTurn: false, hidden: true, textLength: 0 }] : [] } }) };
         });
+        // A caller can also resume management after handling the exact card in
+        // the provider UI: approval-only must rearm, without another grant/send.
+        const paused = receipts.get('fixture-owner', reviewKey)!;
+        receipts.record({ ...paused, status: 'complete', result: { reason: 'provider.failure-unverified',
+          decisionRequired: true, nextReviewAt: null } });
         const collectorAbort = new AbortController();
         const pendingWait = callRpc<any>({ socketPath: config.socketPath, method: 'workflow.wait',
           params: { teamId: team.teamId, requestRefs: [requestRef], followupUserMessageId: 'manual-managed', waitMs: 60000, untilResult: false },
@@ -257,7 +298,6 @@ test('explicit later responses preserve a completed original and an optional pre
           assert.equal(core.actorScheduler.collectors(session.sessionId).length, 1);
           assert.equal(core.actorScheduler.collectors(session.sessionId)[0]!.continuationApproved, true);
           assert.equal(await page.evaluate(() => (window as any).sends), 1, 'Approval itself never sends');
-          const reviewKey = `followup-review:${requestRef}:managed-user`;
           const reason = () => receipts.get('fixture-owner', reviewKey)?.resultJson;
           await eventually(async () => !!reason() && JSON.parse(reason()!).reason === 'backend-generation-in-progress');
           const originalSummary = (await show()).request.managedContinuation;

@@ -761,6 +761,7 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   }, sessionSendRpcTimeoutMs(config));
   if (action === 'hostspan_permission') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'hostspan_permission', action: requireOption(parsed, 'action'),
+    ...optionalParam('followupUserMessageId', parsed.options['followup-message-id']),
     appName: requireOption(parsed, 'app-name'), ...optionalParam('toolName', parsed.options['tool-name']),
     ...(parsed.options['allow-mode'] === undefined ? {} : { allowMode: parsed.options['allow-mode'] }),
     ...(parsed.options['evidence-hash'] === undefined ? {} : { evidenceHash: parsed.options['evidence-hash'] }),
@@ -1393,7 +1394,7 @@ Exact request flow (same request; no automatic resend):
     Preserves original uncertainty; never automatically retries or bypasses provider errors/drafts/activity.
   Confirm an observed matching submission without resending:
     request acknowledge TEAM_ID REQUEST_REF --message-id ID --evidence-hash HASH
-  Approved HostSpan tool permission: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow --app-name NAME [--tool-name NAME] [--allow-mode once|always] [--evidence-hash HASH]
+  Approved HostSpan tool permission: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow --app-name NAME [--tool-name NAME] [--allow-mode once|always] [--evidence-hash HASH] [--followup-message-id SOURCE_ID]
   User-controlled review: request human_review TEAM_ID CURRENT_REQUEST_REF --action pause|resume
   Cancel: request stop TEAM_ID REQUEST_REF
   Delete a collected conversation: request delete TEAM_ID REQUEST_REF --outputs-retrieved
