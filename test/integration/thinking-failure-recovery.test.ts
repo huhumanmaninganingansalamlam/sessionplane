@@ -803,7 +803,10 @@ test('a lost continuation ACK uses proven server absence and the exact retained 
         submittedUserMessageId: current.submittedUserMessageId, submittedUserTurnId: current.submittedUserTurnId });
     await f.fake.page.setContent(body + '<div data-message-author-role="user" data-message-id="later">Already sent</div>' + disconnected + controls);
     await assert.rejects(f.rpc('decide', input), /idle original turn/);
-    await f.fake.page.setContent(body + disconnected + controls);
+    // Automatic recovery needs an executable Send; only the first, exact
+    // user-confirmed interruption above authorizes a Stop-only Enter gesture.
+    await f.fake.page.setContent(body + disconnected +
+      '<textarea></textarea><button data-testid="send-button">Send</button></main>');
     f.fake.failureCount = 2;
     f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="recovered" data-end-turn="true">New work recovered</div>';
     const recovered = await f.rpc<any>('decide', input);
