@@ -944,14 +944,15 @@ export class TeamWorkflow {
   }
 
   async #continuationConfigurationFailure(original: OutboxRecord, error: SessionPlaneDomainError) {
-    if (error.errorCode !== 'provider.configuration-stale') return null;
+    if (!['provider.configuration-stale', 'provider.submit-unavailable'].includes(error.errorCode)) return null;
     const pending = this.#outbox.getByRequest(original.clientId, `continue:managed-continuation:${original.outboxId}`);
     if (pending?.submissionState !== 'prepared' || pending.promptSubmitted) return null;
     const observed = await this.#observe(pending);
     if (observed.submissionState !== 'prepared' || observed.promptSubmitted !== false || observed.terminal === true) return null;
     return { ...observed, requestRef: pending.outboxId, status: 'needs_decision', recovery: {
       state: 'decision_required', decisionRequired: true, userActionRequired: false,
-      reason: error.errorCode, message: error.message, nextAction: 'configure_same_request',
+      reason: error.errorCode, message: error.message,
+      nextAction: error.errorCode === 'provider.submit-unavailable' ? 'inspect_same_request' : 'configure_same_request',
       originalRequestRef: original.outboxId,
     } };
   }
@@ -1193,6 +1194,10 @@ export class TeamWorkflow {
     const acknowledgementRecovery = result.submissionState === 'submission_unknown'
       ? acknowledgementEvents.latestAcknowledgementRecovery(request.sessionId, request.generation) : null;
     return { ...result, ...verification,
+      ...(result.submissionState === 'submission_unknown' && result.reason === 'submit-dispatch-unobserved'
+        ? { status: 'recovery_required', recovery: { state: 'decision_required', decisionRequired: true,
+          userActionRequired: false, reason: 'provider.submit-dispatch-unobserved', automaticResubmit: false,
+          message: 'The continuation Enter gesture produced no observed outgoing user submission. Preserve UNKNOWN and the draft; inspect the original submission controls. Backend pacing does not prove delivery.' } } : {}),
       ...(inspectCurrent && current.generation === request.generation && current.provider === 'chatgpt'
         ? { observedSurface: (result.evidence as { observedSurface?: unknown } | undefined)?.observedSurface
           ?? await this.services.ui.inspectSurface(current) } : {}),

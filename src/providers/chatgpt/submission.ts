@@ -397,6 +397,11 @@ export class ChatGptSubmission implements ProviderSubmission {
         }
         await this.#page.waitForTimeout(100);
       }
+      if (this.#submitWithEnter && this.#sentRequests.size === 0) {
+        throw new ProviderSubmissionError('provider.submit-dispatch-unobserved',
+          'Enter completed without an observed outgoing user submission. Preserve the request and draft; inspect the original submission controls without resending.',
+          { promptSubmitted: true });
+      }
       return null;
     } finally {
       this.#page.off('request', this.#captureSentIdentity);

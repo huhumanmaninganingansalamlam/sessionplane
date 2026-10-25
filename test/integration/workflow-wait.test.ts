@@ -42,6 +42,32 @@ async function fixture() {
     close: async () => { await core.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
+test('a continuation with no observed dispatch returns a decision instead of remaining in a paced ACK wait', async t => {
+  const f = await fixture();
+  try {
+    const id = f.sent.sessionId as string;
+    await f.core.actorScheduler.updateGeneration(id, 1, { submissionState: 'submission_unknown',
+      submittedUserMessageId: null, submittedUserTurnId: null, providerState: 'unknown',
+      reason: 'submit-dispatch-unobserved', errorCode: 'session.submission-unknown' });
+    const preserved = f.core.teamDirectory.getSession(id);
+    const sends = f.fake.submitCount;
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+      snapshot: preserved, evidence: { nodes: [], submissionCandidates: [] }, requested: { prompt: '계속' },
+    })) as any);
+    const result = (await f.invoke('wait', { teamId: f.team.teamId,
+      requestRefs: [f.sent.requestRef], waitMs: 600000 })).structuredContent.results[0];
+    assert.equal(result.recovery.reason, 'provider.submit-dispatch-unobserved');
+    assert.equal(result.recovery.decisionRequired, true);
+    assert.equal(result.recovery.userActionRequired, false);
+    assert.equal(result.recovery.automaticResubmit, false);
+    assert.equal(result.submissionState, 'submission_unknown');
+    assert.equal(result.terminal, false);
+    assert.equal(f.fake.submitCount, sends);
+    assert.deepEqual(f.core.teamDirectory.getSession(id), preserved);
+    assert.equal(f.core.actorScheduler.collectors(id).length, 0);
+  } finally { await f.close(); }
+});
+
 test('explicit evidence reads a held request without resuming observation or acknowledgement recovery', async t => {
   const f = await fixture();
   try {

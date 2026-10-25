@@ -14,7 +14,7 @@ import { ProviderSubmissionError, type ProviderSubmissionAttempt } from '../../s
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { ChatGptSubmission, recoverChatGptAcknowledgement, inspectChatGptSubmissionCandidates } from '../../src/providers/chatgpt/submission.ts';
 
-test('confirmed continuation Enter gesture uses the original composer and accepted ACK without clicking Stop', async () => {
+for (const dispatch of [true, false]) test(`continuation Enter ${dispatch ? 'dispatches and accepts the exact ACK' : 'reports a no-op without claiming delivery or clicking Stop'}`, async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-enter-continuation-'));
   const registry = new PageRegistry();
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
@@ -33,7 +33,7 @@ test('confirmed continuation Enter gesture uses the original composer and accept
         <button data-testid="stop-button" onclick="window.stopCount++">Stop</button>
         <script>window.stopCount=0;window.sendCount=0;
         const composer=document.querySelector('#prompt-textarea');
-        composer.addEventListener('keydown',async e=>{if(e.key!=='Enter'||e.shiftKey)return;e.preventDefault();window.sendCount++;
+        composer.addEventListener('keydown',async e=>{if(e.key!=='Enter'||e.shiftKey)return;e.preventDefault();if(!${dispatch})return;window.sendCount++;
           const text=composer.innerText;
           await fetch('/backend-api/f/conversation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
             action:'next',conversation_id:'keyboardconv123',parent_message_id:'partial',messages:[{
@@ -54,6 +54,12 @@ test('confirmed continuation Enter gesture uses the original composer and accept
     await submission.prepare({ composer: { ...composer, purpose: 'composer', selectedValue: null },
       submit: { ...composer, purpose: 'submit', selectedValue: null, submitGesture: 'enter' } });
     await submission.submitOnce();
+    if (!dispatch) {
+      await assert.rejects(submission.captureAcknowledgement(), (error: any) => error.errorCode === 'provider.submit-dispatch-unobserved');
+      assert.equal(await page.locator('#prompt-textarea').innerText(), '계속');
+      assert.deepEqual(await page.evaluate(()=>({send:(window as any).sendCount,stop:(window as any).stopCount})), {send:0,stop:0});
+      return;
+    }
     const ack = await submission.captureAcknowledgement();
     assert.equal(ack?.submittedUserMessageId, 'continuation-ack');
     assert.equal(ack?.conversationId, 'keyboardconv123');
