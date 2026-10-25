@@ -110,6 +110,64 @@ test('explicit reopen restores a held original page without clicks, collection, 
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('startup preserves closed displaced requests without reopening while retaining live pages and current recovery', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-detached-closed-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', backendRecoveryAfterMs: 60_000 });
+  const fake = new FakeProviderAdapter();
+  let navigations = 0;
+  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    recoveryNavigatePage: async (page, url) => { navigations++; await navigateFixture(page, url); },
+    logger: silentLogger() });
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'detached-closed' });
+    const create = () => service.teamDirectory.createSession({ teamId: team.teamId,
+      roleKey: team.primaryRoleKey, provider: 'chatgpt' });
+    const old = create();
+    await service.submissionService.send({ clientId: `team:${team.teamId}`, requestId: 'old-question',
+      sessionId: old.sessionId, prompt: 'Preserve original unanswered question', sessionDeadlineSec: 600 });
+    service.observationService.stop(old.sessionId, 1);
+    await service.recoveryService.ensurePage(old.sessionId, 1, { openMissing: true });
+    const retained = service.teamDirectory.getSession(old.sessionId);
+    const oldPage = service.pageRegistry.pageForObservation(retained.pageKey!);
+    await oldPage.evaluate(() => { const input = document.createElement('textarea'); input.value = 'Retain draft'; document.body.append(input); });
+    const successor = create();
+    // A displaced request still owns its retained live page and draft.
+    await service.recoveryService.restore();
+    service.observationService.stop(old.sessionId, 1);
+    assert.equal(await oldPage.locator('textarea').inputValue(), 'Retain draft');
+    assert.equal(navigations, 1);
+    await oldPage.close();
+    const saved = service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').all(old.sessionId);
+    const generation = service.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').all(old.sessionId);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const report = await service.recoveryService.restore({ forceObservers: true });
+      service.observationService.stop(old.sessionId, 1);
+      assert.equal(report.opened, 0, 'preserving an uncollected historical request is not permission to reopen its closed tab');
+      assert.equal(service.pageRegistry.findByConversation(retained.conversationId!).length, 0);
+      assert.equal(navigations, 1);
+      assert.deepEqual(service.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').all(old.sessionId), saved);
+      assert.deepEqual(service.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').all(old.sessionId), generation);
+    }
+    // The same startup still recovers the current request normally.
+    await service.submissionService.send({ clientId: `team:${team.teamId}`, requestId: 'current-question',
+      sessionId: successor.sessionId, prompt: 'Current fixture work', sessionDeadlineSec: 600 });
+    service.observationService.stop(successor.sessionId, 1);
+    const report = await service.recoveryService.restore();
+    assert.equal(report.opened, 1);
+    assert.equal(navigations, 2);
+    assert.equal(service.pageRegistry.findByConversation(retained.conversationId!).length, 0);
+    assert.equal(fake.submitCount, 2, 'restart never repeats a product prompt');
+    assert.equal(service.teamDirectory.getSession(old.sessionId).submittedUserMessageId, retained.submittedUserMessageId);
+    const release = service.actorScheduler.actorFor(old.sessionId).retainCollector('original-owner', false);
+    try {
+      assert.equal((await service.recoveryService.restore()).opened, 1,
+        'an attached caller can still recover its exact historical request');
+      assert.equal(navigations, 3);
+      assert.equal(fake.submitCount, 2);
+    } finally { release(); }
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('startup leaves missing prepared pages closed; explicit concurrent recovery reuses one page', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-prepared-fanout-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });

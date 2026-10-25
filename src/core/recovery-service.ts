@@ -263,10 +263,12 @@ export class RecoveryService {
         (shouldRecoverPage(snapshot) || isPendingPreparation(snapshot) ||
           snapshot.submissionState === 'failed_pre_submit')
       ) {
-        // Startup reattaches retained preparation pages, but only attempted
-        // submissions need a missing page reopened for answer recovery.
-        // Unsubmitted work can reopen its exact conversation explicitly.
-        const reconciled = await this.#reconcilePage(snapshot, shouldRecoverPage(snapshot));
+        // Preserving unanswered historical work does not authorize reopening a
+        // closed tab. Reattach retained pages; only current work or an attached
+        // caller may recover a missing page automatically.
+        const currentOrCollected = this.#sessions.listCurrentSessionsForTeam(snapshot.teamId).has(snapshot.sessionId) ||
+          this.#scheduler.collectors(snapshot.sessionId).length > 0;
+        const reconciled = await this.#reconcilePage(snapshot, shouldRecoverPage(snapshot) && currentOrCollected);
         snapshot = reconciled.snapshot;
         rebound += reconciled.rebound ? 1 : 0;
         opened += reconciled.opened ? 1 : 0;
