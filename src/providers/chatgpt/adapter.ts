@@ -29,6 +29,7 @@ import {
 import { observeChatGptActivity } from './activity-observer.ts';
 import {
   ChatGptBackendRecovery,
+  parseRetryAfterMs,
   type ChatGptBackendRecoveryOptions,
   type BackendJsonClient,
 } from './backend-recovery.ts';
@@ -62,6 +63,7 @@ export class ChatGptAdapter implements ProviderAdapter {
   readonly #loginUrl: string;
   readonly #acknowledgementTimeoutMs: number;
   readonly #backendRecovery: ChatGptBackendRecovery;
+  #deletionDeferral: { stage: string; retryAt: number } | null = null;
 
   constructor(options: ChatGptAdapterOptions) {
     this.#pageMutex = options.pageMutex ?? new PageMutationMutex();
@@ -324,9 +326,19 @@ export class ChatGptAdapter implements ProviderAdapter {
   }
 
   async openDeletion(request: ProviderRecoveryRequest) {
+    return await this.#pageMutex.runExclusive('chatgpt-deletion-preparation', () => this.#prepareDeletion(request));
+  }
+
+  async #prepareDeletion(request: ProviderRecoveryRequest) {
     const conversationId = request.session.conversationId;
     if (conversationId === null || conversationId.startsWith('WEB:')) {
       throw new ProviderSubmissionError('session.conversation-mismatch', 'Deletion requires a durable ChatGPT conversation');
+    }
+    const remaining = (this.#deletionDeferral?.retryAt ?? 0) - Date.now();
+    if (remaining > 0) {
+      throw new ProviderSubmissionError('provider.unavailable', 'Deletion preparation is deferred by provider Retry-After', {
+        details: { stage: this.#deletionDeferral!.stage, httpStatus: 429, retryAfterMs: remaining },
+      });
     }
     const { page } = await this.#browserOwner.createPage();
     const origin = new URL(this.#loginUrl).origin;
@@ -389,6 +401,12 @@ export class ChatGptAdapter implements ProviderAdapter {
         close: async () => { await page.close(); },
       };
     } catch (error) {
+      if (error instanceof ProviderSubmissionError && error.details !== null && typeof error.details === 'object') {
+        const { stage, httpStatus, retryAfterMs } = error.details as ReturnType<typeof deletionHttpDetails>;
+        if (httpStatus === 429) {
+          this.#deletionDeferral = { stage, retryAt: Date.now() + Math.max(5_000, retryAfterMs ?? 0) };
+        }
+      }
       await page.close().catch(() => {});
       throw error;
     }
@@ -909,8 +927,5 @@ function backendClient(page: Page): BackendJsonClient {
 
 // Only allowlisted transport metadata: never include auth headers or provider bodies.
 function deletionHttpDetails(stage: string, response: { status(): number; headers(): Record<string, string> }) {
-  const value = response.headers()['retry-after'];
-  const seconds = value !== undefined && /^\d+$/.test(value) ? Number(value) : null;
-  return { stage, httpStatus: response.status(), retryAfterMs:
-    seconds !== null && Number.isSafeInteger(seconds * 1000) ? seconds * 1000 : null };
+  return { stage, httpStatus: response.status(), retryAfterMs: parseRetryAfterMs(response.headers(), new Date()) };
 }
