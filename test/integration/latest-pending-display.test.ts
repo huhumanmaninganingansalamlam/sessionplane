@@ -9,7 +9,7 @@ import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 import { observeChatGptDom } from '../../src/providers/chatgpt/dom-observer.ts';
 
-test('explicit pending-anchor latest display preserves guards and recovers only exact turn evidence without submitting', async t => {
+for (const displaced of [false, true]) test(`explicit ${displaced ? 'preserved predecessor' : 'current'} pending-anchor latest display preserves guards and recovers only exact turn evidence without submitting`, async t => {
   const root=mkdtempSync(path.join(tmpdir(),'sessionplane-pending-latest-'));
   const config=resolveConfig({cwd:root,env:{},stateDir:'.state'});
   const fake=new FakeProviderAdapter();
@@ -27,6 +27,7 @@ test('explicit pending-anchor latest display preserves guards and recovers only 
     await core.submissionService.send({clientId:'fixture-owner',requestId:'original',sessionId:session.sessionId,prompt:'Fixture question',sessionDeadlineSec:600});
     const row=core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(session.sessionId)!;
     const generation=core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').get(session.sessionId)!;
+    const successor=displaced ? core.teamDirectory.createSession({teamId:team.teamId,roleKey:'main',provider:'chatgpt'}) : null;
     await page.evaluate(()=>{document.querySelector('button')!.onclick=()=>{
       document.querySelector('button')!.dataset.clicks=String(Number(document.querySelector('button')!.dataset.clicks??0)+1);
       document.querySelector('#history')!.innerHTML='<div data-message-author-role="user" data-message-id="user-message-1">Fixture question</div><div data-message-author-role="assistant" data-message-id="exact-answer" data-end-turn="true">Exact answer</div><div data-message-author-role="user" data-message-id="later-user">Fixture question</div><div data-message-author-role="assistant" data-message-id="later-answer" data-end-turn="true">Do not attach this answer</div>';
@@ -68,8 +69,28 @@ test('explicit pending-anchor latest display preserves guards and recovers only 
     assert.equal(await page.locator('textarea').inputValue(),'Preserved shadow-read draft');
     assert.equal(await page.locator('button[aria-label="Scroll to bottom"]').getAttribute('data-clicks'),'1');
     assert.equal(await page.locator('[data-testid="stop-button"]').count(),1);
+    await page.setContent('<main style="height:200px;overflow-y:auto"><div data-message-author-role="user" data-message-id="user-message-1">Fixture question</div><div style="height:1200px"></div></main><textarea></textarea>');
+    await page.locator('main').evaluate(main=>main.addEventListener('scroll',()=>{
+      main.insertAdjacentHTML('beforeend','<div data-message-author-role="assistant" data-message-id="mounted-after-scroll">Preserved intermediate work</div>');
+    },{once:true}));
+    const scrolled=await latest('mounted-anchor-scroll');
+    assert.equal(scrolled.isError,false,JSON.stringify(scrolled));
+    assert.equal(scrolled.structuredContent.displayOutcome,'scrolled');
+    await page.locator('[data-message-id="mounted-after-scroll"]').waitFor();
+    assert.equal((await observeChatGptDom(page,{submittedUserMessageId:'user-message-1',submittedUserTurnId:null})).candidate?.answerText,'Preserved intermediate work');
+    await page.locator('[data-message-id="mounted-after-scroll"]').evaluate(node=>node.remove());
+    await page.locator('main').evaluate(main=>{main.scrollTop=0;});
+    await page.locator('textarea').fill('Keep the current draft');
+    assert.equal((await latest('mounted-draft-protected')).structuredContent.displayOutcome,'not-dispatched');
+    assert.equal(await page.locator('main').evaluate(main=>main.scrollTop),0);
+    assert.equal(await page.locator('textarea').inputValue(),'Keep the current draft');
+    await page.locator('textarea').fill('');
+    await page.locator('main').evaluate(main=>main.insertAdjacentHTML('beforeend','<button data-testid="stop-button">Stop generating</button>'));
+    assert.equal((await latest('mounted-active-protected')).structuredContent.displayOutcome,'not-dispatched');
+    assert.equal(await page.locator('main').evaluate(main=>main.scrollTop),0);
     assert.deepEqual(core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(session.sessionId),row);
     assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').get(session.sessionId),generation);
+    if(successor) assert.deepEqual(core.teamDirectory.getSession(successor.sessionId),successor);
     assert.equal(fake.submitCount,1);
     assert.equal(navigations,1);
   } finally {await core.close();rmSync(root,{recursive:true,force:true});}

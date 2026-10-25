@@ -351,7 +351,7 @@ export class TeamWorkflow {
         }
         // Completed generations are not rebound during startup. Recover only
         // the retained conversation page, without opening or navigating one.
-        await this.services.ensurePage(request.sessionId, current.generation, { openMissing: false });
+        await this.services.ensurePage(request.sessionId, current.generation, { openMissing: false, passive: true });
       }
       return await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
         const method = 'workflow.latest';
@@ -819,7 +819,9 @@ export class TeamWorkflow {
 
   #requestPageOwner(request: OutboxRecord, inspect = false, followupSource?: string) {
     const snapshot = this.services.directory.getSession(request.sessionId);
-    const current = this.#role({ teamId: request.teamId, roleRef: roleRef(snapshot) });
+    // An explicitly addressed card belongs to its exact retained page and ACK,
+    // independently of the role's routing for new work. All card/lineage guards remain.
+    const current = snapshot;
     if (followupSource) {
       const exact = this.#exactFollowup(request, followupSource);
       const original = this.#sessions.getGenerationResult(request.sessionId, request.generation);
@@ -876,8 +878,8 @@ export class TeamWorkflow {
   }
 
   #latestRequest(request: OutboxRecord): { current: SessionSnapshot; original: SessionSnapshot | null } {
-    const snapshot = this.services.directory.getSession(request.sessionId);
-    const current = this.#role({ teamId: request.teamId, roleRef: `${request.sessionId}:${snapshot.generation}` });
+    // Exact retained-page display does not route new work to this role.
+    const current = this.services.directory.getSession(request.sessionId);
     if (current.generation === request.generation) return { current, original: null };
     const previous = this.#sessions.getGenerationResult(request.sessionId, request.generation);
     const ack = JSON.parse(request.resultJson ?? '{}');

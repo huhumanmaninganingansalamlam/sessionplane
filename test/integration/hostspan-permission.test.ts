@@ -10,7 +10,7 @@ import { Readable, Writable } from 'node:stream';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
-test('explicit HostSpan permission controls only the current exact grant, preserving work and idempotency', async t => {
+for(const displaced of [false,true]) test(`explicit HostSpan permission ${displaced ? 'inspects a preserved predecessor' : 'controls only the current exact grant'}, preserving work and idempotency`, async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-hostspan-permission-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const fake = new FakeProviderAdapter();
@@ -46,6 +46,7 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     await core.submissionService.send({ clientId: 'fixture-owner', requestId: 'original', sessionId: session.sessionId,
       prompt: 'Fixture question', sessionDeadlineSec: 600 });
     const row = core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=?').get(session.sessionId)!;
+    const successor=displaced ? core.teamDirectory.createSession({teamId:team.teamId,roleKey:'main',provider:'chatgpt'}) : null;
     const decide = async (requestId: string, extra: Record<string, unknown>) => invokeMcpTool({
       name: 'sessionplane_decide', arguments: { teamId: team.teamId, requestRef: row.outbox_id, requestId,
         decision: 'hostspan_permission', appName: 'hostspan-desktop', toolName: 'Process Start', ...extra },
@@ -62,6 +63,16 @@ test('explicit HostSpan permission controls only the current exact grant, preser
     assert.equal(await page.evaluate(() => (window as any).unrelatedClicks ?? 0), 0,
       'Explicit permission inspection opens only the card-linked disclosure, never integration controls or another work question');
     assert.equal(prepare.mock.callCount(), 1, 'Use the existing exact-page background interaction lifecycle');
+    if(successor){
+      const granted=await decide('retained-exact-grant',{action:'allow',evidenceHash:inspected.structuredContent.permission.evidenceHash});
+      assert.equal(granted.isError,false,JSON.stringify(granted));
+      assert.equal((granted.structuredContent.permission as any).permissionStillVisible,false);
+      assert.equal(await page.evaluate(()=>(window as any).grants??0),1);
+      assert.equal(await page.locator('textarea').inputValue(),'Keep my draft');
+      assert.deepEqual(core.teamDirectory.getSession(successor.sessionId),successor);
+      assert.equal(fake.submitCount,1);
+      return;
+    }
     await page.evaluate(() => document.querySelector('main')!.insertAdjacentHTML('beforeend',
       '<button aria-expanded="false" data-state="closed" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">채팅 및 작업 필터링</button>'));
     const discoveryCurrent = await decide('discover-current-card', { action: 'inspect', toolName: undefined, allowMode: 'always' });
