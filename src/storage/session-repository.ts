@@ -209,7 +209,18 @@ export class SessionRepository {
           AND reason = 'manual-followup-reconciled' AND EXISTS (
             SELECT 1 FROM events e WHERE e.session_id = generations.session_id
               AND e.generation = generations.generation AND e.event_type = 'generation.manual-followup-reconciled'
-              AND json_extract(e.payload_json, '$.evidence.originalUserMessageId') = generations.submitted_user_message_id
+              AND (json_extract(e.payload_json, '$.evidence.originalUserMessageId') = generations.submitted_user_message_id OR (
+                json_extract(e.payload_json, '$.evidence.retiredRecoveryGeneration') = generations.generation
+                AND json_extract(e.payload_json, '$.evidence.submissionEvidencePreserved') = 1
+                AND json_extract(e.payload_json, '$.evidence.completionSource') = 'exact-followup-observation'
+                AND EXISTS (SELECT 1 FROM generations original JOIN outbox o
+                  ON o.session_id = original.session_id AND o.generation = original.generation
+                  WHERE original.session_id = generations.session_id
+                    AND original.generation = json_extract(e.payload_json, '$.evidence.originalGeneration')
+                    AND original.generation < generations.generation
+                    AND original.submission_state = 'submitted' AND original.prompt_submitted = 1
+                    AND original.submitted_user_message_id = json_extract(e.payload_json, '$.evidence.originalUserMessageId')
+                    AND o.outbox_id = json_extract(e.payload_json, '$.evidence.originalRequestRef'))))
               AND json_extract(e.payload_json, '$.evidence.conversationId') = ?)) OR
         (submission_state = 'submitted' AND prompt_submitted = 1 AND completed_at IS NOT NULL
           AND submitted_user_message_id IS NOT NULL AND error_code IS NULL

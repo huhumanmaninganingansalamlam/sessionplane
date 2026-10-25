@@ -114,6 +114,68 @@ test('displaced timeout cleanup accepts an earlier officially reconciled manual 
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('cleanup recognizes reconciled recovery ACKs through their exact original request evidence', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-recovery-ack-cleanup-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const core = await startCore({ config, startBrowser: false, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const rpc = <T>(method: string, params: object) => callRpc<T>({ socketPath: config.socketPath,
+    method, params: { clientId: 'cleanup-recovery-ack', ...params }, timeoutMs: 5000 });
+  try {
+    const team = await rpc<{ teamId: string }>('team.create', { requestId: 'team' });
+    const session = await rpc<SessionSnapshot>('session.create', { requestId: 'session', teamId: team.teamId,
+      roleKey: 'main', provider: 'chatgpt' });
+    await rpc('session.send', { requestId: 'original', sessionId: session.sessionId, prompt: 'Original work' });
+    const original = core.teamDirectory.getSession(session.sessionId);
+    const request = core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=? AND generation=1')
+      .get(session.sessionId) as { outbox_id: string };
+    const sessions = new SessionRepository(core.database.raw), events = new EventRepository(core.database.raw);
+    const now = new Date().toISOString();
+    sessions.updateCurrentGeneration(session.sessionId, 1, { sessionState: 'complete', completedAt: now,
+      reason: 'approved-continuation-prepared', errorCode: null }, now);
+    events.append({ teamId: team.teamId, sessionId: session.sessionId, generation: 1,
+      eventType: 'generation.continuation-prepared', payload: { receiptId: 'resume', evidence: {
+        originalUserMessageId: original.submittedUserMessageId, conversationId: original.conversationId } }, createdAt: now });
+    await rpc('session.send', { requestId: 'continue:resume', sessionId: session.sessionId, prompt: '계속' });
+    const recovery = core.teamDirectory.getSession(session.sessionId);
+    assert.notEqual(recovery.submittedUserMessageId, original.submittedUserMessageId);
+    sessions.updateCurrentGeneration(session.sessionId, 2, { sessionState: 'cancelled', completedAt: now,
+      reason: 'manual-followup-reconciled', errorCode: null }, now);
+    const proof = { conversationId: original.conversationId, originalUserMessageId: original.submittedUserMessageId,
+      originalRequestRef: request.outbox_id, originalGeneration: 1, retiredRecoveryGeneration: 2,
+      submissionEvidencePreserved: true, completionSource: 'exact-followup-observation',
+      followupUserMessageId: 'manual-followup', responseMessageId: 'collected-followup-answer' };
+    const sequence = events.append({ teamId: team.teamId, sessionId: session.sessionId, generation: 2,
+      eventType: 'generation.manual-followup-reconciled', payload: { evidence: proof }, createdAt: now });
+    for (const invalid of [{ originalRequestRef: 'unrelated' }, { originalGeneration: 2 },
+      { originalUserMessageId: 'unrelated' }, { retiredRecoveryGeneration: 3 },
+      { submissionEvidencePreserved: false }, { conversationId: 'unrelated' }]) {
+      core.database.raw.prepare('UPDATE events SET payload_json=? WHERE sequence=?')
+        .run(JSON.stringify({ evidence: { ...proof, ...invalid } }), sequence);
+      assert.equal(sessions.conversationCleanupBlocker(session.sessionId, original.conversationId!), true);
+    }
+    core.database.raw.prepare('UPDATE events SET payload_json=? WHERE sequence=?')
+      .run(JSON.stringify({ evidence: proof }), sequence);
+    assert.equal(sessions.conversationCleanupBlocker(session.sessionId, original.conversationId!), false,
+      'Official recovery retirement retains its own ACK and references the verified original ACK');
+    await rpc('session.send', { requestId: 'exhausted', sessionId: session.sessionId, prompt: 'Later work' });
+    const before = core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(session.sessionId);
+    const successor = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    assert.equal(sessions.conversationCleanupBlocker(session.sessionId, original.conversationId!), true,
+      'An unrelated unresolved generation remains protected');
+    sessions.retireObservation(session.sessionId, 3, now);
+    events.append({ teamId: team.teamId, sessionId: session.sessionId, generation: 3,
+      eventType: 'generation.observation-retired', payload: { providerMutation: false }, createdAt: now });
+    const result = await rpc<{ deleted: boolean }>('session.delete', { requestId: 'cleanup', sessionId: session.sessionId,
+      generation: 3, conversationId: original.conversationId, outputsRetrieved: true,
+      discardRetiredObservation: { conversationId: original.conversationId, evidenceRef: 'collected-old-output' } });
+    assert.equal(result.deleted, true);
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(session.sessionId), before);
+    assert.equal(core.teamDirectory.getCurrentSession(team.teamId, 'main').sessionId, successor.sessionId);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('conversation deletion protects unresolved work, retains answers and persists uncertain outcomes', async () => {
   class DeletingProvider extends FakeProviderAdapter {
     deleted = new Set<string>();
