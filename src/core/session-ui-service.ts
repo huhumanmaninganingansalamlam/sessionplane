@@ -1068,7 +1068,7 @@ export class SessionUiService {
     if (!targetMounted || target.role === 'user') {
       const dom = await observeChatGptDom(page, session);
       const activity = await observeChatGptActivity(page, dom);
-      const scrollMounted = targetMounted && dom.candidate === null && !dom.laterUserFound;
+      const scrollMounted = !session.terminal && targetMounted && dom.candidate === null && !dom.laterUserFound;
       const clicked = (!targetMounted || scrollMounted) && activity.strength === 'none' && !dom.actionableAlert && await page.evaluate(restoreLatestPosition, {
         origin: this.#chatgptOrigin, conversationId: session.conversationId!,
         anchorIds: target.ids, expiresAt: Date.now() + 5_000, explicit: true, scrollMounted,
