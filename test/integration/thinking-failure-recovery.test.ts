@@ -329,7 +329,7 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
   } finally { await f.close(); }
 });
 
-test('approved managed wait resumes an exact disconnected tool turn despite stale Stop without server results or human confirmation', async t => {
+for (const sendAvailable of [true, false]) test(`automatic disconnected continuation ${sendAvailable ? 'uses an available Send despite stale Stop' : 'preserves preparation when no executable Send exists'}`, async t => {
   const f = await fixture();
   try {
     f.fake.surface = users => users;
@@ -341,7 +341,8 @@ test('approved managed wait resumes an exact disconnected tool turn despite stal
     await f.fake.page.setContent('<main>' + configuration +
       '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>' +
       '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>' +
-      '<textarea></textarea><button data-testid="stop-button">Stop</button></main>');
+      '<textarea></textarea><button data-testid="stop-button">Stop</button>' +
+      (sendAvailable ? '<button data-testid="send-button">Send</button>' : '') + '</main>');
     const verify = SessionUiService.prototype.verifyContinuation;
     let checked = false;
     t.mock.method(SessionUiService.prototype, 'verifyContinuation', async function (...args) {
@@ -361,6 +362,18 @@ test('approved managed wait resumes an exact disconnected tool turn despite stal
       waitMs: 60000, continuationApproved: true });
     await until(() => checked);
     const result = await waiting;
+    if (!sendAvailable) {
+      const pending = f.core.teamDirectory.getSession(original.sessionId);
+      assert.equal(result.results[0].recovery?.reason, 'provider.submit-unavailable');
+      assert.equal(result.results[0].recovery?.userActionRequired, false);
+      assert.equal(pending.submissionState, 'prepared');
+      assert.equal(pending.promptSubmitted, false);
+      assert.equal(pending.submittedUserMessageId, null);
+      assert.equal(f.fake.submitCount, 1);
+      assert.equal(await f.fake.page.locator('textarea').inputValue(), '계속');
+      assert.equal(await f.fake.page.locator('[data-testid="stop-button"]').count(), 1);
+      return;
+    }
     assert.equal(result.results[0].recovery?.userActionRequired, undefined);
     assert.equal(result.results[0].generation, 2);
     assert.equal(result.results[0].terminal, true);
@@ -790,7 +803,10 @@ test('a lost continuation ACK uses proven server absence and the exact retained 
         submittedUserMessageId: current.submittedUserMessageId, submittedUserTurnId: current.submittedUserTurnId });
     await f.fake.page.setContent(body + '<div data-message-author-role="user" data-message-id="later">Already sent</div>' + disconnected + controls);
     await assert.rejects(f.rpc('decide', input), /idle original turn/);
-    await f.fake.page.setContent(body + disconnected + controls);
+    // Automatic recovery needs an executable Send; only the first, exact
+    // user-confirmed interruption above authorizes a Stop-only Enter gesture.
+    await f.fake.page.setContent(body + disconnected +
+      '<textarea></textarea><button data-testid="send-button">Send</button></main>');
     f.fake.failureCount = 2;
     f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="recovered" data-end-turn="true">New work recovered</div>';
     const recovered = await f.rpc<any>('decide', input);

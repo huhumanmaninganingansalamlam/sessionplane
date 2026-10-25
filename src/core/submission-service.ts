@@ -804,7 +804,8 @@ export class SubmissionService {
       return await this.#markSubmissionUnknown(
         actor,
         prepared.outbox,
-        submitError === null ? 'acknowledgement-missing' : 'submit-unacknowledged',
+        submitError instanceof ProviderSubmissionError && submitError.errorCode === 'provider.submit-dispatch-unobserved'
+          ? 'submit-dispatch-unobserved' : submitError === null ? 'acknowledgement-missing' : 'submit-unacknowledged',
       );
     });
   }

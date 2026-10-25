@@ -204,8 +204,14 @@ export class SessionUiService {
                     submissionCandidates };
                 }
               }
+              const controls = await this.#capture(session, input.maxNodes, input.readOnly);
+              const composers = this.#requirePage(session, input.readOnly).locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
+              const composerCount = await composers.count();
               return {
-              ...await this.#capture(session, input.maxNodes, input.readOnly),
+              ...controls,
+              submissionControls: { composerCount,
+                enabledSubmitCount: controls.nodes.filter(node => node.submitControl && !node.disabled).length,
+                continuationDraftPresent: composerCount === 1 && await composerHasExactValue(composers.first(), '계속') },
               providerAlerts: await observeChatGptAlerts(this.#requirePage(session, input.readOnly), session),
               ...(session.submissionState !== 'submitted' ? {} : {
                 submissionVerification: await (async () => {
@@ -790,8 +796,12 @@ export class SessionUiService {
         const { original, confirmation } = continuation;
         const evidence = await this.verifyContinuation(session, original, confirmation);
         const composers = snapshot.nodes.filter(node => node.role === 'textbox' && node.editable && !node.disabled);
-        if ((('disconnectedRecovery' in evidence && evidence.disconnectedRecovery === true) || 'userConfirmedInterruption' in evidence) && composers.length === 1) return { choice: { ...toPreparationTarget('submit', composers[0]!), submitGesture: 'enter' as const },
+        // Disconnection/Stop does not advertise a working keyboard submit.
+        // Retain this explicit gesture only for the exact user-confirmed turn.
+        if (confirmation && 'userConfirmedInterruption' in evidence && composers.length === 1) return { choice: { ...toPreparationTarget('submit', composers[0]!), submitGesture: 'enter' as const },
           result: { purpose: 'submit', gesture: 'enter', userConfirmedInterruption: confirmation } };
+        throw new SessionPlaneDomainError('provider.submit-unavailable',
+          'The prepared continuation has no enabled Send control. Preserve its draft and inspect the same request when the original page can submit; do not infer Enter support from disconnection or Stop.');
       }
       throw new SessionPlaneDomainError('provider.failure-unverified', 'Unique enabled submit evidence is missing');
     });
