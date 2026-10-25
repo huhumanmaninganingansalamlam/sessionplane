@@ -1063,15 +1063,18 @@ export class SessionUiService {
     const page = this.#requirePage(pageOwner);
     const mounted = async () => (await readChatGptMessages(page)).some(message =>
       message.role === target.role && [message.messageId, message.turnId].some(id => id !== null && target.ids.includes(id)));
-    let outcome: 'already-present' | 'clicked' | 'not-dispatched' = 'already-present';
-    if (!await mounted()) {
+    let outcome: 'already-present' | 'clicked' | 'scrolled' | 'not-dispatched' = 'already-present';
+    const targetMounted = await mounted();
+    if (!targetMounted || target.role === 'user') {
       const dom = await observeChatGptDom(page, session);
       const activity = await observeChatGptActivity(page, dom);
-      const clicked = activity.strength === 'none' && !dom.actionableAlert && await page.evaluate(restoreLatestPosition, {
+      const scrollMounted = targetMounted && dom.candidate === null && !dom.laterUserFound;
+      const clicked = (!targetMounted || scrollMounted) && activity.strength === 'none' && !dom.actionableAlert && await page.evaluate(restoreLatestPosition, {
         origin: this.#chatgptOrigin, conversationId: session.conversationId!,
-        anchorIds: target.ids, expiresAt: Date.now() + 5_000, explicit: true,
+        anchorIds: target.ids, expiresAt: Date.now() + 5_000, explicit: true, scrollMounted,
       });
-      outcome = clicked ? 'clicked' : 'not-dispatched';
+      if (clicked) outcome = scrollMounted ? 'scrolled' : 'clicked';
+      else if (!targetMounted || scrollMounted) outcome = 'not-dispatched';
     }
     this.#requirePage(pageOwner);
     return { pageKey: session.pageKey, conversationId: session.conversationId,
@@ -1079,7 +1082,7 @@ export class SessionUiService {
       displayTarget: target.role === 'user' ? 'submitted-anchor' : 'completed-answer',
       ...(target.role === 'user' ? { anchorPresent: await mounted() } : { responseMounted: await mounted() }),
       ...(outcome !== 'not-dispatched' ? {} : { reason: 'display-guard-or-latest-control-unavailable',
-        message: 'No click: preserve draft, selection, active generation and alerts; a unique enabled latest-position button must be visible.' }) };
+        message: 'No display movement: preserve draft, selection, active generation and alerts; the exact turn needs a usable scroll surface or latest-position control.' }) };
   }
 
   /** Read the original turn under the current prepared generation's ownership.
