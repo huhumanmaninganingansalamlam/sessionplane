@@ -274,12 +274,17 @@ export class ObservationService {
               const actor = this.#scheduler.actorFor(sessionId);
               return actor.snapshot().provider === current.provider && actor.subscriberCount > 0;
             });
-          if (collectionWaiting) withdrawProbe();
+          // Preserving replacement keeps the old DOM/results alive, but its
+          // detached observer must not spend backend slots after ownership moves.
+          const displacedWithoutCollector = this.#scheduler.collectors(current.sessionId).length === 0 &&
+            !this.#sessions.listCurrentSessionsForTeam(current.teamId).has(current.sessionId);
+          if (collectionWaiting || displacedWithoutCollector) withdrawProbe();
           if (
             decision.kind !== 'blocked' &&
             decision.kind !== 'interstitial' &&
             !backendRecoveryPaced &&
             !collectionWaiting &&
+            !displacedWithoutCollector &&
             this.#now().getTime() - lastExactProgressAtMs >= this.#backendRecoveryAfterMs
           ) {
             const recoveredResult = await this.#recover(persisted, probeCaller);

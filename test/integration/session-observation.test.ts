@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { callRpc } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
@@ -17,6 +18,63 @@ interface TeamSnapshot {
 interface WaitSnapshot extends SessionSnapshot {
   readonly latestEventSequence: number;
 }
+
+test('a preserved predecessor collects DOM finals but uses backend only for its explicit collector', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-displaced-observer-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state',
+    observationActiveSweepMs: 10, observationQuietSweepMs: 10, observationQuietWindowMs: 10,
+    backendRecoveryAfterMs: 10, probeSuccessIntervalMs: 1 });
+  const fake = new FakeProviderAdapter();
+  const reads = new Map<string, number>();
+  const recover = fake.recover.bind(fake);
+  fake.recover = async request => {
+    reads.set(request.session.sessionId, (reads.get(request.session.sessionId) ?? 0) + 1);
+    return recover(request);
+  };
+  const options = { config, startBrowser: false, providerAdapters: [fake], logger: silentLogger() };
+  let core = await startCore(options);
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'preserved-observer' });
+    const old = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    const original = await core.submissionService.send({ clientId: 'preserved-observer', requestId: 'old',
+      sessionId: old.sessionId, prompt: 'Preserved original question', sessionDeadlineSec: 600 });
+    // The preserving replacement's routing operation leaves the old submission intact.
+    const next = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    await core.submissionService.send({ clientId: 'preserved-observer', requestId: 'next',
+      sessionId: next.sessionId, prompt: 'Current product question', sessionDeadlineSec: 600 });
+    const generation = core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').get(old.sessionId);
+    const outbox = core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(old.sessionId);
+    await core.close();
+    reads.clear();
+    core = await startCore(options);
+    await delay(150);
+    assert.ok((reads.get(next.sessionId) ?? 0) > 0, 'current request retains backend recovery');
+    assert.equal(reads.get(old.sessionId) ?? 0, 0, 'restart must not give an ownerless predecessor a backend slot');
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(old.sessionId), outbox);
+    const release = core.actorScheduler.actorFor(old.sessionId).retainCollector(String(outbox!.outbox_id), false);
+    try {
+      for (let i = 0; i < 100 && !reads.get(old.sessionId); i++) await delay(10);
+      assert.ok((reads.get(old.sessionId) ?? 0) > 0, 'an explicit original owner can still recover backend results');
+    } finally { release(); }
+    const settledReads = reads.get(old.sessionId);
+    await delay(100);
+    assert.equal(reads.get(old.sessionId), settledReads, 'releasing the owner returns the predecessor to passive DOM collection');
+    const preserved = core.teamDirectory.getSession(old.sessionId);
+    assert.equal(preserved.submittedUserMessageId, original.submittedUserMessageId);
+    assert.equal(preserved.terminal, false);
+    assert.equal(core.database.raw.prepare('SELECT completed_at FROM generations WHERE session_id=?').get(old.sessionId)!.completed_at,
+      generation!.completed_at);
+    fake.emitObservation(old.sessionId, { activity: 'none', candidate: {
+      responseMessageId: 'preserved-dom-final', answerText: 'Original answer', terminalMarker: true, streamingMarker: false,
+    } });
+    const final = await waitForSnapshot(config.socketPath, old.sessionId, snapshot => snapshot.terminal);
+    assert.equal(final.responseMessageId, 'preserved-dom-final');
+    assert.equal(final.submittedUserMessageId, original.submittedUserMessageId);
+    assert.equal(core.teamDirectory.getCurrentSession(team.teamId, 'main').sessionId, next.sessionId);
+    assert.equal(fake.submitCount, 2);
+    assert.equal(fake.stopCount, 0);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('core-owned observation continues after wait expiry and publishes exact final once', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-observation-'));
