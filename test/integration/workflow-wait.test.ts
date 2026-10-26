@@ -120,6 +120,42 @@ test('explicit evidence reads a held request without resuming observation or ack
   } finally { t.mock.restoreAll(); await f.close(); }
 });
 
+test('explicit completed evidence reads the current page without resuming work or changing the stored final', async t => {
+  const f = await fixture();
+  try {
+    const sessionId = f.sent.sessionId as string;
+    await f.core.actorScheduler.updateGeneration(sessionId, 1, {
+      sessionState: 'complete', providerState: 'complete', answerText: 'Original final', responseMessageId: 'original-final' });
+    const before = f.core.teamDirectory.getSession(sessionId);
+    let reads = 0, unavailable = false;
+    t.mock.method(f.core.recoveryService, 'ensurePage', async (_id, _generation, options) => {
+      assert.deepEqual(options, { openMissing: false, passive: true });
+      if (unavailable) throw new SessionPlaneDomainError('browser.unavailable', 'Original tab unavailable');
+    });
+    t.mock.method(f.core.submissionService, 'recoverAcknowledgement', () => assert.fail('No ACK probe'));
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async (input: any) => {
+      assert.equal(input.readOnly, true);
+      return await f.core.submissionService.inspectSubmission(input, async () => {
+        reads++;
+        return { submissionVerification: { hostspanActivity: { available: true, disclosures: [{ name: 'Previous activity' }] } } };
+      });
+    }) as any);
+    for (const view of ['summary', 'result']) await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view });
+    assert.equal(reads, 0);
+    const read = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view: 'evidence' })).structuredContent.request;
+    assert.equal(reads, 1);
+    assert.equal(read.evidence.submissionVerification.hostspanActivity.disclosures[0].name, 'Previous activity');
+    assert.equal(read.answerText, 'Original final');
+    assert.equal(read.terminal, true);
+    unavailable = true;
+    const missing = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view: 'evidence' })).structuredContent.request;
+    assert.equal(missing.inspectionError.errorCode, 'browser.unavailable');
+    assert.deepEqual(f.core.teamDirectory.getSession(sessionId), before);
+    assert.equal(f.fake.submitCount, 1);
+    assert.deepEqual(f.core.actorScheduler.collectors(sessionId), []);
+  } finally { t.mock.restoreAll(); await f.close(); }
+});
+
 test('managed collection recovers only a literal continuation lineage without rebinding a lost ACK', async t => {
   for (const { complete, continuation } of [
     { complete: false, continuation: true }, { complete: true, continuation: true },

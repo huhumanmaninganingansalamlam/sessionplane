@@ -259,7 +259,8 @@ export class TeamWorkflow {
               throw new SessionPlaneDomainError('provider.permission-unverified', 'The original work ACK and continuation lineage must agree');
             workOriginal = { ...session, ...work, generation: workRequest.generation };
           }
-          const permission = await this.services.ui.hostspanPermission(session, input, original, passiveInspection, workOriginal, exactFollowup);
+          const permission = await this.services.ui.hostspanPermission(session, input, original, passiveInspection, workOriginal, exactFollowup,
+            this.#sessions.submittedMessageIds(session.sessionId));
           if (exactFollowup && input.action === 'allow' && permission.outcome === 'clicked' &&
               'permissionStillVisible' in permission && permission.permissionStillVisible === false) {
             this.#rearmExactReview(request, exactFollowup.sourceUserMessageId, 'exact-permission-resolved');
@@ -1417,11 +1418,11 @@ export class TeamWorkflow {
         message: evidence.preparationAvailability.available ? preparation.message
           : 'The exact provider page has no usable composer. This request remains prepared and was not submitted. Read the same request after the provider page becomes usable; do not treat Retry or another ordinary button as submit.' };
     }
-    // A reconciled execution failure is still inspectable on its original turn.
+    // Explicit evidence also inspects completed current turns without rewriting their result.
     // Never reopen a missing tab or change its stored terminal result for a read.
-    const inspectFailed = inspectCurrent && snapshot.terminal && snapshot.sessionState === 'failed' &&
-      latestDisplayTarget(snapshot)?.role === 'user';
-    if (inspectFailed || (!snapshot.terminal && snapshot.submissionState === 'submission_unknown' && snapshot.provider === 'chatgpt') ||
+    const inspectTerminal = inspectCurrent && snapshot.terminal && snapshot.provider === 'chatgpt' &&
+      (snapshot.submissionState === 'submitted' || (snapshot.sessionState === 'failed' && latestDisplayTarget(snapshot)?.role === 'user'));
+    if (inspectTerminal || (!snapshot.terminal && snapshot.submissionState === 'submission_unknown' && snapshot.provider === 'chatgpt') ||
         (snapshot.provider === 'chatgpt' && !snapshot.terminal && snapshot.submissionState === 'submitted' &&
           (inspectCurrent || snapshot.reason === 'provider-actionable-alert' || snapshot.reason === 'dom-user-anchor-missing' ||
             snapshot.reason === 'backend-user-anchor-absent-from-mapping' || snapshot.reason === 'backend-user-anchor-not-on-current-branch' ||
@@ -1429,8 +1430,9 @@ export class TeamWorkflow {
               String(new EventRepository(this.services.database.raw).latestAnchorRecovery(snapshot.sessionId, snapshot.generation)?.recoveryReason))))) {
       try {
         if (snapshot.conversationId !== null) await this.services.ensurePage(snapshot.sessionId, snapshot.generation,
-          inspectFailed ? { openMissing: false } : undefined);
-        const inspected = await this.services.ui.inspectSubmission({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });
+          inspectTerminal ? { openMissing: false, passive: true } : undefined);
+        const inspected = await this.services.ui.inspectSubmission({ ...ownerOf(request),
+          ...(inspectTerminal ? { readOnly: true } : {}), ...(maxNodes === undefined ? {} : { maxNodes }) });
         return { ...inspected.snapshot, requestRef: request.outboxId, roleRef: roleRef(inspected.snapshot),
           ...((inspected.evidence?.submissionCandidates?.length ?? 0) > 0 ? { status: 'needs_decision' } : {}),
           evidence: inspected.evidence, requested: inspected.requested };
