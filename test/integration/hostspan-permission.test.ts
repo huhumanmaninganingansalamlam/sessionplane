@@ -9,6 +9,7 @@ import { runCli } from '../../src/cli/main.ts';
 import { Readable, Writable } from 'node:stream';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 
 for(const displaced of [false,true]) test(`explicit HostSpan permission ${displaced ? 'inspects a preserved predecessor' : 'controls only the current exact grant'}, preserving work and idempotency`, async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-hostspan-permission-'));
@@ -26,26 +27,38 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
       <section role="alert" hidden>hostspan-desktop Process Start Old permission</section>
       <div data-message-author-role="user" data-message-id="user-message-1">Fixture question</div>
       <div class="group/activity-header"><button aria-expanded="false" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">hostspan-desktop 통합 사용함</button></div>
-      <div class="group/activity-header"><button aria-expanded="false" aria-controls="work" aria-labelledby="work-label" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#work').hidden=false"></button><span id="work-label">이전 활동</span></div>
+      <div id="activity"><div class="group/activity-header"><button aria-expanded="false" aria-labelledby="work-label" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#work').hidden=false"></button><span id="work-label">이전 활동</span></div>
       <span id="elapsed">1 hour 14 seconds working</span>
       <textarea id="prompt-textarea">Keep my draft</textarea><button data-testid="stop-button">Stop generating</button>
-      <div id="work" hidden><section id="permission"><div role="alert">hostspan-desktop Process Start
+      <div id="work" hidden>
+      <section><div class="group/activity-header"><button aria-expanded="false" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">Nested tool activity</button></div></section>
+      <section id="permission"><div role="alert">hostspan-desktop Process Start
         <button aria-expanded="false" onclick="document.querySelector('#details').hidden=false">View details</button></div>
         <button id="allow" onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove()"><span>한 번만 허용</span><kbd>⏎</kbd></button>
           <button onclick="throw Error('Must not click')">Always allow</button>
       </section>
       <section role="dialog" id="details" hidden>hostspan-desktop Process Start Command: original work
         <button aria-label="Close dialog" onclick="document.querySelector('#details').hidden=true">Close dialog</button>
-      </section></div><div role="alert">another-app Process Start<button>Allow</button></div>
+      </section></div></div><div role="alert">another-app Process Start<button>Allow</button></div>
     </main>` }));
     await page.goto(`https://chatgpt.com/c/conversation-${session.sessionId}`);
     const open = fake.openSubmission.bind(fake);
+    const observer = new ChatGptAdapter({ browserOwner: core.browserOwner!, pageRegistry: core.pageRegistry,
+      loginUrl: 'https://chatgpt.com/' });
+    t.mock.method(fake, 'openObservation', request => observer.openObservation(request));
     t.mock.method(fake, 'openSubmission', async request => ({ ...await open(request), pageKey: binding.pageKey,
       bindAcknowledgement() { core.pageRegistry.reservePage(binding.pageKey, { sessionId: session.sessionId,
         generation: 1, conversationId: `conversation-${session.sessionId}` }); } }));
     await core.submissionService.send({ clientId: 'fixture-owner', requestId: 'original', sessionId: session.sessionId,
       prompt: 'Fixture question', sessionDeadlineSec: 600 });
     const row = core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=?').get(session.sessionId)!;
+    const waited = await invokeMcpTool({ name: 'sessionplane_wait', arguments: {
+      teamId: team.teamId, requestRefs: [row.outbox_id], waitMs: 60000, continuationApproved: true,
+    }, socketPath: config.socketPath, timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
+    assert.equal(waited.structuredContent.results[0].errorCode, 'provider.actionable-alert', JSON.stringify(waited));
+    assert.equal(await page.locator('button[aria-labelledby="work-label"]').getAttribute('aria-expanded'), 'false');
+    assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0);
+    assert.equal(fake.submitCount, 1, 'Hidden permission returns the existing collector without another Continue');
     const successor=displaced ? core.teamDirectory.createSession({teamId:team.teamId,roleKey:'main',provider:'chatgpt'}) : null;
     const decide = async (requestId: string, extra: Record<string, unknown>) => invokeMcpTool({
       name: 'sessionplane_decide', arguments: { teamId: team.teamId, requestRef: row.outbox_id, requestId,

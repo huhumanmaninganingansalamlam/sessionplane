@@ -614,16 +614,17 @@ test('MCP explicitly recovers a retained UNKNOWN conversation without resend and
       assert.equal((await acknowledge('draft-preserved')).isError, true);
       assert.equal(await page.locator('textarea').inputValue(), 'Exact pending draft https://example.test/plan\n');
       assert.equal(service.teamDirectory.getSession(session.sessionId).conversationId, null);
-      assert.equal(await page.locator('[data-user-message-bubble]').textContent(), 'Exact pending draft https://example.test/plan', 'Explicit recovery expands only the selected original user message');
+      assert.equal(await page.locator('[data-user-message-bubble]').textContent(), 'Exact pending draft더 보기',
+        'Rejected acknowledgement preserves the selected message and its evidence hash without expanding it');
       await page.locator('textarea').evaluate(element => { element.value = ''; });
-      const expanded = (await inspect()).structuredContent.request as { conversationId: string | null; evidence: { submissionCandidates: Array<typeof candidate> } };
-      assert.equal(expanded.conversationId, null, 'read does not accept history navigation');
-      candidate = expanded.evidence.submissionCandidates[0]!;
+      const selected = (await inspect()).structuredContent.request as { conversationId: string | null; evidence: { submissionCandidates: Array<typeof candidate> } };
+      assert.equal(selected.conversationId, null, 'read does not accept history navigation');
+      candidate = selected.evidence.submissionCandidates[0]!;
       await page.locator('[data-user-message-bubble]').evaluate(element => { element.textContent = 'Different PLAN'; });
       assert.equal((await acknowledge('different-full-message')).isError, true, 'A changed selected message invalidates the original full-text evidence hash');
       assert.equal(service.teamDirectory.getSession(session.sessionId).conversationId, null);
       await page.locator('[data-user-message-bubble]').evaluate(element => { element.textContent = 'Exact pending draft https://example.test/plan'; });
-      candidate = ((await inspect()).structuredContent.request as typeof expanded).evidence.submissionCandidates[0]!;
+      candidate = ((await inspect()).structuredContent.request as typeof selected).evidence.submissionCandidates[0]!;
       const ack = await acknowledge('explicit-history-ack');
       assert.equal(ack.isError, false, JSON.stringify(ack.structuredContent));
     }

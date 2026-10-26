@@ -65,7 +65,8 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
           .map(id => root.getElementById(id));
         const activity = button.closest('[class~="group/activity-header"]')?.parentElement;
         const ownsCard = controlled.some(panel => panel?.contains(target)) || (activity?.contains(target) &&
-          activity.querySelectorAll('[class~="group/activity-header"] > button[aria-expanded]').length === 1);
+          !activity.querySelector('[data-message-author-role="user"], [data-user-message-bubble]') &&
+          activity.querySelectorAll(':scope > [class~="group/activity-header"] > button[aria-expanded]').length === 1);
         return ownsCard ? [index] : [];
       }), card).finally(() => card.dispose());
       for (const index of linked) if (await inWork(disclosures.nth(index))) indices.add(index);
