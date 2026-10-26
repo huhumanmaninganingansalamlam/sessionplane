@@ -10,6 +10,8 @@ import { Readable, Writable } from 'node:stream';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
+import { callRpc } from '../../src/cli/client.ts';
+import { inspectHostSpanActivity } from '../../src/providers/chatgpt/hostspan-permission.ts';
 
 for(const displaced of [false,true]) test(`explicit HostSpan permission ${displaced ? 'inspects a preserved predecessor' : 'controls only the current exact grant'}, preserving work and idempotency`, async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-hostspan-permission-'));
@@ -56,6 +58,43 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
       teamId: team.teamId, requestRefs: [row.outbox_id], waitMs: 60000, continuationApproved: true,
     }, socketPath: config.socketPath, timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
     assert.equal(waited.structuredContent.results[0].errorCode, 'provider.actionable-alert', JSON.stringify(waited));
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend', `
+      <div data-message-author-role="assistant" data-message-id="activity-answer">
+        <button aria-expanded="false" onclick="throw Error('Read must not reveal')">Previous activity</button>
+        <section hidden id="roleless-card">hostspan-desktop File Patch (no ARIA alert)
+          <button onclick="throw Error('Read must not grant')">Always allow</button>
+        </section>
+      </div>`));
+    const original = core.teamDirectory.getSession(session.sessionId);
+    const read = await callRpc<any>({ socketPath: config.socketPath, method: 'session.submission.inspect',
+      params: { clientId: 'fixture-owner', requestId: 'original', sessionId: session.sessionId, generation: 1 },
+      timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    const activity = read.evidence.submissionVerification.hostspanActivity;
+    assert.equal(activity.available, true, JSON.stringify(activity));
+    assert.equal(activity.providerMutation, false);
+    assert.equal(activity.workUserMessageId, 'user-message-1');
+    assert.ok(activity.disclosures.some((item: any) => item.name === 'Previous activity' && item.expanded === 'false'));
+    assert.ok(activity.cards.some((item: any) => item.role === null && !item.visible &&
+      item.text.includes('File Patch') && item.controls.some((control: any) => control.name === 'Always allow')),
+      'Read evidence includes hidden roleless controls inside assistant activity omitted by preparation snapshots');
+    assert.doesNotMatch(JSON.stringify(activity), /Old permission|Unrelated earlier work/);
+    assert.equal(activity.evidenceHash, undefined, 'Diagnostic candidates do not authorize a permission');
+    const afterRead = core.teamDirectory.getSession(session.sessionId);
+    for (const key of ['generation', 'submissionState', 'submittedUserMessageId', 'submittedUserTurnId',
+      'conversationId', 'pageKey', 'answerText', 'responseMessageId', 'terminal'] as const)
+      assert.equal(afterRead[key], original[key], 'A read preserves request identity/result while its original observer can progress');
+    assert.equal(await page.locator('textarea').inputValue(), 'Keep my draft');
+    assert.equal(await page.locator('button[aria-labelledby="work-label"]').getAttribute('aria-expanded'), 'false');
+    await assert.rejects(callRpc({ socketPath: config.socketPath, method: 'session.submission.inspect',
+      params: { clientId: 'another-owner', requestId: 'original', sessionId: session.sessionId, generation: 1 },
+      timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes }), /Exact caller-owned submission/);
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="later-work">Different work</div>'));
+    const later = await inspectHostSpanActivity(page, 'user-message-1');
+    assert.equal(later.available, false, 'A later work question cannot be inspected as the original request');
+    assert.equal('cards' in later, false);
+    await page.locator('[data-message-id="later-work"]').evaluate(element => element.remove());
+    await page.locator('#roleless-card').evaluate(element => element.parentElement!.remove());
     assert.equal(await page.locator('button[aria-labelledby="work-label"]').getAttribute('aria-expanded'), 'false');
     assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0);
     assert.equal(fake.submitCount, 1, 'Hidden permission returns the existing collector without another Continue');
@@ -198,6 +237,13 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
         <button onclick="throw Error('Must not choose once')">Allow once</button>
         <button onclick="window.earlierGrants=(window.earlierGrants||0)+1;document.querySelector('#earlier').remove()">Always allow</button></section>
       <div data-message-author-role="user" data-message-id="user-message-1">계속</div><textarea>Preserved draft</textarea></main>`);
+    const retained = await inspectHostSpanActivity(page, 'user-message-1');
+    assert.equal(retained.available, true);
+    if (retained.available) {
+      assert.equal(retained.workUserMessageId, 'older-work-user');
+      assert.ok(retained.cards.some(card => !card.visible && card.text.includes('File Patch')));
+      assert.equal(retained.disclosures[0]?.expanded, 'false', 'Reading does not reveal earlier activity');
+    }
     output = '';
     assert.equal(await runCli(['request', 'hostspan_permission', team.teamId, String(row.outbox_id), '--action', 'inspect',
       '--app-name', 'hostspan-desktop', '--allow-mode', 'always', '--request-id', 'discover-earlier-card',

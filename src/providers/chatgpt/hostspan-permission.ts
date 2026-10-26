@@ -16,6 +16,74 @@ const once = /^(?:허용|이번만 허용|한 번 허용|한 번만 허용|Allow
 
 const always = /^(?:항상 허용|Always allow)(?:\s*⏎)?$/i;
 
+/** Read mounted work activity, including hidden cards, without revealing or granting it. */
+export async function inspectHostSpanActivity(page: Page, submittedUserMessageId: string) {
+  const users = (await readChatGptMessages(page, true)).filter(message => message.role === 'user');
+  const unavailable = (reason: string) => ({ scope: 'mounted-dom' as const, available: false as const,
+    reason, submittedUserMessageId, providerMutation: false as const });
+  if (users.at(-1)?.messageId !== submittedUserMessageId ||
+      users.filter(message => message.messageId === submittedUserMessageId).length !== 1)
+    return unavailable('exact-current-ack-not-mounted');
+  let start = users.length - 1;
+  while (start > 0 && users[start]!.text.trim() === '계속' && users[start - 1]!.rootIndex === users[start]!.rootIndex) start--;
+  const work = users[start]!;
+  if (work.elementIndex === undefined) return unavailable('work-anchor-unavailable');
+  const surface = await page.locator(CHATGPT_SELECTORS.messages).nth(work.elementIndex).evaluate((anchor, workId) => {
+    const identity = anchor.closest('[data-message-id], [data-turn-id], [data-dil-message-id]') ?? anchor;
+    const ids = [identity.getAttribute('data-message-id'), anchor.getAttribute('data-message-id'),
+      anchor.getAttribute('data-dil-message-id'), ...(anchor.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/)];
+    if (workId === null || !ids.includes(workId)) return null;
+    const root = anchor.getRootNode() as Document | ShadowRoot;
+    const app = /(^|[^\w-])hostspan(?:-[a-z0-9_-]+)?($|[^\w-])/i;
+    const action = /^(?:항상 허용|Always allow|허용|이번만 허용|한 번 허용|한 번만 허용|Allow|Allow once|Allow this time|자세히 보기|View details|See details)(?:\s*⏎)?$/i;
+    const inWork = (element: Element) => {
+      const position = anchor.compareDocumentPosition(element);
+      return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING) &&
+        element.closest('nav, aside, [role="navigation"]') === null;
+    };
+    const name = (element: Element) => element.getAttribute('aria-label') ||
+      (element.getAttribute('aria-labelledby') ?? '').split(/\s+/).map(id => root.getElementById(id)?.textContent ?? '').join(' ').trim() ||
+      (element.textContent ?? '').trim();
+    const visible = (element: Element) => element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+    const controls = (element: Element) => [...element.querySelectorAll('button, [role="button"], summary')].slice(0, 20)
+      .map(button => ({ name: name(button).slice(0, 500), visible: visible(button),
+        disabled: button.hasAttribute('disabled') || button.getAttribute('aria-disabled') === 'true' }));
+    const cards = new Set<Element>();
+    for (const element of root.querySelectorAll('[role="alert"], [role="alertdialog"], [role="dialog"]'))
+      if (inWork(element) && app.test(element.textContent ?? '')) cards.add(element);
+    // An observed control may live beside an alert, or in a card with no ARIA role.
+    // These are diagnostic candidates, never permission evidence or click targets.
+    for (const button of root.querySelectorAll('button, [role="button"]')) {
+      if (!inWork(button) || !action.test(name(button))) continue;
+      let card = button.parentElement;
+      for (let depth = 0; card && depth < 4; depth++, card = card.parentElement) {
+        if (card.matches('body, main, [role="main"]') || card.contains(anchor) ||
+            card.querySelector('[data-message-author-role="user"], [data-user-message-bubble]')) break;
+        if (app.test(card.textContent ?? '') && inWork(card)) { cards.add(card); break; }
+      }
+    }
+    const disclosures = [...root.querySelectorAll('button[aria-expanded], summary')].filter(element => inWork(element) &&
+      (element.closest('[class~="group/activity-header"], details') !== null ||
+        /이전 활동|작업|활동|previous activity|working|worked|activity/i.test(name(element))));
+    return {
+      cards: [...cards].slice(0, 20).map(card => ({ role: card.getAttribute('role'),
+        text: (card.textContent ?? '').trim().slice(0, 4000), textTruncated: (card.textContent ?? '').trim().length > 4000,
+        visible: visible(card), controls: controls(card) })),
+      disclosures: disclosures.slice(0, 40).map(element => ({ name: name(element).slice(0, 500), visible: visible(element),
+        expanded: element.getAttribute('aria-expanded'), state: element.getAttribute('data-state'),
+        controls: (element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean) })),
+      truncated: cards.size > 20 || disclosures.length > 40,
+    };
+  }, work.messageId);
+  if (surface === null) return unavailable('work-anchor-changed-during-inspection');
+  const current = (await readChatGptMessages(page)).filter(message => message.role === 'user');
+  if (current.length !== users.length || current.some((user, index) =>
+      user.messageId !== users[index]?.messageId || user.text !== users[index]?.text || user.rootIndex !== users[index]?.rootIndex))
+    return unavailable('user-boundary-changed-during-inspection');
+  return { scope: 'mounted-dom' as const, available: true as const, submittedUserMessageId,
+    workUserMessageId: work.messageId, providerMutation: false as const, ...surface };
+}
+
 /** Only an explicitly selected HostSpan tool permission, never a generic UI click. */
 export async function controlHostSpanPermission(page: Page, input: HostSpanPermissionInput, submittedUserMessageId: string) {
   if (!/^hostspan(?:-[a-z0-9_-]+)?$/i.test(input.appName)) throw unavailable('Only HostSpan permissions are supported');

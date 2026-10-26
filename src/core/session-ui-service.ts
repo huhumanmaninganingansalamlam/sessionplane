@@ -2,7 +2,7 @@ import type { ConversationLoadRecoveryRepository } from '../storage/conversation
 import { streamRetrySurface } from '../providers/chatgpt/stream-retry.ts';
 import type { ReceiptRepository } from '../storage/receipt-repository.ts';
 import { observeChatGptSurface, type ChatGptSurface } from '../providers/chatgpt/surface.ts';
-import { controlHostSpanPermission, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
+import { controlHostSpanPermission, inspectHostSpanActivity, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
 import { createHash } from 'node:crypto';
 import { requireIdleConversationPage } from './conversation-cleanup-service.ts';
 import { conversationLoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
@@ -226,6 +226,8 @@ export class SessionUiService {
                     laterUserFound: dom.laterUserFound,
                     activity: activity.strength, activityReason: activity.reason,
                     messageTimeout: dom.providerAlerts.some(isMessageTimeoutAlert),
+                    hostspanActivity: session.submittedUserMessageId === null ? null :
+                      await inspectHostSpanActivity(this.#requirePage(session, input.readOnly), session.submittedUserMessageId),
                     // Passive evidence is not a completed answer or permission to submit.
                     responseCandidate: dom.candidate,
                     turnBoundary: dom.turnBoundary,
