@@ -16,7 +16,7 @@ import { restoreLatestPosition } from '../../src/providers/chatgpt/latest-positi
 
 const CONVERSATION_ID = 'conversation-observer-123456';
 
-test('observation never clicks activity or integration disclosures and still collects the exact answer', async t => {
+test('observation reports hidden same-work permissions without clicking disclosures and still collects the exact answer', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-work-permission-observer-'));
   const registry = new PageRegistry();
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
@@ -40,10 +40,10 @@ test('observation never clicks activity or integration disclosures and still col
           <section id="grant" hidden><div role="alert">hostspan-desktop ChatGPT가 hostspan-desktop의 File Patch 도구를 호출합니다. 자세히 보기</div>
           <button onclick="window.grants=(window.grants||0)+1">한 번만 허용</button></section>
           <div data-chatgpt-search-message-ids="user-message-1"><div data-user-message-bubble>계속</div></div><textarea>Original draft</textarea></main>`);
-        assert.notEqual((await source.observe()).reason, 'provider-actionable-alert');
+        assert.equal((await source.observe()).reason, 'provider-actionable-alert');
         assert.equal(await page.locator('#work').getAttribute('aria-expanded'), 'false');
         held = false;
-        assert.notEqual((await source.observe()).reason, 'provider-actionable-alert', 'An observer does not open hidden controls');
+        assert.equal((await source.observe()).reason, 'provider-actionable-alert', 'A hidden grant is reported without opening controls');
         assert.equal(await page.locator('#work').getAttribute('aria-expanded'), 'false');
         await page.locator('#grant').evaluate(element => { (element as HTMLElement).hidden = false; });
         assert.equal((await source.observe()).reason, 'provider-actionable-alert');
@@ -53,6 +53,11 @@ test('observation never clicks activity or integration disclosures and still col
         assert.equal(session.submittedUserMessageId, 'user-message-1');
       }
       assert.equal(await page.evaluate(() => (window as any).opens ?? 0), 0, 'All observation rounds remain click-free');
+      await page.locator('[data-chatgpt-search-message-ids="user-message-1"] [data-user-message-bubble]').evaluate(node => {
+        node.textContent = 'An unrelated new work question';
+      });
+      await page.locator('#grant').evaluate(element => { (element as HTMLElement).hidden = true; });
+      assert.notEqual((await source.observe()).reason, 'provider-actionable-alert', 'A different work question cannot inherit an earlier hidden grant');
       await page.setContent(`<main>
         <div data-message-author-role="user" data-message-id="user-message-1">Original question</div>
         ${'<div class="group/activity-header"><button aria-expanded="true">이전 활동</button></div>'.repeat(102)}
