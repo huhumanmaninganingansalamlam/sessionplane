@@ -89,6 +89,9 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
         visible: visible(card), controls: controls(card), ...provenance(card) })),
       disclosures: disclosures.slice(0, 40).map(element => ({ name: name(element).slice(0, 500), visible: visible(element),
         expanded: element.getAttribute('aria-expanded'), state: element.getAttribute('data-state'),
+        revealAvailable: element.tagName === 'BUTTON' && element.closest('[class~="group/activity-header"]') !== null &&
+          app.test(name(element)) && visible(element) && !element.hasAttribute('disabled') && element.getAttribute('aria-disabled') !== 'true' &&
+          (element.getAttribute('aria-expanded') === 'false' || element.getAttribute('data-state') === 'closed'),
         controls: (element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean), ...provenance(element) })),
       truncated: cards.size > 20 || disclosures.length > 40,
     };
@@ -99,7 +102,53 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
       user.messageId !== users[index]?.messageId || user.text !== users[index]?.text || user.rootIndex !== users[index]?.rootIndex))
     return unavailable('user-boundary-changed-during-inspection');
   return { scope: 'mounted-dom' as const, available: true as const, submittedUserMessageId,
-    workUserMessageId: work.messageId, providerMutation: false as const, ...surface };
+    workUserMessageId: work.messageId, providerMutation: false as const, ...surface,
+    disclosures: surface.disclosures.map(disclosure => ({ ...disclosure,
+      activityEvidenceHash: disclosure.revealAvailable && disclosure.owningUserMessageId !== null
+        ? createHash('sha256').update(JSON.stringify(['hostspan-activity-inspection', page.url(), submittedUserMessageId,
+          disclosure.owningUserMessageId, disclosure.name, disclosure.expanded, disclosure.state, disclosure.controls])).digest('hex') : null })) };
+}
+
+/** An explicit inspection can reveal one freshly selected owned activity, never grant a tool. */
+export async function revealHostSpanActivity(page: Page, submittedUserMessageId: string,
+  retainedAcknowledgements: ReadonlySet<string>, appName: string, evidenceHash: string) {
+  if (!/^hostspan(?:-[a-z0-9_-]+)?$/i.test(appName)) throw unavailable('Only HostSpan activity inspection is supported');
+  const observed = await inspectHostSpanActivity(page, submittedUserMessageId, retainedAcknowledgements);
+  if (!observed.available) throw unavailable(observed.reason);
+  const matches = observed.disclosures.filter(disclosure => disclosure.activityEvidenceHash === evidenceHash);
+  if (matches.length !== 1) throw unavailable('Inspect and select one fresh HostSpan activityEvidenceHash');
+  const activity = matches[0]!;
+  if (!new RegExp(`(^|[^\\w-])${appName}($|[^\\w-])`, 'i').test(activity.name)) throw unavailable('The selected activity belongs to a different app');
+  const buttons = page.getByRole('button', { name: activity.name, exact: true });
+  if (await buttons.count() !== 1) throw unavailable('The exact observed activity disclosure is absent or ambiguous');
+  const clicked = await buttons.evaluate((element, expected) => {
+    const root = element.getRootNode() as Document | ShadowRoot;
+    const name = (node: Element) => node.getAttribute('aria-label') ||
+      (node.getAttribute('aria-labelledby') ?? '').split(/\s+/).map(id => root.getElementById(id)?.textContent ?? '').join(' ').trim() ||
+      (node.textContent ?? '').trim();
+    const users = [...root.querySelectorAll(expected.selector)].filter(node =>
+      node.getAttribute('data-message-author-role') === 'user' || node.querySelector('[data-user-message-bubble]'));
+    const id = (node: Element) => (node.closest('[data-message-id], [data-turn-id], [data-dil-message-id]') ?? node).getAttribute('data-message-id') ??
+      node.getAttribute('data-dil-message-id') ?? node.getAttribute('data-chatgpt-search-message-ids');
+    const owner = users.filter(node => {
+      const position = node.compareDocumentPosition(element);
+      return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING);
+    }).at(-1);
+    if (!(element instanceof HTMLButtonElement) || location.href !== expected.url ||
+        !element.closest('[class~="group/activity-header"]') || element.closest('nav, aside, [role="navigation"]') ||
+        !element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || element.disabled || element.getAttribute('aria-disabled') === 'true' ||
+        name(element) !== expected.activity.name || element.getAttribute('aria-expanded') !== expected.activity.expanded ||
+        element.getAttribute('data-state') !== expected.activity.state ||
+        JSON.stringify((element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean)) !== JSON.stringify(expected.activity.controls) ||
+        users.filter(node => id(node) === expected.currentAck).length !== 1 || id(users.at(-1)!) !== expected.currentAck ||
+        !owner || id(owner) !== expected.activity.owningUserMessageId) return false;
+    element.click();
+    return true;
+  }, { url: page.url(), selector: CHATGPT_SELECTORS.messages, currentAck: submittedUserMessageId, activity });
+  if (!clicked) throw unavailable('The selected activity or ACK boundary changed before inspection');
+  return { outcome: 'activity-revealed' as const, activityUserMessageId: activity.owningUserMessageId,
+    activityEvidenceHash: evidenceHash, revealClicked: true, grantAttempted: false,
+    activity: await inspectHostSpanActivity(page, submittedUserMessageId, retainedAcknowledgements) };
 }
 
 /** Only an explicitly selected HostSpan tool permission, never a generic UI click. */

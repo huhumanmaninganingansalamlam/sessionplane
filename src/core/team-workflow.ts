@@ -259,7 +259,8 @@ export class TeamWorkflow {
               throw new SessionPlaneDomainError('provider.permission-unverified', 'The original work ACK and continuation lineage must agree');
             workOriginal = { ...session, ...work, generation: workRequest.generation };
           }
-          const permission = await this.services.ui.hostspanPermission(session, input, original, passiveInspection, workOriginal, exactFollowup);
+          const permission = await this.services.ui.hostspanPermission(session, input, original, passiveInspection, workOriginal, exactFollowup,
+            this.#sessions.submittedMessageIds(session.sessionId));
           if (exactFollowup && input.action === 'allow' && permission.outcome === 'clicked' &&
               'permissionStillVisible' in permission && permission.permissionStillVisible === false) {
             this.#rearmExactReview(request, exactFollowup.sourceUserMessageId, 'exact-permission-resolved');

@@ -2,7 +2,7 @@ import type { ConversationLoadRecoveryRepository } from '../storage/conversation
 import { streamRetrySurface } from '../providers/chatgpt/stream-retry.ts';
 import type { ReceiptRepository } from '../storage/receipt-repository.ts';
 import { observeChatGptSurface, type ChatGptSurface } from '../providers/chatgpt/surface.ts';
-import { controlHostSpanPermission, inspectHostSpanActivity, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
+import { controlHostSpanPermission, inspectHostSpanActivity, revealHostSpanActivity, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
 import { createHash } from 'node:crypto';
 import { requireIdleConversationPage } from './conversation-cleanup-service.ts';
 import { conversationLoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
@@ -972,7 +972,7 @@ export class SessionUiService {
   /** Caller holds the exact current request actor and page mutation lock. */
   async hostspanPermission(session: SessionSnapshot, input: HostSpanPermissionInput, original = session,
     passiveInspection = false, workOriginal?: SessionSnapshot,
-    exactFollowup?: { sourceUserMessageId: string; userMessageId: string }) {
+    exactFollowup?: { sourceUserMessageId: string; userMessageId: string }, retainedAcknowledgements: ReadonlySet<string> = new Set()) {
     if (session.provider !== 'chatgpt' ||
         (original.submissionState !== 'submitted' && original.submissionState !== 'submission_unknown') ||
         original.sessionId !== session.sessionId || original.conversationId !== session.conversationId ||
@@ -1033,6 +1033,12 @@ export class SessionUiService {
         anchor = currentAnchor;
         association = { association: 'exact-original-question-and-literal-continuations',
           workUserMessageId: root.messageId, currentUserMessageId: anchor, workAcknowledgementVerified: true };
+      }
+      if (input.action === 'inspect' && input.toolName === undefined && input.evidenceHash !== undefined) {
+        if (!acknowledgementVerified) throw new SessionPlaneDomainError('provider.permission-unverified', 'Recover the current ACK before revealing its retained activity');
+        const result = await revealHostSpanActivity(page, anchor, retainedAcknowledgements, input.appName, input.evidenceHash);
+        this.#requirePage(session);
+        return { ...result, requestAcknowledgementVerified: true };
       }
       const result = await controlHostSpanPermission(page, input, anchor);
       this.#requirePage(session);

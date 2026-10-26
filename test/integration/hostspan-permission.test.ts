@@ -11,7 +11,7 @@ import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { callRpc } from '../../src/cli/client.ts';
-import { inspectHostSpanActivity } from '../../src/providers/chatgpt/hostspan-permission.ts';
+import { inspectHostSpanActivity, revealHostSpanActivity } from '../../src/providers/chatgpt/hostspan-permission.ts';
 
 test('retained activity is read only under its stored ACK, never reassigned to the current request', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-retained-activity-'));
@@ -23,8 +23,8 @@ test('retained activity is read only under its stored ACK, never reassigned to t
     await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: `<main>
       <div data-message-author-role="user" data-message-id="owned-older-ack">Original work</div>
       <div data-message-author-role="assistant" data-message-id="older-answer">
-        <button aria-expanded="false" onclick="throw Error('No reveal')">Previous activity</button>
-        <section hidden>hostspan-desktop File Patch<button onclick="throw Error('No allow')">Always allow</button></section>
+        <div class="group/activity-header"><button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#retained-body').hidden=false">hostspan-desktop previous activity</button></div>
+        <section hidden id="retained-body">hostspan-desktop File Patch<button onclick="throw Error('No allow')">Always allow</button></section>
       </div>
       <div data-message-author-role="user" data-message-id="unowned-user">Unrelated manual question</div>
       <div role="alert">hostspan-desktop unrelated permission<button>Allow</button></div>
@@ -43,6 +43,22 @@ test('retained activity is read only under its stored ACK, never reassigned to t
     assert.equal(older.visible, false);
     assert.equal(read.disclosures.find(item => item.owningUserMessageId === 'owned-older-ack')?.expanded, 'false');
     assert.doesNotMatch(JSON.stringify(read), /unrelated permission|evidenceHash/);
+    const selected = read.disclosures.find(item => item.activityEvidenceHash !== null)!;
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']),
+      'hostspan-other', selected.activityEvidenceHash!), /different app/);
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="new-user">Different request</div>'));
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']),
+      'hostspan-desktop', selected.activityEvidenceHash!), /exact-current-ack-not-mounted/);
+    await page.locator('[data-message-id="new-user"]').evaluate(element => element.remove());
+    const revealed = await revealHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']),
+      'hostspan-desktop', selected.activityEvidenceHash!);
+    assert.equal(revealed.revealClicked, true);
+    assert.equal(revealed.grantAttempted, false);
+    assert.equal(revealed.activityUserMessageId, 'owned-older-ack');
+    assert.equal(await page.locator('#retained-body').isVisible(), true);
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']),
+      'hostspan-desktop', selected.activityEvidenceHash!), /fresh HostSpan activityEvidenceHash/);
     assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
@@ -137,6 +153,20 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
       name: 'sessionplane_decide', arguments: { teamId: team.teamId, requestRef: row.outbox_id, requestId,
         decision: 'hostspan_permission', appName: 'hostspan-desktop', toolName: 'Process Start', ...extra },
       socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend', `
+      <section id="selected-activity"><div class="group/activity-header"><button aria-expanded="false"
+        onclick="this.setAttribute('aria-expanded','true');document.querySelector('#activity-body').hidden=false">hostspan-desktop exact activity</button></div>
+        <div id="activity-body" hidden>hostspan-desktop File Patch<button onclick="throw Error('No grant')">Always allow</button></div></section>`));
+    const surface = await callRpc<any>({ socketPath: config.socketPath, method: 'session.submission.inspect',
+      params: { clientId: 'fixture-owner', requestId: 'original', sessionId: session.sessionId, generation: 1 },
+      timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    const selectedHash = surface.evidence!.submissionVerification!.hostspanActivity!.disclosures
+      .find(item => item.name === 'hostspan-desktop exact activity')!.activityEvidenceHash;
+    const reveal = await decide('inspect-observed-activity', { action: 'inspect', toolName: undefined, evidenceHash: selectedHash });
+    assert.equal(reveal.isError, false, JSON.stringify(reveal));
+    assert.equal((reveal.structuredContent.permission as any).outcome, 'activity-revealed');
+    assert.equal((reveal.structuredContent.permission as any).grantAttempted, false);
+    await page.locator('#selected-activity').evaluate(element => element.remove());
     t.mock.method(page, 'bringToFront', async () => { throw Error('Must not focus'); });
     const prepare = t.mock.method(core.browserOwner!, 'preparePageInteraction');
     let output = '';
