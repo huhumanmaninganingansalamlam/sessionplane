@@ -80,6 +80,20 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
         if (app.test(card.textContent ?? '') && inWork(card)) { cards.add(card); break; }
       }
     }
+    // Only inherit app context from a structural activity wrapper, never a nearby label.
+    const appActivity = (element: Element) => {
+      if (app.test(name(element))) return null;
+      for (let container = element.parentElement; container; container = container.parentElement) {
+        if (container.matches('body, main, [role="main"]') || container.querySelector('[data-message-author-role="user"], [data-user-message-bubble]')) break;
+        const headers = container.querySelectorAll(':scope > [class~="group/activity-header"] > button[aria-expanded]');
+        if (headers.length !== 1) continue;
+        const header = headers[0]!;
+        if (header === element || !app.test(name(header)) || !visible(header) ||
+            header.getAttribute('aria-expanded') !== 'true' || association(header) !== association(element)) continue;
+        return { name: name(header), expanded: header.getAttribute('aria-expanded'), state: header.getAttribute('data-state') };
+      }
+      return null;
+    };
     const disclosures = [...root.querySelectorAll('button[aria-expanded], summary')].filter(element => inWork(element) &&
       (element.closest('[class~="group/activity-header"], details') !== null ||
         /이전 활동|작업|활동|previous activity|working|worked|activity/i.test(name(element))));
@@ -89,8 +103,9 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
         visible: visible(card), controls: controls(card), ...provenance(card) })),
       disclosures: disclosures.slice(0, 40).map(element => ({ name: name(element).slice(0, 500), visible: visible(element),
         expanded: element.getAttribute('aria-expanded'), state: element.getAttribute('data-state'),
+        appActivity: appActivity(element),
         revealAvailable: element.tagName === 'BUTTON' && element.closest('[class~="group/activity-header"]') !== null &&
-          app.test(name(element)) && visible(element) && !element.hasAttribute('disabled') && element.getAttribute('aria-disabled') !== 'true' &&
+          (app.test(name(element)) || appActivity(element) !== null) && visible(element) && !element.hasAttribute('disabled') && element.getAttribute('aria-disabled') !== 'true' &&
           (element.getAttribute('aria-expanded') === 'false' || element.getAttribute('data-state') === 'closed'),
         controls: (element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean), ...provenance(element) })),
       truncated: cards.size > 20 || disclosures.length > 40,
@@ -106,7 +121,7 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
     disclosures: surface.disclosures.map(disclosure => ({ ...disclosure,
       activityEvidenceHash: disclosure.revealAvailable && disclosure.owningUserMessageId !== null
         ? createHash('sha256').update(JSON.stringify(['hostspan-activity-inspection', page.url(), submittedUserMessageId,
-          disclosure.owningUserMessageId, disclosure.name, disclosure.expanded, disclosure.state, disclosure.controls])).digest('hex') : null })) };
+          disclosure.owningUserMessageId, disclosure.name, disclosure.expanded, disclosure.state, disclosure.controls, disclosure.appActivity])).digest('hex') : null })) };
 }
 
 /** An explicit inspection can reveal one freshly selected owned activity, never grant a tool. */
@@ -118,7 +133,7 @@ export async function revealHostSpanActivity(page: Page, submittedUserMessageId:
   const matches = observed.disclosures.filter(disclosure => disclosure.activityEvidenceHash === evidenceHash);
   if (matches.length !== 1) throw unavailable('Inspect and select one fresh HostSpan activityEvidenceHash');
   const activity = matches[0]!;
-  if (!new RegExp(`(^|[^\\w-])${appName}($|[^\\w-])`, 'i').test(activity.name)) throw unavailable('The selected activity belongs to a different app');
+  if (!new RegExp(`(^|[^\\w-])${appName}($|[^\\w-])`, 'i').test(activity.appActivity?.name ?? activity.name)) throw unavailable('The selected activity belongs to a different app');
   const buttons = page.getByRole('button', { name: activity.name, exact: true });
   if (await buttons.count() !== 1) throw unavailable('The exact observed activity disclosure is absent or ambiguous');
   const clicked = await buttons.evaluate((element, expected) => {
@@ -134,9 +149,28 @@ export async function revealHostSpanActivity(page: Page, submittedUserMessageId:
       const position = node.compareDocumentPosition(element);
       return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING);
     }).at(-1);
+    let appActivity = null;
+    if (expected.activity.appActivity !== null) {
+      for (let container = element.parentElement; container; container = container.parentElement) {
+        if (container.matches('body, main, [role="main"]') || container.querySelector('[data-message-author-role="user"], [data-user-message-bubble]')) break;
+        const headers = container.querySelectorAll(':scope > [class~="group/activity-header"] > button[aria-expanded]');
+        if (headers.length !== 1) continue;
+        const header = headers[0]!;
+        if (header === element || !/(^|[^\w-])hostspan(?:-[a-z0-9_-]+)?($|[^\w-])/i.test(name(header)) ||
+            !header.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || header.getAttribute('aria-expanded') !== 'true') continue;
+        const headerOwner = users.filter(node => {
+          const position = node.compareDocumentPosition(header);
+          return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING);
+        }).at(-1);
+        if (!headerOwner || !owner || id(headerOwner) !== id(owner)) continue;
+        appActivity = { name: name(header), expanded: header.getAttribute('aria-expanded'), state: header.getAttribute('data-state') };
+        break;
+      }
+    }
     if (!(element instanceof HTMLButtonElement) || location.href !== expected.url ||
         !element.closest('[class~="group/activity-header"]') || element.closest('nav, aside, [role="navigation"]') ||
         !element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || element.disabled || element.getAttribute('aria-disabled') === 'true' ||
+        JSON.stringify(appActivity) !== JSON.stringify(expected.activity.appActivity) ||
         name(element) !== expected.activity.name || element.getAttribute('aria-expanded') !== expected.activity.expanded ||
         element.getAttribute('data-state') !== expected.activity.state ||
         JSON.stringify((element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean)) !== JSON.stringify(expected.activity.controls) ||

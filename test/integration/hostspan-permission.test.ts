@@ -23,8 +23,12 @@ test('retained activity is read only under its stored ACK, never reassigned to t
     await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: `<main>
       <div data-message-author-role="user" data-message-id="owned-older-ack">Original work</div>
       <div data-message-author-role="assistant" data-message-id="older-answer">
-        <div class="group/activity-header"><button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#retained-body').hidden=false">hostspan-desktop previous activity</button></div>
-        <section hidden id="retained-body">hostspan-desktop File Patch<button onclick="throw Error('No allow')">Always allow</button></section>
+        <section id="app-activity"><div class="group/activity-header"><button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#retained-body').hidden=false">hostspan-desktop previous activity</button></div>
+        <section hidden id="retained-body">hostspan-desktop File Patch<button onclick="throw Error('No allow')">Always allow</button>
+          <section><div class="group/activity-header"><button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#child-output').hidden=false">Exact child tool activity</button></div>
+          <div hidden id="child-output">Original tool output</div></section>
+        </section></section>
+        <section><div class="group/activity-header"><button aria-expanded="false" onclick="throw Error('Unrelated sibling must stay closed')">Unrelated sibling</button></div></section>
       </div>
       <div data-message-author-role="user" data-message-id="unowned-user">Unrelated manual question</div>
       <div role="alert">hostspan-desktop unrelated permission<button>Allow</button></div>
@@ -57,6 +61,20 @@ test('retained activity is read only under its stored ACK, never reassigned to t
     assert.equal(revealed.grantAttempted, false);
     assert.equal(revealed.activityUserMessageId, 'owned-older-ack');
     assert.equal(await page.locator('#retained-body').isVisible(), true);
+    const child = revealed.activity.available && revealed.activity.disclosures.find(item => item.name === 'Exact child tool activity');
+    assert.ok(child && child.activityEvidenceHash);
+    assert.equal(child.appActivity?.name, 'hostspan-desktop previous activity');
+    assert.equal(child.owningUserMessageId, 'owned-older-ack');
+    assert.equal(revealed.activity.available && revealed.activity.disclosures.find(item => item.name === 'Unrelated sibling')?.revealAvailable, false);
+    await page.getByRole('button', { name: 'hostspan-desktop previous activity', exact: true }).evaluate(element => element.textContent = 'another-app previous activity');
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']),
+      'hostspan-desktop', child.activityEvidenceHash), /fresh HostSpan activityEvidenceHash/);
+    await page.getByRole('button', { name: 'another-app previous activity', exact: true }).evaluate(element => element.textContent = 'hostspan-desktop previous activity');
+    const childResult = await revealHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']),
+      'hostspan-desktop', child.activityEvidenceHash);
+    assert.equal(childResult.grantAttempted, false);
+    assert.equal(await page.locator('#child-output').isVisible(), true);
+
     await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']),
       'hostspan-desktop', selected.activityEvidenceHash!), /fresh HostSpan activityEvidenceHash/);
     assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
