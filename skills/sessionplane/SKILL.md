@@ -175,6 +175,10 @@ out prompts, infer consensus, or inject answers into other roles.
   observation. Use focus separately when the user asks to see the recovered tab.
 
 - Select the requested combined model/effort label from the observed catalog.
+  Verify selection from supported provider UI/preparation/submission evidence when
+  needed. Never ask the answering assistant to identify or confirm its model, or
+  treat its self-report as verification. Missing response fields alone require
+  neither an identity prompt nor user confirmation.
   Preserve requested model/mode through cancellation and replacement. Honor exact
   versions; do not substitute or infer Pro from an account badge or High effort.
   Use Chat only, never Work. Do not bypass access controls.
