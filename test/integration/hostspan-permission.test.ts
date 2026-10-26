@@ -9,6 +9,7 @@ import { runCli } from '../../src/cli/main.ts';
 import { Readable, Writable } from 'node:stream';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 
 for(const displaced of [false,true]) test(`explicit HostSpan permission ${displaced ? 'inspects a preserved predecessor' : 'controls only the current exact grant'}, preserving work and idempotency`, async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-hostspan-permission-'));
@@ -40,12 +41,22 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
     </main>` }));
     await page.goto(`https://chatgpt.com/c/conversation-${session.sessionId}`);
     const open = fake.openSubmission.bind(fake);
+    const observer = new ChatGptAdapter({ browserOwner: core.browserOwner!, pageRegistry: core.pageRegistry,
+      loginUrl: 'https://chatgpt.com/' });
+    t.mock.method(fake, 'openObservation', request => observer.openObservation(request));
     t.mock.method(fake, 'openSubmission', async request => ({ ...await open(request), pageKey: binding.pageKey,
       bindAcknowledgement() { core.pageRegistry.reservePage(binding.pageKey, { sessionId: session.sessionId,
         generation: 1, conversationId: `conversation-${session.sessionId}` }); } }));
     await core.submissionService.send({ clientId: 'fixture-owner', requestId: 'original', sessionId: session.sessionId,
       prompt: 'Fixture question', sessionDeadlineSec: 600 });
     const row = core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=?').get(session.sessionId)!;
+    const waited = await invokeMcpTool({ name: 'sessionplane_wait', arguments: {
+      teamId: team.teamId, requestRefs: [row.outbox_id], waitMs: 60000, continuationApproved: true,
+    }, socketPath: config.socketPath, timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
+    assert.equal(waited.structuredContent.results[0].errorCode, 'provider.actionable-alert', JSON.stringify(waited));
+    assert.equal(await page.locator('button[aria-controls="work"]').getAttribute('aria-expanded'), 'false');
+    assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0);
+    assert.equal(fake.submitCount, 1, 'Hidden permission returns the existing collector without another Continue');
     const successor=displaced ? core.teamDirectory.createSession({teamId:team.teamId,roleKey:'main',provider:'chatgpt'}) : null;
     const decide = async (requestId: string, extra: Record<string, unknown>) => invokeMcpTool({
       name: 'sessionplane_decide', arguments: { teamId: team.teamId, requestRef: row.outbox_id, requestId,
