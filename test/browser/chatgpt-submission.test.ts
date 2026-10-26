@@ -92,7 +92,7 @@ test('UNKNOWN history acknowledgement requires retained ownership, empty draft a
         },
       },
     }));
-    const selection = (await inspectChatGptSubmissionCandidates(page, 'recovered123456'))[0]!;
+    let selection = (await inspectChatGptSubmissionCandidates(page, 'recovered123456'))[0]!;
     assert.ok(selection);
     const recover = (selected = true) => new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry,
       loginUrl: 'https://chatgpt.com/', acknowledgementTimeoutMs: 100 }).recoverAcknowledgement({
@@ -121,9 +121,19 @@ test('UNKNOWN history acknowledgement requires retained ownership, empty draft a
       ...selection, verifyExactPrompt: true, onPromptMismatch: values => { compared = values; },
     }), null);
     assert.ok(compared.includes('Exact original'), 'Retained full-text mismatch exposes its actual text candidates to privacy-safe diagnostics');
+    // Rendered line breaks need not match canonical text. Diagnostic expansion
+    // must not change the explicitly selected evidence before canonical recovery.
+    await page.locator('[data-message-id="original-user"]').evaluate(node => {
+      node.innerHTML = '<div class="whitespace-pre-wrap" style="white-space:pre-wrap">Exact\n\noriginal</div><button aria-expanded="false">More</button>';
+      node.querySelector('button')!.onclick = event => {
+        (event.currentTarget as HTMLButtonElement).textContent = 'Collapse';
+      };
+    });
+    selection = (await inspectChatGptSubmissionCandidates(page, 'recovered123456'))[0]!;
     const ack = await recover();
     assert.equal(ack?.submittedUserMessageId, 'original-user');
     assert.equal(ack?.conversationId, 'recovered123456');
+    assert.equal(await page.locator('button').innerText(), 'More', 'ACK recovery preserves the selected message surface');
     assert.equal(registry.requireSessionPage(binding.pageKey, { ...session, conversationId: 'recovered123456' }), page);
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
