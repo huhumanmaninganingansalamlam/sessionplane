@@ -27,17 +27,19 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
       <section role="alert" hidden>hostspan-desktop Process Start Old permission</section>
       <div data-message-author-role="user" data-message-id="user-message-1">Fixture question</div>
       <div class="group/activity-header"><button aria-expanded="false" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">hostspan-desktop 통합 사용함</button></div>
-      <div class="group/activity-header"><button aria-expanded="false" aria-controls="work" aria-labelledby="work-label" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#work').hidden=false"></button><span id="work-label">이전 활동</span></div>
+      <div id="activity"><div class="group/activity-header"><button aria-expanded="false" aria-labelledby="work-label" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#work').hidden=false"></button><span id="work-label">이전 활동</span></div>
       <span id="elapsed">1 hour 14 seconds working</span>
       <textarea id="prompt-textarea">Keep my draft</textarea><button data-testid="stop-button">Stop generating</button>
-      <div id="work" hidden><section id="permission"><div role="alert">hostspan-desktop Process Start
+      <div id="work" hidden>
+      <section><div class="group/activity-header"><button aria-expanded="false" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">Nested tool activity</button></div></section>
+      <section id="permission"><div role="alert">hostspan-desktop Process Start
         <button aria-expanded="false" onclick="document.querySelector('#details').hidden=false">View details</button></div>
         <button id="allow" onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove()"><span>한 번만 허용</span><kbd>⏎</kbd></button>
           <button onclick="throw Error('Must not click')">Always allow</button>
       </section>
       <section role="dialog" id="details" hidden>hostspan-desktop Process Start Command: original work
         <button aria-label="Close dialog" onclick="document.querySelector('#details').hidden=true">Close dialog</button>
-      </section></div><div role="alert">another-app Process Start<button>Allow</button></div>
+      </section></div></div><div role="alert">another-app Process Start<button>Allow</button></div>
     </main>` }));
     await page.goto(`https://chatgpt.com/c/conversation-${session.sessionId}`);
     const open = fake.openSubmission.bind(fake);
@@ -54,7 +56,7 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
       teamId: team.teamId, requestRefs: [row.outbox_id], waitMs: 60000, continuationApproved: true,
     }, socketPath: config.socketPath, timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
     assert.equal(waited.structuredContent.results[0].errorCode, 'provider.actionable-alert', JSON.stringify(waited));
-    assert.equal(await page.locator('button[aria-controls="work"]').getAttribute('aria-expanded'), 'false');
+    assert.equal(await page.locator('button[aria-labelledby="work-label"]').getAttribute('aria-expanded'), 'false');
     assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0);
     assert.equal(fake.submitCount, 1, 'Hidden permission returns the existing collector without another Continue');
     const successor=displaced ? core.teamDirectory.createSession({teamId:team.teamId,roleKey:'main',provider:'chatgpt'}) : null;
