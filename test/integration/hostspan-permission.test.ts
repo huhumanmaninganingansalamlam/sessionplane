@@ -13,6 +13,40 @@ import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { callRpc } from '../../src/cli/client.ts';
 import { inspectHostSpanActivity } from '../../src/providers/chatgpt/hostspan-permission.ts';
 
+test('retained activity is read only under its stored ACK, never reassigned to the current request', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-retained-activity-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [new FakeProviderAdapter()],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: `<main>
+      <div data-message-author-role="user" data-message-id="owned-older-ack">Original work</div>
+      <div data-message-author-role="assistant" data-message-id="older-answer">
+        <button aria-expanded="false" onclick="throw Error('No reveal')">Previous activity</button>
+        <section hidden>hostspan-desktop File Patch<button onclick="throw Error('No allow')">Always allow</button></section>
+      </div>
+      <div data-message-author-role="user" data-message-id="unowned-user">Unrelated manual question</div>
+      <div role="alert">hostspan-desktop unrelated permission<button>Allow</button></div>
+      <div data-message-author-role="user" data-message-id="current-ack">New contextual follow-up</div>
+      <div role="alert">hostspan-desktop current warning</div><textarea>Preserved draft</textarea></main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    const currentOnly = await inspectHostSpanActivity(page, 'current-ack');
+    assert.equal(currentOnly.available, true);
+    assert.doesNotMatch(JSON.stringify(currentOnly), /File Patch|unrelated permission/);
+    const read = await inspectHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']));
+    assert.equal(read.available, true);
+    if (!read.available) return;
+    const older = read.cards.find(card => card.text.includes('File Patch'))!;
+    assert.equal(older.association, 'retained-acknowledged-turn');
+    assert.equal(older.owningUserMessageId, 'owned-older-ack');
+    assert.equal(older.visible, false);
+    assert.equal(read.disclosures.find(item => item.owningUserMessageId === 'owned-older-ack')?.expanded, 'false');
+    assert.doesNotMatch(JSON.stringify(read), /unrelated permission|evidenceHash/);
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 for(const displaced of [false,true]) test(`explicit HostSpan permission ${displaced ? 'inspects a preserved predecessor' : 'controls only the current exact grant'}, preserving work and idempotency`, async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-hostspan-permission-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });

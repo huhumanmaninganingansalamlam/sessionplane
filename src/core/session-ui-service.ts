@@ -227,7 +227,7 @@ export class SessionUiService {
                     activity: activity.strength, activityReason: activity.reason,
                     messageTimeout: dom.providerAlerts.some(isMessageTimeoutAlert),
                     hostspanActivity: session.submittedUserMessageId === null ? null :
-                      await inspectHostSpanActivity(this.#requirePage(session, input.readOnly), session.submittedUserMessageId),
+                      await inspectHostSpanActivity(this.#requirePage(session, input.readOnly), session.submittedUserMessageId, submittedMessageIds),
                     // Passive evidence is not a completed answer or permission to submit.
                     responseCandidate: dom.candidate,
                     turnBoundary: dom.turnBoundary,

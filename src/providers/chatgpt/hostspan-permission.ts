@@ -17,7 +17,8 @@ const once = /^(?:허용|이번만 허용|한 번 허용|한 번만 허용|Allow
 const always = /^(?:항상 허용|Always allow)(?:\s*⏎)?$/i;
 
 /** Read mounted work activity, including hidden cards, without revealing or granting it. */
-export async function inspectHostSpanActivity(page: Page, submittedUserMessageId: string) {
+export async function inspectHostSpanActivity(page: Page, submittedUserMessageId: string,
+  retainedAcknowledgements: ReadonlySet<string> = new Set()) {
   const users = (await readChatGptMessages(page, true)).filter(message => message.role === 'user');
   const unavailable = (reason: string) => ({ scope: 'mounted-dom' as const, available: false as const,
     reason, submittedUserMessageId, providerMutation: false as const });
@@ -28,19 +29,36 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
   while (start > 0 && users[start]!.text.trim() === '계속' && users[start - 1]!.rootIndex === users[start]!.rootIndex) start--;
   const work = users[start]!;
   if (work.elementIndex === undefined) return unavailable('work-anchor-unavailable');
-  const surface = await page.locator(CHATGPT_SELECTORS.messages).nth(work.elementIndex).evaluate((anchor, workId) => {
+  const surface = await page.locator(CHATGPT_SELECTORS.messages).nth(work.elementIndex).evaluate((anchor, input) => {
     const identity = anchor.closest('[data-message-id], [data-turn-id], [data-dil-message-id]') ?? anchor;
     const ids = [identity.getAttribute('data-message-id'), anchor.getAttribute('data-message-id'),
       anchor.getAttribute('data-dil-message-id'), ...(anchor.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/)];
-    if (workId === null || !ids.includes(workId)) return null;
+    if (input.workId === null || !ids.includes(input.workId)) return null;
     const root = anchor.getRootNode() as Document | ShadowRoot;
     const app = /(^|[^\w-])hostspan(?:-[a-z0-9_-]+)?($|[^\w-])/i;
     const action = /^(?:항상 허용|Always allow|허용|이번만 허용|한 번 허용|한 번만 허용|Allow|Allow once|Allow this time|자세히 보기|View details|See details)(?:\s*⏎)?$/i;
-    const inWork = (element: Element) => {
-      const position = anchor.compareDocumentPosition(element);
-      return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING) &&
-        element.closest('nav, aside, [role="navigation"]') === null;
+    const userNodes = [...root.querySelectorAll(input.selector)].flatMap(node => {
+      if (node.getAttribute('data-message-author-role') !== 'user' && !node.querySelector('[data-user-message-bubble]')) return [];
+      const identity = node.closest('[data-message-id], [data-turn-id], [data-dil-message-id]') ?? node;
+      const id = identity.getAttribute('data-message-id') ?? node.getAttribute('data-message-id') ??
+        node.getAttribute('data-dil-message-id') ?? node.getAttribute('data-chatgpt-search-message-ids');
+      return [{ node, id }];
+    });
+    const association = (element: Element) => {
+      const owner = userNodes.filter(({ node }) => {
+        const position = node.compareDocumentPosition(element);
+        return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING);
+      }).at(-1);
+      return owner?.id && input.retainedIds.includes(owner.id) ? owner.id : null;
     };
+    const inCurrentWork = (element: Element) => {
+      const position = anchor.compareDocumentPosition(element);
+      return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING);
+    };
+    const inWork = (element: Element) => element.closest('nav, aside, [role="navigation"]') === null &&
+      (inCurrentWork(element) || association(element) !== null);
+    const provenance = (element: Element) => ({ association: inCurrentWork(element) ? 'current-work' : 'retained-acknowledged-turn',
+      owningUserMessageId: association(element) });
     const name = (element: Element) => element.getAttribute('aria-label') ||
       (element.getAttribute('aria-labelledby') ?? '').split(/\s+/).map(id => root.getElementById(id)?.textContent ?? '').join(' ').trim() ||
       (element.textContent ?? '').trim();
@@ -68,13 +86,13 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
     return {
       cards: [...cards].slice(0, 20).map(card => ({ role: card.getAttribute('role'),
         text: (card.textContent ?? '').trim().slice(0, 4000), textTruncated: (card.textContent ?? '').trim().length > 4000,
-        visible: visible(card), controls: controls(card) })),
+        visible: visible(card), controls: controls(card), ...provenance(card) })),
       disclosures: disclosures.slice(0, 40).map(element => ({ name: name(element).slice(0, 500), visible: visible(element),
         expanded: element.getAttribute('aria-expanded'), state: element.getAttribute('data-state'),
-        controls: (element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean) })),
+        controls: (element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean), ...provenance(element) })),
       truncated: cards.size > 20 || disclosures.length > 40,
     };
-  }, work.messageId);
+  }, { workId: work.messageId, selector: CHATGPT_SELECTORS.messages, retainedIds: [...retainedAcknowledgements, submittedUserMessageId] });
   if (surface === null) return unavailable('work-anchor-changed-during-inspection');
   const current = (await readChatGptMessages(page)).filter(message => message.role === 'user');
   if (current.length !== users.length || current.some((user, index) =>
