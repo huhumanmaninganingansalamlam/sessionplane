@@ -39,6 +39,14 @@ export interface UserConfirmedInterruption {
   readonly conversationId: string;
   readonly submittedUserMessageId: string;
   readonly evidenceRef: string;
+  /** Caller attests completed app recovery and the recovered original operation;
+   * this never establishes a tool result or changes the retained alert. */
+  readonly resolvedToolAlert?: {
+    readonly appName: string;
+    readonly alertSha256: string;
+    readonly originalOperationOutcome: 'not-started' | 'completed' | 'unknown';
+    readonly readOnlyOperationInactive?: true | undefined;
+  } | undefined;
 }
 
 export interface FailureContinuation {

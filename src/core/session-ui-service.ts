@@ -523,10 +523,34 @@ export class SessionUiService {
           'Preserve the current draft, attachment or active generation before continuation');
       }
       const controls = await this.#capture(session);
+      const resolvedAlert = confirmation?.resolvedToolAlert;
+      let recoveredToolAlert = false;
+      if (resolvedAlert && (resolvedAlert.originalOperationOutcome !== 'unknown' || resolvedAlert.readOnlyOperationInactive === true) &&
+          confirmedInterruption && activity.strength === 'none' && anchor.candidate === null &&
+          anchor.providerAlerts.length === 1 && retained === null) {
+        const alert = anchor.providerAlerts[0]!;
+        // An exact retained tool error may survive successful account recovery.
+        // Explicit caller evidence is not a new grant or proof of tool success.
+        const expected = `${resolvedAlert.appName} ${resolvedAlert.appName} 다시 연결 ${resolvedAlert.appName} 연결이 만료되었습니다. ChatGPT가 이 요청을 처리하는 데 사용할 수 있도록 먼저 다시 연결하세요.`;
+        if (alert.replace(/\s+/g, ' ').trim() === expected &&
+            createHash('sha256').update(alert).digest('hex') === resolvedAlert.alertSha256) {
+          const work = await inspectHostSpanActivity(page, original.submittedUserMessageId!);
+          const compact = (text: string) => text.replace(/\s+/g, '');
+          const warning = compact(expected);
+          recoveredToolAlert = work.available && !work.truncated && work.cards.length > 0 && work.cards.every(card =>
+            card.association === 'current-work' && card.owningUserMessageId === original.submittedUserMessageId &&
+            !card.textTruncated && (card.role === null || card.role === 'alert') &&
+            [warning, warning + '나중에Esc다시연결⏎'].includes(compact(card.text)) &&
+            card.controls.every(control => control.href === null &&
+              /^(?:나중에(?:\s*Esc)?|다시 연결(?:\s*⏎)?)$/.test(control.name.trim())));
+        }
+      }
+      if (resolvedAlert && !recoveredToolAlert) throw new SessionPlaneDomainError('provider.preparation-required',
+        'The exact recovered tool expiration alert is no longer verified; preserve current alerts and work');
       const after = this.#registry.refreshPage(session.pageKey!);
       if (binding.bindingEpoch !== after.bindingEpoch || !anchor.conversationSurfaceAvailable ||
           !anchor.submittedUserFound || anchor.laterUserFound ||
-          (!confirmedInterruption && anchor.candidate !== null && !(disconnected && !anchor.candidate.terminalMarker)) || anchor.actionableAlert ||
+          (!confirmedInterruption && anchor.candidate !== null && !(disconnected && !anchor.candidate.terminalMarker)) || (anchor.actionableAlert && !recoveredToolAlert) ||
           (!confirmedInterruption && !disconnected && activity.strength !== 'none') || controls.nodesTruncated ||
           controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role)) ||
           !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
@@ -541,6 +565,7 @@ export class SessionUiService {
       return { pageKey: session.pageKey!, conversationId: session.conversationId!, bindingEpoch: after.bindingEpoch,
         observedAt: controls.capturedAt, continuationPrompt: '계속',
         disconnectedRecovery: disconnected && !anchor.candidate?.terminalMarker,
+        ...(recoveredToolAlert ? { recoveredToolAlert: { ...resolvedAlert, alertRetained: true, callerAttestedRecovery: true } } : {}),
         ...(retained ? { missingContinuationAcknowledgement: original.submittedUserMessageId,
           retainedPredecessorAcknowledgement: missing!.submittedUserMessageId } : {}),
         ...(confirmedInterruption ? { userConfirmedInterruption: confirmation,

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -705,6 +706,99 @@ test('explicitly confirmed idle acknowledged turn with no response continues onc
     assert.equal(f.fake.submitCount, 2);
     const payload = f.core.database.raw.prepare('SELECT payload_json FROM outbox WHERE outbox_id=?').get(result.requestRef)!;
     assert.equal(JSON.parse(String(payload.payload_json)).prompt, '계속');
+  } finally { await f.close(); }
+});
+
+test('completed app recovery continues once past only its exact retained expiration alert, preserving all other guards', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    f.fake.idleToolTurn = true;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const alert = 'hostspan-desktop\nhostspan-desktop 다시 연결\nhostspan-desktop 연결이 만료되었습니다. ChatGPT가 이 요청을 처리하는 데 사용할 수 있도록 먼저 다시 연결하세요.';
+    const confirmation = { conversationId: original.conversationId!, submittedUserMessageId: original.submittedUserMessageId!,
+      evidenceRef: 'Completed user account action and exact original server receipt: operation not started',
+      resolvedToolAlert: { appName: 'hostspan-desktop', alertSha256: createHash('sha256').update(alert).digest('hex'),
+        originalOperationOutcome: 'not-started' } };
+    const input = { teamId: f.team.teamId, requestRef, requestId: `recovered-app:${requestRef}`,
+      decision: 'continue', continuationApproved: true, userConfirmedInterruption: confirmation };
+    const warning = `<section><div role="alert">${alert.split('\n').map(line => `<div>${line}</div>`).join('')}</div><button>나중에Esc</button><button>다시 연결⏎</button></section>`;
+    const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
+    const idle = '<textarea></textarea><button data-testid="send-button">Send</button></main>';
+    await f.fake.page.setContent(body + warning + idle);
+    const before = { ...original };
+    await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: { ...confirmation, resolvedToolAlert: undefined } }), /no answer|alert/);
+    await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: { ...confirmation,
+      resolvedToolAlert: { ...confirmation.resolvedToolAlert, originalOperationOutcome: 'unknown' } } }), /invalid|Invalid|expected/i);
+    await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: { ...confirmation,
+      resolvedToolAlert: { ...confirmation.resolvedToolAlert, alertSha256: '0'.repeat(64) } } }), /exact recovered/);
+    for (const unsafe of [
+      body + warning.replace('</section>', '<button>항상 허용</button></section>') + idle,
+      body + warning + '<div role="alert">A different current failure</div>' + idle,
+      body + warning + '<div role="dialog">New authentication challenge</div>' + idle,
+      body + warning + '<div data-message-author-role="assistant" data-message-id="new-answer">Partial answer</div>' + idle,
+      body + warning + '<div data-message-author-role="user" data-message-id="new-user">Later user</div>' + idle,
+      body + warning + idle.replace('<textarea></textarea>', '<textarea>Separate draft</textarea>'),
+      body + warning + idle.replace('</main>', '<button data-testid="stop-button">Stop</button></main>'),
+    ]) {
+      await f.fake.page.setContent(unsafe);
+      await assert.rejects(f.rpc('decide', input), /recovered|idle|draft|interruption|no answer/i);
+      assert.equal(f.fake.submitCount, 1);
+    }
+    assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, before.generation);
+    assert.equal(f.core.teamDirectory.getSession(original.sessionId).submittedUserMessageId, before.submittedUserMessageId);
+    await f.fake.page.setContent(body + warning + idle);
+    f.fake.failureCount = 1;
+    const recoveredInput = { ...input, userConfirmedInterruption: { ...confirmation,
+      evidenceRef: 'Original read-only git status output remains UNKNOWN; exact command preserved and current process ledger proves inactive',
+      resolvedToolAlert: { ...confirmation.resolvedToolAlert, originalOperationOutcome: 'unknown', readOnlyOperationInactive: true } } };
+    const result = await f.rpc<any>('decide', recoveredInput);
+    assert.equal(result.generation, 2);
+    assert.equal(result.reconciliation.evidence.recoveredToolAlert.alertRetained, true);
+    assert.equal(result.reconciliation.evidence.recoveredToolAlert.callerAttestedRecovery, true);
+    assert.equal(result.reconciliation.evidence.recoveredToolAlert.originalOperationOutcome, 'unknown');
+    await f.rpc('decide', recoveredInput);
+    assert.equal(f.fake.submitCount, 2);
+    assert.equal(f.fake.stopCount, 0);
+    const payloads = f.core.database.raw.prepare('SELECT payload_json FROM outbox WHERE session_id=? ORDER BY generation')
+      .all(original.sessionId);
+    assert.deepEqual(payloads.map(s => JSON.parse(String(s.payload_json)).prompt), ['Original operation snapshot', '계속']);
+  } finally { await f.close(); }
+});
+
+test('recovered tool alert authorization is rechecked before submission when a real permission appears during preparation', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    f.fake.idleToolTurn = true;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const alert = 'hostspan-desktop\nhostspan-desktop 다시 연결\nhostspan-desktop 연결이 만료되었습니다. ChatGPT가 이 요청을 처리하는 데 사용할 수 있도록 먼저 다시 연결하세요.';
+    await f.fake.page.setContent(`<main>${configuration}<div data-message-author-role="user" data-message-id="user-message-1">Original</div>
+      <div role="alert">${alert.split('\n').map(line => `<div>${line}</div>`).join('')}</div>
+      <textarea></textarea><button data-testid="send-button">Send</button></main>`);
+    f.fake.afterPrepare = async request => {
+      if (request.generation === 2) await f.fake.page.evaluate(() => {
+        const card = document.createElement('div'); card.setAttribute('role', 'alertdialog');
+        card.innerHTML = 'hostspan-desktop Process Start <button>항상 허용</button>';
+        document.querySelector('main')!.append(card);
+      });
+    };
+    await assert.rejects(f.rpc('decide', { teamId: f.team.teamId, requestRef, requestId: `recovered-race:${requestRef}`,
+      decision: 'continue', continuationApproved: true, userConfirmedInterruption: {
+        conversationId: original.conversationId!, submittedUserMessageId: original.submittedUserMessageId!,
+        evidenceRef: 'Completed actual account recovery; original command receipt proves not started',
+        resolvedToolAlert: { appName: 'hostspan-desktop', alertSha256: createHash('sha256').update(alert).digest('hex'), originalOperationOutcome: 'not-started' }
+      } }), error => error instanceof RpcClientError &&
+        (error.data as { errorCode?: string }).errorCode === 'provider.preparation-required');
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(f.fake.stopCount, 0);
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), '계속');
+    assert.equal(await f.fake.page.getByRole('button', { name: '항상 허용' }).count(), 1);
+    const prepared = f.core.database.raw.prepare('SELECT submission_state, prompt_submitted FROM outbox WHERE session_id=? AND generation=2').get(original.sessionId)!;
+    assert.equal(prepared.submission_state, 'prepared');
+    assert.equal(prepared.prompt_submitted, 0);
   } finally { await f.close(); }
 });
 
