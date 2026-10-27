@@ -359,6 +359,24 @@ export class ConversationCleanupService {
     });
   }
 
+  async closePages(input: { sessionId: string; generation: number; conversationId: string; evidenceRef: string }) {
+    return await this.#options.scheduler.actorFor(input.sessionId).enqueue(async () => {
+      const sessions = new SessionRepository(this.#options.database.raw);
+      const session = sessions.getSnapshot(input.sessionId);
+      if (!session || session.generation !== input.generation || session.conversationId !== input.conversationId) {
+        throw new SessionPlaneDomainError('session.conversation-mismatch', 'Tab cleanup requires the exact durable conversation and generation');
+      }
+      if (!input.evidenceRef.trim() || (!hasCollectedFinal(session) &&
+          !sessions.canDiscardRetiredObservation(session.sessionId, session.generation))) {
+        throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Retrieve the final output or explicitly retire the displaced observation before closing tabs');
+      }
+      const pageCleanup = await this.#closeSessionPages(session);
+      return { requestOk: pageCleanup.pageErrors.length === 0, sessionId: session.sessionId,
+        generation: session.generation, conversationId: session.conversationId,
+        providerDeletionAttempted: false, evidenceRef: input.evidenceRef, pageCleanup };
+    });
+  }
+
   async #closeSessionPages(session: SessionSnapshot) {
     const { database, registry, pageMutex } = this.#options;
     const sessions = new SessionRepository(database.raw);

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Page } from 'playwright-core';
+import { REF_PROPERTY } from '../../browser/ref-snapshot.ts';
 import { SessionPlaneDomainError } from '../../domain/errors.ts';
 import { readChatGptMessages } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
@@ -15,6 +16,240 @@ export interface HostSpanPermissionInput {
 const once = /^(?:허용|이번만 허용|한 번 허용|한 번만 허용|Allow|Allow once|Allow this time)(?:\s*⏎)?$/i;
 
 const always = /^(?:항상 허용|Always allow)(?:\s*⏎)?$/i;
+
+/** Read mounted work activity, including hidden cards, without revealing or granting it. */
+export async function inspectHostSpanActivity(page: Page, submittedUserMessageId: string,
+  retainedAcknowledgements: ReadonlySet<string> = new Set()) {
+  const users = (await readChatGptMessages(page, true)).filter(message => message.role === 'user');
+  const unavailable = (reason: string) => ({ scope: 'mounted-dom' as const, available: false as const,
+    reason, submittedUserMessageId, providerMutation: false as const });
+  if (users.at(-1)?.messageId !== submittedUserMessageId ||
+      users.filter(message => message.messageId === submittedUserMessageId).length !== 1)
+    return unavailable('exact-current-ack-not-mounted');
+  let start = users.length - 1;
+  while (start > 0 && users[start]!.text.trim() === '계속' && users[start - 1]!.rootIndex === users[start]!.rootIndex) start--;
+  const work = users[start]!;
+  if (work.elementIndex === undefined) return unavailable('work-anchor-unavailable');
+  const surface = await page.locator(CHATGPT_SELECTORS.messages).nth(work.elementIndex).evaluate((anchor, input) => {
+    const identity = anchor.closest('[data-message-id], [data-turn-id], [data-dil-message-id]') ?? anchor;
+    const ids = [identity.getAttribute('data-message-id'), anchor.getAttribute('data-message-id'),
+      anchor.getAttribute('data-dil-message-id'), ...(anchor.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/)];
+    if (input.workId === null || !ids.includes(input.workId)) return null;
+    const root = anchor.getRootNode() as Document | ShadowRoot;
+    const app = /(^|[^\w-])hostspan(?:-[a-z0-9_-]+)?($|[^\w-])/i;
+    const action = /^(?:항상 허용|Always allow|허용|이번만 허용|한 번 허용|한 번만 허용|Allow|Allow once|Allow this time|자세히 보기|View details|See details|다시 연결|Reconnect)(?:\s*⏎)?$/i;
+    const userNodes = [...root.querySelectorAll(input.selector)].flatMap(node => {
+      if (node.getAttribute('data-message-author-role') !== 'user' && !node.querySelector('[data-user-message-bubble]')) return [];
+      const identity = node.closest('[data-message-id], [data-turn-id], [data-dil-message-id]') ?? node;
+      const id = identity.getAttribute('data-message-id') ?? node.getAttribute('data-message-id') ??
+        node.getAttribute('data-dil-message-id') ?? node.getAttribute('data-chatgpt-search-message-ids');
+      return [{ node, id }];
+    });
+    const association = (element: Element) => {
+      const owner = userNodes.filter(({ node }) => {
+        const position = node.compareDocumentPosition(element);
+        return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING);
+      }).at(-1);
+      return owner?.id && input.retainedIds.includes(owner.id) ? owner.id : null;
+    };
+    const inCurrentWork = (element: Element) => {
+      const position = anchor.compareDocumentPosition(element);
+      return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING);
+    };
+    const inWork = (element: Element) => element.closest('nav, aside, [role="navigation"]') === null &&
+      (inCurrentWork(element) || association(element) !== null);
+    const provenance = (element: Element) => ({ association: inCurrentWork(element) ? 'current-work' : 'retained-acknowledged-turn',
+      owningUserMessageId: association(element) });
+    const name = (element: Element) => element.getAttribute('aria-label') ||
+      (element.getAttribute('aria-labelledby') ?? '').split(/\s+/).map(id => root.getElementById(id)?.textContent ?? '').join(' ').trim() ||
+      (element.textContent ?? '').trim();
+    const visible = (element: Element) => element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+    // Reuse snapshot element identity: equal labels and DOM order never select a disclosure.
+    const ref = (element: Element) => {
+      const existing = Reflect.get(element, input.refProperty);
+      if (typeof existing === 'string') return existing;
+      const token = `hostspan-activity:${crypto.randomUUID()}`;
+      Object.defineProperty(element, input.refProperty, { value: token, configurable: true });
+      return token;
+    };
+    const controls = (element: Element) => [...element.querySelectorAll('button, [role="button"], summary, a[href], [role="link"]')].slice(0, 20)
+      .map(button => {
+        const href = button.getAttribute('href');
+        let url: URL | null = null;
+        try {
+          const parsed = href === null ? null : new URL(href, location.href);
+          if (parsed?.protocol === 'https:' || parsed?.protocol === 'http:') url = parsed;
+        } catch { /* Malformed links remain diagnostic controls without a URL. */ }
+        return { name: name(button).slice(0, 500), visible: visible(button),
+          disabled: button.hasAttribute('disabled') || button.getAttribute('aria-disabled') === 'true',
+          role: button.getAttribute('role') ?? (button.tagName === 'A' ? 'link' : 'button'),
+          href: url === null ? null : url.origin + url.pathname,
+          urlParameterNames: url === null ? [] : [...url.searchParams.keys()].sort() };
+      });
+    const cards = new Set<Element>();
+    for (const element of root.querySelectorAll('[role="alert"], [role="alertdialog"], [role="dialog"]'))
+      if (inWork(element) && app.test(element.textContent ?? '')) cards.add(element);
+    // An observed control may live beside an alert, or in a card with no ARIA role.
+    // These are diagnostic candidates, never permission evidence or click targets.
+    for (const button of root.querySelectorAll('button, [role="button"]')) {
+      if (!inWork(button) || !action.test(name(button))) continue;
+      let card = button.parentElement;
+      for (let depth = 0; card && depth < 4; depth++, card = card.parentElement) {
+        if (card.matches('body, main, [role="main"]') || card.contains(anchor) ||
+            card.querySelector('[data-message-author-role="user"], [data-user-message-bubble]')) break;
+        if (app.test(card.textContent ?? '') && inWork(card)) { cards.add(card); break; }
+      }
+    }
+    // Only inherit app context from a structural activity wrapper, never a nearby label.
+    const appActivity = (element: Element) => {
+      if (app.test(name(element))) return null;
+      for (let container = element.parentElement; container; container = container.parentElement) {
+        if (container.matches('body, main, [role="main"]') || container.querySelector('[data-message-author-role="user"], [data-user-message-bubble]')) break;
+        const headers = container.querySelectorAll(':scope > [class~="group/activity-header"] > button[aria-expanded]');
+        if (headers.length !== 1) continue;
+        const header = headers[0]!;
+        if (header === element || !app.test(name(header)) || !visible(header) ||
+            header.getAttribute('aria-expanded') !== 'true' || association(header) !== association(element)) continue;
+        return { ref: ref(header), name: name(header), expanded: header.getAttribute('aria-expanded'), state: header.getAttribute('data-state') };
+      }
+      return null;
+    };
+    // Bind a generic previous-activity opener to its nearest single-app container.
+    const containedApp = (element: Element) => {
+      if (!/^(이전 활동|Previous activity)$/i.test(name(element))) return null;
+      const container = element.closest('[class~="group/activity-header"]')?.parentElement ?? element.parentElement;
+      if (!container || container.matches('body, main, [role="main"]') ||
+          container.querySelector('[data-message-author-role="user"], [data-user-message-bubble]')) return null;
+      const openers = [...container.querySelectorAll('button[aria-expanded]')].filter(button => /^(이전 활동|Previous activity)$/i.test(name(button)));
+      const headers = [...container.querySelectorAll('button[aria-expanded]')].filter(header => header !== element && app.test(name(header)));
+      if (openers.length !== 1 || openers[0] !== element || headers.length !== 1) return null;
+      const header = headers[0]!;
+      if (association(header) === null || association(header) !== association(element)) return null;
+      return { containerRef: ref(container), ref: ref(header), name: name(header),
+        expanded: header.getAttribute('aria-expanded'), state: header.getAttribute('data-state') };
+    };
+    const disclosures = [...root.querySelectorAll('button[aria-expanded], summary')].filter(element => inWork(element) &&
+      (element.closest('[class~="group/activity-header"], details') !== null ||
+        /이전 활동|작업|활동|previous activity|working|worked|activity/i.test(name(element))));
+    return {
+      cards: [...cards].slice(0, 20).map(card => ({ role: card.getAttribute('role'),
+        text: (card.textContent ?? '').trim().slice(0, 4000), textTruncated: (card.textContent ?? '').trim().length > 4000,
+        visible: visible(card), controls: controls(card), ...provenance(card) })),
+      disclosures: disclosures.slice(0, 40).map(element => {
+        const contained = containedApp(element);
+        const container = contained === null ? null
+          : element.closest('[class~="group/activity-header"]')?.parentElement ?? element.parentElement;
+        const text = (container?.textContent ?? '').trim();
+        return { activityRef: ref(element), name: name(element).slice(0, 500), visible: visible(element),
+        expanded: element.getAttribute('aria-expanded'), state: element.getAttribute('data-state'),
+        appActivity: appActivity(element), containedApp: contained,
+        containedActivity: container === null ? null : { text: text.slice(0, 4000), textTruncated: text.length > 4000,
+          controls: controls(container) },
+        revealAvailable: element.tagName === 'BUTTON' &&
+          ((element.closest('[class~="group/activity-header"]') !== null && (app.test(name(element)) || appActivity(element) !== null)) || contained !== null) &&
+          visible(element) && !element.hasAttribute('disabled') && element.getAttribute('aria-disabled') !== 'true' &&
+          (element.getAttribute('aria-expanded') === 'false' || element.getAttribute('data-state') === 'closed'),
+        controls: (element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean), ...provenance(element) };
+      }),
+      truncated: cards.size > 20 || disclosures.length > 40,
+    };
+  }, { workId: work.messageId, selector: CHATGPT_SELECTORS.messages, retainedIds: [...retainedAcknowledgements, submittedUserMessageId], refProperty: REF_PROPERTY });
+  if (surface === null) return unavailable('work-anchor-changed-during-inspection');
+  const current = (await readChatGptMessages(page)).filter(message => message.role === 'user');
+  if (current.length !== users.length || current.some((user, index) =>
+      user.messageId !== users[index]?.messageId || user.text !== users[index]?.text || user.rootIndex !== users[index]?.rootIndex))
+    return unavailable('user-boundary-changed-during-inspection');
+  return { scope: 'mounted-dom' as const, available: true as const, submittedUserMessageId,
+    workUserMessageId: work.messageId, providerMutation: false as const, ...surface,
+    disclosures: surface.disclosures.map(disclosure => ({ ...disclosure,
+      activityEvidenceHash: disclosure.revealAvailable && disclosure.owningUserMessageId !== null
+        ? createHash('sha256').update(JSON.stringify(['hostspan-activity-inspection', page.url(), submittedUserMessageId,
+          disclosure.owningUserMessageId, disclosure.activityRef, disclosure.name, disclosure.expanded, disclosure.state, disclosure.controls, disclosure.appActivity, disclosure.containedApp])).digest('hex') : null })) };
+}
+
+/** An explicit inspection can reveal one freshly selected owned activity, never grant a tool. */
+export async function revealHostSpanActivity(page: Page, submittedUserMessageId: string,
+  retainedAcknowledgements: ReadonlySet<string>, appName: string, evidenceHash: string) {
+  if (!/^hostspan(?:-[a-z0-9_-]+)?$/i.test(appName)) throw unavailable('Only HostSpan activity inspection is supported');
+  const observed = await inspectHostSpanActivity(page, submittedUserMessageId, retainedAcknowledgements);
+  if (!observed.available) throw unavailable(observed.reason);
+  const matches = observed.disclosures.filter(disclosure => disclosure.activityEvidenceHash === evidenceHash);
+  if (matches.length !== 1) throw unavailable('Inspect and select one fresh HostSpan activityEvidenceHash');
+  const activity = matches[0]!;
+  if (!new RegExp(`(^|[^\\w-])${appName}($|[^\\w-])`, 'i').test(activity.containedApp?.name ?? activity.appActivity?.name ?? activity.name)) throw unavailable('The selected activity belongs to a different app');
+  const buttons = page.getByRole('button', { name: activity.name, exact: true });
+  const selected = await buttons.evaluateAll((elements, expected) => elements.flatMap((element, index) =>
+    Reflect.get(element, expected.property) === expected.ref ? [index] : []),
+  { property: REF_PROPERTY, ref: activity.activityRef });
+  if (selected.length !== 1) throw unavailable('The exact observed activity disclosure is absent or ambiguous');
+  const clicked = await buttons.nth(selected[0]!).evaluate((element, expected) => {
+    const root = element.getRootNode() as Document | ShadowRoot;
+    const name = (node: Element) => node.getAttribute('aria-label') ||
+      (node.getAttribute('aria-labelledby') ?? '').split(/\s+/).map(id => root.getElementById(id)?.textContent ?? '').join(' ').trim() ||
+      (node.textContent ?? '').trim();
+    const users = [...root.querySelectorAll(expected.selector)].filter(node =>
+      node.getAttribute('data-message-author-role') === 'user' || node.querySelector('[data-user-message-bubble]'));
+    const id = (node: Element) => (node.closest('[data-message-id], [data-turn-id], [data-dil-message-id]') ?? node).getAttribute('data-message-id') ??
+      node.getAttribute('data-dil-message-id') ?? node.getAttribute('data-chatgpt-search-message-ids');
+    const owner = users.filter(node => {
+      const position = node.compareDocumentPosition(element);
+      return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING);
+    }).at(-1);
+    let appActivity = null;
+    if (expected.activity.appActivity !== null) {
+      for (let container = element.parentElement; container; container = container.parentElement) {
+        if (container.matches('body, main, [role="main"]') || container.querySelector('[data-message-author-role="user"], [data-user-message-bubble]')) break;
+        const headers = container.querySelectorAll(':scope > [class~="group/activity-header"] > button[aria-expanded]');
+        if (headers.length !== 1) continue;
+        const header = headers[0]!;
+        if (header === element || !/(^|[^\w-])hostspan(?:-[a-z0-9_-]+)?($|[^\w-])/i.test(name(header)) ||
+            !header.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || header.getAttribute('aria-expanded') !== 'true') continue;
+        const headerOwner = users.filter(node => {
+          const position = node.compareDocumentPosition(header);
+          return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING);
+        }).at(-1);
+        if (!headerOwner || !owner || id(headerOwner) !== id(owner)) continue;
+        appActivity = { ref: Reflect.get(header, expected.refProperty), name: name(header), expanded: header.getAttribute('aria-expanded'), state: header.getAttribute('data-state') };
+        break;
+      }
+    }
+    let containedApp = null;
+    if (expected.activity.containedApp !== null && /^(이전 활동|Previous activity)$/i.test(name(element))) {
+      const container = element.closest('[class~="group/activity-header"]')?.parentElement ?? element.parentElement;
+      if (container && !container.matches('body, main, [role="main"]') &&
+          !container.querySelector('[data-message-author-role="user"], [data-user-message-bubble]')) {
+        const openers = [...container.querySelectorAll('button[aria-expanded]')].filter(button => /^(이전 활동|Previous activity)$/i.test(name(button)));
+        const headers = [...container.querySelectorAll('button[aria-expanded]')].filter(header =>
+          header !== element && /(^|[^\w-])hostspan(?:-[a-z0-9_-]+)?($|[^\w-])/i.test(name(header)));
+        const header = headers[0];
+        const headerOwner = header && users.filter(node => {
+          const position = node.compareDocumentPosition(header);
+          return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING);
+        }).at(-1);
+        if (openers.length === 1 && openers[0] === element && headers.length === 1 && header && headerOwner && owner && id(headerOwner) === id(owner))
+          containedApp = { containerRef: Reflect.get(container, expected.refProperty), ref: Reflect.get(header, expected.refProperty),
+            name: name(header), expanded: header.getAttribute('aria-expanded'), state: header.getAttribute('data-state') };
+      }
+    }
+    if (!(element instanceof HTMLButtonElement) || location.href !== expected.url ||
+        Reflect.get(element, expected.refProperty) !== expected.activity.activityRef ||
+        (!element.closest('[class~="group/activity-header"]') && containedApp === null) || element.closest('nav, aside, [role="navigation"]') ||
+        !element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || element.disabled || element.getAttribute('aria-disabled') === 'true' ||
+        JSON.stringify(appActivity) !== JSON.stringify(expected.activity.appActivity) ||
+        JSON.stringify(containedApp) !== JSON.stringify(expected.activity.containedApp) ||
+        name(element) !== expected.activity.name || element.getAttribute('aria-expanded') !== expected.activity.expanded ||
+        element.getAttribute('data-state') !== expected.activity.state ||
+        JSON.stringify((element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean)) !== JSON.stringify(expected.activity.controls) ||
+        users.filter(node => id(node) === expected.currentAck).length !== 1 || id(users.at(-1)!) !== expected.currentAck ||
+        !owner || id(owner) !== expected.activity.owningUserMessageId) return false;
+    element.click();
+    return true;
+  }, { url: page.url(), selector: CHATGPT_SELECTORS.messages, currentAck: submittedUserMessageId, activity, refProperty: REF_PROPERTY });
+  if (!clicked) throw unavailable('The selected activity or ACK boundary changed before inspection');
+  return { outcome: 'activity-revealed' as const, activityUserMessageId: activity.owningUserMessageId,
+    activityEvidenceHash: evidenceHash, revealClicked: true, grantAttempted: false,
+    activity: await inspectHostSpanActivity(page, submittedUserMessageId, retainedAcknowledgements) };
+}
 
 /** Only an explicitly selected HostSpan tool permission, never a generic UI click. */
 export async function controlHostSpanPermission(page: Page, input: HostSpanPermissionInput, submittedUserMessageId: string) {

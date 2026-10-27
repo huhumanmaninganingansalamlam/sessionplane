@@ -120,6 +120,42 @@ test('explicit evidence reads a held request without resuming observation or ack
   } finally { t.mock.restoreAll(); await f.close(); }
 });
 
+test('explicit completed evidence reads the current page without resuming work or changing the stored final', async t => {
+  const f = await fixture();
+  try {
+    const sessionId = f.sent.sessionId as string;
+    await f.core.actorScheduler.updateGeneration(sessionId, 1, {
+      sessionState: 'complete', providerState: 'complete', answerText: 'Original final', responseMessageId: 'original-final' });
+    const before = f.core.teamDirectory.getSession(sessionId);
+    let reads = 0, unavailable = false;
+    t.mock.method(f.core.recoveryService, 'ensurePage', async (_id, _generation, options) => {
+      assert.deepEqual(options, { openMissing: false, passive: true });
+      if (unavailable) throw new SessionPlaneDomainError('browser.unavailable', 'Original tab unavailable');
+    });
+    t.mock.method(f.core.submissionService, 'recoverAcknowledgement', () => assert.fail('No ACK probe'));
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async (input: any) => {
+      assert.equal(input.readOnly, true);
+      return await f.core.submissionService.inspectSubmission(input, async () => {
+        reads++;
+        return { submissionVerification: { hostspanActivity: { available: true, disclosures: [{ name: 'Previous activity' }] } } };
+      });
+    }) as any);
+    for (const view of ['summary', 'result']) await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view });
+    assert.equal(reads, 0);
+    const read = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view: 'evidence' })).structuredContent.request;
+    assert.equal(reads, 1);
+    assert.equal(read.evidence.submissionVerification.hostspanActivity.disclosures[0].name, 'Previous activity');
+    assert.equal(read.answerText, 'Original final');
+    assert.equal(read.terminal, true);
+    unavailable = true;
+    const missing = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view: 'evidence' })).structuredContent.request;
+    assert.equal(missing.inspectionError.errorCode, 'browser.unavailable');
+    assert.deepEqual(f.core.teamDirectory.getSession(sessionId), before);
+    assert.equal(f.fake.submitCount, 1);
+    assert.deepEqual(f.core.actorScheduler.collectors(sessionId), []);
+  } finally { t.mock.restoreAll(); await f.close(); }
+});
+
 test('managed collection recovers only a literal continuation lineage without rebinding a lost ACK', async t => {
   for (const { complete, continuation } of [
     { complete: false, continuation: true }, { complete: true, continuation: true },
@@ -568,7 +604,7 @@ test('authorized broad continuation review stays inside the wait and runs at thi
 });
 
 
-test('approved broad review recovers an exact idle unanswered turn while backend probes are paced', async t => {
+for (const alert of [false, true]) test(`approved broad review returns ${alert ? 'a provider blocker without inventing a user action' : 'an exact idle recovery failure while backend probes are paced'}`, async t => {
   const f = await fixture();
   try {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
@@ -585,7 +621,10 @@ test('approved broad review recovers an exact idle unanswered turn while backend
     const reviews: any[] = [];
     t.mock.method(SessionUiService.prototype, 'prepareContinuation', async input => {
       reviews.push(input);
-      throw new SessionPlaneDomainError('provider.preparation-required', 'Actual fresh submit control unavailable');
+      throw new SessionPlaneDomainError('provider.preparation-required', 'Actual fresh submit control unavailable',
+        !alert ? undefined : { kind: 'provider-alert', source: 'dom',
+          submittedUserMessageId: f.sent.submittedUserMessageId,
+          providerAlerts: ['hostspan-desktop reconnect warning'], actionVerified: false, requiredUserAction: null });
     });
     const waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef],
       waitMs: 3600000, untilResult: false, continuationApproved: true });
@@ -596,7 +635,17 @@ test('approved broad review recovers an exact idle unanswered turn while backend
     const result = (await waiting).structuredContent;
     assert.equal(reviews.length, 1);
     assert.equal(reviews[0].userConfirmedInterruption.submittedUserMessageId, f.sent.submittedUserMessageId);
-    assert.equal(result.results[0].recovery.userActionRequired, true, 'A real inability to submit is returned');
+    const recovery = result.results[0].recovery;
+    assert.equal(recovery.userActionRequired, !alert, 'An alert refusal alone cannot establish a required human action');
+    if (alert) {
+      assert.equal(recovery.state, 'blocked');
+      assert.equal(recovery.decisionRequired, false);
+      assert.equal(recovery.requiredUserAction, null);
+      assert.equal(recovery.providerBlocker.submittedUserMessageId, f.sent.submittedUserMessageId);
+      assert.deepEqual(recovery.providerBlocker.providerAlerts, ['hostspan-desktop reconnect warning']);
+      assert.equal(recovery.automaticContinuation, false);
+      assert.equal(workflowWaitOutcome(result.results[0]), true, 'The original wait returns without another collection/retry');
+    }
     assert.equal(f.fake.submitCount, 1, 'A failed fresh control check never submits');
   } finally { t.mock.timers.reset(); await f.close(); }
 });

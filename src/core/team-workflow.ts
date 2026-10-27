@@ -259,7 +259,8 @@ export class TeamWorkflow {
               throw new SessionPlaneDomainError('provider.permission-unverified', 'The original work ACK and continuation lineage must agree');
             workOriginal = { ...session, ...work, generation: workRequest.generation };
           }
-          const permission = await this.services.ui.hostspanPermission(session, input, original, passiveInspection, workOriginal, exactFollowup);
+          const permission = await this.services.ui.hostspanPermission(session, input, original, passiveInspection, workOriginal, exactFollowup,
+            this.#sessions.submittedMessageIds(session.sessionId));
           if (exactFollowup && input.action === 'allow' && permission.outcome === 'clicked' &&
               'permissionStillVisible' in permission && permission.permissionStillVisible === false) {
             this.#rearmExactReview(request, exactFollowup.sourceUserMessageId, 'exact-permission-resolved');
@@ -276,7 +277,7 @@ export class TeamWorkflow {
         });
       });
     }
-    if (input.decision !== 'focus' && this.#userReview(request)) throw new SessionPlaneDomainError('provider.preparation-required',
+    if (input.decision !== 'focus' && input.decision !== 'retire_observation' && this.#userReview(request)) throw new SessionPlaneDomainError('provider.preparation-required',
       'Observation and controls are paused for user review; resume only after the user reports completion');
     if (input.decision === 'retire_observation') {
       return await this.services.scheduler.actorFor(request.sessionId).enqueue(() => {
@@ -615,7 +616,7 @@ export class TeamWorkflow {
                     requestId: reviewId, decision: 'continue', continuationApproved: true });
                 } catch (error) {
                   if (!(error instanceof SessionPlaneDomainError)) throw error;
-                  result = await this.#continuationConfigurationFailure(request, error) ?? { ...await this.#observe(successor), status: 'recovery_required', recovery: {
+                  result = await this.#continuationConfigurationFailure(request, error) ?? { ...await this.#observe(successor), status: 'recovery_required', recovery: providerAlertRecovery(error) ?? {
                     state: 'decision_required', decisionRequired: true, userActionRequired: true,
                     reason: error.errorCode, message: error.message,
                     url: `https://chatgpt.com/c/${result.conversationId}`,
@@ -735,7 +736,7 @@ export class TeamWorkflow {
                 }
                 // Preserve uncertain work, but never swallow an inability to
                 // recover an observed interruption. The caller must see it now.
-                if (interrupted) result = { ...result, status: 'recovery_required', recovery: {
+                if (interrupted) result = { ...result, status: 'recovery_required', recovery: providerAlertRecovery(error) ?? {
                   state: 'decision_required', decisionRequired: true, userActionRequired: error.errorCode !== 'session.busy',
                   reason: error.errorCode, message: error.message,
                   url: `https://chatgpt.com/c/${result.conversationId}`,
@@ -1417,11 +1418,11 @@ export class TeamWorkflow {
         message: evidence.preparationAvailability.available ? preparation.message
           : 'The exact provider page has no usable composer. This request remains prepared and was not submitted. Read the same request after the provider page becomes usable; do not treat Retry or another ordinary button as submit.' };
     }
-    // A reconciled execution failure is still inspectable on its original turn.
+    // Explicit evidence also inspects completed current turns without rewriting their result.
     // Never reopen a missing tab or change its stored terminal result for a read.
-    const inspectFailed = inspectCurrent && snapshot.terminal && snapshot.sessionState === 'failed' &&
-      latestDisplayTarget(snapshot)?.role === 'user';
-    if (inspectFailed || (!snapshot.terminal && snapshot.submissionState === 'submission_unknown' && snapshot.provider === 'chatgpt') ||
+    const inspectTerminal = inspectCurrent && snapshot.terminal && snapshot.provider === 'chatgpt' &&
+      (snapshot.submissionState === 'submitted' || (snapshot.sessionState === 'failed' && latestDisplayTarget(snapshot)?.role === 'user'));
+    if (inspectTerminal || (!snapshot.terminal && snapshot.submissionState === 'submission_unknown' && snapshot.provider === 'chatgpt') ||
         (snapshot.provider === 'chatgpt' && !snapshot.terminal && snapshot.submissionState === 'submitted' &&
           (inspectCurrent || snapshot.reason === 'provider-actionable-alert' || snapshot.reason === 'dom-user-anchor-missing' ||
             snapshot.reason === 'backend-user-anchor-absent-from-mapping' || snapshot.reason === 'backend-user-anchor-not-on-current-branch' ||
@@ -1429,8 +1430,9 @@ export class TeamWorkflow {
               String(new EventRepository(this.services.database.raw).latestAnchorRecovery(snapshot.sessionId, snapshot.generation)?.recoveryReason))))) {
       try {
         if (snapshot.conversationId !== null) await this.services.ensurePage(snapshot.sessionId, snapshot.generation,
-          inspectFailed ? { openMissing: false } : undefined);
-        const inspected = await this.services.ui.inspectSubmission({ ...ownerOf(request), ...(maxNodes === undefined ? {} : { maxNodes }) });
+          inspectTerminal ? { openMissing: false, passive: true } : undefined);
+        const inspected = await this.services.ui.inspectSubmission({ ...ownerOf(request),
+          ...(inspectTerminal ? { readOnly: true } : {}), ...(maxNodes === undefined ? {} : { maxNodes }) });
         return { ...inspected.snapshot, requestRef: request.outboxId, roleRef: roleRef(inspected.snapshot),
           ...((inspected.evidence?.submissionCandidates?.length ?? 0) > 0 ? { status: 'needs_decision' } : {}),
           evidence: inspected.evidence, requested: inspected.requested };
@@ -1480,4 +1482,14 @@ function needsDecision(snapshot: SessionSnapshot) { return !snapshot.terminal &&
 function failure(error: unknown, requestRef: string) {
   if (!(error instanceof SessionPlaneDomainError) && !(error instanceof ProviderSubmissionError)) throw error;
   return { requestOk: false, requestRef, errorCode: error.errorCode, message: error.message, ...(error instanceof SessionPlaneDomainError ? { details: error.details } : {}) };
+}
+
+/** A blocking alert proves neither a human-only action nor its cause. */
+function providerAlertRecovery(error: SessionPlaneDomainError) {
+  const details = error.details as { kind?: string; source?: string; providerAlerts?: unknown } | undefined;
+  if (error.errorCode !== 'provider.preparation-required' || details?.kind !== 'provider-alert' ||
+      details.source !== 'dom' || !Array.isArray(details.providerAlerts) || details.providerAlerts.length === 0) return null;
+  return { state: 'blocked', decisionRequired: false, userActionRequired: false, automaticContinuation: false,
+    reason: error.errorCode, message: error.message, providerBlocker: error.details,
+    requiredUserAction: null };
 }

@@ -2,7 +2,7 @@ import type { ConversationLoadRecoveryRepository } from '../storage/conversation
 import { streamRetrySurface } from '../providers/chatgpt/stream-retry.ts';
 import type { ReceiptRepository } from '../storage/receipt-repository.ts';
 import { observeChatGptSurface, type ChatGptSurface } from '../providers/chatgpt/surface.ts';
-import { controlHostSpanPermission, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
+import { controlHostSpanPermission, inspectHostSpanActivity, revealHostSpanActivity, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
 import { createHash } from 'node:crypto';
 import { requireIdleConversationPage } from './conversation-cleanup-service.ts';
 import { conversationLoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
@@ -231,6 +231,8 @@ export class SessionUiService {
                     laterUserFound: dom.laterUserFound,
                     activity: activity.strength, activityReason: activity.reason,
                     messageTimeout: dom.providerAlerts.some(isMessageTimeoutAlert),
+                    hostspanActivity: session.submittedUserMessageId === null ? null :
+                      await inspectHostSpanActivity(this.#requirePage(session, input.readOnly), session.submittedUserMessageId, submittedMessageIds),
                     // Passive evidence is not a completed answer or permission to submit.
                     responseCandidate: dom.candidate,
                     turnBoundary: dom.turnBoundary,
@@ -529,7 +531,12 @@ export class SessionUiService {
           controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role)) ||
           !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
         throw new SessionPlaneDomainError('provider.preparation-required',
-          'Continuation requires the exact idle original turn with no answer, later user, alert or separate draft');
+          'Continuation requires the exact idle original turn with no answer, later user, alert or separate draft',
+          !(binding.bindingEpoch === after.bindingEpoch && retained === null &&
+            anchor.submittedUserFound && !anchor.laterUserFound && anchor.actionableAlert) ? undefined : { kind: 'provider-alert', source: 'dom',
+            observedAt: anchor.messageDiagnostics.observedAt, pageKey: session.pageKey,
+            conversationId: original.conversationId, submittedUserMessageId: original.submittedUserMessageId,
+            providerAlerts: anchor.providerAlerts, actionVerified: false, requiredUserAction: null });
       }
       return { pageKey: session.pageKey!, conversationId: session.conversationId!, bindingEpoch: after.bindingEpoch,
         observedAt: controls.capturedAt, continuationPrompt: '계속',
@@ -997,7 +1004,7 @@ export class SessionUiService {
   /** Caller holds the exact current request actor and page mutation lock. */
   async hostspanPermission(session: SessionSnapshot, input: HostSpanPermissionInput, original = session,
     passiveInspection = false, workOriginal?: SessionSnapshot,
-    exactFollowup?: { sourceUserMessageId: string; userMessageId: string }) {
+    exactFollowup?: { sourceUserMessageId: string; userMessageId: string }, retainedAcknowledgements: ReadonlySet<string> = new Set()) {
     if (session.provider !== 'chatgpt' ||
         (original.submissionState !== 'submitted' && original.submissionState !== 'submission_unknown') ||
         original.sessionId !== session.sessionId || original.conversationId !== session.conversationId ||
@@ -1058,6 +1065,12 @@ export class SessionUiService {
         anchor = currentAnchor;
         association = { association: 'exact-original-question-and-literal-continuations',
           workUserMessageId: root.messageId, currentUserMessageId: anchor, workAcknowledgementVerified: true };
+      }
+      if (input.action === 'inspect' && input.toolName === undefined && input.evidenceHash !== undefined) {
+        if (!acknowledgementVerified) throw new SessionPlaneDomainError('provider.permission-unverified', 'Recover the current ACK before revealing its retained activity');
+        const result = await revealHostSpanActivity(page, anchor, retainedAcknowledgements, input.appName, input.evidenceHash);
+        this.#requirePage(session);
+        return { ...result, requestAcknowledgementVerified: true };
       }
       const result = await controlHostSpanPermission(page, input, anchor);
       this.#requirePage(session);
