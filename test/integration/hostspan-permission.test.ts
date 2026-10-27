@@ -13,6 +13,40 @@ import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { callRpc } from '../../src/cli/client.ts';
 import { inspectHostSpanActivity, revealHostSpanActivity } from '../../src/providers/chatgpt/hostspan-permission.ts';
 
+test('identical activity labels keep exact mounted element identity across reads and reordering', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-identical-activity-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [new FakeProviderAdapter()],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: `<main>
+      <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+      ${[1, 2, 3].map(id => `<section id="activity-${id}"><div class="group/activity-header"><button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#output-${id}').hidden=false">hostspan-desktop 통합 사용함</button></div><div hidden id="output-${id}">Original output ${id}</div></section>`).join('')}
+      <textarea>Preserved draft</textarea></main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    const read = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(read.available);
+    const hashes = read.disclosures.map(item => item.activityEvidenceHash!);
+    assert.equal(hashes.length, 3);
+    assert.equal(new Set(hashes).size, 3, 'Identical names, ACKs and states must not collide');
+    const again = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(again.available);
+    assert.deepEqual(again.disclosures.map(item => item.activityEvidenceHash), hashes);
+    await page.locator('#activity-2').evaluate(element => element.parentElement!.insertBefore(element, element.parentElement!.querySelector('#activity-1')));
+    const reveal = await revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', hashes[1]!);
+    assert.equal(reveal.grantAttempted, false);
+    assert.equal(await page.locator('#output-2').isVisible(), true);
+    assert.equal(await page.locator('#output-1').isVisible(), false);
+    assert.equal(await page.locator('#output-3').isVisible(), false);
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', hashes[1]!), /fresh HostSpan activityEvidenceHash/);
+    await page.locator('#activity-3 button').evaluate(element => element.replaceWith(element.cloneNode(true)));
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', hashes[2]!), /fresh HostSpan activityEvidenceHash/);
+    assert.equal(await page.locator('#output-3').isVisible(), false, 'A replacement with the same label cannot inherit identity');
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('retained activity is read only under its stored ACK, never reassigned to the current request', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-retained-activity-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });

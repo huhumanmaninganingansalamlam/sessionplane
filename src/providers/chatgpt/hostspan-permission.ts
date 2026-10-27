@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Page } from 'playwright-core';
+import { REF_PROPERTY } from '../../browser/ref-snapshot.ts';
 import { SessionPlaneDomainError } from '../../domain/errors.ts';
 import { readChatGptMessages } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
@@ -63,6 +64,14 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
       (element.getAttribute('aria-labelledby') ?? '').split(/\s+/).map(id => root.getElementById(id)?.textContent ?? '').join(' ').trim() ||
       (element.textContent ?? '').trim();
     const visible = (element: Element) => element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+    // Reuse snapshot element identity: equal labels and DOM order never select a disclosure.
+    const ref = (element: Element) => {
+      const existing = Reflect.get(element, input.refProperty);
+      if (typeof existing === 'string') return existing;
+      const token = `hostspan-activity:${crypto.randomUUID()}`;
+      Object.defineProperty(element, input.refProperty, { value: token, configurable: true });
+      return token;
+    };
     const controls = (element: Element) => [...element.querySelectorAll('button, [role="button"], summary')].slice(0, 20)
       .map(button => ({ name: name(button).slice(0, 500), visible: visible(button),
         disabled: button.hasAttribute('disabled') || button.getAttribute('aria-disabled') === 'true' }));
@@ -90,7 +99,7 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
         const header = headers[0]!;
         if (header === element || !app.test(name(header)) || !visible(header) ||
             header.getAttribute('aria-expanded') !== 'true' || association(header) !== association(element)) continue;
-        return { name: name(header), expanded: header.getAttribute('aria-expanded'), state: header.getAttribute('data-state') };
+        return { ref: ref(header), name: name(header), expanded: header.getAttribute('aria-expanded'), state: header.getAttribute('data-state') };
       }
       return null;
     };
@@ -101,7 +110,7 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
       cards: [...cards].slice(0, 20).map(card => ({ role: card.getAttribute('role'),
         text: (card.textContent ?? '').trim().slice(0, 4000), textTruncated: (card.textContent ?? '').trim().length > 4000,
         visible: visible(card), controls: controls(card), ...provenance(card) })),
-      disclosures: disclosures.slice(0, 40).map(element => ({ name: name(element).slice(0, 500), visible: visible(element),
+      disclosures: disclosures.slice(0, 40).map(element => ({ activityRef: ref(element), name: name(element).slice(0, 500), visible: visible(element),
         expanded: element.getAttribute('aria-expanded'), state: element.getAttribute('data-state'),
         appActivity: appActivity(element),
         revealAvailable: element.tagName === 'BUTTON' && element.closest('[class~="group/activity-header"]') !== null &&
@@ -110,7 +119,7 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
         controls: (element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean), ...provenance(element) })),
       truncated: cards.size > 20 || disclosures.length > 40,
     };
-  }, { workId: work.messageId, selector: CHATGPT_SELECTORS.messages, retainedIds: [...retainedAcknowledgements, submittedUserMessageId] });
+  }, { workId: work.messageId, selector: CHATGPT_SELECTORS.messages, retainedIds: [...retainedAcknowledgements, submittedUserMessageId], refProperty: REF_PROPERTY });
   if (surface === null) return unavailable('work-anchor-changed-during-inspection');
   const current = (await readChatGptMessages(page)).filter(message => message.role === 'user');
   if (current.length !== users.length || current.some((user, index) =>
@@ -121,7 +130,7 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
     disclosures: surface.disclosures.map(disclosure => ({ ...disclosure,
       activityEvidenceHash: disclosure.revealAvailable && disclosure.owningUserMessageId !== null
         ? createHash('sha256').update(JSON.stringify(['hostspan-activity-inspection', page.url(), submittedUserMessageId,
-          disclosure.owningUserMessageId, disclosure.name, disclosure.expanded, disclosure.state, disclosure.controls, disclosure.appActivity])).digest('hex') : null })) };
+          disclosure.owningUserMessageId, disclosure.activityRef, disclosure.name, disclosure.expanded, disclosure.state, disclosure.controls, disclosure.appActivity])).digest('hex') : null })) };
 }
 
 /** An explicit inspection can reveal one freshly selected owned activity, never grant a tool. */
@@ -135,8 +144,11 @@ export async function revealHostSpanActivity(page: Page, submittedUserMessageId:
   const activity = matches[0]!;
   if (!new RegExp(`(^|[^\\w-])${appName}($|[^\\w-])`, 'i').test(activity.appActivity?.name ?? activity.name)) throw unavailable('The selected activity belongs to a different app');
   const buttons = page.getByRole('button', { name: activity.name, exact: true });
-  if (await buttons.count() !== 1) throw unavailable('The exact observed activity disclosure is absent or ambiguous');
-  const clicked = await buttons.evaluate((element, expected) => {
+  const selected = await buttons.evaluateAll((elements, expected) => elements.flatMap((element, index) =>
+    Reflect.get(element, expected.property) === expected.ref ? [index] : []),
+  { property: REF_PROPERTY, ref: activity.activityRef });
+  if (selected.length !== 1) throw unavailable('The exact observed activity disclosure is absent or ambiguous');
+  const clicked = await buttons.nth(selected[0]!).evaluate((element, expected) => {
     const root = element.getRootNode() as Document | ShadowRoot;
     const name = (node: Element) => node.getAttribute('aria-label') ||
       (node.getAttribute('aria-labelledby') ?? '').split(/\s+/).map(id => root.getElementById(id)?.textContent ?? '').join(' ').trim() ||
@@ -163,11 +175,12 @@ export async function revealHostSpanActivity(page: Page, submittedUserMessageId:
           return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING);
         }).at(-1);
         if (!headerOwner || !owner || id(headerOwner) !== id(owner)) continue;
-        appActivity = { name: name(header), expanded: header.getAttribute('aria-expanded'), state: header.getAttribute('data-state') };
+        appActivity = { ref: Reflect.get(header, expected.refProperty), name: name(header), expanded: header.getAttribute('aria-expanded'), state: header.getAttribute('data-state') };
         break;
       }
     }
     if (!(element instanceof HTMLButtonElement) || location.href !== expected.url ||
+        Reflect.get(element, expected.refProperty) !== expected.activity.activityRef ||
         !element.closest('[class~="group/activity-header"]') || element.closest('nav, aside, [role="navigation"]') ||
         !element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || element.disabled || element.getAttribute('aria-disabled') === 'true' ||
         JSON.stringify(appActivity) !== JSON.stringify(expected.activity.appActivity) ||
@@ -178,7 +191,7 @@ export async function revealHostSpanActivity(page: Page, submittedUserMessageId:
         !owner || id(owner) !== expected.activity.owningUserMessageId) return false;
     element.click();
     return true;
-  }, { url: page.url(), selector: CHATGPT_SELECTORS.messages, currentAck: submittedUserMessageId, activity });
+  }, { url: page.url(), selector: CHATGPT_SELECTORS.messages, currentAck: submittedUserMessageId, activity, refProperty: REF_PROPERTY });
   if (!clicked) throw unavailable('The selected activity or ACK boundary changed before inspection');
   return { outcome: 'activity-revealed' as const, activityUserMessageId: activity.owningUserMessageId,
     activityEvidenceHash: evidenceHash, revealClicked: true, grantAttempted: false,
