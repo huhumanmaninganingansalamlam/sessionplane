@@ -408,6 +408,10 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
       { stdin: Readable.from([]), stdout: stream, stderr: stream }), 0, output);
     const inspected = { structuredContent: JSON.parse(output) };
     assert.equal(inspected.structuredContent.requestOk, true, JSON.stringify(inspected));
+    assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0,
+      'Inspect reveals the unknown pending arguments without granting or launching the tool');
+    assert.match(inspected.structuredContent.permission.permissionText, /Command: original work/);
+    assert.equal(fake.submitCount, 1, 'Inspect must not submit a new provider turn');
     assert.equal(await page.evaluate(() => (window as any).unrelatedClicks ?? 0), 0,
       'Explicit permission inspection opens only the card-linked disclosure, never integration controls or another work question');
     assert.equal(prepare.mock.callCount(), 1, 'Use the existing exact-page background interaction lifecycle');
