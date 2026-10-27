@@ -504,7 +504,12 @@ export class SessionUiService {
           controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role)) ||
           !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
         throw new SessionPlaneDomainError('provider.preparation-required',
-          'Continuation requires the exact idle original turn with no answer, later user, alert or separate draft');
+          'Continuation requires the exact idle original turn with no answer, later user, alert or separate draft',
+          !(binding.bindingEpoch === after.bindingEpoch && retained === null &&
+            anchor.submittedUserFound && !anchor.laterUserFound && anchor.actionableAlert) ? undefined : { kind: 'provider-alert', source: 'dom',
+            observedAt: anchor.messageDiagnostics.observedAt, pageKey: session.pageKey,
+            conversationId: original.conversationId, submittedUserMessageId: original.submittedUserMessageId,
+            providerAlerts: anchor.providerAlerts, actionVerified: false, requiredUserAction: null });
       }
       return { pageKey: session.pageKey!, conversationId: session.conversationId!, bindingEpoch: after.bindingEpoch,
         observedAt: controls.capturedAt, continuationPrompt: '계속',

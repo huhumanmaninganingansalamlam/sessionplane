@@ -616,7 +616,7 @@ export class TeamWorkflow {
                     requestId: reviewId, decision: 'continue', continuationApproved: true });
                 } catch (error) {
                   if (!(error instanceof SessionPlaneDomainError)) throw error;
-                  result = await this.#continuationConfigurationFailure(request, error) ?? { ...await this.#observe(successor), status: 'recovery_required', recovery: {
+                  result = await this.#continuationConfigurationFailure(request, error) ?? { ...await this.#observe(successor), status: 'recovery_required', recovery: providerAlertRecovery(error) ?? {
                     state: 'decision_required', decisionRequired: true, userActionRequired: true,
                     reason: error.errorCode, message: error.message,
                     url: `https://chatgpt.com/c/${result.conversationId}`,
@@ -736,7 +736,7 @@ export class TeamWorkflow {
                 }
                 // Preserve uncertain work, but never swallow an inability to
                 // recover an observed interruption. The caller must see it now.
-                if (interrupted) result = { ...result, status: 'recovery_required', recovery: {
+                if (interrupted) result = { ...result, status: 'recovery_required', recovery: providerAlertRecovery(error) ?? {
                   state: 'decision_required', decisionRequired: true, userActionRequired: error.errorCode !== 'session.busy',
                   reason: error.errorCode, message: error.message,
                   url: `https://chatgpt.com/c/${result.conversationId}`,
@@ -1482,4 +1482,14 @@ function needsDecision(snapshot: SessionSnapshot) { return !snapshot.terminal &&
 function failure(error: unknown, requestRef: string) {
   if (!(error instanceof SessionPlaneDomainError) && !(error instanceof ProviderSubmissionError)) throw error;
   return { requestOk: false, requestRef, errorCode: error.errorCode, message: error.message, ...(error instanceof SessionPlaneDomainError ? { details: error.details } : {}) };
+}
+
+/** A blocking alert proves neither a human-only action nor its cause. */
+function providerAlertRecovery(error: SessionPlaneDomainError) {
+  const details = error.details as { kind?: string; source?: string; providerAlerts?: unknown } | undefined;
+  if (error.errorCode !== 'provider.preparation-required' || details?.kind !== 'provider-alert' ||
+      details.source !== 'dom' || !Array.isArray(details.providerAlerts) || details.providerAlerts.length === 0) return null;
+  return { state: 'blocked', decisionRequired: false, userActionRequired: false, automaticContinuation: false,
+    reason: error.errorCode, message: error.message, providerBlocker: error.details,
+    requiredUserAction: null };
 }

@@ -10,8 +10,55 @@ import { Readable, Writable } from 'node:stream';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
+import { SessionUiService } from '../../src/core/session-ui-service.ts';
+import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { callRpc } from '../../src/cli/client.ts';
 import { inspectHostSpanActivity, revealHostSpanActivity } from '../../src/providers/chatgpt/hostspan-permission.ts';
+
+test('a buttonless current provider alert blocks continuation without fabricating a user action', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-alert-blocker-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [new FakeProviderAdapter()],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'fixture-owner' });
+    const initial = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    const { page, binding } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<main>
+      <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+      <div role="alert">hostspan-desktop 다시 연결. 연결이 만료되었습니다.</div>
+      <textarea id="prompt-textarea"></textarea></main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    core.pageRegistry.reservePage(binding.pageKey, { sessionId: initial.sessionId, generation: initial.generation, conversationId: 'fixture' });
+    const session = { ...core.teamDirectory.getSession(initial.sessionId), pageKey: binding.pageKey,
+      conversationId: 'fixture', submittedUserMessageId: 'current-ack', submittedUserTurnId: 'current-ack',
+      submissionState: 'submitted' as const, promptSubmitted: true };
+    const ui = new SessionUiService({ submissions: core.submissionService, registry: core.pageRegistry,
+      browserOwner: core.browserOwner, chatgptUrl: 'https://chatgpt.com/' });
+    await assert.rejects(ui.verifyContinuation(session, session), error => {
+      assert.ok(error instanceof SessionPlaneDomainError);
+      assert.equal(error.errorCode, 'provider.preparation-required');
+      const details = error.details as any;
+      assert.equal(details.kind, 'provider-alert');
+      assert.equal(details.submittedUserMessageId, 'current-ack');
+      assert.deepEqual(details.providerAlerts, ['hostspan-desktop 다시 연결. 연결이 만료되었습니다.']);
+      assert.equal(details.actionVerified, false);
+      assert.equal(details.requiredUserAction, null);
+      return true;
+    });
+    assert.equal(await page.getByRole('alert').textContent(), 'hostspan-desktop 다시 연결. 연결이 만료되었습니다.');
+    assert.equal(await page.locator('textarea').inputValue(), '');
+    assert.equal(await page.locator('[data-message-author-role="user"]').count(), 1);
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="later-user">Other work</div>'));
+    await assert.rejects(ui.verifyContinuation(session, session), error => {
+      assert.ok(error instanceof SessionPlaneDomainError);
+      assert.equal(error.errorCode, 'provider.preparation-required');
+      assert.equal(error.details, undefined, 'A later user cannot inherit the original blocker provenance');
+      return true;
+    });
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('identical activity labels keep exact mounted element identity across reads and reordering', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-identical-activity-'));
