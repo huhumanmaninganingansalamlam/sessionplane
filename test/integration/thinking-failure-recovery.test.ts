@@ -750,11 +750,15 @@ test('completed app recovery continues once past only its exact retained expirat
     assert.equal(f.core.teamDirectory.getSession(original.sessionId).submittedUserMessageId, before.submittedUserMessageId);
     await f.fake.page.setContent(body + warning + idle);
     f.fake.failureCount = 1;
-    const result = await f.rpc<any>('decide', input);
+    const recoveredInput = { ...input, userConfirmedInterruption: { ...confirmation,
+      evidenceRef: 'Original read-only git status output remains UNKNOWN; exact command preserved and current process ledger proves inactive',
+      resolvedToolAlert: { ...confirmation.resolvedToolAlert, originalOperationOutcome: 'unknown', readOnlyOperationInactive: true } } };
+    const result = await f.rpc<any>('decide', recoveredInput);
     assert.equal(result.generation, 2);
     assert.equal(result.reconciliation.evidence.recoveredToolAlert.alertRetained, true);
     assert.equal(result.reconciliation.evidence.recoveredToolAlert.callerAttestedRecovery, true);
-    await f.rpc('decide', input);
+    assert.equal(result.reconciliation.evidence.recoveredToolAlert.originalOperationOutcome, 'unknown');
+    await f.rpc('decide', recoveredInput);
     assert.equal(f.fake.submitCount, 2);
     assert.equal(f.fake.stopCount, 0);
     const payloads = f.core.database.raw.prepare('SELECT payload_json FROM outbox WHERE session_id=? ORDER BY generation')

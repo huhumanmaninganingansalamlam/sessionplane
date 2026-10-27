@@ -27,8 +27,11 @@ export const workflowSchemas = {
       userConfirmedInterruption: z.object({ conversationId: z.string().min(1).max(300), submittedUserMessageId: z.string().min(1).max(300),
         evidenceRef: z.string().trim().min(1).max(2000),
         resolvedToolAlert: z.object({ appName: z.string().regex(/^hostspan(?:-[a-z0-9_-]+)?$/i),
-          alertSha256: z.string().regex(/^[a-f0-9]{64}$/), originalOperationOutcome: z.enum(['not-started', 'completed'])
-        }).strict().optional().describe('Only after actual app recovery and recovery of the original operation, recorded in evidenceRef. Hash the exact retained expiration alert. UNKNOWN operations, new permission/auth dialogs and other alerts remain blocked; never retries the tool.')
+          alertSha256: z.string().regex(/^[a-f0-9]{64}$/), originalOperationOutcome: z.enum(['not-started', 'completed', 'unknown']),
+          readOnlyOperationInactive: z.literal(true).optional()
+        }).strict().refine(value => value.originalOperationOutcome !== 'unknown' || value.readOnlyOperationInactive === true,
+          'Invalid UNKNOWN recovery: evidenceRef must preserve the reviewed read-only command and current operation inactivity')
+          .optional().describe('After actual app recovery, record the original operation evidence and exact expiration-alert hash. UNKNOWN is retained only for a reviewed read-only command with current inactivity evidence and readOnlyOperationInactive:true; never reissues it. New permission/auth dialogs and other alerts remain blocked.')
       }).strict().optional().describe('Only after the user directly confirms this exact disconnected turn and explicitly requests one continue. Not for automated inference; active streaming, final answers, later users, permissions and separate drafts remain protected.') }).strict(),
     z.object({ ...request, requestId, decision: z.literal('hostspan_permission'), action: z.enum(['inspect', 'allow']),
       followupUserMessageId: z.string().min(1).max(300).optional().describe('Source of an acknowledged exact recovery chain under a separate unsubmitted preparation.'),

@@ -44,7 +44,8 @@ export interface UserConfirmedInterruption {
   readonly resolvedToolAlert?: {
     readonly appName: string;
     readonly alertSha256: string;
-    readonly originalOperationOutcome: 'not-started' | 'completed';
+    readonly originalOperationOutcome: 'not-started' | 'completed' | 'unknown';
+    readonly readOnlyOperationInactive?: true | undefined;
   } | undefined;
 }
 

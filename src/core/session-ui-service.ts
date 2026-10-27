@@ -525,7 +525,8 @@ export class SessionUiService {
       const controls = await this.#capture(session);
       const resolvedAlert = confirmation?.resolvedToolAlert;
       let recoveredToolAlert = false;
-      if (resolvedAlert && confirmedInterruption && activity.strength === 'none' && anchor.candidate === null &&
+      if (resolvedAlert && (resolvedAlert.originalOperationOutcome !== 'unknown' || resolvedAlert.readOnlyOperationInactive === true) &&
+          confirmedInterruption && activity.strength === 'none' && anchor.candidate === null &&
           anchor.providerAlerts.length === 1 && retained === null) {
         const alert = anchor.providerAlerts[0]!;
         // An exact retained tool error may survive successful account recovery.
