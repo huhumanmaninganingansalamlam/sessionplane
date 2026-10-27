@@ -52,6 +52,11 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    also use `decision: "configure", configurationId: option.id`. Neither path needs
    menu navigation, selectors or numeric power inference. Configure verifies the result and never submits.
    Later requests reuse the catalog; each selection is revalidated on its own page.
+   To retain already-selected settings, use fresh DOM choose/model on the current
+   chooser or summary. With explicit model and effort hints, Core verifies the
+   checked version, effort label and Chat mode without selection clicks, then
+   rechecks before submission. Verification only records evidence; it never fills
+   the composer or resumes a saved Submit. Mismatch stays unverified.
    If `evidence.preparationAvailability.available` or catalog `selectionAvailable`
    is false, the exact page has no usable composer: cached labels are not current
    choices. Preserve the prepared request and inspect it again after the provider
@@ -74,7 +79,7 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    does not require switching an already intended 5.5 Pro to 5.6 Pro. Reinspect
    after menu/composer changes and use the current summary, never an old menu ref,
    account badge or inferred slider power. Missing or mismatching evidence is not
-   readiness. A saved Submit choice can resume after any later raw choose, so
+   readiness. Other raw choices can resume a saved Submit, so
    only the original Coordinator performs this recovery; readiness-only work must
    have no saved Submit choice. Recheck current status before each such choose.
    Follow explicit user corrections when request hints conflict. Keep the same requestRef.

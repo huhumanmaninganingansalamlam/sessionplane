@@ -793,10 +793,23 @@ export class SessionUiService {
 
   async verifyFailureContinuation(session: SessionSnapshot, failed: SessionSnapshot, model: PreparationTarget) {
     await this.#failureEvidence(session, failed);
+    if (model.configurationVerification) {
+      const proof = model.configurationVerification;
+      const verified = await new ChatGptConfigurationMenu(this.#requirePage(session), session.pageKey!)
+        .reobserveSelection(proof.version, proof.effort, true);
+      if (verified.configurationVerification?.version !== proof.version ||
+          verified.configurationVerification.effort !== proof.effort ||
+          verified.configurationVerification.surface !== proof.surface) throw new SessionPlaneDomainError(
+        'provider.failure-unverified', 'Current verified model, effort or Chat mode changed');
+      this.#requirePage(session);
+      model = { ...toPreparationTarget('model', verified), configurationVersion: proof.version,
+        configurationVerification: verified.configurationVerification };
+    }
     const snapshot = await this.#capture(session, 5_000);
     const composers = snapshot.nodes.filter(node => node.role === 'textbox' && node.editable && !node.disabled);
-    const combinedSummary = model.role === 'menuitem' && model.name.trim() !== '' &&
-      model.text.trim() !== '' && model.text.trim() !== model.name.trim();
+    const combinedSummary = model.configurationVerification !== undefined ||
+      (model.role === 'menuitem' && model.name.trim() !== '' &&
+        model.text.trim() !== '' && model.text.trim() !== model.name.trim());
     if (!combinedSummary || snapshot.nodesTruncated || composers.length !== 1 || !hasPreparationSelectionEvidence(snapshot.nodes, model)) {
       throw new SessionPlaneDomainError('provider.failure-unverified', 'Exact configured model/effort or sole composer is unavailable');
     }
@@ -819,12 +832,16 @@ export class SessionUiService {
         decision: 'configure', purpose }, async session => {
         let snapshot = await this.#capture(session, 5_000);
         const version = model.configurationVersion ?? intended?.model;
+        const effort = intended?.effort ?? model.configurationVerification?.effort;
         if (purpose === 'model' && !snapshot.nodesTruncated &&
             (model.configurationVersion !== undefined || !hasPreparationSelectionEvidence(snapshot.nodes, model)) &&
-            version && intended?.effort) {
+            version && effort) {
           const summary = await new ChatGptConfigurationMenu(this.#requirePage(session), session.pageKey!)
-            .reobserveSelection(version, intended.effort);
+            .reobserveSelection(version, effort, model.configurationVerification !== undefined);
+          if (model.configurationVerification && !summary.configurationVerification) throw new SessionPlaneDomainError(
+            'provider.failure-unverified', 'Current full selection verification is unavailable');
           model = { ...toPreparationTarget('model', summary),
+            ...(summary.configurationVerification ? { configurationVerification: summary.configurationVerification } : {}),
             ...(model.configurationVersion === undefined ? {} : { configurationVersion: model.configurationVersion }) };
           snapshot = await this.#capture(session, 5_000);
         }
@@ -903,7 +920,9 @@ export class SessionUiService {
     readonly ref?: string;
     readonly value?: number | undefined;
   }) {
-      return await this.#submissions.decidePreparation<BrowserSnapshot | { configurationId: string; label: string }>(input, async (session) => {
+      return await this.#submissions.decidePreparation<(BrowserSnapshot & {
+        configurationVerification?: PreparationTarget['configurationVerification'];
+      }) | { configurationId: string; label: string }>(input, async (session, requested) => {
       const purpose = input.purpose;
       const snapshotId = input.snapshotId;
       const ref = input.ref;
@@ -945,6 +964,25 @@ export class SessionUiService {
         }
         if (input.value !== undefined && currentNode.role !== 'slider') {
           throw new SessionPlaneDomainError('input.invalid', 'A numeric value is only valid for a model or effort slider');
+        }
+        const existingSelection = !reveal && ['model', 'effort'].includes(purpose) &&
+          ((currentNode.role === 'button' && currentNode.hasPopup !== null) ||
+            isPreparationSummary(currentNode, currentNode.ancestorIds.some(id => menuIds.has(id))) ||
+            currentNode.checked === true || currentNode.selected === true);
+        if (existingSelection && requested.model && requested.effort) {
+          if (requested.surface && !['chat', 'normal'].includes(requested.surface.trim().toLowerCase())) {
+            throw new SessionPlaneDomainError('capability.unsupported', 'Existing-selection verification supports Chat only');
+          }
+          const verified = await new ChatGptConfigurationMenu(page, session.pageKey)
+            .reobserveSelection(requested.model, requested.effort, true);
+          this.#requirePage(session);
+          const after = await this.#capture(session, 5_000);
+          const choice = { ...toPreparationTarget(purpose, verified),
+            configurationVersion: verified.configurationVerification!.version,
+            configurationVerification: verified.configurationVerification! };
+          if (after.nodesTruncated || !hasPreparationSelectionEvidence(after.nodes, choice)) throw new SessionPlaneDomainError(
+            'provider.configuration-stale', 'Verified selection no longer matches the current chooser');
+          return { choice, result: { ...after, configurationVerification: choice.configurationVerification } };
         }
         let actionTimeout: Error | undefined;
         try {

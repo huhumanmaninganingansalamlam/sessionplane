@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { SessionPlaneDomainError } from '../../domain/errors.ts';
 import { inspectChatGptSurfaceDocument, observeChatGptSurface } from './surface.ts';
 import type { ElementHandle, Locator, Page, Request, Response } from 'playwright-core';
 
@@ -21,6 +22,7 @@ import {
 } from '../human-verification.ts';
 import { attachmentsAcknowledged } from '../attachment-evidence.ts';
 import { CHATGPT_SELECTORS, CHATGPT_PREPARATION_SNAPSHOT, CHATGPT_COMPOSER_SELECTOR } from './selectors.ts';
+import { ChatGptConfigurationMenu } from './configuration-catalog.ts';
 import { readChatGptMessages, type ChatGptMessage } from './message-dom.ts';
 
 const COMPOSER_HYDRATION_TIMEOUT_MS = 3_000;
@@ -203,6 +205,24 @@ export class ChatGptSubmission implements ProviderSubmission {
   async #verifyConfiguration(choices?: PreparationChoices): Promise<void> {
     const configuration = choices?.model ?? choices?.effort;
     if (configuration !== undefined || this.#request.model != null || this.#request.effort != null) {
+      if (configuration?.configurationVerification) {
+        const proof = configuration.configurationVerification;
+        try {
+          const verified = await new ChatGptConfigurationMenu(this.#page, this.pageKey)
+            .reobserveSelection(this.#request.model ?? proof.version, this.#request.effort ?? proof.effort, true);
+          const current = verified.configurationVerification;
+          if (current?.version !== proof.version || current.effort !== proof.effort || current.surface !== proof.surface) {
+            throw new ProviderSubmissionError('provider.preparation-required',
+              'Current model, effort or Chat mode changed since verification; preserve preparation');
+          }
+        } catch (error) {
+          if (error instanceof SessionPlaneDomainError &&
+              ['provider.configuration-stale', 'provider.configuration-unavailable'].includes(error.errorCode)) {
+            throw new ProviderSubmissionError('provider.preparation-required', error.message);
+          }
+          throw error;
+        }
+      }
       const snapshot = await this.#preparationRefs.capture({
         pageKey: this.pageKey,
         bindingEpoch: this.#registry.refreshPage(this.pageKey).bindingEpoch,
@@ -212,7 +232,8 @@ export class ChatGptSubmission implements ProviderSubmission {
       });
       if (configuration === undefined || snapshot.nodesTruncated || !hasPreparationSelectionEvidence(snapshot.nodes, configuration)) {
         throw new ProviderSubmissionError('provider.preparation-required',
-          'Configuration must be verified before submission. Choose a matching configurationCatalog option with decide configure and configurationId. ' +
+          'Configuration must be verified before submission. Choose a matching configurationCatalog option with decide configure and configurationId, ' +
+          'or record the already-selected chooser with native choose/model: explicit model/effort hints require fresh checked-version, effort and Chat verification without selection. ' +
           'After a click timeout, the original Coordinator must first team_get this same requestRef and check promptSubmitted, submissionState, terminal and saved choices. ' +
           'Only while still prepared/unsubmitted, native choose/model can verify a fresh current combined model/version/effort summary matching the user intent; otherwise discover or report the evidence gap. ' +
           'Reinspect after menu/composer changes. A saved Submit choice may resume on a later raw choose.');
