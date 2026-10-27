@@ -42,6 +42,94 @@ async function fixture() {
     close: async () => { await core.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
+test('CLI and MCP retain one exact selected ACK through valid deferrals and return fresh validation failures', async t => {
+  for (const client of ['cli', 'mcp'] as const) for (const stale of [false, true])
+  await t.test(`${client}: ${stale ? 'changed evidence is actionable' : 'selected ACK completes'}`, async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-selected-ack-'));
+    const socketPath = path.join(root, 'rpc.sock');
+    const params = { teamId: 'team', requestRef: 'original', requestId: 'selected-ack',
+      decision: 'acknowledge', messageId: 'selected-user', evidenceHash: 'a'.repeat(64) };
+    const observed: any[] = [];
+    let nextCheck = 0;
+    const server = net.createServer(socket => {
+      let input = '';
+      socket.on('data', chunk => {
+        input += chunk;
+        if (!input.includes('\n')) return;
+        const request = JSON.parse(input.trim()); observed.push(request);
+        assert.equal(request.method, 'workflow.decide', 'No wait, new collector or provider operation');
+        assert.deepEqual(request.params, params, 'Keep exact owner-selected identity and idempotency arguments');
+        assert.ok(Date.now() >= nextCheck, 'Never retry before the actual provider nextCheckAt');
+        let response;
+        if (observed.length === 1) {
+          nextCheck = Date.now() + 1100;
+          response = { error: { code: -32000, message: 'Canonical observation deferred', data: {
+            errorCode: 'provider.observation-deferred', details: { kind: 'deferred', source: 'backend',
+              reason: 'backend-http-429', httpStatus: 429, requestRef: 'original', automaticResubmit: false,
+              nextCheckAt: new Date(nextCheck).toISOString() } } } };
+        } else if (stale) response = { error: { code: -32000, message: 'Fresh selected evidence changed',
+          data: { errorCode: 'browser.snapshot-stale' } } };
+        else response = { result: { requestOk: true, requestRef: 'original', generation: 1,
+          submissionState: 'submitted', submittedUserMessageId: 'selected-user', terminal: false } };
+        socket.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, ...response }) + '\n');
+      });
+    });
+    await new Promise<void>(resolve => server.listen(socketPath, resolve));
+    try {
+      if (client === 'mcp') {
+        const result = await invokeMcpTool({ name: 'sessionplane_decide', arguments: params,
+          socketPath, timeoutMs: 5000, maxLineBytes: 4096 });
+        assert.equal(result.isError, stale);
+        assert.equal(result.structuredContent[stale ? 'errorCode' : 'submittedUserMessageId'],
+          stale ? 'browser.snapshot-stale' : 'selected-user');
+      } else {
+        let output = '', error = '';
+        const code = await runCli(['request', 'acknowledge', 'team', 'original', '--request-id', 'selected-ack',
+          '--message-id', 'selected-user', '--evidence-hash', 'a'.repeat(64), '--socket', socketPath, '--json'], {
+          stdin: Readable.from([]), stdout: new Writable({ write(c, _e, done) { output += c; done(); } }),
+          stderr: new Writable({ write(c, _e, done) { error += c; done(); } }) });
+        assert.equal(code, stale ? 1 : 0, error);
+        if (!stale) assert.equal(JSON.parse(output).submittedUserMessageId, 'selected-user');
+        else assert.match(output + error, /browser.snapshot-stale/);
+      }
+      assert.equal(observed.length, 2, 'One selected operation; no repeated owner wake or retry after a real failure');
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test('selected ACK collection does not retry a foreign or unpaced deferral', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-ack-deferral-guard-'));
+  const socketPath = path.join(root, 'rpc.sock');
+  let calls = 0, foreign = true;
+  const server = net.createServer(socket => {
+    socket.once('data', raw => {
+      const request = JSON.parse(raw.toString()); calls++;
+      socket.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { code: -32000, message: 'Deferred',
+        data: { errorCode: 'provider.observation-deferred', details: { kind: 'deferred',
+          requestRef: foreign ? 'another-request' : 'original', automaticResubmit: false,
+          nextCheckAt: foreign ? new Date(Date.now() + 1000).toISOString() : null } } } }) + '\n');
+    });
+  });
+  await new Promise<void>(resolve => server.listen(socketPath, resolve));
+  try {
+    for (foreign of [true, false]) {
+      const before = calls;
+      const result = await invokeMcpTool({ name: 'sessionplane_decide', arguments: {
+        teamId: 'team', requestRef: 'original', requestId: 'selection', decision: 'acknowledge',
+        messageId: 'selected-user', evidenceHash: 'a'.repeat(64) }, socketPath, timeoutMs: 5000, maxLineBytes: 4096 });
+      assert.equal(result.isError, true);
+      assert.equal(result.structuredContent.errorCode, 'provider.observation-deferred');
+      assert.equal(calls, before + 1, 'No authorized same-request provider deadline, so no automatic retry');
+    }
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 for (const candidates of [[], [{ messageId: 'unverified-existing-user', evidenceHash: 'fresh-comparison' }]])
 test(`UNKNOWN without a bound conversation returns reconciliation despite retained ACK pacing (${candidates.length} candidates)`, async t => {
   const f = await fixture();

@@ -661,6 +661,25 @@ test('session.send submits once, persists exact acknowledgement, and never resen
       hasRpcError('provider.observation-deferred'));
     assert.equal(service.teamDirectory.getSession(unknown.sessionId).submissionState, 'submission_unknown');
     assert.equal(afterRestart.submitCount, 0, 'A deferred acknowledgement cannot dispatch another prompt');
+    const retainedSelection = service.receipts.get('client-send', decision.requestId);
+    assert.equal(retainedSelection?.status, 'attempted');
+    assert.equal(JSON.parse(retainedSelection!.resultJson).messageId, decision.messageId);
+    await assert.rejects(rpc(config.socketPath, 'workflow.decide', { ...decision, evidenceHash: 'b'.repeat(64) }),
+      hasRpcError('input.idempotency-conflict'));
+    const budgets = new ProbeBudgetRepository(service.database.raw);
+    const cooldown = new Date(Date.now() + 50000).toISOString();
+    budgets.save({ scope: 'chatgpt:default', nextAllowedAt: cooldown, blockedUntil: cooldown,
+      backoffLevel: 1, consecutiveFailures: 1, updatedAt: new Date().toISOString() });
+    await assert.rejects(rpc(config.socketPath, 'workflow.decide', decision), (error: unknown) => {
+      assert.ok(error instanceof RpcClientError);
+      const data = error.data as any;
+      assert.equal(data.errorCode, 'provider.observation-deferred');
+      assert.equal(data.details.reason, 'account-cooldown');
+      assert.equal(data.details.nextCheckAt, cooldown);
+      return true;
+    });
+    budgets.save({ scope: 'chatgpt:default', nextAllowedAt: null, blockedUntil: null,
+      backoffLevel: 0, consecutiveFailures: 0, updatedAt: new Date().toISOString() });
     afterRestart.recoverAcknowledgement = async request => {
       request.onRecoveryObservation?.({ kind: 'unverified', source: 'backend', reason: 'backend-exact-prompt-absent',
         observedAt: new Date().toISOString(), nextCheckAt: null, httpStatus: 200,

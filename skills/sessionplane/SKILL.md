@@ -200,7 +200,11 @@ out prompts, infer consensus, or inject answers into other roles.
   If `evidence.submissionCandidates` contains the matching submitted message,
   compare it with `requested.prompt` and call decide with `decision: "acknowledge"`,
   its `messageId` and `evidenceHash`. This connects the existing answer without
-  sending. Do not guess from incomplete or ambiguous candidate text; ask the user
+  sending. CLI/MCP acknowledge keeps valid provider deferrals inside that one call,
+  retaining the same requestId/messageId/evidenceHash and honoring nextCheckAt.
+  Every retry revalidates fresh evidence; stale/unverified evidence returns for
+  reconciliation. Do not start another acknowledge or collector while it is pending.
+  Do not guess from incomplete or ambiguous candidate text; ask the user
   when the available evidence cannot establish which message belongs to the request.
   If the result has status `recovery_required` and recovery.state `unavailable`,
   stop polling/refreshing: the owned page and durable conversation ID are both absent.
