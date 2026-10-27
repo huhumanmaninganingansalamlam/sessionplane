@@ -1073,8 +1073,8 @@ export class SessionUiService {
         original.sessionId !== session.sessionId || original.conversationId !== session.conversationId ||
         !session.conversationId) throw new SessionPlaneDomainError(
       'provider.permission-unverified', 'Recover the original ACK before controlling its tool permission');
-    if (input.action === 'allow' && session.terminal) throw new SessionPlaneDomainError(
-      'provider.permission-unverified', 'A completed turn permits inspection only, not another permission grant');
+    if (input.action !== 'inspect' && session.terminal) throw new SessionPlaneDomainError(
+      'provider.permission-unverified', 'A completed turn permits inspection only, not permission control');
     if (passiveInspection && input.action === 'inspect' && original.generation < session.generation && original.terminal) {
       const page = this.#requirePage(session, true);
       const users = (await readChatGptMessages(page)).filter(message => message.role === 'user');

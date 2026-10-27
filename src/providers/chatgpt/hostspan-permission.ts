@@ -6,7 +6,7 @@ import { readChatGptMessages } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
 export interface HostSpanPermissionInput {
-  action: 'inspect' | 'allow';
+  action: 'inspect' | 'allow' | 'decline';
   appName: string;
   toolName?: string | undefined;
   evidenceHash?: string | undefined;
@@ -16,6 +16,7 @@ export interface HostSpanPermissionInput {
 const once = /^(?:허용|이번만 허용|한 번 허용|한 번만 허용|Allow|Allow once|Allow this time)(?:\s*⏎)?$/i;
 
 const always = /^(?:항상 허용|Always allow)(?:\s*⏎)?$/i;
+const decline = /^(?:거부|Decline|Deny)(?:\s*Esc)?$/i;
 
 /** Read mounted work activity, including hidden cards, without revealing or granting it. */
 export async function inspectHostSpanActivity(page: Page, submittedUserMessageId: string,
@@ -323,9 +324,12 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
   if (!/^hostspan(?:-[a-z0-9_-]+)?$/i.test(input.appName)) throw unavailable('Only HostSpan permissions are supported');
   const allowMode = input.allowMode ?? 'once';
   const allow = allowMode === 'always' ? always : once;
-  if (input.action === 'allow' && !input.toolName) throw unavailable('Select the observed tool name before allowing it');
-  if (input.action === 'allow' && !input.evidenceHash) throw unavailable(
-    'Inspect the exact tool with the same allowMode, then pass its evidenceHash to allow');
+  const selected = input.action === 'decline' ? decline : allow;
+  const selectedName = input.action === 'decline' ? 'Decline' : 'Allow';
+  if (input.action !== 'inspect' && !input.toolName) throw unavailable('Select the observed tool name before allowing or declining it');
+  if (input.action !== 'inspect' && !input.evidenceHash) throw unavailable(
+    'Inspect the exact tool with the same allowMode, then pass its evidenceHash to allow or decline');
+  const expectedUrl = page.url();
   const users = (await readChatGptMessages(page, true)).filter(message => message.role === 'user');
   if (users.at(-1)?.messageId !== submittedUserMessageId ||
       users.filter(message => message.messageId === submittedUserMessageId).length !== 1) {
@@ -476,23 +480,34 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
   const evidenceHash = createHash('sha256').update(JSON.stringify([page.url(), input.appName, input.toolName, allowMode, permissionUserMessageId, permissionText])).digest('hex');
   if (input.action === 'inspect') return { outcome: 'inspected', allowMode, appName: input.appName, toolName: input.toolName,
     evidenceHash, permissionUserMessageId, permissionText, workDisclosure, buttons: buttons.map(name => name.trim()) };
-  if (input.evidenceHash !== evidenceHash) throw unavailable('Inspect the current exact permission before allowing it');
+  if (input.evidenceHash !== evidenceHash) throw unavailable('Inspect the current exact permission before allowing or declining it');
   // Recheck the command/details and explicitly selected button in the same DOM operation.
   const clicked = await scope.evaluate((element, expected) => {
-    if (!(element instanceof HTMLElement) || element.innerText.trim() !== expected.text) return false;
+    if (!(element instanceof HTMLElement) || location.href !== expected.url || element.innerText.trim() !== expected.text) return false;
+    const identity = (node: Element) => node.closest('[data-message-id], [data-turn-id], [data-dil-message-id], [data-chatgpt-search-message-ids]') ?? node;
+    const users = [...new Set([...document.querySelectorAll(expected.selector)].filter(node =>
+      node.getAttribute('data-message-author-role') === 'user' || node.querySelector('[data-user-message-bubble]')).map(identity))];
+    const hasId = (node: Element, id: string | null) => id !== null && [node.getAttribute('data-message-id'), node.getAttribute('data-turn-id'),
+      node.getAttribute('data-dil-message-id'), ...(node.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/)].includes(id);
+    if (!users.at(-1) || !hasId(users.at(-1)!, expected.currentAck) || users.filter(node => hasId(node, expected.currentAck)).length !== 1) return false;
+    const owner = users.filter(node => !!(node.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING)).at(-1);
+    if (!owner || !hasId(owner, expected.permissionAck)) return false;
     const buttons = [...element.querySelectorAll('button, [role="button"]')].filter(button =>
       button instanceof HTMLElement && button.getClientRects().length > 0 &&
       !button.hasAttribute('disabled') && button.getAttribute('aria-disabled') !== 'true' &&
-      new RegExp(expected.allow, 'i').test((button.getAttribute('aria-label') ?? button.textContent ?? '').trim()));
+      new RegExp(expected.selected, 'i').test((button.getAttribute('aria-label') ?? button.textContent ?? '').trim()));
     if (buttons.length !== 1) return false;
     (buttons[0] as HTMLElement).click();
     return true;
-  }, { text, allow: allow.source });
-  if (!clicked) throw unavailable('The exact selected Allow control changed or is unavailable');
+  }, { text, selected: selected.source, url: expectedUrl, selector: CHATGPT_SELECTORS.messages,
+    currentAck: submittedUserMessageId, permissionAck: permissionUserMessageId });
+  if (!clicked) throw unavailable(`The exact selected ${selectedName} control or ACK changed or is unavailable`);
   await page.waitForFunction(expected => ![...document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="alert"]')]
     .some(element => element instanceof HTMLElement && element.getClientRects().length > 0 &&
       element.innerText.trim() === expected), alertText, { timeout: 5_000 }).catch(() => undefined);
-  return { outcome: 'clicked', allowMode, appName: input.appName, toolName: input.toolName, evidenceHash, permissionUserMessageId, workDisclosure,
+  return { outcome: input.action === 'decline' ? 'decline-clicked' as const : 'clicked' as const,
+    ...(input.action === 'decline' ? { grantAttempted: false as const } : {}),
+    allowMode, appName: input.appName, toolName: input.toolName, evidenceHash, permissionUserMessageId, workDisclosure,
     permissionStillVisible: await scopes.evaluateAll((elements, expected) => elements.some(element =>
       element instanceof HTMLElement && element.getClientRects().length > 0 && element.innerText.trim() === expected), alertText) };
 }

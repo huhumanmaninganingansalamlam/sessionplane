@@ -13,7 +13,7 @@ import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { SessionUiService } from '../../src/core/session-ui-service.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { callRpc } from '../../src/cli/client.ts';
-import { inspectHostSpanActivity, revealHostSpanActivity } from '../../src/providers/chatgpt/hostspan-permission.ts';
+import { controlHostSpanPermission, inspectHostSpanActivity, revealHostSpanActivity } from '../../src/providers/chatgpt/hostspan-permission.ts';
 
 test('a buttonless current provider alert blocks continuation without fabricating a user action', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-alert-blocker-'));
@@ -35,6 +35,9 @@ test('a buttonless current provider alert blocks continuation without fabricatin
       submissionState: 'submitted' as const, promptSubmitted: true };
     const ui = new SessionUiService({ submissions: core.submissionService, registry: core.pageRegistry,
       browserOwner: core.browserOwner, chatgptUrl: 'https://chatgpt.com/' });
+    await assert.rejects(ui.hostspanPermission({ ...session, terminal: true }, {
+      action: 'decline', appName: 'hostspan-desktop', toolName: 'Process Cancel', evidenceHash: 'a'.repeat(64),
+    }), /completed turn permits inspection only/);
     await assert.rejects(ui.verifyContinuation(session, session), error => {
       assert.ok(error instanceof SessionPlaneDomainError);
       assert.equal(error.errorCode, 'provider.preparation-required');
@@ -57,6 +60,50 @@ test('a buttonless current provider alert blocks continuation without fabricatin
       assert.equal(error.details, undefined, 'A later user cannot inherit the original blocker provenance');
       return true;
     });
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const label of ['Decline', '거부Esc']) test(`permission ${label} rejects only the freshly inspected owned card without granting Cancel`, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-permission-decline-'));
+  const core = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    providerAdapters: [new FakeProviderAdapter()], logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<main>
+      <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+      <section id="card"><div role="alert">hostspan-desktop Process Cancel <span id="target">proc_unknown</span></div>
+        <button onclick="throw Error('Never grant Cancel')">Allow once</button>
+        <button id="decline" onclick="window.declines=(window.declines||0)+1;document.querySelector('#card').remove()">${label}</button>
+      </section><textarea id="prompt-textarea">Preserved draft</textarea></main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    const input = { appName: 'hostspan-desktop', toolName: 'Process Cancel' };
+    const inspected = await controlHostSpanPermission(page, { ...input, action: 'inspect' }, 'current-ack');
+    assert.equal(inspected.outcome, 'inspected');
+    assert.ok('evidenceHash' in inspected && inspected.evidenceHash);
+    const reject = { ...input, action: 'decline' as const, evidenceHash: inspected.evidenceHash };
+    await assert.rejects(controlHostSpanPermission(page, { ...reject, evidenceHash: undefined }, 'current-ack'), /evidenceHash/);
+    await assert.rejects(controlHostSpanPermission(page, { ...reject, toolName: undefined }, 'current-ack'), /observed tool name/);
+    await assert.rejects(controlHostSpanPermission(page, { ...reject, toolName: 'File Patch' }, 'current-ack'), /absent or ambiguous/);
+    await page.locator('#target').evaluate(node => node.textContent = 'proc_changed');
+    await assert.rejects(controlHostSpanPermission(page, reject, 'current-ack'), /current exact permission/);
+    await page.locator('#target').evaluate(node => node.textContent = 'proc_unknown');
+    await page.locator('#decline').evaluate(node => node.setAttribute('disabled', ''));
+    await assert.rejects(controlHostSpanPermission(page, reject, 'current-ack'), /Decline control/);
+    await page.locator('#decline').evaluate(node => { node.removeAttribute('disabled'); node.after(node.cloneNode(true)); });
+    await assert.rejects(controlHostSpanPermission(page, reject, 'current-ack'), /current exact permission/);
+    await page.locator('#decline').last().evaluate(node => node.remove());
+    await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="later-user">Later work</div>'));
+    await assert.rejects(controlHostSpanPermission(page, reject, 'current-ack'), /current user anchor/);
+    await page.locator('[data-message-id="later-user"]').evaluate(node => node.remove());
+    assert.equal(await page.evaluate(() => (window as any).declines ?? 0), 0);
+    const result = await controlHostSpanPermission(page, reject, 'current-ack');
+    assert.equal(result.outcome, 'decline-clicked');
+    assert.ok('grantAttempted' in result && result.grantAttempted === false);
+    assert.ok('permissionStillVisible' in result && result.permissionStillVisible === false);
+    assert.equal(await page.evaluate(() => (window as any).declines), 1);
+    assert.equal(await page.locator('#prompt-textarea').inputValue(), 'Preserved draft');
+    assert.equal(await page.locator('[data-message-author-role="user"]').count(), 1);
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -527,6 +574,29 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
     assert.equal((await decide('unverified-card-action', { action: 'inspect' })).isError, true,
       'An unknown card action cannot broaden evidence to the entire conversation');
     await page.locator('main > section').evaluateAll(elements => elements.forEach(element => element.remove()));
+    await page.evaluate(() => document.querySelector('main')!.insertAdjacentHTML('beforeend',
+      `<section id="decline-card"><div role="alert">hostspan-desktop Process Cancel proc_unknown</div>
+      <button onclick="throw Error('Decline must never grant')">Allow once</button>
+      <button onclick="window.declines=(window.declines||0)+1;document.querySelector('#decline-card').remove()">거부Esc</button></section>`));
+    const cancelCard = await decide('inspect-cancel-for-decline', { action: 'inspect', toolName: 'Process Cancel' });
+    assert.equal(cancelCard.isError, false, JSON.stringify(cancelCard));
+    const cancelHash = (cancelCard.structuredContent.permission as { evidenceHash: string }).evidenceHash;
+    output = '';
+    const declineArgs = ['request', 'hostspan_permission', team.teamId, String(row.outbox_id), '--action', 'decline',
+      '--app-name', 'hostspan-desktop', '--tool-name', 'Process Cancel', '--evidence-hash', cancelHash,
+      '--request-id', 'cli-decline', '--socket', config.socketPath, '--json'];
+    assert.equal(await runCli(declineArgs, { stdin: Readable.from([]), stdout: stream, stderr: stream }), 0, output);
+    const declined = JSON.parse(output);
+    assert.equal(declined.permission.outcome, 'decline-clicked');
+    assert.equal(declined.permission.grantAttempted, false);
+    assert.equal(declined.permission.permissionStillVisible, false);
+    output = '';
+    assert.equal(await runCli(declineArgs, { stdin: Readable.from([]), stdout: stream, stderr: stream }), 0, output);
+    assert.deepEqual(JSON.parse(output), declined, 'The same decline requestId returns its receipt without another click');
+    assert.equal(await page.evaluate(() => (window as any).declines), 1);
+    assert.equal(await page.evaluate(() => (window as any).grants), 2);
+    assert.equal(fake.submitCount, 1, 'Decline does not resend or continue the product prompt');
+    assert.equal(await page.locator('textarea').inputValue(), 'Keep my draft');
     await page.evaluate(() => document.querySelector('main')!.insertAdjacentHTML('beforeend',
       `<section id="persistent"><div role="alert">hostspan-desktop Process Start Command: authorized development</div>
       <button onclick="throw Error('Must not choose once')">Allow once</button>
