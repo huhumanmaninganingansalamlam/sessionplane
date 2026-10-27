@@ -22,8 +22,11 @@ test('held evidence reads the exact rendered response and draft without controls
     await page.route('https://chatgpt.com/**', route => {
       navigations++;
       return route.fulfill({ contentType: 'text/html', body: '<main>' +
+        '<article data-message-author-role="user" data-message-id="older-user">Unrelated older work</article>' +
         '<article data-message-author-role="user" data-message-id="original-user">Original WP</article>' +
         '<article data-message-author-role="assistant" data-message-id="current-answer"><div class="markdown">Current response</div></article>' +
+        '<article data-message-author-role="user" data-message-id="later-user">Keep my later command and result</article>' +
+        '<article data-message-author-role="assistant" data-message-id="partial-answer" data-is-streaming="true"><div class="markdown">Process 42 is still running</div></article>' +
         '<textarea id="prompt-textarea">Preserved draft</textarea><button onclick="document.body.dataset.clicked=1">Retry</button></main>' });
     });
     await page.goto('https://chatgpt.com/c/held-original');
@@ -41,11 +44,28 @@ test('held evidence reads the exact rendered response and draft without controls
     await assert.rejects(ui.inspectSubmission(input), /user is reviewing/);
     const result = await ui.inspectSubmission({ ...input, readOnly: true });
     assert.equal(result.evidence.submissionVerification?.anchorPresent, true);
-    assert.equal(result.evidence.submissionVerification?.responseCandidate?.responseMessageId, 'current-answer');
-    assert.equal(result.evidence.submissionVerification?.responseCandidate?.answerText, 'Current response');
+    assert.equal(result.evidence.submissionVerification?.responseCandidate, null, 'Later human work must not become the original request result');
+    assert.equal(result.evidence.submissionVerification?.laterUserFound, true);
+    const context = result.evidence.submissionVerification?.conversationContext;
+    assert.equal(context?.originalAnchorPresent, true);
+    assert.equal(context?.truncated, false);
+    assert.deepEqual(context?.messages.map(message => [message.messageId, message.text]), [
+      ['original-user', 'Original WP'], ['current-answer', 'Current response'],
+      ['later-user', 'Keep my later command and result'], ['partial-answer', 'Process 42 is still running'],
+    ]);
+    assert.equal(context?.messages.at(-1)?.streamingMarker, true, 'Partial work must retain its real generation marker');
+    assert.deepEqual(result.evidence.submissionControls?.draft, { text: 'Preserved draft', textLength: 15, truncated: false });
     assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
     assert.equal(await page.locator('body').getAttribute('data-clicked'), null);
     assert.equal(navigations, 1);
+    await page.locator('[data-message-id="later-user"]').evaluate(element => { element.textContent = 'x'.repeat(200_001); });
+    const bounded = await ui.inspectSubmission({ ...input, readOnly: true });
+    assert.equal(bounded.evidence.submissionVerification?.conversationContext.truncated, true);
+    assert.ok((bounded.evidence.submissionVerification?.conversationContext.messages.reduce((size, message) => size + message.text.length, 0) ?? Infinity) <= 200_000);
+    await page.locator('[data-message-id="original-user"]').evaluate(element => element.removeAttribute('data-message-id'));
+    const missing = await ui.inspectSubmission({ ...input, readOnly: true });
+    assert.equal(missing.evidence.submissionVerification?.conversationContext.originalAnchorPresent, false);
+    assert.deepEqual(missing.evidence.submissionVerification?.conversationContext.messages, [], 'No later text without the exact original ACK');
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
