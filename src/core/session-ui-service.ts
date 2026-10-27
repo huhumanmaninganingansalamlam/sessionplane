@@ -241,10 +241,13 @@ export class SessionUiService {
                         ((session.submittedUserMessageId !== null && message.messageId === session.submittedUserMessageId) ||
                           (session.submittedUserTurnId !== null && message.turnId === session.submittedUserTurnId)));
                       const anchor = anchors.length === 1 ? anchors[0] : undefined;
-                      const following = anchor === undefined ? [] : messages.slice(messages.indexOf(anchor))
-                        .filter(message => message.rootIndex === anchor.rootIndex);
+                      // An owned conversation can virtualize its old ACK. Reading its
+                      // mounted text does not verify that ACK or authorize replacement.
+                      const following = anchors.length > 1 ? [] : anchor === undefined ? messages
+                        : messages.slice(messages.indexOf(anchor)).filter(message => message.rootIndex === anchor.rootIndex);
                       let remaining = 200_000;
-                      return { scope: 'mounted-dom-from-original-ack' as const, originalAnchorPresent: anchor !== undefined,
+                      return { scope: anchor === undefined ? 'mounted-owned-conversation' as const : 'mounted-dom-from-original-ack' as const,
+                        originalAnchorPresent: anchor !== undefined, originalAnchorAmbiguous: anchors.length > 1,
                         observedMessageCount: following.length,
                         truncated: following.length > 100 || following.reduce((size, message) => size + message.text.length, 0) > remaining,
                         messages: following.slice(0, 100).map(message => {

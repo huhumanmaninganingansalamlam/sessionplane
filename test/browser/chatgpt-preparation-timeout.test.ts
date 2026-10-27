@@ -62,10 +62,19 @@ test('held evidence reads the exact rendered response and draft without controls
     const bounded = await ui.inspectSubmission({ ...input, readOnly: true });
     assert.equal(bounded.evidence.submissionVerification?.conversationContext.truncated, true);
     assert.ok((bounded.evidence.submissionVerification?.conversationContext.messages.reduce((size, message) => size + message.text.length, 0) ?? Infinity) <= 200_000);
+    await page.locator('[data-message-id="later-user"]').evaluate(element => { element.textContent = 'Keep my later command and result'; });
     await page.locator('[data-message-id="original-user"]').evaluate(element => element.removeAttribute('data-message-id'));
     const missing = await ui.inspectSubmission({ ...input, readOnly: true });
     assert.equal(missing.evidence.submissionVerification?.conversationContext.originalAnchorPresent, false);
-    assert.deepEqual(missing.evidence.submissionVerification?.conversationContext.messages, [], 'No later text without the exact original ACK');
+    assert.equal(missing.evidence.submissionVerification?.conversationContext.scope, 'mounted-owned-conversation');
+    assert.equal(missing.evidence.submissionVerification?.anchorPresent, false, 'Reading the exact owned page cannot manufacture ACK verification');
+    assert.equal(missing.evidence.submissionVerification?.conversationContext.messages.at(-1)?.text, 'Process 42 is still running');
+    assert.equal(missing.evidence.submissionVerification?.conversationContext.messages.at(-1)?.streamingMarker, true);
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend',
+      '<article data-message-author-role="user" data-message-id="original-user">Ambiguous original</article>'.repeat(2)));
+    const ambiguous = await ui.inspectSubmission({ ...input, readOnly: true });
+    assert.equal(ambiguous.evidence.submissionVerification?.conversationContext.originalAnchorAmbiguous, true);
+    assert.deepEqual(ambiguous.evidence.submissionVerification?.conversationContext.messages, []);
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
