@@ -604,7 +604,7 @@ test('authorized broad continuation review stays inside the wait and runs at thi
 });
 
 
-test('approved broad review recovers an exact idle unanswered turn while backend probes are paced', async t => {
+for (const alert of [false, true]) test(`approved broad review returns ${alert ? 'a provider blocker without inventing a user action' : 'an exact idle recovery failure while backend probes are paced'}`, async t => {
   const f = await fixture();
   try {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
@@ -621,7 +621,10 @@ test('approved broad review recovers an exact idle unanswered turn while backend
     const reviews: any[] = [];
     t.mock.method(SessionUiService.prototype, 'prepareContinuation', async input => {
       reviews.push(input);
-      throw new SessionPlaneDomainError('provider.preparation-required', 'Actual fresh submit control unavailable');
+      throw new SessionPlaneDomainError('provider.preparation-required', 'Actual fresh submit control unavailable',
+        !alert ? undefined : { kind: 'provider-alert', source: 'dom',
+          submittedUserMessageId: f.sent.submittedUserMessageId,
+          providerAlerts: ['hostspan-desktop reconnect warning'], actionVerified: false, requiredUserAction: null });
     });
     const waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef],
       waitMs: 3600000, untilResult: false, continuationApproved: true });
@@ -632,7 +635,17 @@ test('approved broad review recovers an exact idle unanswered turn while backend
     const result = (await waiting).structuredContent;
     assert.equal(reviews.length, 1);
     assert.equal(reviews[0].userConfirmedInterruption.submittedUserMessageId, f.sent.submittedUserMessageId);
-    assert.equal(result.results[0].recovery.userActionRequired, true, 'A real inability to submit is returned');
+    const recovery = result.results[0].recovery;
+    assert.equal(recovery.userActionRequired, !alert, 'An alert refusal alone cannot establish a required human action');
+    if (alert) {
+      assert.equal(recovery.state, 'blocked');
+      assert.equal(recovery.decisionRequired, false);
+      assert.equal(recovery.requiredUserAction, null);
+      assert.equal(recovery.providerBlocker.submittedUserMessageId, f.sent.submittedUserMessageId);
+      assert.deepEqual(recovery.providerBlocker.providerAlerts, ['hostspan-desktop reconnect warning']);
+      assert.equal(recovery.automaticContinuation, false);
+      assert.equal(workflowWaitOutcome(result.results[0]), true, 'The original wait returns without another collection/retry');
+    }
     assert.equal(f.fake.submitCount, 1, 'A failed fresh control check never submits');
   } finally { t.mock.timers.reset(); await f.close(); }
 });
