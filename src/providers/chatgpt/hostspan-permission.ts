@@ -37,7 +37,7 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
     if (input.workId === null || !ids.includes(input.workId)) return null;
     const root = anchor.getRootNode() as Document | ShadowRoot;
     const app = /(^|[^\w-])hostspan(?:-[a-z0-9_-]+)?($|[^\w-])/i;
-    const action = /^(?:항상 허용|Always allow|허용|이번만 허용|한 번 허용|한 번만 허용|Allow|Allow once|Allow this time|자세히 보기|View details|See details)(?:\s*⏎)?$/i;
+    const action = /^(?:항상 허용|Always allow|허용|이번만 허용|한 번 허용|한 번만 허용|Allow|Allow once|Allow this time|자세히 보기|View details|See details|다시 연결|Reconnect)(?:\s*⏎)?$/i;
     const userNodes = [...root.querySelectorAll(input.selector)].flatMap(node => {
       if (node.getAttribute('data-message-author-role') !== 'user' && !node.querySelector('[data-user-message-bubble]')) return [];
       const identity = node.closest('[data-message-id], [data-turn-id], [data-dil-message-id]') ?? node;

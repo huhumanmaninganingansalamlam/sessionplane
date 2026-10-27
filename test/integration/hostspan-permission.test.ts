@@ -72,7 +72,7 @@ test('previous activity reveals only its structurally contained same-ACK HostSpa
       <section><button aria-expanded="false" onclick="throw Error('Unrelated disclosure')">이전 활동</button></section>
       <section id="owned"><button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#hidden-work').hidden=false">이전 활동</button>
       <div hidden id="hidden-work"><div class="group/activity-header"><button aria-expanded="false">hostspan-desktop 및 Personal Context 통합 사용함</button></div>
-      <div role="alert">hostspan-desktop reconnect<a href="https://connector.example/authorize?client_id=existing&state=private-value">Reconnect existing link</a><a href="http://[invalid">Malformed</a><a href="javascript:alert('private-value')">Unsafe scheme</a><button onclick="throw Error('No grant')">Always allow</button></div></div></section>
+      <section><div role="alert">hostspan-desktop reconnect</div><a href="https://connector.example/authorize?client_id=existing&state=private-value">Reconnect existing link</a><a href="http://[invalid">Malformed</a><a href="javascript:alert('private-value')">Unsafe scheme</a><button onclick="window.reconnects=(window.reconnects||0)+1">다시 연결⏎</button></section></div></section>
       <textarea>Preserved draft</textarea></main>` }));
     await page.goto('https://chatgpt.com/c/fixture');
     const read = await inspectHostSpanActivity(page, 'current-ack');
@@ -88,6 +88,8 @@ test('previous activity reveals only its structurally contained same-ACK HostSpa
     assert.equal(hiddenLink.href, 'https://connector.example/authorize');
     assert.doesNotMatch(JSON.stringify(previous[1]!.containedActivity), /private-value/);
     assert.equal(await page.locator('#hidden-work').isVisible(), false);
+    assert.ok(read.cards.some(card => card.role === null && card.controls.some(control => control.name === '다시 연결⏎')),
+      'Reconnect controls beside an alert are diagnostic candidates, not a permission grant');
     await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-other', previous[1]!.activityEvidenceHash!), /different app/);
     await page.locator('#hidden-work [class~="group/activity-header"] button').evaluate(element => element.replaceWith(element.cloneNode(true)));
     await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', previous[1]!.activityEvidenceHash!), /fresh HostSpan activityEvidenceHash/);
@@ -106,7 +108,7 @@ test('previous activity reveals only its structurally contained same-ACK HostSpa
       assert.equal(result.activity.cards.flatMap(card => card.controls).find(control => control.name === name)!.href, null);
     assert.doesNotMatch(JSON.stringify(result.activity), /private-value/);
     assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
-    assert.equal(await page.getByRole('button', { name: 'Always allow' }).count(), 1);
+    assert.equal(await page.evaluate(() => (window as any).reconnects ?? 0), 0, 'Inspection never opens authentication');
     await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', selected.activityEvidenceHash!), /fresh HostSpan activityEvidenceHash/);
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
