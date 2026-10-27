@@ -20,6 +20,10 @@ export function registerSessionMethods(
   cleanup: ConversationCleanupService,
   ui?: SessionUiService,
 ): void {
+  router.register('session.close_pages', z.object({
+    clientId: ClientId, sessionId: SessionId, generation: z.number().int().positive(),
+    conversationId: z.string().min(1).max(300), evidenceRef: z.string().trim().min(1).max(2000),
+  }).strict(), (input) => cleanup.closePages(input));
   router.register('session.delete', z.object({
     clientId: ClientId, requestId: RequestId, sessionId: SessionId,
     generation: z.number().int().positive(), conversationId: z.string().min(1).max(300),

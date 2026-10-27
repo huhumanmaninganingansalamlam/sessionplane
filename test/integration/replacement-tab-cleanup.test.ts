@@ -11,6 +11,48 @@ import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 import type { ReplacementCleanup } from '../../src/core/conversation-cleanup-service.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 
+test('tab-only cleanup preserves unresolved evidence and successor, rejects current work and drafts without provider deletion', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-tabs-only-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  let deletes = 0;
+  t.mock.method(fake, 'openDeletion', async () => { deletes++; throw new Error('No provider deletion permitted'); });
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const rpc = <T = any>(method: string, params: object) => callRpc<T>({ socketPath: config.socketPath,
+    method, params: { ...(method.startsWith('workflow.') ? {} : { clientId: 'tabs-only' }), ...params }, timeoutMs: 10000 });
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'tabs-only' });
+    const old = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    await rpc('session.send', { sessionId: old.sessionId, requestId: 'send', prompt: 'Unresolved original' });
+    const original = core.teamDirectory.getSession(old.sessionId);
+    const outbox = core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(old.sessionId)!;
+    const before = core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').all(old.sessionId);
+    const input = { sessionId: old.sessionId, generation: 1, conversationId: original.conversationId,
+      evidenceRef: 'Explicit tab-only cleanup after preserved handoff' };
+    await assert.rejects(rpc('session.close_pages', input), /Retrieve the final output/);
+    const next = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<textarea>Keep draft</textarea>' }));
+    await page.goto('https://chatgpt.com/c/' + original.conversationId);
+    await rpc('workflow.decide', { teamId: team.teamId, requestRef: outbox.outbox_id, requestId: 'retire',
+      decision: 'retire_observation', workComplete: true, evidenceRef: input.evidenceRef });
+    assert.deepEqual((await rpc('session.close_pages', input)).pageCleanup, { closedPages: 0, pageErrors: ['session.cleanup-not-ready'] });
+    assert.equal(page.isClosed(), false);
+    await page.setContent('<main>Idle obsolete original</main>');
+    const result = await rpc('session.close_pages', input);
+    assert.equal(result.providerDeletionAttempted, false);
+    assert.deepEqual(result.pageCleanup, { closedPages: 1, pageErrors: [] });
+    assert.equal(page.isClosed(), true);
+    assert.deepEqual((await rpc('session.close_pages', input)).pageCleanup, { closedPages: 0, pageErrors: [] });
+    assert.equal(core.teamDirectory.getSession(next.sessionId).sessionState, next.sessionState);
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations WHERE session_id=?').all(old.sessionId), before);
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=?').get(old.sessionId), outbox);
+    assert.equal(deletes, 0);
+    assert.equal(fake.stopCount, 0);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('collected replacement closes idle predecessor tab while preserving historical UNKNOWN and deletion guard', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-history-tabs-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', observationActiveSweepMs: 5, observationQuietSweepMs: 5 });
