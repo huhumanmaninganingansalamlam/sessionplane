@@ -1005,6 +1005,10 @@ test('user review pauses the existing managed collector and observation without 
     assert.equal(get.request.observationHeld, true);
     assert.equal(held.observationHeld, true);
     assert.equal(held.recovery.automaticContinuation, false);
+    assert.match(held.recovery.nextAction, /original owner reviews current evidence/);
+    assert.match(held.recovery.nextAction, /diagnostic hold alone does not establish a human-only action/);
+    assert.match(held.recovery.nextAction, /Preserve explicit user stops/);
+    assert.match(held.recovery.nextAction, /human-only actions require actual user completion/);
     const focused = t.mock.method(f.fake.page, 'bringToFront', async () => {});
     const focusInput = { teamId: f.team.teamId, requestRef, requestId: 'held-focus', decision: 'focus' };
     const focus = await f.rpc<any>('decide', focusInput);
@@ -1088,6 +1092,9 @@ for (const newTool of [false, true]) test(`managed recovery reviews a persistent
       assert.equal(result.recovery?.decisionRequired, true);
       assert.equal(result.recovery?.userActionRequired, true);
       assert.equal(result.recovery?.url, `https://chatgpt.com/c/${current.conversationId}`);
+      assert.match(result.recovery.message, /original owner reviews.*original tool\/result evidence/);
+      assert.match(result.recovery.message, /not evidence of authentication or a human-only action/);
+      assert.match(result.recovery.message, /do not repeat an ineffective continuation/);
       assert.equal(f.fake.submitCount, 2, 'An ACK alone must not restart another ineffective recovery');
       assert.equal(f.core.teamDirectory.getSession(current.sessionId).terminal, false);
     }

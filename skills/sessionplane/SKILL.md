@@ -92,8 +92,14 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    request tab and report the current error and one required action. Use decide
    `decision:"human_review", action:"pause"` on its current requestRef to pause
    observation and Continue without stopping provider work or changing drafts.
-   A human-wait report alone does not pause Core. After user completion, use
-   `action:"resume"` with a new requestId and resume the same managed chain.
+   A human-wait report alone does not pause Core. The owner reviews actual owned
+   evidence itself; a diagnostic hold, returned failure or `userActionRequired`
+   alone does not prove authentication or a human-only action. After completing
+   its own diagnostic review, the original owner may explicitly use `action:"resume"`
+   with a new requestId under existing user authorization. Never resume blindly.
+   Preserve an explicit user stop until the user authorizes resumption; an observed
+   human-only action requires actual user completion. Do not invent either completion
+   or a user action from the hold's generic wording. Resume the same managed chain.
 5. Keep one managed wait per request chain. When the user has approved normal
    same-conversation `계속` recovery, pass `continuationApproved: true` on positive
    MCP waits, or `--continuation-approved` on the existing CLI wait. Without it,
@@ -133,8 +139,9 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    A returned recovery decision, failed submission or repeated ineffective recovery
    needs immediate delivery to the supervisor/user, not another silent wait. Read
    the exact error and current controls; focus the original tab and report one
-   concrete user action when human review is needed. An ambiguous or persistent
-   send failure can require review even without a permission card. Never invent a
+   concrete user action only when the observed boundary requires a human. The
+   owner handles diagnostic review from existing evidence itself. An ambiguous or
+   persistent send failure can require review even without a permission card. Never invent a
    hidden button, infer completion from an empty assistant, or set a fixed retry
    count as the sole stopping condition. Do not automatically refresh; the user
    refreshes when required. After their completion, re-read the same request and
@@ -156,6 +163,14 @@ The caller chooses experts and context; SessionPlane does not automatically fan
 out prompts, infer consensus, or inject answers into other roles.
 
 ## Recovery and cleanup
+
+- `reconcile_failure` does not retry or submit. After it returns a terminal
+  `message-timeout-reconciled` failure, another wait returns that stored outcome.
+  For an already-authorized same-chat continuation, the original owner uses
+  explicit `decide continue` with `continuationApproved:true`; it freshly validates
+  the idle page and creates one literal `계속` successor. Preserve the old ACK,
+  interrupted output and UNKNOWN physical command state; do not replay commands
+  or click raw Retry. This is not a Retry click on the old ACK.
 
 - Approved managed continuation also handles an exact idle acknowledged turn
   with a standalone message-stream error and enabled Retry: the core clicks that
