@@ -25,7 +25,11 @@ export const workflowSchemas = {
       manageOnly: z.literal(true).optional().describe('Approve paced management of this exact acknowledged recovery chain in the existing collector. No immediate send or new collector; requires followupUserMessageId.'),
       followupUserMessageId: z.string().min(1).max(300).optional().describe('Recover this exact interrupted later turn while retaining a separate never-submitted preparation and its draft.'),
       userConfirmedInterruption: z.object({ conversationId: z.string().min(1).max(300), submittedUserMessageId: z.string().min(1).max(300),
-        evidenceRef: z.string().trim().min(1).max(2000) }).strict().optional().describe('Only after the user directly confirms this exact disconnected turn and explicitly requests one continue. Not for automated inference; active streaming, final answers, later users, permissions and separate drafts remain protected.') }).strict(),
+        evidenceRef: z.string().trim().min(1).max(2000),
+        resolvedToolAlert: z.object({ appName: z.string().regex(/^hostspan(?:-[a-z0-9_-]+)?$/i),
+          alertSha256: z.string().regex(/^[a-f0-9]{64}$/), originalOperationOutcome: z.enum(['not-started', 'completed'])
+        }).strict().optional().describe('Only after actual app recovery and recovery of the original operation, recorded in evidenceRef. Hash the exact retained expiration alert. UNKNOWN operations, new permission/auth dialogs and other alerts remain blocked; never retries the tool.')
+      }).strict().optional().describe('Only after the user directly confirms this exact disconnected turn and explicitly requests one continue. Not for automated inference; active streaming, final answers, later users, permissions and separate drafts remain protected.') }).strict(),
     z.object({ ...request, requestId, decision: z.literal('hostspan_permission'), action: z.enum(['inspect', 'allow']),
       followupUserMessageId: z.string().min(1).max(300).optional().describe('Source of an acknowledged exact recovery chain under a separate unsubmitted preparation.'),
       appName: z.string().regex(/^hostspan(?:-[a-z0-9_-]+)?$/i), toolName: z.string().trim().min(1).max(200).optional().describe('Omit only for inspect to discover actual HostSpan cards in this owned conversation; allow requires the observed tool name.'),
