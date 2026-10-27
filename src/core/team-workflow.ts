@@ -1198,6 +1198,14 @@ export class TeamWorkflow {
     const acknowledgementRecovery = result.submissionState === 'submission_unknown'
       ? acknowledgementEvents.latestAcknowledgementRecovery(request.sessionId, request.generation) : null;
     return { ...result, ...verification,
+      // Without a bound conversation recoverAcknowledgement requires an explicit
+      // selection. A retained deferral cannot make this wait advance on its own.
+      ...(result.submissionState === 'submission_unknown' && result.promptSubmitted === true &&
+          result.conversationId === null && result.status !== 'recovery_required'
+        ? { status: 'needs_decision', recovery: { state: 'decision_required', decisionRequired: true,
+          userActionRequired: false, reason: 'acknowledgement-selection-required', automaticResubmit: false,
+          nextAction: 'inspect_same_request',
+          message: 'No provider conversation or ACK is bound. Automatic ACK recovery requires exact-message selection. Compare the full original prompt and fresh candidates on this same owned request before acknowledge; preserve UNKNOWN and provider pacing, and never resend.' } } : {}),
       ...(result.submissionState === 'submission_unknown' && result.reason === 'submit-dispatch-unobserved'
         ? { status: 'recovery_required', recovery: { state: 'decision_required', decisionRequired: true,
           userActionRequired: false, reason: 'provider.submit-dispatch-unobserved', automaticResubmit: false,

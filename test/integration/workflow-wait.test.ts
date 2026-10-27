@@ -42,6 +42,58 @@ async function fixture() {
     close: async () => { await core.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
+for (const candidates of [[], [{ messageId: 'unverified-existing-user', evidenceHash: 'fresh-comparison' }]])
+test(`UNKNOWN without a bound conversation returns reconciliation despite retained ACK pacing (${candidates.length} candidates)`, async t => {
+  const f = await fixture();
+  const controller = new AbortController();
+  let waiting: Promise<any> | undefined;
+  try {
+    const sessionId = f.sent.sessionId as string;
+    await f.core.actorScheduler.updateGeneration(sessionId, 1, {
+      submissionState: 'submission_unknown', conversationId: null,
+      submittedUserMessageId: null, submittedUserTurnId: null, providerState: 'unknown',
+      observationTransport: 'unavailable', reason: 'acknowledgement-missing', errorCode: 'session.submission-unknown',
+    });
+    const preserved = f.core.teamDirectory.getSession(sessionId);
+    const deferred = { kind: 'deferred', source: 'backend', reason: 'backend-http-429', httpStatus: 429,
+      observedAt: '2026-10-27T15:32:19.233Z', nextCheckAt: '2026-10-27T15:32:40.233Z',
+      requestRef: f.sent.requestRef, conversationId: null, pageKey: preserved.pageKey };
+    new EventRepository(f.core.database.raw).append({ teamId: f.team.teamId as string, sessionId, generation: 1,
+      eventType: 'generation.acknowledgement-recovery', createdAt: deferred.observedAt, payload: deferred });
+    t.mock.method(SessionUiService.prototype, 'isSubmissionPageLost', () => false);
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+      snapshot: preserved, requested: { prompt: 'Original prompt' },
+      evidence: { nodes: [], submissionCandidates: candidates },
+    })) as any);
+    const sends = f.fake.submitCount, probes = f.fake.acknowledgementRecoveryCount;
+    let returned = false;
+    waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef], waitMs: 1000 },
+      controller.signal).then(value => { returned = true; return value; });
+    for (let i = 0; i < 100 && !returned; i++) await flush();
+    assert.equal(returned, true, 'A missing conversation cannot progress through automatic ACK recovery');
+    const result = (await waiting).structuredContent.results[0];
+    assert.equal(result.requestRef, f.sent.requestRef);
+    assert.equal(result.recovery.reason, 'acknowledgement-selection-required');
+    assert.equal(result.recovery.decisionRequired, true);
+    assert.equal(result.recovery.userActionRequired, false);
+    assert.equal(result.recovery.automaticResubmit, false);
+    assert.equal(result.recovery.nextAction, 'inspect_same_request');
+    assert.equal(result.submissionState, 'submission_unknown');
+    assert.equal(result.terminal, false);
+    assert.equal(result.conversationId, null);
+    assert.deepEqual(result.evidence.submissionCandidates, candidates);
+    assert.deepEqual(result.acknowledgementRecovery, { ...deferred, automaticResubmit: false, currentIdentityMatches: true });
+    assert.deepEqual(f.core.teamDirectory.getSession(sessionId), preserved);
+    assert.equal(f.core.actorScheduler.collectors(sessionId).length, 0);
+    assert.equal(f.fake.submitCount, sends);
+    assert.equal(f.fake.acknowledgementRecoveryCount, probes);
+  } finally {
+    controller.abort();
+    await waiting?.catch(() => {});
+    await f.close();
+  }
+});
+
 test('a continuation with no observed dispatch returns a decision instead of remaining in a paced ACK wait', async t => {
   const f = await fixture();
   try {
