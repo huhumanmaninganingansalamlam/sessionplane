@@ -20,6 +20,7 @@ const always = /^(?:항상 허용|Always allow)(?:\s*⏎)?$/i;
 /** Read mounted work activity, including hidden cards, without revealing or granting it. */
 export async function inspectHostSpanActivity(page: Page, submittedUserMessageId: string,
   retainedAcknowledgements: ReadonlySet<string> = new Set()) {
+  const expectedUrl = page.url();
   const users = (await readChatGptMessages(page, true)).filter(message => message.role === 'user');
   const unavailable = (reason: string) => ({ scope: 'mounted-dom' as const, available: false as const,
     reason, submittedUserMessageId, providerMutation: false as const });
@@ -128,6 +129,42 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
       return { containerRef: ref(container), ref: ref(header), name: name(header),
         expanded: header.getAttribute('aria-expanded'), state: header.getAttribute('data-state') };
     };
+    // Read only this already-expanded, app-associated disclosure's mounted body.
+    // Text is evidence, never a parsed process state or proof that resources are free.
+    const expandedActivity = (element: Element, associated: boolean) => {
+      if (!associated || association(element) === null || element.getAttribute('aria-expanded') !== 'true' || !visible(element)) return null;
+      const ids = (element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean);
+      let bodies: Element[];
+      if (ids.length > 0) {
+        const targets = ids.map(id => [...root.querySelectorAll('[id]')].filter(node => node.id === id));
+        if (new Set(ids).size !== ids.length || targets.some(matches => matches.length !== 1)) return null;
+        bodies = targets.flat();
+      } else {
+        const header = element.closest('[class~="group/activity-header"]');
+        const container = header?.parentElement;
+        if (!container || container.querySelectorAll(':scope > [class~="group/activity-header"] > button[aria-expanded]').length !== 1) return null;
+        bodies = [...container.children].filter(node => node !== header);
+      }
+      if (bodies.length === 0 || bodies.some(body => !inWork(body) || association(body) !== association(element) ||
+          body.contains(element) || body.querySelector('[data-message-author-role="user"], [data-user-message-bubble]'))) return null;
+      const texts: string[] = [];
+      const read = (node: Node): void => {
+        if (node instanceof Element) {
+          // Do not read hidden payloads, drafts/credentials, links or another nested call.
+          if (!visible(node) || node.matches('script, style, input, textarea, [contenteditable], a, button, [role="button"], [class~="group/activity-header"]') ||
+              node.querySelector(':scope > [class~="group/activity-header"] > button[aria-expanded]')) return;
+        }
+        if (node.nodeType === Node.TEXT_NODE) texts.push(node.textContent ?? '');
+        else for (const child of node.childNodes) read(child);
+      };
+      for (const body of bodies) read(body);
+      const text = texts.join('\n').trim()
+        .replace(/https?:\/\/[^\s<>"']+/gi, value => value.replace(/(https?:\/\/)[^/@\s]+@/i, '$1[redacted]@').replace(/[?#].*$/, '?[redacted]'))
+        .replace(/\bBearer\s+[a-z0-9._~+\/-]+=*/gi, 'Bearer [redacted]')
+        .replace(/(["']?(?:access_token|refresh_token|id_token|token|client_secret|secret|api[_-]?key|password|authorization|cookie)["']?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|[^\s,}\n]+)/gi, '$1[redacted]');
+      return text === '' ? null : { text: text.slice(0, 4000), textTruncated: text.length > 4000,
+        controls: [] };
+    };
     const disclosures = [...root.querySelectorAll('button[aria-expanded], summary')].filter(element => inWork(element) &&
       (element.closest('[class~="group/activity-header"], details') !== null ||
         /이전 활동|작업|활동|previous activity|working|worked|activity/i.test(name(element))));
@@ -137,13 +174,14 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
         visible: visible(card), controls: controls(card), ...provenance(card) })),
       disclosures: disclosures.slice(0, 40).map(element => {
         const contained = containedApp(element);
+        const parentApp = appActivity(element);
         const container = contained === null ? null
           : element.closest('[class~="group/activity-header"]')?.parentElement ?? element.parentElement;
         const text = (container?.textContent ?? '').trim();
         return { activityRef: ref(element), name: name(element).slice(0, 500), visible: visible(element),
         expanded: element.getAttribute('aria-expanded'), state: element.getAttribute('data-state'),
-        appActivity: appActivity(element), containedApp: contained,
-        containedActivity: container === null ? null : { text: text.slice(0, 4000), textTruncated: text.length > 4000,
+        appActivity: parentApp, containedApp: contained,
+        containedActivity: container === null ? expandedActivity(element, app.test(name(element)) || parentApp !== null) : { text: text.slice(0, 4000), textTruncated: text.length > 4000,
           controls: controls(container) },
         revealAvailable: element.tagName === 'BUTTON' &&
           ((element.closest('[class~="group/activity-header"]') !== null && (app.test(name(element)) || appActivity(element) !== null)) || contained !== null) &&
@@ -156,6 +194,7 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
   }, { workId: work.messageId, selector: CHATGPT_SELECTORS.messages, retainedIds: [...retainedAcknowledgements, submittedUserMessageId], refProperty: REF_PROPERTY });
   if (surface === null) return unavailable('work-anchor-changed-during-inspection');
   const current = (await readChatGptMessages(page)).filter(message => message.role === 'user');
+  if (page.url() !== expectedUrl) return unavailable('page-changed-during-inspection');
   if (current.length !== users.length || current.some((user, index) =>
       user.messageId !== users[index]?.messageId || user.text !== users[index]?.text || user.rootIndex !== users[index]?.rootIndex))
     return unavailable('user-boundary-changed-during-inspection');

@@ -29,6 +29,9 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    or --view evidence. Summary collection reports connected Core calls, not OS PID
    survival or product execution; managedContinuation.nextReviewAt is a review
    eligibility time, not a promise to submit. Backend nextCheckAt is separate. Retired/replaced conversations remain individually addressable.
+   Evidence hostspanActivity.disclosures[].containedActivity reads an already-expanded,
+   exact owned HostSpan body when mounted; it never executes or grants. Missing or
+   truncated tool output leaves process/resource state UNKNOWN, not available.
    To rediscover older requestRefs, use history:true and continue with nextRequestRef
    as beforeRequestRef until null.
 3. `sessionplane_send` takes teamId, a fresh roleRef, prompt and intended model/

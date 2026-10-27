@@ -147,6 +147,78 @@ test('identical activity labels keep exact mounted element identity across reads
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('passive evidence reads only an already-expanded exact HostSpan response without inferring execution', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-expanded-response-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [new FakeProviderAdapter()],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    // Retained Bible576 evidence: successful outer/group/individual reveal, but
+    // expanded disclosures had containedActivity:null. Fixture bodies are synthetic.
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: `<main>
+      <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+      <section><div class="group/activity-header"><button aria-expanded="true">hostspan-desktop</button></div>
+        <section><div class="group/activity-header"><button aria-expanded="true">monitor 2 calls</button></div>
+          <section id="running"><div class="group/activity-header"><button aria-expanded="true" aria-controls="running-body">monitor</button></div>
+            <pre id="running-body">{"processId":"proc_exact_running","status":"running","stdout":"partial","access_token":"private-token"}
+Authorization: Bearer private-bearer
+https://example.test/result?token=private-query#private-fragment</pre>
+            <textarea>private-draft</textarea><input type="password" value="private-password">
+          </section>
+          <section id="terminal"><div class="group/activity-header"><button aria-expanded="true">monitor</button></div>
+            <pre>{"processId":"proc_exact_done","status":"exited","exitCode":0,"stdout":"done","stderr":""}</pre>
+            <pre hidden>private-hidden</pre><a href="https://example.test/?token=private-link">private-link-label</a>
+          </section>
+          <section id="missing"><div class="group/activity-header"><button aria-expanded="true">monitor source inventory proc_not_evidence</button></div></section>
+          <section id="collapsed"><div class="group/activity-header"><button aria-expanded="false" onclick="throw Error('No reveal')">monitor</button></div>
+            <pre>private-collapsed</pre></section>
+        </section>
+      </section>
+      <section><div class="group/activity-header"><button aria-expanded="true">unrelated</button></div><pre>private-other-app</pre></section>
+      <textarea id="prompt-textarea">Preserved draft</textarea><button onclick="throw Error('No grant')">Always allow</button>
+      </main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    await page.evaluate(() => document.addEventListener('click', () => {
+      (window as any).inspectionClicks = ((window as any).inspectionClicks ?? 0) + 1;
+    }, true));
+    const read = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(read.available);
+    assert.equal(read.providerMutation, false);
+    const bodies = read.disclosures.filter(item => item.containedActivity !== null);
+    assert.equal(bodies.length, 2, 'Parent/group bodies must not pool sibling or nested call output');
+    const running = bodies.find(item => item.containedActivity!.text.includes('proc_exact_running'))!;
+    const terminal = bodies.find(item => item.containedActivity!.text.includes('proc_exact_done'))!;
+    assert.equal(running.owningUserMessageId, 'current-ack');
+    assert.match(running.containedActivity!.text, /"status":"running"/);
+    assert.doesNotMatch(running.containedActivity!.text, /proc_exact_done/);
+    assert.match(terminal.containedActivity!.text, /"exitCode":0/);
+    assert.match(terminal.containedActivity!.text, /"stderr":""/);
+    assert.equal(read.disclosures.find(item => item.name.includes('source inventory'))!.containedActivity, null,
+      'A tool label without returned body is UNKNOWN, not a process receipt');
+    assert.equal(read.disclosures.find(item => item.expanded === 'false')!.containedActivity, null);
+    assert.doesNotMatch(JSON.stringify(bodies), /private-|proc_not_evidence/);
+    assert.equal(await page.locator('#prompt-textarea').inputValue(), 'Preserved draft');
+    assert.equal(await page.locator('#collapsed button').getAttribute('aria-expanded'), 'false');
+    assert.equal(await page.evaluate(() => (window as any).inspectionClicks ?? 0), 0);
+    await page.locator('#terminal pre').first().evaluate(element => element.textContent = 'x'.repeat(5000));
+    const bounded = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(bounded.available);
+    const long = bounded.disclosures.find(item => item.activityRef === terminal.activityRef)!.containedActivity!;
+    assert.equal(long.text.length, 4000);
+    assert.equal(long.textTruncated, true, 'Incomplete output is explicit, never a completion inference');
+    await page.locator('#running button').evaluate(element => element.setAttribute('aria-controls', 'running-body missing-body'));
+    const absent = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(absent.available);
+    assert.equal(absent.disclosures.find(item => item.activityRef === running.activityRef)!.containedActivity, null);
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="later-user">Later work</div>'));
+    const later = await inspectHostSpanActivity(page, 'current-ack');
+    assert.equal(later.available, false);
+    assert.equal('disclosures' in later, false, 'A stale ACK cannot expose current tool responses');
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('retained activity is read only under its stored ACK, never reassigned to the current request', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-retained-activity-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
@@ -318,6 +390,14 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
     assert.equal(reveal.isError, false, JSON.stringify(reveal));
     assert.equal((reveal.structuredContent.permission as any).outcome, 'activity-revealed');
     assert.equal((reveal.structuredContent.permission as any).grantAttempted, false);
+    const expanded = await invokeMcpTool({ name: 'sessionplane_team_get', arguments: {
+      teamId: team.teamId, requestRef: row.outbox_id, view: 'evidence', maxNodes: 300,
+    }, socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    assert.equal(expanded.isError, false, JSON.stringify(expanded));
+    const body = (expanded.structuredContent as any).request.evidence.submissionVerification.hostspanActivity.disclosures
+      .find((item: any) => item.name === 'hostspan-desktop exact activity').containedActivity;
+    assert.match(body.text, /hostspan-desktop File Patch/, 'Public evidence reads the revealed exact body despite preparation snapshots excluding it');
+    assert.doesNotMatch(body.text, /Fixture question|Keep my draft|Always allow/);
     await page.locator('#selected-activity').evaluate(element => element.remove());
     t.mock.method(page, 'bringToFront', async () => { throw Error('Must not focus'); });
     const prepare = t.mock.method(core.browserOwner!, 'preparePageInteraction');
