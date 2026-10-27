@@ -113,6 +113,60 @@ test('previous activity reveals only its structurally contained same-ACK HostSpa
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('collapsed activity diagnostics preserve parent identity without reading payloads or enabling reveal', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-activity-structure-'));
+  const core = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    providerAdapters: [new FakeProviderAdapter()], logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    // The retained Webturn packet proves six hidden disclosures, but not their
+    // ancestry. This synthetic topology checks diagnostics, not its live shape.
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<main>
+      <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+      <section class="activity-shell"><button aria-expanded="false" aria-controls="hidden-work" onclick="throw Error('private-handler')">이전 활동</button>
+        <div hidden id="hidden-work">${Array.from({ length: 6 }, (_, i) => `<section><div class="group/activity-header"><button aria-expanded="false">hostspan-desktop 통합 사용함</button></div>
+          <pre>private-tool-body-${i}</pre><input value="private-credential"><textarea>private-draft</textarea></section>`).join('')}</div>
+      </section>
+      <section><div class="group/activity-header"><button aria-expanded="false">hostspan-desktop separate activity</button></div></section>
+      <textarea id="prompt-textarea">Preserved draft</textarea></main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    const read = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(read.available);
+    const opener = read.disclosures.find(item => item.name === '이전 활동')!;
+    const headers = read.disclosures.filter(item => item.name === 'hostspan-desktop 통합 사용함');
+    assert.equal(opener.activityEvidenceHash, null);
+    assert.equal(opener.revealAvailable, false, 'Diagnostics cannot authorize a multi-header reveal');
+    assert.equal(opener.structure!.tag, 'button');
+    const container = opener.structure!.ancestors[0]!;
+    assert.deepEqual(container.classes, ['activity-shell']);
+    assert.equal(opener.structure!.parentRef, container.ref);
+    const controlled = opener.structure!.controlled[0]!;
+    assert.equal(controlled.matches, 1);
+    assert.equal(controlled.target!.parentRef, container.ref);
+    assert.equal(headers.length, 6);
+    for (const header of headers) {
+      assert.equal(header.structure!.visible, false);
+      assert.equal(header.structure!.owningUserMessageId, 'current-ack');
+      assert.ok(header.structure!.ancestors.some(node => node.ref === controlled.target!.ref));
+      assert.equal(header.structure!.ancestors[0]!.classes[0], 'group/activity-header');
+    }
+    const unrelated = read.disclosures.find(item => item.name === 'hostspan-desktop separate activity')!;
+    assert.ok(!unrelated.structure!.ancestors.some(node => node.ref === container.ref));
+    assert.doesNotMatch(JSON.stringify(read.disclosures.map(item => item.structure)), /private-|Preserved draft/);
+    assert.equal(await page.locator('#hidden-work').isVisible(), false);
+    assert.equal(await page.locator('#prompt-textarea').inputValue(), 'Preserved draft');
+    await page.locator('#hidden-work').evaluate(node => node.insertAdjacentHTML('afterend', '<div id="hidden-work"></div>'));
+    const ambiguous = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(ambiguous.available);
+    const duplicate = ambiguous.disclosures.find(item => item.name === '이전 활동')!.structure!.controlled[0]!;
+    assert.equal(duplicate.matches, 2);
+    assert.equal(duplicate.target, null, 'An ambiguous controls ID cannot acquire structural identity');
+    await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="later-user">Later work</div>'));
+    assert.equal((await inspectHostSpanActivity(page, 'current-ack')).available, false);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('identical activity labels keep exact mounted element identity across reads and reordering', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-identical-activity-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
@@ -394,8 +448,11 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
       teamId: team.teamId, requestRef: row.outbox_id, view: 'evidence', maxNodes: 300,
     }, socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
     assert.equal(expanded.isError, false, JSON.stringify(expanded));
-    const body = (expanded.structuredContent as any).request.evidence.submissionVerification.hostspanActivity.disclosures
-      .find((item: any) => item.name === 'hostspan-desktop exact activity').containedActivity;
+    const disclosure = (expanded.structuredContent as any).request.evidence.submissionVerification.hostspanActivity.disclosures
+      .find((item: any) => item.name === 'hostspan-desktop exact activity');
+    assert.equal(disclosure.structure.tag, 'button', 'Normal public evidence retains structural diagnostics');
+    assert.equal(disclosure.structure.parentRef, disclosure.structure.ancestors[0].ref);
+    const body = disclosure.containedActivity;
     assert.match(body.text, /hostspan-desktop File Patch/, 'Public evidence reads the revealed exact body despite preparation snapshots excluding it');
     assert.doesNotMatch(body.text, /Fixture question|Keep my draft|Always allow/);
     await page.locator('#selected-activity').evaluate(element => element.remove());
