@@ -135,14 +135,22 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
       cards: [...cards].slice(0, 20).map(card => ({ role: card.getAttribute('role'),
         text: (card.textContent ?? '').trim().slice(0, 4000), textTruncated: (card.textContent ?? '').trim().length > 4000,
         visible: visible(card), controls: controls(card), ...provenance(card) })),
-      disclosures: disclosures.slice(0, 40).map(element => ({ activityRef: ref(element), name: name(element).slice(0, 500), visible: visible(element),
+      disclosures: disclosures.slice(0, 40).map(element => {
+        const contained = containedApp(element);
+        const container = contained === null ? null
+          : element.closest('[class~="group/activity-header"]')?.parentElement ?? element.parentElement;
+        const text = (container?.textContent ?? '').trim();
+        return { activityRef: ref(element), name: name(element).slice(0, 500), visible: visible(element),
         expanded: element.getAttribute('aria-expanded'), state: element.getAttribute('data-state'),
-        appActivity: appActivity(element), containedApp: containedApp(element),
+        appActivity: appActivity(element), containedApp: contained,
+        containedActivity: container === null ? null : { text: text.slice(0, 4000), textTruncated: text.length > 4000,
+          controls: controls(container) },
         revealAvailable: element.tagName === 'BUTTON' &&
-          ((element.closest('[class~="group/activity-header"]') !== null && (app.test(name(element)) || appActivity(element) !== null)) || containedApp(element) !== null) &&
+          ((element.closest('[class~="group/activity-header"]') !== null && (app.test(name(element)) || appActivity(element) !== null)) || contained !== null) &&
           visible(element) && !element.hasAttribute('disabled') && element.getAttribute('aria-disabled') !== 'true' &&
           (element.getAttribute('aria-expanded') === 'false' || element.getAttribute('data-state') === 'closed'),
-        controls: (element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean), ...provenance(element) })),
+        controls: (element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean), ...provenance(element) };
+      }),
       truncated: cards.size > 20 || disclosures.length > 40,
     };
   }, { workId: work.messageId, selector: CHATGPT_SELECTORS.messages, retainedIds: [...retainedAcknowledgements, submittedUserMessageId], refProperty: REF_PROPERTY });

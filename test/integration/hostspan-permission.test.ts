@@ -79,8 +79,15 @@ test('previous activity reveals only its structurally contained same-ACK HostSpa
     assert.ok(read.available);
     const previous = read.disclosures.filter(item => item.name === '이전 활동');
     assert.equal(previous[0]!.revealAvailable, false, 'A nearby app cannot qualify an unrelated disclosure');
+    assert.equal(previous[0]!.containedActivity, null);
     assert.ok(previous[1]!.activityEvidenceHash);
     assert.equal(previous[1]!.containedApp?.name, 'hostspan-desktop 및 Personal Context 통합 사용함');
+    assert.match(previous[1]!.containedActivity!.text, /hostspan-desktop reconnect/);
+    const hiddenLink = previous[1]!.containedActivity!.controls.find(control => control.role === 'link')!;
+    assert.equal(hiddenLink.visible, false, 'Read hidden controls without revealing or resuming a held turn');
+    assert.equal(hiddenLink.href, 'https://connector.example/authorize');
+    assert.doesNotMatch(JSON.stringify(previous[1]!.containedActivity), /private-value/);
+    assert.equal(await page.locator('#hidden-work').isVisible(), false);
     await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-other', previous[1]!.activityEvidenceHash!), /different app/);
     await page.locator('#hidden-work [class~="group/activity-header"] button').evaluate(element => element.replaceWith(element.cloneNode(true)));
     await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', previous[1]!.activityEvidenceHash!), /fresh HostSpan activityEvidenceHash/);
