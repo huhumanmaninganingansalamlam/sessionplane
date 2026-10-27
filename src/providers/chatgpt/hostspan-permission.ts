@@ -72,9 +72,20 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
       Object.defineProperty(element, input.refProperty, { value: token, configurable: true });
       return token;
     };
-    const controls = (element: Element) => [...element.querySelectorAll('button, [role="button"], summary')].slice(0, 20)
-      .map(button => ({ name: name(button).slice(0, 500), visible: visible(button),
-        disabled: button.hasAttribute('disabled') || button.getAttribute('aria-disabled') === 'true' }));
+    const controls = (element: Element) => [...element.querySelectorAll('button, [role="button"], summary, a[href], [role="link"]')].slice(0, 20)
+      .map(button => {
+        const href = button.getAttribute('href');
+        let url: URL | null = null;
+        try {
+          const parsed = href === null ? null : new URL(href, location.href);
+          if (parsed?.protocol === 'https:' || parsed?.protocol === 'http:') url = parsed;
+        } catch { /* Malformed links remain diagnostic controls without a URL. */ }
+        return { name: name(button).slice(0, 500), visible: visible(button),
+          disabled: button.hasAttribute('disabled') || button.getAttribute('aria-disabled') === 'true',
+          role: button.getAttribute('role') ?? (button.tagName === 'A' ? 'link' : 'button'),
+          href: url === null ? null : url.origin + url.pathname,
+          urlParameterNames: url === null ? [] : [...url.searchParams.keys()].sort() };
+      });
     const cards = new Set<Element>();
     for (const element of root.querySelectorAll('[role="alert"], [role="alertdialog"], [role="dialog"]'))
       if (inWork(element) && app.test(element.textContent ?? '')) cards.add(element);
@@ -103,6 +114,20 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
       }
       return null;
     };
+    // Bind a generic previous-activity opener to its nearest single-app container.
+    const containedApp = (element: Element) => {
+      if (!/^(이전 활동|Previous activity)$/i.test(name(element))) return null;
+      const container = element.closest('[class~="group/activity-header"]')?.parentElement ?? element.parentElement;
+      if (!container || container.matches('body, main, [role="main"]') ||
+          container.querySelector('[data-message-author-role="user"], [data-user-message-bubble]')) return null;
+      const openers = [...container.querySelectorAll('button[aria-expanded]')].filter(button => /^(이전 활동|Previous activity)$/i.test(name(button)));
+      const headers = [...container.querySelectorAll('button[aria-expanded]')].filter(header => header !== element && app.test(name(header)));
+      if (openers.length !== 1 || openers[0] !== element || headers.length !== 1) return null;
+      const header = headers[0]!;
+      if (association(header) === null || association(header) !== association(element)) return null;
+      return { containerRef: ref(container), ref: ref(header), name: name(header),
+        expanded: header.getAttribute('aria-expanded'), state: header.getAttribute('data-state') };
+    };
     const disclosures = [...root.querySelectorAll('button[aria-expanded], summary')].filter(element => inWork(element) &&
       (element.closest('[class~="group/activity-header"], details') !== null ||
         /이전 활동|작업|활동|previous activity|working|worked|activity/i.test(name(element))));
@@ -112,9 +137,10 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
         visible: visible(card), controls: controls(card), ...provenance(card) })),
       disclosures: disclosures.slice(0, 40).map(element => ({ activityRef: ref(element), name: name(element).slice(0, 500), visible: visible(element),
         expanded: element.getAttribute('aria-expanded'), state: element.getAttribute('data-state'),
-        appActivity: appActivity(element),
-        revealAvailable: element.tagName === 'BUTTON' && element.closest('[class~="group/activity-header"]') !== null &&
-          (app.test(name(element)) || appActivity(element) !== null) && visible(element) && !element.hasAttribute('disabled') && element.getAttribute('aria-disabled') !== 'true' &&
+        appActivity: appActivity(element), containedApp: containedApp(element),
+        revealAvailable: element.tagName === 'BUTTON' &&
+          ((element.closest('[class~="group/activity-header"]') !== null && (app.test(name(element)) || appActivity(element) !== null)) || containedApp(element) !== null) &&
+          visible(element) && !element.hasAttribute('disabled') && element.getAttribute('aria-disabled') !== 'true' &&
           (element.getAttribute('aria-expanded') === 'false' || element.getAttribute('data-state') === 'closed'),
         controls: (element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean), ...provenance(element) })),
       truncated: cards.size > 20 || disclosures.length > 40,
@@ -130,7 +156,7 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
     disclosures: surface.disclosures.map(disclosure => ({ ...disclosure,
       activityEvidenceHash: disclosure.revealAvailable && disclosure.owningUserMessageId !== null
         ? createHash('sha256').update(JSON.stringify(['hostspan-activity-inspection', page.url(), submittedUserMessageId,
-          disclosure.owningUserMessageId, disclosure.activityRef, disclosure.name, disclosure.expanded, disclosure.state, disclosure.controls, disclosure.appActivity])).digest('hex') : null })) };
+          disclosure.owningUserMessageId, disclosure.activityRef, disclosure.name, disclosure.expanded, disclosure.state, disclosure.controls, disclosure.appActivity, disclosure.containedApp])).digest('hex') : null })) };
 }
 
 /** An explicit inspection can reveal one freshly selected owned activity, never grant a tool. */
@@ -142,7 +168,7 @@ export async function revealHostSpanActivity(page: Page, submittedUserMessageId:
   const matches = observed.disclosures.filter(disclosure => disclosure.activityEvidenceHash === evidenceHash);
   if (matches.length !== 1) throw unavailable('Inspect and select one fresh HostSpan activityEvidenceHash');
   const activity = matches[0]!;
-  if (!new RegExp(`(^|[^\\w-])${appName}($|[^\\w-])`, 'i').test(activity.appActivity?.name ?? activity.name)) throw unavailable('The selected activity belongs to a different app');
+  if (!new RegExp(`(^|[^\\w-])${appName}($|[^\\w-])`, 'i').test(activity.containedApp?.name ?? activity.appActivity?.name ?? activity.name)) throw unavailable('The selected activity belongs to a different app');
   const buttons = page.getByRole('button', { name: activity.name, exact: true });
   const selected = await buttons.evaluateAll((elements, expected) => elements.flatMap((element, index) =>
     Reflect.get(element, expected.property) === expected.ref ? [index] : []),
@@ -179,11 +205,30 @@ export async function revealHostSpanActivity(page: Page, submittedUserMessageId:
         break;
       }
     }
+    let containedApp = null;
+    if (expected.activity.containedApp !== null && /^(이전 활동|Previous activity)$/i.test(name(element))) {
+      const container = element.closest('[class~="group/activity-header"]')?.parentElement ?? element.parentElement;
+      if (container && !container.matches('body, main, [role="main"]') &&
+          !container.querySelector('[data-message-author-role="user"], [data-user-message-bubble]')) {
+        const openers = [...container.querySelectorAll('button[aria-expanded]')].filter(button => /^(이전 활동|Previous activity)$/i.test(name(button)));
+        const headers = [...container.querySelectorAll('button[aria-expanded]')].filter(header =>
+          header !== element && /(^|[^\w-])hostspan(?:-[a-z0-9_-]+)?($|[^\w-])/i.test(name(header)));
+        const header = headers[0];
+        const headerOwner = header && users.filter(node => {
+          const position = node.compareDocumentPosition(header);
+          return !(position & Node.DOCUMENT_POSITION_DISCONNECTED) && !!(position & Node.DOCUMENT_POSITION_FOLLOWING);
+        }).at(-1);
+        if (openers.length === 1 && openers[0] === element && headers.length === 1 && header && headerOwner && owner && id(headerOwner) === id(owner))
+          containedApp = { containerRef: Reflect.get(container, expected.refProperty), ref: Reflect.get(header, expected.refProperty),
+            name: name(header), expanded: header.getAttribute('aria-expanded'), state: header.getAttribute('data-state') };
+      }
+    }
     if (!(element instanceof HTMLButtonElement) || location.href !== expected.url ||
         Reflect.get(element, expected.refProperty) !== expected.activity.activityRef ||
-        !element.closest('[class~="group/activity-header"]') || element.closest('nav, aside, [role="navigation"]') ||
+        (!element.closest('[class~="group/activity-header"]') && containedApp === null) || element.closest('nav, aside, [role="navigation"]') ||
         !element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || element.disabled || element.getAttribute('aria-disabled') === 'true' ||
         JSON.stringify(appActivity) !== JSON.stringify(expected.activity.appActivity) ||
+        JSON.stringify(containedApp) !== JSON.stringify(expected.activity.containedApp) ||
         name(element) !== expected.activity.name || element.getAttribute('aria-expanded') !== expected.activity.expanded ||
         element.getAttribute('data-state') !== expected.activity.state ||
         JSON.stringify((element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean)) !== JSON.stringify(expected.activity.controls) ||

@@ -60,6 +60,50 @@ test('a buttonless current provider alert blocks continuation without fabricatin
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('previous activity reveals only its structurally contained same-ACK HostSpan surface and reports links without secrets', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-previous-activity-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [new FakeProviderAdapter()],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<main>
+      <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+      <section><button aria-expanded="false" onclick="throw Error('Unrelated disclosure')">이전 활동</button></section>
+      <section id="owned"><button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#hidden-work').hidden=false">이전 활동</button>
+      <div hidden id="hidden-work"><div class="group/activity-header"><button aria-expanded="false">hostspan-desktop 및 Personal Context 통합 사용함</button></div>
+      <div role="alert">hostspan-desktop reconnect<a href="https://connector.example/authorize?client_id=existing&state=private-value">Reconnect existing link</a><a href="http://[invalid">Malformed</a><a href="javascript:alert('private-value')">Unsafe scheme</a><button onclick="throw Error('No grant')">Always allow</button></div></div></section>
+      <textarea>Preserved draft</textarea></main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    const read = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(read.available);
+    const previous = read.disclosures.filter(item => item.name === '이전 활동');
+    assert.equal(previous[0]!.revealAvailable, false, 'A nearby app cannot qualify an unrelated disclosure');
+    assert.ok(previous[1]!.activityEvidenceHash);
+    assert.equal(previous[1]!.containedApp?.name, 'hostspan-desktop 및 Personal Context 통합 사용함');
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-other', previous[1]!.activityEvidenceHash!), /different app/);
+    await page.locator('#hidden-work [class~="group/activity-header"] button').evaluate(element => element.replaceWith(element.cloneNode(true)));
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', previous[1]!.activityEvidenceHash!), /fresh HostSpan activityEvidenceHash/);
+    const fresh = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(fresh.available);
+    const selected = fresh.disclosures.find(item => item.containedApp !== null)!;
+    const result = await revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', selected.activityEvidenceHash!);
+    assert.equal(result.grantAttempted, false);
+    assert.equal(result.activityUserMessageId, 'current-ack');
+    assert.ok(result.activity.available);
+    const link = result.activity.cards.flatMap(card => card.controls).find(control => control.role === 'link')!;
+    assert.equal(link.visible, true);
+    assert.equal(link.href, 'https://connector.example/authorize');
+    assert.deepEqual(link.urlParameterNames, ['client_id', 'state']);
+    for (const name of ['Malformed', 'Unsafe scheme'])
+      assert.equal(result.activity.cards.flatMap(card => card.controls).find(control => control.name === name)!.href, null);
+    assert.doesNotMatch(JSON.stringify(result.activity), /private-value/);
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
+    assert.equal(await page.getByRole('button', { name: 'Always allow' }).count(), 1);
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', selected.activityEvidenceHash!), /fresh HostSpan activityEvidenceHash/);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('identical activity labels keep exact mounted element identity across reads and reordering', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-identical-activity-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
