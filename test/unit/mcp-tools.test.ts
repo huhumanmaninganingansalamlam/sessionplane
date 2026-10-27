@@ -9,6 +9,18 @@ import { startCore } from '../../src/main.ts';
 import { invokeMcpTool, MCP_TOOLS } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
+test('MCP permission action explains nonexecuting inspection without marking the mixed decide tool read-only', () => {
+  const decide = MCP_TOOLS.find(tool => tool.name === 'sessionplane_decide')!;
+  const variants = decide.inputSchema.anyOf as Array<{ properties: Record<string, any> }>;
+  const permission = variants.find(variant => variant.properties.decision.const === 'hostspan_permission')!;
+  assert.deepEqual(permission.properties.action.enum, ['inspect', 'allow']);
+  assert.match(permission.properties.action.description, /inspect reads.*tool arguments.*opening\/closing details/);
+  assert.match(permission.properties.action.description, /never grants permission or executes/);
+  assert.match(permission.properties.action.description, /allow grants the separately authorized tool.*fresh matching.*may resume execution/);
+  assert.match(decide.description, /inspect reads pending arguments before approval/);
+  assert.equal(decide.annotations.readOnlyHint, false, 'Other decide actions grant, submit or reload; no blanket read-only claim');
+});
+
 test('MCP distinguishes an unreachable core from lost responses without claiming submit failure', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-mcp-transport-'));
   try {

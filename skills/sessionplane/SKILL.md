@@ -32,6 +32,11 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    Evidence hostspanActivity.disclosures[].containedActivity reads an already-expanded,
    exact owned HostSpan body when mounted; it never executes or grants. Missing or
    truncated tool output leaves process/resource state UNKNOWN, not available.
+   For pending arguments, decide hostspan_permission action:inspect may reveal/close
+   details but never grants permission or executes the tool. Unknown arguments are
+   inspected before approval; action:allow is a separate authorized grant using
+   fresh matching evidence and may resume execution. An external review refusal
+   remains blocked; do not retry or route around it from this description alone.
    To rediscover older requestRefs, use history:true and continue with nextRequestRef
    as beforeRequestRef until null.
 3. `sessionplane_send` takes teamId, a fresh roleRef, prompt and intended model/
