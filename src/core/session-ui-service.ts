@@ -211,6 +211,11 @@ export class SessionUiService {
               ...controls,
               submissionControls: { composerCount,
                 enabledSubmitCount: controls.nodes.filter(node => node.submitControl && !node.disabled).length,
+                draft: composerCount !== 1 ? null : await composers.first().evaluate(element => {
+                  const text = element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement
+                    ? element.value : (element as HTMLElement).innerText;
+                  return { text: text.slice(0, 200_000), textLength: text.length, truncated: text.length > 200_000 };
+                }),
                 continuationDraftPresent: composerCount === 1 && await composerHasExactValue(composers.first(), '계속') },
               providerAlerts: await observeChatGptAlerts(this.#requirePage(session, input.readOnly), session),
               ...(session.submissionState !== 'submitted' ? {} : {
@@ -231,6 +236,28 @@ export class SessionUiService {
                     // Passive evidence is not a completed answer or permission to submit.
                     responseCandidate: dom.candidate,
                     turnBoundary: dom.turnBoundary,
+                    // Preserve later human work without adopting it as this request's answer.
+                    conversationContext: await (async () => {
+                      const messages = await readChatGptMessages(this.#requirePage(session, input.readOnly));
+                      const anchors = messages.filter(message => message.role === 'user' &&
+                        ((session.submittedUserMessageId !== null && message.messageId === session.submittedUserMessageId) ||
+                          (session.submittedUserTurnId !== null && message.turnId === session.submittedUserTurnId)));
+                      const anchor = anchors.length === 1 ? anchors[0] : undefined;
+                      // An owned conversation can virtualize its old ACK. Reading its
+                      // mounted text does not verify that ACK or authorize replacement.
+                      const following = anchors.length > 1 ? [] : anchor === undefined ? messages
+                        : messages.slice(messages.indexOf(anchor)).filter(message => message.rootIndex === anchor.rootIndex);
+                      let remaining = 200_000;
+                      return { scope: anchor === undefined ? 'mounted-owned-conversation' as const : 'mounted-dom-from-original-ack' as const,
+                        originalAnchorPresent: anchor !== undefined, originalAnchorAmbiguous: anchors.length > 1,
+                        observedMessageCount: following.length,
+                        truncated: following.length > 100 || following.reduce((size, message) => size + message.text.length, 0) > remaining,
+                        messages: following.slice(0, 100).map(message => {
+                          const text = message.text.slice(0, remaining);
+                          remaining -= text.length;
+                          return { ...message, text };
+                        }) };
+                    })(),
                     messageDiagnostics: dom.messageDiagnostics,
                     scope: 'mounted-dom' as const,
                   };
