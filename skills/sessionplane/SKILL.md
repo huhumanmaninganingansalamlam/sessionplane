@@ -35,7 +35,9 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    For pending arguments, decide hostspan_permission action:inspect may reveal/close
    details but never grants permission or executes the tool. Unknown arguments are
    inspected before approval; action:allow is a separate authorized grant using
-   fresh matching evidence and may resume execution. An external review refusal
+   fresh matching evidence and may resume execution. action:decline rejects only the exact
+   pending tool with its observed toolName and fresh inspection evidenceHash; it never
+   grants/executes that tool, sends a prompt or stops a process. An external review refusal
    remains blocked; do not retry or route around it from this description alone.
    To rediscover older requestRefs, use history:true and continue with nextRequestRef
    as beforeRequestRef until null.

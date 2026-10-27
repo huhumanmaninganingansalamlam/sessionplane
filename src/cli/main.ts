@@ -1395,7 +1395,7 @@ Exact request flow (same request; no automatic resend):
     Preserves original uncertainty; never automatically retries or bypasses provider errors/drafts/activity.
   Confirm an observed matching submission without resending:
     request acknowledge TEAM_ID REQUEST_REF --message-id ID --evidence-hash HASH
-  HostSpan permission inspection or authorized grant: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow --app-name NAME [--tool-name NAME] [--allow-mode once|always] [--evidence-hash HASH] [--followup-message-id SOURCE_ID]
+  HostSpan permission inspection, authorized grant or decline: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow|decline --app-name NAME [--tool-name NAME] [--allow-mode once|always] [--evidence-hash HASH] [--followup-message-id SOURCE_ID]
   User-controlled review: request human_review TEAM_ID CURRENT_REQUEST_REF --action pause|resume
   Cancel: request stop TEAM_ID REQUEST_REF
   Delete a collected conversation: request delete TEAM_ID REQUEST_REF --outputs-retrieved
