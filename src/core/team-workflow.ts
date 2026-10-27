@@ -277,7 +277,7 @@ export class TeamWorkflow {
         });
       });
     }
-    if (input.decision !== 'focus' && this.#userReview(request)) throw new SessionPlaneDomainError('provider.preparation-required',
+    if (input.decision !== 'focus' && input.decision !== 'retire_observation' && this.#userReview(request)) throw new SessionPlaneDomainError('provider.preparation-required',
       'Observation and controls are paused for user review; resume only after the user reports completion');
     if (input.decision === 'retire_observation') {
       return await this.services.scheduler.actorFor(request.sessionId).enqueue(() => {

@@ -120,6 +120,11 @@ test('displaced routing retirement permits explicit disposal but preserves unres
     const input = { teamId: team.teamId, requestRef: requests[1]!.outbox_id, requestId: 'dispose', outputsRetrieved: true,
       discardRetiredObservation: { conversationId: first.conversationId, evidenceRef: 'User explicitly discards obsolete conversation; unresolved original retained' } };
     assert.equal((await workflow('session_delete', input)).structuredContent.errorCode, 'session.cleanup-not-ready');
+    assert.equal((await workflow('decide', { teamId: team.teamId, requestRef: requests[1]!.outbox_id,
+      requestId: 'hold-obsolete', decision: 'human_review', action: 'pause' })).isError, false);
+    assert.equal((await workflow('decide', { teamId: team.teamId, requestRef: requests[1]!.outbox_id,
+      requestId: 'retire-still-current', decision: 'retire_observation', workComplete: true,
+      evidenceRef: 'Cannot discard current role work' })).structuredContent.errorCode, 'session.recovery-unavailable');
     const replacement = (await workflow('session_replace', { teamId: team.teamId,
       roleRef: `${session.sessionId}:2`, requestId: 'replace-role' })).structuredContent;
     const successor = replacement.replacement;
@@ -134,6 +139,8 @@ test('displaced routing retirement permits explicit disposal but preserves unres
     assert.equal((await workflow('decide', { teamId: team.teamId, requestRef: requests[1]!.outbox_id,
       requestId: 'retire-observation', decision: 'retire_observation', workComplete: true,
       evidenceRef: 'Obsolete work ended; preserve missing original result' })).isError, false);
+    assert.equal((await workflow('team_get', { teamId: team.teamId, requestRef: requests[1]!.outbox_id }))
+      .structuredContent.request.observationHeld, true);
     const { discardRetiredObservation: _disposal, ...ordinary } = input;
     assert.equal((await workflow('session_delete', ordinary)).structuredContent.errorCode, 'session.cleanup-not-ready');
     assert.equal((await workflow('session_delete', { ...input, requestRef: requests[0]!.outbox_id })).structuredContent.errorCode,
