@@ -165,6 +165,34 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
       return text === '' ? null : { text: text.slice(0, 4000), textTruncated: text.length > 4000,
         controls: [] };
     };
+    // Structural diagnostics for a collapsed group never read its payload or
+    // confer reveal authority. Keep parent identity so equal labels cannot
+    // substitute a nearby app for a structurally contained one.
+    const structure = (element: Element) => {
+      const owner = association(element);
+      if (owner === null) return null;
+      const describe = (node: Element) => ({ ref: ref(node), tag: node.tagName.toLowerCase(),
+        parentRef: node.parentElement === null ? null : ref(node.parentElement),
+        classes: [...node.classList].slice(0, 12).map(value => value.slice(0, 120)),
+        visible: visible(node), owningUserMessageId: association(node) });
+      const ancestors = [];
+      let node = element.parentElement;
+      for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
+        if (node.matches('body, main, nav, aside, [role="main"], [role="navigation"]') ||
+            node.querySelector('[data-message-author-role="user"], [data-user-message-bubble]') ||
+            association(node) !== owner) break;
+        ancestors.push(describe(node));
+      }
+      const controls = (element.getAttribute('aria-controls') ?? '').split(/\s+/).filter(Boolean).slice(0, 20);
+      const controlled = controls.map(id => {
+        const targets = [...root.querySelectorAll('[id]')].filter(node => node.id === id);
+        const target = targets.length === 1 ? targets[0] : undefined;
+        return { id, matches: targets.length, target: target && inWork(target) && association(target) === owner &&
+          !target.matches('body, main, nav, aside, [role="main"], [role="navigation"], [data-message-author-role="user"], [data-user-message-bubble]') &&
+          !target.querySelector('[data-message-author-role="user"], [data-user-message-bubble]') ? describe(target) : null };
+      });
+      return { ...describe(element), ancestors, ancestryTruncated: node !== null && ancestors.length === 6, controlled };
+    };
     const disclosures = [...root.querySelectorAll('button[aria-expanded], summary')].filter(element => inWork(element) &&
       (element.closest('[class~="group/activity-header"], details') !== null ||
         /이전 활동|작업|활동|previous activity|working|worked|activity/i.test(name(element))));
@@ -180,7 +208,7 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
         const text = (container?.textContent ?? '').trim();
         return { activityRef: ref(element), name: name(element).slice(0, 500), visible: visible(element),
         expanded: element.getAttribute('aria-expanded'), state: element.getAttribute('data-state'),
-        appActivity: parentApp, containedApp: contained,
+        appActivity: parentApp, containedApp: contained, structure: structure(element),
         containedActivity: container === null ? expandedActivity(element, app.test(name(element)) || parentApp !== null) : { text: text.slice(0, 4000), textTruncated: text.length > 4000,
           controls: controls(container) },
         revealAvailable: element.tagName === 'BUTTON' &&
