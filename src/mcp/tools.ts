@@ -90,6 +90,7 @@ export async function invokeMcpTool(options: {
       remote: options.remote,
       method: definition.rpcMethod,
       collectContinuation: definition.rpcMethod === 'workflow.decide' && (options.arguments as { decision?: string })?.decision === 'continue',
+      collectAcknowledgement: definition.rpcMethod === 'workflow.decide' && (options.arguments as { decision?: string })?.decision === 'acknowledge',
       params: keepWaiting ? { ...wait.data, untilResult: true } : options.arguments,
       timeoutMs: wait?.success ? Math.max(options.timeoutMs, (keepWaiting ? MAX_WORKFLOW_WAIT_MS : wait.data.waitMs) + 5_000) : options.timeoutMs,
       maxLineBytes: options.maxLineBytes,

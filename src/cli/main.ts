@@ -1130,6 +1130,7 @@ async function printRpc(
     timeoutMs: Math.max(config.rpcRequestTimeoutMs, minimumTimeoutMs),
     maxLineBytes: config.rpcMaxLineBytes,
     collectContinuation,
+    collectAcknowledgement: method === 'workflow.decide' && params.decision === 'acknowledge',
   });
   const view = !parsed.json && result !== null && typeof result === 'object' && !Array.isArray(result)
     ? { ...('teamId' in params ? { teamId: params.teamId } : {}), ...result } : result;

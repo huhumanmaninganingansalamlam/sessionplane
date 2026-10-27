@@ -1,4 +1,4 @@
-import { workflowWaitOutcome } from '../domain/workflow-wait.ts';
+import { MAX_WORKFLOW_WAIT_MS, workflowWaitOutcome } from '../domain/workflow-wait.ts';
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import type { Duplex } from 'node:stream';
@@ -30,6 +30,7 @@ export interface RpcCallOptions {
   readonly maxLineBytes?: number;
   readonly signal?: AbortSignal;
   readonly collectContinuation?: boolean;
+  readonly collectAcknowledgement?: boolean;
 }
 
 export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> {
@@ -43,7 +44,22 @@ export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> 
       if (!Array.isArray(result.results) || result.results.some(workflowWaitOutcome) || options.signal?.aborted) return result as Result;
     }
   }
-  const result = await callRpcOnce<Result>(options);
+  let result: Result;
+  for (;;) {
+    try { result = await callRpcOnce<Result>(options); break; }
+    catch (error) {
+      const data = error instanceof RpcClientError ? error.data as { errorCode?: string;
+        details?: { kind?: string; requestRef?: string; automaticResubmit?: boolean; nextCheckAt?: string } } | undefined : undefined;
+      const nextCheck = Date.parse(String(data?.details?.nextCheckAt));
+      if (!options.collectAcknowledgement || options.method !== 'workflow.decide' || params?.decision !== 'acknowledge' ||
+          data?.errorCode !== 'provider.observation-deferred' || data.details?.kind !== 'deferred' ||
+          data.details.requestRef !== params.requestRef || data.details.automaticResubmit !== false || !Number.isFinite(nextCheck)) throw error;
+      // Retain only the caller's exact selection in this existing call. Every
+      // retry re-enters the normal owner/generation and fresh DOM/hash guards.
+      const retryAt = Math.max(Date.now() + 1000, nextCheck);
+      while (Date.now() < retryAt) await delay(Math.min(retryAt - Date.now(), MAX_WORKFLOW_WAIT_MS), undefined, { signal: options.signal });
+    }
+  }
   const continuation = result as Record<string, unknown>;
   if (options.collectContinuation && continuation && typeof continuation === 'object' && continuation.requestOk !== false && continuation.promptSubmitted === true && continuation.terminal !== true &&
       typeof continuation.requestRef === 'string') {

@@ -333,7 +333,16 @@ export class SubmissionService {
         throw new SessionPlaneDomainError('session.generation-superseded', 'Acknowledgement requires the current caller-owned request');
       }
       if (snapshot.provider !== 'chatgpt') throw new SessionPlaneDomainError('capability.unsupported', 'Observed message selection currently supports ChatGPT only');
-      const recovered = await this.recoverAcknowledgement(snapshot, { messageId: input.messageId, evidenceHash: input.evidenceHash });
+      let recovered: SessionSnapshot;
+      try { recovered = await this.recoverAcknowledgement(snapshot, { messageId: input.messageId, evidenceHash: input.evidenceHash }); }
+      catch (error) {
+        if (error instanceof SessionPlaneDomainError && error.errorCode === 'provider.observation-deferred') {
+          receipts.record({ clientId: input.clientId, requestId: input.decisionId, method, requestHash, status: 'attempted',
+            result: { requestRef: outbox.outboxId, generation: input.generation,
+              messageId: input.messageId, evidenceHash: input.evidenceHash } });
+        }
+        throw error;
+      }
       if (recovered.generation !== input.generation || recovered.submittedUserMessageId !== input.messageId) {
         throw new SessionPlaneDomainError('browser.snapshot-stale', 'Selected submission evidence is unavailable or no longer current; inspect the same request');
       }
@@ -387,7 +396,14 @@ export class SubmissionService {
         if (selection !== undefined && this.#sessions.submittedMessageIds(current.sessionId).has(selection.messageId)) {
           throw new SessionPlaneDomainError('input.invalid', 'Selected message already belongs to another generation');
         }
-        if (this.accountCooldown(current)) return current;
+        const cooldown = this.accountCooldown(current);
+        if (cooldown !== null) {
+          if (selection !== undefined) throw new SessionPlaneDomainError('provider.observation-deferred',
+            'Selected ACK verification is waiting for the existing account cooldown; no prompt was sent.',
+            { kind: 'deferred', source: 'pacing', reason: 'account-cooldown', nextCheckAt: cooldown,
+              requestRef: currentOutbox.outboxId, pageKey: current.pageKey, automaticResubmit: false });
+          return current;
+        }
         const attempts = this.#events.submissionAttempts(current.sessionId, current.generation)
           .filter(e => e.requestRef === currentOutbox.outboxId && e.conversationId === currentConversationId &&
             e.promptHash === createHash('sha256').update(currentPrompt).digest('hex'))
