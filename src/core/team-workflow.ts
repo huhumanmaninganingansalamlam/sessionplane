@@ -20,6 +20,8 @@ import type { StopService } from './stop-service.ts';
 import type { SubmissionService, UserConfirmedInterruption } from './submission-service.ts';
 import type { TeamDirectory } from './team-directory.ts';
 
+const REVIEW_RESUME_GUIDANCE = 'The original owner reviews current evidence before explicit human_review resume. After completing its own diagnostic review, the owner may resume under existing user authorization; never resume blindly. An owner diagnostic hold alone does not establish a human-only action. Preserve explicit user stops until the user authorizes resumption; observed human-only actions require actual user completion. Preserve the request and draft.';
+
 type Identity = { teamId: string; requestRef: string };
 type Mutation = { teamId: string; requestId: string };
 type RoleInput = Mutation & { roleRef: string };
@@ -240,7 +242,7 @@ export class TeamWorkflow {
         const exactFollowup = 'exactFollowup' in pageOwner ? pageOwner.exactFollowup : undefined;
         if (this.#userReview(request) && !passiveInspection) {
           throw new SessionPlaneDomainError('provider.preparation-required',
-            'Observation and controls are paused for user review; resume only after the user reports completion');
+            `Observation and controls are paused for review. ${REVIEW_RESUME_GUIDANCE}`);
         }
         if (!session.pageKey) throw new SessionPlaneDomainError('browser.unavailable', 'No connected request page');
         return await this.services.pageMutex.runExclusive(session.pageKey, async () => {
@@ -278,7 +280,7 @@ export class TeamWorkflow {
       });
     }
     if (input.decision !== 'focus' && input.decision !== 'retire_observation' && this.#userReview(request)) throw new SessionPlaneDomainError('provider.preparation-required',
-      'Observation and controls are paused for user review; resume only after the user reports completion');
+      `Observation and controls are paused for review. ${REVIEW_RESUME_GUIDANCE}`);
     if (input.decision === 'retire_observation') {
       return await this.services.scheduler.actorFor(request.sessionId).enqueue(() => {
         const result = this.services.receipts.execute({ clientId: request.clientId, requestId: input.requestId,
@@ -697,7 +699,7 @@ export class TeamWorkflow {
                     reason: 'provider.failure-unverified', automaticContinuation: false,
                     nextAction: 'human_review_original_conversation', url: `https://chatgpt.com/c/${result.conversationId}`,
                     lastContinuationAt: request.updatedAt,
-                    message: 'The same empty disconnection remains after the approved continuation and its broad review interval, without new exact answer, tool or output evidence. Review the original conversation; preserve the request and do not resend or refresh automatically. Backend deferral does not prove execution failure.' };
+                    message: 'The same empty disconnection remains after the approved continuation and its broad review interval, without new exact answer, tool or output evidence. The original owner reviews the existing exact conversation and original tool/result evidence; this decision is not evidence of authentication or a human-only action. Ask the user only for an observed human-only action. Preserve the request and UNKNOWN command state; do not repeat an ineffective continuation, resend or refresh automatically. Backend deferral does not prove execution failure.' };
                   new EventRepository(this.services.database.raw).append({ teamId: request.teamId,
                     sessionId: request.sessionId, generation: request.generation, eventType: 'generation.recovery-review-required',
                     payload: { requestRef: request.outboxId, recovery, providerMutation: false }, createdAt: new Date().toISOString() });
@@ -1294,7 +1296,7 @@ export class TeamWorkflow {
       originalRequestRef: request.outboxId, observationHeld: true, status: 'recovery_required',
       recovery: { state: 'decision_required', decisionRequired: true, userActionRequired: true,
         reason: 'user-review', automaticContinuation: false, url: `https://chatgpt.com/c/${current.conversationId}`,
-        nextAction: 'Resume human_review only after the user reports completion; preserve the request and draft.' } };
+        nextAction: REVIEW_RESUME_GUIDANCE } };
   }
 
   async #observeRequest(request: OutboxRecord, maxNodes?: number, inspectCurrent = false): Promise<Record<string, unknown>> {
