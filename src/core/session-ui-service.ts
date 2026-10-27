@@ -903,7 +903,9 @@ export class SessionUiService {
     readonly ref?: string;
     readonly value?: number | undefined;
   }) {
-      return await this.#submissions.decidePreparation<BrowserSnapshot | { configurationId: string; label: string }>(input, async (session) => {
+      return await this.#submissions.decidePreparation<(BrowserSnapshot & {
+        configurationVerification?: PreparationTarget['configurationVerification'];
+      }) | { configurationId: string; label: string }>(input, async (session, requested) => {
       const purpose = input.purpose;
       const snapshotId = input.snapshotId;
       const ref = input.ref;
@@ -945,6 +947,25 @@ export class SessionUiService {
         }
         if (input.value !== undefined && currentNode.role !== 'slider') {
           throw new SessionPlaneDomainError('input.invalid', 'A numeric value is only valid for a model or effort slider');
+        }
+        const existingSelection = !reveal && ['model', 'effort'].includes(purpose) &&
+          ((currentNode.role === 'button' && currentNode.hasPopup !== null) ||
+            isPreparationSummary(currentNode, currentNode.ancestorIds.some(id => menuIds.has(id))) ||
+            currentNode.checked === true || currentNode.selected === true);
+        if (existingSelection && requested.model && requested.effort) {
+          if (requested.surface && !['chat', 'normal'].includes(requested.surface.trim().toLowerCase())) {
+            throw new SessionPlaneDomainError('capability.unsupported', 'Existing-selection verification supports Chat only');
+          }
+          const verified = await new ChatGptConfigurationMenu(page, session.pageKey)
+            .reobserveSelection(requested.model, requested.effort, true);
+          this.#requirePage(session);
+          const after = await this.#capture(session, 5_000);
+          const choice = { ...toPreparationTarget(purpose, verified),
+            configurationVersion: verified.configurationVerification!.version,
+            configurationVerification: verified.configurationVerification! };
+          if (after.nodesTruncated || !hasPreparationSelectionEvidence(after.nodes, choice)) throw new SessionPlaneDomainError(
+            'provider.configuration-stale', 'Verified selection no longer matches the current chooser');
+          return { choice, result: { ...after, configurationVerification: choice.configurationVerification } };
         }
         let actionTimeout: Error | undefined;
         try {

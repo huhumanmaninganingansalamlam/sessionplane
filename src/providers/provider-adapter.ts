@@ -36,6 +36,7 @@ export type PreparationPurpose = 'model' | 'effort' | 'composer' | 'submit';
 export interface PreparationTarget {
   readonly purpose: PreparationPurpose;
   readonly configurationVersion?: string;
+  readonly configurationVerification?: { readonly version: string; readonly effort: string; readonly surface: 'chat' };
   readonly submitGesture?: 'enter';
   readonly id: string;
   readonly role: string;

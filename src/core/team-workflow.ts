@@ -495,11 +495,12 @@ export class TeamWorkflow {
       await this.services.ui.refresh({ ...owner, decisionId: input.requestId });
       return await this.#observe(this.#request(input), undefined, true);
     }
-    await this.services.ui.decide({ ...owner, decisionId: input.requestId, decision: input.decision,
+    const preparation = await this.services.ui.decide({ ...owner, decisionId: input.requestId, decision: input.decision,
       purpose: input.purpose, snapshotId: input.snapshotId, ref: input.ref,
       ...(input.value === undefined ? {} : { value: input.value }),
     });
-    if (input.decision === 'choose' && Number(input.ref.slice(2)) <= 5000) {
+    if (input.decision === 'choose' && Number(input.ref.slice(2)) <= 5000 &&
+        !('configurationVerification' in preparation)) {
       try { await this.services.ui.resume(owner); }
       catch (error) {
         if (!(error instanceof SessionPlaneDomainError) || error.errorCode !== 'provider.preparation-required') throw error;

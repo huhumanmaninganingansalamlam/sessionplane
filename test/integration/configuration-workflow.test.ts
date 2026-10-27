@@ -763,3 +763,163 @@ test('continuation reobserves exact current model and effort without switching c
       { version: 'Aurora-9', power: 1, submits: 0 });
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
+
+test('existing selected-state recording verifies version, effort and Chat without selecting or submitting', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-selected-state-proof-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const service = await startCore({ config, browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const create = service.browserOwner!.createPage.bind(service.browserOwner!);
+  service.browserOwner!.createPage = async (...args) => {
+    const created = await create(...args);
+    await created.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html',
+      body: fixture.replace('<textarea', '<textarea id="prompt-textarea"') }));
+    return created;
+  };
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_' + name,
+    arguments: args, socketPath: config.socketPath, timeoutMs: 30_000, maxLineBytes: config.rpcMaxLineBytes });
+  const ok = async (name: string, args: Record<string, unknown>) => {
+    const result = await invoke(name, args);
+    assert.equal(result.isError, false, JSON.stringify(result));
+    return result.structuredContent as any;
+  };
+  try {
+    const team = await ok('team_create', { requestId: 'selected-team' });
+    const sent = await ok('send', { teamId: team.teamId, roleRef: team.roles[0].roleRef,
+      requestId: 'selected-send', prompt: 'Preserve this prepared request', model: 'Aurora-9 Thinking', effort: 'Balanced' });
+    const identity = { teamId: team.teamId, requestRef: sent.requestRef };
+    const page = service.pageRegistry.pageForObservation(sent.pageKey);
+    const inspect = async () => (await ok('team_get', { ...identity, view: 'evidence' })).request;
+    let seq = 0;
+    const choose = async (purpose: string, node?: any, snapshot?: any) => {
+      const q = snapshot ?? await inspect();
+      node ??= q.evidence.nodes.find((n: any) => purpose === 'model' ? n.id === 'chooser' :
+        purpose === 'composer' ? n.editable : n.submitControl);
+      return await invoke('decide', { ...identity, requestId: 'selected-choice-' + seq++, decision: 'choose',
+        purpose, snapshotId: q.evidence.snapshotId, ref: node.ref });
+    };
+    const draft = await page.locator('textarea').inputValue();
+    await page.evaluate(() => {
+      const w = window as any;
+      w.selectionClicks = 0; w.draftEvents = 0;
+      document.addEventListener('click', e => {
+        if ((e.target as Element).closest('[role="menuitemradio"], [role="slider"]')) w.selectionClicks++;
+      });
+      document.querySelector('textarea')!.addEventListener('input', () => w.draftEvents++);
+      // Current provider summaries can expose effort alone.
+      const render = w.render;
+      w.render = () => { render(); document.querySelector('#summary')!.textContent = w.labels[w.powerValue]; };
+      w.version = 'Aurora-8'; w.render();
+      // Both versions have the identical footer; that footer alone must not pass.
+      document.querySelector('#chooser')!.textContent = 'Balanced';
+    });
+    const mismatch = await choose('model');
+    assert.equal(mismatch.isError, true, 'same effort under the wrong version is not proof');
+    assert.equal(mismatch.structuredContent.errorCode, 'provider.configuration-stale');
+    assert.equal((await inspect()).choices.model, undefined);
+    // Reset only fixture UI state, never through a provider configuration action.
+    await page.evaluate(() => {
+      const w = window as any; w.version = 'Aurora-9'; w.render();
+      (document.querySelector('#versions') as HTMLElement).hidden = true;
+      (document.querySelector('#configuration') as HTMLElement).hidden = true;
+      document.querySelector('#chooser')!.setAttribute('aria-expanded', 'false');
+      document.querySelector('#chooser')!.setAttribute('aria-controls', 'configuration');
+    });
+    const recorded = await choose('model');
+    assert.equal(recorded.isError, false, JSON.stringify(recorded));
+    assert.deepEqual((recorded.structuredContent as any).choices.model.configurationVerification,
+      { version: 'Aurora-9', effort: 'Balanced', surface: 'chat' });
+    assert.equal((recorded.structuredContent as any).promptSubmitted, false);
+    assert.equal((recorded.structuredContent as any).choices.submit, undefined);
+    assert.equal(await page.locator('textarea').inputValue(), draft);
+    assert.deepEqual(await page.evaluate(() => {
+      const w = window as any; return [w.selectionClicks, w.draftEvents, w.submits];
+    }), [0, 0, 0]);
+    // Save a Submit that is still blocked by the absent composer choice. Verification
+    // must neither resume it nor restore an older composer over a human draft.
+    await choose('submit');
+    assert.ok((await inspect()).choices.submit);
+    await page.locator('textarea').fill('Preserved newer human draft');
+    await page.evaluate(() => { (window as any).draftEvents = 0; });
+    const recordOnly = await choose('model');
+    assert.equal(recordOnly.isError, false, JSON.stringify(recordOnly));
+    assert.equal((recordOnly.structuredContent as any).promptSubmitted, false);
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved newer human draft');
+    assert.equal(await page.evaluate(() => (window as any).draftEvents), 0);
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+    await page.locator('textarea').fill(draft);
+    // An exact footer can survive version drift after recording. Submission must
+    // reverify the full selection instead of trusting that surviving label.
+    await page.evaluate(() => {
+      const w = window as any; w.version = 'Aurora-8'; w.render();
+      document.querySelector('#chooser')!.textContent = 'Balanced';
+    });
+    const submit = await choose('composer');
+    assert.equal(submit.isError, false, JSON.stringify(submit));
+    assert.equal((submit.structuredContent as any).errorCode, 'provider.preparation-required');
+    assert.match((submit.structuredContent as any).message, /does not match/);
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+    assert.equal((await inspect()).promptSubmitted, false);
+    assert.equal((await inspect()).submissionState, 'prepared');
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserve this prepared request');
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('strict selected-state reading rejects mode, ambiguity and draft changes without selection fallback', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-selected-state-guards-'));
+  const service = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await service.browserOwner!.createPage();
+    const reset = async () => {
+      await page.setContent(fixture.replace('<textarea', '<textarea id="prompt-textarea"')
+        .replace('<script>', '<script>(() => {').replace('</script>', '})();</script>'));
+      await page.locator('#chooser').evaluate(node => { (node as HTMLElement).hidden = false; });
+      await page.evaluate(() => {
+        (window as any).selectionClicks = 0;
+        document.addEventListener('click', e => {
+          if ((e.target as Element).closest('[role="menuitemradio"], [role="slider"]')) (window as any).selectionClicks++;
+        });
+      });
+    };
+    const verify = () => new ChatGptConfigurationMenu(page, 'strict-guards').reobserveSelection('Aurora-9 Thinking', 'Balanced', true);
+    await reset();
+    await page.locator('[role="radio"]').evaluate(node => { node.textContent = 'Work'; });
+    await assert.rejects(verify, /Chat mode/);
+    assert.equal(await page.evaluate(() => (window as any).opens), 0);
+    await reset();
+    await page.locator('#summary').evaluate(node => node.addEventListener('click', () =>
+      document.querySelectorAll('#versions [role="menuitemradio"]')[1]!.setAttribute('aria-checked', 'true')));
+    await assert.rejects(verify, /ambiguous/);
+    assert.equal(await page.evaluate(() => (window as any).selectionClicks), 0);
+    await reset();
+    await assert.rejects(() => new ChatGptConfigurationMenu(page, 'strict-effort').reobserveSelection('Aurora-9', 'Deep', true), /does not match/);
+    assert.equal(await page.evaluate(() => (window as any).powerValue), 1);
+    await reset();
+    await page.locator('#summary').evaluate(node => node.addEventListener('click', () => {
+      document.querySelector('textarea')!.value = 'New human draft';
+    }));
+    await assert.rejects(verify, /draft.*changed/);
+    assert.equal(await page.locator('textarea').inputValue(), 'New human draft');
+    assert.equal(await page.evaluate(() => (window as any).selectionClicks), 0);
+    await reset();
+    await page.evaluate(() => {
+      // Retained submenu route cannot be dismissed except through a checked
+      // option in this provider variant. Verification must refuse that fallback.
+      const chooser = document.querySelector('#chooser') as HTMLElement;
+      chooser.setAttribute('aria-expanded', 'true'); chooser.setAttribute('aria-controls', 'versions');
+      (document.querySelector('#versions') as HTMLElement).hidden = false;
+      chooser.onclick = () => {
+        const open = chooser.getAttribute('aria-expanded') !== 'true';
+        chooser.setAttribute('aria-expanded', String(open));
+        chooser.setAttribute('aria-controls', 'versions');
+        (document.querySelector('#versions') as HTMLElement).hidden = !open;
+        (document.querySelector('#configuration') as HTMLElement).hidden = true;
+        (window as any).render();
+      };
+    });
+    await assert.rejects(verify, /without a selection action/);
+    assert.equal(await page.evaluate(() => (window as any).selectionClicks), 0);
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
