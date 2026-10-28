@@ -490,7 +490,7 @@ export class SessionUiService {
       const receipt = { clientId: input.clientId, requestId, method: 'session.stream-retry',
         requestHash: createHash('sha256').update(JSON.stringify(target)).digest('hex') };
       const outputPopoverDismissed = surface.reason === 'output-popover-open';
-      const outputPopoverSettled = outputPopoverDismissed || surface.reason === 'output-popover-closing';
+      const outputPopoverSettled = outputPopoverDismissed || surface.reason === 'output-popover-closing' || surface.outputPopover?.inactive === true;
       const preparationReceipt = { ...receipt, requestId: `stream-retry-popover:${session.sessionId}:${session.generation}`, method: 'session.stream-retry-popover' };
       if (outputPopoverDismissed && receipts.get(input.clientId, preparationReceipt.requestId) !== null)
         throw new SessionPlaneDomainError('provider.action-unknown',
@@ -507,12 +507,14 @@ export class SessionUiService {
           `Output popover was not dismissed: ${preparation.reason}`, { retrySurface: preparation });
       }
       if (outputPopoverSettled) {
-        // Radix retains closed popovers during their exit animation. Await actual
-        // invisibility, including an earlier recorded toggle, without another gesture.
+        // Radix can retain a painted but closed inert panel indefinitely. Wait
+        // without another gesture, then revalidate the entire document-only
+        // surface and all work/permission/hit-test guards before any Retry.
         try {
           const hidden = await page.waitForFunction(id => {
             const dialog = document.getElementById(id);
-            return !dialog || !dialog.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+            return !dialog || !dialog.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) ||
+              (dialog.getAttribute('data-state') === 'closed' && dialog.hasAttribute('inert') && dialog.getAttribute('aria-hidden') === 'true');
           }, surface.outputPopover!.dialogId, { timeout: 5_000, polling: 50 });
           await hidden.dispose();
         } catch (error) {
