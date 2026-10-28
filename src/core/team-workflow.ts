@@ -670,7 +670,7 @@ export class TeamWorkflow {
               dom.turnBoundary.every(turn => turn.role === 'user');
             const streamRetry = dom?.activity === 'none' && dom.anchorPresent === true && dom.laterUserFound === false &&
               ((result.evidence as { providerAlerts?: string[] } | undefined)?.providerAlerts ?? []).some(alert =>
-                /^(메시지 스트림에 오류 발생|Error in message stream)[.!]?\s*(다시 시도|Retry|Try again)$/i.test(alert.trim()));
+                /^(메시지 스트림에 오류 발생|Error in message stream|Hmm\.{3}something seems to have gone wrong)[.!]?\s*(다시 시도|Retry|Try again)$/i.test(alert.trim()));
             const interrupted = streamRetry || idleWithoutResponse || timeoutReady || (dom?.activityReason === 'provider-stream-disconnected' &&
               dom.activity !== 'strong' && (dom.anchorPresent === true || missingContinuation) && dom.laterUserFound === false);
             const parentRef = JSON.parse(request.payloadJson).continuationOf;

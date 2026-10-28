@@ -8,7 +8,7 @@ import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
-async function fixture() {
+async function fixture(alertText = '메시지 스트림에 오류 발생') {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-stream-retry-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state', observationActiveSweepMs: 600000 });
   const fake = new FakeProviderAdapter();
@@ -35,7 +35,7 @@ async function fixture() {
   const snapshot = core.teamDirectory.getSession(String(sent.sessionId));
   const page = core.pageRegistry.pageForObservation(snapshot.pageKey!);
   const markup = `<main><div data-chatgpt-search-message-ids="${snapshot.submittedUserMessageId}"><div data-user-message-bubble>Original work question</div></div>
-    <aside role="alert"><div>메시지 스트림에 오류 발생</div><button onclick="window.clicks=(window.clicks||0)+1">다시 시도</button></aside><textarea></textarea></main>`;
+    <aside role="alert"><div>${alertText}</div><button onclick="window.clicks=(window.clicks||0)+1">다시 시도</button></aside><textarea></textarea></main>`;
   await page.setContent(markup);
   const decide = () => invoke('decide', { teamId: team.teamId, requestRef: sent.requestRef,
     requestId: 'approved-continue', decision: 'continue', continuationApproved: true });
@@ -43,17 +43,27 @@ async function fixture() {
     close: async () => { await core.close(); rmSync(root, { recursive: true, force: true }); } };
 }
 
-test('approved continue retries exact stream chrome once without resubmitting or changing the ACK; guards preserve work', async () => {
-  const f = await fixture();
+for (const alertText of ['메시지 스트림에 오류 발생', 'Hmm...something seems to have gone wrong.']) {
+test(`approved continue retries exact stream chrome once without resubmitting or changing the ACK; guards preserve work (${alertText})`, async () => {
+  const f = await fixture(alertText);
   try {
     const before = f.core.database.raw.prepare('SELECT * FROM outbox').all();
     for (const extra of ['<button aria-label="중지">Stop</button>', '<div role="dialog">Permission required</div>',
+      '<div role="status">Disconnected. Waiting for full answer.</div>',
       '<div data-message-author-role="user" data-message-id="later">A later request</div>',
+      `<aside role="alert">${alertText}<button>다시 시도</button></aside>`,
       '<div data-message-author-role="assistant" data-message-id="answer" data-message-status="complete"><div class="markdown">Completed answer</div></div>']) {
       await f.page.setContent(f.markup.replace('</main>', extra + '</main>'));
       assert.equal((await f.decide()).isError, true);
       assert.equal(await f.page.evaluate(() => (window as any).clicks ?? 0), 0);
     }
+    await f.page.setContent(f.markup);
+    await f.page.locator('aside button').evaluate(button => (button as HTMLButtonElement).disabled = true);
+    assert.equal((await f.decide()).isError, true);
+    assert.equal(await f.page.evaluate(() => (window as any).clicks ?? 0), 0);
+    await f.page.setContent(f.markup.replace(alertText, 'An unknown provider error.'));
+    assert.equal((await f.decide()).isError, true);
+    assert.equal(await f.page.evaluate(() => (window as any).clicks ?? 0), 0);
     await f.page.setContent(f.markup);
     await f.page.locator('textarea').fill('Human draft');
     assert.equal((await f.decide()).isError, true);
@@ -72,8 +82,8 @@ test('approved continue retries exact stream chrome once without resubmitting or
   } finally { await f.close(); }
 });
 
-test('continuation-approved managed wait uses stream Retry and collects the same original request result', async () => {
-  const f = await fixture();
+test(`continuation-approved managed wait uses stream Retry and collects the same original request result (${alertText})`, async () => {
+  const f = await fixture(alertText);
   try {
     await f.page.exposeFunction('retryCompleted', () => {
       f.fake.emitObservation(f.snapshot.sessionId, { activity: 'none', candidate: {
@@ -95,6 +105,7 @@ test('continuation-approved managed wait uses stream Retry and collects the same
     assert.equal(await f.page.evaluate(() => (window as any).clicks), 1);
   } finally { await f.close(); }
 });
+}
 
 test('UNKNOWN Continue retries existing conversation chrome while preserving draft and ambiguous ACKs', async () => {
   const f = await fixture();

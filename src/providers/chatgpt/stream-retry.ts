@@ -6,7 +6,7 @@ export function streamRetrySurface(input: { origin: string; conversationId: stri
   const visible = (e: Element) => e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
   const messages = '[data-message-author-role], [data-chatgpt-search-message-ids], [data-testid^="conversation-turn"], .markdown';
   const alerts = [...document.querySelectorAll('[role=alert]')].filter(e => visible(e) &&
-    !e.closest(`${messages},pre,code,blockquote`) && /^(메시지 스트림에 오류 발생|Error in message stream)[.!]?\s*(다시 시도|Retry|Try again)$/i.test((e as HTMLElement).innerText.trim()));
+    !e.closest(`${messages},pre,code,blockquote`) && /^(메시지 스트림에 오류 발생|Error in message stream|Hmm\.{3}something seems to have gone wrong)[.!]?\s*(다시 시도|Retry|Try again)$/i.test((e as HTMLElement).innerText.trim()));
   if (!alerts.length) return result(false, 'no-stream-retry');
   if (alerts.length !== 1) return result(true, 'ambiguous-stream-retry');
   // Match both provider renderers, including the current single-ID search wrapper.
