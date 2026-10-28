@@ -231,6 +231,10 @@ export class SessionUiService {
                     laterUserFound: dom.laterUserFound,
                     activity: activity.strength, activityReason: activity.reason,
                     messageTimeout: dom.providerAlerts.some(isMessageTimeoutAlert),
+                    streamRetry: dom.submittedUserFound && !dom.laterUserFound && dom.actionableAlert && session.submittedUserMessageId
+                      ? await this.#requirePage(session, input.readOnly).evaluate(streamRetrySurface, {
+                        origin: this.#chatgptOrigin, conversationId: session.conversationId!, anchor: session.submittedUserMessageId, click: false,
+                      }) : null,
                     hostspanActivity: session.submittedUserMessageId === null ? null :
                       await inspectHostSpanActivity(this.#requirePage(session, input.readOnly), session.submittedUserMessageId, submittedMessageIds),
                     // Passive evidence is not a completed answer or permission to submit.
@@ -457,21 +461,27 @@ export class SessionUiService {
       if (!anchor) return null;
       const target = { origin: this.#chatgptOrigin, conversationId: session.conversationId,
         anchor, click: false, preserveContinuationDraft: unknown };
-      const surface = await page.evaluate(streamRetrySurface, target);
+      let surface = await page.evaluate(streamRetrySurface, target);
       if (!surface.present) return null;
-      const dom = await observeChatGptDom(page, { submittedUserMessageId: anchor, submittedUserTurnId: null });
-      const activity = await observeChatGptActivity(page, dom);
-      // Exact enabled Retry chrome already rejects live Stop/thinking controls.
-      // A weak generic label (including the Thinking model menu) is not a live stream.
-      if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate?.terminalMarker || dom.candidate?.streamingMarker ||
-          activity.strength === 'strong' || activity.strength === 'unknown' ||
-          surface.reason !== 'exact-stream-retry') throw new SessionPlaneDomainError('provider.preparation-required',
-        `Preserve the original turn before stream Retry: ${surface.reason}`, {
-          anchorPresent: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
-          responseCandidatePresent: dom.candidate !== null, observedUserMessageId: anchor, responseCandidate: dom.candidate,
-          activity: activity.strength, activityReason: activity.reason,
-        });
-      await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
+      const verify = async (allowOffscreen = false) => {
+        this.#requirePage(session);
+        const dom = await observeChatGptDom(page, { submittedUserMessageId: anchor, submittedUserTurnId: null });
+        const activity = await observeChatGptActivity(page, dom);
+        // Exact enabled Retry chrome already rejects live Stop/thinking controls.
+        // A weak generic label (including the Thinking model menu) is not a live stream.
+        if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate?.terminalMarker || dom.candidate?.streamingMarker ||
+            activity.strength === 'strong' || activity.strength === 'unknown' ||
+            (surface.reason !== 'exact-stream-retry' && !(allowOffscreen && surface.reason === 'retry-offscreen'))) throw new SessionPlaneDomainError('provider.preparation-required',
+          `Preserve the original turn before stream Retry: ${surface.reason}`, {
+            anchorPresent: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
+            responseCandidatePresent: dom.candidate !== null, observedUserMessageId: anchor, responseCandidate: dom.candidate,
+            activity: activity.strength, activityReason: activity.reason,
+            retrySurface: surface,
+          });
+        await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
+        this.#requirePage(session);
+      };
+      await verify(true);
       const requestId = `stream-retry:${session.sessionId}:${session.generation}`;
       const previous = receipts.get(input.clientId, requestId);
       if (previous !== null) throw new SessionPlaneDomainError('provider.action-unknown',
@@ -480,13 +490,21 @@ export class SessionUiService {
         requestHash: createHash('sha256').update(JSON.stringify(target)).digest('hex') };
       if (!budgets.reserveRefresh(new Date().toISOString(), 60_000, session.conversationId))
         throw new SessionPlaneDomainError('provider.preparation-required', 'Stream Retry is paced by the existing provider/UI cooldown; preserve this request');
+      const viewportPrepared = surface.reason === 'retry-offscreen';
+      if (viewportPrepared) {
+        const preparation = await page.evaluate(streamRetrySurface, { ...target, prepareViewport: true, expiresAt: Date.now() + 5_000 });
+        if (preparation.reason !== 'viewport-prepared' && preparation.reason !== 'exact-stream-retry')
+          throw new SessionPlaneDomainError('provider.preparation-required', `Stream Retry viewport was not prepared: ${preparation.reason}`, { retrySurface: preparation });
+        surface = await page.evaluate(streamRetrySurface, target);
+        await verify();
+      }
       receipts.record({ ...receipt, status: 'attempted', result: { decisionId: input.decisionId, anchor: target.anchor } });
       this.#requirePage(session);
-      const retried = await page.evaluate(streamRetrySurface, { ...target, click: true });
-      receipts.record({ ...receipt, status: 'complete', result: { ...retried, anchor: target.anchor } });
+      const retried = await page.evaluate(streamRetrySurface, { ...target, click: true, expiresAt: Date.now() + 5_000 });
+      receipts.record({ ...receipt, status: 'complete', result: { ...retried, viewportPrepared, anchor: target.anchor } });
       if (!retried.clicked) throw new SessionPlaneDomainError('provider.preparation-required',
         `Stream Retry was not dispatched: ${retried.reason}`);
-      return { ...retried, observedUserMessageId: target.anchor,
+      return { ...retried, viewportPrepared, observedUserMessageId: target.anchor,
         ...(unknown ? {} : { submittedUserMessageId: target.anchor }),
         requestAcknowledgementVerified: !unknown, generation: session.generation };
     });

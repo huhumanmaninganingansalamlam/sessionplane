@@ -1,6 +1,9 @@
 /** Exact provider chrome only; inspect and click share one renderer task. */
-export function streamRetrySurface(input: { origin: string; conversationId: string; anchor: string; click: boolean; preserveContinuationDraft?: boolean }) {
-  const result = (present: boolean, reason: string, clicked = false) => ({ present, reason, clicked });
+export function streamRetrySurface(input: { origin: string; conversationId: string; anchor: string; click: boolean; preserveContinuationDraft?: boolean; prepareViewport?: boolean; expiresAt?: number }) {
+  const result = (present: boolean, reason: string, clicked = false, geometry?: {
+    buttonBox: { x: number; y: number; width: number; height: number };
+    viewport: { width: number; height: number }; centerInViewport: boolean; centerHit: 'button' | 'other' | 'none';
+  }) => ({ present, reason, clicked, ...(geometry ? { geometry } : {}) });
   if (location.origin !== input.origin || location.pathname !== `/c/${input.conversationId}`)
     return result(false, 'binding-url-changed');
   const visible = (e: Element) => e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
@@ -41,8 +44,22 @@ export function streamRetrySurface(input: { origin: string; conversationId: stri
   if (buttons.length !== 1 || buttons[0]!.disabled || buttons[0]!.getAttribute('aria-disabled') === 'true')
     return result(true, 'retry-unavailable');
   const button = buttons[0]!, box = button.getBoundingClientRect();
-  const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
-  if (!hit || !button.contains(hit)) return result(true, 'retry-obscured');
+  const x = box.x + box.width / 2, y = box.y + box.height / 2;
+  const hit = document.elementFromPoint(x, y);
+  const geometry = { buttonBox: { x: box.x, y: box.y, width: box.width, height: box.height },
+    viewport: { width: innerWidth, height: innerHeight },
+    centerInViewport: x >= 0 && x < innerWidth && y >= 0 && y < innerHeight,
+    centerHit: hit && button.contains(hit) ? 'button' as const : hit ? 'other' as const : 'none' as const };
+  if (!geometry.centerInViewport) {
+    if (!input.prepareViewport) return result(true, 'retry-offscreen', false, geometry);
+    if (input.expiresAt === undefined || Date.now() > input.expiresAt) return result(true, 'viewport-lease-expired', false, geometry);
+    if (document.getSelection()?.isCollapsed === false) return result(true, 'preserve-selection', false, geometry);
+    button.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+    // Preparation never clicks. The caller must freshly revalidate the turn and hit test.
+    return result(true, 'viewport-prepared', false, geometry);
+  }
+  if (!hit || !button.contains(hit)) return result(true, 'retry-obscured', false, geometry);
+  if (input.click && (input.expiresAt === undefined || Date.now() > input.expiresAt)) return result(true, 'click-lease-expired', false, geometry);
   if (input.click) button.click();
-  return result(true, 'exact-stream-retry', input.click);
+  return result(true, 'exact-stream-retry', input.click, geometry);
 }
