@@ -107,6 +107,60 @@ test(`continuation-approved managed wait uses stream Retry and collects the same
 });
 }
 
+test('offscreen Retry preparation preserves partial evidence and clicks the same original turn only once', async () => {
+  const f = await fixture('Hmm...something seems to have gone wrong.');
+  try {
+    await f.page.setViewportSize({ width: 1280, height: 720 });
+    await f.page.setContent(f.markup.replace('<aside', '<div data-message-author-role="assistant" data-message-id="partial">Preserved partial</div><aside style="margin-top:2500px"'));
+    const before = await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view: 'evidence' });
+    assert.equal(await f.page.evaluate(() => scrollY), 0);
+    assert.equal(await f.page.evaluate(() => (window as any).clicks ?? 0), 0);
+    const result = await f.decide();
+    assert.equal(result.isError, false, JSON.stringify(result));
+    const diagnostic = (before.structuredContent.request as any).evidence.submissionVerification.streamRetry;
+    assert.equal(diagnostic.reason, 'retry-offscreen');
+    assert.equal(diagnostic.geometry.centerInViewport, false);
+    assert.equal(diagnostic.geometry.viewport.height, 720);
+    assert.ok(diagnostic.geometry.buttonBox.y > 720);
+    const retry = result.structuredContent.providerRetry as any;
+    assert.equal(retry.clicked, true);
+    assert.equal(retry.viewportPrepared, true);
+    assert.equal(retry.geometry.centerHit, 'button');
+    assert.equal(result.structuredContent.requestRef, f.sent.requestRef);
+    assert.equal(result.structuredContent.generation, 1);
+    assert.equal(result.structuredContent.submittedUserMessageId, f.snapshot.submittedUserMessageId);
+    assert.equal(await f.page.locator('[data-message-id="partial"]').innerText(), 'Preserved partial');
+    assert.equal((await f.decide()).structuredContent.errorCode, 'provider.action-unknown');
+    assert.equal(await f.page.evaluate(() => (window as any).clicks), 1);
+    assert.equal(f.fake.submitCount, 1);
+  } finally { await f.close(); }
+});
+
+test('Retry viewport preparation refuses real overlays and revalidates new drafts before an attempt receipt', async () => {
+  const f = await fixture('Hmm...something seems to have gone wrong.');
+  try {
+    await f.page.setViewportSize({ width: 1280, height: 720 });
+    await f.page.setContent(f.markup.replace('</main>', '<div style="position:fixed;inset:0;z-index:9999"></div></main>'));
+    const blocked = await f.decide();
+    assert.equal(blocked.structuredContent.errorCode, 'provider.preparation-required');
+    assert.equal((blocked.structuredContent.details as any).retrySurface.reason, 'retry-obscured');
+    assert.equal((blocked.structuredContent.details as any).retrySurface.geometry.centerInViewport, true);
+    assert.equal((blocked.structuredContent.details as any).retrySurface.geometry.centerHit, 'other');
+    assert.equal(await f.page.evaluate(() => scrollY), 0);
+    await f.page.setContent(f.markup.replace('<aside', '<aside style="margin-top:2500px"'));
+    await f.page.locator('aside button').evaluate(button => {
+      const original = button.scrollIntoView.bind(button);
+      button.scrollIntoView = options => { original(options); (document.querySelector('textarea') as HTMLTextAreaElement).value = 'New human draft'; };
+    });
+    const changed = await f.decide();
+    assert.equal(changed.structuredContent.errorCode, 'provider.preparation-required');
+    assert.equal(await f.page.locator('textarea').inputValue(), 'New human draft');
+    assert.equal(await f.page.evaluate(() => (window as any).clicks ?? 0), 0);
+    assert.equal(f.core.database.raw.prepare("SELECT count(*) AS n FROM request_receipts WHERE method='session.stream-retry'").get()!.n, 0);
+    assert.equal(f.fake.submitCount, 1);
+  } finally { await f.close(); }
+});
+
 test('UNKNOWN Continue retries existing conversation chrome while preserving draft and ambiguous ACKs', async () => {
   const f = await fixture();
   try {
