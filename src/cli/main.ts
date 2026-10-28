@@ -1424,7 +1424,7 @@ Skill distribution:
 Global options:
   --client-id ID       Stable caller identity
   --request-id ID      Stable mutation identity for exact retries
-  --json               Emit one compact JSON object
+  --json               Emit compact JSON: results on stdout, command errors on stderr
   --socket PATH        Override core Unix socket
   --browser NAME       auto|chrome|chromium|edge|brave|custom
   --browser-executable PATH  Explicit host Chromium-family executable

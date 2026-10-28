@@ -103,7 +103,10 @@ explicit stop, conversation replacement and completed-history deletion. The
 
 Run `sessplane --help` to find preparation, collection, recovery and cleanup actions.
 Default output shows the request stage and the next exact command. `--json` retains
-machine-readable results and diagnostics.
+machine-readable RPC results (including unsuccessful request outcomes) on stdout
+and command/RPC errors on stderr. Save both streams and the exit status when
+retaining a command receipt; empty stdout alone does not establish the request's
+outcome.
 
 1. Run `sessplane team list`, then `sessplane team show TEAM_ID`. Use the displayed
    current role reference; create a session only for a role that has none.
