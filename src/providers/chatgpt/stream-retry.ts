@@ -2,7 +2,8 @@
 export function streamRetrySurface(input: { origin: string; conversationId: string; anchor: string; click: boolean; preserveContinuationDraft?: boolean; prepareViewport?: boolean; dismissOutputPopover?: boolean; expiresAt?: number }) {
   let outputPopover: { dialogId: string; ariaModal: string | null; state: string | null;
     controls: { label: string; expanded: string | null; description: string }[];
-    triggers: { label: string; expanded: string | null; hasPopup: string | null }[]; eligible: boolean } | undefined;
+    triggers: { label: string; expanded: string | null; hasPopup: string | null }[]; eligible: boolean;
+    rendering: ReturnType<typeof rendering> } | undefined;
   const result = (present: boolean, reason: string, clicked = false, geometry?: {
     buttonBox: { x: number; y: number; width: number; height: number };
     viewport: { width: number; height: number }; centerInViewport: boolean; centerHit: 'button' | 'other' | 'none';
@@ -10,6 +11,26 @@ export function streamRetrySurface(input: { origin: string; conversationId: stri
   if (location.origin !== input.origin || location.pathname !== `/c/${input.conversationId}`)
     return result(false, 'binding-url-changed');
   const visible = (e: Element) => e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+  const rendering = (dialog: Element, retry: HTMLButtonElement) => {
+    const chain = [];
+    for (let e: Element | null = dialog; e && chain.length < 6; e = e.parentElement) {
+      const style = getComputedStyle(e), box = e.getBoundingClientRect();
+      chain.push({ tag: e.tagName.toLowerCase(), id: e.id.slice(0, 160), role: e.getAttribute('role'),
+        state: e.getAttribute('data-state'), ariaHidden: e.getAttribute('aria-hidden'), inert: e.hasAttribute('inert'),
+        box: { x: box.x, y: box.y, width: box.width, height: box.height },
+        display: style.display, visibility: style.visibility, opacity: style.opacity,
+        pointerEvents: style.pointerEvents, overflowX: style.overflowX, overflowY: style.overflowY,
+        clipPath: style.clipPath.slice(0, 160), transform: style.transform.slice(0, 160),
+        animations: e.getAnimations().slice(0, 4).map(a => ({ playState: a.playState,
+          currentTime: typeof a.currentTime === 'number' ? a.currentTime : null })) });
+    }
+    const box = retry.getBoundingClientRect(), x = box.x + box.width / 2, y = box.y + box.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return { checkVisibility: visible(dialog), viewport: { width: innerWidth, height: innerHeight }, chain,
+      retry: { box: { x: box.x, y: box.y, width: box.width, height: box.height },
+        centerInViewport: x >= 0 && x < innerWidth && y >= 0 && y < innerHeight,
+        centerHit: hit && retry.contains(hit) ? 'button' : hit && dialog.contains(hit) ? 'output-popover' : hit ? 'other' : 'none' } };
+  };
   const messages = '[data-message-author-role], [data-chatgpt-search-message-ids], [data-testid^="conversation-turn"], .markdown';
   const alerts = [...document.querySelectorAll('[role=alert]')].filter(e => visible(e) &&
     !e.closest(`${messages},pre,code,blockquote`) && /^(메시지 스트림에 오류 발생|Error in message stream|Hmm\.{3}something seems to have gone wrong)[.!]?\s*(다시 시도|Retry|Try again)$/i.test((e as HTMLElement).innerText.trim()));
@@ -78,7 +99,8 @@ export function streamRetrySurface(input: { origin: string; conversationId: stri
     // Bounded structural evidence only: no document body, draft, handlers or credentials.
     outputPopover = { dialogId: dialog.id, ariaModal: dialog.getAttribute('aria-modal'), state: dialog.getAttribute('data-state'),
       controls: controls.slice(0, 20).map(e => ({ label: label(e).slice(0, 160), expanded: e.getAttribute('aria-expanded'), description: description(e).slice(0, 80) })),
-      triggers: triggers.slice(0, 4).map(e => ({ label: label(e).slice(0, 80), expanded: e.getAttribute('aria-expanded'), hasPopup: e.getAttribute('aria-haspopup') })), eligible };
+      triggers: triggers.slice(0, 4).map(e => ({ label: label(e).slice(0, 80), expanded: e.getAttribute('aria-expanded'), hasPopup: e.getAttribute('aria-haspopup') })),
+      eligible, rendering: rendering(dialog, buttons[0]!) };
     if (documentOnly && [null, 'false'].includes(outputPopover.ariaModal) && outputPopover.state === 'closed' && triggers.length === 0)
       return result(true, 'output-popover-closing'); // Wait for invisibility; never click or ignore a visible closing dialog.
     if (!eligible) return result(true, 'other-provider-control');

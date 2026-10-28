@@ -168,6 +168,34 @@ const outputPopover = `<header><button type="button" aria-haspopup="dialog" aria
   <div role="dialog" id="output-list" data-state="open"><button aria-expanded="true">출력</button>
   <div><button aria-label="report.md 열기" aria-describedby="document-type">report.md</button><span id="document-type">문서</span></div></div>`;
 
+test('owned Retry evidence distinguishes a retained closed shell from CSS invisibility without dismissing or retrying', async () => {
+  const f = await fixture();
+  try {
+    await f.page.setContent(f.markup + outputPopover.replace('aria-controls="output-list"', '')
+      .replace('data-state="open"', 'data-state="closed" aria-hidden="true" style="width:0;height:0;overflow:hidden;pointer-events:none"'));
+    const before = f.core.database.raw.prepare('SELECT * FROM outbox').all();
+    const read = await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view: 'evidence' });
+    assert.equal(read.isError, false, JSON.stringify(read));
+    const evidence = (read.structuredContent.request as any).evidence;
+    const retry = evidence.submissionVerification.streamRetry;
+    assert.equal(retry.reason, 'output-popover-closing');
+    assert.equal(retry.outputPopover.rendering.checkVisibility, true, 'CSS visibility alone includes a clipped empty shell');
+    const shell = retry.outputPopover.rendering.chain[0];
+    assert.equal(shell.id, 'output-list');
+    assert.equal(shell.ariaHidden, 'true');
+    assert.equal(shell.box.width, 0);
+    assert.equal(shell.box.height, 0);
+    assert.equal(shell.overflowX, 'hidden');
+    assert.deepEqual(shell.animations, []);
+    assert.equal(retry.outputPopover.rendering.retry.centerHit, 'button');
+    assert.ok(evidence.nodes.every((node: any) => node.id !== 'output-list'));
+    assert.equal(await f.page.evaluate(() => (window as any).dismissals ?? 0), 0);
+    assert.equal(await f.page.evaluate(() => (window as any).clicks ?? 0), 0);
+    assert.equal(f.core.database.raw.prepare("SELECT count(*) AS n FROM request_receipts WHERE method LIKE 'session.stream-retry%'").get()!.n, 0);
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM outbox').all(), before);
+  } finally { await f.close(); }
+});
+
 test('normal Retry dismisses only a linked document-output popover, then collects the original ACK without resubmission', async () => {
   const f = await fixture('Hmm...something seems to have gone wrong.');
   try {
