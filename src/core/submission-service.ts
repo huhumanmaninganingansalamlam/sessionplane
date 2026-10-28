@@ -529,7 +529,7 @@ export class SubmissionService {
     const model = normalizeOptional(input.model);
     const effort = normalizeOptional(input.effort);
     const surface = normalizeOptional(input.surface);
-    if (surface?.toLowerCase() === 'work') {
+    if (surface !== null && !['chat', 'normal'].includes(surface.toLowerCase())) {
       throw new SessionPlaneDomainError(
         'capability.unsupported',
         'SessionPlane supports the Chat surface only; ChatGPT Work is not supported',
@@ -679,7 +679,7 @@ export class SubmissionService {
         prompt: input.prompt,
         model: normalizeOptional(input.model),
         effort: normalizeOptional(input.effort),
-        surface: normalizeOptional(input.surface),
+        surface: normalizeOptional(input.surface) ?? 'chat',
         attachments,
         onSubmissionAttempt: attempt => {
           const current = this.#outbox.requireById(prepared.outbox.outboxId);

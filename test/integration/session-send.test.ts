@@ -33,6 +33,28 @@ interface SessionSnapshot {
   readonly errorCode: string | null;
 }
 
+test('Chat is the effective default and legacy Work requests fail before opening a provider page', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chat-default-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const service = await startCore({ config, startBrowser: false, providerAdapters: [fake], logger: silentLogger() });
+  try {
+    const team = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'client-send', requestId: 'chat-only-team', name: 'Chat only', primaryRoleKey: 'main' });
+    const session = await createSession(config.socketPath, team.teamId, 'main', 'chat-only-session');
+    const input = { clientId: 'client-send', sessionId: session.sessionId, prompt: 'Keep this original', sessionDeadlineSec: 600 };
+    const sent = await rpc<SessionSnapshot>(config.socketPath, 'session.send', { ...input, requestId: 'chat-default' });
+    assert.equal(fake.submissionRequests[0]!.surface, 'chat');
+    assert.equal((await rpc<SessionSnapshot>(config.socketPath, 'session.send', { ...input, requestId: 'chat-default' })).generation, sent.generation);
+    const count = fake.submissionRequests.length;
+    await assert.rejects(rpc(config.socketPath, 'session.send', { ...input, requestId: 'work-schema', surface: 'work' }),
+      (error: unknown) => error instanceof RpcClientError);
+    await assert.rejects(service.submissionService.send({ ...input, requestId: 'legacy-work', surface: 'Work' }), /Chat surface only/);
+    assert.equal(fake.submissionRequests.length, count);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).generation, sent.generation);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('restart retains request-bound dispatch proof and recovers late duplicate ACK without another submit', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-durable-dispatch-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });

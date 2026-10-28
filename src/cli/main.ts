@@ -1370,7 +1370,7 @@ Team and role sessions:
   sessplane session create TEAM_ID ROLE_KEY [--provider chatgpt|gemini|grok]
   sessplane session show SESSION_ID
   sessplane session events TEAM_ID [--after-sequence N]
-  sessplane send TEAM_ID ROLE_KEY (--prompt TEXT | --prompt-file PATH | --prompt-stdin) [--model MODEL] [--effort LEVEL] [--surface NAME] [--file PATH ...]
+  sessplane send TEAM_ID ROLE_KEY (--prompt TEXT | --prompt-file PATH | --prompt-stdin) [--model MODEL] [--effort LEVEL] [--surface chat] [--file PATH ...]
   sessplane send --session SESSION_ID (--prompt TEXT | --prompt-file PATH | --prompt-stdin)
   sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID
   sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]

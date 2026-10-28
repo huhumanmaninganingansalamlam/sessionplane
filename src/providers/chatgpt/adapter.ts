@@ -81,6 +81,8 @@ export class ChatGptAdapter implements ProviderAdapter {
   }
 
   async openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission> {
+    if (request.surface != null && !['chat', 'normal'].includes(request.surface.trim().toLowerCase()))
+      throw new ProviderSubmissionError('capability.unsupported', 'Chat is the only supported surface; no page was opened');
     let createdPage: Page | null = null;
     try {
       let pageKey = request.session.pageKey;

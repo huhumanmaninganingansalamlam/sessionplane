@@ -11,6 +11,61 @@ import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import type { ConfigurationCatalog } from '../../src/providers/chatgpt/configuration-catalog.ts';
 import { ChatGptConfigurationMenu } from '../../src/providers/chatgpt/configuration-catalog.ts';
 
+test('Chat-only preparation never advertises or activates Work through catalog or raw choices', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chat-only-choices-'));
+  const service = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const owner = service.browserOwner!;
+  const createPage = owner.createPage.bind(owner);
+  owner.createPage = async (...args) => {
+    const created = await createPage(...args);
+    await created.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: fixture
+      .replace('<button type="button" role="radio" aria-checked="true">Chat</button>', '<div role="radiogroup"><button type="button" role="radio" aria-checked="true">Chat</button><button type="button" id="work-mode" role="radio" aria-checked="false" onclick="window.workActivations++">Work</button></div>')
+      .replace('<div role="menuitemradio" tabindex="0" aria-checked="false" aria-disabled="true">Unavailable-7</div>', '$&<div role="menuitemradio" tabindex="0" aria-checked="false">Work</div>')
+      .replace('<script>', '<script>window.workActivations=0;document.addEventListener("click",e=>{if(e.target.closest("[role=menuitemradio]")?.textContent==="Work")window.workActivations++},true);') }));
+    return created;
+  };
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: `sessionplane_${name}`,
+    arguments: args, socketPath: service.config.socketPath, timeoutMs: 30_000, maxLineBytes: service.config.rpcMaxLineBytes });
+  try {
+    const team = (await invoke('team_create', { requestId: 'chat-team' })).structuredContent;
+    const pending = (await invoke('send', { teamId: team.teamId, roleRef: (team.roles as any[])[0].roleRef,
+      requestId: 'chat-prepared', prompt: 'Preserve this request', model: 'Aurora-9', effort: 'Balanced' })).structuredContent;
+    const identity = { teamId: team.teamId, requestRef: pending.requestRef };
+    const current = (await invoke('team_get', { ...identity, view: 'evidence' })).structuredContent.request as any;
+    assert.equal(current.evidence.observedSurface.mode, 'chat');
+    assert.ok(current.configurationCatalog.options.length > 0);
+    assert.ok(current.configurationCatalog.options.every((o: any) => !/^work$/i.test(o.version) && !/^work$/i.test(o.label)));
+    const work = current.evidence.nodes.find((n: any) => n.name === 'Work');
+    assert.ok(work);
+    assert.deepEqual(work.actions, { choose: [], reveal: [] });
+    for (const decision of ['choose', 'reveal']) {
+      const rejected = await invoke('decide', { ...identity, requestId: `raw-work-${decision}`, decision,
+        purpose: 'model', snapshotId: current.evidence.snapshotId, ref: work.ref });
+      assert.equal(rejected.isError, true);
+      assert.equal(rejected.structuredContent.errorCode, 'capability.unsupported');
+    }
+    const page = service.pageRegistry.pageForObservation(current.pageKey);
+    const menu = new ChatGptConfigurationMenu(page, current.pageKey);
+    await assert.rejects(menu.select({ id: 'legacy-work', label: 'Work', version: 'Work', power: null }), /Only model and effort/);
+    assert.equal(await page.evaluate(() => (window as any).workActivations), 0);
+    await page.evaluate(() => {
+      document.querySelector('[role="radio"]')!.setAttribute('aria-checked', 'false');
+      document.querySelector('#work-mode')!.setAttribute('aria-checked', 'true');
+    });
+    const blocked = (await invoke('team_get', { ...identity, view: 'evidence' })).structuredContent.request as any;
+    assert.equal(blocked.evidence.observedSurface.mode, 'work');
+    assert.equal(blocked.configurationCatalog, null);
+    assert.ok(blocked.evidence.nodes.every((n: any) => n.actions.choose.length === 0 && n.actions.reveal.length === 0));
+    assert.equal(blocked.promptSubmitted, false);
+    const draft = await page.locator('textarea').inputValue();
+    await assert.rejects(menu.discover(), /observation-only/);
+    assert.equal(await page.locator('textarea').inputValue(), draft);
+    assert.equal(await page.evaluate(() => (window as any).workActivations), 0);
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 const fixture = `<!doctype html><html><body><main><button type="button" role="radio" aria-checked="true">Chat</button><form>
   <button type="button" id="chooser" aria-label="ChatGPT model selection" aria-haspopup="menu" aria-expanded="false" aria-controls="configuration" hidden>Aurora-9 / Balanced</button>
   <textarea aria-label="Prompt">Untouched draft</textarea><button type="submit">Send</button>

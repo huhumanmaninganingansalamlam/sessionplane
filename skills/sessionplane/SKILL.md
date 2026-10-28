@@ -211,7 +211,12 @@ out prompts, infer consensus, or inject answers into other roles.
   neither an identity prompt nor user confirmation.
   Preserve requested model/mode through cancellation and replacement. Honor exact
   versions; do not substitute or infer Pro from an account badge or High effort.
-  Use Chat only, never Work. Do not bypass access controls.
+  Chat is the only supported mode and the default. Work controls are not configuration
+  choices; legacy Work activation is rejected. Only fresh selected Chat evidence permits
+  configuration/submission; inherited composer-state false and model labels do not prove Chat.
+  Normal unsubmitted preparation may materialize the owned successor UI for that read.
+  Preserve wrong-mode work and use the authorized same-role replacement; never replay it.
+  Do not bypass access controls.
 - `submission_unknown` means acknowledgement is ambiguous. Use team_get with the
   same requestRef and view:evidence for read-only recovery; never automatically resend it.
   If `evidence.submissionCandidates` contains the matching submitted message,

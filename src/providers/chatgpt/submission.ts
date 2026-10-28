@@ -242,10 +242,6 @@ export class ChatGptSubmission implements ProviderSubmission {
   }
 
   async prepare(choices?: PreparationChoices): Promise<void> {
-    this.#checkpoint('page-ready');
-    await this.prepareForObservation();
-    await assertChatOnlySurface(this.#page);
-    this.#checkpoint('composer-resolve');
     const surface = normalizeLabel(this.#request.surface ?? '');
     if (surface === 'work') {
       throw new ProviderSubmissionError(
@@ -256,6 +252,10 @@ export class ChatGptSubmission implements ProviderSubmission {
     if (surface !== '' && surface !== 'chat' && surface !== 'normal') {
       throw new ProviderSubmissionError('capability.unsupported', 'Named-mode automatic selection is not supported');
     }
+    this.#checkpoint('page-ready');
+    await this.prepareForObservation();
+    await assertChatOnlySurface(this.#page);
+    this.#checkpoint('composer-resolve');
     if (choices?.composer === undefined) {
       throw new ProviderSubmissionError('provider.preparation-required', 'Choose the composer on this exact owned page to replace any provider-restored draft with this request prompt; select the requested configuration from configurationCatalog before submitting');
     }
