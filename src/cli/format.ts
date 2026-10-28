@@ -66,7 +66,7 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
 function recoveryAdvice(code: string): string {
   if (code === 'session.submission-unknown') return 'Delivery is unconfirmed. Inspect the same request; do not send it again.';
   if (code.startsWith('core.')) return 'Check sessplane health. Recover the same request after service recovery; do not resend.';
-  if (code === 'provider.preparation-required') return 'The request is not sent. Use request show to inspect its preparation choices.';
+  if (code === 'provider.preparation-required') return 'The requested action needs preparation. Inspect the same request for its current state and recovery choices; do not resend.';
   if (code === 'provider.unavailable') return 'Provider access failed. Keep the request and respect Retry-After before another observation.';
   return 'Inspect the same request before retrying. Use --json for diagnostic details.';
 }
