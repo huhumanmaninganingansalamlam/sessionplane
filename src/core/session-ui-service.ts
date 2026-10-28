@@ -463,7 +463,7 @@ export class SessionUiService {
         anchor, click: false, preserveContinuationDraft: unknown };
       let surface = await page.evaluate(streamRetrySurface, target);
       if (!surface.present) return null;
-      const verify = async (allowOffscreen = false) => {
+      const verify = async (allowPreparation = false) => {
         this.#requirePage(session);
         const dom = await observeChatGptDom(page, { submittedUserMessageId: anchor, submittedUserTurnId: null });
         const activity = await observeChatGptActivity(page, dom);
@@ -471,7 +471,7 @@ export class SessionUiService {
         // A weak generic label (including the Thinking model menu) is not a live stream.
         if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate?.terminalMarker || dom.candidate?.streamingMarker ||
             activity.strength === 'strong' || activity.strength === 'unknown' ||
-            (surface.reason !== 'exact-stream-retry' && !(allowOffscreen && surface.reason === 'retry-offscreen'))) throw new SessionPlaneDomainError('provider.preparation-required',
+            (surface.reason !== 'exact-stream-retry' && !(allowPreparation && ['retry-offscreen', 'output-popover-open'].includes(surface.reason)))) throw new SessionPlaneDomainError('provider.preparation-required',
           `Preserve the original turn before stream Retry: ${surface.reason}`, {
             anchorPresent: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
             responseCandidatePresent: dom.candidate !== null, observedUserMessageId: anchor, responseCandidate: dom.candidate,
@@ -488,8 +488,25 @@ export class SessionUiService {
         'Stream Retry was already attempted for this request; inspect its result without repeating the click');
       const receipt = { clientId: input.clientId, requestId, method: 'session.stream-retry',
         requestHash: createHash('sha256').update(JSON.stringify(target)).digest('hex') };
+      const outputPopoverDismissed = surface.reason === 'output-popover-open';
+      const preparationReceipt = { ...receipt, requestId: `stream-retry-popover:${session.sessionId}:${session.generation}`, method: 'session.stream-retry-popover' };
+      if (outputPopoverDismissed && receipts.get(input.clientId, preparationReceipt.requestId) !== null)
+        throw new SessionPlaneDomainError('provider.action-unknown',
+          'Output popover dismissal was already attempted; inspect its result without repeating the toggle');
       if (!budgets.reserveRefresh(new Date().toISOString(), 60_000, session.conversationId))
         throw new SessionPlaneDomainError('provider.preparation-required', 'Stream Retry is paced by the existing provider/UI cooldown; preserve this request');
+      if (outputPopoverDismissed) {
+        receipts.record({ ...preparationReceipt, status: 'attempted', result: { decisionId: input.decisionId, anchor: target.anchor } });
+        this.#requirePage(session);
+        const preparation = await page.evaluate(streamRetrySurface, { ...target, dismissOutputPopover: true, expiresAt: Date.now() + 5_000 });
+        receipts.record({ ...preparationReceipt, status: 'complete', result: preparation });
+        if (preparation.reason !== 'output-popover-toggle-dispatched') throw new SessionPlaneDomainError('provider.preparation-required',
+          `Output popover was not dismissed: ${preparation.reason}`, { retrySurface: preparation });
+        surface = await page.evaluate(streamRetrySurface, target);
+        await verify(true);
+        if (surface.reason === 'output-popover-open') throw new SessionPlaneDomainError('provider.preparation-required',
+          'Output popover remains open after its one toggle; preserve the original request', { retrySurface: surface });
+      }
       const viewportPrepared = surface.reason === 'retry-offscreen';
       if (viewportPrepared) {
         const preparation = await page.evaluate(streamRetrySurface, { ...target, prepareViewport: true, expiresAt: Date.now() + 5_000 });
@@ -501,10 +518,10 @@ export class SessionUiService {
       receipts.record({ ...receipt, status: 'attempted', result: { decisionId: input.decisionId, anchor: target.anchor } });
       this.#requirePage(session);
       const retried = await page.evaluate(streamRetrySurface, { ...target, click: true, expiresAt: Date.now() + 5_000 });
-      receipts.record({ ...receipt, status: 'complete', result: { ...retried, viewportPrepared, anchor: target.anchor } });
+      receipts.record({ ...receipt, status: 'complete', result: { ...retried, viewportPrepared, outputPopoverDismissed, anchor: target.anchor } });
       if (!retried.clicked) throw new SessionPlaneDomainError('provider.preparation-required',
         `Stream Retry was not dispatched: ${retried.reason}`);
-      return { ...retried, viewportPrepared, observedUserMessageId: target.anchor,
+      return { ...retried, viewportPrepared, outputPopoverDismissed, observedUserMessageId: target.anchor,
         ...(unknown ? {} : { submittedUserMessageId: target.anchor }),
         requestAcknowledgementVerified: !unknown, generation: session.generation };
     });
