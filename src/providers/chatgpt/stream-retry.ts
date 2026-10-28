@@ -2,7 +2,7 @@
 export function streamRetrySurface(input: { origin: string; conversationId: string; anchor: string; click: boolean; preserveContinuationDraft?: boolean; prepareViewport?: boolean; dismissOutputPopover?: boolean; expiresAt?: number }) {
   let outputPopover: { dialogId: string; ariaModal: string | null; state: string | null;
     controls: { label: string; expanded: string | null; description: string }[];
-    triggers: { label: string; expanded: string | null; hasPopup: string | null }[]; eligible: boolean;
+    triggers: { label: string; expanded: string | null; hasPopup: string | null }[]; eligible: boolean; inactive: boolean;
     rendering: ReturnType<typeof rendering> } | undefined;
   const result = (present: boolean, reason: string, clicked = false, geometry?: {
     buttonBox: { x: number; y: number; width: number; height: number };
@@ -96,20 +96,27 @@ export function streamRetrySurface(input: { origin: string; conversationId: stri
       trigger !== null && trigger.type === 'button' && trigger.getAttribute('aria-haspopup') === 'dialog' &&
       trigger.getAttribute('aria-expanded') === 'true' && !trigger.disabled && trigger.getAttribute('aria-disabled') !== 'true' &&
       trigger.closest('[inert],[aria-hidden=true]') === null && hit !== null && hit !== undefined && trigger.contains(hit);
+    const closed = documentOnly && [null, 'false'].includes(dialog.getAttribute('aria-modal')) &&
+      dialog.getAttribute('data-state') === 'closed' && triggers.length === 0;
+    // The provider retains this exact document panel after closing it. CSS
+    // visibility alone does not distinguish its inert, accessibility-hidden state.
+    // Other dialogs remain blockers; the actual Retry hit test still runs below.
+    const inactive = closed && dialog.hasAttribute('inert') && dialog.getAttribute('aria-hidden') === 'true';
     // Bounded structural evidence only: no document body, draft, handlers or credentials.
     outputPopover = { dialogId: dialog.id, ariaModal: dialog.getAttribute('aria-modal'), state: dialog.getAttribute('data-state'),
       controls: controls.slice(0, 20).map(e => ({ label: label(e).slice(0, 160), expanded: e.getAttribute('aria-expanded'), description: description(e).slice(0, 80) })),
       triggers: triggers.slice(0, 4).map(e => ({ label: label(e).slice(0, 80), expanded: e.getAttribute('aria-expanded'), hasPopup: e.getAttribute('aria-haspopup') })),
-      eligible, rendering: rendering(dialog, buttons[0]!) };
-    if (documentOnly && [null, 'false'].includes(outputPopover.ariaModal) && outputPopover.state === 'closed' && triggers.length === 0)
-      return result(true, 'output-popover-closing'); // Wait for invisibility; never click or ignore a visible closing dialog.
-    if (!eligible) return result(true, 'other-provider-control');
-    if (!input.dismissOutputPopover) return result(true, 'output-popover-open');
-    if (input.expiresAt === undefined || Date.now() > input.expiresAt) return result(true, 'popover-lease-expired');
-    if (document.getSelection()?.isCollapsed === false) return result(true, 'preserve-selection');
-    trigger!.click();
-    // Dispatch is not proof of dismissal. The caller must verify the entire surface again.
-    return result(true, 'output-popover-toggle-dispatched');
+      eligible, inactive, rendering: rendering(dialog, buttons[0]!) };
+    if (!inactive) {
+      if (closed) return result(true, 'output-popover-closing');
+      if (!eligible) return result(true, 'other-provider-control');
+      if (!input.dismissOutputPopover) return result(true, 'output-popover-open');
+      if (input.expiresAt === undefined || Date.now() > input.expiresAt) return result(true, 'popover-lease-expired');
+      if (document.getSelection()?.isCollapsed === false) return result(true, 'preserve-selection');
+      trigger!.click();
+      // Dispatch is not proof of dismissal. The caller must verify the entire surface again.
+      return result(true, 'output-popover-toggle-dispatched');
+    }
   }
   const button = buttons[0]!, box = button.getBoundingClientRect();
   const x = box.x + box.width / 2, y = box.y + box.height / 2;

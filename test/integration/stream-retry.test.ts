@@ -196,6 +196,91 @@ test('owned Retry evidence distinguishes a retained closed shell from CSS invisi
   } finally { await f.close(); }
 });
 
+// Current original-page evidence: a painted 300x86 closed document panel, no
+// animation or linked trigger, aria-hidden+inert, and an unobscured Retry.
+const inactiveOutputPopover = outputPopover.replace('aria-controls="output-list"', '')
+  .replace('data-state="open"', 'data-state="closed" aria-hidden="true" inert style="position:fixed;left:860px;top:60px;width:300px;height:86px"');
+
+test('a persistently rendered inert document-output panel permits exactly one original Retry without another toggle', async () => {
+  const f = await fixture();
+  try {
+    await f.page.setViewportSize({ width: 1168, height: 811 });
+    await f.page.setContent(f.markup + inactiveOutputPopover);
+    const before = f.core.database.raw.prepare('SELECT * FROM outbox').all();
+    const result = await f.decide();
+    assert.equal(result.isError, false, JSON.stringify(result));
+    const retry = result.structuredContent.providerRetry as any;
+    assert.equal(retry.outputPopover.inactive, true);
+    assert.equal(retry.outputPopover.rendering.checkVisibility, true, 'the retained panel remains painted');
+    assert.equal(retry.outputPopover.rendering.chain[0].box.width, 300);
+    assert.equal(retry.outputPopover.rendering.chain[0].box.height, 86);
+    assert.deepEqual(retry.outputPopover.rendering.chain[0].animations, []);
+    assert.equal(retry.outputPopoverDismissed, false);
+    assert.equal(retry.outputPopoverSettled, true);
+    assert.equal(retry.clicked, true);
+    assert.equal(await f.page.evaluate(() => (window as any).dismissals ?? 0), 0);
+    assert.equal(await f.page.evaluate(() => (window as any).clicks), 1);
+    assert.equal((await f.decide()).structuredContent.errorCode, 'provider.action-unknown');
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(result.structuredContent.submittedUserMessageId, f.snapshot.submittedUserMessageId);
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM outbox').all(), before);
+  } finally { await f.close(); }
+});
+
+test('document-output settlement accepts the actual closed inert transition without waiting for CSS removal', async () => {
+  const f = await fixture();
+  try {
+    await f.page.setContent(f.markup + outputPopover);
+    await f.page.locator('header button').evaluate(button => {
+      (button as HTMLButtonElement).onclick = () => {
+        (window as any).dismissals = ((window as any).dismissals ?? 0) + 1;
+        button.removeAttribute('aria-controls'); button.setAttribute('aria-expanded', 'false');
+        const dialog = document.querySelector('#output-list')!;
+        dialog.setAttribute('data-state', 'closed'); dialog.setAttribute('inert', ''); dialog.setAttribute('aria-hidden', 'true');
+      };
+    });
+    const result = await f.decide();
+    assert.equal(result.isError, false, JSON.stringify(result));
+    const retry = result.structuredContent.providerRetry as any;
+    assert.equal(retry.outputPopover.inactive, true);
+    assert.equal(retry.outputPopover.rendering.checkVisibility, true);
+    assert.equal(retry.outputPopoverDismissed, true);
+    assert.equal(retry.outputPopoverSettled, true);
+    assert.equal(await f.page.evaluate(() => (window as any).dismissals), 1);
+    assert.equal(await f.page.evaluate(() => (window as any).clicks), 1);
+    assert.equal(f.fake.submitCount, 1);
+  } finally { await f.close(); }
+});
+
+test('inactive-output classification keeps incomplete state, modal, permission, identity, draft and hit-test guards', async () => {
+  const f = await fixture();
+  try {
+    for (const [popup, reason] of [
+      [inactiveOutputPopover.replace(' inert ', ' '), 'output-popover-closing'],
+      [inactiveOutputPopover.replace('aria-hidden="true"', ''), 'output-popover-closing'],
+      [inactiveOutputPopover.replace('data-state="closed"', 'data-state="open"'), 'other-provider-control'],
+      [inactiveOutputPopover.replace('role="dialog"', 'role="dialog" aria-modal="true"'), 'other-provider-control'],
+      [inactiveOutputPopover.replace('<button aria-expanded="true">출력</button>', '<button aria-expanded="true">출력</button><p>Approve execution</p>'), 'other-provider-control'],
+      [inactiveOutputPopover + '<div role="dialog">Process Start <button>Allow</button></div>', 'other-provider-control'],
+      [inactiveOutputPopover + '<div data-message-author-role="user" data-message-id="later">Later work</div>', 'original-anchor-not-latest'],
+      [inactiveOutputPopover + '<input value="Human draft">', 'preserve-draft'],
+      [inactiveOutputPopover + '<div style="position:fixed;inset:0;z-index:9999"></div>', 'retry-obscured'],
+    ]) {
+      await f.page.setContent(f.markup + popup);
+      const read = await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view: 'evidence' });
+      const verification = (read.structuredContent.request as any).evidence.submissionVerification;
+      // Later-user evidence intentionally withholds the original Retry surface.
+      if (reason === 'original-anchor-not-latest') assert.equal(verification.streamRetry, null);
+      else assert.equal(verification.streamRetry.reason, reason);
+      assert.equal(await f.page.evaluate(() => (window as any).dismissals ?? 0), 0);
+      assert.equal(await f.page.evaluate(() => (window as any).clicks ?? 0), 0);
+    }
+    assert.equal((await f.decide()).structuredContent.errorCode, 'provider.preparation-required');
+    assert.equal(f.core.database.raw.prepare("SELECT count(*) AS n FROM request_receipts WHERE method LIKE 'session.stream-retry%'").get()!.n, 0);
+    assert.equal(f.fake.submitCount, 1);
+  } finally { await f.close(); }
+});
+
 test('normal Retry dismisses only a linked document-output popover, then collects the original ACK without resubmission', async () => {
   const f = await fixture('Hmm...something seems to have gone wrong.');
   try {
