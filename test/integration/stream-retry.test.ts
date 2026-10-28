@@ -177,6 +177,16 @@ test('normal Retry dismisses only a linked document-output popover, then collect
     assert.equal(evidence.evidence.submissionVerification.streamRetry.reason, 'output-popover-open', JSON.stringify(evidence.evidence.submissionVerification.streamRetry));
     assert.equal(evidence.evidence.submissionVerification.streamRetry.outputPopover.eligible, true);
     assert.equal(await f.page.evaluate(() => (window as any).dismissals ?? 0), 0, 'inspection must not dismiss');
+    // The provider retains its closed dialog during the exit animation and
+    // removes aria-controls immediately. Closing is not yet invisibility.
+    await f.page.locator('header button').evaluate(button => {
+      (button as HTMLButtonElement).onclick = () => {
+        (window as any).dismissals = ((window as any).dismissals ?? 0) + 1;
+        button.setAttribute('aria-expanded', 'false'); button.removeAttribute('aria-controls');
+        document.querySelector('#output-list')!.setAttribute('data-state', 'closed');
+        setTimeout(() => document.querySelector('#output-list')!.remove(), 500);
+      };
+    });
     await f.page.exposeFunction('retryCompleted', () => {
       f.fake.emitObservation(f.snapshot.sessionId, { activity: 'none', candidate: {
         responseMessageId: 'output-recovered', answerText: 'Original result', terminalMarker: true, streamingMarker: false } });
@@ -230,6 +240,26 @@ test('output-popover recovery preserves modal, permission, auth, identity, draft
   } finally { await f.close(); }
 });
 
+test('an already-closing output popover settles without another toggle before the original Retry', async () => {
+  const f = await fixture();
+  try {
+    await f.page.setContent(f.markup + outputPopover.replace('aria-controls="output-list"', '')
+      .replace('aria-expanded="true" aria-controls', 'aria-expanded="false" aria-controls').replace('data-state="open"', 'data-state="closed"'));
+    await f.page.locator('header button').evaluate(button => button.setAttribute('aria-expanded', 'false'));
+    await f.page.evaluate(() => setTimeout(() => document.querySelector('#output-list')!.remove(), 500));
+    const result = await f.decide();
+    assert.equal(result.isError, false, JSON.stringify(result));
+    const retry = result.structuredContent.providerRetry as any;
+    assert.equal(retry.clicked, true);
+    assert.equal(retry.outputPopoverDismissed, false);
+    assert.equal(retry.outputPopoverSettled, true);
+    assert.equal(await f.page.evaluate(() => (window as any).dismissals ?? 0), 0);
+    assert.equal(await f.page.evaluate(() => (window as any).clicks), 1);
+    assert.equal(result.structuredContent.submittedUserMessageId, f.snapshot.submittedUserMessageId);
+    assert.equal(f.fake.submitCount, 1);
+  } finally { await f.close(); }
+});
+
 for (const change of ['new-draft', 'still-open']) {
 test(`popover preparation freshly rechecks work and never repeats its toggle (${change})`, async () => {
   const f = await fixture();
@@ -243,6 +273,7 @@ test(`popover preparation freshly rechecks work and never repeats its toggle (${
     }, change);
     const result = await f.decide();
     assert.equal(result.structuredContent.errorCode, 'provider.preparation-required');
+    assert.equal((result.structuredContent.details as any).outputPopoverToggleDispatched, true);
     assert.equal(await f.page.locator('textarea').inputValue(), change === 'new-draft' ? 'New draft during dismissal' : '');
     assert.equal(await f.page.evaluate(() => (window as any).clicks ?? 0), 0);
     assert.equal(f.core.database.raw.prepare("SELECT count(*) AS n FROM request_receipts WHERE method='session.stream-retry'").get()!.n, 0);

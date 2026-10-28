@@ -463,6 +463,7 @@ export class SessionUiService {
         anchor, click: false, preserveContinuationDraft: unknown };
       let surface = await page.evaluate(streamRetrySurface, target);
       if (!surface.present) return null;
+      let outputPopoverToggleDispatched = false;
       const verify = async (allowPreparation = false) => {
         this.#requirePage(session);
         const dom = await observeChatGptDom(page, { submittedUserMessageId: anchor, submittedUserTurnId: null });
@@ -471,12 +472,12 @@ export class SessionUiService {
         // A weak generic label (including the Thinking model menu) is not a live stream.
         if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate?.terminalMarker || dom.candidate?.streamingMarker ||
             activity.strength === 'strong' || activity.strength === 'unknown' ||
-            (surface.reason !== 'exact-stream-retry' && !(allowPreparation && ['retry-offscreen', 'output-popover-open'].includes(surface.reason)))) throw new SessionPlaneDomainError('provider.preparation-required',
+            (surface.reason !== 'exact-stream-retry' && !(allowPreparation && ['retry-offscreen', 'output-popover-open', 'output-popover-closing'].includes(surface.reason)))) throw new SessionPlaneDomainError('provider.preparation-required',
           `Preserve the original turn before stream Retry: ${surface.reason}`, {
             anchorPresent: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
             responseCandidatePresent: dom.candidate !== null, observedUserMessageId: anchor, responseCandidate: dom.candidate,
             activity: activity.strength, activityReason: activity.reason,
-            retrySurface: surface,
+            retrySurface: surface, outputPopoverToggleDispatched,
           });
         await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
         this.#requirePage(session);
@@ -489,6 +490,7 @@ export class SessionUiService {
       const receipt = { clientId: input.clientId, requestId, method: 'session.stream-retry',
         requestHash: createHash('sha256').update(JSON.stringify(target)).digest('hex') };
       const outputPopoverDismissed = surface.reason === 'output-popover-open';
+      const outputPopoverSettled = outputPopoverDismissed || surface.reason === 'output-popover-closing';
       const preparationReceipt = { ...receipt, requestId: `stream-retry-popover:${session.sessionId}:${session.generation}`, method: 'session.stream-retry-popover' };
       if (outputPopoverDismissed && receipts.get(input.clientId, preparationReceipt.requestId) !== null)
         throw new SessionPlaneDomainError('provider.action-unknown',
@@ -499,12 +501,29 @@ export class SessionUiService {
         receipts.record({ ...preparationReceipt, status: 'attempted', result: { decisionId: input.decisionId, anchor: target.anchor } });
         this.#requirePage(session);
         const preparation = await page.evaluate(streamRetrySurface, { ...target, dismissOutputPopover: true, expiresAt: Date.now() + 5_000 });
-        receipts.record({ ...preparationReceipt, status: 'complete', result: preparation });
-        if (preparation.reason !== 'output-popover-toggle-dispatched') throw new SessionPlaneDomainError('provider.preparation-required',
+        outputPopoverToggleDispatched = preparation.reason === 'output-popover-toggle-dispatched';
+        receipts.record({ ...preparationReceipt, status: 'complete', result: { ...preparation, outputPopoverToggleDispatched } });
+        if (!outputPopoverToggleDispatched) throw new SessionPlaneDomainError('provider.preparation-required',
           `Output popover was not dismissed: ${preparation.reason}`, { retrySurface: preparation });
+      }
+      if (outputPopoverSettled) {
+        // Radix retains closed popovers during their exit animation. Await actual
+        // invisibility, including an earlier recorded toggle, without another gesture.
+        try {
+          const hidden = await page.waitForFunction(id => {
+            const dialog = document.getElementById(id);
+            return !dialog || !dialog.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+          }, surface.outputPopover!.dialogId, { timeout: 5_000, polling: 50 });
+          await hidden.dispose();
+        } catch (error) {
+          if (!(error instanceof errors.TimeoutError)) throw error;
+          throw new SessionPlaneDomainError('provider.preparation-required',
+            'Output popover is still visible after dismissal; preserve the original request',
+            { outputPopoverToggleDispatched, retryClicked: false, dialogId: surface.outputPopover!.dialogId });
+        }
         surface = await page.evaluate(streamRetrySurface, target);
         await verify(true);
-        if (surface.reason === 'output-popover-open') throw new SessionPlaneDomainError('provider.preparation-required',
+        if (['output-popover-open', 'output-popover-closing'].includes(surface.reason)) throw new SessionPlaneDomainError('provider.preparation-required',
           'Output popover remains open after its one toggle; preserve the original request', { retrySurface: surface });
       }
       const viewportPrepared = surface.reason === 'retry-offscreen';
@@ -518,10 +537,10 @@ export class SessionUiService {
       receipts.record({ ...receipt, status: 'attempted', result: { decisionId: input.decisionId, anchor: target.anchor } });
       this.#requirePage(session);
       const retried = await page.evaluate(streamRetrySurface, { ...target, click: true, expiresAt: Date.now() + 5_000 });
-      receipts.record({ ...receipt, status: 'complete', result: { ...retried, viewportPrepared, outputPopoverDismissed, anchor: target.anchor } });
+      receipts.record({ ...receipt, status: 'complete', result: { ...retried, viewportPrepared, outputPopoverDismissed, outputPopoverSettled, anchor: target.anchor } });
       if (!retried.clicked) throw new SessionPlaneDomainError('provider.preparation-required',
         `Stream Retry was not dispatched: ${retried.reason}`);
-      return { ...retried, viewportPrepared, outputPopoverDismissed, observedUserMessageId: target.anchor,
+      return { ...retried, viewportPrepared, outputPopoverDismissed, outputPopoverSettled, observedUserMessageId: target.anchor,
         ...(unknown ? {} : { submittedUserMessageId: target.anchor }),
         requestAcknowledgementVerified: !unknown, generation: session.generation };
     });
