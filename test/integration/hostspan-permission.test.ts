@@ -15,6 +15,61 @@ import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { callRpc } from '../../src/cli/client.ts';
 import { controlHostSpanPermission, inspectHostSpanActivity, revealHostSpanActivity } from '../../src/providers/chatgpt/hostspan-permission.ts';
 
+test('owned permission inspection records redacted modal structure before close without granting or reading form values', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-permission-details-'));
+  const core = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    providerAdapters: [new FakeProviderAdapter()], logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main></main>' }));
+    await page.goto('https://chatgpt.com/c/details-fixture');
+    for (const variant of ['label-only', 'rendered-json', 'value-only', 'hidden-json', 'changed-ack']) {
+      await page.setContent(`<main>
+        <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+        <section><div role="alert">hostspan-desktop Process Start
+          <button onclick="document.querySelector('#details').hidden=false;${variant === 'changed-ack'
+            ? "document.querySelector('[data-message-id]').setAttribute('data-message-id','later-ack')" : ''}">View details</button></div>
+          <button onclick="window.grants++">Allow once</button></section>
+        <section role="dialog" id="details" hidden><h2>Details</h2>
+          <p>ChatGPT가 hostspan-desktop의 Process Start 도구를 호출합니다.</p>
+          ${variant === 'rendered-json' ? '<pre><code>{"argv":["private-command"],"password":"private-secret"}</code></pre>' : ''}
+          ${variant === 'value-only' ? '<input value="private-secret"><textarea>private-draft</textarea>' : ''}
+          ${variant === 'hidden-json' ? '<pre hidden>{"argv":["private-hidden-command"]}</pre>' : ''}
+          <button aria-label="Close dialog" onclick="window.closes++;this.closest('[role=dialog]').hidden=true">Close dialog</button>
+        </section><textarea id="prompt-textarea">Preserved consumer draft</textarea>
+        <script>window.grants=0;window.closes=0</script></main>`);
+      const inspect = () => controlHostSpanPermission(page, {
+        action: 'inspect', appName: 'hostspan-desktop', toolName: 'Process Start',
+      }, 'current-ack');
+      if (variant === 'changed-ack') {
+        await assert.rejects(inspect, /ACK or details dialog changed/);
+        assert.equal(await page.evaluate(() => (window as any).closes), 0);
+      } else {
+        const result = await inspect();
+        assert.equal(result.outcome, 'inspected');
+        assert.ok('detailsInspection' in result);
+        assert.equal(result.detailsInspection.length, 1);
+        const diagnostic = result.detailsInspection[0]!;
+        assert.equal(diagnostic.submittedUserMessageId, 'current-ack');
+        assert.equal(diagnostic.beforeClose, true);
+        assert.equal(diagnostic.argumentValuesIncluded, false);
+        assert.equal(diagnostic.formValuesRead, false);
+        assert.equal(diagnostic.structureTruncated, false);
+        assert.doesNotMatch(JSON.stringify(diagnostic), /private-|Preserved consumer draft/);
+        assert.equal(diagnostic.argumentMarkersPresent, variant === 'rendered-json');
+        assert.equal(diagnostic.renderedElements.code, variant === 'rendered-json' ? 1 : 0);
+        assert.equal(diagnostic.renderedElements.input, variant === 'value-only' ? 1 : 0);
+        assert.equal(diagnostic.renderedElements.textarea, variant === 'value-only' ? 1 : 0);
+        if (variant === 'label-only' || variant === 'hidden-json') assert.equal(diagnostic.additionalTextCharacters, 0);
+        assert.equal(await page.evaluate(() => (window as any).closes), 1);
+        assert.equal(await page.locator('#details').isVisible(), false);
+      }
+      assert.equal(await page.locator('#prompt-textarea').inputValue(), 'Preserved consumer draft');
+      assert.equal(await page.evaluate(() => (window as any).grants), 0);
+    }
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('a buttonless current provider alert blocks continuation without fabricating a user action', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-alert-blocker-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
