@@ -79,6 +79,8 @@ export function streamRetrySurface(input: { origin: string; conversationId: stri
     outputPopover = { dialogId: dialog.id, ariaModal: dialog.getAttribute('aria-modal'), state: dialog.getAttribute('data-state'),
       controls: controls.slice(0, 20).map(e => ({ label: label(e).slice(0, 160), expanded: e.getAttribute('aria-expanded'), description: description(e).slice(0, 80) })),
       triggers: triggers.slice(0, 4).map(e => ({ label: label(e).slice(0, 80), expanded: e.getAttribute('aria-expanded'), hasPopup: e.getAttribute('aria-haspopup') })), eligible };
+    if (documentOnly && [null, 'false'].includes(outputPopover.ariaModal) && outputPopover.state === 'closed' && triggers.length === 0)
+      return result(true, 'output-popover-closing'); // Wait for invisibility; never click or ignore a visible closing dialog.
     if (!eligible) return result(true, 'other-provider-control');
     if (!input.dismissOutputPopover) return result(true, 'output-popover-open');
     if (input.expiresAt === undefined || Date.now() > input.expiresAt) return result(true, 'popover-lease-expired');
