@@ -7,6 +7,7 @@ import { providerArtifactsMigration } from './0004-provider-artifacts.ts';
 import { teamOwnerIndexMigration } from './0005-team-owner-index.ts';
 import { pageTargetIdentityMigration } from './0006-page-target-identity.ts';
 import { conversationLoadRecoveryMigration } from './0007-conversation-load-recovery.ts';
+import { generationEventIndexMigration } from './0008-generation-event-index.ts';
 
 export interface Migration {
   readonly version: number;
@@ -22,6 +23,7 @@ export const migrations: readonly Migration[] = [
   teamOwnerIndexMigration,
   pageTargetIdentityMigration,
   conversationLoadRecoveryMigration,
+  generationEventIndexMigration,
 ];
 
 export function runMigrations(database: DatabaseSync, now: () => Date = () => new Date()): number {
