@@ -592,6 +592,36 @@ test('existing-thread composer selection is observable without sending; missing 
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('actual pressed Chat/Work button group proves mode while incomplete, hidden and conflicting groups stay guarded', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-pressed-surface-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page } = await owner.createPage();
+    const pair = (chat: string, work: string) => `<div role="group"><button aria-pressed="${chat}" data-state="closed">Chat</button><button aria-pressed="${work}" data-state="closed">Work</button></div>`;
+    const read = async (chrome: string) => {
+      await page.setContent(`<main><form data-chatgpt-composer><textarea>Preserved draft</textarea></form>${chrome}</main>`);
+      const surface = await observeChatGptSurface(page);
+      assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
+      return surface;
+    };
+    assert.equal((await read(pair('true', 'false'))).mode, 'chat');
+    assert.equal((await read(pair('false', 'true'))).mode, 'work');
+    for (const chrome of [pair('true', 'true'), pair('false', 'false'),
+      '<div role="group"><button aria-pressed="true">Chat</button></div>',
+      '<div role="group"><button aria-pressed="true">Chat</button></div><div role="group"><button aria-pressed="false">Work</button></div>',
+      `<nav>${pair('true', 'false')}</nav>`, `<article>${pair('true', 'false')}</article>`,
+      pair('true', 'false').replace('<div ', '<div hidden '),
+      pair('true', 'false').replace('</div>', '<button aria-pressed="true">Chat</button></div>'),
+      pair('true', 'false') + pair('false', 'true')]) {
+      assert.equal((await read(chrome)).mode, 'unknown', chrome);
+    }
+    await page.setContent(pair('true', 'false') + '<button role="radio" aria-checked="true">Work</button>');
+    assert.equal((await observeChatGptSurface(page)).source, 'conflicting-evidence');
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('provider navigation surfaces visible verification before DOM readiness timeout', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-navigation-verification-'));
   const registry = new PageRegistry();

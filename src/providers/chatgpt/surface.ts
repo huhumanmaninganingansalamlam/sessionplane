@@ -47,6 +47,23 @@ export function inspectChatGptSurfaceDocument(knownOnly = false): Omit<ChatGptSu
   }
   const result = (mode: ChatGptSurface['mode'], source: ChatGptSurface['source']) => ({ mode, source, modeControls });
   const controls = new Set<'chat' | 'work'>();
+  // Current composer chrome uses a two-button toggle group, not radio roles.
+  // Require both visible complementary states in the same group; a lone Chat
+  // label/pressed button elsewhere is not mode proof.
+  for (const group of document.querySelectorAll('[role="group"]')) {
+    if (group.closest('[data-message-author-role], article, [data-chatgpt-search-message-ids], nav, aside, [role="navigation"]')) continue;
+    const buttons = [...group.querySelectorAll('button[aria-pressed]')].filter(e =>
+      e.closest('[role="group"]') === group && e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+      e.getBoundingClientRect().width > 0);
+    const named = (label: string) => buttons.filter(e =>
+      (e.getAttribute('aria-label') ?? e.textContent ?? '').trim().toLowerCase() === label);
+    const chat = named('chat'), work = named('work');
+    if (chat.length !== 1 || work.length !== 1) continue;
+    const selected = [chat[0]!, work[0]!].filter(e => e.getAttribute('aria-pressed') === 'true');
+    const other = [chat[0]!, work[0]!].filter(e => e.getAttribute('aria-pressed') === 'false');
+    if (selected.length !== 1 || other.length !== 1) return knownOnly ? null : result('unknown', 'conflicting-evidence');
+    controls.add(selected[0] === chat[0] ? 'chat' : 'work');
+  }
   for (const e of document.querySelectorAll('[role="radio"], [role="tab"], [role="menuitemradio"]')) {
     if (!e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || !e.getBoundingClientRect().width ||
         e.closest('[data-message-author-role], article, [data-chatgpt-search-message-ids], nav, aside, [role="navigation"]')) continue;
