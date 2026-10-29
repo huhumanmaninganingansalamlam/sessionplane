@@ -46,6 +46,56 @@ test('Chat default remains selected through preparation and a later Work drift b
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('same-conversation follow-up without optional mode chrome submits its exact prepared prompt once and captures ACK', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chat-default-followup-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', async route => {
+      if (route.request().url().endsWith('/api/auth/session')) return await route.fulfill({ json: { accessToken: 'isolated-fixture-token' } });
+      if (route.request().method() === 'POST') return await route.fulfill({ json: {} });
+      await route.fulfill({ contentType: 'text/html', body: `<main>
+        <div data-message-author-role="user" data-message-id="original-ack">Original preserved</div>
+        <div data-message-author-role="assistant" data-message-id="original-answer">Original result preserved</div>
+        <div id="prompt-textarea" role="textbox" contenteditable="true">Retained draft</div>
+        <button data-testid="send-button" type="button">Send</button>
+        <script>window.sends=0;
+          document.querySelector('button').onclick=async()=>{
+            window.sends++; const composer=document.querySelector('#prompt-textarea'); const text=composer.innerText;
+            await fetch('/backend-api/f/conversation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+              action:'next',conversation_id:'followup-chat',parent_message_id:'original-answer',messages:[{
+                id:'followup-ack',author:{role:'user'},content:{content_type:'text',parts:[text]}}]})});
+            const user=document.createElement('div'); user.dataset.messageAuthorRole='user'; user.dataset.messageId='followup-ack';
+            user.textContent=text; document.querySelector('main').append(user); composer.textContent='';
+          };
+        </script></main>` });
+    });
+    await page.goto('https://chatgpt.com/c/followup-chat');
+    registry.reservePage(binding.pageKey, { sessionId: 'followup', generation: 2, conversationId: 'followup-chat' });
+    const submission = new ChatGptSubmission({ page, pageKey: binding.pageKey, pageRegistry: registry,
+      request: { session: { ...sessionSnapshot({ sessionId: 'followup', pageKey: binding.pageKey }), generation: 2,
+        conversationId: 'followup-chat' }, generation: 2, prompt: 'Exact authorized follow-up', model: null }, acknowledgementTimeoutMs: 2000 });
+    await submission.prepareForObservation();
+    const snapshot = await new BrowserRefSnapshotStore().capture({ page, pageKey: binding.pageKey, bindingEpoch: 1, interactive: false });
+    const composer = snapshot.nodes.find(n => n.role === 'textbox' && n.editable)!;
+    const submit = snapshot.nodes.find(n => n.role === 'button' && n.name === 'Send')!;
+    assert.ok(composer); assert.ok(submit);
+    await submission.prepare({ composer: { ...composer, purpose: 'composer', selectedValue: null },
+      submit: { ...submit, purpose: 'submit', selectedValue: null } });
+    assert.equal((await observeChatGptSurface(page)).source, 'chat-default');
+    assert.equal(await page.locator('#prompt-textarea').innerText(), 'Exact authorized follow-up');
+    await submission.submitOnce();
+    const ack = await submission.captureAcknowledgement();
+    assert.equal(ack?.conversationId, 'followup-chat');
+    assert.equal(ack?.submittedUserMessageId, 'followup-ack');
+    assert.equal(await page.locator('[data-message-id="followup-ack"]').innerText(), 'Exact authorized follow-up');
+    assert.equal(await page.locator('[data-message-id="original-answer"]').innerText(), 'Original result preserved');
+    assert.equal(await page.evaluate(() => (window as any).sends), 1);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 for (const dispatch of [true, false]) test(`continuation Enter ${dispatch ? 'dispatches and accepts the exact ACK' : 'reports a no-op without claiming delivery or clicking Stop'}`, async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-enter-continuation-'));
   const registry = new PageRegistry();
