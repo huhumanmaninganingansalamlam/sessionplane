@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { Page } from 'playwright-core';
+import type { Locator, Page } from 'playwright-core';
 import { REF_PROPERTY } from '../../browser/ref-snapshot.ts';
 import { SessionPlaneDomainError } from '../../domain/errors.ts';
 import { readChatGptMessages } from './message-dom.ts';
@@ -17,6 +17,42 @@ const once = /^(?:허용|이번만 허용|한 번 허용|한 번만 허용|Allow
 
 const always = /^(?:항상 허용|Always allow)(?:\s*⏎)?$/i;
 const decline = /^(?:거부|Decline|Deny)(?:\s*Esc)?$/i;
+
+/** Diagnostic metadata only: never return argument values, attributes or hidden text. */
+async function inspectPermissionDetails(dialog: Locator, url: string, ack: string, appName: string, toolName: string) {
+  return await dialog.evaluate((element, expected) => {
+    const visible = (node: Element) => node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true });
+    const users = [...document.querySelectorAll(expected.selector)].filter(node =>
+      node.getAttribute('data-message-author-role') === 'user' || node.querySelector('[data-user-message-bubble]'));
+    const id = (node: Element) => (node.closest('[data-message-id], [data-turn-id], [data-dil-message-id]') ?? node).getAttribute('data-message-id') ??
+      node.getAttribute('data-dil-message-id') ?? node.getAttribute('data-chatgpt-search-message-ids');
+    if (location.href !== expected.url || !visible(element) || users.filter(node => id(node) === expected.ack).length !== 1 ||
+        users.at(-1) === undefined || id(users.at(-1)!) !== expected.ack) return null;
+    const text = (element as HTMLElement).innerText.trim();
+    const labels = new Set([expected.appName, expected.toolName, '세부 정보', 'Details', '대화 상자 닫기', 'Close dialog',
+      `ChatGPT가 ${expected.appName}의 ${expected.toolName} 도구를 호출합니다.`]);
+    const lines = text.split(/\n+/).map(line => line.trim()).filter(Boolean);
+    const additionalTextCharacters = lines.filter(line => !labels.has(line)).reduce((sum, line) => sum + line.length, 0);
+    const descendants = [...element.querySelectorAll('*')];
+    const mounted = descendants.slice(0, 1000);
+    const shown = mounted.filter(visible);
+    const count = (selector: string) => shown.filter(node => node.matches(selector)).length;
+    return {
+      scope: 'exact-owned-permission-details' as const, observedAt: new Date().toISOString(),
+      submittedUserMessageId: expected.ack, beforeClose: true as const, argumentValuesIncluded: false as const,
+      renderedTextCharacters: text.length, domTextCharacters: (element.textContent ?? '').trim().length,
+      additionalTextCharacters,
+      argumentMarkersPresent: /["']?\b(?:arguments|args|argv|command|cwd|path|target_id|call_tool)["']?\s*[:=]/i.test(text),
+      renderedElements: { pre: count('pre'), code: count('code'), input: count('input'), textarea: count('textarea'),
+        editable: count('[contenteditable]:not([contenteditable="false"]), [role="textbox"]'), iframe: count('iframe'),
+        loading: count('[aria-busy="true"], [role="progressbar"]'), shadowHosts: shown.filter(node => node.shadowRoot !== null).length },
+      rootBusy: element.getAttribute('aria-busy') === 'true',
+      structureTruncated: descendants.length > mounted.length,
+      // A value-only editor or frame is a coverage boundary, not proof that arguments are absent.
+      formValuesRead: false as const,
+    };
+  }, { url, ack, appName, toolName, selector: CHATGPT_SELECTORS.messages });
+}
 
 /** Read mounted work activity, including hidden cards, without revealing or granting it. */
 export async function inspectHostSpanActivity(page: Page, submittedUserMessageId: string,
@@ -421,6 +457,7 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
   }
   // ChatGPT opens command details in a separate modal over the permission alert.
   // Inspect and close only that exact modal, then act on the original permission.
+  const detailsInspection: NonNullable<Awaited<ReturnType<typeof inspectPermissionDetails>>>[] = [];
   const closeDetails = async () => {
     const dialogs = await matching();
     let command = '';
@@ -430,6 +467,11 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
       if (await close.count() !== 1 || await dialog.getByRole('button', { name: allow }).count() !== 0) continue;
       if (command) throw unavailable('The exact HostSpan command details are ambiguous');
       command = (await dialog.innerText()).trim();
+      if (input.action === 'inspect') {
+        const diagnostic = await inspectPermissionDetails(dialog, expectedUrl, submittedUserMessageId, input.appName, input.toolName!);
+        if (diagnostic === null) throw unavailable('The exact ACK or details dialog changed during inspection');
+        detailsInspection.push(diagnostic);
+      }
       await close.click({ timeout: 5_000 });
       await dialog.waitFor({ state: 'hidden', timeout: 5_000 });
     }
@@ -479,7 +521,7 @@ export async function controlHostSpanPermission(page: Page, input: HostSpanPermi
   const permissionUserMessageId = await permissionAnchor(scope);
   const evidenceHash = createHash('sha256').update(JSON.stringify([page.url(), input.appName, input.toolName, allowMode, permissionUserMessageId, permissionText])).digest('hex');
   if (input.action === 'inspect') return { outcome: 'inspected', allowMode, appName: input.appName, toolName: input.toolName,
-    evidenceHash, permissionUserMessageId, permissionText, workDisclosure, buttons: buttons.map(name => name.trim()) };
+    evidenceHash, permissionUserMessageId, permissionText, workDisclosure, buttons: buttons.map(name => name.trim()), detailsInspection };
   if (input.evidenceHash !== evidenceHash) throw unavailable('Inspect the current exact permission before allowing or declining it');
   // Recheck the command/details and explicitly selected button in the same DOM operation.
   const clicked = await scope.evaluate((element, expected) => {
