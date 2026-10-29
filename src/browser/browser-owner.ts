@@ -72,7 +72,7 @@ export interface ManualLoginResumeSnapshot {
 }
 
 export interface BrowserOwnerOptions {
-  readonly resolveTeam?: (sessionId: string | null, conversationId: string | null) => { teamId: string; title: string } | null;
+  readonly resolveTeam?: (sessionId: string | null, conversationId: string | null, targetId: string) => { teamId: string; title: string } | null;
   readonly profileDir: string;
   readonly scopeProfileByBrowser?: boolean;
   readonly pageRegistry: PageRegistry;
