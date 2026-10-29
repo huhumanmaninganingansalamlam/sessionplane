@@ -284,6 +284,8 @@ out prompts, infer consensus, or inject answers into other roles.
   displacement, decide `retire_observation` with `discardUnresolved:true` and that
   existing evidenceRef; omit workComplete. This disposes local tracking only and
   preserves all original generation, ACK, draft, result and command uncertainty.
+  The same explicit route accepts a displaced, held prepared/unsubmitted obsolete
+  draft with no ACK and no collectors; it never submits that draft or asserts completion.
   Then session_delete may use `outputsRetrieved:true` for the available preserved
   outputs plus `discardRetiredObservation:{conversationId,evidenceRef}`. This never
   asserts a missing final or child END. CLI exposes `request retire_observation

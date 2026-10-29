@@ -337,13 +337,17 @@ export class TeamWorkflow {
                 role.roleState !== 'retired' && !completedSuccessor)) throw new SessionPlaneDomainError(
               'session.recovery-unavailable', 'Requires explicit work completion and a displaced/retired session or a completed same-team successor request');
             const generation = this.#sessions.getGenerationResult(request.sessionId, request.generation);
+            const discardPrepared = input.discardUnresolved === true && current.submissionState === 'prepared' &&
+              !current.promptSubmitted && request.submissionState === 'prepared' && !request.promptSubmitted &&
+              current.submittedUserMessageId === null && current.submittedUserTurnId === null &&
+              current.responseMessageId === null && current.answerText === null;
             // Superseded routing does not prove that the submitted generation resolved.
             if ((current.terminal && current.sessionState !== 'superseded') ||
-                generation?.completedAt !== null || !current.promptSubmitted ||
-                !['submitted', 'submission_unknown'].includes(current.submissionState ?? '')) throw new SessionPlaneDomainError(
-              'session.recovery-unavailable', 'Only unresolved submitted observation can be retired');
+                generation?.completedAt !== null || (!discardPrepared && (!current.promptSubmitted ||
+                !['submitted', 'submission_unknown'].includes(current.submissionState ?? '')))) throw new SessionPlaneDomainError(
+              'session.recovery-unavailable', 'Requires unresolved submitted observation or explicit disposal of a displaced unsubmitted preparation');
             const timestamp = new Date().toISOString();
-            if (!this.#sessions.retireObservation(request.sessionId, request.generation, timestamp)) throw new SessionPlaneDomainError(
+            if (!this.#sessions.retireObservation(request.sessionId, request.generation, timestamp, discardPrepared)) throw new SessionPlaneDomainError(
               'session.generation-superseded', 'Tracking changed before retirement');
             new EventRepository(this.services.database.raw).append({ teamId: input.teamId, roleId: current.roleId,
               sessionId: request.sessionId, generation: request.generation, eventType: 'generation.observation-retired',
