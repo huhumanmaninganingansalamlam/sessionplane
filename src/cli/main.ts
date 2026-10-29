@@ -775,6 +775,10 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
     ...mutation, decision: 'answer_question', answer: requireOption(parsed, 'answer'),
     evidenceHash: requireOption(parsed, 'evidence-hash'),
   }, sessionSendRpcTimeoutMs(config));
+  if (action === 'output_panel') return await printRpc(io, parsed, config, 'workflow.decide', {
+    ...mutation, decision: 'output_panel', action: requireOption(parsed, 'action'),
+    ...optionalParam('evidenceHash', parsed.options['evidence-hash']),
+  }, sessionSendRpcTimeoutMs(config));
   if (action === 'hostspan_permission') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'hostspan_permission', action: requireOption(parsed, 'action'),
     ...optionalParam('followupUserMessageId', parsed.options['followup-message-id']),
@@ -1412,6 +1416,7 @@ Exact request flow (same request; no automatic resend):
   Confirm an observed matching submission without resending:
     request acknowledge TEAM_ID REQUEST_REF --message-id ID --evidence-hash HASH
   Answer an owned provider question: request answer_question TEAM_ID REQUEST_REF --answer EXACT_OPTION --evidence-hash HASH
+  Owned output panel inspect/close: request output_panel TEAM_ID REQUEST_REF --action inspect|close [--evidence-hash HASH]
   HostSpan permission inspection, authorized grant or decline: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow|decline --app-name NAME [--tool-name NAME] [--allow-mode once|always] [--evidence-hash HASH] [--followup-message-id SOURCE_ID]
   User-controlled review: request human_review TEAM_ID CURRENT_REQUEST_REF --action pause|resume
   Cancel: request stop TEAM_ID REQUEST_REF

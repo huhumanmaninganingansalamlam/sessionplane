@@ -489,6 +489,62 @@ export class SessionUiService {
     return read.evidence;
   }
 
+  async outputPanel(input: PreparationOwner & { decisionId: string; action: 'inspect' | 'close'; evidenceHash?: string | undefined }, receipts: ReceiptRepository) {
+    const method = 'workflow.output_panel';
+    const receipt = { clientId: input.clientId, requestId: input.decisionId, method,
+      requestHash: createHash('sha256').update(JSON.stringify(input)).digest('hex') };
+    const replay = () => {
+      const prior = receipts.get(receipt.clientId, receipt.requestId);
+      if (prior === null) return null;
+      if (prior.method !== method || prior.requestHash !== receipt.requestHash) throw new SessionPlaneDomainError(
+        'input.idempotency-conflict', 'Output panel operation identity was reused with different arguments');
+      if (prior.status !== 'complete') throw new SessionPlaneDomainError('provider.action-unknown',
+        'Output panel action was attempted; inspect without repeating the toggle');
+      return JSON.parse(prior.resultJson) as Record<string, unknown>;
+    };
+    const prior = replay();
+    if (prior !== null) return prior;
+    const read = await this.#submissions.inspectSubmission({ ...input, readOnly: true }, async session => {
+      const repeated = replay();
+      if (repeated !== null) return repeated;
+      if (session.submissionState !== 'submitted' || !session.promptSubmitted || !session.submittedUserMessageId || !session.conversationId)
+        throw new SessionPlaneDomainError('provider.preparation-required', 'Output panel control requires the exact current submitted request and ACK');
+      const page = this.#requirePage(session, input.action === 'inspect');
+      const binding = this.#registry.refreshPage(session.pageKey!);
+      const target = { origin: this.#chatgptOrigin, conversationId: session.conversationId,
+        anchor: session.submittedUserMessageId, click: false, outputPanel: 'inspect' as const };
+      const surface = await page.evaluate(streamRetrySurface, target);
+      const evidenceHash = createHash('sha256').update(JSON.stringify([session.sessionId, session.generation,
+        session.pageKey, binding.bindingEpoch, target, surface.reason, surface.outputPopover?.identity ?? null])).digest('hex');
+      let dispatch = null;
+      if (input.action === 'close') {
+        if (input.evidenceHash !== evidenceHash) throw new SessionPlaneDomainError('provider.preparation-required',
+          'Inspect the current exact output panel and pass its matching evidenceHash before closing');
+        if (!['output-popover-open', 'output-panel-inactive', 'output-panel-absent', 'output-popover-closing'].includes(surface.reason))
+          throw new SessionPlaneDomainError('provider.preparation-required', `Output panel cannot be closed: ${surface.reason}`);
+        if (surface.reason === 'output-popover-open') {
+          await requireChatGptSurface(page);
+          await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
+          this.#requirePage(session);
+          receipts.record({ ...receipt, status: 'attempted', result: { submittedUserMessageId: target.anchor, evidenceHash } });
+          dispatch = await page.evaluate(streamRetrySurface, { ...target, outputPanel: 'close' as const,
+            expectedOutputIdentity: surface.outputPopover!.identity, expiresAt: Date.now() + 5_000 });
+        }
+      }
+      this.#requirePage(session, input.action === 'inspect');
+      const after = dispatch?.clicked ? await page.evaluate(streamRetrySurface, target) : surface;
+      const result = { action: input.action, outcome: dispatch?.clicked ? 'toggle-dispatched' : dispatch ? 'not-dispatched' : input.action === 'inspect' ? 'inspected' : 'no-op',
+        observedAt: new Date().toISOString(), pageKey: session.pageKey, submittedUserMessageId: target.anchor,
+        requestAcknowledgementVerified: !['binding-url-changed', 'original-anchor-not-latest'].includes(surface.reason),
+        evidenceHash, surface: after, ...(dispatch ? { dispatch } : {}),
+        panelClosed: ['output-panel-inactive', 'output-panel-absent'].includes(after.reason),
+        providerMutation: dispatch?.clicked === true, retryClicked: false, promptSubmitted: session.promptSubmitted };
+      receipts.record({ ...receipt, status: 'complete', result });
+      return result;
+    });
+    return read.evidence;
+  }
+
   async retryStream(input: PreparationOwner & { decisionId: string }, receipts: ReceiptRepository, budgets: ConversationLoadRecoveryRepository) {
     const read = await this.#submissions.inspectSubmission(input, async session => {
       const unknown = session.submissionState === 'submission_unknown';
@@ -648,12 +704,17 @@ export class SessionUiService {
       }
       if (resolvedAlert && !recoveredToolAlert) throw new SessionPlaneDomainError('provider.preparation-required',
         'The exact recovered tool expiration alert is no longer verified; preserve current alerts and work');
+      const output = original.submittedUserMessageId && controls.nodes.some(node => node.role === 'dialog')
+        ? await page.evaluate(streamRetrySurface, { origin: this.#chatgptOrigin, conversationId: original.conversationId!,
+          anchor: original.submittedUserMessageId, click: false, outputPanel: 'inspect' as const }) : null;
+      const inactiveOutputId = output?.outputPopover?.inactive ? output.outputPopover.dialogId : null;
       const after = this.#registry.refreshPage(session.pageKey!);
       if (binding.bindingEpoch !== after.bindingEpoch || !anchor.conversationSurfaceAvailable ||
           !anchor.submittedUserFound || anchor.laterUserFound ||
           (!confirmedInterruption && anchor.candidate !== null && !(disconnected && !anchor.candidate.terminalMarker)) || (anchor.actionableAlert && !recoveredToolAlert) ||
           (!confirmedInterruption && !disconnected && activity.strength !== 'none') || controls.nodesTruncated ||
-          controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role)) ||
+          controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role) &&
+            !(node.role === 'dialog' && node.id === inactiveOutputId)) ||
           !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
         throw new SessionPlaneDomainError('provider.preparation-required',
           'Continuation requires the exact idle original turn with no answer, later user, alert or separate draft',

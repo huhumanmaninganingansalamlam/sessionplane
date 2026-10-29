@@ -32,6 +32,14 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    Evidence hostspanActivity.disclosures[].containedActivity reads an already-expanded,
    exact owned HostSpan body when mounted; it never executes or grants. Missing or
    truncated tool output leaves process/resource state UNKNOWN, not available.
+   For an OUTPUT file-list panel, use decide `decision:"output_panel", action:"inspect"`
+   on the same current submitted request. It returns structural state, inert/aria-hidden,
+   exact external toggle eligibility and evidenceHash without reading file bodies.
+   To close only that open nonmodal panel, use `action:"close"` with the fresh hash and
+   a distinct stable requestId. CLI: `request output_panel TEAM REQUEST --action inspect|close
+   [--evidence-hash HASH]`. Inactive/absent panels are no-ops; real dialogs, alerts and
+   review holds remain guarded. Preserve the existing collector; this never Retry/send/Stop.
+   After an ambiguous toggle inspect without repeating it under another ID.
    For pending arguments, decide hostspan_permission action:inspect may reveal/close
    details but never grants permission or executes the tool. Unknown arguments are
    inspected before approval; action:allow is a separate authorized grant using
