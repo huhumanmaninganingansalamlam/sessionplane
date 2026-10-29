@@ -579,12 +579,17 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
     const hiddenMode = await decide('inspect-without-composer-mode', { action: 'inspect' });
     assert.equal(hiddenMode.isError, false, JSON.stringify(hiddenMode));
     assert.equal((hiddenMode.structuredContent.permission as any).detailsInspection[0].beforeClose, true);
-    assert.equal((await decide('no-unverified-grant', { action: 'allow', evidenceHash: inspected.structuredContent.permission.evidenceHash })).isError, true);
+    const missingCardEvidence = await decide('no-unverified-grant', { action: 'allow' });
+    assert.equal(missingCardEvidence.isError, true);
+    assert.match(JSON.stringify(missingCardEvidence), /same allowMode.*evidenceHash/);
     await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend', '<button role=radio aria-checked=true>Work</button>'));
     assert.equal((await decide('inspect-work-read-only', { action: 'inspect' })).isError, false);
-    assert.equal((await decide('no-work-grant', { action: 'allow', evidenceHash: inspected.structuredContent.permission.evidenceHash })).isError, true);
     assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0);
     await page.locator('[role=radio]').evaluate(node => { node.textContent = 'Chat'; });
+    await page.locator('[role=radio]').evaluate(node => node.remove());
+    await page.locator('textarea').evaluate(node => { node.hidden = true; });
+    assert.equal(await page.locator('[role=radio]').count(), 0,
+      'The original request must finish authorized grant/decline, including always, without mode chrome or historical mode records');
     if(successor){
       const granted=await decide('retained-exact-grant',{action:'allow',evidenceHash:inspected.structuredContent.permission.evidenceHash});
       assert.equal(granted.isError,false,JSON.stringify(granted));
