@@ -357,7 +357,6 @@ export class SubmissionService {
       snapshot.submissionState !== 'submission_unknown' ||
       !snapshot.promptSubmitted ||
       snapshot.pageKey === null ||
-      (snapshot.conversationId === null && selection === undefined) ||
       !this.#adapters.has(snapshot.provider)
     ) {
       return snapshot;
@@ -380,8 +379,7 @@ export class SubmissionService {
         current.generation !== snapshot.generation || current.terminal ||
         current.submissionState !== 'submission_unknown' ||
         !current.promptSubmitted ||
-        current.pageKey === null ||
-        (currentConversationId === null && selection === undefined)
+        current.pageKey === null
       ) {
         return current;
       }
@@ -397,19 +395,14 @@ export class SubmissionService {
           throw new SessionPlaneDomainError('input.invalid', 'Selected message already belongs to another generation');
         }
         const cooldown = this.accountCooldown(current);
-        if (cooldown !== null) {
-          if (selection !== undefined) throw new SessionPlaneDomainError('provider.observation-deferred',
-            'Selected ACK verification is waiting for the existing account cooldown; no prompt was sent.',
-            { kind: 'deferred', source: 'pacing', reason: 'account-cooldown', nextCheckAt: cooldown,
-              requestRef: currentOutbox.outboxId, pageKey: current.pageKey, automaticResubmit: false });
-          return current;
-        }
         const attempts = this.#events.submissionAttempts(current.sessionId, current.generation)
           .filter(e => e.requestRef === currentOutbox.outboxId && e.conversationId === currentConversationId &&
             e.promptHash === createHash('sha256').update(currentPrompt).digest('hex'))
           .map(e => e.attempt as ProviderSubmissionAttempt);
         let recoveryEvidence: ProviderAcknowledgementRecoveryEvidence | undefined;
-        const acknowledgement = await adapter.recoverAcknowledgement?.({
+        if (cooldown !== null) recoveryEvidence = { kind: 'deferred', source: 'pacing', reason: 'account-cooldown',
+          observedAt: this.#now().toISOString(), nextCheckAt: cooldown, httpStatus: null, endpointCategory: null };
+        const acknowledgement = cooldown !== null ? null : await adapter.recoverAcknowledgement?.({
           session: current,
           generation: current.generation,
           prompt: currentPrompt,
@@ -442,7 +435,9 @@ export class SubmissionService {
           (selection !== undefined && acknowledgement.submittedUserMessageId !== selection.messageId) ||
           (acknowledgement.conversationId !== currentConversationId &&
             !(current.provider === 'chatgpt' &&
-              (currentConversationId === null && selection !== undefined || currentConversationId?.startsWith('WEB:')) &&
+              (currentConversationId === null && (selection !== undefined ||
+                acknowledgement.evidence === 'backend-exact-user' || acknowledgement.evidence === 'backend-exact-editor-text') ||
+                currentConversationId?.startsWith('WEB:')) &&
               !acknowledgement.conversationId.startsWith('WEB:')))
         ) {
           return current;

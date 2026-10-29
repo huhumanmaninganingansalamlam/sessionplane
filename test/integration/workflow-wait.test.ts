@@ -636,7 +636,8 @@ test('ten-minute wait survives the TabletAuto observation timeout then returns t
 });
 
 
-test('CLI retains paced UNKNOWN ACK recovery through collection without a selection or replay', async t => {
+for (const unknownConversation of [false, true])
+test(`CLI retains paced UNKNOWN ACK recovery through collection without a selection or replay (unknown conversation: ${unknownConversation})`, async t => {
   const f = await fixture();
   try {
     await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, {
@@ -646,6 +647,7 @@ test('CLI retains paced UNKNOWN ACK recovery through collection without a select
       sessionId: f.sent.sessionId as string, expectedGeneration: 1, prompt: 'Exact next prompt', sessionDeadlineSec: 60 }));
     const request = f.core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=? AND generation=2')
       .get(f.sent.sessionId as string) as { outbox_id: string };
+    if (unknownConversation) await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 2, { conversationId: null });
     let probes = 0;
     const nextCheckAt = new Date(Date.now() + 150).toISOString();
     f.fake.recoverAcknowledgement = async input => {
@@ -657,10 +659,11 @@ test('CLI retains paced UNKNOWN ACK recovery through collection without a select
       }
       assert.ok(Date.now() >= Date.parse(nextCheckAt), 'Respect the actual provider delay');
       assert.equal(input.selection, undefined, 'Do not choose a rendered candidate to bypass canonical proof');
-      return { conversationId: input.session.conversationId!, submittedUserMessageId: 'exact-canonical-user',
+      return { conversationId: input.session.conversationId ?? 'new-canonical-conversation', evidence: 'backend-exact-user', submittedUserMessageId: 'exact-canonical-user',
         submittedUserTurnId: 'exact-canonical-user' };
     };
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+    t.mock.method(SessionUiService.prototype, 'isSubmissionPageLost', () => false);
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async function(input: any) {
       return await f.core.submissionService.inspectSubmission(input, async snapshot => ({
         submissionCandidates: snapshot.submissionState === 'submission_unknown' ? [{ messageId: 'visible-user' }] : [] }));

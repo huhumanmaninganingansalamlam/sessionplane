@@ -279,7 +279,6 @@ export class RecoveryService {
       if (
         snapshot.submissionState === 'submission_unknown' &&
         snapshot.pageKey !== null &&
-        snapshot.conversationId !== null &&
         snapshot.submittedUserMessageId === null &&
         snapshot.submittedUserTurnId === null
       ) {
@@ -373,7 +372,7 @@ export class RecoveryService {
           pageRecoveryAttempted = true;
           identified = (await this.#reconcilePage(identified, false)).snapshot;
         }
-        if (identified.pageKey !== null && identified.conversationId !== null) {
+        if (identified.pageKey !== null) {
           const recovered = await this.#submissions.recoverAcknowledgement(identified);
           if (!needsAcknowledgementRecovery(recovered)) return;
         }

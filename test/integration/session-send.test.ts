@@ -55,6 +55,40 @@ test('Chat is the effective default and legacy Work requests fail before opening
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('current UNKNOWN with no conversation binds only canonical ACK evidence without resending its request', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-unknown-canonical-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  fake.acknowledgementMode = 'missing';
+  const service = await startCore({ config, startBrowser: false, providerAdapters: [fake], logger: silentLogger() });
+  try {
+    const team = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'client-send', requestId: 'canonical-team', name: 'Canonical recovery', primaryRoleKey: 'main' });
+    const session = await createSession(config.socketPath, team.teamId, 'main', 'canonical-session');
+    await assert.rejects(rpc(config.socketPath, 'session.send', { clientId: 'client-send', requestId: 'original-unknown',
+      sessionId: session.sessionId, prompt: 'Exact saved contextual prompt', sessionDeadlineSec: 600 }), hasRpcError('session.submission-unknown', true));
+    const before = service.database.raw.prepare('SELECT outbox_id,request_hash,payload_json FROM outbox WHERE session_id=?').all(session.sessionId);
+    const current = () => service.teamDirectory.getSession(session.sessionId);
+    assert.equal(current().conversationId, null);
+    const ack = { conversationId: 'canonical-current', submittedUserMessageId: 'canonical-user', submittedUserTurnId: 'canonical-turn' };
+    fake.recoverAcknowledgement = async () => ack;
+    assert.equal((await service.submissionService.recoverAcknowledgement(current())).submissionState, 'submission_unknown',
+      'An unqualified adapter ACK cannot adopt an unknown conversation');
+    fake.recoverAcknowledgement = async input => {
+      assert.equal(input.prompt, 'Exact saved contextual prompt');
+      assert.equal(input.selection, undefined);
+      return { ...ack, evidence: 'backend-exact-user' };
+    };
+    const recovered = await service.submissionService.recoverAcknowledgement(current());
+    assert.equal(recovered.submissionState, 'submitted');
+    assert.equal(recovered.submittedUserMessageId, ack.submittedUserMessageId);
+    assert.equal(recovered.conversationId, ack.conversationId);
+    assert.equal(recovered.generation, 1);
+    assert.equal(fake.submitCount, 1);
+    assert.deepEqual(service.database.raw.prepare('SELECT outbox_id,request_hash,payload_json FROM outbox WHERE session_id=?').all(session.sessionId), before);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('restart retains request-bound dispatch proof and recovers late duplicate ACK without another submit', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-durable-dispatch-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });

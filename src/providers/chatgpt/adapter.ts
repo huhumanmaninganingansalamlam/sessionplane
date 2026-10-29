@@ -39,7 +39,7 @@ import { ChatGptNetworkObserver } from './network-observer.ts';
 import { readChatGptMessages } from './message-dom.ts';
 import { restoreLatestPosition } from './latest-position-recovery.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
-import { ChatGptSubmission, recoverChatGptAcknowledgement } from './submission.ts';
+import { ChatGptSubmission, recoverChatGptAcknowledgement, inspectChatGptSubmissionCandidates } from './submission.ts';
 
 export interface ChatGptAdapterOptions {
   readonly onBackendRateLimit?: ChatGptBackendRecoveryOptions['onRateLimit'];
@@ -184,25 +184,37 @@ export class ChatGptAdapter implements ProviderAdapter {
     try {
       const binding = this.#pageRegistry.refreshPage(pageKey);
       if (conversationId === null) {
-        // Finding history is not acceptance. Only an explicit selection plus
-        // canonical exact-prompt evidence can bind the retained UNKNOWN page.
-        if (request.selection === undefined) return null;
+        // A retained target is not acceptance. Canonical full-prompt evidence,
+        // a stable mounted ACK and a cleared composer must all agree before binding.
         const candidate = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);
         if (new URL(candidate.page.url()).origin !== new URL(this.#loginUrl).origin) return null;
         const foundId = candidate.binding.conversationId!;
+        let selection = request.selection;
+        let server: ProviderSubmissionAcknowledgement | null = null;
+        if (selection === undefined) {
+          server = await this.#backendRecovery.recoverAcknowledgement(
+            foundId, request.prompt, backendClient(candidate.page), new URL(candidate.page.url()).origin,
+            request.attempts, request.onRecoveryObservation);
+          if (server === null) return null;
+          const messageId = server.submittedUserMessageId;
+          const mounted = (await inspectChatGptSubmissionCandidates(candidate.page, foundId))
+            .filter(message => message.messageId === messageId);
+          if (mounted.length !== 1) return null;
+          selection = mounted[0]!;
+        }
         // Preserve the selected DOM/hash unchanged. Diagnostic expansion can
         // change its control text and invalidate that evidence before canonical
         // verification; only the server's full-text proof establishes acceptance.
-        const selected = await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, request.selection);
+        const selected = await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, selection);
         if (selected === null) return null;
-        const server = await this.#backendRecovery.recoverAcknowledgement(
+        server ??= await this.#backendRecovery.recoverAcknowledgement(
           foundId, request.prompt, backendClient(candidate.page), new URL(candidate.page.url()).origin,
-          request.attempts, request.onRecoveryObservation, request.selection.messageId);
+          request.attempts, request.onRecoveryObservation, selection.messageId);
         if (server === null || server.submittedUserMessageId !== selected.submittedUserMessageId ||
             server.submittedUserTurnId !== selected.submittedUserTurnId) return null;
         const fresh = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);
         if (fresh.binding.bindingEpoch !== binding.bindingEpoch ||
-            await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, request.selection) === null) return null;
+            await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, selection) === null) return null;
         if (this.#pageRegistry.refreshPage(pageKey).bindingEpoch !== binding.bindingEpoch) return null;
         this.#pageRegistry.bindPage(pageKey, { sessionId: request.session.sessionId,
           generation: request.generation, conversationId: foundId });
