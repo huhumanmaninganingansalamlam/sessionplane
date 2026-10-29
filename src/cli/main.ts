@@ -56,6 +56,7 @@ const FLAG_OPTIONS = new Set([
 ]);
 const MULTI_VALUE_OPTIONS = new Set(['file', 'skill']);
 const VALUE_OPTIONS = new Set([
+  'answer',
   'view',
   'user-confirmed-interruption',
   'unresolved-handoff',
@@ -770,6 +771,10 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
     ...mutation, decision: 'retire_observation', discardUnresolved: parsed.options['discard-unresolved'] === 'true',
     evidenceRef: requireOption(parsed, 'evidence-ref'),
   }, sessionSendRpcTimeoutMs(config));
+  if (action === 'answer_question') return await printRpc(io, parsed, config, 'workflow.decide', {
+    ...mutation, decision: 'answer_question', answer: requireOption(parsed, 'answer'),
+    evidenceHash: requireOption(parsed, 'evidence-hash'),
+  }, sessionSendRpcTimeoutMs(config));
   if (action === 'hostspan_permission') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'hostspan_permission', action: requireOption(parsed, 'action'),
     ...optionalParam('followupUserMessageId', parsed.options['followup-message-id']),
@@ -1406,6 +1411,7 @@ Exact request flow (same request; no automatic resend):
     Preserves original uncertainty; never automatically retries or bypasses provider errors/drafts/activity.
   Confirm an observed matching submission without resending:
     request acknowledge TEAM_ID REQUEST_REF --message-id ID --evidence-hash HASH
+  Answer an owned provider question: request answer_question TEAM_ID REQUEST_REF --answer EXACT_OPTION --evidence-hash HASH
   HostSpan permission inspection, authorized grant or decline: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow|decline --app-name NAME [--tool-name NAME] [--allow-mode once|always] [--evidence-hash HASH] [--followup-message-id SOURCE_ID]
   User-controlled review: request human_review TEAM_ID CURRENT_REQUEST_REF --action pause|resume
   Cancel: request stop TEAM_ID REQUEST_REF

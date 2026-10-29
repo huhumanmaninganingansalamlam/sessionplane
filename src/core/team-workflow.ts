@@ -197,7 +197,7 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; followupUserMessageId?: string | undefined; manageOnly?: true | undefined; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow' | 'decline'; appName: string; followupUserMessageId?: string | undefined; toolName?: string | undefined; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; evidenceRef: string; workComplete?: true; discardUnresolved?: true; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'human_review'; action: 'pause' | 'resume' } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'reopen' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'answer_question'; answer: string; evidenceHash: string } | { requestId: string; decision: 'continue'; continuationApproved: true; followupUserMessageId?: string | undefined; manageOnly?: true | undefined; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow' | 'decline'; appName: string; followupUserMessageId?: string | undefined; toolName?: string | undefined; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; evidenceRef: string; workComplete?: true; discardUnresolved?: true; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'human_review'; action: 'pause' | 'resume' } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'reopen' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     if (input.decision === 'human_review') {
       const result = await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
@@ -308,6 +308,12 @@ export class TeamWorkflow {
     }
     if (input.decision !== 'focus' && input.decision !== 'retire_observation' && this.#userReview(request)) throw new SessionPlaneDomainError('provider.preparation-required',
       `Observation and controls are paused for review. ${REVIEW_RESUME_GUIDANCE}`);
+    if (input.decision === 'answer_question') {
+      const questionAnswer = await this.services.ui.answerQuestion({ ...owner, decisionId: input.requestId,
+        answer: input.answer, evidenceHash: input.evidenceHash }, this.services.receipts);
+      return { requestOk: true, teamId: input.teamId, requestRef: request.outboxId,
+        sessionId: request.sessionId, generation: request.generation, questionAnswer, promptSubmitted: false };
+    }
     if (input.decision === 'retire_observation') {
       return await this.services.scheduler.actorFor(request.sessionId).enqueue(() => {
         const result = this.services.receipts.execute({ clientId: request.clientId, requestId: input.requestId,
@@ -1459,7 +1465,9 @@ export class TeamWorkflow {
       return { ...snapshot, status: 'needs_decision', requestRef: request.outboxId, evidence,
         configurationCatalog,
         requested: { model: payload.model, effort: payload.effort, surface: payload.surface }, choices: preparation.choices,
-        message: evidence.preparationAvailability.available ? preparation.message
+        message: evidence.providerQuestion?.available
+          ? 'A provider question replaces the composer. The owning Coordinator can answer one authorized exact option with decide answer_question and its fresh evidenceHash. This prepared prompt remains unsubmitted.'
+          : evidence.preparationAvailability.available ? preparation.message
           : 'reason' in evidence.preparationAvailability && evidence.preparationAvailability.reason === 'chat-selection-unverified'
             ? evidence.observedSurface.mode === 'work'
               ? 'This Work conversation is observation-only. Preserve its work and use the authorized same-role Chat replacement; never select or submit in Work.'
