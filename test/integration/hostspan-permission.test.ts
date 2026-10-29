@@ -575,6 +575,16 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
     assert.equal(await page.evaluate(() => (window as any).unrelatedClicks ?? 0), 0,
       'Explicit permission inspection opens only the card-linked disclosure, never integration controls or another work question');
     assert.equal(prepare.mock.callCount(), 1, 'Use the existing exact-page background interaction lifecycle');
+    await page.locator('[role=radio]').evaluate(node => node.remove());
+    const hiddenMode = await decide('inspect-without-composer-mode', { action: 'inspect' });
+    assert.equal(hiddenMode.isError, false, JSON.stringify(hiddenMode));
+    assert.equal((hiddenMode.structuredContent.permission as any).detailsInspection[0].beforeClose, true);
+    assert.equal((await decide('no-unverified-grant', { action: 'allow', evidenceHash: inspected.structuredContent.permission.evidenceHash })).isError, true);
+    await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend', '<button role=radio aria-checked=true>Work</button>'));
+    assert.equal((await decide('inspect-work-read-only', { action: 'inspect' })).isError, false);
+    assert.equal((await decide('no-work-grant', { action: 'allow', evidenceHash: inspected.structuredContent.permission.evidenceHash })).isError, true);
+    assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0);
+    await page.locator('[role=radio]').evaluate(node => { node.textContent = 'Chat'; });
     if(successor){
       const granted=await decide('retained-exact-grant',{action:'allow',evidenceHash:inspected.structuredContent.permission.evidenceHash});
       assert.equal(granted.isError,false,JSON.stringify(granted));

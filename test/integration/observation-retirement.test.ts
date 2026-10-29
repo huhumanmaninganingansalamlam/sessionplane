@@ -114,6 +114,10 @@ test('displaced routing retirement permits explicit disposal but preserves unres
     await rpc('session.send', { sessionId: session.sessionId, requestId: 'unresolved', prompt: 'Original unresolved request' });
     const requests = core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? ORDER BY generation').all(session.sessionId);
     const generations = () => core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(session.sessionId);
+    // Earlier continuation history may remain UNKNOWN too; disposal must preserve it.
+    core.database.raw.prepare("UPDATE generations SET submission_state='submission_unknown', completed_at=NULL, answer_text=NULL, response_message_id=NULL WHERE session_id=? AND generation=1").run(session.sessionId);
+    core.database.raw.prepare("UPDATE outbox SET submission_state='submission_unknown' WHERE session_id=? AND generation=1").run(session.sessionId);
+    const preservedRequests = core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? ORDER BY generation').all(session.sessionId);
     const before = generations();
     const historical = (await workflow('team_get', { teamId: team.teamId, requestRef: requests[0]!.outbox_id })).structuredContent;
     assert.equal((historical.request as Record<string, unknown>).conversationId, first.conversationId);
@@ -123,7 +127,7 @@ test('displaced routing retirement permits explicit disposal but preserves unres
     assert.equal((await workflow('decide', { teamId: team.teamId, requestRef: requests[1]!.outbox_id,
       requestId: 'hold-obsolete', decision: 'human_review', action: 'pause' })).isError, false);
     assert.equal((await workflow('decide', { teamId: team.teamId, requestRef: requests[1]!.outbox_id,
-      requestId: 'retire-still-current', decision: 'retire_observation', workComplete: true,
+      requestId: 'retire-still-current', decision: 'retire_observation', discardUnresolved: true,
       evidenceRef: 'Cannot discard current role work' })).structuredContent.errorCode, 'session.recovery-unavailable');
     const replacement = (await workflow('session_replace', { teamId: team.teamId,
       roleRef: `${session.sessionId}:2`, requestId: 'replace-role' })).structuredContent;
@@ -136,9 +140,15 @@ test('displaced routing retirement permits explicit disposal but preserves unres
     assert.equal(successorBefore.terminal, false);
     unavailable = false;
     assert.equal((await workflow('session_delete', input)).structuredContent.errorCode, 'session.cleanup-not-ready');
-    assert.equal((await workflow('decide', { teamId: team.teamId, requestRef: requests[1]!.outbox_id,
-      requestId: 'retire-observation', decision: 'retire_observation', workComplete: true,
-      evidenceRef: 'Obsolete work ended; preserve missing original result' })).isError, false);
+    const disposal = { teamId: team.teamId, requestRef: requests[1]!.outbox_id,
+      requestId: 'retire-observation', decision: 'retire_observation', discardUnresolved: true,
+      evidenceRef: 'Existing agent-handoff; USER orders old-chat disposal; child commands remain UNKNOWN' };
+    const release = core.actorScheduler.actorFor(session.sessionId).retainCollector(String(requests[1]!.outbox_id), false);
+    try { assert.equal((await workflow('decide', disposal)).structuredContent.errorCode, 'session.recovery-unavailable'); }
+    finally { release(); }
+    assert.equal((await workflow('decide', disposal)).isError, false);
+    const event = core.database.raw.prepare("SELECT payload_json FROM events WHERE session_id=? AND event_type='generation.observation-retired'").get(session.sessionId)!;
+    assert.equal(JSON.parse(String(event.payload_json)).completionSource, 'explicit-observation-disposal');
     assert.equal((await workflow('team_get', { teamId: team.teamId, requestRef: requests[1]!.outbox_id }))
       .structuredContent.request.observationHeld, true);
     const { discardRetiredObservation: _disposal, ...ordinary } = input;
@@ -161,7 +171,7 @@ test('displaced routing retirement permits explicit disposal but preserves unres
     assert.deepEqual(deleted.pageCleanup, { closedPages: 1, pageErrors: [] });
     assert.equal(page.isClosed(), true);
     assert.deepEqual(generations(), before);
-    assert.deepEqual(core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? ORDER BY generation').all(session.sessionId), requests);
+    assert.deepEqual(core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? ORDER BY generation').all(session.sessionId), preservedRequests);
     assert.deepEqual((await workflow('session_delete', input)).structuredContent, deleted);
     assert.equal(deletes, 1);
     assert.deepEqual(core.teamDirectory.getSession(successor.sessionId), successorBefore);

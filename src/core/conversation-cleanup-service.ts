@@ -486,7 +486,8 @@ export class ConversationCleanupService {
             'Explicit disposal requires the exact conversation, evidence and a retired observation on a displaced or retired role');
         }
         if (!input.outputsRetrieved || (!options.replacement && !session.terminal) ||
-            sessions.conversationCleanupBlocker(input.sessionId, input.conversationId, options.replacement === true,
+            sessions.conversationCleanupBlocker(input.sessionId, input.conversationId, options.replacement === true ||
+              (disposal !== undefined && sessions.hasUnresolvedConversationDisposal(input.sessionId, input.generation, input.conversationId)),
               disposal ? session.generation : null)) {
           throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Conversation has active, unresolved or shared work; retrieve completed outputs before deletion');
         }

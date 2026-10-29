@@ -134,6 +134,33 @@ export class TeamWorkflow {
     } };
   }
 
+  async openSession(input: RoleInput) {
+    const session = this.#role(input);
+    return await this.services.scheduler.actorFor(session.sessionId).enqueue(async () => {
+      const current = this.#role(input);
+      if (current.provider !== 'chatgpt' || current.generation !== 0 || current.conversationId !== null || current.promptSubmitted)
+        throw new SessionPlaneDomainError('session.preparation-not-ready', 'Open requires the empty current ChatGPT session; existing requests remain unchanged');
+      const method = 'workflow.session_open';
+      const receipt = { clientId: `team:${input.teamId}`, requestId: input.requestId, method,
+        requestHash: hashCanonical({ method, payload: input }) };
+      const prior = this.services.receipts.get(receipt.clientId, receipt.requestId);
+      if (prior && (prior.method !== method || prior.requestHash !== receipt.requestHash))
+        throw new SessionPlaneDomainError('input.idempotency-conflict', 'Empty-page operation identity changed');
+      if (prior?.status === 'complete') return JSON.parse(prior.resultJson);
+      this.services.receipts.record({ ...receipt, status: 'attempted', result: { sessionId: current.sessionId } });
+      // Retain the page before navigation, so an interrupted open never creates a second tab.
+      const pageKey = await this.services.ui.openEmptySession(current, key => {
+        if (!this.#sessions.updateCurrentGeneration(current.sessionId, 0, { pageKey: key }, new Date().toISOString()))
+          throw new SessionPlaneDomainError('session.generation-superseded', 'Empty session changed before opening');
+      });
+      const result = { requestOk: true, sessionId: current.sessionId, generation: 0, pageKey,
+        promptSubmitted: false, observedSurface: await this.services.ui.inspectSurface(this.#role(input)),
+        providerMutation: false };
+      this.services.receipts.record({ ...receipt, status: 'complete', result });
+      return result;
+    });
+  }
+
   async send(input: RoleInput & { prompt: string; model?: string | undefined; effort?: string | undefined; files?: string[] | undefined; thinkingFailureRecovery?: true | undefined; continuationOf?: string | undefined; sessionDeadlineSec: number }) {
     this.services.directory.getTeam(input.teamId);
     const clientId = `team:${input.teamId}`;
@@ -170,7 +197,7 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; followupUserMessageId?: string | undefined; manageOnly?: true | undefined; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow' | 'decline'; appName: string; followupUserMessageId?: string | undefined; toolName?: string | undefined; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; workComplete: true; evidenceRef: string; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'human_review'; action: 'pause' | 'resume' } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'reopen' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
+  async decide(input: Identity & ({ requestId: string; decision: 'continue'; continuationApproved: true; followupUserMessageId?: string | undefined; manageOnly?: true | undefined; userConfirmedInterruption?: UserConfirmedInterruption | undefined } | { requestId: string; decision: 'hostspan_permission'; action: 'inspect' | 'allow' | 'decline'; appName: string; followupUserMessageId?: string | undefined; toolName?: string | undefined; allowMode?: 'once' | 'always' | undefined; evidenceHash?: string | undefined } | { requestId: string; decision: 'retire_observation'; evidenceRef: string; workComplete?: true; discardUnresolved?: true; successorRequestRef?: string | undefined } | { requestId: string; decision: 'reconcile_followup'; followupUserMessageId: string; responseMessageId: string; responseSha256: string; followupCompleted: true } | { requestId: string; decision: 'human_review'; action: 'pause' | 'resume' } | { requestId: string; decision: 'discover' } | { requestId: string; decision: 'prepare_resend'; approvalRef: string; duplicateRiskAccepted: true } | { requestId: string; decision: 'followup'; approvalRef: string } | { requestId: string; decision: 'configure'; configurationId: string } | { requestId: string; decision: 'acknowledge'; messageId: string; evidenceHash: string } | { requestId: string; decision: 'refresh' } | { requestId: string; decision: 'focus' } | { requestId: string; decision: 'reopen' } | { requestId: string; decision: 'latest' } | { requestId: string; decision: 'reconcile_failure'; continuationPrompt?: '계속' | undefined } | { requestId: string; decision: 'choose' | 'reveal'; purpose: 'model' | 'effort' | 'composer' | 'submit'; snapshotId: string; ref: string; value?: number | undefined })) {
     const request = this.#request(input);
     if (input.decision === 'human_review') {
       const result = await this.services.scheduler.actorFor(request.sessionId).enqueue(async () => {
@@ -296,7 +323,11 @@ export class TeamWorkflow {
             const completedSuccessor = successor !== null && successor.sessionId !== request.sessionId &&
               successor.createdAt > request.createdAt && successorResult?.completedAt != null &&
               successorResult.responseMessageId !== null && successorResult.answerText !== null;
-            if (input.workComplete !== true || (role.currentSessionId === request.sessionId &&
+            if (input.discardUnresolved === true && (role.currentSessionId === request.sessionId ||
+                !this.#userReview(request) || this.services.scheduler.collectors(request.sessionId).length > 0))
+              throw new SessionPlaneDomainError('session.recovery-unavailable',
+                'Unresolved disposal requires a displaced, held exact conversation and consumed collectors; UNKNOWN children remain preserved');
+            if ((!input.discardUnresolved && input.workComplete !== true) || (role.currentSessionId === request.sessionId &&
                 role.roleState !== 'retired' && !completedSuccessor)) throw new SessionPlaneDomainError(
               'session.recovery-unavailable', 'Requires explicit work completion and a displaced/retired session or a completed same-team successor request');
             const generation = this.#sessions.getGenerationResult(request.sessionId, request.generation);
@@ -311,7 +342,9 @@ export class TeamWorkflow {
             new EventRepository(this.services.database.raw).append({ teamId: input.teamId, roleId: current.roleId,
               sessionId: request.sessionId, generation: request.generation, eventType: 'generation.observation-retired',
               payload: { requestRef: request.outboxId, evidenceRef: input.evidenceRef,
-                successorRequestRef: input.successorRequestRef ?? null, completionSource: 'explicit-user-confirmation',
+                successorRequestRef: input.successorRequestRef ?? null,
+                discardUnresolved: input.discardUnresolved === true, conversationId: current.conversationId,
+                completionSource: input.discardUnresolved ? 'explicit-observation-disposal' : 'explicit-user-confirmation',
                 providerMutation: false, originalSubmissionState: current.submissionState }, createdAt: timestamp });
             return { requestOk: true, requestRef: request.outboxId, sessionId: request.sessionId, generation: request.generation,
               disposition: 'observation-retired', providerMutation: false, originalSubmissionState: current.submissionState,

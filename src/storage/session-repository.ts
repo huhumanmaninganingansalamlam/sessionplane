@@ -251,6 +251,14 @@ export class SessionRepository {
           AND e.event_type='generation.observation-retired')`).get(sessionId, generation) !== undefined;
   }
 
+  hasUnresolvedConversationDisposal(sessionId: string, generation: number, conversationId: string): boolean {
+    return this.canDiscardRetiredObservation(sessionId, generation) && this.#database.prepare(`
+      SELECT 1 FROM events WHERE session_id=? AND generation=? AND event_type='generation.observation-retired'
+        AND json_extract(payload_json, '$.discardUnresolved')=1
+        AND json_extract(payload_json, '$.conversationId')=?
+    `).get(sessionId, generation, conversationId) !== undefined;
+  }
+
   retireDeletedConversation(sessionId: string, timestamp: string, keepRole = false): void {
     this.#database.prepare("UPDATE sessions SET session_state = 'superseded', next_check_at = NULL, updated_at = ? WHERE session_id = ?")
       .run(timestamp, sessionId);
