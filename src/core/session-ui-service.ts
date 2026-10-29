@@ -40,6 +40,29 @@ export class SessionUiService {
 
   get configurationCatalog() { return this.#catalog; }
 
+  async openEmptySession(session: SessionSnapshot, retainPage: (pageKey: string) => void): Promise<string> {
+    if (!this.#browserOwner) throw new SessionPlaneDomainError('browser.unavailable', 'Dedicated browser is unavailable');
+    let pageKey = session.pageKey;
+    if (pageKey === null) {
+      const created = await this.#browserOwner.createPage();
+      pageKey = created.binding.pageKey;
+      this.#registry.reservePage(pageKey, { sessionId: session.sessionId, generation: 0, conversationId: null });
+      retainPage(pageKey);
+      // Only the new empty owned tab is navigated. Never revisit an old conversation.
+      await created.page.goto(this.#chatgptOrigin + '/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      this.#registry.refreshPage(pageKey);
+    }
+    // A failed first navigation can leave this exact reserved empty tab blank.
+    const retained = this.#registry.requireSessionPage(pageKey, { sessionId: session.sessionId, generation: 0, conversationId: null });
+    if (retained.url() === 'about:blank') {
+      await retained.goto(this.#chatgptOrigin + '/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      this.#registry.refreshPage(pageKey);
+    }
+    const page = this.#requirePage({ ...session, pageKey });
+    await prepareChatGptObservation(page, pageKey);
+    return pageKey;
+  }
+
   async discover(input: PreparationOwner & { decisionId: string }) {
     let result = await this.#submissions.decidePreparation({ ...input, decision: 'discover', purpose: 'model' }, async session => {
       try {
@@ -1164,7 +1187,7 @@ export class SessionUiService {
         reason: 'completed-original-has-successor', providerMutation: false };
     }
     try {
-      const page = await this.#interactionPage(session);
+      const page = await this.#interactionPage(session, input.action === 'inspect');
       await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
       const messages = (await readChatGptMessages(page)).filter(message => message.role === 'user');
       // A visible exact grant belongs to this owned conversation independently of

@@ -11,6 +11,48 @@ import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import type { ConfigurationCatalog } from '../../src/providers/chatgpt/configuration-catalog.ts';
 import { ChatGptConfigurationMenu } from '../../src/providers/chatgpt/configuration-catalog.ts';
 
+test('empty same-role Chat opening materializes once without a prompt, generation or submission', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-empty-chat-'));
+  const core = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const create = core.browserOwner!.createPage.bind(core.browserOwner);
+  let pages = 0;
+  t.mock.method(core.browserOwner!, 'createPage', async (...args) => {
+    pages++;
+    const result = await create(...args);
+    await result.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body:
+      '<main><div role="group"><button aria-pressed="true">Chat</button><button aria-pressed="false" onclick="throw Error(\'No Work\')">Work</button></div><textarea></textarea></main>' }));
+    return result;
+  });
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_' + name,
+    arguments: args, socketPath: core.config.socketPath, timeoutMs: 10000, maxLineBytes: core.config.rpcMaxLineBytes });
+  try {
+    const team = (await invoke('team_create', { requestId: 'empty-chat-team' })).structuredContent as any;
+    const input = { teamId: team.teamId, roleRef: team.roles[0].roleRef, requestId: 'open-empty' };
+    const opened = await invoke('session_open', input);
+    assert.equal(opened.isError, false, JSON.stringify(opened));
+    assert.equal((opened.structuredContent.observedSurface as any).mode, 'chat', JSON.stringify({ opened, snapshot: core.teamDirectory.getSession(String(opened.structuredContent.sessionId)), binding: core.pageRegistry.getBinding(String(opened.structuredContent.pageKey)) }));
+    assert.equal((opened.structuredContent.observedSurface as any).source, 'selected-control');
+    assert.equal(opened.structuredContent.generation, 0);
+    assert.equal(opened.structuredContent.promptSubmitted, false);
+    assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS count FROM outbox').get()!.count, 0);
+    assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS count FROM generations').get()!.count, 0);
+    assert.deepEqual((await invoke('session_open', input)).structuredContent, opened.structuredContent);
+    assert.equal((await invoke('session_open', { ...input, requestId: 'read-retained-empty' })).isError, false);
+    assert.equal(pages, 1);
+    const page = core.pageRegistry.pageForObservation(String(opened.structuredContent.pageKey));
+    assert.equal(await page.locator('textarea').inputValue(), '');
+    const foreign = (await invoke('team_create', { requestId: 'foreign-empty-team' })).structuredContent as any;
+    assert.equal((await invoke('session_open', { ...input, teamId: foreign.teamId })).isError, true);
+    assert.equal(pages, 1);
+    // A previously open operation cannot be used to open a submitted generation.
+    await core.submissionService.send({ clientId: 'fixture', requestId: 'not-an-empty-request',
+      sessionId: String(opened.structuredContent.sessionId), prompt: 'Authorized fixture preparation', sessionDeadlineSec: 600 }).catch(() => {});
+    assert.equal((await invoke('session_open', { ...input, roleRef: String(opened.structuredContent.sessionId) + ':1' })).isError, true);
+    assert.equal(await page.locator('textarea').inputValue(), '');
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('Chat-only preparation never advertises or activates Work through catalog or raw choices', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chat-only-choices-'));
   const service = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,

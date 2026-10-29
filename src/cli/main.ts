@@ -742,6 +742,7 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
       ...optionalParam('model', parsed.options.model), ...optionalParam('effort', parsed.options.effort),
       ...(parsed.files.length ? { files: parsed.files } : {}) }, sessionSendRpcTimeoutMs(config));
   }
+  if (action === 'open') return await printRpc(io, parsed, config, 'workflow.session_open', { teamId, roleRef: ref, requestId }, sessionSendRpcTimeoutMs(config));
   if (action === 'replace') return await printRpc(io, parsed, config, 'workflow.session_replace', {
     teamId, roleRef: ref, requestId,
     ...(parsed.options['preserve-conversation'] === 'true' ? { preserveConversation: true } : {}),
@@ -750,7 +751,10 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   }, sessionSendRpcTimeoutMs(config));
   if (action === 'delete') {
     if (parsed.options['outputs-retrieved'] !== 'true') throw new Error('Retrieve the original answer/files first, then pass --outputs-retrieved to authorize conversation deletion.');
-    return await printRpc(io, parsed, config, 'workflow.session_delete', { ...mutation, outputsRetrieved: true }, sessionSendRpcTimeoutMs(config));
+    return await printRpc(io, parsed, config, 'workflow.session_delete', { ...mutation, outputsRetrieved: true,
+      ...(parsed.options['discard-retired-observation'] === undefined ? {} : {
+        discardRetiredObservation: JSON.parse(readFileSync(parsed.options['discard-retired-observation'], 'utf8')) }),
+    }, sessionSendRpcTimeoutMs(config));
   }
   if (action === 'stop') return await printRpc(io, parsed, config, 'workflow.stop', mutation, sessionSendRpcTimeoutMs(config));
   if (action === 'configure') return await printRpc(io, parsed, config, 'workflow.decide', {
@@ -758,6 +762,10 @@ async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionP
   }, sessionSendRpcTimeoutMs(config));
   if (action === 'human_review') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'human_review', action: requireOption(parsed, 'action'),
+  }, sessionSendRpcTimeoutMs(config));
+  if (action === 'retire_observation') return await printRpc(io, parsed, config, 'workflow.decide', {
+    ...mutation, decision: 'retire_observation', discardUnresolved: parsed.options['discard-unresolved'] === 'true',
+    evidenceRef: requireOption(parsed, 'evidence-ref'),
   }, sessionSendRpcTimeoutMs(config));
   if (action === 'hostspan_permission') return await printRpc(io, parsed, config, 'workflow.decide', {
     ...mutation, decision: 'hostspan_permission', action: requireOption(parsed, 'action'),
@@ -1398,7 +1406,12 @@ Exact request flow (same request; no automatic resend):
   HostSpan permission inspection, authorized grant or decline: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow|decline --app-name NAME [--tool-name NAME] [--allow-mode once|always] [--evidence-hash HASH] [--followup-message-id SOURCE_ID]
   User-controlled review: request human_review TEAM_ID CURRENT_REQUEST_REF --action pause|resume
   Cancel: request stop TEAM_ID REQUEST_REF
-  Delete a collected conversation: request delete TEAM_ID REQUEST_REF --outputs-retrieved
+  Open an empty current Chat session without a prompt: request open TEAM_ID ROLE_REF
+  Dispose obsolete local observation without declaring child completion:
+    request retire_observation TEAM_ID REQUEST_REF --discard-unresolved --evidence-ref EXISTING_AGENT_HANDOFF
+    Requires displaced role routing, exact review hold and no remaining collectors; UNKNOWN records stay unchanged.
+  Delete a collected conversation: request delete TEAM_ID REQUEST_REF --outputs-retrieved [--discard-retired-observation FILE]
+    For explicitly disposed unresolved history, FILE contains exact conversationId and existing evidenceRef.
   Replace: request replace TEAM_ID ROLE_REF [--preserve-conversation] [--unresolved-handoff FILE]
     Unresolved handoff JSON: exact requestRef and explicit user approvalRef; requires hold and no collectors.
     Default replacement attempts old-chat deletion. Preserve mode retains the old conversation.
