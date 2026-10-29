@@ -59,6 +59,14 @@ test('CLI unresolved cleanup forwards explicit disposal without claiming work co
     assert.equal((await runCliJson(['request', 'retire_observation', ...common,
       '--discard-unresolved=true', ...flags])).code, 2, 'Explicit disposal remains a flag, not an arbitrary value');
     assert.equal(requests.length, 2, 'Invalid input never reaches Core');
+    for (const action of ['inspect', 'close']) {
+      const hash = 'a'.repeat(64);
+      const output = await runCliJson(['request', 'output_panel', ...common, '--action', action,
+        ...(action === 'close' ? ['--evidence-hash', hash] : []), ...flags]);
+      assert.equal(output.code, 0, output.stderr);
+      assert.deepEqual(requests.at(-1)!.params, { teamId: common[0], requestRef: common[1], requestId: 'stable-disposal',
+        decision: 'output_panel', action, ...(action === 'close' ? { evidenceHash: hash } : {}) });
+    }
   } finally {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     rmSync(root, { recursive: true, force: true });

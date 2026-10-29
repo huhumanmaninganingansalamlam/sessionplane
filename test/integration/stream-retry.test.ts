@@ -6,6 +6,7 @@ import test from 'node:test';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
+import { SessionUiService } from '../../src/core/session-ui-service.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 async function fixture(alertText = '메시지 스트림에 오류 발생') {
@@ -453,5 +454,107 @@ test('UNKNOWN Continue retries existing conversation chrome while preserving dra
     assert.equal(stored.answerText, null);
     assert.equal(f.fake.submitCount, 1);
     assert.equal(f.core.database.raw.prepare('SELECT count(*) AS n FROM outbox').get()!.n, 1);
+  } finally { await f.close(); }
+});
+
+test('owned output_panel inspects and closes only its open image/code panel without stream Retry, send, Stop or draft changes', async () => {
+  const f = await fixture();
+  try {
+    // Hither's retained panel is image/code output chrome, with no stream-error alert.
+    const panel = outputPopover.replace('문서', '이미지').replaceAll('report.md', 'observe-frame.png')
+      .replace('</div></div>', '</div><div><button aria-label="request.json 열기" aria-describedby="code-type">request.json</button><span id="code-type">코드</span></div></div>')
+      .replace("document.querySelector('#output-list').remove();", "const d=document.querySelector('#output-list');d.setAttribute('data-state','closed');d.setAttribute('inert','');d.setAttribute('aria-hidden','true');");
+    await f.page.setContent(f.markup.replace(/<aside[\s\S]*?<\/aside>/, '') + panel);
+    await f.page.locator('textarea').fill('Preserve the separate saved draft');
+    const outbox = f.core.database.raw.prepare('SELECT * FROM outbox').all();
+    const ack = f.snapshot.submittedUserMessageId;
+    const decide = (requestId: string, action: string, evidenceHash?: string) => f.invoke('decide', {
+      teamId: f.team.teamId, requestRef: f.sent.requestRef, requestId, decision: 'output_panel', action,
+      ...(evidenceHash ? { evidenceHash } : {}) });
+    const inspected = await decide('panel-inspect', 'inspect');
+    assert.equal(inspected.isError, false, JSON.stringify(inspected));
+    const evidence = inspected.structuredContent.outputPanel as any;
+    assert.equal(evidence.requestAcknowledgementVerified, true);
+    assert.equal(evidence.surface.reason, 'output-popover-open');
+    assert.equal(evidence.surface.outputPopover.eligible, true);
+    assert.equal(evidence.surface.outputPopover.rendering.chain[0].inert, false);
+    assert.equal(evidence.surface.outputPopover.rendering.chain[0].ariaHidden, null);
+    assert.equal(await f.page.evaluate(() => (window as any).dismissals ?? 0), 0);
+    assert.equal((await decide('panel-stale', 'close', '0'.repeat(64))).isError, true);
+    const close = await decide('panel-close', 'close', evidence.evidenceHash);
+    assert.equal(close.isError, false, JSON.stringify(close));
+    const result = close.structuredContent.outputPanel as any;
+    assert.equal(result.outcome, 'toggle-dispatched');
+    assert.equal(result.panelClosed, true);
+    assert.equal(result.surface.outputPopover.inactive, true);
+    assert.equal(result.surface.outputPopover.rendering.chain[0].ariaHidden, 'true');
+    assert.equal(result.surface.outputPopover.rendering.chain[0].inert, true);
+    assert.deepEqual((await decide('panel-close', 'close', evidence.evidenceHash)).structuredContent, close.structuredContent);
+    const inactive = (await decide('panel-inactive', 'inspect')).structuredContent.outputPanel as any;
+    assert.equal((await decide('panel-no-reopen', 'close', inactive.evidenceHash)).isError, false);
+    assert.equal(await f.page.evaluate(() => (window as any).dismissals), 1);
+    assert.equal(await f.page.evaluate(() => (window as any).clicks ?? 0), 0);
+    assert.equal(await f.page.locator('textarea').inputValue(), 'Preserve the separate saved draft');
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(f.core.teamDirectory.getSession(f.snapshot.sessionId).submittedUserMessageId, ack);
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM outbox').all(), outbox);
+    assert.equal(f.core.database.raw.prepare("SELECT count(*) n FROM request_receipts WHERE method LIKE 'session.stream-retry%'").get()!.n, 0);
+  } finally { await f.close(); }
+});
+
+test('owned output_panel keeps actual modal, alert, unknown panel, ambiguous toggle, stale ACK and review-hold guards', async () => {
+  const f = await fixture();
+  try {
+    const markup = f.markup.replace(/<aside[\s\S]*?<\/aside>/, '');
+    const variants = [outputPopover + '<div role="dialog" aria-modal="true">Actual permission</div>',
+      outputPopover + '<div role="alert">HostSpan permission required</div>',
+      outputPopover.replace('>문서<', '>Unknown control<'),
+      outputPopover.replace('<header>', '<header><button type="button" aria-controls="output-list">Other toggle</button>'),
+      outputPopover.replace('data-state="open"', 'data-state="open" aria-modal="true"')];
+    for (let i = 0; i < variants.length; i++) {
+      await f.page.setContent(markup + variants[i]);
+      const inspect = await f.invoke('decide', { teamId: f.team.teamId, requestRef: f.sent.requestRef,
+        requestId: `guard-inspect-${i}`, decision: 'output_panel', action: 'inspect' });
+      const evidence = inspect.structuredContent.outputPanel as any;
+      assert.equal(evidence.surface.reason, 'other-provider-control');
+      const close = await f.invoke('decide', { teamId: f.team.teamId, requestRef: f.sent.requestRef,
+        requestId: `guard-close-${i}`, decision: 'output_panel', action: 'close', evidenceHash: evidence.evidenceHash });
+      assert.equal(close.isError, true);
+      assert.equal(await f.page.evaluate(() => (window as any).dismissals ?? 0), 0);
+    }
+    await f.page.setContent(markup + outputPopover);
+    const current = await f.invoke('decide', { teamId: f.team.teamId, requestRef: f.sent.requestRef,
+      requestId: 'current-inspect', decision: 'output_panel', action: 'inspect' });
+    await f.page.locator('[data-user-message-bubble]').evaluate(e => e.parentElement!.setAttribute('data-chatgpt-search-message-ids', 'different-ack'));
+    const changed = await f.invoke('decide', { teamId: f.team.teamId, requestRef: f.sent.requestRef,
+      requestId: 'changed-close', decision: 'output_panel', action: 'close', evidenceHash: (current.structuredContent.outputPanel as any).evidenceHash });
+    assert.equal(changed.isError, true);
+    await f.page.setContent(markup + outputPopover);
+    await f.invoke('decide', { teamId: f.team.teamId, requestRef: f.sent.requestRef, requestId: 'hold', decision: 'human_review', action: 'pause' });
+    const held = await f.invoke('decide', { teamId: f.team.teamId, requestRef: f.sent.requestRef, requestId: 'held-close',
+      decision: 'output_panel', action: 'close', evidenceHash: (current.structuredContent.outputPanel as any).evidenceHash });
+    assert.equal(held.isError, true);
+    assert.equal(await f.page.evaluate(() => (window as any).dismissals ?? 0), 0);
+    assert.equal(f.fake.submitCount, 1);
+  } finally { await f.close(); }
+});
+
+
+test('only a verified inactive output panel stops blocking normal continuation inspection; an open panel or real modal still blocks', async () => {
+  const f = await fixture();
+  try {
+    const ui = new SessionUiService({ submissions: f.core.submissionService, registry: f.core.pageRegistry,
+      chatgptUrl: 'https://chatgpt.com/' });
+    const markup = f.markup.replace(/<aside[\s\S]*?<\/aside>/, '');
+    await f.page.setContent(markup + outputPopover);
+    await assert.rejects(ui.verifyContinuation(f.snapshot, f.snapshot), /Continuation requires/);
+    await f.page.setContent(markup + inactiveOutputPopover);
+    const verified = await ui.verifyContinuation(f.snapshot, f.snapshot);
+    assert.equal(verified.conversationId, f.snapshot.conversationId);
+    await f.page.setContent(markup + inactiveOutputPopover + '<div role="dialog" aria-modal="true">Actual modal</div>');
+    await assert.rejects(ui.verifyContinuation(f.snapshot, f.snapshot), /Continuation requires/);
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(await f.page.evaluate(() => (window as any).clicks ?? 0), 0);
+    assert.equal(await f.page.evaluate(() => (window as any).dismissals ?? 0), 0);
   } finally { await f.close(); }
 });
