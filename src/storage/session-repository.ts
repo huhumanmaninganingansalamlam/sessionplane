@@ -489,15 +489,18 @@ export class SessionRepository {
     return Number(result.changes);
   }
 
-  retireObservation(sessionId: string, generation: number, updatedAt: string): boolean {
+  retireObservation(sessionId: string, generation: number, updatedAt: string, discardPrepared = false): boolean {
     // This is local tracking retirement, not provider completion or cancellation.
     return this.#database.prepare(`UPDATE sessions SET session_state = 'cancelled',
       next_check_at = NULL, updated_at = ? WHERE session_id = ? AND current_generation = ?
       AND session_state NOT IN ('complete', 'cancelled', 'failed')
       AND EXISTS (SELECT 1 FROM generations g WHERE g.session_id=sessions.session_id
         AND g.generation=sessions.current_generation AND g.completed_at IS NULL
-        AND g.prompt_submitted=1 AND g.submission_state IN ('submitted', 'submission_unknown'))
-    `).run(updatedAt, sessionId, generation).changes === 1;
+        AND ((g.prompt_submitted=1 AND g.submission_state IN ('submitted', 'submission_unknown')) OR
+          (?=1 AND g.prompt_submitted=0 AND g.submission_state='prepared'
+            AND g.submitted_user_message_id IS NULL AND g.submitted_user_turn_id IS NULL
+            AND g.response_message_id IS NULL AND g.answer_text IS NULL)))
+    `).run(updatedAt, sessionId, generation, Number(discardPrepared)).changes === 1;
   }
 
   retireUnsubmittedSession(sessionId: string, state: 'superseded' | 'cancelled', updatedAt: string): void {

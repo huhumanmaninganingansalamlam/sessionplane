@@ -43,7 +43,7 @@ export const workflowSchemas = {
     z.object({ ...request, requestId, decision: z.literal('retire_observation'), workComplete: z.literal(true),
       evidenceRef: z.string().trim().min(1).max(2000), successorRequestRef: requestRef.optional() }).strict(),
     z.object({ ...request, requestId, decision: z.literal('retire_observation'), discardUnresolved: z.literal(true),
-      evidenceRef: z.string().trim().min(1).max(2000).describe('Preserved outputs/drafts and UNKNOWN command references plus the explicit user disposal instruction. Disposes only obsolete observation, never asserts child completion.') }).strict(),
+      evidenceRef: z.string().trim().min(1).max(2000).describe('Existing agent-handoff and explicit disposal authorization for a displaced, held conversation with no collectors. Includes an exact prepared/unsubmitted obsolete draft without ACK as well as unresolved submitted observation. Retains original requests, outputs and UNKNOWN commands; never asserts child completion or submits/stops provider work.') }).strict(),
     z.object({ ...request, requestId, decision: z.literal('reconcile_followup'), followupUserMessageId: z.string().min(1).max(300),
       responseMessageId: z.string().min(1).max(300), responseSha256: z.string().regex(/^[a-f0-9]{64}$/),
       followupCompleted: z.literal(true) }).strict(),
