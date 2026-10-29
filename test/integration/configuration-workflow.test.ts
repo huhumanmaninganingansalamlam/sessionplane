@@ -16,9 +16,7 @@ test('empty same-role Chat opening materializes once without a prompt, generatio
   const core = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
     logger: { debug() {}, info() {}, warn() {}, error() {} } });
   const create = core.browserOwner!.createPage.bind(core.browserOwner);
-  let pages = 0;
   t.mock.method(core.browserOwner!, 'createPage', async (...args) => {
-    pages++;
     const result = await create(...args);
     await result.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body:
       '<main><div role="group"><button aria-pressed="true">Chat</button><button aria-pressed="false" onclick="throw Error(\'No Work\')">Work</button></div><textarea></textarea></main>' }));
@@ -38,16 +36,21 @@ test('empty same-role Chat opening materializes once without a prompt, generatio
     assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS count FROM outbox').get()!.count, 0);
     assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS count FROM generations').get()!.count, 0);
     assert.deepEqual((await invoke('session_open', input)).structuredContent, opened.structuredContent);
-    assert.equal((await invoke('session_open', { ...input, requestId: 'read-retained-empty' })).isError, false);
-    assert.equal(pages, 1);
+    const retained = await invoke('session_open', { ...input, requestId: 'read-retained-empty' });
+    assert.equal(retained.isError, false, JSON.stringify(retained));
+    assert.equal(retained.structuredContent.pageKey, opened.structuredContent.pageKey);
+    assert.equal(core.pageRegistry.listBindings({ includeClosed: false }).filter(binding =>
+      binding.sessionId === opened.structuredContent.sessionId).length, 1, 'Only one Chat page belongs to this session; native tab-group helper pages are unrelated');
     const page = core.pageRegistry.pageForObservation(String(opened.structuredContent.pageKey));
     assert.equal(await page.locator('textarea').inputValue(), '');
     const foreign = (await invoke('team_create', { requestId: 'foreign-empty-team' })).structuredContent as any;
     assert.equal((await invoke('session_open', { ...input, teamId: foreign.teamId })).isError, true);
-    assert.equal(pages, 1);
+    assert.equal(core.pageRegistry.listBindings({ includeClosed: false }).filter(binding =>
+      binding.sessionId === opened.structuredContent.sessionId).length, 1);
     // A previously open operation cannot be used to open a submitted generation.
-    await core.submissionService.send({ clientId: 'fixture', requestId: 'not-an-empty-request',
-      sessionId: String(opened.structuredContent.sessionId), prompt: 'Authorized fixture preparation', sessionDeadlineSec: 600 }).catch(() => {});
+    await assert.rejects(core.submissionService.send({ clientId: 'fixture', requestId: 'not-an-empty-request',
+      sessionId: String(opened.structuredContent.sessionId), prompt: 'Authorized fixture preparation', sessionDeadlineSec: 600 }),
+      (error: any) => error.errorCode === 'provider.preparation-required' && error.details.promptSubmitted === false);
     assert.equal((await invoke('session_open', { ...input, roleRef: String(opened.structuredContent.sessionId) + ':1' })).isError, true);
     assert.equal(await page.locator('textarea').inputValue(), '');
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }

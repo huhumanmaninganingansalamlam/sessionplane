@@ -713,7 +713,7 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
 async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionPlaneConfig): Promise<number> {
   const action = parsed.words[1];
   const teamId = requirePositional(parsed.words, 2, 'teamId');
-  const ref = requirePositional(parsed.words, 3, action === 'send' || action === 'replace' ? 'roleRef' : 'requestRef');
+  const ref = requirePositional(parsed.words, 3, ['send', 'replace', 'open'].includes(action ?? '') ? 'roleRef' : 'requestRef');
   const request = { teamId, requestRef: ref };
   const requestId = parsed.options['request-id'] ?? randomUUID();
   const mutation = { ...request, requestId };

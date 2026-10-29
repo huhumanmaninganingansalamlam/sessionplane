@@ -1187,6 +1187,8 @@ export class SessionUiService {
         reason: 'completed-original-has-successor', providerMutation: false };
     }
     try {
+      // Generation may hide mode/composer chrome. Inspection only reveals/reads
+      // the exact ACK-bound card; grant/decline still require verified Chat.
       const page = await this.#interactionPage(session, input.action === 'inspect');
       await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
       const messages = (await readChatGptMessages(page)).filter(message => message.role === 'user');

@@ -270,6 +270,24 @@ out prompts, infer consensus, or inject answers into other roles.
   CLI: add `--unresolved-handoff FILE` containing those two fields. This is
   not automatic recovery or an access/security bypass. The original Coordinator
   owns the routing decision and the separately authorized next prompt.
+- An empty successor needs no invented product prompt to show its Chat page:
+  `sessionplane_session_open` takes teamId, its fresh roleRef and requestId
+  (CLI: `request open TEAM_ID ROLE_REF`). It creates no generation, fills nothing,
+  submits nothing and starts no collector. Use returned actual mode evidence;
+  configuration/submission still require verified Chat.
+- When the user explicitly orders disposal of an obsolete conversation with UNKNOWN
+  children, preserve their references in the existing agent-handoff, hold the exact
+  old observation and consume its collector before replacing the same role. After
+  displacement, decide `retire_observation` with `discardUnresolved:true` and that
+  existing evidenceRef; omit workComplete. This disposes local tracking only and
+  preserves all original generation, ACK, draft, result and command uncertainty.
+  Then session_delete may use `outputsRetrieved:true` for the available preserved
+  outputs plus `discardRetiredObservation:{conversationId,evidenceRef}`. This never
+  asserts a missing final or child END. CLI exposes `request retire_observation
+  TEAM_ID REQUEST_REF --discard-unresolved --evidence-ref REF`, and `request delete
+  TEAM_ID REQUEST_REF --outputs-retrieved --discard-retired-observation FILE`.
+  Deletion failure does not block the existing successor. Inspect deletion and
+  pageCleanup separately; shared work, active pages and drafts remain guarded.
 - For authorized context renewal, use `sessionplane_session_replace` on the same
   stable role with its fresh `roleRef` and the same provider. Keep the role ID/key;
   do not create dated continuation roles for the same responsibility.
