@@ -21,6 +21,10 @@ export interface ConfigurationCatalog {
   readonly message?: string;
 }
 
+export function isChatGptModelChooser(node: BrowserSnapshotNode) {
+  return node.role === 'button' && node.hasPopup === 'menu' && /(?:model|모델)/i.test(node.name) && !isChatGptModeControl(node);
+}
+
 // Labels and combinations come from the provider, not a model-name table.
 // The caller holds the exact preparation page's mutation lease throughout.
 export class ChatGptConfigurationMenu {
@@ -117,8 +121,7 @@ export class ChatGptConfigurationMenu {
   }
 
   #opener(nodes: readonly BrowserSnapshotNode[]) {
-    const matches = nodes.filter(n => n.role === 'button' && n.hasPopup === 'menu' &&
-      /(?:model|모델)/i.test(n.name));
+    const matches = nodes.filter(isChatGptModelChooser);
     if (this.#verificationOnly && matches.length > 1) throw new SessionPlaneDomainError(
       'provider.configuration-unavailable', 'Current model chooser is ambiguous');
     return matches[0];

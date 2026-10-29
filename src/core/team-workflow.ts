@@ -1428,7 +1428,9 @@ export class TeamWorkflow {
         requested: { model: payload.model, effort: payload.effort, surface: payload.surface }, choices: preparation.choices,
         message: evidence.preparationAvailability.available ? preparation.message
           : 'reason' in evidence.preparationAvailability && evidence.preparationAvailability.reason === 'chat-selection-unverified'
-            ? 'Actual Chat selection is unverified or the conversation is Work. Preserve this prepared request and draft. Work is observation-only; use the authorized same-role Chat recovery, never a model/effort choice to activate Work.'
+            ? evidence.observedSurface.mode === 'work'
+              ? 'This Work conversation is observation-only. Preserve its work and use the authorized same-role Chat replacement; never select or submit in Work.'
+              : 'Actual Chat selection is unverified. Preserve this prepared request and draft. Only an advertised read-only model-picker reveal is available for mode inspection; it selects nothing and cannot resume Submit. Model labels and an inherited false composer flag do not prove Chat.'
             : 'The exact provider page has no usable composer. This request remains prepared and was not submitted. Read the same request after the provider page becomes usable; do not treat Retry or another ordinary button as submit.' };
     }
     // Explicit evidence also inspects completed current turns without rewriting their result.

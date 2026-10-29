@@ -6,7 +6,7 @@ import { controlHostSpanPermission, inspectHostSpanActivity, revealHostSpanActiv
 import { createHash } from 'node:crypto';
 import { requireIdleConversationPage } from './conversation-cleanup-service.ts';
 import { conversationLoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
-import { ChatGptConfigurationMenu, type ConfigurationCatalog } from '../providers/chatgpt/configuration-catalog.ts';
+import { isChatGptModelChooser, ChatGptConfigurationMenu, type ConfigurationCatalog } from '../providers/chatgpt/configuration-catalog.ts';
 import { errors, type ElementHandle, type Page } from 'playwright-core';
 
 import type { BrowserOwner } from '../browser/browser-owner.ts';
@@ -138,6 +138,7 @@ export class SessionUiService {
           this.#requirePage(session);
         }
         const chatVerified = snapshot.observedSurface.mode === 'chat';
+        const inspectModeChooser = modeInspectionChooser(snapshot.nodes, snapshot.observedSurface);
         const cachedCatalog = chatVerified ? this.#discoveryFailures.get(`${session.sessionId}:${session.generation}`) ?? this.#catalog : null;
         const catalog = cachedCatalog === null ? null : { ...cachedCatalog, options: cachedCatalog.options.filter(option =>
           !isChatGptModeControl({ role: 'menuitemradio', name: option.version, text: option.label })) };
@@ -145,7 +146,7 @@ export class SessionUiService {
         this.#configurationRefs.set(snapshot.pageKey, { snapshotId: snapshot.snapshotId,
           ids: composerAvailable ? catalog?.options.map(option => option.id) ?? [] : [] });
         return { ...snapshot, nodes: snapshot.nodes.map((node) => ({ ...node,
-          actions: chatVerified ? preparationActions(node, menuIds) : { choose: [], reveal: [] } })),
+          actions: chatVerified ? preparationActions(node, menuIds) : { choose: [], reveal: node === inspectModeChooser ? ['model' as const] : [] } })),
           preparationAvailability: { available: composerAvailable && chatVerified,
             ...(!composerAvailable ? { reason: 'composer-unavailable' as const }
               : !chatVerified ? { reason: 'chat-selection-unverified' as const } : {}) },
@@ -1036,7 +1037,9 @@ export class SessionUiService {
         if (input.value !== undefined && currentNode.role !== 'slider') {
           throw new SessionPlaneDomainError('input.invalid', 'A numeric value is only valid for a model or effort slider');
         }
-        await this.#interactionPage(session);
+        const modeInspection = reveal && purpose === 'model' && input.value === undefined &&
+          currentNode.ref === modeInspectionChooser(currentObservation.nodes, await observeChatGptSurface(page))?.ref;
+        await this.#interactionPage(session, modeInspection);
         const existingSelection = !reveal && ['model', 'effort'].includes(purpose) &&
           ((currentNode.role === 'button' && currentNode.hasPopup !== null) ||
             isPreparationSummary(currentNode, currentNode.ancestorIds.some(id => menuIds.has(id))) ||
@@ -1404,9 +1407,10 @@ export class SessionUiService {
     return await this.#submissions.resumePreparation(input);
   }
 
-  async #interactionPage(session: SessionSnapshot): Promise<Page> {
+  async #interactionPage(session: SessionSnapshot, modeInspection = false): Promise<Page> {
     const page = this.#requirePage(session);
-    await requireChatGptSurface(page);
+    if (modeInspection) await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
+    else await requireChatGptSurface(page);
     return this.#browserOwner === null ? page : await this.#browserOwner.preparePageInteraction(session.pageKey!, session);
   }
 
@@ -1437,6 +1441,14 @@ export interface PreparationOwner {
   readonly requestId: string;
   readonly sessionId: string;
   readonly generation: number;
+}
+
+// Opening this exact chooser is observation, never a mode/model selection or
+// saved Submit resume. It is the only action advertised before Chat is proven.
+function modeInspectionChooser(nodes: readonly BrowserSnapshotNode[], surface: ChatGptSurface) {
+  if (surface.mode !== 'unknown' || surface.source === 'conflicting-evidence') return undefined;
+  const candidates = nodes.filter(isChatGptModelChooser);
+  return candidates.length === 1 && candidates[0]!.expanded === false && !candidates[0]!.disabled ? candidates[0] : undefined;
 }
 
 function preparationActions(node: BrowserSnapshotNode, menuIds: ReadonlySet<string>) {

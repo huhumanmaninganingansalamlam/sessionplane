@@ -15,7 +15,7 @@ export interface ChatGptSurface {
   readonly modeControls?: readonly {
     tag: string; role: string | null; label: 'chat' | 'work';
     checked: string | null; selected: string | null; pressed: string | null;
-    state: string | null; hasPopup: string | null; navigation: boolean;
+    state: string | null; current: string | null; hasPopup: string | null; navigation: boolean;
     ancestorRoles: readonly string[];
   }[];
 }
@@ -26,7 +26,8 @@ export function inspectChatGptSurfaceDocument(knownOnly = false): Omit<ChatGptSu
   for (const e of document.querySelectorAll('button, a, input[type="radio"], [role="radio"], [role="tab"], [role="menuitemradio"], [role="combobox"]')) {
     if (modeControls.length >= 16 || !e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) ||
         e.closest('[data-message-author-role], article, [data-chatgpt-search-message-ids]')) continue;
-    const label = (e.getAttribute('aria-label') ?? e.textContent ?? '').trim().toLowerCase();
+    const label = [e.getAttribute('aria-label'), e.textContent].map(s => (s ?? '').trim().toLowerCase())
+      .find(s => /^(?:chat(?:\s+mode)?|(?:chatgpt\s+)?work(?:\s*\([^)]*\))?(?:\s+mode)?)$/i.test(s)) ?? '';
     if (!/^(?:chat(?:\s+mode)?|(?:chatgpt\s+)?work(?:\s*\([^)]*\))?(?:\s+mode)?)$/i.test(label)) continue;
     const attribute = (name: string, allowed: readonly string[]) => {
       const value = e.getAttribute(name);
@@ -40,6 +41,7 @@ export function inspectChatGptSurfaceDocument(knownOnly = false): Omit<ChatGptSu
     modeControls.push({ tag: e.tagName.toLowerCase(), role: attribute('role', ['radio', 'tab', 'menuitemradio', 'combobox', 'button', 'link']), label: /^chat(?:\s+mode)?$/.test(label) ? 'chat' : 'work',
       checked: attribute('aria-checked', ['true', 'false', 'mixed']), selected: attribute('aria-selected', ['true', 'false']), pressed: attribute('aria-pressed', ['true', 'false', 'mixed']),
       state: attribute('data-state', ['on', 'off', 'checked', 'unchecked', 'active', 'inactive', 'open', 'closed']),
+      current: attribute('aria-current', ['page', 'true', 'false']),
       hasPopup: attribute('aria-haspopup', ['true', 'false', 'menu', 'listbox', 'dialog']),
       navigation: e.closest('nav, aside, [role="navigation"]') !== null, ancestorRoles });
   }

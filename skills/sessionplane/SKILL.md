@@ -215,6 +215,8 @@ out prompts, infer consensus, or inject answers into other roles.
   choices; legacy Work activation is rejected. Only fresh selected Chat evidence permits
   configuration/submission; inherited composer-state false and model labels do not prove Chat.
   Normal unsubmitted preparation may materialize the owned successor UI for that read.
+  If mode is unknown, only an advertised exact model-picker reveal may inspect it;
+  this selects nothing, preserves the draft and never resumes saved Submit.
   Preserve wrong-mode work and use the authorized same-role replacement; never replay it.
   Do not bypass access controls.
 - `submission_unknown` means acknowledgement is ambiguous. Use team_get with the
