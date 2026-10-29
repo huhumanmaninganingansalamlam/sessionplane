@@ -343,6 +343,31 @@ test('thinking-failed activity headers report an exact nonterminal provider erro
   }
 });
 
+test('owned result reads do not require getElementById on an activity header root', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-header-root-'));
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: new PageRegistry(), headless: true });
+  try {
+    await owner.start();
+    const { page } = await owner.createPage();
+    await page.setContent(`<main>
+      <div data-message-author-role="user" data-message-id="original">Implement</div>
+      <div class="group/activity-header"><button aria-labelledby="activity-label"></button><span id="activity-label">Working</span></div>
+      <div data-message-author-role="assistant" data-message-id="answer">Retained answer</div>
+      <textarea>Preserved draft</textarea></main>`);
+    // Some provider roots expose scoped queries without getElementById.
+    await page.evaluate(() => Object.defineProperty(document, 'getElementById', { value: undefined }));
+    const identity = { submittedUserMessageId: 'original', submittedUserTurnId: null };
+    const observed = await observeChatGptDom(page, identity);
+    assert.equal(observed.submittedUserFound, true);
+    assert.equal(observed.candidate?.responseMessageId, 'answer');
+    assert.equal(observed.candidate?.answerText, 'Retained answer');
+    assert.deepEqual(observed.providerAlerts, []);
+    await page.locator('[id="activity-label"]').evaluate(label => { label.textContent = 'Thinking failed'; });
+    assert.deepEqual(await observeChatGptAlerts(page, identity, true), ['Thinking failed']);
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('automatic and selected UNKNOWN recovery require the exact canonical user, preserving failed POST uncertainty', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-optimistic-ack-'));
   const registry = new PageRegistry();
