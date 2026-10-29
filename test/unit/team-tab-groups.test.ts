@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { DatabaseSync } from 'node:sqlite';
 import { syncNativeTeamGroups, resolveNativeTeamTabs } from '../../src/browser/team-tab-groups.ts';
+import { PageBindingRepository } from '../../src/storage/page-binding-repository.ts';
 
 test('native team groups follow create/replace/close/delete without changing unmanaged tabs or focus', async () => {
   const tabs = [
@@ -42,6 +44,13 @@ test('native team groups follow create/replace/close/delete without changing unm
     assert.equal(tabs[4]!.groupId, -1, 'Incognito remains outside this owner');
     assert.equal(tabs[3]!.groupId, -1, 'User unmanaged tab stays untouched');
     const a = tabs[0]!.groupId;
+    delete saved.teams['stable-a'];
+    await syncNativeTeamGroups([
+      { teamId: 'stable-a', title: 'Maetda', targetIds: ['target-1', 'target-2'] },
+      { teamId: 'stable-b', title: 'Webturn', targetIds: ['target-3', 'target-5'] },
+    ]);
+    assert.equal(tabs[0]!.groupId, a, 'A lost saved mapping reuses the existing exact same-team group');
+    assert.equal(groups.length, 2, 'Restoring the mapping creates no extra group');
     const restored = resolveNativeTeamTabs([
       { targetId: 'target-1', sessionId: 'current', state: 'owned', url: 'https://chatgpt.com/c/original' },
     ], tabs.map(tab => ({ targetId: `target-${tab.id}`, type: 'page', url: `https://chatgpt.com/c/${tab.id === 2 ? 'retained' : 'unmanaged'}` })), [],
@@ -79,4 +88,37 @@ test('restored native targets retain their exact durable team group without adop
   ], ['other-context'], resolve);
   assert.deepEqual(groups, [{ teamId: 'stable-a', title: 'Maetda', targetIds: ['live', 'pre-adoption-crashed'] }],
     'The tab retained by Chrome must not invalidate its saved group simply because Playwright omitted it');
+});
+
+test('restored home targets retain unique durable team membership without claiming page ownership', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec('CREATE TABLE page_bindings(target_id TEXT, team_id TEXT)');
+  database.exec(`INSERT INTO page_bindings VALUES ('restored-home','stable-a'), ('restored-home',NULL),
+    ('conflicting-home','stable-a'), ('conflicting-home','stable-b')`);
+  const repository = new PageBindingRepository(database);
+  const resolve = (_sessionId: string | null, conversationId: string | null, targetId: string) => {
+    const teamId = conversationId === null ? repository.uniqueTeamForTarget(targetId) : null;
+    return teamId ? { teamId, title: 'Project' } : null;
+  };
+  const binding = { targetId: 'restored-home', sessionId: null, state: 'unbound', url: 'https://chatgpt.com/' };
+  try {
+    const result = resolveNativeTeamTabs([binding], [
+      { targetId: 'restored-home', type: 'page', url: 'https://chatgpt.com/' },
+      { targetId: 'unknown-home', type: 'page', url: 'https://chatgpt.com/' },
+      { targetId: 'conflicting-home', type: 'page', url: 'https://chatgpt.com/' },
+      { targetId: 'restored-home', type: 'page', url: 'https://chatgpt.com/', browserContextId: 'private' },
+    ], ['private'], resolve);
+    assert.deepEqual(result, [{ teamId: 'stable-a', title: 'Project', targetIds: ['restored-home'] }]);
+    assert.equal(binding.sessionId, null, 'Grouping never rebinds an unowned home page');
+    assert.equal(repository.uniqueTeamForTarget('conflicting-home'), null);
+    assert.equal(repository.uniqueTeamForTarget('unknown-home'), null);
+    assert.deepEqual(resolveNativeTeamTabs([], [
+      { targetId: 'restored-home', type: 'page', url: 'https://chatgpt.com/' },
+    ], [], resolve), result, 'Native targets omitted by Playwright retain the same exact team');
+    assert.deepEqual(resolveNativeTeamTabs([], [
+      { targetId: 'restored-home', type: 'page', url: 'https://other.example/' },
+      { targetId: 'restored-home', type: 'page', url: 'https://chatgpt.com/c/unknown' },
+      { targetId: 'restored-home', type: 'page', url: 'https://chatgpt.com/', browserContextId: 'private' },
+    ], ['private'], resolve), [], 'Unknown conversations, foreign sites and private targets remain excluded');
+  } finally { database.close(); }
 });

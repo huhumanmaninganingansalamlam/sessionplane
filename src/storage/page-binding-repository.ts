@@ -23,6 +23,13 @@ export class PageBindingRepository {
     this.#database = database;
   }
 
+  /** Organization only: an exact retained target never grants page ownership. */
+  uniqueTeamForTarget(targetId: string): string | null {
+    const teams = this.#database.prepare('SELECT DISTINCT team_id AS teamId FROM page_bindings WHERE target_id = ? AND team_id IS NOT NULL')
+      .all(targetId) as { teamId: string }[];
+    return teams.length === 1 ? teams[0]!.teamId : null;
+  }
+
   upsert(binding: PageBindingSnapshot): void {
     this.#database
       .prepare(`

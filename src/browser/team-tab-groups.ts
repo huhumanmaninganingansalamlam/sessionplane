@@ -11,16 +11,16 @@ export function resolveNativeTeamTabs(
   bindings: readonly Pick<PageBindingSnapshot, 'targetId' | 'sessionId' | 'state' | 'url'>[],
   nativeTargets: readonly { targetId: string; type: string; url: string; browserContextId?: string }[],
   otherContexts: readonly string[],
-  resolveTeam: (sessionId: string | null, conversationId: string | null) => { teamId: string; title: string } | null,
+  resolveTeam: (sessionId: string | null, conversationId: string | null, targetId: string) => { teamId: string; title: string } | null,
 ): TeamTabs[] {
   const teams = new Map<string, { teamId: string; title: string; targetIds: string[] }>();
   for (const binding of bindings) {
     if (!binding.targetId) continue;
     const owned = binding.sessionId && ['owned', 'reserved'].includes(binding.state);
-    const conversationId = !binding.sessionId && ['unbound', 'conflict'].includes(binding.state) && isChatGptUrl(binding.url)
-      ? parseProviderConversationId(binding.url) : null;
-    if (!owned && !conversationId) continue;
-    const owner = resolveTeam(owned ? binding.sessionId : null, conversationId);
+    const restored = !binding.sessionId && ['unbound', 'conflict'].includes(binding.state) && isChatGptUrl(binding.url);
+    const conversationId = restored ? parseProviderConversationId(binding.url) : null;
+    if (!owned && !restored) continue;
+    const owner = resolveTeam(owned ? binding.sessionId : null, conversationId, binding.targetId);
     if (!owner) continue;
     const team = teams.get(owner.teamId) ?? { ...owner, targetIds: [] };
     team.targetIds.push(binding.targetId);
@@ -33,7 +33,7 @@ export function resolveNativeTeamTabs(
         (target.browserContextId !== undefined && otherContexts.includes(target.browserContextId)) ||
         !isChatGptUrl(target.url)) continue;
     const conversationId = parseProviderConversationId(target.url);
-    const owner = conversationId ? resolveTeam(null, conversationId) : null;
+    const owner = resolveTeam(null, conversationId, target.targetId);
     if (!owner) continue;
     const team = teams.get(owner.teamId) ?? { ...owner, targetIds: [] };
     team.targetIds.push(target.targetId);
@@ -63,10 +63,13 @@ export async function syncNativeTeamGroups(teams: readonly TeamTabs[]) {
   const result = [];
   for (const team of requested) {
     if (!team.tabs.length) continue;
-    // Never adopt a user group or modify its unmanaged members. A saved native
-    // group is usable only while every member remains owned by this exact team.
-    let group = groups.find(group => group.id === saved[team.teamId] &&
-      tabs.filter(tab => tab.groupId === group.id).every(tab => membership.get(tab.id) === team.teamId));
+    // Reuse exact member ownership if a restart lost the saved group mapping.
+    // Titles never establish team identity; unmanaged members remain untouched.
+    const ownedGroups = groups.filter(group => {
+      const members = tabs.filter(tab => tab.groupId === group.id);
+      return members.length > 0 && members.every(tab => membership.get(tab.id) === team.teamId);
+    });
+    let group = ownedGroups.find(group => group.id === saved[team.teamId]) ?? ownedGroups.sort((a, b) => a.id - b.id)[0];
     const active = team.tabs.find(tab => tab.active && windows.some(window => window.id === tab.windowId && window.focused));
     const windowId = active?.windowId ?? group?.windowId ?? team.tabs[0]!.windowId;
     if (group && group.windowId !== windowId) group = undefined;
