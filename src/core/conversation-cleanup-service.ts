@@ -28,7 +28,7 @@ export interface ConversationDeleteInput {
   readonly generation: number;
   readonly conversationId: string;
   readonly outputsRetrieved: true;
-  readonly discardRetiredObservation?: { conversationId: string; evidenceRef: string } | undefined;
+  readonly discardRetiredObservation?: { conversationId: string; evidenceRef: string; discardPageState?: true | undefined } | undefined;
 }
 
 export interface ReplacementCleanup {
@@ -377,7 +377,7 @@ export class ConversationCleanupService {
     });
   }
 
-  async #closeSessionPages(session: SessionSnapshot) {
+  async #closeSessionPages(session: SessionSnapshot, discardPageState = false) {
     const { database, registry, pageMutex } = this.#options;
     const sessions = new SessionRepository(database.raw);
     const result = { closedPages: 0, pageErrors: [] as string[] };
@@ -411,7 +411,9 @@ export class ConversationCleanupService {
             if (failedNavigation) throw new SessionPlaneDomainError('session.page-identity-unverified', 'Failed navigation target changed during cleanup; preserve it');
             return;
           }
-          await requireIdleConversationPage(page);
+          if (discardPageState && this.#options.scheduler.collectors(session.sessionId).length > 0)
+            throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Consume obsolete observation collectors before discarding its page');
+          if (!discardPageState || !isExactOwnedConversationPage(current, session)) await requireIdleConversationPage(page);
           const final = registry.refreshPage(binding.pageKey);
           if (final.bindingEpoch !== current.bindingEpoch || final.state !== current.state || final.url !== current.url ||
               (failedNavigation && !await this.#options.isFailedConversationPage?.(binding.pageKey, session))) {
@@ -438,7 +440,7 @@ export class ConversationCleanupService {
     if ((!result.deleted || !result.requestOk) && result.pageCleanup === undefined) return result;
     const session = new SessionRepository(this.#options.database.raw).getSnapshot(result.sessionId);
     if (session === null || session.generation !== result.generation || session.conversationId !== result.conversationId) return result;
-    const pages = await this.#closeSessionPages(session);
+    const pages = await this.#closeSessionPages(session, result.discardedPageState === true);
     return { ...result, pageCleanup: { closedPages: (result.pageCleanup?.closedPages ?? 0) + pages.closedPages, pageErrors: pages.pageErrors } };
   }
 
@@ -491,12 +493,18 @@ export class ConversationCleanupService {
               disposal ? session.generation : null)) {
           throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Conversation has active, unresolved or shared work; retrieve completed outputs before deletion');
         }
+        const discardPageState = disposal?.discardPageState === true;
+        if (discardPageState && (!sessions.hasUnresolvedConversationDisposal(input.sessionId, input.generation, input.conversationId) ||
+            scheduler.collectors(session.sessionId).length > 0)) throw new SessionPlaneDomainError('session.cleanup-not-ready',
+          'Page-state disposal requires explicit unresolved observation retirement and consumed collectors');
         for (const binding of registry.listBindings({ includeClosed: false })) {
           if (binding.sessionId === session.sessionId || (binding.sessionId === null && binding.conversationId === session.conversationId && isProviderUrl(session.provider, binding.url)) ||
               (binding.state === 'unbound' && binding.url === 'chrome-error://chromewebdata/' &&
                 await this.#options.isFailedConversationPage?.(binding.pageKey, session))) {
             await pageMutex.runExclusive(binding.pageKey, async () => {
-              await requireIdleConversationPage(registry.pageForObservation(binding.pageKey, binding.bindingEpoch));
+              const current = registry.refreshPage(binding.pageKey);
+              const page = registry.pageForObservation(binding.pageKey, binding.bindingEpoch);
+              if (!discardPageState || !isExactOwnedConversationPage(current, session)) await requireIdleConversationPage(page);
             });
           }
         }
@@ -512,7 +520,7 @@ export class ConversationCleanupService {
           // failure and pacing separately from cleanup of the verified idle page.
           if (error instanceof ProviderSubmissionError) {
             if (options.replacement) throw new SessionPlaneDomainError(error.errorCode, error.message, error.details);
-            const pageCleanup = await this.#closeSessionPages(session);
+            const pageCleanup = await this.#closeSessionPages(session, discardPageState);
             throw new SessionPlaneDomainError(error.errorCode, error.message, {
               ...(error.details !== null && typeof error.details === 'object' ? error.details : { providerDetails: error.details }),
               sessionId: session.sessionId, generation: session.generation,
@@ -524,6 +532,7 @@ export class ConversationCleanupService {
         const result: DeletionResult = prior !== null ? JSON.parse(prior.resultJson) as DeletionResult : {
           requestOk: false, sessionId: input.sessionId, generation: input.generation,
           conversationId: input.conversationId, deleted: false, errorCode: 'provider.deletion-unknown',
+          ...(discardPageState ? { discardedPageState: true as const } : {}),
         };
         let recordedStatus: 'attempted' | 'complete' | null = prior?.status === 'attempted' ? 'attempted' : null;
         const record = (status: 'attempted' | 'complete') => {
@@ -567,7 +576,7 @@ export class ConversationCleanupService {
           await operation.close().catch(() => {});
           // Replacement/team cleanup owns its separate unresolved-work policy.
           if (!options.replacement || (result.requestOk && result.deleted)) {
-            const pages = await this.#closeSessionPages(session);
+            const pages = await this.#closeSessionPages(session, result.discardedPageState === true);
             result.pageCleanup = { closedPages: (result.pageCleanup?.closedPages ?? 0) + pages.closedPages, pageErrors: pages.pageErrors };
             if (recordedStatus !== null) record(recordedStatus);
           }
@@ -583,6 +592,7 @@ interface DeletionResult {
   conversationId: string;
   deleted: boolean;
   errorCode: string | null;
+  discardedPageState?: true;
   pageCleanup?: { closedPages: number; pageErrors: string[] };
 }
 
@@ -608,6 +618,12 @@ function cleanupProviderErrorDetails(error: unknown) {
 function cleanupErrorCode(error: unknown): string {
   return error !== null && typeof error === 'object' && 'errorCode' in error
     ? String(error.errorCode) : 'browser.unavailable';
+}
+
+function isExactOwnedConversationPage(binding: ReturnType<PageRegistry['getBinding']>, session: SessionSnapshot): boolean {
+  return binding.state === 'owned' && binding.sessionId === session.sessionId && binding.generation === session.generation &&
+    session.conversationId !== null && binding.conversationId === session.conversationId &&
+    binding.expectedConversationId === session.conversationId && isProviderUrl(session.provider, binding.url);
 }
 
 // Replacement owns tab cleanup separately from deletion of uncertain history.
