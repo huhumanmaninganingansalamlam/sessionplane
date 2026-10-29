@@ -133,7 +133,7 @@ export async function observeChatGptAlerts(page: Page, identity: SubmittedUserId
       query('[class~="group/activity-header"]').filter(header => {
         if (header.closest('[data-message-author-role="user"], [data-user-message-bubble], [data-chatgpt-selection-message-id], [data-message-content], .markdown') !== null) return false;
         const labelId = header.querySelector('button[aria-labelledby]')?.getAttribute('aria-labelledby');
-        const label = labelId ? (header.getRootNode() as Document | ShadowRoot).getElementById(labelId) : null;
+        const label = labelId ? [...header.querySelectorAll<HTMLElement>('[id]')].find(node => node.id === labelId) ?? null : null;
         return label !== null && header.contains(label) &&
           label.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
           /^(생각 실패|Thinking failed)$/i.test(label.innerText.trim());
