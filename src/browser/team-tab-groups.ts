@@ -17,7 +17,7 @@ export function resolveNativeTeamTabs(
   for (const binding of bindings) {
     if (!binding.targetId) continue;
     const owned = binding.sessionId && ['owned', 'reserved'].includes(binding.state);
-    const restored = !binding.sessionId && ['unbound', 'conflict'].includes(binding.state) && isChatGptUrl(binding.url);
+    const restored = ['unbound', 'conflict', 'identity_lost'].includes(binding.state) && isChatGptUrl(binding.url);
     const conversationId = restored ? parseProviderConversationId(binding.url) : null;
     if (!owned && !restored) continue;
     const owner = resolveTeam(owned ? binding.sessionId : null, conversationId, binding.targetId);

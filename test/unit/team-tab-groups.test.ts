@@ -90,6 +90,18 @@ test('restored native targets retain their exact durable team group without adop
     'The tab retained by Chrome must not invalidate its saved group simply because Playwright omitted it');
 });
 
+test('an identity-lost page keeps its exact durable conversation group without regaining page ownership', () => {
+  const binding = { targetId: 'retained', sessionId: 'original', state: 'identity_lost', url: 'https://chatgpt.com/c/known-conversation' };
+  const result = resolveNativeTeamTabs([binding], [], [], (sessionId, conversationId) => {
+    assert.equal(sessionId, null, 'Lost mutation ownership must not be treated as a live owned session');
+    return conversationId === 'known-conversation' ? { teamId: 'stable-a', title: 'Project' } : null;
+  });
+  assert.deepEqual(result, [{ teamId: 'stable-a', title: 'Project', targetIds: ['retained'] }]);
+  assert.equal(binding.state, 'identity_lost');
+  assert.deepEqual(resolveNativeTeamTabs([{ ...binding, url: 'https://chatgpt.com/c/unknown-conversation' }], [], [],
+    (_sessionId, conversationId) => conversationId === 'known-conversation' ? { teamId: 'stable-a', title: 'Project' } : null), []);
+});
+
 test('restored home targets retain unique durable team membership without claiming page ownership', () => {
   const database = new DatabaseSync(':memory:');
   database.exec('CREATE TABLE page_bindings(target_id TEXT, team_id TEXT)');
