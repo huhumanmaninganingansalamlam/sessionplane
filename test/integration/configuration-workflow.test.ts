@@ -62,7 +62,7 @@ test('Chat-only preparation never advertises or activates Work through catalog o
   owner.createPage = async (...args) => {
     const created = await createPage(...args);
     await created.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: fixture
-      .replace('<button type="button" role="radio" aria-checked="true">Chat</button>', '<div role="radiogroup"><button type="button" role="radio" aria-checked="true">Chat</button><button type="button" id="work-mode" role="radio" aria-checked="false" onclick="window.workActivations++">Work</button></div>')
+      .replace('<button type="button" role="radio" aria-checked="true">Chat</button>', '<div role="radiogroup"><button type="button" id="chat-mode" role="radio" aria-checked="true">Chat</button><button type="button" id="work-mode" role="radio" aria-checked="false" onclick="window.workActivations++">Work</button></div>')
       .replace('<div role="menuitemradio" tabindex="0" aria-checked="false" aria-disabled="true">Unavailable-7</div>', '$&<div role="menuitemradio" tabindex="0" aria-checked="false">Work</div>')
       .replace('<script>', '<script>window.workActivations=0;document.addEventListener("click",e=>{if(e.target.closest("[role=menuitemradio]")?.textContent==="Work")window.workActivations++},true);') }));
     return created;
@@ -90,10 +90,28 @@ test('Chat-only preparation never advertises or activates Work through catalog o
     const page = service.pageRegistry.pageForObservation(current.pageKey);
     const menu = new ChatGptConfigurationMenu(page, current.pageKey);
     await assert.rejects(menu.select({ id: 'legacy-work', label: 'Work', version: 'Work', power: null }), /Only model and effort/);
+    // Match the current real provider's role=group + ordinary pressed buttons.
+    await page.locator('[role="radiogroup"]').evaluate(group => {
+      group.setAttribute('role', 'group');
+      for (const button of group.querySelectorAll('button')) {
+        button.setAttribute('aria-pressed', button.getAttribute('aria-checked')!);
+        button.removeAttribute('aria-checked'); button.removeAttribute('role');
+        button.setAttribute('data-state', 'closed');
+      }
+    });
+    const pressed = (await invoke('team_get', { ...identity, view: 'evidence' })).structuredContent.request as any;
+    assert.equal(pressed.evidence.observedSurface.mode, 'chat');
+    assert.equal(pressed.evidence.preparationAvailability.available, true);
+    const configured = await invoke('decide', { ...identity, requestId: 'configure-observed-chat', decision: 'configure',
+      configurationId: pressed.configurationCatalog.options.find((o: any) => o.label === 'Aurora-9 / Balanced').id });
+    assert.equal(configured.isError, false, JSON.stringify(configured));
+    assert.equal(configured.structuredContent.promptSubmitted, false);
+    assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');
+    assert.equal(await page.locator('#chat-mode').getAttribute('aria-pressed'), 'true');
     assert.equal(await page.evaluate(() => (window as any).workActivations), 0);
     await page.evaluate(() => {
-      document.querySelector('[role="radio"]')!.setAttribute('aria-checked', 'false');
-      document.querySelector('#work-mode')!.setAttribute('aria-checked', 'true');
+      document.querySelector('#chat-mode')!.setAttribute('aria-pressed', 'false');
+      document.querySelector('#work-mode')!.setAttribute('aria-pressed', 'true');
     });
     const blocked = (await invoke('team_get', { ...identity, view: 'evidence' })).structuredContent.request as any;
     assert.equal(blocked.evidence.observedSurface.mode, 'work');
