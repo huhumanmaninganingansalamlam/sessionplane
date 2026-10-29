@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:net';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import test from 'node:test';
@@ -20,6 +21,49 @@ import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 interface TeamSnapshot {
   readonly teamId: string;
 }
+
+test('CLI unresolved cleanup forwards explicit disposal without claiming work completion', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-cli-disposal-'));
+  const socketPath = path.join(root, 'fixture.sock');
+  const requests: Array<{ id: string; method: string; params: Record<string, unknown> }> = [];
+  const server = createServer(socket => {
+    let input = '';
+    socket.setEncoding('utf8');
+    socket.on('data', chunk => {
+      input += chunk;
+      if (!input.includes('\n')) return;
+      const request = JSON.parse(input.split('\n')[0]!);
+      requests.push(request);
+      socket.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { requestOk: true } }) + '\n');
+    });
+  });
+  try {
+    await new Promise<void>(resolve => server.listen(socketPath, resolve));
+    const common = ['fixture-team', 'fixture-old-request'];
+    const flags = ['--request-id', 'stable-disposal', '--socket', socketPath, '--json'];
+    const retired = await runCliJson(['request', 'retire_observation', ...common,
+      '--discard-unresolved', '--evidence-ref', 'existing-agent-handoff', ...flags]);
+    assert.equal(retired.code, 0, retired.stderr);
+    assert.equal(requests[0]!.method, 'workflow.decide');
+    assert.deepEqual(requests[0]!.params, { teamId: common[0], requestRef: common[1], requestId: 'stable-disposal',
+      decision: 'retire_observation', discardUnresolved: true, evidenceRef: 'existing-agent-handoff' });
+    const disposal = { conversationId: 'fixture-old-conversation', evidenceRef: 'existing-agent-handoff' };
+    const file = path.join(root, 'disposal.json');
+    writeFileSync(file, JSON.stringify(disposal));
+    const deleted = await runCliJson(['request', 'delete', ...common, '--outputs-retrieved',
+      '--discard-retired-observation', file, ...flags]);
+    assert.equal(deleted.code, 0, deleted.stderr);
+    assert.equal(requests[1]!.method, 'workflow.session_delete');
+    assert.deepEqual(requests[1]!.params, { teamId: common[0], requestRef: common[1], requestId: 'stable-disposal',
+      outputsRetrieved: true, discardRetiredObservation: disposal });
+    assert.equal((await runCliJson(['request', 'retire_observation', ...common,
+      '--discard-unresolved=true', ...flags])).code, 2, 'Explicit disposal remains a flag, not an arbitrary value');
+    assert.equal(requests.length, 2, 'Invalid input never reaches Core');
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 interface JsonRpcResponse {
   readonly id: string | number | null;

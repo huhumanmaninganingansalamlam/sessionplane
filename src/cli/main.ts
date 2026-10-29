@@ -52,12 +52,15 @@ const FLAG_OPTIONS = new Set([
   'manage-only',
   'return-on-wait-expiry',
   'preserve-conversation',
+  'discard-unresolved',
 ]);
 const MULTI_VALUE_OPTIONS = new Set(['file', 'skill']);
 const VALUE_OPTIONS = new Set([
   'view',
   'user-confirmed-interruption',
   'unresolved-handoff',
+  'discard-retired-observation',
+  'evidence-ref',
   'followup-message-id', 'remote', 'remote-executable', 'remote-socket', 'remote-control-path',
   'state-dir',
   'browser',
