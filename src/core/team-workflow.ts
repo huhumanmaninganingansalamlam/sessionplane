@@ -845,7 +845,7 @@ export class TeamWorkflow {
     return await this.#observe(request);
   }
 
-  async deleteSession(input: Identity & { requestId: string; outputsRetrieved: true; discardRetiredObservation?: { conversationId: string; evidenceRef: string } | undefined }) {
+  async deleteSession(input: Identity & { requestId: string; outputsRetrieved: true; discardRetiredObservation?: { conversationId: string; evidenceRef: string; discardPageState?: true | undefined } | undefined }) {
     const request = this.#request(input);
     const session = this.services.directory.getSession(request.sessionId);
     if (session.conversationId === null) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'No bound provider conversation exists');

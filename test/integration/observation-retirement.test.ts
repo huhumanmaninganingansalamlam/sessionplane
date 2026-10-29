@@ -123,7 +123,10 @@ test('displaced routing retirement permits explicit disposal but preserves unres
     assert.equal((historical.request as Record<string, unknown>).conversationId, first.conversationId);
     const input = { teamId: team.teamId, requestRef: requests[1]!.outbox_id, requestId: 'dispose', outputsRetrieved: true,
       discardRetiredObservation: { conversationId: first.conversationId, evidenceRef: 'User explicitly discards obsolete conversation; unresolved original retained' } };
+    const discardPage = { ...input, requestId: 'dispose-owned-page',
+      discardRetiredObservation: { ...input.discardRetiredObservation, discardPageState: true } };
     assert.equal((await workflow('session_delete', input)).structuredContent.errorCode, 'session.cleanup-not-ready');
+    assert.equal((await workflow('session_delete', discardPage)).structuredContent.errorCode, 'session.cleanup-not-ready');
     assert.equal((await workflow('decide', { teamId: team.teamId, requestRef: requests[1]!.outbox_id,
       requestId: 'hold-obsolete', decision: 'human_review', action: 'pause' })).isError, false);
     assert.equal((await workflow('decide', { teamId: team.teamId, requestRef: requests[1]!.outbox_id,
@@ -157,22 +160,53 @@ test('displaced routing retirement permits explicit disposal but preserves unres
       'session.conversation-mismatch');
     assert.equal((await workflow('session_delete', { ...input, discardRetiredObservation: { ...input.discardRetiredObservation,
       conversationId: 'different-conversation' } })).structuredContent.errorCode, 'session.cleanup-not-ready');
-    const { page } = await core.browserOwner!.createPage();
+    const { page, binding } = await core.browserOwner!.createPage();
     await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<textarea>Human draft</textarea>' }));
     await page.goto('https://chatgpt.com/c/' + first.conversationId);
     assert.equal((await workflow('session_delete', input)).structuredContent.errorCode, 'session.cleanup-not-ready');
+    assert.equal((await workflow('session_delete', discardPage)).structuredContent.errorCode, 'session.cleanup-not-ready',
+      'Explicit disposal must not discard an unbound page draft');
     assert.equal(await page.locator('textarea').inputValue(), 'Human draft');
     await page.setContent('<button data-testid="stop-button">Stop</button>');
     assert.equal((await workflow('session_delete', input)).structuredContent.errorCode, 'session.cleanup-not-ready');
+    assert.equal((await workflow('session_delete', discardPage)).structuredContent.errorCode, 'session.cleanup-not-ready',
+      'Explicit disposal must not waive an unbound page generation guard');
     assert.equal(deletes, 0);
-    await page.setContent('<main>Obsolete conversation, idle</main>');
-    const deleted = (await workflow('session_delete', input)).structuredContent;
-    assert.equal(deleted.deleted, true, JSON.stringify(deleted));
-    assert.deepEqual(deleted.pageCleanup, { closedPages: 1, pageErrors: [] });
+    core.pageRegistry.bindPage(binding.pageKey, { sessionId: session.sessionId, generation: 2, conversationId: first.conversationId! });
+    await page.setContent('<textarea>Explicitly discarded obsolete draft</textarea><button data-testid="stop-button">Stop</button>');
+    assert.equal((await workflow('session_delete', input)).structuredContent.errorCode, 'session.cleanup-not-ready');
+    const releaseAgain = core.actorScheduler.actorFor(session.sessionId).retainCollector(String(requests[1]!.outbox_id), false);
+    try { assert.equal((await workflow('session_delete', discardPage)).structuredContent.errorCode, 'session.cleanup-not-ready'); }
+    finally { releaseAgain(); }
+    // Provider failure must not strand the explicitly discarded exact owned tab.
+    unavailable = true;
+    const unavailableDelete = await workflow('session_delete', discardPage);
+    assert.equal(unavailableDelete.structuredContent.errorCode, 'provider.unavailable');
+    assert.equal(unavailableDelete.structuredContent.details.pageCleanup.closedPages, 1);
     assert.equal(page.isClosed(), true);
+    assert.equal(deletes, 0);
+    unavailable = false;
+    const reopened = await core.browserOwner!.createPage();
+    await reopened.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html',
+      body: '<textarea>Discarded old draft</textarea><button data-testid="stop-button">Stop</button>' }));
+    await reopened.page.goto('https://chatgpt.com/c/' + first.conversationId);
+    core.pageRegistry.bindPage(reopened.binding.pageKey, { sessionId: session.sessionId, generation: 2, conversationId: first.conversationId! });
+    const deleted = (await workflow('session_delete', discardPage)).structuredContent;
+    assert.equal(deleted.deleted, true, JSON.stringify(deleted));
+    assert.equal(deleted.discardedPageState, true);
+    assert.deepEqual(deleted.pageCleanup, { closedPages: 1, pageErrors: [] });
+    assert.equal(reopened.page.isClosed(), true);
     assert.deepEqual(generations(), before);
     assert.deepEqual(core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? ORDER BY generation').all(session.sessionId), preservedRequests);
-    assert.deepEqual((await workflow('session_delete', input)).structuredContent, deleted);
+    assert.deepEqual((await workflow('session_delete', discardPage)).structuredContent, deleted);
+    const retained = await core.browserOwner!.createPage();
+    await retained.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html',
+      body: '<textarea>Obsolete retained draft</textarea><button data-testid="stop-button">Stop</button>' }));
+    await retained.page.goto('https://chatgpt.com/c/' + first.conversationId);
+    core.pageRegistry.bindPage(retained.binding.pageKey, { sessionId: session.sessionId, generation: 2, conversationId: first.conversationId! });
+    const replay = (await workflow('session_delete', discardPage)).structuredContent;
+    assert.deepEqual(replay.pageCleanup, { closedPages: 2, pageErrors: [] });
+    assert.equal(retained.page.isClosed(), true, 'Canonical disposal receipt permits remaining exact owned-page cleanup');
     assert.equal(deletes, 1);
     assert.deepEqual(core.teamDirectory.getSession(successor.sessionId), successorBefore);
     assert.equal(fake.submitCount, 3);

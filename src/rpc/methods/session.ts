@@ -28,7 +28,7 @@ export function registerSessionMethods(
     clientId: ClientId, requestId: RequestId, sessionId: SessionId,
     generation: z.number().int().positive(), conversationId: z.string().min(1).max(300),
     outputsRetrieved: z.literal(true),
-    discardRetiredObservation: z.object({ conversationId: z.string().min(1).max(300), evidenceRef: z.string().trim().min(1).max(2000) }).strict().optional().describe('Explicitly authorize permanent deletion of this exact obsolete conversation after observation retirement and role displacement/retirement. Preserves unresolved generation records; never means its answer was retrieved.'),
+    discardRetiredObservation: z.object({ conversationId: z.string().min(1).max(300), evidenceRef: z.string().trim().min(1).max(2000), discardPageState: z.literal(true).optional().describe('Explicitly discard draft and generation UI only on the exact obsolete owned page after unresolved observation retirement. Never stops backend commands or marks them complete.') }).strict().optional().describe('Explicitly authorize permanent deletion of this exact obsolete conversation after observation retirement and role displacement/retirement. Preserves unresolved generation records; never means its answer was retrieved.'),
   }).strict(), (input) => cleanup.delete(input));
   router.register(
     'session.create',
