@@ -6,6 +6,7 @@ import { controlHostSpanPermission, inspectHostSpanActivity, revealHostSpanActiv
 import { createHash } from 'node:crypto';
 import { requireIdleConversationPage } from './conversation-cleanup-service.ts';
 import { conversationLoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
+import { inspectChatGptQuestion, answerChatGptQuestion } from '../providers/chatgpt/question.ts';
 import { isChatGptModelChooser, ChatGptConfigurationMenu, type ConfigurationCatalog } from '../providers/chatgpt/configuration-catalog.ts';
 import { errors, type ElementHandle, type Page } from 'playwright-core';
 
@@ -161,6 +162,10 @@ export class SessionUiService {
           this.#requirePage(session);
         }
         const chatVerified = snapshot.observedSurface.mode === 'chat';
+        const question = await inspectChatGptQuestion(this.#requirePage(session));
+        const questionAllowed = snapshot.observedSurface.mode !== 'work' &&
+          snapshot.observedSurface.source !== 'conflicting-evidence' &&
+          !snapshot.observedSurface.modeControls?.some(control => !control.navigation && snapshot.observedSurface.mode !== 'chat');
         const inspectModeChooser = modeInspectionChooser(snapshot.nodes, snapshot.observedSurface);
         const cachedCatalog = chatVerified ? this.#discoveryFailures.get(`${session.sessionId}:${session.generation}`) ?? this.#catalog : null;
         const catalog = cachedCatalog === null ? null : { ...cachedCatalog, options: cachedCatalog.options.filter(option =>
@@ -168,7 +173,10 @@ export class SessionUiService {
         const menuIds = new Set(snapshot.nodes.filter((node) => node.role === 'menu' && node.id !== '').map((node) => node.id));
         this.#configurationRefs.set(snapshot.pageKey, { snapshotId: snapshot.snapshotId,
           ids: composerAvailable ? catalog?.options.map(option => option.id) ?? [] : [] });
-        return { ...snapshot, nodes: snapshot.nodes.map((node) => ({ ...node,
+        return { ...snapshot, providerQuestion: question === null ? null : { ...question,
+          available: question.available && questionAllowed,
+          instruction: 'The owning Coordinator chooses an authorized exact option with decide answer_question, answer and evidenceHash. Answering never submits this prepared prompt.' },
+          nodes: snapshot.nodes.map((node) => ({ ...node,
           actions: chatVerified ? preparationActions(node, menuIds) : { choose: [], reveal: node === inspectModeChooser ? ['model' as const] : [] } })),
           preparationAvailability: { available: composerAvailable && chatVerified,
             ...(!composerAvailable ? { reason: 'composer-unavailable' as const }
@@ -1430,6 +1438,45 @@ export class SessionUiService {
 
   async resume(input: PreparationOwner) {
     return await this.#submissions.resumePreparation(input);
+  }
+
+  async answerQuestion(input: PreparationOwner & { decisionId: string; answer: string; evidenceHash: string }, receipts: ReceiptRepository) {
+    const method = 'workflow.answer_question';
+    const requestHash = createHash('sha256').update(JSON.stringify(input)).digest('hex');
+    const receipt = { clientId: input.clientId, requestId: input.decisionId, method, requestHash };
+    const replay = () => {
+      const prior = receipts.get(receipt.clientId, receipt.requestId);
+      if (prior === null) return null;
+      if (prior.method !== method || prior.requestHash !== requestHash) throw new SessionPlaneDomainError(
+        'input.idempotency-conflict', 'Question answer identity was reused with different arguments');
+      if (prior.status !== 'complete') throw new SessionPlaneDomainError('provider.action-unknown',
+        'Question answer was attempted; inspect without repeating it');
+      return JSON.parse(prior.resultJson) as Awaited<ReturnType<typeof answerChatGptQuestion>>;
+    };
+    const prior = replay();
+    if (prior !== null) return prior;
+    return await this.#submissions.withPendingPreparation(input, async session => {
+      const repeated = replay();
+      if (repeated !== null) return repeated;
+      const page = this.#requirePage(session);
+      await inspectChatGptPageReady(page, session.pageKey!);
+      const surface = await observeChatGptSurface(page);
+      if (surface.mode === 'work' || surface.source === 'conflicting-evidence' ||
+          surface.modeControls?.some(control => !control.navigation && surface.mode !== 'chat')) throw new SessionPlaneDomainError(
+        'provider.preparation-required', 'Work or conflicting mode controls cannot be operated; preserve this prepared request');
+      const blocked = await page.locator('[role="alert"], [role="alertdialog"], [role="dialog"], [data-testid="stop-button"]')
+        .evaluateAll(elements => elements.some(e => e.closest('[aria-hidden="true"], [inert]') === null &&
+          e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) && e.getBoundingClientRect().width > 0));
+      if (blocked) throw new SessionPlaneDomainError('provider.question-unverified', 'Preserve active generation, permission and other dialogs before answering a question');
+      await this.#browserOwner?.preparePageInteraction(session.pageKey!, session);
+      const result = await answerChatGptQuestion(page, input, () => {
+        this.#requirePage(session);
+        receipts.record({ ...receipt, status: 'attempted', result: { promptSubmitted: false } });
+      });
+      this.#requirePage(session);
+      receipts.record({ ...receipt, status: 'complete', result });
+      return result;
+    });
   }
 
   async #interactionPage(session: SessionSnapshot, modeInspection = false): Promise<Page> {
