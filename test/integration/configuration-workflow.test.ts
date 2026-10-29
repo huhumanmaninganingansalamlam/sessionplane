@@ -925,7 +925,7 @@ test('continuation reobserves exact current model and effort without switching c
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test('existing selected-state recording verifies version, effort and Chat without selecting or submitting', async () => {
+test('existing selected-state recording verifies version and effort with optional mode chrome absent, without selecting or submitting', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-selected-state-proof-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const service = await startCore({ config, browserHeadless: true,
@@ -950,6 +950,8 @@ test('existing selected-state recording verifies version, effort and Chat withou
       requestId: 'selected-send', prompt: 'Preserve this prepared request', model: 'Aurora-9 Thinking', effort: 'Balanced' });
     const identity = { teamId: team.teamId, requestRef: sent.requestRef };
     const page = service.pageRegistry.pageForObservation(sent.pageKey);
+    // Existing Chat conversations omit this optional new-chat selector.
+    await page.locator('[role="radio"]').evaluate(node => node.remove());
     const inspect = async () => (await ok('team_get', { ...identity, view: 'evidence' })).request;
     let seq = 0;
     const choose = async (purpose: string, node?: any, snapshot?: any) => {

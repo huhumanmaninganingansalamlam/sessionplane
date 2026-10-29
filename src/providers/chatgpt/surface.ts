@@ -9,7 +9,7 @@ export function isChatGptModeControl(node: Pick<BrowserSnapshotNode, 'role' | 'n
 
 export interface ChatGptSurface {
   readonly mode: 'chat' | 'work' | 'unknown';
-  readonly source: 'selected-control' | 'composer-state' | 'conflicting-evidence' | 'unavailable';
+  readonly source: 'selected-control' | 'chat-default' | 'composer-state' | 'conflicting-evidence' | 'unavailable';
   readonly observedAt: string;
   /** Diagnostic labels/state only; never a ref or a selectable action. */
   readonly modeControls?: readonly {
@@ -20,7 +20,7 @@ export interface ChatGptSurface {
   }[];
 }
 
-/** Read only the mounted composer's explicit selection, never model/effort or a default. */
+/** Honor explicit mode evidence; Chat is the default when its optional selector is absent. */
 export function inspectChatGptSurfaceDocument(knownOnly = false): Omit<ChatGptSurface, 'observedAt'> | null {
   const modeControls: NonNullable<ChatGptSurface['modeControls']>[number][] = [];
   for (const e of document.querySelectorAll('button, a, input[type="radio"], [role="radio"], [role="tab"], [role="menuitemradio"], [role="combobox"]')) {
@@ -74,9 +74,14 @@ export function inspectChatGptSurfaceDocument(knownOnly = false): Omit<ChatGptSu
     if (/^(?:chatgpt\s+)?work(?:\b|\s|\()/i.test(label)) controls.add('work');
   }
   const state = new Set<'chat' | 'work'>();
+  let composerAvailable = false;
   for (const composer of document.querySelectorAll('[data-chatgpt-composer], #prompt-textarea, [data-testid="prompt-textarea"]')) {
     if (!composer.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) || !composer.getBoundingClientRect().width ||
         composer.closest('[data-message-author-role], article')) continue;
+    const editors = composer.matches('textarea, [contenteditable="true"], [role="textbox"]')
+      ? [composer] : [...composer.querySelectorAll('textarea, [contenteditable="true"], [role="textbox"]')];
+    composerAvailable ||= editors.some(editor => editor.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+      editor.getBoundingClientRect().width > 0 && !editor.matches(':disabled, [aria-disabled="true"], [readonly]'));
     // Current ChatGPT hides the switch on existing threads. Its mounted UI passes
     // this explicit boolean to the composer; do not inspect hooks or invoke callbacks.
     const key = Object.keys(composer).find(key => key.startsWith('__reactFiber$'));
@@ -87,12 +92,16 @@ export function inspectChatGptSurfaceDocument(knownOnly = false): Omit<ChatGptSu
       if (typeof work === 'boolean') state.add(work ? 'work' : 'chat');
     }
   }
-  // An inherited false prop can be a default or stale React state. It does not
-  // independently prove the actual selected Chat surface. Positive Work state
-  // remains blocking; only the explicit selected Chat control proves Chat.
+  // An inherited false prop is not selected-control evidence. Positive Work
+  // state remains blocking, including when the provider hides its selector.
   const modes = new Set([...controls, ...(state.has('work') ? ['work' as const] : [])]);
   if (modes.size > 1) return knownOnly ? null : result('unknown', 'conflicting-evidence');
-  if (modes.size === 0) return knownOnly ? null : result('unknown', state.size ? 'composer-state' : 'unavailable');
+  if (modes.size === 0) {
+    // Do not require an optional new-chat selector on every ordinary follow-up.
+    // Visible incomplete/ambiguous mode controls still require resolution.
+    if (composerAvailable && !modeControls.some(control => !control.navigation)) return result('chat', 'chat-default');
+    return knownOnly ? null : result('unknown', state.size ? 'composer-state' : 'unavailable');
+  }
   return result([...modes][0]!, controls.size ? 'selected-control' : 'composer-state');
 }
 
