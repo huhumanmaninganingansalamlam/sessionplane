@@ -405,6 +405,91 @@ for (const sendAvailable of [true, false]) test(`automatic disconnected continua
   } finally { await f.close(); }
 });
 
+test('question-resumed original card permits exact ALWAYS while a contextual successor stays unsubmitted', async () => {
+  const f = await fixture();
+  try {
+    f.fake.idleToolTurn = true;
+    f.fake.surface = users => users;
+    const requestRef = await f.submit(false);
+    f.core.observationService.stop(f.session.sessionId, 1);
+    await f.core.actorScheduler.updateGeneration(f.session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
+      completedAt: new Date().toISOString(), responseMessageId: 'original-final', answerText: 'Retained original result',
+      reason: 'dom-quiet-stable-final' });
+    await assert.rejects(f.core.submissionService.send({ clientId: `team:${f.team.teamId}`, requestId: 'contextual-next',
+      sessionId: f.session.sessionId, expectedGeneration: 1, prompt: 'Preserved contextual next work, not literal Continue',
+      sessionDeadlineSec: 600 }), { errorCode: 'provider.preparation-required' });
+    const pending = f.core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=? AND generation=2').get(f.session.sessionId)!;
+    await f.fake.page.setContent(`<main>
+      <div data-message-author-role="user" data-message-id="user-message-1" data-turn-id="user-turn-1">Original work</div>
+      <div data-message-author-role="assistant" data-message-id="original-final">Retained original result</div>
+      <section id="question" data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">
+        <p>Choose the already-authorized disposition</p><div role="radiogroup">
+        <button type="button" role="radio" aria-label="Wait for handoff (Recommended)"
+          onclick="document.querySelector('#question').remove();document.querySelector('#permission').hidden=false">Wait for handoff</button>
+        <button type="button" role="radio" aria-label="Other disposition">Other disposition</button></div></section>
+      <section id="permission" hidden><div role="alert">hostspan-desktop File Patch
+        <button onclick="document.querySelector('#details').hidden=false">View details</button></div>
+        <button onclick="throw Error('Never use once')">Allow once</button>
+        <button onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove()">Always allow</button></section>
+      <section role="dialog" id="details" hidden>hostspan-desktop File Patch
+        <pre id="args">{&quot;path&quot;:&quot;owned-file&quot;,&quot;patch&quot;:&quot;authorized change&quot;}</pre>
+        <button aria-label="Close dialog" onclick="document.querySelector('#details').hidden=true">Close dialog</button></section>
+      <textarea id="prompt-textarea">Preserved contextual next work, not literal Continue</textarea>
+      <button data-testid="send-button" onclick="throw Error('No product Submit during consent')">Send</button></main>`);
+    const identity = { teamId: f.team.teamId, requestRef: pending.outbox_id };
+    const fresh = await f.rpc<any>('team_get', { ...identity, view: 'evidence' });
+    const answered = await f.rpc<any>('decide', { ...identity, requestId: 'answer-owned-question', decision: 'answer_question',
+      answer: 'Wait for handoff (Recommended)', evidenceHash: fresh.request.evidence.providerQuestion.evidenceHash });
+    assert.equal(answered.questionAnswer.outcome, 'answered');
+    assert.equal(answered.promptSubmitted, false);
+    const rows = () => ({ session: f.core.teamDirectory.getSession(f.session.sessionId),
+      outbox: f.core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? ORDER BY generation').all(f.session.sessionId),
+      generations: f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(f.session.sessionId) });
+    const before = rows();
+    const permission = (requestId: string, extra: object = {}) => f.rpc<any>('decide', {
+      teamId: f.team.teamId, requestRef, requestId, decision: 'hostspan_permission', action: 'inspect',
+      appName: 'hostspan-desktop', toolName: 'File Patch', allowMode: 'always', ...extra });
+    const inspected = await permission('original-inspect');
+    assert.equal(inspected.permission.outcome, 'inspected');
+    assert.equal(inspected.permission.requestAcknowledgementVerified, true);
+    assert.equal(inspected.permissionRequestRef, requestRef);
+    assert.equal(inspected.permissionGeneration, 1);
+    assert.equal(inspected.generation, 2);
+    assert.match(inspected.permission.permissionText, /owned-file/);
+    const grant = { action: 'allow', evidenceHash: inspected.permission.evidenceHash };
+    await assert.rejects(permission('foreign-team', { teamId: f.core.teamDirectory.createTeam({ clientId: 'foreign' }).teamId }), /this team/);
+    await assert.rejects(permission('missing-hash', { action: 'allow' }), /evidenceHash/);
+    await f.fake.page.locator('#args').evaluate(node => node.textContent += ' changed');
+    await assert.rejects(permission('changed-arguments', grant), /permission|evidence/i);
+    await f.fake.page.locator('#args').evaluate(node => node.textContent = node.textContent!.replace(' changed', ''));
+    await f.fake.page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="later-user">Later actual work</div>'));
+    await assert.rejects(permission('later-user', grant), /original user anchor/);
+    await f.fake.page.locator('[data-message-id="later-user"]').evaluate(node => node.remove());
+    await f.fake.page.locator('[data-message-id="user-message-1"]').evaluate(node => node.setAttribute('data-message-id', 'wrong-ack'));
+    await assert.rejects(permission('missing-ack', grant), /original user anchor/);
+    await f.fake.page.locator('[data-message-id="wrong-ack"]').evaluate(node => node.setAttribute('data-message-id', 'user-message-1'));
+    await f.rpc('decide', { ...identity, requestId: 'hold-current', decision: 'human_review', action: 'pause' });
+    await assert.rejects(permission('held', grant), /permission|review/i);
+    await f.rpc('decide', { ...identity, requestId: 'resume-own-review', decision: 'human_review', action: 'resume' });
+    const allowed = await permission('authorized-always', grant);
+    assert.equal(allowed.permission.outcome, 'clicked');
+    assert.equal(allowed.permission.permissionStillVisible, false);
+    assert.equal(allowed.permission.requestAcknowledgementVerified, true);
+    assert.deepEqual(await permission('authorized-always', grant), allowed);
+    await assert.rejects(permission('authorized-always', { ...grant, allowMode: 'once' }), /different arguments/);
+    assert.equal(await f.fake.page.evaluate(() => (window as any).grants), 1);
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved contextual next work, not literal Continue');
+    assert.deepEqual(rows().outbox, before.outbox);
+    assert.deepEqual(rows().generations, before.generations);
+    assert.equal(rows().session.submissionState, 'prepared');
+    assert.equal(rows().session.promptSubmitted, false);
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(f.fake.stopCount, 0);
+    assert.equal(f.core.actorScheduler.collectors(f.session.sessionId).length, 0);
+  } finally { await f.close(); }
+});
+
 test('completed original permission inspection verifies its ACK and never inherits a held successor control', async () => {
   const f = await fixture();
   try {

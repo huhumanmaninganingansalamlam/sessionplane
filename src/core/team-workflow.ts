@@ -886,6 +886,18 @@ export class TeamWorkflow {
     if (current.generation === request.generation && current.submissionState !== 'prepared')
       return { current, original: current, permissionRequest: request };
     const pending = this.#outbox.getByGeneration(current.sessionId, current.generation);
+    // A contextual preparation has not created a provider turn. The immediately
+    // preceding original may resume (for example after an owned question answer).
+    // Reuse its immutable ACK checks; the UI still requires it to be the latest
+    // uniquely mounted user turn and verifies the exact current card and hash.
+    if (!this.#userReview(request) && pending?.clientId === request.clientId &&
+        pending.submissionState === 'prepared' && !pending.promptSubmitted &&
+        request.submissionState === 'submitted' && request.promptSubmitted &&
+        current.generation === request.generation + 1 &&
+        this.#sessions.getGenerationResult(request.sessionId, request.generation)?.reason === 'dom-quiet-stable-final') {
+      const { original } = this.#latestRequest(request);
+      return { current, original: original!, permissionRequest: request };
+    }
     const context = pending && this.services.submissions.continuationContext(ownerOf(pending));
     const original = context?.original;
     const permissionRequest = original && this.#outbox.getByGeneration(original.sessionId, original.generation);
