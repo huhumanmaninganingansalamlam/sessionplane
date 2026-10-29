@@ -212,8 +212,11 @@ out prompts, infer consensus, or inject answers into other roles.
   Preserve requested model/mode through cancellation and replacement. Honor exact
   versions; do not substitute or infer Pro from an account badge or High effort.
   Chat is the only supported mode and the default. Work controls are not configuration
-  choices; legacy Work activation is rejected. Only fresh selected Chat evidence permits
-  configuration/submission; inherited composer-state false and model labels do not prove Chat.
+  choices; legacy Work activation is rejected. A usable composer without the optional
+  mode selector uses `source:chat-default`, so ordinary same-chat follow-ups continue
+  normally without fresh selected controls or historical proof records. Explicit Work,
+  incomplete/conflicting controls and unavailable composers remain guarded. Model labels
+  and inherited false composer flags are not selected-control proof.
   Normal unsubmitted preparation may materialize the owned successor UI for that read.
   If mode is unknown, only an advertised exact model-picker reveal may inspect it;
   this selects nothing, preserves the draft and never resumes saved Submit.
