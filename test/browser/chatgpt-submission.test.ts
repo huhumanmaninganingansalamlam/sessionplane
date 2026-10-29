@@ -13,6 +13,38 @@ import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ProviderSubmissionError, type ProviderSubmissionAttempt } from '../../src/providers/provider-adapter.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { ChatGptSubmission, recoverChatGptAcknowledgement, inspectChatGptSubmissionCandidates } from '../../src/providers/chatgpt/submission.ts';
+import { observeChatGptSurface } from '../../src/providers/chatgpt/surface.ts';
+
+test('Chat default remains selected through preparation and a later Work drift blocks the actual submit', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chat-mode-submit-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: `<main>
+      <div role="radiogroup"><button type="button" id="chat" role="radio" aria-checked="true">Chat</button>
+        <button type="button" id="work" role="radio" aria-checked="false" onclick="window.workClicks++">Work</button></div>
+      <div id="prompt-textarea" contenteditable="true"></div>
+      <button data-testid="send-button" type="button" onclick="window.sends++">Send</button>
+      <script>window.sends=0;window.workClicks=0;</script></main>` }));
+    await page.goto('https://chatgpt.com/');
+    registry.reservePage(binding.pageKey, { sessionId: 'chat-default', generation: 1 });
+    const submission = new ChatGptSubmission({ page, pageKey: binding.pageKey, pageRegistry: registry,
+      request: { session: sessionSnapshot({ sessionId: 'chat-default', pageKey: binding.pageKey }),
+        generation: 1, prompt: 'Preserve exact prompt', model: null }, acknowledgementTimeoutMs: 100 });
+    await prepareFixture(submission, page);
+    assert.equal((await observeChatGptSurface(page)).mode, 'chat');
+    assert.equal(await page.locator('#prompt-textarea').innerText(), 'Preserve exact prompt');
+    await page.evaluate(() => {
+      document.querySelector('#chat')!.setAttribute('aria-checked', 'false');
+      document.querySelector('#work')!.setAttribute('aria-checked', 'true');
+    });
+    await assert.rejects(submission.submitOnce(), /composer is Work/);
+    assert.equal(await page.locator('#prompt-textarea').innerText(), 'Preserve exact prompt');
+    assert.deepEqual(await page.evaluate(() => [(window as any).sends, (window as any).workClicks]), [0, 0]);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 for (const dispatch of [true, false]) test(`continuation Enter ${dispatch ? 'dispatches and accepts the exact ACK' : 'reports a no-op without claiming delivery or clicking Stop'}`, async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-enter-continuation-'));

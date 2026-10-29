@@ -403,6 +403,7 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
       <div data-message-author-role="user" data-message-id="old-question">Unrelated earlier work</div>
       <section role="alert" hidden>hostspan-desktop Process Start Old permission</section>
       <div data-message-author-role="user" data-message-id="user-message-1">Fixture question</div>
+      <button type="button" role="radio" aria-checked="true">Chat</button>
       <div class="group/activity-header"><button aria-expanded="false" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">hostspan-desktop 통합 사용함</button></div>
       <div id="activity"><div class="group/activity-header"><button aria-expanded="false" aria-labelledby="work-label" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#work').hidden=false"></button><span id="work-label">이전 활동</span></div>
       <span id="elapsed">1 hour 14 seconds working</span>
@@ -657,7 +658,7 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
     assert.equal(fake.stopCount, 0);
     assert.equal(core.teamDirectory.getSession(session.sessionId).generation, 1);
     assert.equal(core.teamDirectory.getSession(session.sessionId).terminal, false);
-    await page.setContent(`<main>
+    await page.setContent(`<main><button type="button" role="radio" aria-checked="true">Chat</button>
       <div data-message-author-role="user" data-message-id="older-work-user">Existing implementation question</div>
       <button aria-expanded="false" aria-controls="earlier" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#earlier').hidden=false">작업함</button>
       <section id="earlier" hidden><div role="alert">hostspan-desktop File Patch</div>

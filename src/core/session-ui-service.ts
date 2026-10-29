@@ -1,12 +1,12 @@
 import type { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
 import { streamRetrySurface } from '../providers/chatgpt/stream-retry.ts';
 import type { ReceiptRepository } from '../storage/receipt-repository.ts';
-import { observeChatGptSurface, type ChatGptSurface } from '../providers/chatgpt/surface.ts';
+import { observeChatGptSurface, isChatGptModeControl, requireChatGptSurface, type ChatGptSurface } from '../providers/chatgpt/surface.ts';
 import { controlHostSpanPermission, inspectHostSpanActivity, revealHostSpanActivity, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
 import { createHash } from 'node:crypto';
 import { requireIdleConversationPage } from './conversation-cleanup-service.ts';
 import { conversationLoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
-import { ChatGptConfigurationMenu, type ConfigurationCatalog } from '../providers/chatgpt/configuration-catalog.ts';
+import { isChatGptModelChooser, ChatGptConfigurationMenu, type ConfigurationCatalog } from '../providers/chatgpt/configuration-catalog.ts';
 import { errors, type ElementHandle, type Page } from 'playwright-core';
 
 import type { BrowserOwner } from '../browser/browser-owner.ts';
@@ -41,7 +41,7 @@ export class SessionUiService {
   get configurationCatalog() { return this.#catalog; }
 
   async discover(input: PreparationOwner & { decisionId: string }) {
-    const result = await this.#submissions.decidePreparation({ ...input, decision: 'discover', purpose: 'model' }, async session => {
+    let result = await this.#submissions.decidePreparation({ ...input, decision: 'discover', purpose: 'model' }, async session => {
       try {
         return { choice: null, result: await new ChatGptConfigurationMenu(await this.#interactionPage(session), session.pageKey!).discover() };
       } catch (error) {
@@ -52,6 +52,10 @@ export class SessionUiService {
     });
     // A receipt replay restores the observation without repeating UI mutations.
     if ('options' in result) {
+      result = { ...result, options: result.options.filter(option => !isChatGptModeControl({
+        role: 'menuitemradio', name: option.version, text: option.label,
+      })), unavailableVersions: result.unavailableVersions.filter(version =>
+        !isChatGptModeControl({ role: 'menuitemradio', name: version, text: version })) };
       const key = `${input.sessionId}:${input.generation}`;
       if (result.status === 'available') {
         this.#catalog = result;
@@ -133,13 +137,19 @@ export class SessionUiService {
           }
           this.#requirePage(session);
         }
-        const catalog = this.#discoveryFailures.get(`${session.sessionId}:${session.generation}`) ?? this.#catalog;
+        const chatVerified = snapshot.observedSurface.mode === 'chat';
+        const inspectModeChooser = modeInspectionChooser(snapshot.nodes, snapshot.observedSurface);
+        const cachedCatalog = chatVerified ? this.#discoveryFailures.get(`${session.sessionId}:${session.generation}`) ?? this.#catalog : null;
+        const catalog = cachedCatalog === null ? null : { ...cachedCatalog, options: cachedCatalog.options.filter(option =>
+          !isChatGptModeControl({ role: 'menuitemradio', name: option.version, text: option.label })) };
         const menuIds = new Set(snapshot.nodes.filter((node) => node.role === 'menu' && node.id !== '').map((node) => node.id));
         this.#configurationRefs.set(snapshot.pageKey, { snapshotId: snapshot.snapshotId,
           ids: composerAvailable ? catalog?.options.map(option => option.id) ?? [] : [] });
-        return { ...snapshot, nodes: snapshot.nodes.map((node) => ({ ...node, actions: preparationActions(node, menuIds) })),
-          preparationAvailability: { available: composerAvailable,
-            ...(composerAvailable ? {} : { reason: 'composer-unavailable' as const }) },
+        return { ...snapshot, nodes: snapshot.nodes.map((node) => ({ ...node,
+          actions: chatVerified ? preparationActions(node, menuIds) : { choose: [], reveal: node === inspectModeChooser ? ['model' as const] : [] } })),
+          preparationAvailability: { available: composerAvailable && chatVerified,
+            ...(!composerAvailable ? { reason: 'composer-unavailable' as const }
+              : !chatVerified ? { reason: 'chat-selection-unverified' as const } : {}) },
           configurationCatalog: catalog === null ? null : { ...catalog,
             selectionAvailable: composerAvailable,
             instruction: composerAvailable
@@ -352,11 +362,13 @@ export class SessionUiService {
           owner.submissionState !== 'prepared' || owner.promptSubmitted || owner.submittedUserMessageId || owner.responseMessageId)
         throw new SessionPlaneDomainError('session.generation-superseded', 'Preserving follow-up recovery requires its never-submitted preparation');
       const page = this.#requirePage(owner);
+      await requireChatGptSurface(page);
       await inspectChatGptPageReady(page, owner.pageKey!);
       const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
       if (await composer.count() !== 1 || !await composer.isEditable()) throw new SessionPlaneDomainError(
         'provider.preparation-required', 'No unique editable original composer');
       const verify = async () => {
+        await requireChatGptSurface(page);
         const transcript = await readChatGptMessages(page);
         const anchors = transcript.filter(m => m.role === 'user' && m.messageId === original.submittedUserMessageId);
         const followups = transcript.filter(m => m.role === 'user' && m.messageId === input.followupUserMessageId);
@@ -463,9 +475,11 @@ export class SessionUiService {
         anchor, click: false, preserveContinuationDraft: unknown };
       let surface = await page.evaluate(streamRetrySurface, target);
       if (!surface.present) return null;
+      await requireChatGptSurface(page);
       let outputPopoverToggleDispatched = false;
       const verify = async (allowPreparation = false) => {
         this.#requirePage(session);
+        await requireChatGptSurface(page);
         const dom = await observeChatGptDom(page, { submittedUserMessageId: anchor, submittedUserTurnId: null });
         const activity = await observeChatGptActivity(page, dom);
         // Exact enabled Retry chrome already rejects live Stop/thinking controls.
@@ -996,11 +1010,13 @@ export class SessionUiService {
         }
         return await this.#selectConfiguration(session, configurationId);
       }
-      const page = await this.#interactionPage(session);
-      const binding = this.#registry.refreshPage(session.pageKey);
+      const page = this.#requirePage(session);
       let element: ElementHandle<Element> | null = null;
       try {
+        const binding = this.#registry.refreshPage(session.pageKey);
         const node = this.#refs.node({ pageKey: session.pageKey, snapshotId, ref });
+        if (isChatGptModeControl(node)) throw new SessionPlaneDomainError(
+          'capability.unsupported', 'Mode controls are not selectable through preparation. Chat is the only supported mode.');
         element = await this.#refs.resolve({ pageKey: session.pageKey, bindingEpoch: binding.bindingEpoch, page, ref, snapshotId });
         const reveal = input.decision === 'reveal';
         const currentObservation = await this.#refs.capture({
@@ -1021,6 +1037,9 @@ export class SessionUiService {
         if (input.value !== undefined && currentNode.role !== 'slider') {
           throw new SessionPlaneDomainError('input.invalid', 'A numeric value is only valid for a model or effort slider');
         }
+        const modeInspection = reveal && purpose === 'model' && input.value === undefined &&
+          currentNode.ref === modeInspectionChooser(currentObservation.nodes, await observeChatGptSurface(page))?.ref;
+        await this.#interactionPage(session, modeInspection);
         const existingSelection = !reveal && ['model', 'effort'].includes(purpose) &&
           ((currentNode.role === 'button' && currentNode.hasPopup !== null) ||
             isPreparationSummary(currentNode, currentNode.ancestorIds.some(id => menuIds.has(id))) ||
@@ -1388,8 +1407,10 @@ export class SessionUiService {
     return await this.#submissions.resumePreparation(input);
   }
 
-  async #interactionPage(session: SessionSnapshot): Promise<Page> {
+  async #interactionPage(session: SessionSnapshot, modeInspection = false): Promise<Page> {
     const page = this.#requirePage(session);
+    if (modeInspection) await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
+    else await requireChatGptSurface(page);
     return this.#browserOwner === null ? page : await this.#browserOwner.preparePageInteraction(session.pageKey!, session);
   }
 
@@ -1422,10 +1443,18 @@ export interface PreparationOwner {
   readonly generation: number;
 }
 
+// Opening this exact chooser is observation, never a mode/model selection or
+// saved Submit resume. It is the only action advertised before Chat is proven.
+function modeInspectionChooser(nodes: readonly BrowserSnapshotNode[], surface: ChatGptSurface) {
+  if (surface.mode !== 'unknown' || surface.source === 'conflicting-evidence') return undefined;
+  const candidates = nodes.filter(isChatGptModelChooser);
+  return candidates.length === 1 && candidates[0]!.expanded === false && !candidates[0]!.disabled ? candidates[0] : undefined;
+}
+
 function preparationActions(node: BrowserSnapshotNode, menuIds: ReadonlySet<string>) {
   const choose: PreparationPurpose[] = [];
   const reveal: PreparationPurpose[] = [];
-  if (node.disabled) return { choose, reveal };
+  if (node.disabled || isChatGptModeControl(node)) return { choose, reveal };
   if (node.editable && node.role === 'textbox') choose.push('composer');
   if (node.role === 'button' && node.submitControl === true) choose.push('submit');
   const insideMenu = node.ancestorIds.some((id) => menuIds.has(id));

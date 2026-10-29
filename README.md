@@ -14,11 +14,14 @@ and one runtime contract.
 ChatGPT sends require an observed Chat selection, independently of model and effort.
 `session show` and exact-request `team_get` with `view:evidence` return `observedSurface` with `mode`,
 `source` and `observedAt`; `requested.surface` is caller intent, not observation.
-The provider reads an explicit selected control or the mounted composer's explicit
-Work-conversation state. During preparation, temporary missing or conflicting
+Chat is the only supported mode and the default; mode controls are never configuration
+choices. Only a visible selected Chat control establishes Chat. A false inherited
+composer flag does not prove Chat; positive Work state blocks operation. During preparation, temporary missing or conflicting
 evidence is reobserved on the same composer within the normal readiness wait.
 Confirmed Chat continues the same request; unresolved evidence remains `unknown`
-without changing the draft or requiring human confirmation. Existing Work requests remain readable;
+without changing the draft or requiring human confirmation. Before mode proof, only the exact
+model picker may be revealed for read-only inspection; no choice or Submit is resumed.
+Existing Work requests remain readable;
 only their Coordinator performs an authorized same-role Chat replacement.
 
 ## Browser diagnostics

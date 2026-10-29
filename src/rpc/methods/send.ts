@@ -11,7 +11,7 @@ const RoleKey = z.string().trim().min(1).max(80);
 const Prompt = z.string().min(1).max(200_000);
 const Model = z.string().trim().min(1).max(200).nullable().optional();
 const Effort = z.string().trim().min(1).max(200).nullable().optional();
-const Surface = z.string().trim().min(1).max(200).nullable().optional();
+const Surface = z.literal('chat').nullable().optional().describe('Chat is the only supported mode and the default when omitted.');
 const Files = z.array(z.string().min(1).max(20_000)).max(20).optional();
 const SessionDeadlineSec = z.number().int().min(1).max(86_400).default(5_400);
 

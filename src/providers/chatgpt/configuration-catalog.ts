@@ -3,7 +3,7 @@ import type { Page } from 'playwright-core';
 import { BrowserRefSnapshotStore, type BrowserSnapshot, type BrowserSnapshotNode } from '../../browser/ref-snapshot.ts';
 import { SessionPlaneDomainError } from '../../domain/errors.ts';
 import { CHATGPT_COMPOSER_SELECTOR, CHATGPT_PREPARATION_SNAPSHOT } from './selectors.ts';
-import { observeChatGptSurface } from './surface.ts';
+import { observeChatGptSurface, isChatGptModeControl, requireChatGptSurface } from './surface.ts';
 import type { PreparationTarget } from '../provider-adapter.ts';
 
 export interface ConfigurationOption {
@@ -19,6 +19,10 @@ export interface ConfigurationCatalog {
   readonly options: readonly ConfigurationOption[];
   readonly unavailableVersions: readonly string[];
   readonly message?: string;
+}
+
+export function isChatGptModelChooser(node: BrowserSnapshotNode) {
+  return node.role === 'button' && node.hasPopup === 'menu' && /(?:model|모델)/i.test(node.name) && !isChatGptModeControl(node);
 }
 
 // Labels and combinations come from the provider, not a model-name table.
@@ -37,11 +41,12 @@ export class ChatGptConfigurationMenu {
   }
 
   async #capture(): Promise<readonly BrowserSnapshotNode[]> {
+    await requireChatGptSurface(this.#page);
     this.#snapshot = await this.#refs.capture({ page: this.#page, pageKey: this.#pageKey,
       bindingEpoch: 1, ...CHATGPT_PREPARATION_SNAPSHOT, maxNodes: 5000 });
     if (this.#verificationOnly && this.#snapshot.nodesTruncated) throw new SessionPlaneDomainError(
       'provider.configuration-unavailable', 'Current configuration evidence is truncated');
-    return this.#snapshot.nodes;
+    return this.#snapshot.nodes.filter(node => !isChatGptModeControl(node));
   }
 
   async #wait(predicate: (nodes: readonly BrowserSnapshotNode[]) => boolean | Promise<boolean>, timeoutMs = 5000, stage = 'configuration-state') {
@@ -62,6 +67,8 @@ export class ChatGptConfigurationMenu {
   }
 
   async #click(node: BrowserSnapshotNode) {
+    if (isChatGptModeControl(node)) throw new SessionPlaneDomainError('capability.unsupported', 'Mode selection is not a model or effort action; only Chat is supported');
+    await requireChatGptSurface(this.#page);
     if (this.#verificationOnly && ['menuitemradio', 'radio', 'option', 'slider'].includes(node.role)) {
       throw new SessionPlaneDomainError('provider.configuration-unavailable',
         'Current selection cannot be verified without a selection action; preserve preparation');
@@ -114,8 +121,7 @@ export class ChatGptConfigurationMenu {
   }
 
   #opener(nodes: readonly BrowserSnapshotNode[]) {
-    const matches = nodes.filter(n => n.role === 'button' && n.hasPopup === 'menu' &&
-      /(?:model|모델)/i.test(n.name));
+    const matches = nodes.filter(isChatGptModelChooser);
     if (this.#verificationOnly && matches.length > 1) throw new SessionPlaneDomainError(
       'provider.configuration-unavailable', 'Current model chooser is ambiguous');
     return matches[0];
@@ -359,6 +365,8 @@ export class ChatGptConfigurationMenu {
   }
 
   async select(option: ConfigurationOption): Promise<BrowserSnapshotNode> {
+    if (isChatGptModeControl({ role: 'menuitemradio', name: option.version, text: option.label }))
+      throw new SessionPlaneDomainError('capability.unsupported', 'Only model and effort configurations in Chat are supported');
     let nodes = await this.#version(option.version);
     if (option.power !== null) nodes = await this.#power(option.power);
     const summary = this.#summary(nodes);

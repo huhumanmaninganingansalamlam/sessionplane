@@ -34,7 +34,7 @@ async function fixture(alertText = '메시지 스트림에 오류 발생') {
     requestId: 'send', prompt: 'Original work question' })).structuredContent;
   const snapshot = core.teamDirectory.getSession(String(sent.sessionId));
   const page = core.pageRegistry.pageForObservation(snapshot.pageKey!);
-  const markup = `<main><div data-chatgpt-search-message-ids="${snapshot.submittedUserMessageId}"><div data-user-message-bubble>Original work question</div></div>
+  const markup = `<main><button type="button" role="radio" aria-checked="true">Chat</button><div data-chatgpt-search-message-ids="${snapshot.submittedUserMessageId}"><div data-user-message-bubble>Original work question</div></div>
     <aside role="alert"><div>${alertText}</div><button onclick="window.clicks=(window.clicks||0)+1">다시 시도</button></aside><textarea></textarea></main>`;
   await page.setContent(markup);
   const decide = () => invoke('decide', { teamId: team.teamId, requestRef: sent.requestRef,
@@ -42,6 +42,22 @@ async function fixture(alertText = '메시지 스트림에 오류 발생') {
   return { core, fake, invoke, team, sent, snapshot, page, markup, decide,
     close: async () => { await core.close(); rmSync(root, { recursive: true, force: true }); } };
 }
+
+test('Work mode cannot retry an acknowledged turn or create a continuation', async () => {
+  const f = await fixture();
+  try {
+    await f.page.setContent(f.markup.replace('>Chat</button>', '>Work</button>'));
+    const before = f.core.database.raw.prepare('SELECT * FROM outbox').all();
+    const result = await f.decide();
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent.errorCode, 'provider.preparation-required');
+    assert.match(String(result.structuredContent.message), /Work.*observation-only/);
+    assert.equal(await f.page.evaluate(() => (window as any).clicks ?? 0), 0);
+    assert.equal(f.fake.submitCount, 1);
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM outbox').all(), before);
+    assert.equal(f.core.teamDirectory.getSession(f.snapshot.sessionId).submittedUserMessageId, f.snapshot.submittedUserMessageId);
+  } finally { await f.close(); }
+});
 
 for (const alertText of ['메시지 스트림에 오류 발생', 'Hmm...something seems to have gone wrong.']) {
 test(`approved continue retries exact stream chrome once without resubmitting or changing the ACK; guards preserve work (${alertText})`, async () => {

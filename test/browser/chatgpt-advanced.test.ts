@@ -570,8 +570,18 @@ test('existing-thread composer selection is observable without sending; missing 
       });
     }, work);
     await setWork(false);
+    await page.evaluate(() => document.body.insertAdjacentHTML('beforeend', '<nav><button aria-pressed="true">Work</button></nav>'));
+    const inherited = await observeChatGptSurface(page);
+    assert.deepEqual(inherited.modeControls?.map(c => ({ label: c.label, pressed: c.pressed, navigation: c.navigation })),
+      [{ label: 'work', pressed: 'true', navigation: true }], 'Mode chrome diagnostics expose no bodies, selectors or action refs');
+    await page.locator('nav').evaluate(node => node.remove());
+    assert.equal(inherited.mode, 'unknown'); assert.equal(inherited.source, 'composer-state');
+    await page.evaluate(() => document.body.insertAdjacentHTML('beforeend', '<button id="actual-chat" style="visibility:hidden" role="radio" aria-checked="true">Chat</button>'));
+    assert.equal((await observeChatGptSurface(page)).mode, 'unknown', 'A CSS-hidden Chat control is not current mode proof');
+    await page.locator('#actual-chat').evaluate(node => (node as HTMLElement).style.visibility = 'visible');
     const chat = await observeChatGptSurface(page);
-    assert.equal(chat.mode, 'chat'); assert.equal(chat.source, 'composer-state');
+    assert.equal(chat.mode, 'chat'); assert.equal(chat.source, 'selected-control');
+    await page.locator('#actual-chat').evaluate(node => node.remove());
     await setWork(true);
     assert.equal((await observeChatGptSurface(page)).mode, 'work');
     await assert.rejects(submission.prepare(), /composer is Work/);
