@@ -220,6 +220,50 @@ test('UNKNOWN history acknowledgement requires retained ownership, empty draft a
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('retained UNKNOWN with a collapsed user bubble recovers only the full canonical original without sending', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-unknown-collapsed-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  const prompt = 'Exact original ' + 'context '.repeat(180) + 'final tail';
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body:
+      '<main><textarea id="prompt-textarea"></textarea><div data-message-author-role="user" data-message-id="retained-user">Exact original…<button>더 보기</button></div><button data-testid="stop-button">Stop</button></main><script>window.clicks=0;document.querySelectorAll("button").forEach(b=>b.onclick=()=>window.clicks++)</script>' }));
+    await page.goto('https://chatgpt.com/');
+    registry.reservePage(binding.pageKey, { sessionId: 'original', generation: 1 });
+    await page.evaluate(() => history.pushState({}, '', '/c/collapsedoriginal'));
+    const session = { ...sessionSnapshot({ sessionId: 'original', pageKey: binding.pageKey }),
+      submissionState: 'submission_unknown' as const, promptSubmitted: true };
+    let canonical = prompt + ' wrong';
+    t.mock.method(page.context().request, 'get', async (url: string) => ({
+      status: () => 200, headers: () => ({}), dispose: async () => {},
+      json: async () => url.endsWith('/api/auth/session') ? { accessToken: 'isolated-fixture-token' } : {
+        id: 'collapsedoriginal', current_node: 'retained-user', mapping: {
+          'retained-user': { parent: null, message: { id: 'retained-user', author: { role: 'user' },
+            content: { content_type: 'text', parts: [canonical] } } },
+        },
+      },
+    }));
+    const recover = () => new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry,
+      loginUrl: 'https://chatgpt.com/' }).recoverAcknowledgement({ session, generation: 1, prompt });
+    assert.equal(await recover(), null, 'Prefix/collapsed DOM never overrides a canonical tail mismatch');
+    assert.equal(registry.getBinding(binding.pageKey).state, 'identity_lost');
+    canonical = prompt;
+    await page.locator('textarea').fill('Preserve human draft');
+    assert.equal(await recover(), null, 'Canonical proof cannot clear or adopt a human draft');
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserve human draft');
+    await page.locator('textarea').fill('');
+    const recovered = await recover();
+    assert.equal(recovered?.submittedUserMessageId, 'retained-user');
+    assert.equal(recovered?.conversationId, 'collapsedoriginal');
+    assert.equal(recovered?.evidence, 'backend-exact-user');
+    assert.equal(registry.getBinding(binding.pageKey).state, 'owned');
+    assert.equal(await page.evaluate(() => (window as any).clicks), 0, 'No More/Stop/Submit button is needed');
+    assert.equal(await page.locator('textarea').inputValue(), '');
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('an accepted dispatch with only the older duplicate mounted preserves attempt identity without ACK', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-dispatch-proof-'));
   const registry = new PageRegistry();

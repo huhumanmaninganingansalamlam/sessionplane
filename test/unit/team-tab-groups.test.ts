@@ -108,8 +108,8 @@ test('restored home targets retain unique durable team membership without claimi
   database.exec(`INSERT INTO page_bindings VALUES ('restored-home','stable-a'), ('restored-home',NULL),
     ('conflicting-home','stable-a'), ('conflicting-home','stable-b')`);
   const repository = new PageBindingRepository(database);
-  const resolve = (_sessionId: string | null, conversationId: string | null, targetId: string) => {
-    const teamId = conversationId === null ? repository.uniqueTeamForTarget(targetId) : null;
+  const resolve = (_sessionId: string | null, _conversationId: string | null, targetId: string) => {
+    const teamId = repository.uniqueTeamForTarget(targetId);
     return teamId ? { teamId, title: 'Project' } : null;
   };
   const binding = { targetId: 'restored-home', sessionId: null, state: 'unbound', url: 'https://chatgpt.com/' };
@@ -129,8 +129,11 @@ test('restored home targets retain unique durable team membership without claimi
     ], [], resolve), result, 'Native targets omitted by Playwright retain the same exact team');
     assert.deepEqual(resolveNativeTeamTabs([], [
       { targetId: 'restored-home', type: 'page', url: 'https://other.example/' },
-      { targetId: 'restored-home', type: 'page', url: 'https://chatgpt.com/c/unknown' },
       { targetId: 'restored-home', type: 'page', url: 'https://chatgpt.com/', browserContextId: 'private' },
-    ], ['private'], resolve), [], 'Unknown conversations, foreign sites and private targets remain excluded');
+    ], ['private'], resolve), [], 'Foreign sites and private targets remain excluded');
+    const unknown = { ...binding, sessionId: 'pending-original', state: 'identity_lost', url: 'https://chatgpt.com/c/not-yet-acknowledged' };
+    assert.deepEqual(resolveNativeTeamTabs([unknown], [], [], resolve), result,
+      'Exact retained target groups before canonical conversation/ACK recovery');
+    assert.equal(unknown.state, 'identity_lost', 'Organization does not restore mutation ownership');
   } finally { database.close(); }
 });

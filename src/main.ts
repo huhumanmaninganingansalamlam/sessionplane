@@ -128,7 +128,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
             const sessions = new SessionRepository(database.raw);
             const session = sessionId ? sessions.getSession(sessionId)
               : conversationId ? sessions.getUniqueConversationSession(conversationId) : null;
-            const teamId = session?.teamId ?? (conversationId === null && targetId ? pageBindings.uniqueTeamForTarget(targetId) : null);
+            const teamId = session?.teamId ?? (targetId ? pageBindings.uniqueTeamForTarget(targetId) : null);
             if (!teamId) return null;
             const team = teamDirectory.getTeam(teamId);
             return { teamId: team.teamId, title: team.name?.trim() || team.teamId };
