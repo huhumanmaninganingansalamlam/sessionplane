@@ -147,12 +147,14 @@ export class TeamWorkflow {
       const prior = this.services.receipts.get(receipt.clientId, receipt.requestId);
       if (prior && (prior.method !== method || prior.requestHash !== receipt.requestHash))
         throw new SessionPlaneDomainError('input.idempotency-conflict', 'Empty-page operation identity changed');
-      if (prior?.status === 'complete' && current.pageKey === null)
-        throw new SessionPlaneDomainError('session.preparation-not-ready', 'The previously opened empty page was closed; use a new open operation without replaying a prompt');
-      if (prior?.status !== 'complete')
-        this.services.receipts.record({ ...receipt, status: 'attempted', result: { sessionId: current.sessionId } });
+      const bindings = new PageBindingRepository(this.services.database.raw);
+      const stored = current.pageKey === null ? null : bindings.get(current.pageKey);
+      if (prior?.status === 'complete') {
+        const opened = bindings.get(JSON.parse(prior.resultJson).pageKey);
+        if (!stored?.targetId || stored.targetId !== opened?.targetId)
+          throw new SessionPlaneDomainError('session.preparation-not-ready', 'The previously opened empty page was closed or replaced; use a new open operation without replaying a prompt');
+      } else this.services.receipts.record({ ...receipt, status: 'attempted', result: { sessionId: current.sessionId } });
       // Retain the page before navigation, so an interrupted open never creates a second tab.
-      const stored = current.pageKey === null ? null : new PageBindingRepository(this.services.database.raw).get(current.pageKey);
       const pageKey = await this.services.ui.openEmptySession(current, key => {
         if (!this.#sessions.updateCurrentGeneration(current.sessionId, 0, { pageKey: key }, new Date().toISOString()))
           throw new SessionPlaneDomainError('session.generation-superseded', 'Empty session changed before opening');

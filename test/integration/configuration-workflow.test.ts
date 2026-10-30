@@ -83,6 +83,7 @@ test('empty same-role Chat opening materializes once without a prompt, generatio
     const fresh = await invoke('session_open', { ...input, requestId: 'explicit-new-empty-open' });
     assert.equal(fresh.isError, false, JSON.stringify(fresh));
     assert.equal(fresh.structuredContent.sessionId, closeInput.sessionId);
+    assert.equal((await invoke('session_open', input)).isError, true, 'old open cannot claim a later explicitly opened target');
     const newPage = core.pageRegistry.pageForObservation(String(fresh.structuredContent.pageKey));
     assert.equal(core.pageRegistry.listBindings({ includeClosed: false }).filter(binding => binding.sessionId === closeInput.sessionId).length, 1);
     // A previously open operation cannot be used to open a submitted generation.
