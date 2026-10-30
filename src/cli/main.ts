@@ -1414,8 +1414,9 @@ Exact request flow (same request; no automatic resend):
   6. Collect: request wait TEAM_ID REQUEST_REF [--wait-ms N] [--out DIRECTORY]
   Recovery: request discover|refresh|focus|latest|reopen|reconcile_failure TEAM_ID REQUEST_REF
   Approved interrupted tool-turn continuation: request continue TEAM_ID REQUEST_REF --continuation-approved
-  Approve existing exact collector without sending: request continue TEAM_ID REQUEST_REF --followup-message-id SOURCE_ID --continuation-approved --manage-only
+  Approve existing exact later collector without sending: request continue TEAM_ID REQUEST_REF --followup-message-id SOURCE_ID --continuation-approved --manage-only
   User-confirmed disconnected turn: add --user-confirmed-interruption FILE (conversationId, submittedUserMessageId, evidenceRef). Never infer user confirmation.
+  Approve existing current ACK collector: request continue TEAM_ID REQUEST_REF --continuation-approved --manage-only
   Explicit new literal 계속 after UNKNOWN or a backend-proven lost continuation: request followup TEAM_ID REQUEST_REF USER_INSTRUCTION_REF
     Preserves original uncertainty; never automatically retries or bypasses provider errors/drafts/activity.
   Confirm an observed matching submission without resending:

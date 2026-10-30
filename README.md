@@ -134,8 +134,12 @@ outcome.
    when attaching the sole owner wait; the recovery receipt connects its response.
    To approve paced management on that existing exact collector, use the same
    Continue command with `--manage-only`. It records approval without sending or
-   adding a collector. Exact reads expose the current ACK and its last/next review
-   under `followup.managedContinuation`, separately from the original generation.
+   adding a collector. For a current acknowledged request in an existing observe-only
+   wait, omit `--followup-message-id`; the exact mounted ACK is verified and that
+   same collector gains approval. A completed diagnostic review can rearm one guarded
+   recovery on the same ACK; drafts, permissions, live work and pacing still apply.
+   Ordinary requests expose approval and review timing under `managedContinuation`;
+   exact later chains use `followup.managedContinuation`, separately from the original generation.
    Select an available combined model
    using the displayed `request configure` command, then the fresh composer control.
    Inspect the input before explicitly choosing the submit control. Disabled or stale
@@ -144,7 +148,7 @@ outcome.
    approved, use `sessplane request wait TEAM_ID REQUEST_REF --wait-ms 600000 --continuation-approved --json`
    (MCP: `continuationApproved: true`). Omitting
    the option leaves observation only. The existing client retains routine expiry,
-   pacing/429 and ACK/load delays, reviews unresolved work about every 30 minutes,
+   pacing/429 and ACK/load delays, reviews unresolved work about every 20 minutes,
    follows the continuation chain and collects the answer. Do not add a competing
    wait or manual `계속`. Add `--out DIR` for files. Return actual successor/ACK/result
    references to the owner; an ACK or alive collector is not product progress.

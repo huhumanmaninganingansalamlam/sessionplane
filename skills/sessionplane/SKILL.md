@@ -148,6 +148,14 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    decides recovery from these observations; do not force a send past a refusal.
    `nextCheckAt` paces backend probes, not collection or a new polling schedule.
 
+   To approve an already-connected observe-only collector without replacing it, use
+   `request continue TEAM REQUEST --continuation-approved --manage-only` (MCP:
+   continue with manageOnly:true). Omit followupUserMessageId for the current request
+   ACK; it verifies that mounted ACK and the sole existing collector, records approval
+   and wakes that same wait without sending. A reviewed recovery decision permits one
+   fresh guarded review, preserving drafts, permissions, live work and real pacing.
+   A separate later recovery chain still uses its exact followupUserMessageId.
+
    A returned recovery decision, failed submission or repeated ineffective recovery
    needs immediate delivery to the supervisor/user, not another silent wait. Read
    the exact error and current controls; focus the original tab and report one

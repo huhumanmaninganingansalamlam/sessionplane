@@ -24,7 +24,7 @@ export const workflowSchemas = {
   decide: z.union([
     z.object({ ...request, requestId, decision: z.literal('answer_question'), answer: z.string().trim().min(1).max(500).describe('Exact enabled option from the current owned providerQuestion; the Coordinator supplies its authorized answer. Never chooses a default or submits the prepared prompt.'), evidenceHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
     z.object({ ...request, requestId, decision: z.literal('continue'), continuationApproved: z.literal(true),
-      manageOnly: z.literal(true).optional().describe('Approve paced management of this exact acknowledged recovery chain in the existing collector. No immediate send or new collector; requires followupUserMessageId.'),
+      manageOnly: z.literal(true).optional().describe('Approve the sole existing collector for this current acknowledged request, or an exact acknowledged later recovery chain. No immediate send or new collector; omit followupUserMessageId for the request ACK.'),
       followupUserMessageId: z.string().min(1).max(300).optional().describe('Recover this exact interrupted later turn while retaining a separate never-submitted preparation and its draft.'),
       userConfirmedInterruption: z.object({ conversationId: z.string().min(1).max(300), submittedUserMessageId: z.string().min(1).max(300),
         evidenceRef: z.string().trim().min(1).max(2000),
