@@ -20,11 +20,18 @@ export function registerSessionMethods(
   cleanup: ConversationCleanupService,
   ui?: SessionUiService,
 ): void {
-  router.register('session.close_pages', z.object({
-    clientId: ClientId, sessionId: SessionId, generation: z.number().int().positive(),
-    conversationId: z.string().min(1).max(300), evidenceRef: z.string().trim().min(1).max(2000),
-    obsoleteEmptyTargetId: z.string().trim().min(1).max(200).optional().describe('Close only this unused startup home target after its exact session moved to another conversation tab. Preserves current conversations, drafts and unknown work; no provider deletion.'),
-  }).strict(), (input) => cleanup.closePages(input));
+  router.register('session.close_pages', z.union([
+    z.object({
+      clientId: ClientId, sessionId: SessionId, generation: z.number().int().positive(),
+      conversationId: z.string().min(1).max(300), evidenceRef: z.string().trim().min(1).max(2000),
+      obsoleteEmptyTargetId: z.string().trim().min(1).max(200).optional().describe('Close only this unused startup home target after its exact session moved to another conversation tab. Preserves current conversations, drafts and unknown work; no provider deletion.'),
+    }).strict(),
+    z.object({
+      clientId: ClientId, sessionId: SessionId, generation: z.literal(0), conversationId: z.null(),
+      evidenceRef: z.string().trim().min(1).max(2000),
+      emptyTargetId: z.string().trim().min(1).max(200).describe('Close only this exact unused current generation-zero home page after fresh empty/idle validation. Preserves the role and session; never deletes a conversation or submits.'),
+    }).strict(),
+  ]), (input) => cleanup.closePages(input));
   router.register('session.delete', z.object({
     clientId: ClientId, requestId: RequestId, sessionId: SessionId,
     generation: z.number().int().positive(), conversationId: z.string().min(1).max(300),
