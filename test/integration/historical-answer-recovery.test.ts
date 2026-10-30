@@ -305,8 +305,18 @@ test('explicit later responses preserve a completed original and an optional pre
           assert.equal(originalSummary.active, false, 'Exact approval is not management of the old ACK');
           const current = (await show('manual-managed')).results[0].followup.managedContinuation;
           assert.ok(current.lastReviewAt && current.nextReviewAt);
+          assert.equal(current.reviewIntervalMs, 1200000);
+          assert.equal(Date.parse(current.nextReviewAt) - Date.parse(current.lastReviewAt), 1200000);
           assert.equal(current.submittedUserMessageId, 'managed-user');
           assert.equal(await page.evaluate(() => (window as any).sends), 1, 'A live backend generation is preserved');
+          const legacyReview = receipts.get('fixture-owner', reviewKey)!;
+          receipts.record({ ...legacyReview, status: 'complete', result: { ...JSON.parse(legacyReview.resultJson),
+            nextReviewAt: new Date(Date.parse(current.lastReviewAt) + 1800000).toISOString() } });
+          const retained = (await show('manual-managed')).results[0].followup.managedContinuation;
+          assert.equal(Date.parse(retained.nextReviewAt) - Date.parse(current.lastReviewAt), 1200000,
+            'Retained ordinary default schedules adopt twenty minutes without rewriting the receipt');
+          assert.equal(Date.parse(JSON.parse(receipts.get('fixture-owner', reviewKey)!.resultJson).nextReviewAt) -
+            Date.parse(current.lastReviewAt), 1800000);
           const dueAgain = () => {
             const saved = receipts.get('fixture-owner', reviewKey)!;
             receipts.record({ ...saved, status: 'complete', result: { ...JSON.parse(saved.resultJson),
