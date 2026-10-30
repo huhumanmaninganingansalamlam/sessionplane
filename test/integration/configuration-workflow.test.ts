@@ -1,3 +1,7 @@
+import { PageRegistry } from '../../src/browser/page-registry.ts';
+import { SessionUiService } from '../../src/core/session-ui-service.ts';
+import { TeamWorkflow } from '../../src/core/team-workflow.ts';
+import { hashCanonical } from '../../src/storage/receipt-repository.ts';
 import { callRpc } from '../../src/cli/client.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -53,6 +57,67 @@ test('empty same-role Chat opening materializes once without a prompt, generatio
       (error: any) => error.errorCode === 'provider.preparation-required' && error.details.promptSubmitted === false);
     assert.equal((await invoke('session_open', { ...input, roleRef: String(opened.structuredContent.sessionId) + ':1' })).isError, true);
     assert.equal(await page.locator('textarea').inputValue(), '');
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('empty session open rebinds the exact retained target after Core adoption and resumes its attempted receipt', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-empty-adoption-'));
+  const core = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const create = core.browserOwner!.createPage.bind(core.browserOwner);
+  let navigations = 0;
+  t.mock.method(core.browserOwner!, 'createPage', async (...args) => {
+    const created = await create(...args);
+    await created.page.route('https://chatgpt.com/**', route => {
+      if (route.request().isNavigationRequest()) navigations++;
+      return route.fulfill({ contentType: 'text/html', body: '<main><textarea></textarea></main>' });
+    });
+    return created;
+  });
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_' + name,
+    arguments: args, socketPath: core.config.socketPath, timeoutMs: 10000, maxLineBytes: core.config.rpcMaxLineBytes });
+  try {
+    const team = (await invoke('team_create', { requestId: 'adopt-team' })).structuredContent as any;
+    const input = { teamId: team.teamId, roleRef: team.roles[0].roleRef, requestId: 'adopt-open' };
+    const first = await invoke('session_open', input);
+    assert.equal(first.isError, false, JSON.stringify(first));
+    const session = core.teamDirectory.getSession(String(first.structuredContent.sessionId));
+    const page = core.pageRegistry.pageForObservation(session.pageKey!);
+    await page.locator('textarea').fill('Retained human draft');
+    const stored = core.pageBindings.get(session.pageKey!)!;
+    const adopted = new PageRegistry();
+    adopted.subscribe(binding => core.pageBindings.upsert(binding));
+    const binding = adopted.identifyPage(page, stored.targetId!);
+    const ui = new SessionUiService({ submissions: core.submissionService, registry: adopted,
+      chatgptUrl: core.config.chatgptUrl, browserOwner: core.browserOwner });
+    const workflow = new TeamWorkflow({ database: core.database, directory: core.teamDirectory, receipts: core.receipts,
+      submissions: core.submissionService, ui, scheduler: core.actorScheduler, pageMutex: core.pageMutationMutex,
+      retireObservation() {}, artifacts: core.artifactService, stops: core.stopService, cleanup: {} as never,
+      enabledProviders: ['chatgpt'], async ensurePage() {} });
+    const retry = { ...input, requestId: 'interrupted-open' };
+    const method = 'workflow.session_open';
+    core.receipts.record({ clientId: `team:${team.teamId}`, requestId: retry.requestId, method,
+      requestHash: hashCanonical({ method, payload: retry }), status: 'attempted', result: { sessionId: session.sessionId } });
+    const reopened = await workflow.openSession(retry);
+    assert.equal(reopened.pageKey, binding.pageKey);
+    assert.notEqual(reopened.pageKey, stored.pageKey);
+    assert.equal(core.teamDirectory.getSession(session.sessionId).pageKey, binding.pageKey);
+    assert.equal(navigations, 1, 'adoption never reloads or creates a replacement');
+    assert.equal(await page.locator('textarea').inputValue(), 'Retained human draft');
+    assert.deepEqual(await workflow.openSession(retry), reopened);
+    assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS n FROM outbox').get()!.n, 0);
+    assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS n FROM generations').get()!.n, 0);
+    assert.equal(adopted.getBinding(binding.pageKey).sessionId, session.sessionId);
+    // An unrelated root tab must never substitute for a missing or differently owned target.
+    const missing = { ...stored, targetId: 'missing-exact-target' };
+    await assert.rejects(ui.openEmptySession(session, () => assert.fail('no rebind'), missing),
+      (error: any) => error.errorCode === 'browser.unavailable');
+    adopted.unbindPage(binding.pageKey);
+    adopted.reservePage(binding.pageKey, { sessionId: 'foreign-session', generation: 0 });
+    await assert.rejects(ui.openEmptySession(session, () => assert.fail('no foreign rebind'), stored),
+      (error: any) => error.errorCode === 'browser.unavailable');
+    assert.equal(await page.locator('textarea').inputValue(), 'Retained human draft');
+    assert.equal(navigations, 1);
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
