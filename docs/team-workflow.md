@@ -54,7 +54,9 @@ and confirm the final active controls; unavailable intent requires a user decisi
   submission, model changes or new tabs. Missing, mismatched, replaced or superseded
   targets fail instead of selecting another tab. Replaying a completed requestId
   returns its receipt without stealing focus again; a new user action uses a fresh ID.
-  Automatic observation and recovery remain independent of foreground focus.
+  Background observation never selects the native tab or window. Opening an exact
+  owned observer restores its per-page rendering emulation after Core adoption;
+  this allows pending animation-frame updates without changing drafts or ACKs.
 - `decide` with `decision:"refresh"`, teamId, requestRef and a stable requestId
   reloads only that request's currently owned ChatGPT page. No UI ref is needed.
   Use when the user requests refresh or visible provider recovery failure warrants
