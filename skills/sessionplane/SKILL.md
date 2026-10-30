@@ -292,6 +292,14 @@ out prompts, infer consensus, or inject answers into other roles.
   (CLI: `request open TEAM_ID ROLE_REF`). It creates no generation, fills nothing,
   submits nothing and starts no collector. Use returned actual mode evidence;
   configuration/submission still require verified Chat.
+  Reusing an open operation revalidates the current retained target and returns
+  fresh mode evidence after Core adoption; an old success is not current readiness.
+  Explicit unused generation-zero tab cleanup uses `session.close_pages` with
+  its exact sessionId, generation:0, conversationId:null, emptyTargetId and evidenceRef.
+  It requires no request, messages, draft, attachments, modal, alert or active work;
+  it closes only that home target, preserving the role/session and all history.
+  A closed open operation cannot silently recreate a tab; a later authorized open
+  uses a new operation ID, without inventing a product prompt.
 - When the user explicitly orders disposal of an obsolete conversation with UNKNOWN
   children, preserve their references in the existing agent-handoff, hold the exact
   old observation and consume its collector before replacing the same role. After

@@ -360,20 +360,51 @@ export class ConversationCleanupService {
     });
   }
 
-  async closePages(input: { sessionId: string; generation: number; conversationId: string; evidenceRef: string; obsoleteEmptyTargetId?: string | undefined }) {
+  async closePages(input: { sessionId: string; generation: number; conversationId: string | null; evidenceRef: string; obsoleteEmptyTargetId?: string | undefined; emptyTargetId?: string | undefined }) {
     return await this.#options.scheduler.actorFor(input.sessionId).enqueue(async () => {
       const sessions = new SessionRepository(this.#options.database.raw);
       const session = sessions.getSnapshot(input.sessionId);
       if (!session || session.generation !== input.generation || session.conversationId !== input.conversationId) {
         throw new SessionPlaneDomainError('session.conversation-mismatch', 'Tab cleanup requires the exact durable conversation and generation');
       }
+      if (input.emptyTargetId !== undefined) {
+        const { database, registry, pageMutex } = this.#options;
+        const bindings = new PageBindingRepository(database.raw);
+        const eligible = () => this.#options.scheduler.collectors(session.sessionId).length === 0 &&
+          bindings.isUnusedCurrentEmptyTarget(session.sessionId, input.emptyTargetId!);
+        const matches = registry.listBindings({ includeClosed: false }).filter(b => b.targetId === input.emptyTargetId);
+        const binding = matches.length === 1 ? matches[0] : undefined;
+        if (!input.evidenceRef.trim() || !eligible() || !binding)
+          throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve a submitted, foreign or unidentified empty page');
+        await pageMutex.runExclusive(binding.pageKey, async () => {
+          const before = registry.refreshPage(binding.pageKey);
+          const isOwnedEmpty = () => ['unbound', 'reserved'].includes(before.state) && before.conversationId === null &&
+            (before.sessionId === null || (before.sessionId === session.sessionId && before.generation === 0)) &&
+            before.url === 'https://chatgpt.com/';
+          if (!eligible() || !isOwnedEmpty()) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve changed empty-page ownership');
+          const page = registry.pageForObservation(before.pageKey, before.bindingEpoch);
+          await requireEmptyConversationPage(page);
+          const after = registry.refreshPage(binding.pageKey);
+          if (!eligible() || after.bindingEpoch !== before.bindingEpoch || after.targetId !== before.targetId ||
+              after.url !== before.url || after.state !== before.state)
+            throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Page changed during empty-page inspection');
+          await page.close();
+          if (!sessions.updateCurrentGeneration(session.sessionId, 0, { pageKey: null }, new Date().toISOString()))
+            throw new SessionPlaneDomainError('session.generation-superseded', 'Empty session changed during cleanup');
+        });
+        return { requestOk: true, sessionId: session.sessionId, generation: 0, conversationId: null,
+          emptyTargetId: input.emptyTargetId, evidenceRef: input.evidenceRef, providerDeletionAttempted: false,
+          pageCleanup: { closedPages: 1, pageErrors: [] } };
+      }
+      if (input.conversationId === null)
+        throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Empty-page cleanup requires an exact target');
       if (input.obsoleteEmptyTargetId !== undefined) {
         const { registry, pageMutex } = this.#options;
         const bindings = new PageBindingRepository(this.#options.database.raw);
         const matches = registry.listBindings({ includeClosed: false }).filter(p => p.targetId === input.obsoleteEmptyTargetId);
         const binding = matches.length === 1 ? matches[0] : undefined;
         const eligible = () => {
-          const destination = registry.findByConversation(input.conversationId);
+          const destination = registry.findByConversation(input.conversationId!);
           return bindings.isObsoleteEmptyTarget(session.sessionId, input.obsoleteEmptyTargetId!) && destination.length === 1 &&
             destination[0]!.targetId !== input.obsoleteEmptyTargetId &&
             ((destination[0]!.state === 'unbound' && destination[0]!.sessionId === null) ||
@@ -389,11 +420,9 @@ export class ConversationCleanupService {
           if (!eligible() || before.state !== 'unbound' || before.sessionId !== null || before.conversationId !== null ||
               before.url !== 'https://chatgpt.com/') throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve a changed startup target');
           const page = registry.pageForObservation(before.pageKey, before.bindingEpoch);
-          await requireIdleConversationPage(page);
-          const occupied = await page.locator('[data-message-author-role], [data-chatgpt-selection-message-id], [role="alert"], [role="alertdialog"], [role="dialog"], dialog[open], [aria-modal="true"]').evaluateAll(nodes =>
-            nodes.some(node => node.closest('[inert], [aria-hidden="true"]') === null && node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })));
+          await requireEmptyConversationPage(page);
           const after = registry.refreshPage(binding.pageKey);
-          if (occupied || !eligible() || after.bindingEpoch !== before.bindingEpoch || after.url !== before.url ||
+          if (!eligible() || after.bindingEpoch !== before.bindingEpoch || after.url !== before.url ||
               after.state !== before.state || after.targetId !== before.targetId) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve messages, alerts or changed ownership');
           await page.close();
           pageCleanup.closedPages = 1;
@@ -693,3 +722,9 @@ export async function requireIdleConversationPage(page: import('playwright-core'
     if (unsafe) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve the page draft or active generation before cleanup');
   }
 
+async function requireEmptyConversationPage(page: import('playwright-core').Page) {
+  await requireIdleConversationPage(page);
+  const occupied = await page.locator('article, [data-message-author-role], [data-chatgpt-selection-message-id], [data-message-id], [role="alert"], [role="alertdialog"], [role="dialog"], dialog[open], [aria-modal="true"]').evaluateAll(nodes =>
+    nodes.some(node => node.closest('[inert], [aria-hidden="true"]') === null && node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })));
+  if (occupied) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve messages, dialogs or alerts on the empty page');
+}

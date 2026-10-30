@@ -42,6 +42,22 @@ export class PageBindingRepository {
         WHERE p.target_id=? LIMIT 1`).get(targetId) === undefined;
   }
 
+  /** Close a current empty UI without retiring its role or fabricating a conversation. */
+  isUnusedCurrentEmptyTarget(sessionId: string, targetId: string): boolean {
+    return this.#database.prepare(`SELECT 1 FROM sessions s
+      JOIN team_roles r ON r.role_id=s.role_id AND r.current_session_id=s.session_id
+      JOIN page_bindings current ON current.page_key=s.page_key
+      WHERE s.session_id=? AND current.target_id=? AND s.current_generation=0 AND s.conversation_id IS NULL
+        AND s.provider='chatgpt' AND s.session_state='created' AND r.role_state='active'
+        AND NOT EXISTS (SELECT 1 FROM generations g WHERE g.session_id=s.session_id)
+        AND NOT EXISTS (SELECT 1 FROM outbox o WHERE o.session_id=s.session_id)
+        AND NOT EXISTS (SELECT 1 FROM page_bindings p WHERE p.target_id=current.target_id AND p.session_id IS NOT NULL
+          AND (p.session_id<>s.session_id OR p.generation IS NOT 0 OR p.conversation_id IS NOT NULL))
+        AND NOT EXISTS (SELECT 1 FROM sessions other JOIN page_bindings p ON p.page_key=other.page_key
+          WHERE p.target_id=current.target_id AND other.session_id<>s.session_id)
+      LIMIT 1`).get(sessionId, targetId) !== undefined;
+  }
+
   upsert(binding: PageBindingSnapshot): void {
     this.#database
       .prepare(`

@@ -39,7 +39,10 @@ test('empty same-role Chat opening materializes once without a prompt, generatio
     assert.equal(opened.structuredContent.promptSubmitted, false);
     assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS count FROM outbox').get()!.count, 0);
     assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS count FROM generations').get()!.count, 0);
-    assert.deepEqual((await invoke('session_open', input)).structuredContent, opened.structuredContent);
+    const replay = (await invoke('session_open', input)).structuredContent;
+    assert.equal(replay.pageKey, opened.structuredContent.pageKey);
+    assert.equal(replay.observedSurface.mode, 'chat');
+    assert.ok(Date.parse(replay.observedSurface.observedAt) >= Date.parse(opened.structuredContent.observedSurface.observedAt));
     const retained = await invoke('session_open', { ...input, requestId: 'read-retained-empty' });
     assert.equal(retained.isError, false, JSON.stringify(retained));
     assert.equal(retained.structuredContent.pageKey, opened.structuredContent.pageKey);
@@ -51,16 +54,49 @@ test('empty same-role Chat opening materializes once without a prompt, generatio
     assert.equal((await invoke('session_open', { ...input, teamId: foreign.teamId })).isError, true);
     assert.equal(core.pageRegistry.listBindings({ includeClosed: false }).filter(binding =>
       binding.sessionId === opened.structuredContent.sessionId).length, 1);
+    // Explicit unused-page cleanup preserves the role/session and refuses drafts, alerts and messages.
+    const closeInput = { clientId: 'empty-chat-cleanup', sessionId: String(opened.structuredContent.sessionId),
+      generation: 0, conversationId: null, emptyTargetId: core.pageRegistry.getBinding(String(opened.structuredContent.pageKey)).targetId,
+      evidenceRef: 'User requested disposal of this exact unused empty target' };
+    const closeEmpty = (input = closeInput) => callRpc<any>({ socketPath: core.config.socketPath,
+      method: 'session.close_pages', params: input, timeoutMs: 10000 });
+    await page.locator('textarea').fill('Preserved draft');
+    await assert.rejects(closeEmpty(), /Preserve the page draft/);
+    await page.locator('textarea').fill('');
+    for (const markup of ['<div role="alert">Pending permission</div>', '<article>Existing conversation</article>', '<button aria-label="Stop generating">Stop</button>']) {
+      await page.locator('main').evaluate((main, html) => main.insertAdjacentHTML('beforeend', html), markup);
+      await assert.rejects(closeEmpty(), /Preserve/);
+      await page.locator('main > :last-child').evaluate(node => node.remove());
+    }
+    await assert.rejects(closeEmpty({ ...closeInput, emptyTargetId: 'foreign-target' }), /unidentified/);
+    const beforeClose = core.teamDirectory.getSession(closeInput.sessionId);
+    const closed = await closeEmpty();
+    assert.deepEqual(closed.pageCleanup, { closedPages: 1, pageErrors: [] });
+    assert.equal(closed.providerDeletionAttempted, false);
+    assert.equal(page.isClosed(), true);
+    const afterClose = core.teamDirectory.getSession(closeInput.sessionId);
+    assert.equal(afterClose.generation, 0);
+    assert.equal(afterClose.pageKey, null);
+    assert.equal(afterClose.roleId, beforeClose.roleId);
+    assert.equal(core.teamDirectory.getCurrentSession(team.teamId, 'main').sessionId, closeInput.sessionId);
+    assert.equal((await invoke('session_open', input)).isError, true, 'closed completed open cannot silently create a replacement');
+    const fresh = await invoke('session_open', { ...input, requestId: 'explicit-new-empty-open' });
+    assert.equal(fresh.isError, false, JSON.stringify(fresh));
+    assert.equal(fresh.structuredContent.sessionId, closeInput.sessionId);
+    assert.equal((await invoke('session_open', input)).isError, true, 'old open cannot claim a later explicitly opened target');
+    const newPage = core.pageRegistry.pageForObservation(String(fresh.structuredContent.pageKey));
+    assert.equal(core.pageRegistry.listBindings({ includeClosed: false }).filter(binding => binding.sessionId === closeInput.sessionId).length, 1);
     // A previously open operation cannot be used to open a submitted generation.
     await assert.rejects(core.submissionService.send({ clientId: 'fixture', requestId: 'not-an-empty-request',
       sessionId: String(opened.structuredContent.sessionId), prompt: 'Authorized fixture preparation', sessionDeadlineSec: 600 }),
       (error: any) => error.errorCode === 'provider.preparation-required' && error.details.promptSubmitted === false);
     assert.equal((await invoke('session_open', { ...input, roleRef: String(opened.structuredContent.sessionId) + ':1' })).isError, true);
-    assert.equal(await page.locator('textarea').inputValue(), '');
+    await assert.rejects(closeEmpty(), /exact durable conversation and generation/);
+    assert.equal(await newPage.locator('textarea').inputValue(), '');
   } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test('empty session open rebinds the exact retained target after Core adoption and resumes its attempted receipt', async t => {
+test('empty session open revalidates completed and attempted receipts after Core adoption', async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-empty-adoption-'));
   const core = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
     logger: { debug() {}, info() {}, warn() {}, error() {} } });
@@ -98,13 +134,16 @@ test('empty session open rebinds the exact retained target after Core adoption a
     const method = 'workflow.session_open';
     core.receipts.record({ clientId: `team:${team.teamId}`, requestId: retry.requestId, method,
       requestHash: hashCanonical({ method, payload: retry }), status: 'attempted', result: { sessionId: session.sessionId } });
+    const completed = await workflow.openSession(input);
+    assert.equal(completed.pageKey, binding.pageKey, 'completed receipt must validate the actual adopted page');
+    assert.ok(Date.parse(completed.observedSurface.observedAt) >= Date.parse(first.structuredContent.observedSurface.observedAt));
     const reopened = await workflow.openSession(retry);
     assert.equal(reopened.pageKey, binding.pageKey);
     assert.notEqual(reopened.pageKey, stored.pageKey);
     assert.equal(core.teamDirectory.getSession(session.sessionId).pageKey, binding.pageKey);
     assert.equal(navigations, 1, 'adoption never reloads or creates a replacement');
     assert.equal(await page.locator('textarea').inputValue(), 'Retained human draft');
-    assert.deepEqual(await workflow.openSession(retry), reopened);
+    assert.equal((await workflow.openSession(retry)).pageKey, reopened.pageKey);
     assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS n FROM outbox').get()!.n, 0);
     assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS n FROM generations').get()!.n, 0);
     assert.equal(adopted.getBinding(binding.pageKey).sessionId, session.sessionId);
