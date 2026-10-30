@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { ExactFinalTracker } from '../providers/chatgpt/exact-final.ts';
-import { workflowAcknowledgementPending, workflowAnchorRecoveryPending, workflowPreparationPending, workflowWaitMs, workflowWaitOutcome } from '../domain/workflow-wait.ts';
+import { DEFAULT_CONTINUATION_REVIEW_MS, workflowAcknowledgementPending, workflowAnchorRecoveryPending, workflowPreparationPending, workflowWaitMs, workflowWaitOutcome } from '../domain/workflow-wait.ts';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { SessionSnapshot } from '../domain/session.ts';
 import type { PageMutationMutex } from '../browser/page-mutex.ts';
@@ -702,7 +702,7 @@ export class TeamWorkflow {
               this.#continuationReviews.set(request.outboxId, { at: Date.parse(request.updatedAt), reviewed: false, reason: null });
             const priorReview = this.#continuationReviews.get(request.outboxId);
             const lastReview = priorReview?.at ?? request.createdAt;
-            const due = Date.now() - (typeof lastReview === 'number' ? lastReview : Date.parse(lastReview)) >= 30 * 60_000;
+            const due = Date.now() - (typeof lastReview === 'number' ? lastReview : Date.parse(lastReview)) >= DEFAULT_CONTINUATION_REVIEW_MS;
             if (due) {
               const review = { at: Date.now(), reviewed: true, reason: null };
               this.#continuationReviews.set(request.outboxId, review);
@@ -742,7 +742,7 @@ export class TeamWorkflow {
               serverReview.serverObservation?.messages?.some(message => message.role === 'tool' || message.textLength > 0 ||
                 (freshServer && (message.status === 'in_progress' || message.endTurn === true)));
             if (proof?.disconnectedRecovery === true && proof.conversationId === result.conversationId &&
-                Date.now() - Date.parse(request.updatedAt) >= 30 * 60_000 &&
+                Date.now() - Date.parse(request.updatedAt) >= DEFAULT_CONTINUATION_REVIEW_MS &&
                 dom?.activityReason === 'provider-stream-disconnected' && dom.activity !== 'strong' &&
                 dom.anchorPresent === true && dom.laterUserFound === false &&
                 !dom.turnBoundary?.some(turn => turn.role !== 'user' && !!turn.text?.trim()) && !serverProgress &&
@@ -768,7 +768,7 @@ export class TeamWorkflow {
             }
             // Reviewing a live turn is not a new submission. Its later exact
             // timeout may use the existing approval after the ACK's broad interval.
-            const timeoutDue = timeoutReady && Date.now() - Date.parse(request.updatedAt) >= 30 * 60_000;
+            const timeoutDue = timeoutReady && Date.now() - Date.parse(request.updatedAt) >= DEFAULT_CONTINUATION_REVIEW_MS;
             if ((due || timeoutDue || (priorReview === undefined && (result.errorCode === 'provider.actionable-alert' || interrupted))) &&
                 (interrupted || freshServer) && result.submissionState === 'submitted' && result.promptSubmitted === true &&
                 result.terminal !== true && (result.status !== 'recovery_required' || interrupted)) {
@@ -813,7 +813,7 @@ export class TeamWorkflow {
           const acknowledgementWait = Number.isFinite(nextAckCheck) ? Math.max(1_000, nextAckCheck - Date.now()) : 30_000;
           const waited = await this.services.scheduler.waitSession(request.sessionId, {
             expectedGeneration: followupId || collectingOriginal ? this.services.directory.getSession(request.sessionId).generation : request.generation,
-            ...(followupId || collectingOriginal ? { wakeOnTerminal: false } : {}), waitMs: Math.min(remaining, input.continuationApproved ? 30 * 60_000 : remaining, followupId ? 5_000 : collectingOriginal || workflowPreparationPending(result) ? 60_000 : acknowledgementPending ? acknowledgementWait : workflowWaitMs(input.waitMs)), signal: controller.signal,
+            ...(followupId || collectingOriginal ? { wakeOnTerminal: false } : {}), waitMs: Math.min(remaining, input.continuationApproved ? DEFAULT_CONTINUATION_REVIEW_MS : remaining, followupId ? 5_000 : collectingOriginal || workflowPreparationPending(result) ? 60_000 : acknowledgementPending ? acknowledgementWait : workflowWaitMs(input.waitMs)), signal: controller.signal,
           });
           if (controller.signal.aborted) break;
           result = await this.#observe(request);
@@ -1077,7 +1077,13 @@ export class TeamWorkflow {
     // A paced probe has not completed the broad review. Also read the provider
     // deadline from existing receipts written before deferred reviews retained it.
     const deferredAt = last?.server?.kind === 'deferred' ? last.server.nextCheckAt : null;
-    const nextReviewAt = Number.isFinite(Date.parse(deferredAt)) ? deferredAt : last?.nextReviewAt;
+    // Apply the current default to retained ordinary reviews, preserving earlier
+    // explicit rearming and actual backend deferrals without editing receipts.
+    const defaultAt = ['reviewing', 'provider-generation-activity', 'backend-generation-in-progress'].includes(last?.reason)
+      ? Date.parse(last.lastReviewAt) + DEFAULT_CONTINUATION_REVIEW_MS : Infinity;
+    const nextReviewAt = Number.isFinite(Date.parse(deferredAt)) ? deferredAt
+      : Number.isFinite(Date.parse(last?.nextReviewAt)) && Number.isFinite(defaultAt)
+        ? new Date(Math.min(Date.parse(last.nextReviewAt), defaultAt)).toISOString() : last?.nextReviewAt;
     const snapshot = this.services.directory.getSession(request.sessionId);
     const held = this.#loadRecovery.isUserHeld(snapshot.conversationId);
     const collectors = this.services.scheduler.collectors(request.sessionId).filter(c => c.requestRef === request.outboxId && c.followupUserMessageId === source);
@@ -1085,9 +1091,9 @@ export class TeamWorkflow {
     const active = approved && collectors.length > 0 && !!exact.acknowledgedAt;
     return { scope: 'exact-followup', originalRequestRef: request.outboxId, sourceFollowupUserMessageId: source,
       submittedUserMessageId: exact.userMessageId, acknowledgedAt: exact.acknowledgedAt, approved, active,
-      observationHeld: held, collectorCount: collectors.length, lastReviewAt: last?.lastReviewAt ?? null,
+      observationHeld: held, collectorCount: collectors.length, reviewIntervalMs: DEFAULT_CONTINUATION_REVIEW_MS, lastReviewAt: last?.lastReviewAt ?? null,
       lastReviewReason: last?.reason ?? null, nextReviewAt: active && !held && !terminal && !last?.decisionRequired
-        ? nextReviewAt ?? new Date(Date.parse(exact.acknowledgedAt!) + 30 * 60000).toISOString() : null,
+        ? nextReviewAt ?? new Date(Date.parse(exact.acknowledgedAt!) + DEFAULT_CONTINUATION_REVIEW_MS).toISOString() : null,
       reason: held ? 'human-review' : !approved ? 'not-approved' : !active ? 'no-exact-collector' : terminal ? 'terminal' : last?.reason ?? 'awaiting-broad-review' };
   }
 
@@ -1110,7 +1116,7 @@ export class TeamWorkflow {
     const receipt = { clientId: request.clientId, requestId, method: 'workflow.followup.review',
       requestHash: hashCanonical({ requestRef: request.outboxId, followup }) };
     const now = new Date().toISOString();
-    let review: Record<string, unknown> = { lastReviewAt: now, nextReviewAt: new Date(Date.now() + 30 * 60000).toISOString(), reason: 'reviewing' };
+    let review: Record<string, unknown> = { lastReviewAt: now, nextReviewAt: new Date(Date.parse(now) + DEFAULT_CONTINUATION_REVIEW_MS).toISOString(), reason: 'reviewing' };
     const save = () => this.services.receipts.record({ ...receipt, status: 'complete', result: review });
     save();
     try {
@@ -1185,13 +1191,13 @@ export class TeamWorkflow {
       return false;
     });
     const terminal = snapshot.generation === current.generation ? snapshot.terminal : stored?.completedAt != null;
-    return { scope: 'original-generation', active, observationHeld: held, requestRef: current.outboxId, generation: current.generation,
+    return { scope: 'original-generation', active, observationHeld: held, reviewIntervalMs: DEFAULT_CONTINUATION_REVIEW_MS, requestRef: current.outboxId, generation: current.generation,
       submittedUserMessageId: stored?.submittedUserMessageId ?? null,
       ...new EventRepository(this.services.database.raw).submissionTimeline(current.sessionId, current.generation),
       lastReviewAt: lastReview?.reviewed ? new Date(lastReview.at).toISOString() : null,
       lastReviewReason: lastReview?.reviewed ? lastReview.reason : null,
       nextReviewAt: active && !held && !terminal && snapshot.generation === current.generation
-        ? new Date(baseline + 30 * 60_000).toISOString() : null,
+        ? new Date(baseline + DEFAULT_CONTINUATION_REVIEW_MS).toISOString() : null,
       backendNextCheckAt: snapshot.generation === current.generation ? snapshot.nextCheckAt : null,
       reason: held ? 'human-review' : !active ? 'no-approved-collector' : terminal ? 'terminal'
         : snapshot.generation !== current.generation ? 'generation-superseded' : snapshot.reason,

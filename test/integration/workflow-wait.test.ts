@@ -712,7 +712,7 @@ test(`CLI retains paced UNKNOWN ACK recovery through collection without a select
 });
 
 
-test('authorized broad continuation review stays inside the wait and runs at thirty-minute intervals', async t => {
+test('authorized broad continuation review stays inside the wait and runs at twenty-minute intervals', async t => {
   const f = await fixture();
   try {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
@@ -745,15 +745,20 @@ test('authorized broad continuation review stays inside the wait and runs at thi
     const before = await status();
     assert.deepEqual(before.collection.waits, [{ requestRef: f.sent.requestRef, continuationApproved: true }]);
     assert.equal(before.managedContinuation.active, true);
+    assert.equal(before.managedContinuation.reviewIntervalMs, 1200000);
     assert.ok(Date.parse(before.managedContinuation.nextReviewAt) > Date.now());
-    t.mock.timers.tick(1800000);
+    t.mock.timers.tick(Date.parse(before.managedContinuation.nextReviewAt) - Date.now() - 1);
+    for (let i = 0; i < 20; i++) await flush();
+    assert.equal(reviews, 0, 'No broad review before the twenty-minute boundary');
+    t.mock.timers.tick(1);
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, { reason: 'review-boundary-wakeup' });
     for (let i = 0; i < 20; i++) await flush();
     assert.equal(reviews, 1);
     assert.equal(returned, false);
     const reviewed = await status();
     assert.equal(reviewed.managedContinuation.lastReviewReason, 'provider.failure-unverified');
     assert.equal(Date.parse(reviewed.managedContinuation.nextReviewAt) -
-      Date.parse(reviewed.managedContinuation.lastReviewAt), 1800000);
+      Date.parse(reviewed.managedContinuation.lastReviewAt), 1200000);
     await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, { reason: 'provider-stream-disconnected' });
     for (let i = 0; i < 20; i++) await flush();
     assert.equal(reviews, 1, 'Progress cannot cause rapid broad reviews');
@@ -792,7 +797,7 @@ for (const alert of [false, true]) test(`approved broad review returns ${alert ?
       waitMs: 3600000, untilResult: false, continuationApproved: true });
     await f.untilSubscribed(f.sent.sessionId as string);
     assert.equal(reviews.length, 0, 'A new ACK must not immediately trigger another continue');
-    t.mock.timers.tick(1800000);
+    t.mock.timers.tick(1200000);
     for (let i = 0; i < 30; i++) await flush();
     const result = (await waiting).structuredContent;
     assert.equal(reviews.length, 1);
@@ -1103,9 +1108,9 @@ test('direct successor collection paces a carried disconnect from the submitted 
     const resumed = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef],
       waitMs: 3600000, untilResult: false, continuationApproved: true });
     await f.untilSubscribed(f.sent.sessionId as string);
-    t.mock.timers.tick(30 * 60000 - 13848 - 1);
+    t.mock.timers.tick(20 * 60000 - 13848 - 1);
     for (let i = 0; i < 30; i++) await flush();
-    assert.equal(reviews, 0, 'No follow-up before thirty minutes from actual ACK');
+    assert.equal(reviews, 0, 'No follow-up before twenty minutes from actual ACK');
     t.mock.timers.tick(2);
     await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 2, { reason: 'cadence-review-wakeup' });
     for (let i = 0; i < 30; i++) await flush();

@@ -1,6 +1,7 @@
 // Node timers use signed 32-bit milliseconds. Keep whole minutes within that bound.
 export const MAX_WORKFLOW_WAIT_MS = Math.floor(2_147_483_647 / 60_000) * 60_000;
 export const DEFAULT_WORKFLOW_WAIT_MS = 10 * 60_000;
+export const DEFAULT_CONTINUATION_REVIEW_MS = 20 * 60_000;
 
 export function workflowWaitMs(value: number): number {
   return value === 0 ? 0 : Math.ceil(value / 60_000) * 60_000;

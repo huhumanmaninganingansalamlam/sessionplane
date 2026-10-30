@@ -132,7 +132,7 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    If a user already submitted a follow-up, collect it using
    `followupUserMessageId` (CLI `--followup-message-id`), without sending it again.
 
-   The core reviews unresolved work at broad, roughly 30-minute intervals and
+   The core reviews unresolved work at broad, default 20-minute (1200000ms) intervals and
    handles supported continuation preparation/submission itself. Do not omit an
    already approved option or delegate routine literal `계속` to the Coordinator
    or user. Do not run a competing wait or manual continue beside that owner.

@@ -219,6 +219,15 @@ without retrying. Original failed receipts and answers retain separate identitie
 A new SessionPlane send starts the next generation; completed results
 remain immutable and cannot be overwritten by later conversation activity.
 
+For an existing collector with `continuationApproved:true`, native broad review
+defaults to 20 minutes (1200000ms). This is review eligibility, not a guaranteed
+send: live work, permission/hold, original ACK, draft, single-owner and provider
+Retry-After guards still apply. Explicit wait durations and approval choices
+remain unchanged. Normal Core handover applies the default to existing approved
+original chains; retained ordinary exact-followup reviews use the current default
+without rewriting receipts. Earlier explicit rearming and real backend deferrals
+retain their deadlines. Held, unapproved and terminal requests are not resumed.
+
 `team_delete` removes the entire team, its roles, sessions, requests, events and
 artifact references. It retires roles before cleanup, stops owned work and closes
 owned tabs. Provider conversation deletion is attempted once; failure does not
