@@ -296,8 +296,8 @@ test('explicit completed evidence reads the current page without resuming work o
   } finally { t.mock.restoreAll(); await f.close(); }
 });
 
-test('managed collection recovers only a literal continuation lineage without rebinding a lost ACK', async t => {
-  for (const { complete, continuation } of [
+test('original collection recovers only a literal continuation lineage without rebinding a lost ACK', async t => {
+  for (const approved of [false, true]) for (const { complete, continuation } of [
     { complete: false, continuation: true }, { complete: true, continuation: true },
     { complete: true, continuation: false },
   ]) {
@@ -332,6 +332,7 @@ test('managed collection recovers only a literal continuation lineage without re
         reads++; assert.equal(original.generation, 1); assert.equal(owner.generation, 2);
         return { originalAnchorPresent: true, originalUserMessageId: f.sent.submittedUserMessageId,
           responseUserMessageId: 'visible-literal-continue', submittedUserMessageId: 'visible-literal-continue',
+          association: 'exact-original-question-and-literal-continuations', providerMutation: false,
           terminal: complete, responseMessageId: complete ? 'actual-followup-final' : null,
           answerText: complete ? 'Actual collected answer' : null,
           activity: complete ? 'none' : 'weak', activityReason: complete ? null : 'unverified-stop-control' };
@@ -346,21 +347,39 @@ test('managed collection recovers only a literal continuation lineage without re
           observedAt: new Date().toISOString(), originalPartialResponses: [],
         }));
       }) as any);
+      const generations = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(sessionId);
       let returned = false;
       waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef],
-        waitMs: 600000, continuationApproved: true }, controller.signal).then(x => { returned = true; return x; });
+        waitMs: 600000, ...(approved ? { continuationApproved: true } : {}) }, controller.signal).then(x => { returned = true; return x; });
       for (let i = 0; i < 50; i++) await flush();
       assert.equal(reads > 0, continuation, 'A distinct product request must never inherit the previous WP final');
       if (complete && continuation) {
+        assert.equal(returned, true, 'Observe-only collection must deliver the verified original FINAL without permission to continue');
         const [result] = (await waiting).structuredContent.results;
-        assert.equal(result.followup.originalRequestRef, f.sent.requestRef);
-        assert.equal(result.followup.responseMessageId, 'actual-followup-final');
-        assert.equal(result.followup.answerText, 'Actual collected answer');
-        assert.equal(reconciliations, 1);
-        const [reconnected] = (await f.invoke('wait', { teamId: f.team.teamId,
-          requestRefs: [next.requestRef], waitMs: 0 })).structuredContent.results;
-        assert.deepEqual(reconnected.followup, result.followup, 'Reconnect returns the separate durable follow-up without reconciling again');
-        assert.equal(reconciliations, 1);
+        assert.equal(workflowWaitOutcome(result), true, 'The CLI/MCP client must return the FINAL instead of opening another routine round');
+        if (!approved) {
+          assert.equal(result.terminal, false, 'The missing successor ACK remains unresolved');
+          assert.equal(result.responseMessageId, null);
+          assert.equal(result.workResult.originalRequestRef, f.sent.requestRef);
+          assert.equal(result.workResult.responseMessageId, 'actual-followup-final');
+          assert.equal(result.workResult.answerText, 'Actual collected answer');
+          assert.equal(result.followup.originalRequestRef, f.sent.requestRef);
+          assert.equal(result.followup.userMessageId, 'visible-literal-continue');
+          assert.equal(result.followup.terminal, true, 'Existing connected CLI clients recognize this separate result without a reload');
+          assert.equal(result.followup.answerText, 'Actual collected answer');
+          assert.equal(result.waitExpired, false);
+          assert.equal(reconciliations, 0, 'Reading a FINAL must not reconcile or grant continuation');
+          assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(sessionId), generations);
+        } else {
+          assert.equal(result.followup.originalRequestRef, f.sent.requestRef);
+          assert.equal(result.followup.responseMessageId, 'actual-followup-final');
+          assert.equal(result.followup.answerText, 'Actual collected answer');
+          assert.equal(reconciliations, 1);
+          const [reconnected] = (await f.invoke('wait', { teamId: f.team.teamId,
+            requestRefs: [next.requestRef], waitMs: 0 })).structuredContent.results;
+          assert.deepEqual(reconnected.followup, result.followup, 'Reconnect returns the separate durable follow-up without reconciling again');
+          assert.equal(reconciliations, 1);
+        }
       } else {
         if (continuation) assert.equal(returned, false, 'A Stop control or backend pacing is neither a final nor proof of fresh tool progress');
         assert.equal(reconciliations, 0);

@@ -163,6 +163,10 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    report it promptly. Do not poll process status in short model turns or add a
    scheduler. Task resume restores context, not delivery of an external result.
 
+   An exact original FINAL recovered under `workResult` also ends observe-only
+   collection without continuation authorization. Read that separately bound answer;
+   the missing successor ACK and its UNKNOWN state remain unchanged.
+
    A normal final answer ends recovery. Read it and its execution/file results;
    if authorized product work remains, the owning Coordinator sends a **contextual
    next-WP follow-up** using a fresh roleRef/requestId. That is separate from the
