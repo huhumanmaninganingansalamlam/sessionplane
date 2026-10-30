@@ -461,7 +461,9 @@ export class TeamWorkflow {
       });
     }
     if (input.decision === 'continue' && input.manageOnly) {
-      if (!input.followupUserMessageId) throw new SessionPlaneDomainError('input.invalid', 'Management requires an exact follow-up');
+      const original = this.#sessions.getGenerationResult(request.sessionId, request.generation);
+      if (!input.followupUserMessageId || input.followupUserMessageId === original?.submittedUserMessageId)
+        return await this.#manageOriginalContinuation(request, input);
       const source = input.followupUserMessageId;
       const exact = this.#exactFollowup(request, source);
       if (!exact.acknowledgedAt) throw new SessionPlaneDomainError('provider.preparation-required', 'No acknowledged exact recovery chain');
@@ -475,7 +477,7 @@ export class TeamWorkflow {
             this.#rearmExactReview(request, source, 'management-reapproved');
             return { approved: true };
           } });
-        this.services.scheduler.actorFor(request.sessionId).approveFollowupCollector(request.outboxId, source);
+        this.services.scheduler.actorFor(request.sessionId).approveCollector(request.outboxId, source);
       });
       return { requestOk: true, teamId: input.teamId, requestRef: request.outboxId, providerMutation: false,
         followup: { kind: 'management-approved', reason: 'management-approved-no-send', terminal: false, userMessageId: exact.userMessageId, recoveredFromUserMessageId: source,
@@ -581,18 +583,23 @@ export class TeamWorkflow {
       let releaseCollector: (() => void) | undefined;
       try {
         let request = this.#request({ teamId: input.teamId, requestRef });
+        const collectionRequest = request;
+        let continuationApproved = input.continuationApproved === true || (!input.followupUserMessageId && !!this.#continuationManagement(collectionRequest));
         if (input.waitMs > 0 && !controller.signal.aborted) {
-          releaseCollector = this.services.scheduler.actorFor(request.sessionId).retainCollector(requestRef, input.continuationApproved === true, input.followupUserMessageId);
+          releaseCollector = this.services.scheduler.actorFor(request.sessionId).retainCollector(requestRef, continuationApproved, input.followupUserMessageId);
         }
-        let result: Record<string, unknown> = await this.#observe(request, undefined, input.waitMs > 0 && input.continuationApproved === true);
+        let result: Record<string, unknown> = await this.#observe(request, undefined, input.waitMs > 0 && continuationApproved);
         const followupTracker = new ExactFinalTracker(1500);
         let followupId = input.followupUserMessageId;
-        if (input.followupUserMessageId && input.continuationApproved) this.#approveExactFollowup(request, input.followupUserMessageId);
+        if (input.followupUserMessageId && continuationApproved) this.#approveExactFollowup(request, input.followupUserMessageId);
         for (;;) {
+          continuationApproved ||= !input.followupUserMessageId && !!this.#continuationManagement(collectionRequest);
+          if (continuationApproved && !input.followupUserMessageId)
+            this.services.scheduler.actorFor(request.sessionId).approveCollector(collectionRequest.outboxId);
           if (input.followupUserMessageId) {
             followupId = this.#exactFollowup(request, input.followupUserMessageId).userMessageId;
             if (this.#exactManagement(request, input.followupUserMessageId, false).approved)
-              this.services.scheduler.actorFor(request.sessionId).approveFollowupCollector(request.outboxId, input.followupUserMessageId);
+              this.services.scheduler.actorFor(request.sessionId).approveCollector(request.outboxId, input.followupUserMessageId);
           }
           const collectedFollowup = result.followup as { terminal?: boolean; userMessageId?: string } | undefined;
           if (collectedFollowup?.terminal && (!followupId || collectedFollowup.userMessageId === followupId)) {
@@ -613,13 +620,13 @@ export class TeamWorkflow {
               // Collection is read-only without continuation approval. Return the
               // existing followup shape so already-connected clients deliver it too;
               // the missing successor ACK and immutable generations stay unchanged.
-              const reconciliation = input.continuationApproved
+              const reconciliation = continuationApproved
                 ? await this.services.ui.reconcileFollowup({ ...ownerOf(original),
                   decisionId: `followup:${original.outboxId}:${work.responseUserMessageId}`,
                   followupUserMessageId: work.responseUserMessageId, responseMessageId: work.responseMessageId,
                   responseSha256: createHash('sha256').update(work.answerText).digest('hex'),
                   followupCompleted: true, answerText: work.answerText }) : undefined;
-              result = { ...(input.continuationApproved ? await this.#observe(request) : result),
+              result = { ...(continuationApproved ? await this.#observe(request) : result),
                 ...(reconciliation === undefined ? {} : { reconciliation }), followup: { kind: 'complete', terminal: true,
                 originalRequestRef: original.outboxId, userMessageId: work.responseUserMessageId,
                 responseMessageId: work.responseMessageId, answerText: work.answerText } };
@@ -668,7 +675,7 @@ export class TeamWorkflow {
               if (evidence.errorCode) { result = { ...result, errorCode: evidence.errorCode, reason: evidence.reason }; controller.abort(); break; }
             }
           }
-          if (input.waitMs > 0 && input.continuationApproved && !followupId && !collectingOriginal && !controller.signal.aborted) {
+          if (input.waitMs > 0 && continuationApproved && !followupId && !collectingOriginal && !controller.signal.aborted) {
             // Durable receipts own the single send. This clock only limits broad
             // reassessment; a disconnected banner is never evidence to continue.
             const reviewId = `managed-continuation:${request.outboxId}`;
@@ -746,7 +753,8 @@ export class TeamWorkflow {
             const serverProgress = serverReview?.currentIdentityMatches === true &&
               serverReview.serverObservation?.messages?.some(message => message.role === 'tool' || message.textLength > 0 ||
                 (freshServer && (message.status === 'in_progress' || message.endTurn === true)));
-            if (proof?.disconnectedRecovery === true && proof.conversationId === result.conversationId &&
+            if (!this.#reviewedContinuationManagement(request) &&
+                proof?.disconnectedRecovery === true && proof.conversationId === result.conversationId &&
                 Date.now() - Date.parse(request.updatedAt) >= DEFAULT_CONTINUATION_REVIEW_MS &&
                 dom?.activityReason === 'provider-stream-disconnected' && dom.activity !== 'strong' &&
                 dom.anchorPresent === true && dom.laterUserFound === false &&
@@ -818,7 +826,7 @@ export class TeamWorkflow {
           const acknowledgementWait = Number.isFinite(nextAckCheck) ? Math.max(1_000, nextAckCheck - Date.now()) : 30_000;
           const waited = await this.services.scheduler.waitSession(request.sessionId, {
             expectedGeneration: followupId || collectingOriginal ? this.services.directory.getSession(request.sessionId).generation : request.generation,
-            ...(followupId || collectingOriginal ? { wakeOnTerminal: false } : {}), waitMs: Math.min(remaining, input.continuationApproved ? DEFAULT_CONTINUATION_REVIEW_MS : remaining, followupId ? 5_000 : collectingOriginal || workflowPreparationPending(result) ? 60_000 : acknowledgementPending ? acknowledgementWait : workflowWaitMs(input.waitMs)), signal: controller.signal,
+            ...(followupId || collectingOriginal ? { wakeOnTerminal: false } : {}), waitMs: Math.min(remaining, continuationApproved ? DEFAULT_CONTINUATION_REVIEW_MS : remaining, followupId ? 5_000 : collectingOriginal || workflowPreparationPending(result) ? 60_000 : acknowledgementPending ? acknowledgementWait : workflowWaitMs(input.waitMs)), signal: controller.signal,
           });
           if (controller.signal.aborted) break;
           result = await this.#observe(request);
@@ -1100,6 +1108,61 @@ export class TeamWorkflow {
       lastReviewReason: last?.reason ?? null, nextReviewAt: active && !held && !terminal && !last?.decisionRequired
         ? nextReviewAt ?? new Date(Date.parse(exact.acknowledgedAt!) + DEFAULT_CONTINUATION_REVIEW_MS).toISOString() : null,
       reason: held ? 'human-review' : !approved ? 'not-approved' : !active ? 'no-exact-collector' : terminal ? 'terminal' : last?.reason ?? 'awaiting-broad-review' };
+  }
+
+  #continuationManagement(request: OutboxRecord) {
+    const receipt = this.services.receipts.get(request.clientId, `continuation-management:${request.outboxId}`);
+    return receipt?.method === 'workflow.continuation.management' && receipt.status === 'complete' &&
+      JSON.parse(receipt.resultJson).approved === true ? receipt : null;
+  }
+
+  #reviewedContinuationManagement(request: OutboxRecord) {
+    const approval = this.#continuationManagement(request);
+    const review = this.services.receipts.get(request.clientId, `managed-recovery-review:${request.outboxId}`);
+    return approval !== null && (review === null || Date.parse(approval.createdAt) >= Date.parse(review.createdAt));
+  }
+
+  async #manageOriginalContinuation(request: OutboxRecord, input: Identity & { requestId: string }) {
+    const receipt = { clientId: request.clientId, requestId: input.requestId,
+      method: 'workflow.continuation.manage', payload: input };
+    if (this.services.receipts.get(receipt.clientId, receipt.requestId))
+      return this.services.receipts.execute({ ...receipt, operation: () => { throw new Error('Existing management must replay'); } });
+    const current = this.#role({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}` });
+    if (this.#userReview(request) || current.provider !== 'chatgpt' || current.terminal ||
+        current.submissionState !== 'submitted' || request.submissionState !== 'submitted' || !request.promptSubmitted || !current.submittedUserMessageId ||
+        !current.promptSubmitted || !current.pageKey || !current.conversationId || current.answerText !== null || current.responseMessageId !== null)
+      throw new SessionPlaneDomainError('provider.preparation-required',
+        'Management requires the exact current unresolved ACK without a review hold');
+    const actor = this.services.scheduler.actorFor(request.sessionId);
+    const soleCollector = () => actor.collectors.length === 1 &&
+      actor.collectors[0]!.requestRef === request.outboxId && !actor.collectors[0]!.followupUserMessageId;
+    if (!soleCollector()) throw new SessionPlaneDomainError('session.busy',
+      'Management requires one existing collector for this exact acknowledged request; no collector was created');
+    // This read cannot resume observation, probe the backend, navigate or submit.
+    const inspected = await this.services.ui.inspectSubmission({ ...ownerOf(request), readOnly: true });
+    const evidence = inspected.evidence && 'submissionVerification' in inspected.evidence
+      ? inspected.evidence.submissionVerification : null;
+    if (!evidence?.anchorPresent || evidence.laterUserFound || evidence.pageKey !== current.pageKey ||
+        evidence.conversationId !== current.conversationId || evidence.submittedUserMessageId !== current.submittedUserMessageId)
+      throw new SessionPlaneDomainError('session.page-identity-unverified',
+        'The existing collector approval requires its exact mounted ACK and no later user');
+    return await actor.enqueue(() => {
+      const latest = this.#role({ teamId: input.teamId, roleRef: `${request.sessionId}:${request.generation}` });
+      if (this.#userReview(request) || latest.terminal || latest.submissionState !== 'submitted' ||
+          latest.pageKey !== current.pageKey || latest.conversationId !== current.conversationId ||
+          latest.submittedUserMessageId !== current.submittedUserMessageId || !soleCollector())
+        throw new SessionPlaneDomainError('provider.preparation-required', 'The exact ACK or collector changed during management approval');
+      const result = this.services.receipts.execute({ ...receipt, operation: () => {
+        this.services.receipts.execute({ clientId: request.clientId, requestId: `continuation-management:${request.outboxId}`,
+          method: 'workflow.continuation.management', payload: { requestRef: request.outboxId,
+            submittedUserMessageId: current.submittedUserMessageId }, operation: () => ({ approved: true }) });
+        return { requestOk: true, teamId: input.teamId, requestRef: request.outboxId, providerMutation: false,
+          management: { kind: 'management-approved', reason: 'management-approved-no-send',
+            submittedUserMessageId: current.submittedUserMessageId } };
+      } });
+      actor.approveCollector(request.outboxId);
+      return result;
+    });
   }
 
   async #continueExactFollowup(request: OutboxRecord, followup: string, decisionId: string, reviewedEmptyAt?: string, signal?: AbortSignal) {

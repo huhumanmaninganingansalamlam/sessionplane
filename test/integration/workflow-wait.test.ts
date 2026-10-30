@@ -11,6 +11,7 @@ import { SessionUiService } from '../../src/core/session-ui-service.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 import { ConversationLoadRecoveryRepository } from '../../src/storage/conversation-load-recovery-repository.ts';
+import { ReceiptRepository } from '../../src/storage/receipt-repository.ts';
 import { EventRepository } from '../../src/storage/event-repository.ts';
 import { workflowWaitOutcome } from '../../src/domain/workflow-wait.ts';
 import { runCli } from '../../src/cli/main.ts';
@@ -1119,4 +1120,129 @@ test('direct successor collection paces a carried disconnect from the submitted 
     assert.equal(row.recovery.reason, 'provider.failure-unverified');
     assert.equal(f.fake.submitCount, 2);
   } finally { t.mock.timers.reset(); t.mock.restoreAll(); await f.close(); }
+});
+
+
+test('manage-only approves the sole existing ordinary ACK collector and delivers its exact recovery failure', async t => {
+  const f = await fixture();
+  const controller = new AbortController();
+  let waiting: Promise<any> | undefined;
+  try {
+    const id = f.sent.sessionId as string;
+    const parent = f.sent.requestRef as string;
+    await f.core.actorScheduler.updateGeneration(id, 1, { sessionState: 'complete', providerState: 'complete',
+      responseMessageId: 'retained-checkpoint', answerText: 'Retained checkpoint' });
+    const next = (await f.invoke('send', { teamId: f.team.teamId, roleRef: `${id}:1`,
+      requestId: `continue:managed-continuation:${parent}`, prompt: '계속' })).structuredContent;
+    f.core.database.raw.prepare("UPDATE outbox SET payload_json=json_set(payload_json, '$.continuationOf', ?) WHERE outbox_id=?")
+      .run(parent, next.requestRef);
+    const receipts = new ReceiptRepository(f.core.database);
+    receipts.record({ clientId: `team:${f.team.teamId}`, requestId: `managed-continuation:${parent}`,
+      method: 'session.continuation.prepare', requestHash: 'fixture', status: 'complete',
+      result: { evidence: { disconnectedRecovery: true, conversationId: next.conversationId } } });
+    receipts.record({ clientId: `team:${f.team.teamId}`, requestId: `managed-recovery-review:${next.requestRef}`,
+      method: 'workflow.managed_recovery_review', requestHash: 'review', status: 'complete', result: { decisionRequired: true } });
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() + 21 * 60_000 });
+    t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+      snapshot: f.core.teamDirectory.getSession(id), evidence: { submissionVerification: {
+        pageKey: next.pageKey, conversationId: next.conversationId, submittedUserMessageId: next.submittedUserMessageId,
+        anchorPresent: true, laterUserFound: false, activity: 'unknown', activityReason: 'provider-stream-disconnected',
+        turnBoundary: [{ role: 'user', text: '계속' }], responseCandidate: null } }, requested: {},
+    })) as any);
+    t.mock.method(EventRepository.prototype, 'latestServerObservation', () => null);
+    let reviews = 0;
+    t.mock.method(SessionUiService.prototype, 'prepareContinuation', async () => {
+      reviews++;
+      throw new SessionPlaneDomainError('provider.preparation-required', 'Exact current permission/draft remains protected');
+    });
+    waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef], waitMs: 600000 }, controller.signal);
+    await f.untilSubscribed(id);
+    const actor = f.core.actorScheduler.actorFor(id);
+    assert.deepEqual(actor.collectors, [{ requestRef: next.requestRef, continuationApproved: false }]);
+    const before = f.core.teamDirectory.getSession(id);
+    const args = { teamId: f.team.teamId, requestRef: next.requestRef, requestId: 'approve-existing-ordinary',
+      decision: 'continue', continuationApproved: true, manageOnly: true, followupUserMessageId: next.submittedUserMessageId };
+    const approved = await f.invoke('decide', args);
+    assert.equal(approved.isError, false, JSON.stringify(approved));
+    assert.equal(approved.structuredContent.providerMutation, false);
+    assert.equal(approved.structuredContent.management.kind, 'management-approved');
+    const result = (await waiting).structuredContent.results[0];
+    assert.equal(reviews, 1, 'The existing observer wakes and performs one normal guarded recovery review');
+    assert.equal(result.recovery.reason, 'provider.preparation-required');
+    assert.equal(result.recovery.message, 'Exact current permission/draft remains protected');
+    assert.equal(result.terminal, false);
+    assert.equal(result.requestRef, next.requestRef);
+    assert.equal(f.fake.submitCount, 2, 'Only the preexisting fixture sends; no management send or guard bypass');
+    assert.deepEqual(f.core.teamDirectory.getSession(id), before);
+    assert.equal(actor.collectors.length, 0, 'The original call returns its actual decision and releases itself');
+    await f.core.actorScheduler.updateGeneration(id, 2, { sessionState: 'complete', providerState: 'complete',
+      responseMessageId: 'later-checkpoint', answerText: 'Later checkpoint' });
+    await f.invoke('send', { teamId: f.team.teamId, roleRef: `${id}:2`, requestId: 'unrelated-next-work', prompt: 'Different authorized work' });
+    const newer = f.core.teamDirectory.getSession(id);
+    const replay = await f.invoke('decide', args);
+    assert.equal(replay.isError, false, 'Same completed management operation replays without needing another collector');
+    assert.deepEqual(replay.structuredContent, approved.structuredContent);
+    assert.deepEqual(f.core.teamDirectory.getSession(id), newer, 'Replay never approves or changes the newer generation');
+    assert.equal(reviews, 1);
+  } finally { controller.abort(); await waiting?.catch(() => {}); t.mock.timers.reset(); await f.close(); }
+});
+
+
+test('ordinary management preserves holds, UNKNOWN, later users, page identity and the sole collector boundary', async t => {
+  const f = await fixture();
+  try {
+    const id = f.sent.sessionId as string;
+    const current = f.core.teamDirectory.getSession(id);
+    const actor = f.core.actorScheduler.actorFor(id);
+    const original = f.core.database.raw.prepare('SELECT * FROM outbox').all();
+    let evidence: any = { pageKey: current.pageKey, conversationId: current.conversationId,
+      submittedUserMessageId: current.submittedUserMessageId, anchorPresent: true, laterUserFound: false };
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async (input: any) => {
+      assert.equal(input.readOnly, true);
+      return { snapshot: current, evidence: { submissionVerification: evidence }, requested: {} };
+    }) as any);
+    let operation = 0;
+    const approve = () => f.invoke('decide', { teamId: f.team.teamId, requestRef: f.sent.requestRef,
+      requestId: `guard-${++operation}`, decision: 'continue', manageOnly: true, continuationApproved: true });
+    assert.equal((await approve()).structuredContent.errorCode, 'session.busy', 'Management creates no missing collector');
+    const release = actor.retainCollector(String(f.sent.requestRef), false);
+    const extra = actor.retainCollector(String(f.sent.requestRef), false);
+    assert.equal((await approve()).structuredContent.errorCode, 'session.busy'); extra();
+    const held = new ConversationLoadRecoveryRepository(f.core.database);
+    held.save({ conversationId: current.conversationId!, sessionId: id, pageKey: current.pageKey!, bindingEpoch: 1,
+      url: `https://chatgpt.com/c/${current.conversationId}`, attempts: 0, state: 'held', reason: 'user-review',
+      lastOutcome: null, lastCheckedAt: new Date().toISOString(), lastAttemptAt: null, notifiedAt: null });
+    assert.equal((await approve()).structuredContent.errorCode, 'provider.preparation-required');
+    held.save({ ...held.get(current.conversationId!)!, state: 'recovered', reason: 'user-review-completed' });
+    for (const changed of [{ anchorPresent: false }, { laterUserFound: true }, { pageKey: 'another-page' },
+      { submittedUserMessageId: 'another-ACK' }, { conversationId: 'another-chat' }]) {
+      const before = evidence; evidence = { ...evidence, ...changed };
+      assert.equal((await approve()).structuredContent.errorCode, 'session.page-identity-unverified'); evidence = before;
+    }
+    await f.core.actorScheduler.updateGeneration(id, 1, { submissionState: 'submission_unknown', submittedUserMessageId: null });
+    assert.equal((await approve()).structuredContent.errorCode, 'provider.preparation-required');
+    assert.deepEqual(actor.collectors, [{ requestRef: f.sent.requestRef, continuationApproved: false }]);
+    assert.equal(f.fake.submitCount, 1);
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM outbox').all(), original);
+    assert.equal(f.core.database.raw.prepare("SELECT count(*) AS n FROM request_receipts WHERE method='workflow.continuation.management'").get()!.n, 0);
+    release();
+  } finally { await f.close(); }
+});
+
+
+test('an unrelated public operation ID cannot authorize an observe-only collector', async () => {
+  const f = await fixture();
+  const controller = new AbortController();
+  let waiting: Promise<any> | undefined;
+  try {
+    new ReceiptRepository(f.core.database).record({ clientId: `team:${f.team.teamId}`,
+      requestId: `continuation-management:${f.sent.requestRef}`, method: 'workflow.focus',
+      requestHash: 'public-operation', status: 'complete', result: { requestOk: true } });
+    waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef], waitMs: 600000 }, controller.signal);
+    await f.untilSubscribed(f.sent.sessionId as string);
+    assert.deepEqual(f.core.actorScheduler.collectors(f.sent.sessionId as string),
+      [{ requestRef: f.sent.requestRef, continuationApproved: false }]);
+    assert.equal(f.fake.submitCount, 1);
+  } finally { controller.abort(); await waiting?.catch(() => {}); await f.close(); }
 });
