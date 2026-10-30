@@ -93,6 +93,26 @@ export async function syncNativeTeamGroups(teams: readonly TeamTabs[]) {
     title: tab.title ?? '', url: tab.url ?? '' })) };
 }
 
+/** Explicit user focus only. Renderer focus can be emulated on a background tab. */
+export async function focusNativeTab(input: { targetId: string; url: string }) {
+  const chrome = (globalThis as any).chrome;
+  const target = (await chrome.debugger.getTargets()).find((target: any) => target.id === input.targetId);
+  if (!Number.isInteger(target?.tabId)) throw new Error('Exact native focus target is unavailable');
+  const before = await chrome.tabs.get(target.tabId);
+  if (before.incognito || before.url !== input.url) throw new Error('Exact native focus target identity changed');
+  await chrome.tabs.update(before.id, { active: true });
+  await chrome.windows.update(before.windowId, { focused: true });
+  const tab = await chrome.tabs.get(before.id);
+  const window = await chrome.windows.get(before.windowId);
+  const current = (await chrome.debugger.getTargets()).find((target: any) => target.id === input.targetId);
+  if (current?.tabId !== tab.id || tab.url !== input.url || tab.windowId !== before.windowId ||
+      tab.incognito || tab.active !== true || window.focused !== true) {
+    throw new Error('Exact native tab/window activation was not confirmed');
+  }
+  return { targetId: input.targetId, tabId: tab.id as number, windowId: tab.windowId as number,
+    tabActive: true, windowFocused: true };
+}
+
 // Public extension identity only; no signing key or website access is retained.
 export const TEAM_GROUPS_EXTENSION_ID = 'kcohfbgmlmjgkljggplakklnpimfpkko';
 export const teamGroupsManifest = {

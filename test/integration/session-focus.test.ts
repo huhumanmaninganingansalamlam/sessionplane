@@ -36,8 +36,8 @@ test('explicit focus shows the unique retained UNKNOWN target without accepting 
       requestId: 'unknown-plan', sessionId: session.sessionId, prompt: 'Original plan', sessionDeadlineSec: 600 }), /acknowledgement/);
     const original = service.teamDirectory.getSession(session.sessionId);
     assert.equal(original.submissionState, 'submission_unknown');
-    const activate = target.page.bringToFront.bind(target.page);
-    target.page.bringToFront = async () => { activations++; await activate(); };
+    const activate = service.browserOwner!.focusPage.bind(service.browserOwner!);
+    service.browserOwner!.focusPage = async (...args) => { activations++; return await activate(...args); };
     const requestRef = service.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=?').get(session.sessionId)!.outbox_id;
     const inspected = await invokeMcpTool({ name: 'sessionplane_team_get', socketPath: config.socketPath,
       timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes, arguments: { teamId: team.teamId, requestRef, view: 'evidence' } });
@@ -99,8 +99,8 @@ test('explicit focus activates only the exact live request tab without reloading
     await page.locator('textarea').fill('Human edited draft');
     const decoy = await service.browserOwner!.createPage();
     let activations = 0;
-    const bringToFront = page.bringToFront.bind(page);
-    page.bringToFront = async () => { activations++; await bringToFront(); };
+    const activate = service.browserOwner!.focusPage.bind(service.browserOwner!);
+    service.browserOwner!.focusPage = async (...args) => { activations++; return await activate(...args); };
     decoy.page.bringToFront = async () => { assert.fail('Focused an unrelated tab'); };
     // Team grouping may create its controller tab independently of explicit focus.
     const groupsDeadline = Date.now() + 10_000;
@@ -113,6 +113,8 @@ test('explicit focus activates only the exact live request tab without reloading
     assert.equal(focused.isError, false, JSON.stringify(focused));
     assert.equal(focused.structuredContent.pageKey, before.pageKey);
     assert.equal(focused.structuredContent.activated, true);
+    assert.equal(focused.structuredContent.tabActive, true);
+    assert.equal(focused.structuredContent.windowFocused, true);
     assert.equal(activations, 1);
     assert.deepEqual((await invoke('decide', focus)).structuredContent, focused.structuredContent);
     assert.equal(activations, 1, 'Receipt replay must not steal focus again');

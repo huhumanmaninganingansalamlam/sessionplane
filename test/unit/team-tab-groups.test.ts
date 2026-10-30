@@ -1,8 +1,39 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
-import { syncNativeTeamGroups, resolveNativeTeamTabs } from '../../src/browser/team-tab-groups.ts';
+import { focusNativeTab, syncNativeTeamGroups, resolveNativeTeamTabs } from '../../src/browser/team-tab-groups.ts';
 import { PageBindingRepository } from '../../src/storage/page-binding-repository.ts';
+
+test('explicit native focus confirms the exact tab and window, and rejects unverified activation', async () => {
+  const original = (globalThis as any).chrome;
+  const tab = { id: 7, windowId: 11, active: false, incognito: false, url: 'https://chatgpt.com/c/exact' };
+  const window = { focused: false };
+  let ignoreWindow = false, ignoreTab = false, mutations = 0;
+  (globalThis as any).chrome = {
+    debugger: { getTargets: async () => [{ id: 'exact', tabId: 7 }, { id: 'other', tabId: 8 }] },
+    tabs: { get: async (id: number) => { assert.equal(id, 7); return { ...tab }; },
+      update: async (id: number, update: any) => {
+        assert.equal(id, 7); mutations++; if (!ignoreTab) Object.assign(tab, update);
+      } },
+    windows: { get: async (id: number) => { assert.equal(id, 11); return { ...window }; },
+      update: async (id: number, update: any) => {
+        assert.equal(id, 11); mutations++; if (!ignoreWindow) Object.assign(window, update);
+      } },
+  };
+  const input = { targetId: 'exact', url: tab.url };
+  try {
+    assert.deepEqual(await focusNativeTab(input), { targetId: 'exact', tabId: 7, windowId: 11,
+      tabActive: true, windowFocused: true });
+    window.focused = false; ignoreWindow = true;
+    await assert.rejects(focusNativeTab(input), /not confirmed/);
+    ignoreWindow = false; tab.active = false; ignoreTab = true;
+    await assert.rejects(focusNativeTab(input), /not confirmed/);
+    const before = mutations;
+    await assert.rejects(focusNativeTab({ ...input, targetId: 'missing' }), /unavailable/);
+    await assert.rejects(focusNativeTab({ ...input, url: 'https://chatgpt.com/c/other' }), /identity/);
+    assert.equal(mutations, before, 'Unknown/mismatched targets cannot select another tab');
+  } finally { (globalThis as any).chrome = original; }
+});
 
 test('native team groups follow create/replace/close/delete without changing unmanaged tabs or focus', async () => {
   const tabs = [

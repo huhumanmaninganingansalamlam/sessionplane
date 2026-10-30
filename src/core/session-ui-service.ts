@@ -1340,8 +1340,9 @@ export class SessionUiService {
         : this.#registry.requireSessionPage(session.pageKey, session);
       if (new URL(page.url()).origin !== this.#chatgptOrigin) throw new SessionPlaneDomainError(
         'session.page-identity-unverified', 'The request page left the provider origin');
-      await page.bringToFront();
-      return { pageKey: session.pageKey, url: page.url(), ...(unknown ? { conversationVerified: false } : {}) };
+      if (!this.#browserOwner) throw new SessionPlaneDomainError('browser.unavailable', 'Native tab activation is unavailable');
+      const activation = await this.#browserOwner.focusPage(session.pageKey, page);
+      return { pageKey: session.pageKey, url: page.url(), ...activation, ...(unknown ? { conversationVerified: false } : {}) };
     } catch (error) {
       throw typedUiError(error);
     }

@@ -47,11 +47,16 @@ and confirm the final active controls; unavailable intent requires a user decisi
   with the current evidence instead of repeating an already recorded choice.
 - `decide` with `decision:"focus"`, teamId, requestRef and a stable requestId
   activates the exact currently connected tab for explicit human viewing or control.
+  Success verifies the native selected tab and focused Chrome window; renderer
+  visibility or focus emulation alone cannot establish activation. A denied or
+  unverified activation returns an error rather than `activated:true`.
   It works for pending and completed current requests, without navigation, reload,
   submission, model changes or new tabs. Missing, mismatched, replaced or superseded
   targets fail instead of selecting another tab. Replaying a completed requestId
   returns its receipt without stealing focus again; a new user action uses a fresh ID.
-  Automatic observation and recovery remain independent of foreground focus.
+  Background observation never selects the native tab or window. Opening an exact
+  owned observer restores its per-page rendering emulation after Core adoption;
+  this allows pending animation-frame updates without changing drafts or ACKs.
 - `decide` with `decision:"refresh"`, teamId, requestRef and a stable requestId
   reloads only that request's currently owned ChatGPT page. No UI ref is needed.
   Use when the user requests refresh or visible provider recovery failure warrants

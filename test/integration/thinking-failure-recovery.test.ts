@@ -1094,10 +1094,12 @@ test('user review pauses the existing managed collector and observation without 
     assert.match(held.recovery.nextAction, /diagnostic hold alone does not establish a human-only action/);
     assert.match(held.recovery.nextAction, /Preserve explicit user stops/);
     assert.match(held.recovery.nextAction, /human-only actions require actual user completion/);
-    const focused = t.mock.method(f.fake.page, 'bringToFront', async () => {});
+    const focused = t.mock.method(f.core.browserOwner!, 'focusPage');
     const focusInput = { teamId: f.team.teamId, requestRef, requestId: 'held-focus', decision: 'focus' };
     const focus = await f.rpc<any>('decide', focusInput);
     assert.equal(focus.activated, true);
+    assert.equal(focus.tabActive, true);
+    assert.equal(focus.windowFocused, true);
     assert.equal(focus.requestRef, requestRef);
     assert.equal(focus.pageKey, original.pageKey);
     assert.equal(focus.url, f.fake.page.url());

@@ -25,7 +25,7 @@ import {
 } from './browser-health.ts';
 import { isChatGptUrl, isProviderUrl, parseProviderConversationId, type PageBindingSnapshot } from './page-binding.ts';
 import { PageRegistry } from './page-registry.ts';
-import { syncNativeTeamGroups, teamGroupsManifest, TEAM_GROUPS_EXTENSION_ID, resolveNativeTeamTabs, type TeamTabs } from './team-tab-groups.ts';
+import { focusNativeTab, syncNativeTeamGroups, teamGroupsManifest, TEAM_GROUPS_EXTENSION_ID, resolveNativeTeamTabs, type TeamTabs } from './team-tab-groups.ts';
 import {
   assertDedicatedBrowserProfile,
   BrowserProfileError,
@@ -327,6 +327,20 @@ export class BrowserOwner {
     const native = await page.evaluate(syncNativeTeamGroups, teams);
     this.#groupsStatus = { state: 'ready', extensionId: TEAM_GROUPS_EXTENSION_ID, ...native,
       bindings: this.#pageRegistry.listBindings({ includeClosed: false }) };
+  }
+
+  /** Only the public explicit-focus decision may select a tab and focus its window. */
+  async focusPage(pageKey: string, page: Page) {
+    const binding = this.#pageRegistry.getBinding(pageKey);
+    if (this.#pageRegistry.pageForObservation(pageKey, binding.bindingEpoch) !== page || !binding.targetId)
+      throw new BrowserOwnerError('browser.unavailable', 'Exact native focus target is unavailable');
+    const controller = this.#requireContext().pages().find(page =>
+      page.url() === `chrome-extension://${TEAM_GROUPS_EXTENSION_ID}/groups.html`);
+    if (!controller) throw new BrowserOwnerError('browser.unavailable', 'Native tab activation controller is unavailable');
+    const result = await controller.evaluate(focusNativeTab, { targetId: binding.targetId, url: page.url() });
+    if (this.#pageRegistry.pageForObservation(pageKey, binding.bindingEpoch) !== page)
+      throw new BrowserOwnerError('browser.unavailable', 'Exact native focus target changed');
+    return result;
   }
 
   async captureDownload(page: Page, name: string, activate: () => Promise<void>): Promise<Uint8Array> {
