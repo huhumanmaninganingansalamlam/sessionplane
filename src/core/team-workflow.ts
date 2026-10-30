@@ -599,16 +599,21 @@ export class TeamWorkflow {
           const collectingOriginal = typeof (result.workResult as { ownerRequestRef?: string } | undefined)?.ownerRequestRef === 'string';
           const work = result.workResult as { originalRequestRef?: string; originalAnchorPresent?: boolean;
             responseUserMessageId?: string; responseMessageId?: string; answerText?: string; terminal?: boolean } | undefined;
-          if (input.continuationApproved && work?.terminal && work.originalAnchorPresent &&
+          if (!input.followupUserMessageId && work?.terminal && work.originalAnchorPresent &&
               work.originalRequestRef && work.responseUserMessageId && work.responseMessageId && work.answerText) {
             const original = this.#request({ teamId: input.teamId, requestRef: work.originalRequestRef });
             if (original.outboxId !== request.outboxId) {
-              const reconciliation = await this.services.ui.reconcileFollowup({ ...ownerOf(original),
-                decisionId: `followup:${original.outboxId}:${work.responseUserMessageId}`,
-                followupUserMessageId: work.responseUserMessageId, responseMessageId: work.responseMessageId,
-                responseSha256: createHash('sha256').update(work.answerText).digest('hex'),
-                followupCompleted: true, answerText: work.answerText });
-              result = { ...await this.#observe(request), reconciliation, followup: { kind: 'complete', terminal: true,
+              // Collection is read-only without continuation approval. Return the
+              // existing followup shape so already-connected clients deliver it too;
+              // the missing successor ACK and immutable generations stay unchanged.
+              const reconciliation = input.continuationApproved
+                ? await this.services.ui.reconcileFollowup({ ...ownerOf(original),
+                  decisionId: `followup:${original.outboxId}:${work.responseUserMessageId}`,
+                  followupUserMessageId: work.responseUserMessageId, responseMessageId: work.responseMessageId,
+                  responseSha256: createHash('sha256').update(work.answerText).digest('hex'),
+                  followupCompleted: true, answerText: work.answerText }) : undefined;
+              result = { ...(input.continuationApproved ? await this.#observe(request) : result),
+                ...(reconciliation === undefined ? {} : { reconciliation }), followup: { kind: 'complete', terminal: true,
                 originalRequestRef: original.outboxId, userMessageId: work.responseUserMessageId,
                 responseMessageId: work.responseMessageId, answerText: work.answerText } };
               break;
