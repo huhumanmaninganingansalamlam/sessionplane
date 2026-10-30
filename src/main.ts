@@ -398,7 +398,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   registerSessionMethods(router, teamDirectory, receipts, cleanup, ui);
   thinkingFailureRecovery = new ThinkingFailureRecovery({ maintenance, database, submissions: submissionService, ui });
   registerSessionUiMethods(router, ui);
-  registerTeamMethods(router, teamDirectory, receipts, cleanup, stopService);
+  registerTeamMethods(router, teamDirectory, receipts, cleanup, stopService, async () => { await browserOwner?.syncTeamGroups(); });
   registerWorkflowMethods(router, new TeamWorkflow({
     database, directory: teamDirectory, receipts, submissions: submissionService, ui,
     scheduler: actorScheduler, artifacts: artifactService, stops: stopService, cleanup,

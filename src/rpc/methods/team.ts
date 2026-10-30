@@ -17,7 +17,16 @@ export function registerTeamMethods(
   receipts: ReceiptRepository,
   cleanup: ConversationCleanupService,
   stops: StopService,
+  syncGroups: () => Promise<void> = async () => {},
 ): void {
+  router.register('team.rename',
+    z.object({ clientId: ClientId, requestId: RequestId, teamId: TeamId, name: z.string().trim().min(1).max(500) }).strict(),
+    async input => {
+      const result = receipts.execute({ clientId: input.clientId, requestId: input.requestId, method: 'team.rename',
+        payload: { teamId: input.teamId, name: input.name }, operation: () => directory.renameTeam(input.teamId, input.name) });
+      await syncGroups();
+      return result;
+    });
   router.register('team.delete',
     z.object({ clientId: ClientId, requestId: RequestId, teamId: TeamId }).strict(),
     (input) => cleanup.deleteTeam(input, stops));

@@ -262,6 +262,17 @@ export class TeamDirectory {
     return this.getTeam(teamId);
   }
 
+  renameTeam(teamId: string, name: string): TeamSnapshot {
+    const team = this.#requireTeam(teamId);
+    const normalized = requireNonEmpty(name, 'name');
+    const timestamp = this.#now().toISOString();
+    this.#database.transaction(() => {
+      this.#teams.rename(team.teamId, normalized, timestamp);
+      this.#events.append({ teamId: team.teamId, eventType: 'team.renamed', payload: { name: normalized }, createdAt: timestamp });
+    });
+    return this.getTeam(team.teamId);
+  }
+
   updateBrief(input: {
     readonly teamId: string;
     readonly objective?: string | null;
