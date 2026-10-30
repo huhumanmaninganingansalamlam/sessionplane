@@ -30,6 +30,18 @@ export class PageBindingRepository {
     return teams.length === 1 ? teams[0]!.teamId : null;
   }
 
+  /** A retired startup target is disposable only after this session moved elsewhere. */
+  isObsoleteEmptyTarget(sessionId: string, targetId: string): boolean {
+    const owners = this.#database.prepare(`SELECT session_id AS sessionId, generation,
+      conversation_id AS conversationId, url FROM page_bindings
+      WHERE target_id=? AND session_id IS NOT NULL`).all(targetId) as
+      { sessionId: string; generation: number | null; conversationId: string | null; url: string }[];
+    return owners.length > 0 && owners.every(row => row.sessionId === sessionId && row.generation === 0 &&
+      row.conversationId === null && row.url === 'https://chatgpt.com/') &&
+      this.#database.prepare(`SELECT 1 FROM sessions s JOIN page_bindings p ON p.page_key=s.page_key
+        WHERE p.target_id=? LIMIT 1`).get(targetId) === undefined;
+  }
+
   upsert(binding: PageBindingSnapshot): void {
     this.#database
       .prepare(`

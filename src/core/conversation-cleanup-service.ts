@@ -15,6 +15,7 @@ import { OutboxRepository } from '../storage/outbox-repository.ts';
 import type { StopService } from './stop-service.ts';
 import { isProviderUrl } from '../browser/page-binding.ts';
 import { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
+import { PageBindingRepository } from '../storage/page-binding-repository.ts';
 
 export interface UnresolvedHandoff {
   requestRef: string;
@@ -359,12 +360,47 @@ export class ConversationCleanupService {
     });
   }
 
-  async closePages(input: { sessionId: string; generation: number; conversationId: string; evidenceRef: string }) {
+  async closePages(input: { sessionId: string; generation: number; conversationId: string; evidenceRef: string; obsoleteEmptyTargetId?: string | undefined }) {
     return await this.#options.scheduler.actorFor(input.sessionId).enqueue(async () => {
       const sessions = new SessionRepository(this.#options.database.raw);
       const session = sessions.getSnapshot(input.sessionId);
       if (!session || session.generation !== input.generation || session.conversationId !== input.conversationId) {
         throw new SessionPlaneDomainError('session.conversation-mismatch', 'Tab cleanup requires the exact durable conversation and generation');
+      }
+      if (input.obsoleteEmptyTargetId !== undefined) {
+        const { registry, pageMutex } = this.#options;
+        const bindings = new PageBindingRepository(this.#options.database.raw);
+        const matches = registry.listBindings({ includeClosed: false }).filter(p => p.targetId === input.obsoleteEmptyTargetId);
+        const binding = matches.length === 1 ? matches[0] : undefined;
+        const eligible = () => {
+          const destination = registry.findByConversation(input.conversationId);
+          return bindings.isObsoleteEmptyTarget(session.sessionId, input.obsoleteEmptyTargetId!) && destination.length === 1 &&
+            destination[0]!.targetId !== input.obsoleteEmptyTargetId &&
+            ((destination[0]!.state === 'unbound' && destination[0]!.sessionId === null) ||
+              (destination[0]!.sessionId === session.sessionId && destination[0]!.generation === session.generation &&
+                ['reserved', 'owned'].includes(destination[0]!.state)));
+        };
+        if (!input.evidenceRef.trim() || !eligible() || matches.length > 1) {
+          throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve a current, foreign or unidentified empty target');
+        }
+        const pageCleanup = { closedPages: 0, pageErrors: [] as string[] };
+        if (binding) await pageMutex.runExclusive(binding.pageKey, async () => {
+          const before = registry.refreshPage(binding.pageKey);
+          if (!eligible() || before.state !== 'unbound' || before.sessionId !== null || before.conversationId !== null ||
+              before.url !== 'https://chatgpt.com/') throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve a changed startup target');
+          const page = registry.pageForObservation(before.pageKey, before.bindingEpoch);
+          await requireIdleConversationPage(page);
+          const occupied = await page.locator('[data-message-author-role], [data-chatgpt-selection-message-id], [role="alert"], [role="alertdialog"], [role="dialog"], dialog[open], [aria-modal="true"]').evaluateAll(nodes =>
+            nodes.some(node => node.closest('[inert], [aria-hidden="true"]') === null && node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })));
+          const after = registry.refreshPage(binding.pageKey);
+          if (occupied || !eligible() || after.bindingEpoch !== before.bindingEpoch || after.url !== before.url ||
+              after.state !== before.state || after.targetId !== before.targetId) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve messages, alerts or changed ownership');
+          await page.close();
+          pageCleanup.closedPages = 1;
+        });
+        return { requestOk: true, sessionId: session.sessionId, generation: session.generation,
+          conversationId: session.conversationId, obsoleteEmptyTargetId: input.obsoleteEmptyTargetId,
+          providerDeletionAttempted: false, evidenceRef: input.evidenceRef, pageCleanup };
       }
       if (!input.evidenceRef.trim() || (!hasCollectedFinal(session) &&
           !sessions.canDiscardRetiredObservation(session.sessionId, session.generation))) {
