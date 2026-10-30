@@ -9,6 +9,7 @@ import { ProviderSubmissionError, type ProviderName } from '../providers/provide
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import { OutboxRepository, type OutboxRecord } from '../storage/outbox-repository.ts';
 import { hashCanonical, type ReceiptRepository } from '../storage/receipt-repository.ts';
+import { PageBindingRepository } from '../storage/page-binding-repository.ts';
 import { SessionRepository } from '../storage/session-repository.ts';
 import { EventRepository } from '../storage/event-repository.ts';
 import { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
@@ -149,10 +150,11 @@ export class TeamWorkflow {
       if (prior?.status === 'complete') return JSON.parse(prior.resultJson);
       this.services.receipts.record({ ...receipt, status: 'attempted', result: { sessionId: current.sessionId } });
       // Retain the page before navigation, so an interrupted open never creates a second tab.
+      const stored = current.pageKey === null ? null : new PageBindingRepository(this.services.database.raw).get(current.pageKey);
       const pageKey = await this.services.ui.openEmptySession(current, key => {
         if (!this.#sessions.updateCurrentGeneration(current.sessionId, 0, { pageKey: key }, new Date().toISOString()))
           throw new SessionPlaneDomainError('session.generation-superseded', 'Empty session changed before opening');
-      });
+      }, stored);
       const result = { requestOk: true, sessionId: current.sessionId, generation: 0, pageKey,
         promptSubmitted: false, observedSurface: await this.services.ui.inspectSurface(this.#role(input)),
         providerMutation: false };

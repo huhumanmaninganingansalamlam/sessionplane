@@ -1,3 +1,4 @@
+import type { StoredPageBinding } from '../storage/page-binding-repository.ts';
 import type { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
 import { streamRetrySurface } from '../providers/chatgpt/stream-retry.ts';
 import type { ReceiptRepository } from '../storage/receipt-repository.ts';
@@ -41,7 +42,7 @@ export class SessionUiService {
 
   get configurationCatalog() { return this.#catalog; }
 
-  async openEmptySession(session: SessionSnapshot, retainPage: (pageKey: string) => void): Promise<string> {
+  async openEmptySession(session: SessionSnapshot, retainPage: (pageKey: string) => void, stored: StoredPageBinding | null): Promise<string> {
     if (!this.#browserOwner) throw new SessionPlaneDomainError('browser.unavailable', 'Dedicated browser is unavailable');
     let pageKey = session.pageKey;
     if (pageKey === null) {
@@ -53,8 +54,27 @@ export class SessionUiService {
       await created.page.goto(this.#chatgptOrigin + '/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
       this.#registry.refreshPage(pageKey);
     }
+    // Core adoption gives retained tabs new registry keys, including generation zero.
+    let retained: Page;
+    try {
+      retained = this.#registry.requireSessionPage(pageKey, { sessionId: session.sessionId, generation: 0, conversationId: null });
+    } catch (error) {
+      if (!(error instanceof PageRegistryError) || error.errorCode !== 'browser.unavailable') throw typedUiError(error);
+      const matches = stored?.targetId == null ? [] : this.#registry.listBindings({ includeClosed: false })
+        .filter(binding => binding.targetId === stored.targetId);
+      const match = matches.length === 1 ? matches[0] : undefined;
+      if (stored?.sessionId !== session.sessionId || stored.generation !== 0 || stored.conversationId !== null ||
+          !match || !['unbound', 'reserved'].includes(match.state) || match.conversationId !== null ||
+          (match.sessionId !== null && (match.sessionId !== session.sessionId || match.generation !== 0)) ||
+          ![this.#chatgptOrigin + '/', 'about:blank'].includes(match.url)) throw typedUiError(error);
+      try {
+        this.#registry.reservePage(match.pageKey, { sessionId: session.sessionId, generation: 0, conversationId: null });
+        retainPage(match.pageKey);
+        pageKey = match.pageKey;
+        retained = this.#registry.requireSessionPage(pageKey, { sessionId: session.sessionId, generation: 0, conversationId: null });
+      } catch (failure) { throw typedUiError(failure); }
+    }
     // A failed first navigation can leave this exact reserved empty tab blank.
-    const retained = this.#registry.requireSessionPage(pageKey, { sessionId: session.sessionId, generation: 0, conversationId: null });
     if (retained.url() === 'about:blank') {
       await retained.goto(this.#chatgptOrigin + '/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
       this.#registry.refreshPage(pageKey);
