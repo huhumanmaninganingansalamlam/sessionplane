@@ -1278,7 +1278,7 @@ export class SessionUiService {
     try {
       // Permission consent belongs to the current owned card/ACK, independently
       // of composer chrome. Chat-only validation guards preparation/submission.
-      const page = await this.#interactionPage(session, true);
+      const page = await this.#interactionPage(session, true, input.action === 'inspect');
       await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
       const messages = (await readChatGptMessages(page)).filter(message => message.role === 'user');
       // A visible exact grant belongs to this owned conversation independently of
@@ -1321,11 +1321,11 @@ export class SessionUiService {
       if (input.action === 'inspect' && input.toolName === undefined && input.evidenceHash !== undefined) {
         if (!acknowledgementVerified) throw new SessionPlaneDomainError('provider.permission-unverified', 'Recover the current ACK before revealing its retained activity');
         const result = await revealHostSpanActivity(page, anchor, retainedAcknowledgements, input.appName, input.evidenceHash);
-        this.#requirePage(session);
+        this.#requirePage(session, true);
         return { ...result, requestAcknowledgementVerified: true };
       }
       const result = await controlHostSpanPermission(page, input, anchor);
-      this.#requirePage(session);
+      this.#requirePage(session, input.action === 'inspect');
       return { ...result, ...association, requestAcknowledgementVerified: acknowledgementVerified };
     } catch (error) { throw typedUiError(error); }
   }
@@ -1561,8 +1561,8 @@ export class SessionUiService {
     });
   }
 
-  async #interactionPage(session: SessionSnapshot, modeInspection = false): Promise<Page> {
-    const page = this.#requirePage(session);
+  async #interactionPage(session: SessionSnapshot, modeInspection = false, readOnly = false): Promise<Page> {
+    const page = this.#requirePage(session, readOnly);
     if (modeInspection) await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
     else await requireChatGptSurface(page);
     return this.#browserOwner === null ? page : await this.#browserOwner.preparePageInteraction(session.pageKey!, session);

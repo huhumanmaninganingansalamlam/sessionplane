@@ -13,6 +13,7 @@ import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { SessionUiService } from '../../src/core/session-ui-service.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { callRpc } from '../../src/cli/client.ts';
+import { ConversationLoadRecoveryRepository } from '../../src/storage/conversation-load-recovery-repository.ts';
 import { controlHostSpanPermission, inspectHostSpanActivity, revealHostSpanActivity } from '../../src/providers/chatgpt/hostspan-permission.ts';
 
 test('owned permission inspection records redacted modal structure before close without granting or reading form values', async () => {
@@ -534,6 +535,15 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
       name: 'sessionplane_decide', arguments: { teamId: team.teamId, requestRef: row.outbox_id, requestId,
         decision: 'hostspan_permission', appName: 'hostspan-desktop', toolName: 'Process Start', ...extra },
       socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    const review = async (action: 'pause' | 'resume') => invokeMcpTool({
+      name: 'sessionplane_decide', arguments: { teamId: team.teamId, requestRef: row.outbox_id,
+        requestId: `permission-review-${action}`, decision: 'human_review', action },
+      socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    assert.equal((await review('pause')).isError, false);
+    const loads = new ConversationLoadRecoveryRepository(core.database);
+    const held = loads.get(original.conversationId!);
+    const heldSession = core.teamDirectory.getSession(session.sessionId);
+    const observationCount = fake.observationOpenCount;
     await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend', `
       <section id="selected-activity"><div class="group/activity-header"><button aria-expanded="false"
         onclick="this.setAttribute('aria-expanded','true');document.querySelector('#activity-body').hidden=false">hostspan-desktop exact activity</button></div>
@@ -575,6 +585,27 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
     assert.equal(await page.evaluate(() => (window as any).unrelatedClicks ?? 0), 0,
       'Explicit permission inspection opens only the card-linked disclosure, never integration controls or another work question');
     assert.equal(prepare.mock.callCount(), 1, 'Use the existing exact-page background interaction lifecycle');
+    for (const action of ['allow', 'decline']) {
+      const blocked = await decide(`held-${action}`, { action,
+        evidenceHash: inspected.structuredContent.permission.evidenceHash });
+      assert.equal(blocked.isError, true);
+      assert.match(JSON.stringify(blocked), /paused for review/);
+    }
+    const blockedContinue = await invokeMcpTool({ name: 'sessionplane_decide', arguments: {
+      teamId: team.teamId, requestRef: row.outbox_id, requestId: 'held-continue',
+      decision: 'continue', continuationApproved: true,
+    }, socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    assert.equal(blockedContinue.isError, true);
+    assert.match(JSON.stringify(blockedContinue), /paused for review/);
+    assert.deepEqual(loads.get(original.conversationId!), held, 'Inspect preserves the exact review hold');
+    assert.deepEqual(core.teamDirectory.getSession(session.sessionId), heldSession);
+    assert.deepEqual(core.actorScheduler.collectors(session.sessionId), []);
+    assert.equal(fake.observationOpenCount, observationCount, 'Inspect never starts observation');
+    assert.equal(fake.stopCount, 0);
+    assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0);
+    assert.equal(await page.locator('textarea').inputValue(), 'Keep my draft');
+    assert.equal(fake.submitCount, 1);
+    assert.equal((await review('resume')).isError, false, 'Only this fixture resumes for the remaining grant tests');
     await page.locator('[role=radio]').evaluate(node => node.remove());
     const hiddenMode = await decide('inspect-without-composer-mode', { action: 'inspect' });
     assert.equal(hiddenMode.isError, false, JSON.stringify(hiddenMode));
