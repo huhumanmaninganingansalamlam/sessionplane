@@ -164,6 +164,11 @@ export class BrowserOwner {
 
   get teamGroupsBusy(): boolean { return this.#groupSync !== null; }
 
+  async syncTeamGroups(): Promise<void> {
+    this.#scheduleGroups();
+    await this.#groupSync;
+  }
+
   async start(): Promise<void> {
     if (this.#state === 'ready' || this.#state === 'manual') return;
     if (this.#state === 'starting' || this.#state === 'stopping') {

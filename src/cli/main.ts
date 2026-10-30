@@ -868,6 +868,10 @@ async function runTeamCommand(
         waitMs + 5_000,
       );
     }
+    case 'rename':
+      return await printRpc(io, parsed, config, 'team.rename', {
+        ...mutationIdentity(parsed), teamId: requirePositional(rest, 0, 'teamId'), name: requireOption(parsed, 'name'),
+      });
     case 'brief': {
       const offset = rest[0] === 'update' ? 1 : 0;
       return await printRpc(io, parsed, config, 'team.brief.update', {
@@ -1381,6 +1385,7 @@ Provider browser runtime:
 Team and role sessions:
   sessplane team create --name NAME [--objective TEXT] [--request-id ID]
   sessplane team delete TEAM_ID [--request-id ID]
+  sessplane team rename TEAM_ID --name NAME [--request-id ID]
   sessplane team show TEAM_ID [--json]
   sessplane team list [--json]
   sessplane team wait TEAM_ID [--roles KEY,KEY] [--until CONDITION]
