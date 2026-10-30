@@ -269,7 +269,8 @@ export class TeamWorkflow {
         const { current: session, original, permissionRequest } = pageOwner;
         const passiveInspection = 'passiveInspection' in pageOwner;
         const exactFollowup = 'exactFollowup' in pageOwner ? pageOwner.exactFollowup : undefined;
-        if (this.#userReview(request) && !passiveInspection) {
+        // Exact details inspection does not release review or grant the pending tool.
+        if (input.action !== 'inspect' && this.#userReview(request) && !passiveInspection) {
           throw new SessionPlaneDomainError('provider.preparation-required',
             `Observation and controls are paused for review. ${REVIEW_RESUME_GUIDANCE}`);
         }

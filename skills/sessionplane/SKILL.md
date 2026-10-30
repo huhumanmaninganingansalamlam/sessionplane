@@ -41,7 +41,9 @@ MCP. Do not replace missing MCP with shell-generated prompts or raw JSON-RPC.
    review holds remain guarded. Preserve the existing collector; this never Retry/send/Stop.
    After an ambiguous toggle inspect without repeating it under another ID.
    For pending arguments, decide hostspan_permission action:inspect may reveal/close
-   details but never grants permission or executes the tool. Unknown arguments are
+   details even while observation is held, without resuming observation, granting
+   permission or executing the tool. The hold still blocks allow/decline and Continue.
+   Unknown arguments are
    inspected before approval; action:allow is a separate authorized grant using
    fresh matching evidence and may resume execution. action:decline rejects only the exact
    pending tool with its observed toolName and fresh inspection evidenceHash; it never
