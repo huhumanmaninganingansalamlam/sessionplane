@@ -47,6 +47,9 @@ and confirm the final active controls; unavailable intent requires a user decisi
   with the current evidence instead of repeating an already recorded choice.
 - `decide` with `decision:"focus"`, teamId, requestRef and a stable requestId
   activates the exact currently connected tab for explicit human viewing or control.
+  Success verifies the native selected tab and focused Chrome window; renderer
+  visibility or focus emulation alone cannot establish activation. A denied or
+  unverified activation returns an error rather than `activated:true`.
   It works for pending and completed current requests, without navigation, reload,
   submission, model changes or new tabs. Missing, mismatched, replaced or superseded
   targets fail instead of selecting another tab. Replaying a completed requestId
