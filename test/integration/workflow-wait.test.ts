@@ -1229,3 +1229,20 @@ test('ordinary management preserves holds, UNKNOWN, later users, page identity a
     release();
   } finally { await f.close(); }
 });
+
+
+test('an unrelated public operation ID cannot authorize an observe-only collector', async () => {
+  const f = await fixture();
+  const controller = new AbortController();
+  let waiting: Promise<any> | undefined;
+  try {
+    new ReceiptRepository(f.core.database).record({ clientId: `team:${f.team.teamId}`,
+      requestId: `continuation-management:${f.sent.requestRef}`, method: 'workflow.focus',
+      requestHash: 'public-operation', status: 'complete', result: { requestOk: true } });
+    waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef], waitMs: 600000 }, controller.signal);
+    await f.untilSubscribed(f.sent.sessionId as string);
+    assert.deepEqual(f.core.actorScheduler.collectors(f.sent.sessionId as string),
+      [{ requestRef: f.sent.requestRef, continuationApproved: false }]);
+    assert.equal(f.fake.submitCount, 1);
+  } finally { controller.abort(); await waiting?.catch(() => {}); await f.close(); }
+});

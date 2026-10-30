@@ -1111,7 +1111,9 @@ export class TeamWorkflow {
   }
 
   #continuationManagement(request: OutboxRecord) {
-    return this.services.receipts.get(request.clientId, `continuation-management:${request.outboxId}`);
+    const receipt = this.services.receipts.get(request.clientId, `continuation-management:${request.outboxId}`);
+    return receipt?.method === 'workflow.continuation.management' && receipt.status === 'complete' &&
+      JSON.parse(receipt.resultJson).approved === true ? receipt : null;
   }
 
   #reviewedContinuationManagement(request: OutboxRecord) {
