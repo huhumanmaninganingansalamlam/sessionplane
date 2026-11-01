@@ -30,6 +30,11 @@ export class PageBindingRepository {
     return teams.length === 1 ? teams[0]!.teamId : null;
   }
 
+  hasCurrentTargetOwner(targetId: string): boolean {
+    return this.#database.prepare(`SELECT 1 FROM page_bindings p LEFT JOIN sessions s ON s.page_key=p.page_key
+      WHERE p.target_id=? AND (p.session_id IS NOT NULL OR s.session_id IS NOT NULL) LIMIT 1`).get(targetId) !== undefined;
+  }
+
   /** A retired startup target is disposable only after this session moved elsewhere. */
   isObsoleteEmptyTarget(sessionId: string, targetId: string): boolean {
     const owners = this.#database.prepare(`SELECT session_id AS sessionId, generation,

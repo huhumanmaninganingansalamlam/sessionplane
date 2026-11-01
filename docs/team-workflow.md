@@ -234,6 +234,16 @@ owned tabs. Provider conversation deletion is attempted once; failure does not
 block local deletion and is reported per session. Retrieve needed outputs first.
 Shared content blobs, exported files and idempotency receipts remain. Retry with
 the same requestId to receive the deletion result without repeating provider actions.
+If `sessions[].pageErrors` remain, a new `team_delete` requestId with
+`resumePageCleanup:{deletionRequestId,sessionId,targetId,evidenceRef}` resumes only
+that failed exact local page after team deletion. `retainedPages` preserves its
+identity before bindings are removed. Legacy receipts require an additional
+`ownershipRequestId` referencing a native ownership result in the same team/client
+scope and the explicitly archived original target. The caller cannot supply a
+replacement URL. Changed/current/shared targets, active Stop, attachments and
+protected dialogs are refused. `discardDraft:true` explicitly escrows an obsolete
+draft in the new receipt before closing. Original deletion results stay immutable;
+recovery never repeats provider deletion, Stop, sends or observation.
 
 ## Human terminal client
 

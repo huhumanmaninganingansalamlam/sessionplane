@@ -12,6 +12,7 @@ import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 import { callRpc } from '../../src/cli/client.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
+import { ReceiptRepository, hashCanonical } from '../../src/storage/receipt-repository.ts';
 
 test('team deletion removes only its owned state, cancels work and survives provider failure and replay', async (t) => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-team-delete-'));
@@ -226,5 +227,94 @@ test('an interrupted team deletion stays retired on restart and resumes without 
     assert.equal(result.isError, false, JSON.stringify(result));
     assert.equal(result.structuredContent.deleted, true);
     assert.equal(attempts, 1);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('deleted-team page-only cleanup survives lost bindings without repeating provider work', async (t) => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-team-orphan-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  fake.autoFinalText = 'Retrieved final';
+  let preparations = 0;
+  t.mock.method(fake, 'openDeletion', async () => {
+    preparations++;
+    throw new ProviderSubmissionError('provider.unavailable', 'Fixture provider unavailable');
+  });
+  const service = await startCore({ config, browserHeadless: true, providerAdapters: [fake],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const invoke = (args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_team_delete',
+    arguments: args, socketPath: config.socketPath, timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
+  try {
+    const team = service.teamDirectory.createTeam({ clientId: 'orphan' });
+    const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    await callRpc({ socketPath: config.socketPath, method: 'session.send', params: {
+      clientId: 'orphan', sessionId: session.sessionId, requestId: 'send', prompt: 'Fixture only' } });
+    const final = await callRpc<SessionSnapshot>({ socketPath: config.socketPath, method: 'session.wait', params: {
+      clientId: 'orphan', sessionId: session.sessionId, generation: 1, waitMs: 3000 } });
+    assert.equal(final.terminal, true);
+    const receipts = new ReceiptRepository(service.database);
+    receipts.execute({ clientId: 'team:' + team.teamId, requestId: 'native-original-ownership',
+      method: 'session.stop', payload: {}, operation: () => final });
+    const { page, binding } = await service.browserOwner!.createPage();
+    const url = 'https://chatgpt.com/c/' + final.conversationId;
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<textarea>Preserve obsolete draft</textarea>' }));
+    await page.goto(url);
+    service.pageRegistry.bindPage(binding.pageKey, { sessionId: session.sessionId, generation: 1, conversationId: final.conversationId! });
+    const targetId = service.pageRegistry.getBinding(binding.pageKey).targetId!;
+    assert.ok(targetId);
+    const original = { teamId: team.teamId, requestId: 'delete' };
+    const deleted = await invoke(original);
+    assert.equal(deleted.isError, false, JSON.stringify(deleted));
+    const cleanup = (deleted.structuredContent.sessions as Array<{ sessionId: string; pageErrors: string[]; retainedPages: unknown[] }>)[0]!;
+    assert.deepEqual(cleanup.pageErrors, ['session.cleanup-not-ready']);
+    assert.equal(page.isClosed(), false);
+    assert.equal(service.pageRegistry.getBinding(binding.pageKey).sessionId, null);
+    assert.equal(cleanup.retainedPages.length, 1, 'Deletion receipt retains failed exact ownership before removing the session');
+    assert.equal((await invokeMcpTool({ name: 'sessionplane_team_get', arguments: { teamId: team.teamId },
+      socketPath: config.socketPath, timeoutMs: 5000, maxLineBytes: config.rpcMaxLineBytes })).isError, true);
+    const resume = { deletionRequestId: 'delete', sessionId: session.sessionId, targetId,
+      evidenceRef: 'fixture:explicit-user-obsolete-page-disposal' };
+    assert.equal((await invoke({ teamId: team.teamId, requestId: 'wrong', resumePageCleanup: { ...resume, targetId: 'OTHER' } })).isError, true);
+    assert.equal((await invoke({ teamId: team.teamId, requestId: 'draft', resumePageCleanup: resume })).isError, true);
+    // The original target navigating elsewhere must not be closed under an old receipt.
+    await page.goto('https://chatgpt.com/c/other-conversation');
+    assert.equal((await invoke({ teamId: team.teamId, requestId: 'changed', resumePageCleanup: { ...resume, discardDraft: true } })).isError, true);
+    await page.goto(url);
+    // Another durable owner of the same conversation protects this tab.
+    const other = service.teamDirectory.createTeam({ clientId: 'other' });
+    const otherSession = service.teamDirectory.createSession({ teamId: other.teamId, roleKey: 'main', provider: 'chatgpt' });
+    service.pageRegistry.bindPage(binding.pageKey, { sessionId: otherSession.sessionId, generation: 0, conversationId: final.conversationId! });
+    assert.equal((await invoke({ teamId: team.teamId, requestId: 'foreign', resumePageCleanup: { ...resume, discardDraft: true } })).isError, true);
+    service.pageRegistry.unbindPage(binding.pageKey);
+    // Reproduce an already-deleted legacy team: only native receipts survive,
+    // and its original delete result predates retainedPages.
+    const legacy = structuredClone(deleted.structuredContent);
+    delete (legacy.sessions as Array<{ retainedPages?: unknown }>)[0]!.retainedPages;
+    receipts.record({ clientId: 'team:' + team.teamId, requestId: 'legacy-delete', method: 'team.delete',
+      requestHash: hashCanonical({ method: 'team.delete', payload: { teamId: team.teamId } }), status: 'complete', result: legacy });
+    const legacyResume = { ...resume, deletionRequestId: 'legacy-delete' };
+    assert.equal((await invoke({ teamId: team.teamId, requestId: 'missing-proof', resumePageCleanup: legacyResume })).isError, true);
+    const input = { teamId: team.teamId, requestId: 'resume', resumePageCleanup: { ...legacyResume,
+      ownershipRequestId: 'native-original-ownership', discardDraft: true as const } };
+    await page.locator('body').evaluate(body => body.insertAdjacentHTML('beforeend', '<button data-testid="stop-button">Stop</button>'));
+    assert.equal((await invoke(input)).isError, true, 'Explicit obsolete draft disposal still preserves active Stop');
+    await page.locator('[data-testid="stop-button"]').evaluate(node => node.remove());
+    await page.locator('body').evaluate(body => body.insertAdjacentHTML('beforeend', '<div role="dialog">Protected</div>'));
+    assert.equal((await invoke(input)).isError, true, 'Protected dialogs remain guarded');
+    await page.locator('[role="dialog"]').evaluate(node => node.remove());
+    const result = await invoke(input);
+    assert.equal(result.isError, false, JSON.stringify(result));
+    assert.equal(result.structuredContent.pageCleanupOnly, true);
+    assert.equal((result.structuredContent.pageCleanup as { closedPages: number }).closedPages, 1);
+    assert.equal(result.structuredContent.preservedDraft, 'Preserve obsolete draft');
+    assert.equal(page.isClosed(), true);
+    const absent = await invoke({ teamId: team.teamId, requestId: 'modern-absent', resumePageCleanup: resume });
+    assert.equal(absent.isError, false, JSON.stringify(absent));
+    assert.deepEqual(absent.structuredContent.pageCleanup, { closedPages: 0, pageErrors: [], targetAbsent: true });
+    assert.deepEqual((await invoke(input)).structuredContent, result.structuredContent);
+    assert.deepEqual((await invoke(original)).structuredContent, deleted.structuredContent, 'Original deletion receipt stays immutable');
+    assert.equal(preparations, 0, 'Original draft preflight refusal and page-only recovery never prepare provider deletion');
+    assert.equal(fake.stopCount, 0);
+    assert.equal(fake.submitCount, 1);
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });

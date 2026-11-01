@@ -15,7 +15,7 @@ import { EventRepository } from '../storage/event-repository.ts';
 import { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import type { ArtifactService } from './artifact-service.ts';
-import type { ConversationCleanupService, UnresolvedHandoff } from './conversation-cleanup-service.ts';
+import type { ConversationCleanupService, UnresolvedHandoff, TeamPageCleanupResume } from './conversation-cleanup-service.ts';
 import { latestDisplayTarget, type SessionUiService } from './session-ui-service.ts';
 import type { StopService } from './stop-service.ts';
 import type { SubmissionService, UserConfirmedInterruption } from './submission-service.ts';
@@ -91,7 +91,7 @@ export class TeamWorkflow {
     };
   }
 
-  async deleteTeam(input: Mutation) {
+  async deleteTeam(input: Mutation & { resumePageCleanup?: TeamPageCleanupResume | undefined }) {
     return await this.services.cleanup.deleteTeam({ ...input, clientId: `team:${input.teamId}` }, this.services.stops);
   }
 

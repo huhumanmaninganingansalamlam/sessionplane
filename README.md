@@ -369,6 +369,18 @@ stops owned work and closes its tabs. Provider conversation deletion is attempte
 once; individual failures are returned. Retrieve needed outputs before deletion;
 exported files, shared content and idempotency receipts remain.
 
+If local tab cleanup failed after the team was removed, use a **new** request ID
+with `team_delete.resumePageCleanup`, or
+`sessplane team delete TEAM_ID --request-id NEW_ID --resume-page-cleanup FILE.json`.
+The JSON contains `deletionRequestId`, `sessionId`, the archived exact `targetId`
+and `evidenceRef`. Only a failed target retained in that team's deletion receipt
+is eligible; legacy receipts additionally require `ownershipRequestId` naming a
+native team-scoped ownership receipt. Current/shared ownership, changed URLs,
+active generation, attachments and protected dialogs remain guarded. Explicit
+`discardDraft:true` escrows an obsolete draft in the new receipt before closing.
+This resumes local page cleanup only: no provider DELETE, Stop, send or ACK change.
+The original delete ID still returns its original result.
+
 ## Attachments, results and skills
 
 Downloads remain enabled. Attachment uploads are disabled by default. An operator

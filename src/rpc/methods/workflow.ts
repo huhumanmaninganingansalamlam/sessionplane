@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { DEFAULT_WORKFLOW_WAIT_MS, MAX_WORKFLOW_WAIT_MS, workflowWaitMs } from '../../domain/workflow-wait.ts';
 import type { TeamWorkflow } from '../../core/team-workflow.ts';
 import type { RpcRouter } from '../router.ts';
+import { TeamPageCleanupResumeSchema } from './team.ts';
 
 const requestId = z.string().trim().min(1).max(300).describe('Stable unique ID for this mutation. Reuse only for identical arguments.');
 const teamId = z.string().uuid().describe('Durable team ID.');
@@ -12,7 +13,8 @@ const mutation = { teamId, requestId };
 const request = { teamId, requestRef };
 
 export const workflowSchemas = {
-  team_delete: z.object(mutation).strict(),
+  team_delete: z.object({ ...mutation, resumePageCleanup: TeamPageCleanupResumeSchema.optional()
+    .describe('With a NEW stable requestId, resume only one exact failed local page cleanup from a completed team-delete receipt after the team is gone. Never repeats provider DELETE, Stop or send. Replays of the original deletion still return its immutable receipt.') }).strict(),
   team_create: z.object({ requestId, name: z.string().max(500).optional(), objective: z.string().max(20_000).optional(), provider }).strict(),
   team_get: z.object({ teamId, requestRef: requestRef.optional(), view: z.enum(['summary', 'result', 'evidence']).optional().describe('Default summary reads stored status, ACK, collection and pacing without a provider probe or prompt/answer body. result recovers the exact answer; evidence also inspects fresh UI and returns preparation/candidate controls. Explicit maxNodes implies evidence when view is omitted.'), maxNodes: z.number().int().min(1).max(5000).optional(), history: z.boolean().optional().describe('List all request generations in pages, newest first.'), beforeRequestRef: requestRef.optional().describe('Continue history using nextRequestRef returned by team_get.') }).strict(),
   role_create: z.object({ ...mutation, roleKey: z.string().trim().min(1).max(80), roleType: z.enum(['expert', 'reviewer', 'custom']).default('expert'), displayName: z.string().max(500).optional(), provider }).strict(),
