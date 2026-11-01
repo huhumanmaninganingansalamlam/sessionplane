@@ -11,6 +11,15 @@ const RequestId = z.string().trim().min(1).max(300);
 const TeamId = z.string().uuid();
 const RoleKey = z.string().trim().min(1).max(80);
 
+export const TeamPageCleanupResumeSchema = z.object({
+  deletionRequestId: RequestId,
+  sessionId: z.string().uuid(),
+  targetId: z.string().trim().min(1).max(300),
+  evidenceRef: z.string().trim().min(1).max(2000),
+  ownershipRequestId: RequestId.optional().describe('Only for legacy deletion receipts: a retained native ownership receipt in the same team/client scope. Supply the archived original target; conversation identity is never accepted from the caller.'),
+  discardDraft: z.literal(true).optional().describe('Explicit obsolete-draft disposal. Escrows the exact current draft in this cleanup receipt before closing. Active Stop, attachments, dialogs and current/shared ownership remain protected.'),
+}).strict();
+
 export function registerTeamMethods(
   router: RpcRouter,
   directory: TeamDirectory,
@@ -28,7 +37,8 @@ export function registerTeamMethods(
       return result;
     });
   router.register('team.delete',
-    z.object({ clientId: ClientId, requestId: RequestId, teamId: TeamId }).strict(),
+    z.object({ clientId: ClientId, requestId: RequestId, teamId: TeamId,
+      resumePageCleanup: TeamPageCleanupResumeSchema.optional() }).strict(),
     (input) => cleanup.deleteTeam(input, stops));
   router.register(
     'team.create',

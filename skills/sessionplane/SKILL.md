@@ -350,6 +350,14 @@ out prompts, infer consensus, or inject answers into other roles.
   stops owned work and closes owned tabs. Retrieve needed outputs first. Provider
   deletion is attempted once; per-session failures do not block local deletion.
   Pass teamId and a stable requestId; exported files remain.
+  If failed pageCleanup remains after local deletion, use a new requestId and
+  resumePageCleanup:{deletionRequestId,sessionId,targetId,evidenceRef} for the exact
+  archived target. Legacy receipts also need ownershipRequestId from a retained
+  native ownership receipt in this team. No provider DELETE/Stop/send is repeated.
+  Current/shared ownership, URL changes, active generation, attachments and
+  protected dialogs remain guarded. Only explicitly authorized obsolete draft
+  disposal uses discardDraft:true; the draft is preserved in the cleanup receipt.
+  This is local page disposal, never proof of backend execution END.
 - `sessionplane_role_retire` ends a non-primary role without deleting provider history.
 - `sessionplane_session_delete` attempts deletion of the exact completed provider
   conversation after retrieving required outputs. Pass its exact requestRef and

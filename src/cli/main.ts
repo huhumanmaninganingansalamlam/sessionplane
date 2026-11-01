@@ -61,6 +61,7 @@ const VALUE_OPTIONS = new Set([
   'user-confirmed-interruption',
   'unresolved-handoff',
   'discard-retired-observation',
+  'resume-page-cleanup',
   'evidence-ref',
   'followup-message-id', 'remote', 'remote-executable', 'remote-socket', 'remote-control-path',
   'state-dir',
@@ -824,6 +825,8 @@ async function runTeamCommand(
     case 'delete':
       return await printRpc(io, parsed, config, 'team.delete', {
         ...mutationIdentity(parsed), teamId: requirePositional(rest, 0, 'teamId'),
+        ...(parsed.options['resume-page-cleanup'] === undefined ? {} : {
+          resumePageCleanup: JSON.parse(readFileSync(parsed.options['resume-page-cleanup'], 'utf8')) }),
       }, sessionSendRpcTimeoutMs(config));
     case 'create':
       return await printRpc(io, parsed, config, 'team.create', {
@@ -1384,7 +1387,7 @@ Provider browser runtime:
 
 Team and role sessions:
   sessplane team create --name NAME [--objective TEXT] [--request-id ID]
-  sessplane team delete TEAM_ID [--request-id ID]
+  sessplane team delete TEAM_ID [--request-id ID] [--resume-page-cleanup JSON_FILE]
   sessplane team rename TEAM_ID --name NAME [--request-id ID]
   sessplane team show TEAM_ID [--json]
   sessplane team list [--json]
