@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import type { Page } from 'playwright-core';
+
 import type { OwnedPageIdentity } from '../../src/browser/owned-page-lifecycle.ts';
 import {
   observeExactNativeTab,
   protectExactOwnedTabFromAutoDiscard,
 } from '../../src/browser/owned-tab-policy.ts';
 import type { NativeTabApi } from '../../src/browser/owned-tab-policy.ts';
+import { nativeTabApiFromController } from '../../src/browser/native-tab-extension-bridge.ts';
+import { TEAM_GROUPS_EXTENSION_ID } from '../../src/browser/team-tab-groups.ts';
 
 const url = 'https://chatgpt.com/c/owner-conversation';
 const lease: OwnedPageIdentity = {
@@ -158,4 +162,37 @@ test('unsupported auto-discard capability stays unknown until observed', async (
   const observed = await observeExactNativeTab(f.api, lease, url, f.isOwned);
   assert.equal(observed.autoDiscardable, null);
   assert.equal(f.updates.length, 0);
+});
+
+test('native extension bridge rejects foreign controller before any tabs API call', async () => {
+  let pageUrl = 'about:blank';
+  let calls = 0;
+  const page = {
+    isClosed: () => false,
+    url: () => pageUrl,
+    evaluate: async () => { calls++; return []; },
+  } as unknown as Page;
+  const api = nativeTabApiFromController(page);
+  await assert.rejects(api.debugger.getTargets(), /extension controller is unavailable/);
+  await assert.rejects(api.tabs.update(7, { autoDiscardable: false }),
+    /extension controller is unavailable/);
+  assert.equal(calls, 0);
+  pageUrl = 'chrome-extension://' + TEAM_GROUPS_EXTENSION_ID + '/groups.html';
+  assert.deepEqual(await api.debugger.getTargets(), []);
+  assert.equal(calls, 1);
+});
+
+test('extension page replacement after tab API execution is not a verified receipt', async () => {
+  let pageUrl = 'chrome-extension://' + TEAM_GROUPS_EXTENSION_ID + '/groups.html';
+  const page = {
+    isClosed: () => false,
+    url: () => pageUrl,
+    evaluate: async () => {
+      pageUrl = 'about:blank';
+      return { id: 7, autoDiscardable: false };
+    },
+  } as unknown as Page;
+  const api = nativeTabApiFromController(page);
+  await assert.rejects(api.tabs.update(7, { autoDiscardable: false }),
+    /extension controller is unavailable/);
 });

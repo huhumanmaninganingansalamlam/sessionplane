@@ -10,18 +10,25 @@ import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 
 /**
- * Optional L2 fixture: deliberately uses its OWN temporary profile and only
- * headless pages. This is NOT proof of headed/user-foreground continuity.
+ * Optional L2 fixture on a disposable profile. The headed mode MUST be run
+ * under an independently created headless Mutter/Wayland virtual monitor;
+ * it refuses the user's DISPLAY and never calls page.bringToFront().
  */
+const virtualHeaded = process.env.SESSIONPLANE_RUN_VIRTUAL_HEADED_BROWSER_L2 === '1';
 test('isolated Chrome measures timers, rAF, DOM and clicks on four background tabs', {
-  skip: process.env.SESSIONPLANE_RUN_HEADLESS_BROWSER_L2 !== '1',
+  skip: !virtualHeaded && process.env.SESSIONPLANE_RUN_HEADLESS_BROWSER_L2 !== '1',
 }, async () => {
+  if (virtualHeaded) {
+    assert.equal(process.env.DISPLAY, undefined, 'Must not attach to the human X display');
+    assert.match(process.env.WAYLAND_DISPLAY ?? '', /^sessionplane-l2-/,
+      'Headed benchmark requires an isolated Wayland compositor');
+  }
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-owned-l2-'));
   const registry = new PageRegistry();
   const owner = new BrowserOwner({
     profileDir: path.join(root, 'disposable-profile'),
     pageRegistry: registry,
-    headless: true,
+    headless: !virtualHeaded,
   });
   let foregroundCalls = 0;
   try {
@@ -78,7 +85,7 @@ test('isolated Chrome measures timers, rAF, DOM and clicks on four background ta
       rendererVisibility: after[index]!.visibility,
     }));
     console.log('ISOLATED_BROWSER_L2 ' + JSON.stringify({
-      mode: 'dedicated-chrome-cdp', headless: true, foregroundCalls,
+      mode: 'dedicated-chrome-cdp', headless: !virtualHeaded, virtualHeaded, foregroundCalls,
       measurementWindowMs: 350, sustainedRafMinimumFrames: 3,
       pages: measurements,
     }));
@@ -123,7 +130,7 @@ test('isolated Chrome measures timers, rAF, DOM and clicks on four background ta
     console.log('ISOLATED_BROWSER_RECONNECT_L2 ' + JSON.stringify({
       transport: 'CDP', exactTargetsRebound: reboundCount, foregroundCalls,
     }));
-    if (process.env.SESSIONPLANE_REQUIRE_BACKGROUND_RAF === '1') {
+    if (virtualHeaded || process.env.SESSIONPLANE_REQUIRE_BACKGROUND_RAF === '1') {
       assert.ok(measurements.every(measurement => measurement.rafDelta >= 3),
         'sustained background rAF gate failed; do not infer liveness from one frame');
     }
