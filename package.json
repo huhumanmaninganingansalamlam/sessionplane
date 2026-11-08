@@ -20,7 +20,7 @@
   "scripts": {
     "prepack": "npm run build",
     "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsc -p tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.json && node scripts/release-preflight.mjs --emit-build-identity",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --test --test-concurrency=1 --experimental-strip-types test/**/*.test.ts",
     "test:ci": "node --test --test-concurrency=1 --experimental-strip-types $(find test -name '*.test.ts' ! -path 'test/browser/*' ! -path 'test/integration/browser-cli-mcp.test.ts' | sort)",

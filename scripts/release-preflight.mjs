@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -28,6 +28,27 @@ if (documentedVersion !== version) {
     `documented release install version ${documentedVersion ?? '(missing)'} does not match package version ${version}`,
   );
 }
+if (process.argv.includes('--emit-build-identity')) {
+  // The artifact identifies its source without embedding the hash of its own tarball.
+  // In a copied test checkout without .git, report unknown instead of guessing.
+  const sourceCommit = safeGit(['rev-parse', 'HEAD']);
+  const sourceTree = safeGit(['rev-parse', 'HEAD^{tree}']);
+  const workingTree = safeGit(['status', '--porcelain']);
+  const sourceState = sourceCommit === null || sourceTree === null || workingTree === null
+    ? 'unavailable'
+    : workingTree === '' ? 'clean' : 'dirty';
+  const identity = {
+    schemaVersion: 1,
+    version,
+    sourceCommit: /^[0-9a-f]{40}$/.test(sourceCommit ?? '') ? sourceCommit : null,
+    sourceTree: /^[0-9a-f]{40}$/.test(sourceTree ?? '') ? sourceTree : null,
+    sourceState,
+  };
+  writeFileSync(path.join(root, 'dist', 'build-identity.json'), `${JSON.stringify(identity, null, 2)}\n`, { flag: 'w' });
+  process.stdout.write(`${JSON.stringify(identity)}\n`);
+  process.exit(0);
+}
+
 const tag = `v${version}`;
 
 const status = capture('git', ['status', '--porcelain'], 'git status --porcelain');
@@ -123,4 +144,9 @@ function execute(command, args, label, captureOutput) {
     );
   }
   return result.stdout ?? '';
+}
+
+function safeGit(args) {
+  const result = spawnSync('git', args, { cwd: root, encoding: 'utf8', stdio: 'pipe' });
+  return result.error === undefined && result.status === 0 ? (result.stdout ?? '').trim() : null;
 }

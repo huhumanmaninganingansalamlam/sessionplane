@@ -49,6 +49,9 @@ jobs:
             exit "$status"
           fi
       - run: npm run build
+      - name: Verify embedded source identity
+        run: |
+          node -e "const b=require('./dist/build-identity.json'); const p=require('./package.json'); if (b.schemaVersion !== 1 || b.version !== p.version || b.sourceCommit !== process.env.GITHUB_SHA || b.sourceState !== 'clean') process.exit(1)"
       - run: npm run doctor
         env:
           SESSIONPLANE_STATE_DIR: ${{ runner.temp }}/sessionplane-doctor-state
@@ -56,18 +59,18 @@ jobs:
       - id: pack
         name: Build release package
         run: |
-          package="$(npm pack --silent)"
-          mkdir -p "$RUNNER_TEMP/repro-pack"
+          mkdir -p "$RUNNER_TEMP/release-pack" "$RUNNER_TEMP/repro-pack"
+          package="$(npm pack --silent --pack-destination "$RUNNER_TEMP/release-pack")"
           repro_package="$(npm pack --silent --pack-destination "$RUNNER_TEMP/repro-pack")"
-          cmp "$package" "$RUNNER_TEMP/repro-pack/$repro_package"
-          sha256sum "$package" > "$package.sha256"
-          echo "package=$package" >> "$GITHUB_OUTPUT"
+          cmp "$RUNNER_TEMP/release-pack/$package" "$RUNNER_TEMP/repro-pack/$repro_package"
+          ( cd "$RUNNER_TEMP/release-pack" && sha256sum "$package" > "$package.sha256" )
+          echo "package=$RUNNER_TEMP/release-pack/$package" >> "$GITHUB_OUTPUT"
       - name: Smoke test release package
         env:
           PACKAGE: ${{ steps.pack.outputs.package }}
         run: |
           prefix="$RUNNER_TEMP/sessionplane-release-install"
-          npm install -g --prefix "$prefix" "./$PACKAGE"
+          npm install -g --prefix "$prefix" "$PACKAGE"
           test -x "$prefix/bin/sessplane"
           "$prefix/bin/sessplane" --help >/dev/null
           mkdir -p "$RUNNER_TEMP/sessionplane-release-home"

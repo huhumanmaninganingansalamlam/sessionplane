@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -18,6 +18,16 @@ try {
   const filename = packed.trim().split(/\r?\n/).at(-1);
   if (!filename) throw new Error('npm pack did not return a package filename');
   const tarball = path.join(temporaryRoot, filename);
+  const repeatDir = path.join(temporaryRoot, 'repeat');
+  mkdirSync(repeatDir, { recursive: true });
+  const repeatName = run('npm', ['pack', '--silent', '--pack-destination', repeatDir], {
+    cwd: sourceRoot,
+    capture: true,
+  }).trim().split(/\r?\n/).at(-1);
+  if (repeatName !== filename ||
+      !readFileSync(tarball).equals(readFileSync(path.join(repeatDir, repeatName)))) {
+    throw new Error('release package is not byte-for-byte reproducible');
+  }
 
   run('npm', ['install', '-g', '--prefix', prefix, tarball], { cwd: sourceRoot });
 
@@ -36,6 +46,19 @@ try {
   );
   if (JSON.stringify(installedPackage.bin) !== JSON.stringify({ sessplane: 'bin/sessplane.mjs' })) {
     throw new Error('installed package must expose only the sessplane executable');
+  }
+
+  const identityPath = path.join(installedRoot, 'dist', 'build-identity.json');
+  if (!existsSync(identityPath)) throw new Error('installed package is missing build identity');
+  const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
+  if (identity.schemaVersion !== 1 || identity.version !== installedPackage.version) {
+    throw new Error('build identity schema/version differs from the installed package');
+  }
+  if (!['clean', 'dirty', 'unavailable'].includes(identity.sourceState) ||
+      (identity.sourceCommit !== null && !/^[0-9a-f]{40}$/.test(identity.sourceCommit)) ||
+      (identity.sourceTree !== null && !/^[0-9a-f]{40}$/.test(identity.sourceTree)) ||
+      (identity.sourceState === 'clean' && (identity.sourceCommit === null || identity.sourceTree === null))) {
+    throw new Error('installed package has an invalid or unverified source identity');
   }
 
   const runtimeEnv = { ...process.env, HOME: temporaryRoot };
