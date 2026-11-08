@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import {
   isTaskTerminal,
   reduceTaskProjection,
@@ -63,6 +65,16 @@ export interface AttemptRecord {
   readonly externalTurnId: string | null;
   readonly dispatchedAt: string | null;
   readonly acknowledgedAt: string | null;
+}
+/** Durable, bounded POST provenance. The prompt body remains only in the
+ * existing attempt record; evidence stores its hash and exact message edges.
+ */
+export interface DispatchEvidenceRecord {
+  readonly conversationId: string;
+  readonly messageId: string;
+  readonly parentMessageId: string;
+  readonly textHash: string;
+  readonly observedAt: string;
 }
 export interface DecisionRecord {
   readonly decisionId: string;
@@ -540,6 +552,94 @@ export class TaskKernelRepository {
       ).run(this.#now(), attemptId);
       return this.#requireAttempt(attemptId, taskId);
     });
+  }
+
+  /**
+   * Record one exact outgoing message for a *previously dispatched* journaled
+   * attempt. Called synchronously by the provider request observer if possible,
+   * before an ACK is probed. Replaying the same evidence is idempotent; a
+   * competing message/turn is rejected. No external network or DOM mutation.
+   */
+  recordDispatchEvidence(input: {
+    taskId: string; clientId: string; attemptId: string;
+    evidence: DispatchEvidenceRecord;
+  }): DispatchEvidenceRecord {
+    return this.#database.transaction(() => {
+      const task = this.#requireTask(input.taskId, input.clientId);
+      const attempt = this.#requireAttempt(input.attemptId, input.taskId);
+      if (!['dispatched', 'uncertain', 'acknowledged'].includes(attempt.state)) {
+        throw new Error('Dispatch evidence requires a previously dispatched attempt');
+      }
+      const binding = this.getBindingAtRevision(task.projectId, task.slotId,
+        task.slotRevision, input.clientId);
+      const evidence = input.evidence;
+      for (const [label, value] of Object.entries(evidence)) {
+        if (typeof value !== 'string' || value.length === 0 || value.length > 512) {
+          throw new Error(`Invalid dispatch evidence ${label}`);
+        }
+      }
+      if (evidence.conversationId !== binding.providerConversationId) {
+        throw new Error('Dispatch evidence conversation is not the immutable slot binding');
+      }
+      const contentHash = createHash('sha256')
+        .update(attempt.content.replaceAll('\r\n', '\n')).digest('hex');
+      if (!/^[a-f0-9]{64}$/.test(evidence.textHash) || evidence.textHash !== contentHash) {
+        throw new Error('Dispatch evidence text does not match the journaled attempt');
+      }
+      if (Number.isNaN(Date.parse(evidence.observedAt))) {
+        throw new Error('Dispatch evidence timestamp is invalid');
+      }
+      const row = this.#database.raw.prepare(
+        `SELECT provider_key AS providerKey,provider_conversation_id AS conversationId,
+          message_id AS messageId,parent_message_id AS parentMessageId,
+          text_hash AS textHash,observed_at AS observedAt
+          FROM kernel_dispatch_evidence WHERE attempt_id=?`,
+      ).get(input.attemptId) as (DispatchEvidenceRecord & { providerKey: string }) | undefined;
+      if (row !== undefined) {
+        if (row.providerKey !== binding.providerKey ||
+          row.conversationId !== evidence.conversationId || row.messageId !== evidence.messageId ||
+          row.parentMessageId !== evidence.parentMessageId || row.textHash !== evidence.textHash ||
+          row.observedAt !== evidence.observedAt) {
+          throw new Error('Conflicting dispatch evidence for the same attempt');
+        }
+        return evidence;
+      }
+      this.#database.raw.prepare(
+        `INSERT INTO kernel_dispatch_evidence(
+          attempt_id,task_id,provider_key,provider_conversation_id,message_id,
+          parent_message_id,text_hash,observed_at
+        ) VALUES(?,?,?,?,?,?,?,?)`,
+      ).run(input.attemptId, input.taskId, binding.providerKey, evidence.conversationId,
+        evidence.messageId, evidence.parentMessageId, evidence.textHash,
+        evidence.observedAt);
+      this.#appendEvent(task, {
+        type: 'attempt.dispatch_evidence_recorded', attemptId: input.attemptId,
+      });
+      return evidence;
+    });
+  }
+
+  /** Exact lookup across Core restart; never authorizes a new POST. */
+  getDispatchEvidence(input: {
+    taskId: string; clientId: string; attemptId: string;
+  }): DispatchEvidenceRecord | null {
+    const task = this.#requireTask(input.taskId, input.clientId);
+    this.#requireAttempt(input.attemptId, input.taskId);
+    const row = this.#database.raw.prepare(
+      `SELECT provider_key AS providerKey,provider_conversation_id AS conversationId,
+        message_id AS messageId,parent_message_id AS parentMessageId,
+        text_hash AS textHash,observed_at AS observedAt
+        FROM kernel_dispatch_evidence WHERE attempt_id=?`,
+    ).get(input.attemptId) as (DispatchEvidenceRecord & { providerKey: string }) | undefined;
+    if (row === undefined) return null;
+    const binding = this.getBindingAtRevision(task.projectId, task.slotId,
+      task.slotRevision, input.clientId);
+    if (row.providerKey !== binding.providerKey ||
+      row.conversationId !== binding.providerConversationId) {
+      throw new Error('Stored dispatch evidence no longer matches the slot binding');
+    }
+    return { conversationId: row.conversationId, messageId: row.messageId,
+      parentMessageId: row.parentMessageId, textHash: row.textHash, observedAt: row.observedAt };
   }
 
   acknowledgeAttempt(input: {

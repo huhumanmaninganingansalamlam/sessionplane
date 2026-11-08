@@ -9,6 +9,7 @@ import { pageTargetIdentityMigration } from './0006-page-target-identity.ts';
 import { conversationLoadRecoveryMigration } from './0007-conversation-load-recovery.ts';
 import { generationEventIndexMigration } from './0008-generation-event-index.ts';
 import { durableTaskKernelMigration } from './0009-durable-task-kernel.ts';
+import { kernelDispatchEvidenceMigration } from './0010-kernel-dispatch-evidence.ts';
 
 export interface Migration {
   readonly version: number;
@@ -26,6 +27,7 @@ export const migrations: readonly Migration[] = [
   conversationLoadRecoveryMigration,
   generationEventIndexMigration,
   durableTaskKernelMigration,
+  kernelDispatchEvidenceMigration,
 ];
 
 export function runMigrations(database: DatabaseSync, now: () => Date = () => new Date()): number {

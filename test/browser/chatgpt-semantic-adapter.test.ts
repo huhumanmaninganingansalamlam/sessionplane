@@ -59,7 +59,9 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
       pageKey: binding.pageKey, targetId: binding.targetId!, bindingEpoch: binding.bindingEpoch,
     };
     let allowedLease: OwnedPageIdentity | null = lease;
+    const durablePostObservations: string[] = [];
     const adapter = new ChatGptSemanticAdapter({
+      onDispatchObserved: value => durablePostObservations.push(value.attemptId + ':' + value.evidence.messageId),
       isExactLease: value => allowedLease === value &&
         registry.getBinding(value.pageKey).bindingEpoch === value.bindingEpoch &&
         registry.getBinding(value.pageKey).targetId === value.targetId,
@@ -160,6 +162,8 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
       [['conversation-b', 'user-b', 'parent-b', digest(networkDraft)]],
       'only the exact outgoing POST can carry dispatch provenance');
     assert.equal(await page.evaluate(() => (window as any).sends), 1);
+    assert.deepEqual(durablePostObservations, ['journaled-attempt-network:user-b'],
+      'the exact outgoing POST invokes its durable journal hook before returning');
 
     // Model choice is a separate, explicit two-step configuration decision.
     // Observe itself must not open the popup or change the current selection.
@@ -242,6 +246,20 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(guardedRetry.blocker, 'unsupported');
     assert.match(guardedRetry.reason ?? '', /stream-retry-preserve-draft/);
     assert.equal(guardedRetry.actions.some(a => a.purpose === 'retry'), false);
+
+    // A currently streaming exact assistant response suppresses any send
+    // candidate, even if a retained editable draft and Send button exist.
+    await page.setContent('<main>' +
+      '<div data-message-author-role="user" data-message-id="user-b">Task</div>' +
+      '<div data-message-author-role="assistant" data-message-id="answer-b" ' +
+      'data-is-streaming="true">Partial output</div>' +
+      '<div id="prompt-textarea" contenteditable="true">Human draft</div>' +
+      '<button data-testid="send-button">Send</button></main>');
+    const streaming = await adapter.observe(context(lease, 'user-b'));
+    assert.equal(streaming.progress, 'streaming');
+    assert.equal(streaming.blocker, 'unsupported');
+    assert.equal(streaming.reason, 'generation-active-preserve-current-turn');
+    assert.equal(streaming.actions.length, 0);
 
     await page.setContent('<main><div data-chatgpt-composer>' +
       '<div role="textbox" contenteditable="true"></div>' +

@@ -61,6 +61,13 @@ export interface ChatGptSemanticAdapterOptions {
   readonly backendOrigin?: string;
   readonly backendClient?: BackendJsonClient;
   readonly backendRecovery?: ChatGptBackendRecovery;
+  /** Synchronous durable callback on the exact page POST, before an ACK probe.
+   * It must never send, modify the UI, or log the message content.
+   */
+  readonly onDispatchObserved?: (input: {
+    context: SemanticTaskContext; attemptId: string;
+    evidence: SemanticDispatchEvidence;
+  }) => void;
   /** Must check the Core's journaled exact model configuration decision. */
   readonly isAuthorizedDecision?: (input: {
     context: SemanticTaskContext; purpose: 'open_model_chooser' | 'choose_model';
@@ -184,6 +191,9 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if (question !== null) {
       blocker = 'provider_question';
       reason = question.available ? 'provider-question-requires-decision' : 'question-evidence-incomplete-or-draft';
+    } else if (blocker === 'none' && progress === 'streaming') {
+      blocker = 'unsupported';
+      reason = 'generation-active-preserve-current-turn';
     } else if (blocker === 'none' && ui.editors.length !== 1) {
       blocker = 'unsupported';
       reason = ui.editors.length === 0 ? 'composer-not-found' : 'composer-ambiguous';
@@ -303,6 +313,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       return { kind: 'authorization_required', reason: 'exact-committed-content-hash-required' };
     }
     let capturedAttempts: SemanticDispatchEvidence[] = [];
+    let dispatchSinkFailed = false;
     // One consumption even if the renderer returns late. No replay of an
     // uncertain external side effect via this actionRef or another requestId.
     snapshot!.actions.delete(request.actionRef);
@@ -395,7 +406,16 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       }
       if (!(await this.#authorized(request, action.purpose))) return 'stale' as const;
       const watch = watchExactDispatch(page, request.context.providerConversationId!,
-        request.expectedContentSha256!);
+        request.expectedContentSha256!, evidence => {
+          if (!this.#options.onDispatchObserved) return;
+          try {
+            this.#options.onDispatchObserved({
+              context: request.context, attemptId: request.authorizedAttemptId!, evidence,
+            });
+          } catch {
+            dispatchSinkFailed = true;
+          }
+        });
       try {
         const button = await exactHandle(page, BUTTONS, fresh.buttons[0]!);
         try {
@@ -421,6 +441,10 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if (result.value === 'stale') return { kind: 'stale', reason: 'semantic-evidence-changed-before-action' };
     if (result.value === 'retry_clicked_unverified') return {
       kind: 'uncertain', reason: 'retry-clicked-provider-progress-unverified',
+    };
+    if (result.value === 'send' && dispatchSinkFailed) return {
+      kind: 'uncertain', reason: 'durable-dispatch-evidence-write-failed',
+      attempts: capturedAttempts,
     };
     if (result.value === 'send') return { kind: 'dispatched_unverified', effect: 'send',
       attempts: capturedAttempts };
@@ -643,7 +667,8 @@ async function exactHandle(page: Page, selector: string, expected: Control): Pro
 /** Capture only the exact outgoing user POST identity; this is attempt
  * provenance, NEVER a provider ACK. Missing/multiple requests stay uncertain.
  */
-function watchExactDispatch(page: Page, conversationId: string, expectedSha256: string) {
+function watchExactDispatch(page: Page, conversationId: string, expectedSha256: string,
+  onObserved?: (evidence: SemanticDispatchEvidence) => void) {
   const attempts: SemanticDispatchEvidence[] = [];
   let wake: (() => void) | null = null;
   const onRequest = (request: Request) => {
@@ -668,10 +693,14 @@ function watchExactDispatch(page: Page, conversationId: string, expectedSha256: 
       const text = user.content.parts.join('\n').replaceAll('\r\n', '\n');
       const textHash = sha(text);
       if (textHash !== expectedSha256) return;
-      attempts.push({
+      const attempt = {
         conversationId, messageId: user.id, parentMessageId: body.parent_message_id,
         textHash, observedAt: new Date().toISOString(),
-      });
+      };
+      attempts.push(attempt);
+      // Persistence is invoked during the request event, not after the
+      // Playwright click/ACK wait. A failed callback marks the result uncertain.
+      onObserved?.(attempt);
       wake?.();
     } catch { /* Unrelated/malformed requests confer no dispatch evidence. */ }
   };

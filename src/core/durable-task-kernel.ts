@@ -12,6 +12,7 @@ import type {
  * an ACK or FINAL. "sendOnce" is NEVER called during recovery.
  */
 export interface ExactSendIntent {
+  readonly clientId: string;
   readonly projectId: string;
   readonly slotId: string;
   readonly slotRevision: number;
@@ -21,7 +22,7 @@ export interface ExactSendIntent {
   readonly kind: AttemptKind;
   readonly content: string;
 }
-export interface ExactTurnQuery extends Omit<ExactSendIntent, 'content'> {
+export interface ExactTurnQuery extends ExactSendIntent {
   readonly externalTurnId: string | null;
 }
 export type SendOutcome =
@@ -142,6 +143,7 @@ export class DurableTaskKernel {
       attempt,
       provider,
       intent: {
+        clientId,
         projectId: task.projectId,
         slotId: task.slotId,
         slotRevision: task.slotRevision,

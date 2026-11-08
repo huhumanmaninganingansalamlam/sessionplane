@@ -26,6 +26,7 @@ export interface TaskProjection {
 export type TaskEvent =
   | { readonly type: 'attempt.planned'; readonly attemptId: string; readonly kind: AttemptKind }
   | { readonly type: 'attempt.dispatched'; readonly attemptId: string; readonly kind: AttemptKind }
+  | { readonly type: 'attempt.dispatch_evidence_recorded'; readonly attemptId: string }
   | { readonly type: 'attempt.acknowledged'; readonly attemptId: string; readonly kind: AttemptKind }
   | { readonly type: 'attempt.uncertain'; readonly attemptId: string; readonly reason: string }
   | { readonly type: 'attempt.failed_before_dispatch'; readonly attemptId: string; readonly reason: string }
@@ -109,6 +110,7 @@ export function reduceTaskProjection(
     case 'timer.scheduled':
     case 'timer.fired':
     case 'decision.action_consumed':
+    case 'attempt.dispatch_evidence_recorded':
     case 'observation.deferred':
       return current;
   }
