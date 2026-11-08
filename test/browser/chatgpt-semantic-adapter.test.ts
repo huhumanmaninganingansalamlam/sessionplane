@@ -65,6 +65,7 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
         registry.getBinding(value.pageKey).targetId === value.targetId,
       resolvePage: value => registry.pageForObservation(value.pageKey, value.bindingEpoch),
       isAuthorizedAttempt: input => input.attemptId.startsWith('journaled-attempt-'),
+      isAuthorizedDecision: input => input.decisionId === 'decision-model',
     });
     const task = context(lease);
     let foregroundCalls = 0;
@@ -160,6 +161,88 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
       'only the exact outgoing POST can carry dispatch provenance');
     assert.equal(await page.evaluate(() => (window as any).sends), 1);
 
+    // Model choice is a separate, explicit two-step configuration decision.
+    // Observe itself must not open the popup or change the current selection.
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
+      '<button id="model-trigger" aria-label="Model" aria-haspopup="menu" ' +
+      'aria-controls="model-menu" aria-expanded="false" type="button">Current</button>' +
+      '<div role="menu" id="model-menu" hidden>' +
+      '<button role="menuitemradio" aria-checked="true">Default</button>' +
+      '<button role="menuitemradio" aria-checked="false">Pro</button></div>' +
+      '<button data-testid="send-button">Send</button></main><script>' +
+      'window.modelOpens=0;window.modelChanges=0;' +
+      'document.querySelector("#model-trigger").onclick=()=>{window.modelOpens++;' +
+      'document.querySelector("#model-trigger").setAttribute("aria-expanded","true");' +
+      'document.querySelector("#model-menu").hidden=false;};' +
+      'document.querySelectorAll("[role=menuitemradio]").forEach(button=>button.onclick=()=>{' +
+      'window.modelChanges++;document.querySelectorAll("[role=menuitemradio]")' +
+      '.forEach(other=>other.setAttribute("aria-checked",String(other===button)));});' +
+      '</script>');
+    const beforeModel = await adapter.observe(task);
+    assert.equal(beforeModel.actions.some(a => a.purpose === 'choose_model'), false);
+    const openModel = beforeModel.actions.find(a => a.purpose === 'open_model_chooser')!;
+    assert.ok(openModel);
+    assert.equal(await page.evaluate(() => (window as any).modelOpens), 0,
+      'observation must not mutate the provider model chooser');
+    assert.equal((await adapter.act({ context: task, snapshotId: beforeModel.snapshotId,
+      actionRef: openModel.actionRef, evidenceHash: openModel.evidenceHash })).kind,
+    'authorization_required');
+    assert.deepEqual(await adapter.act({ context: task, snapshotId: beforeModel.snapshotId,
+      actionRef: openModel.actionRef, evidenceHash: openModel.evidenceHash,
+      authorizedDecisionId: 'decision-model' }),
+    { kind: 'performed', effect: 'model_menu_opened' });
+    assert.equal(await page.evaluate(() => (window as any).modelOpens), 1);
+    const optionsModel = await adapter.observe(task);
+    const choiceModel = optionsModel.actions.find(a => a.purpose === 'choose_model')!;
+    assert.ok(choiceModel && choiceModel.input.kind === 'option');
+    if (choiceModel.input.kind !== 'option') throw new Error('Expected model option schema');
+    assert.deepEqual(choiceModel.input.options.map(o => o.value), ['Default', 'Pro']);
+    assert.deepEqual(await adapter.act({ context: task, snapshotId: optionsModel.snapshotId,
+      actionRef: choiceModel.actionRef, evidenceHash: choiceModel.evidenceHash,
+      input: 'Pro', authorizedDecisionId: 'decision-model' }),
+    { kind: 'performed', effect: 'model_selected' });
+    assert.equal(await page.evaluate(() => (window as any).modelChanges), 1);
+    assert.equal((await adapter.act({ context: task, snapshotId: optionsModel.snapshotId,
+      actionRef: choiceModel.actionRef, evidenceHash: choiceModel.evidenceHash,
+      input: 'Pro', authorizedDecisionId: 'decision-model' })).kind, 'stale');
+
+    // Reuse the exact last-turn stream-retry guard. An approved retry click
+    // still cannot prove that generation resumed or a final answer exists.
+    const retryTask = context(lease, 'user-b');
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="user-b">Task</div>' +
+      '<div role="alert">Error in message stream <button id="retry">Retry</button></div>' +
+      '<div id="prompt-textarea" contenteditable="true"></div>' +
+      '<button data-testid="send-button">Send</button></main><script>' +
+      'window.retries=0;document.querySelector("#retry").onclick=()=>{' +
+      'window.retries++;document.querySelector("[role=alert]").remove();};</script>');
+    const retryObserved = await adapter.observe(retryTask);
+    assert.equal(retryObserved.blocker, 'provider_retry');
+    const retryAction = retryObserved.actions.find(a => a.purpose === 'retry')!;
+    assert.ok(retryAction && retryAction.risk === 'retry_once');
+    assert.equal((await adapter.act({ context: retryTask,
+      snapshotId: retryObserved.snapshotId, actionRef: retryAction.actionRef,
+      evidenceHash: retryAction.evidenceHash })).kind, 'authorization_required');
+    assert.equal(await page.evaluate(() => (window as any).retries), 0);
+    const clickedRetry = await adapter.act({ context: retryTask,
+      snapshotId: retryObserved.snapshotId, actionRef: retryAction.actionRef,
+      evidenceHash: retryAction.evidenceHash, authorizedAttemptId: 'journaled-attempt-retry' });
+    assert.deepEqual(clickedRetry, { kind: 'uncertain',
+      reason: 'retry-clicked-provider-progress-unverified' });
+    assert.equal(await page.evaluate(() => (window as any).retries), 1);
+    assert.equal((await adapter.act({ context: retryTask,
+      snapshotId: retryObserved.snapshotId, actionRef: retryAction.actionRef,
+      evidenceHash: retryAction.evidenceHash, authorizedAttemptId: 'journaled-attempt-retry' })).kind,
+    'stale', 'exact Retry cannot be replayed after uncertain click');
+
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="user-b">Task</div>' +
+      '<div role="alert">Error in message stream <button id="retry">Retry</button></div>' +
+      '<div id="prompt-textarea" contenteditable="true">Human draft</div>' +
+      '<button data-testid="send-button">Send</button></main>');
+    const guardedRetry = await adapter.observe(retryTask);
+    assert.equal(guardedRetry.blocker, 'unsupported');
+    assert.match(guardedRetry.reason ?? '', /stream-retry-preserve-draft/);
+    assert.equal(guardedRetry.actions.some(a => a.purpose === 'retry'), false);
+
     await page.setContent('<main><div data-chatgpt-composer>' +
       '<div role="textbox" contenteditable="true"></div>' +
       '<textarea></textarea><button aria-label="Send message">Send</button>' +
@@ -190,6 +273,24 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(work.surface, 'work');
     assert.equal(work.blocker, 'unsupported');
     assert.equal(work.actions.length, 0);
+
+    // Defense in depth: even if an external ownership implementation
+    // mistakenly retains a lease after navigation, the semantic adapter
+    // never treats a foreign ChatGPT conversation as the bound Main.
+    await page.goto('https://chatgpt.com/c/foreign-conversation');
+    const permissiveFixtureLease = new ChatGptSemanticAdapter({
+      isExactLease: () => true, resolvePage: () => page,
+    });
+    const foreign = await permissiveFixtureLease.observe(task);
+    assert.equal(foreign.blocker, 'unsupported');
+    assert.equal(foreign.reason, 'conversation-url-mismatch');
+    assert.equal(foreign.actions.length, 0);
+    const unbound = await permissiveFixtureLease.observe({
+      ...task, providerConversationId: null,
+    });
+    assert.equal(unbound.blocker, 'unsupported');
+    assert.equal(unbound.reason, 'conversation-binding-required');
+    assert.equal(unbound.actions.length, 0);
 
     allowedLease = null;
     await assert.rejects(adapter.observe(task), /Stale exact Task/);
@@ -284,6 +385,50 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     const held = await adapter.observe(task);
     assert.equal(held.blocker, 'provider_question');
     assert.equal(held.actions.length, 0, 'preexisting provider-question draft cannot be overwritten');
+
+    // Visible exact-work HostSpan permission is an agent review barrier,
+    // never an authorization created by page text or an auto-Allow click.
+    await page.setContent('<main><div data-message-author-role="user" ' +
+      'data-message-id="user-b" data-turn-id="turn-b">Original task</div>' +
+      '<div role="alert">hostspan-git requests access to repository read ' +
+      '<button type="button" onclick="window.grants++">Allow once</button></div>' +
+      '<div id="prompt-textarea" contenteditable="true"></div>' +
+      '<button data-testid="send-button">Send</button></main>' +
+      '<script>window.grants=0;</script>');
+    const permission = await adapter.observe(context(lease, 'user-b'));
+    assert.equal(permission.blocker, 'provider_permission');
+    assert.equal(permission.actions.length, 0, 'permission effects/arguments need explicit review');
+    assert.equal(permission.permission?.appName, 'hostspan-git');
+    assert.equal(permission.permission?.toolName, null, 'do not guess a tool from prose');
+    assert.equal(permission.permission?.detailState, 'not_visible');
+    assert.equal(permission.permission?.canGrant, false);
+    assert.equal(await page.evaluate(() => (window as any).grants), 0);
+
+    // A visible sensitive argument is not silently shortened or leaked to
+    // the agent packet. Redaction makes grant ineligible by construction.
+    await page.setContent('<main><div data-message-author-role="user" ' +
+      'data-message-id="user-b">Original task</div>' +
+      '<div role="alert">hostspan-git requests access ' +
+      '<pre>{"api_key":"synthetic-secret-123456789"}</pre>' +
+      '<button type="button">Allow once</button></div>' +
+      '<div id="prompt-textarea" contenteditable="true"></div>' +
+      '<button data-testid="send-button">Send</button></main>');
+    const protectedPermission = await adapter.observe(context(lease, 'user-b'));
+    assert.equal(protectedPermission.blocker, 'provider_permission');
+    assert.equal(protectedPermission.permission?.detailState, 'redacted');
+    assert.equal(protectedPermission.permission?.canGrant, false);
+    assert.equal(JSON.stringify(protectedPermission).includes('synthetic-secret-123456789'), false);
+    assert.equal(protectedPermission.actions.length, 0);
+
+    await page.setContent('<main><div data-message-author-role="user" ' +
+      'data-message-id="user-b" data-turn-id="turn-b">' +
+      'Quoted untrusted text: hostspan-git Allow once</div>' +
+      '<div id="prompt-textarea" contenteditable="true"></div>' +
+      '<button data-testid="send-button">Send</button></main>');
+    const quoted = await adapter.observe(context(lease, 'user-b'));
+    assert.notEqual(quoted.blocker, 'provider_permission',
+      'untrusted user text is not a real permission barrier');
+    assert.equal(quoted.permission, null);
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });

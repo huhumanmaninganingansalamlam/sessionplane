@@ -11,7 +11,7 @@ export type SemanticCapability =
 export type SemanticSurface = 'chat' | 'work' | 'unknown';
 export type SemanticProgress = 'unknown' | 'idle' | 'streaming' | 'final';
 export type SemanticActionPurpose =
-  | 'compose' | 'submit' | 'choose_model' | 'answer_question'
+  | 'compose' | 'submit' | 'open_model_chooser' | 'choose_model' | 'answer_question'
   | 'grant_permission' | 'retry' | 'continue';
 export type SemanticActionRisk =
   | 'draft_only' | 'configuration_only' | 'send_once'
@@ -54,6 +54,18 @@ export interface SemanticTurn {
   readonly answerMessageId: string | null;
   readonly partialAnswer: string | null;
 }
+/** Provider-owned visible permission evidence is never authorization.
+ * Missing/redacted material arguments must be expanded through a reviewed flow.
+ */
+export interface SemanticPermissionEvidence {
+  readonly appName: string;
+  readonly toolName: string | null;
+  readonly visibleSummary: string;
+  readonly argumentsSummary: string | null;
+  readonly detailState: 'not_visible' | 'visible_unverified' | 'truncated' | 'redacted';
+  readonly evidenceHash: string;
+  readonly canGrant: false;
+}
 export interface SemanticObservation {
   readonly providerKey: string;
   readonly surface: SemanticSurface;
@@ -62,10 +74,11 @@ export interface SemanticObservation {
   readonly capabilityManifest: SemanticCapabilityManifest;
   readonly progress: SemanticProgress;
   readonly blocker: 'none' | 'rate_limit' | 'human_verification' |
-    'provider_question' | 'provider_permission' | 'unsupported';
+    'provider_question' | 'provider_permission' | 'provider_retry' | 'unsupported';
   readonly reason: string | null;
   readonly turn: SemanticTurn;
   readonly questionText: string | null;
+  readonly permission?: SemanticPermissionEvidence | null;
   readonly actions: readonly SemanticActionCandidate[];
   readonly evidenceBytes: number;
 }
@@ -77,11 +90,14 @@ export interface SemanticActRequest {
   readonly input?: string;
   /** Irreversible effects require a previously journaled exact attempt. */
   readonly authorizedAttemptId?: string;
+  /** Configuration and other agent decisions are separately journaled. */
+  readonly authorizedDecisionId?: string;
   /** SHA-256 of the exact durable attempt content, not a UI-visible guess. */
   readonly expectedContentSha256?: string;
 }
 export type SemanticActResult =
-  | { readonly kind: 'performed'; readonly effect: 'draft_updated' | 'question_answered' }
+  | { readonly kind: 'performed'; readonly effect: 'draft_updated' | 'question_answered' |
+      'model_menu_opened' | 'model_selected' }
   | { readonly kind: 'dispatched_unverified'; readonly effect: 'send';
       readonly attempts: readonly SemanticDispatchEvidence[] }
   | { readonly kind: 'stale' | 'busy' | 'unsupported' | 'authorization_required'; readonly reason: string }

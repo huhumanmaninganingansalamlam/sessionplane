@@ -13,7 +13,11 @@ import { observeChatGptDialog } from './dialog-observer.ts';
 import { observeChatGptDom, observeChatGptAlerts } from './dom-observer.ts';
 import { inspectChatGptQuestion, answerChatGptQuestion } from './question.ts';
 import { inspectChatGptFreeTextQuestion, answerChatGptFreeTextQuestion } from './semantic-free-text-question.ts';
+import { inspectSemanticHostSpanPermission } from './semantic-hostspan-permission.ts';
+import { inspectSemanticChatGptModelMenu, openExactChatGptModelMenu,
+  selectExactChatGptModelMenu } from './semantic-model-menu.ts';
 import { observeChatGptSurface } from './surface.ts';
+import { streamRetrySurface } from './stream-retry.ts';
 
 const EDITORS = 'main :is(#prompt-textarea, [data-testid="prompt-textarea"], [contenteditable="true"], textarea, [role="textbox"])';
 const BUTTONS = 'main :is(button, [role="button"])';
@@ -41,6 +45,8 @@ interface CachedAction {
   readonly contextKey: string;
   readonly expiresAtMs: number;
   readonly questionHash: string | null;
+  readonly modelHash: string | null;
+  readonly retryHash: string | null;
 }
 interface ActiveSnapshot {
   readonly snapshotId: string;
@@ -55,7 +61,11 @@ export interface ChatGptSemanticAdapterOptions {
   readonly backendOrigin?: string;
   readonly backendClient?: BackendJsonClient;
   readonly backendRecovery?: ChatGptBackendRecovery;
-  /** Must check the Core's journaled attempt and exact task/slot authorization. */
+  /** Must check the Core's journaled exact model configuration decision. */
+  readonly isAuthorizedDecision?: (input: {
+    context: SemanticTaskContext; purpose: 'open_model_chooser' | 'choose_model';
+    decisionId: string; input: string | null;
+  }) => boolean | Promise<boolean>;
   readonly isAuthorizedAttempt?: (input: {
     context: SemanticTaskContext; purpose: SemanticActionPurpose;
     attemptId: string; contentSha256: string | null; input: string | null;
@@ -71,7 +81,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
   readonly providerKey = 'chatgpt';
   readonly capabilities = Object.freeze({
     providerKey: 'chatgpt', browserRequired: true, contractVersion: 1 as const,
-    supports: ['conversation', 'question', 'continuation'] as const,
+    supports: ['conversation', 'question', 'continuation', 'model_choice'] as const,
   });
   readonly #options: ChatGptSemanticAdapterOptions;
   readonly #gate: PageOperationGate;
@@ -101,6 +111,18 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       answerMessageId: null, partialAnswer: null,
     };
 
+    const conversationError = conversationBindingProblem(page, context);
+    if (conversationError !== null) {
+      // Page ownership alone does not prove that this tab still points to the
+      // bound ChatGPT conversation. Do not inspect a foreign transcript.
+      this.#latest.delete(lease.pageKey);
+      const denied: SemanticObservation = {
+        providerKey: this.providerKey, surface: 'unknown', snapshotId, observedAt,
+        capabilityManifest: this.capabilities, progress: 'unknown', blocker: 'unsupported',
+        reason: conversationError, turn, questionText: null, permission: null, actions: [], evidenceBytes: 0,
+      };
+      return { ...denied, evidenceBytes: Buffer.byteLength(JSON.stringify(denied)) };
+    }
     const surface = await observeChatGptSurface(page);
     const dialog = await observeChatGptDialog(page);
     const ui = await captureUi(page);
@@ -140,6 +162,21 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       blocker = 'provider_permission';
       reason = 'scoped-tool-permission-requires-reviewed-effect-and-arguments';
     }
+    const permission = (blocker === 'none' || blocker === 'provider_permission') &&
+      context.submittedUserMessageId !== null
+      ? await inspectSemanticHostSpanPermission(page, context.submittedUserMessageId) : null;
+    if (permission !== null) {
+      blocker = 'provider_permission';
+      reason = permission.detailState === 'visible_unverified'
+        ? 'scoped-permission-details-still-require-reviewed-authorization'
+        : 'scoped-permission-arguments-missing-or-protected';
+    }
+    const retry = blocker === 'none' ? await inspectExactChatGptRetry(page, context) : null;
+    if (retry !== null) {
+      blocker = retry.available ? 'provider_retry' : 'unsupported';
+      reason = retry.available ? 'exact-stream-retry-requires-journaled-attempt'
+        : `stream-retry-${retry.reason}`;
+    }
     const radioQuestion = blocker === 'none' ? await inspectChatGptQuestion(page) : null;
     const freeTextQuestion = blocker === 'none' && radioQuestion === null
       ? await inspectChatGptFreeTextQuestion(page) : null;
@@ -154,7 +191,8 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
 
     const issue = (purpose: SemanticActionPurpose, effect: string,
       risk: SemanticActionCandidate['risk'], input: SemanticActionCandidate['input'],
-      fingerprint: string, questionHash: string | null = null): void => {
+      fingerprint: string, questionHash: string | null = null,
+      modelHash: string | null = null, retryHash: string | null = null): void => {
       const evidenceHash = sha(JSON.stringify({
         identity: lease, context: contextKey(context), purpose, fingerprint,
       }));
@@ -167,11 +205,14 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       actions.push(option);
       cached.set(actionRef, {
         purpose, evidenceHash, uiFingerprint: fingerprint,
-        contextKey: contextKey(context), expiresAtMs, questionHash,
+        contextKey: contextKey(context), expiresAtMs, questionHash, modelHash, retryHash,
       });
     };
 
-    if (blocker === 'provider_question' && question?.available) {
+    if (blocker === 'provider_retry' && retry?.available) {
+      issue('retry', 'Retry one exact failed provider stream, with no prompt replay',
+        'retry_once', { kind: 'none' }, ui.fingerprint, null, null, retry.evidenceHash);
+    } else if (blocker === 'provider_question' && question?.available) {
       const input = radioQuestion !== null
         ? { kind: 'option' as const, options: radioQuestion.options.map(option => ({
           value: option.answer, enabled: !option.disabled,
@@ -198,12 +239,28 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         blocker = 'unsupported'; reason = 'submit-control-ambiguous';
         actions.length = 0; cached.clear();
       }
+      // This is a two-step, explicit *agent decision*. Read-only observe
+      // never opens menus. Only a linked, uniquely identified simple menu is
+      // supported; advanced Pro effort sliders remain typed unsupported.
+      if (blocker === 'none') {
+        const model = await inspectSemanticChatGptModelMenu(page);
+        if (model?.status === 'closed') {
+          issue('open_model_chooser', 'Inspect currently offered model choices',
+            'configuration_only', { kind: 'none' }, ui.fingerprint,
+            null, model.evidenceHash);
+        } else if (model?.status === 'open') {
+          issue('choose_model', 'Select one verified model menu option',
+            'configuration_only', { kind: 'option', options: model.options.map(o => ({
+              value: o.value, enabled: o.enabled,
+            })) }, ui.fingerprint, null, model.evidenceHash);
+        }
+      }
     }
 
     let observation: SemanticObservation = {
       providerKey: this.providerKey, surface: surface.mode, snapshotId, observedAt,
       capabilityManifest: this.capabilities, progress, blocker, reason, turn,
-      questionText: question?.text ?? null, actions, evidenceBytes: 0,
+      questionText: question?.text ?? null, permission, actions, evidenceBytes: 0,
     };
     let bytes = Buffer.byteLength(JSON.stringify(observation));
     if (bytes > MAX_PACKET_BYTES) {
@@ -230,10 +287,13 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       return { kind: 'stale', reason: 'action-ref-stale-or-foreign' };
     }
     if (action.purpose !== 'compose' && !(await this.#authorized(request, action.purpose))) {
-      return { kind: 'authorization_required', reason: 'journaled-attempt-authorization-unverified' };
+      return { kind: 'authorization_required', reason: 'journaled-action-authorization-unverified' };
     }
     if (action.purpose === 'compose' && (!request.input || request.input.length > MAX_DRAFT)) {
       return { kind: 'unsupported', reason: 'invalid-draft-input' };
+    }
+    if (action.purpose === 'choose_model' && (!request.input || request.input.length > 160)) {
+      return { kind: 'unsupported', reason: 'exact-model-option-required' };
     }
     if (action.purpose === 'answer_question' && (!request.input || request.input.length > 2_000)) {
       return { kind: 'unsupported', reason: 'question-option-required' };
@@ -250,12 +310,44 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     const result = await this.#gate.run(lease, 'mutate', async () => {
       const page = await this.#options.resolvePage(lease);
       this.#checkOrigin(page);
+      if (conversationBindingProblem(page, request.context) !== null) return 'stale' as const;
       const surface = await observeChatGptSurface(page);
       if (surface.mode !== 'chat' || (await observeChatGptDialog(page)).kind !== null) {
         return 'stale' as const;
       }
       const fresh = await captureUi(page);
       if (fresh.fingerprint !== action.uiFingerprint) return 'stale' as const;
+      if (action.purpose === 'open_model_chooser' || action.purpose === 'choose_model') {
+        const model = await inspectSemanticChatGptModelMenu(page);
+        if (!model || model.evidenceHash !== action.modelHash ||
+          !(await this.#authorized(request, action.purpose))) return 'stale' as const;
+        if (action.purpose === 'open_model_chooser') {
+          if (model.status !== 'closed') return 'stale' as const;
+          await openExactChatGptModelMenu(page, model.evidenceHash);
+          return 'model_menu_opened' as const;
+        }
+        if (model.status !== 'open' ||
+          !model.options.some(option => option.value === request.input && option.enabled)) {
+          return 'stale' as const;
+        }
+        await selectExactChatGptModelMenu(page, model.evidenceHash, request.input!);
+        return 'model_selected' as const;
+      }
+      if (action.purpose === 'retry') {
+        const retry = await inspectExactChatGptRetry(page, request.context);
+        if (!retry?.available || retry.evidenceHash !== action.retryHash ||
+          !(await this.#authorized(request, action.purpose)) || !this.#options.isExactLease(lease)) {
+          return 'stale' as const;
+        }
+        const clicked = await page.evaluate(streamRetrySurface, {
+          origin: new URL(page.url()).origin,
+          conversationId: request.context.providerConversationId!,
+          anchor: request.context.submittedUserMessageId!,
+          click: true, expiresAt: Date.now() + 5_000,
+        });
+        return clicked.reason === 'exact-stream-retry' && clicked.clicked
+          ? 'retry_clicked_unverified' as const : 'stale' as const;
+      }
       if (action.purpose === 'answer_question') {
         const radio = await inspectChatGptQuestion(page);
         const freeText = radio === null ? await inspectChatGptFreeTextQuestion(page) : null;
@@ -327,6 +419,9 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if (result.kind !== 'ok') return { kind: 'uncertain', reason: result.reason,
       attempts: capturedAttempts };
     if (result.value === 'stale') return { kind: 'stale', reason: 'semantic-evidence-changed-before-action' };
+    if (result.value === 'retry_clicked_unverified') return {
+      kind: 'uncertain', reason: 'retry-clicked-provider-progress-unverified',
+    };
     if (result.value === 'send') return { kind: 'dispatched_unverified', effect: 'send',
       attempts: capturedAttempts };
     return { kind: 'performed', effect: result.value };
@@ -334,6 +429,15 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
 
   async #authorized(request: SemanticActRequest, purpose: SemanticActionPurpose): Promise<boolean> {
     if (purpose === 'compose') return true;
+    if (purpose === 'open_model_chooser' || purpose === 'choose_model') {
+      if (!request.authorizedDecisionId || !this.#options.isAuthorizedDecision) return false;
+      try {
+        return await this.#options.isAuthorizedDecision({
+          context: request.context, purpose, decisionId: request.authorizedDecisionId,
+          input: request.input ?? null,
+        });
+      } catch { return false; }
+    }
     if (!request.authorizedAttemptId || !this.#options.isAuthorizedAttempt) return false;
     try {
       return await this.#options.isAuthorizedAttempt({
@@ -431,9 +535,44 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
   }
 }
 
+/** Uses the existing exact stream-error guard in read-only mode. It checks
+ * URL, latest owned user message, no competing dialog/generation, draft and
+ * the sole visible retry hit target; it does not alter the page.
+ */
+async function inspectExactChatGptRetry(page: Page, context: SemanticTaskContext) {
+  if (!context.providerConversationId || !context.submittedUserMessageId) return null;
+  const observed = await page.evaluate(streamRetrySurface, {
+    origin: new URL(page.url()).origin,
+    conversationId: context.providerConversationId,
+    anchor: context.submittedUserMessageId,
+    click: false,
+  });
+  if (!observed.present) return null;
+  return {
+    available: observed.reason === 'exact-stream-retry',
+    reason: observed.reason,
+    evidenceHash: sha(JSON.stringify({
+      url: page.url(), context: contextKey(context), reason: observed.reason,
+      centerHit: observed.geometry?.centerHit ?? null,
+    })),
+  };
+}
+
 function sha(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
+/** Mutation requires a previously bound canonical conversation. New-chat
+ * creation needs its own exact dispatch/ACK identity protocol; a leased tab
+ * at the wrong URL or an unknown ID cannot receive an optimistic send.
+ */
+function conversationBindingProblem(page: Page, context: SemanticTaskContext): string | null {
+  const id = context.providerConversationId;
+  if (!id || !/^[A-Za-z0-9_-]{1,160}$/.test(id)) return 'conversation-binding-required';
+  const current = new URL(page.url());
+  const expected = `/c/${encodeURIComponent(id)}`;
+  return current.pathname === expected ? null : 'conversation-url-mismatch';
+}
+
 function contextKey(context: SemanticTaskContext): string {
   return JSON.stringify(context);
 }
