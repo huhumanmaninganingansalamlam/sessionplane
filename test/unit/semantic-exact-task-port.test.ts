@@ -286,3 +286,54 @@ test('semantic Core port rejects a foreign provider observation after drafting',
   assert.equal(adapter.sends, 0, 'never dispatch an action from a foreign provider snapshot');
   assert.equal(journalWrites, 0);
 });
+
+test('semantic Core port requires a stable declared conversation capability before dispatch', async () => {
+  const fake = new FakeSemanticProvider();
+  const intent: ExactSendIntent = {
+    clientId: 'alice', projectId: 'project-1', slotId: 'main', slotRevision: 1,
+    providerConversationId: 'conv-1', taskId: 'task-1',
+    attemptId: 'attempt-1', kind: 'initial', content: 'original question 1',
+  };
+  const context = (query: ExactSendIntent): SemanticTaskContext => ({
+    projectId: query.projectId, slotId: query.slotId,
+    slotRevision: query.slotRevision, taskId: query.taskId,
+    providerConversationId: query.providerConversationId,
+    submittedUserMessageId: null, submittedUserTurnId: null, pageLease: null,
+  });
+  let journalWrites = 0;
+  const port = (adapter: SemanticProviderAdapter) => new SemanticExactTaskPort({
+    adapter, resolveContext: context,
+    dispatchJournal: { record: () => { journalWrites++; }, read: () => null },
+  });
+  const withoutConversation: SemanticProviderAdapter = {
+    providerKey: fake.providerKey,
+    capabilities: { ...fake.capabilities, supports: [] },
+    observe: query => fake.observe(query),
+    act: request => fake.act(request),
+    verify: query => fake.verify(query),
+    recover: query => fake.recover(query),
+  };
+  const unsupportedPort = port(withoutConversation);
+  assert.equal((await unsupportedPort.sendOnce(intent)).kind, 'uncertain');
+  assert.deepEqual(await unsupportedPort.recoverAck({ ...intent, externalTurnId: null }), {
+    kind: 'unavailable', reason: 'semantic-conversation-capability-unavailable',
+  });
+  assert.deepEqual(await unsupportedPort.observeFinal({ ...intent, externalTurnId: 'turn-1' }), {
+    kind: 'unavailable', reason: 'semantic-conversation-capability-unavailable',
+  });
+  assert.equal(fake.observations, 0, 'unsupported adapters are never asked to draft');
+  assert.equal(fake.recovered, 0, 'unsupported adapters cannot perform backend recovery');
+
+  const driftingManifest: SemanticProviderAdapter = {
+    ...withoutConversation,
+    capabilities: fake.capabilities,
+    observe: async query => ({
+      ...(await fake.observe(query)),
+      capabilityManifest: { ...fake.capabilities, supports: [] },
+    }),
+  };
+  assert.equal((await port(driftingManifest).sendOnce(intent)).kind, 'uncertain');
+  assert.equal(fake.observations, 1, 'an unsupported observation must not be acted on');
+  assert.equal(fake.sends, 0);
+  assert.equal(journalWrites, 0);
+});

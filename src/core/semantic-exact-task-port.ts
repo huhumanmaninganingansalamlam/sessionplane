@@ -5,7 +5,7 @@ import type {
   FinalObservation, RecoveryOutcome, SendOutcome,
 } from './durable-task-kernel.ts';
 import type {
-  SemanticActionCandidate, SemanticActResult, SemanticDispatchEvidence,
+  SemanticActionCandidate, SemanticActResult, SemanticDispatchEvidence, SemanticObservation,
   SemanticProviderAdapter, SemanticTaskContext,
 } from '../providers/semantic-adapter.ts';
 
@@ -34,6 +34,22 @@ function sameTask(intent: ExactSendIntent, context: SemanticTaskContext): boolea
   return context.taskId === intent.taskId && context.projectId === intent.projectId &&
     context.slotId === intent.slotId && context.slotRevision === intent.slotRevision &&
     context.providerConversationId === intent.providerConversationId;
+}
+function supportsConversation(adapter: SemanticProviderAdapter): boolean {
+  return adapter.capabilities.providerKey === adapter.providerKey &&
+    adapter.capabilities.contractVersion === 1 &&
+    adapter.capabilities.supports.includes('conversation');
+}
+function isConversationObservation(
+  observation: SemanticObservation, adapter: SemanticProviderAdapter,
+): boolean {
+  const manifest = observation.capabilityManifest;
+  return supportsConversation(adapter) &&
+    observation.providerKey === adapter.providerKey &&
+    manifest.providerKey === adapter.providerKey &&
+    manifest.contractVersion === adapter.capabilities.contractVersion &&
+    manifest.browserRequired === adapter.capabilities.browserRequired &&
+    manifest.supports.includes('conversation');
 }
 function failed(result: SemanticActResult): string {
   return result.kind === 'uncertain' || result.kind === 'stale' ||
@@ -76,13 +92,16 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
     if (!intent.providerConversationId) {
       return { kind: 'uncertain', reason: 'canonical-conversation-binding-required-before-send' };
     }
+    if (!supportsConversation(this.#adapter)) {
+      return { kind: 'uncertain', reason: 'semantic-conversation-capability-unavailable' };
+    }
     try {
       const context = await this.#context(intent);
       if (!sameTask(intent, context)) {
         return { kind: 'uncertain', reason: 'semantic-context-does-not-match-task-binding' };
       }
       let observation = await this.#adapter.observe(context);
-      if (observation.providerKey !== this.providerKey ||
+      if (!isConversationObservation(observation, this.#adapter) ||
         observation.blocker !== 'none' || observation.progress === 'streaming') {
         return { kind: 'uncertain', reason: 'semantic-observation-blocked-or-generating' };
       }
@@ -99,7 +118,7 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
           return { kind: 'uncertain', reason: failed(drafted) };
         }
         observation = await this.#adapter.observe(context);
-        if (observation.providerKey !== this.providerKey ||
+        if (!isConversationObservation(observation, this.#adapter) ||
           observation.blocker !== 'none' || observation.progress === 'streaming') {
           return { kind: 'uncertain', reason: 'semantic-observation-changed-after-draft' };
         }
@@ -144,6 +163,9 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
   }
 
   async recoverAck(query: ExactTurnQuery): Promise<RecoveryOutcome> {
+    if (!supportsConversation(this.#adapter)) {
+      return { kind: 'unavailable', reason: 'semantic-conversation-capability-unavailable' };
+    }
     try {
       const evidence = this.#journal.read(query);
       if (evidence === null || !correlate(query, evidence)) {
@@ -169,6 +191,9 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
   }
 
   async observeFinal(query: ExactTurnQuery): Promise<FinalObservation> {
+    if (!supportsConversation(this.#adapter)) {
+      return { kind: 'unavailable', reason: 'semantic-conversation-capability-unavailable' };
+    }
     if (!query.externalTurnId) {
       return { kind: 'unavailable', reason: 'exact-acknowledged-turn-required' };
     }
