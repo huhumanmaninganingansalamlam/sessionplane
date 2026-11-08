@@ -172,6 +172,10 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
       return { kind: 'unavailable', reason: 'exact-acknowledged-turn-required' };
     }
     try {
+      const evidence = this.#journal.read(query);
+      if (evidence === null || !correlate(query, evidence)) {
+        return { kind: 'unavailable', reason: 'durable-exact-dispatch-evidence-unavailable' };
+      }
       const context = await this.#context(query);
       if (!sameTask(query, context) || (
         context.submittedUserTurnId !== null &&
@@ -179,14 +183,13 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
       )) {
         return { kind: 'unavailable', reason: 'semantic-final-task-or-turn-mismatch' };
       }
-      const evidence = this.#journal.read(query);
-      if (evidence !== null && context.submittedUserMessageId !== null &&
+      if (context.submittedUserMessageId !== null &&
         context.submittedUserMessageId !== evidence.messageId) {
         return { kind: 'unavailable', reason: 'semantic-final-message-boundary-conflict' };
       }
       const exactContext: SemanticTaskContext = {
         ...context,
-        submittedUserMessageId: evidence?.messageId ?? context.submittedUserMessageId,
+        submittedUserMessageId: evidence.messageId,
         submittedUserTurnId: query.externalTurnId,
       };
       const final = await this.#adapter.recover({ context: exactContext, kind: 'final' });

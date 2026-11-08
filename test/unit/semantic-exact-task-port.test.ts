@@ -169,6 +169,21 @@ test('semantic Core bridge persists exact dispatch evidence and recovers ACK/FIN
   assert.equal(recovered.state, 'working');
   assert.equal(adapter.sends, 1, 'recovery never mutates the provider');
   assert.equal(adapter.observations, observedBefore, 'recovery never observes a UI page');
+  // A forged FINAL from an adapter cannot complete an acknowledged attempt
+  // if its exact outgoing dispatch journal has been lost.
+  const forged = new FakeSemanticProvider();
+  forged.recover = async () => ({
+    kind: 'exact_final', externalTurnId: 'turn-1', answerText: 'unproven final',
+  });
+  const withoutJournal = new SemanticExactTaskPort({ adapter: forged,
+    resolveContext, dispatchJournal: { record: journal.record, read: () => null },
+  });
+  const unproven = await new DurableTaskKernel(store, [withoutJournal]).observeFinal({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'attempt-1',
+    resultId: 'result-no-proof', completeTask: true,
+  });
+  assert.equal(unproven, null, 'FINAL requires durable exact POST evidence');
+  assert.equal(store.getFullTask('task-1', 'alice').results.length, 0);
   adapter.finalTurn = 'foreign-turn';
   const foreign = await kernel.observeFinal({ taskId: 'task-1', clientId: 'alice',
     attemptId: 'attempt-1', resultId: 'result-wrong', completeTask: true });
