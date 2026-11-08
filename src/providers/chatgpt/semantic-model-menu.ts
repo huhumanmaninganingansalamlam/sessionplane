@@ -12,6 +12,8 @@ export interface SemanticModelChoice {
   readonly selected: boolean;
 }
 export interface SemanticModelMenu {
+  readonly strategy: 'linked-radio' | 'composer-radix';
+  readonly openerId: string;
   readonly status: 'closed' | 'open' | 'nested' | 'unsupported';
   readonly reason: string | null;
   readonly openerIndex: number;
@@ -24,10 +26,9 @@ export interface SemanticModelMenu {
 }
 
 /**
- * Read-only inspection of an explicitly linked ChatGPT model menu. A single
- * Pro submenu with a separately linked Standard/Extended radio menu is
- * supported as two distinct, reauthorized actions. No UI control is opened
- * while observing, and unknown nested/slider controls fail closed.
+ * Read-only B-specific inspection of linked radio menus (including the
+ * historical Pro submenu) and the observed composer Radix picker. Its
+ * thinking-effort slider is never presented as a model choice or modified.
  */
 export async function inspectSemanticChatGptModelMenu(page: Page): Promise<SemanticModelMenu | null> {
   const data = await page.evaluate(({ openerSelector, labelPattern }) => {
@@ -42,7 +43,8 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
         ? [{ element, index, label }] : [];
     });
     const base = {
-      openerIndex: -1, menuId: '', optionMenuId: '',
+      strategy: 'linked-radio' as 'linked-radio' | 'composer-radix',
+      openerId: '', openerIndex: -1, menuId: '', optionMenuId: '',
       submenuId: '', submenuTriggerIndex: -1,
       label: '', expanded: '',
       options: [] as Array<{ value: string; controlLabel: string;
@@ -54,18 +56,28 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
     const { element, index, label } = selected[0]!;
     const menuId = element.getAttribute('aria-controls') ?? '';
     const expanded = element.getAttribute('aria-expanded') ?? '';
+    const strategy = element.getAttribute('aria-label') === 'ChatGPT 모델 선택'
+      ? 'composer-radix' as const : 'linked-radio' as const;
+    const openerId = element.id;
     const linked = (id: string) => id && /^[A-Za-z0-9_.:-]{1,128}$/.test(id)
       ? [...document.querySelectorAll<HTMLElement>('[role="menu"][id]')]
         .filter(menu => menu.id === id) : [];
     const menus = linked(menuId);
-    const initial = { ...base, openerIndex: index, menuId, label, expanded };
-    // Portals commonly mount only after opening; the declared aria-controls
-    // identity is sufficient to attempt disclosure, but the resulting menu
-    // must be mounted, unique and visible before any model can be chosen.
+    const initial = { ...base, strategy, openerId, openerIndex: index, menuId, label, expanded };
+    // The composer Radix trigger receives aria-controls only after opening.
+    // In that one verified pattern, bind the newly mounted portal back to
+    // this unique trigger via both aria-controls and aria-labelledby.
+    const idValid = (id: string) => /^[A-Za-z0-9_.:-]{1,128}$/.test(id);
     const rootLinked = expanded === 'true'
       ? menus.length === 1 && visible(menus[0]!)
       : menus.length <= 1 && (menus.length === 0 || !visible(menus[0]!));
-    if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(menuId) || !['true', 'false'].includes(expanded) || !rootLinked) {
+    const openerBound = strategy === 'linked-radio' ? idValid(menuId)
+      : idValid(openerId) &&
+        [...document.querySelectorAll<HTMLElement>('[id]')]
+          .filter(candidate => candidate.id === openerId).length === 1 &&
+        (!menuId || idValid(menuId)) &&
+        element.getAttribute('data-state') === (expanded === 'true' ? 'open' : 'closed');
+    if (!openerBound || !['true', 'false'].includes(expanded) || !rootLinked) {
       return { ...initial, status: 'unsupported' as const,
         reason: 'model-menu-link-unverified' };
     }
@@ -96,6 +108,37 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
         !!o.controlLabel && o.controlLabel.length <= 160 &&
         !/^(?:Chat|Work)$/i.test(o.value)) &&
       new Set(options.map(o => o.value)).size === options.length;
+    if (strategy === 'composer-radix') {
+      const inRoot = (selector: string) =>
+        [...root.querySelectorAll<HTMLElement>(selector)]
+          .filter(control => control.closest('[role="menu"]') === root && visible(control));
+      const items = inRoot('[role="menuitem"]');
+      const sliders = inRoot('[role="slider"]');
+      const inputs = inRoot('input, textarea');
+      const modelRadios = inRoot('[role="menuitemradio"]');
+      const options = radios(root);
+      if (root.getAttribute('aria-labelledby') !== openerId ||
+        root.getAttribute('data-state') !== 'open' ||
+        root.querySelector('[role="menu"], [role="menuitemcheckbox"]') !== null ||
+        inputs.length !== 0) {
+        return { ...initial, status: 'unsupported' as const,
+          reason: 'composer-model-menu-link-or-controls-unverified' };
+      }
+      if (modelRadios.length === 0 && items.length === 2 && sliders.length === 1 &&
+        items.filter(item => item.getAttribute('aria-label') === '모델 선택').length === 1 &&
+        items.filter(item => item.getAttribute('aria-label') === '파워').length === 1) {
+        return { ...initial, status: 'nested' as const, reason: null };
+      }
+      if (items.length === 0 && sliders.length === 0 && optionsValid(options) &&
+        modelRadios.every(radio => ['true', 'false'].includes(
+          radio.getAttribute('aria-checked') ?? '')) &&
+        modelRadios.filter(radio => radio.getAttribute('aria-checked') === 'true').length === 1) {
+        return { ...initial, status: 'open' as const, reason: null,
+          optionMenuId: menuId, options };
+      }
+      return { ...initial, status: 'unsupported' as const,
+        reason: 'composer-model-view-ambiguous' };
+    }
     if (unsafe || nested.length > 1) return { ...initial,
       status: 'unsupported' as const, reason: 'nested-or-ambiguous-model-controls' };
     if (nested.length === 0) {
@@ -140,6 +183,7 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
     url: page.url(), ...data,
   })).digest('hex');
   return {
+    strategy: data.strategy, openerId: data.openerId,
     status: data.status, reason: data.reason, openerIndex: data.openerIndex,
     menuId: data.menuId, optionMenuId: data.optionMenuId,
     submenuId: data.submenuId, submenuTriggerIndex: data.submenuTriggerIndex,
@@ -149,9 +193,13 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
 
 export async function openExactChatGptModelMenu(page: Page, expectedHash: string): Promise<void> {
   const current = await inspectSemanticChatGptModelMenu(page);
+  const validIdentity = current?.strategy === 'composer-radix'
+    ? ID.test(current.openerId) &&
+      (current.status === 'closed' || ID.test(current.menuId))
+    : !!current && ID.test(current.menuId);
   if (!current || !['closed', 'nested'].includes(current.status) ||
     current.evidenceHash !== expectedHash || current.openerIndex < 0 ||
-    !ID.test(current.menuId)) {
+    !validIdentity) {
     throw new Error('Model opener changed before action');
   }
   if (current.status === 'closed') {
@@ -160,9 +208,29 @@ export async function openExactChatGptModelMenu(page: Page, expectedHash: string
     try { await button.click({ timeout: 5_000 }); }
     finally { await button.dispose(); }
     const after = await inspectSemanticChatGptModelMenu(page);
-    if (!after || after.menuId !== current.menuId ||
-      !['open', 'nested'].includes(after.status)) {
+    if (!after || after.strategy !== current.strategy ||
+      after.openerId !== current.openerId ||
+      (current.menuId !== '' && after.menuId !== current.menuId) ||
+      !ID.test(after.menuId) || !['open', 'nested'].includes(after.status)) {
       throw new Error('Model menu not verified open after one action');
+    }
+    return;
+  }
+  if (current.strategy === 'composer-radix') {
+    const root = page.locator('[role="menu"][id="' + current.menuId + '"]');
+    if (await root.count() !== 1 || !await root.isVisible()) {
+      throw new Error('Composer model root menu disappeared');
+    }
+    const disclosure = root.getByRole('menuitem', { name: '모델 선택', exact: true });
+    if (await disclosure.count() !== 1 || !await disclosure.isEnabled()) {
+      throw new Error('Composer model list disclosure changed');
+    }
+    await disclosure.click({ timeout: 5_000 });
+    const after = await inspectSemanticChatGptModelMenu(page);
+    if (!after || after.strategy !== current.strategy ||
+      after.openerId !== current.openerId || after.menuId !== current.menuId ||
+      after.status !== 'open' || after.optionMenuId !== current.menuId) {
+      throw new Error('Composer model list not verified after disclosure');
     }
     return;
   }
@@ -206,8 +274,9 @@ export async function selectExactChatGptModelMenu(
   }
   await choice.click({ timeout: 5_000 });
   const after = await inspectSemanticChatGptModelMenu(page);
-  if (!after || after.menuId !== current.menuId || after.status !== 'open' ||
-    after.optionMenuId !== current.optionMenuId ||
+  if (!after || after.strategy !== current.strategy ||
+    after.openerId !== current.openerId || after.menuId !== current.menuId ||
+    after.status !== 'open' || after.optionMenuId !== current.optionMenuId ||
     !after.options.some(o => o.value === option && o.selected)) {
     // Provider may close its menu on selection. Without a trustworthy final
     // selected-state read, do not report successful Pro configuration.

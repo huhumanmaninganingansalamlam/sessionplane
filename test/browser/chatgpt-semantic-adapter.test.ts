@@ -325,6 +325,108 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(brokenPro.actions.some(a => a.purpose === 'choose_model' ||
       a.purpose === 'open_model_chooser'), false);
 
+    // Observed ChatGPT composer picker: the root portal is lazy and gains
+    // aria-controls only after opening. The effort slider and model radios
+    // coexist in the DOM, but only one view is visible at a time.
+    await page.setContent(`
+      <main>
+        <div id="prompt-textarea" contenteditable="true"></div>
+        <button id="radix-opener" aria-label="ChatGPT 모델 선택"
+          aria-haspopup="menu" aria-expanded="false" data-state="closed">추론 수준 Medium</button>
+        <button data-testid="send-button">Send</button>
+      </main>
+      <script>
+        window.radixRootOpens = 0;
+        window.radixModelDisclosures = 0;
+        window.radixSliderChanges = 0;
+        window.radixModelChanges = 0;
+        const opener = document.getElementById('radix-opener');
+        opener.onclick = () => {
+          window.radixRootOpens++;
+          opener.setAttribute('aria-expanded', 'true');
+          opener.setAttribute('data-state', 'open');
+          opener.setAttribute('aria-controls', 'radix-menu');
+          const menu = document.createElement('div');
+          menu.id = 'radix-menu';
+          menu.setAttribute('role', 'menu');
+          menu.setAttribute('aria-labelledby', 'radix-opener');
+          menu.setAttribute('data-state', 'open');
+          menu.innerHTML = '<div role="group">' +
+            '<div id="radix-effort-view">' +
+              '<div role="menuitem" aria-label="모델 선택" id="radix-choose">Medium</div>' +
+              '<div role="menuitem" aria-label="파워">' +
+                '<span role="slider" aria-valuenow="2" aria-valuemin="1" aria-valuemax="5" ' +
+                'style="display:inline-block;width:28px;height:28px"></span>' +
+              '</div></div>' +
+            '<div id="radix-model-view" style="display:none">' +
+              '<div role="menuitemradio" aria-checked="true">GPT-6</div>' +
+              '<div role="menuitemradio" aria-checked="false">GPT-5.6 Sol</div>' +
+            '</div></div>';
+          document.querySelector('main').append(menu);
+          document.querySelector('[role=slider]').onclick = () => window.radixSliderChanges++;
+          document.getElementById('radix-choose').onclick = () => {
+            window.radixModelDisclosures++;
+            document.getElementById('radix-effort-view').style.display = 'none';
+            document.getElementById('radix-model-view').style.display = 'block';
+          };
+          document.querySelectorAll('#radix-model-view [role=menuitemradio]')
+            .forEach(radio => radio.onclick = () => {
+              window.radixModelChanges++;
+              document.querySelectorAll('#radix-model-view [role=menuitemradio]')
+                .forEach(other => other.setAttribute('aria-checked', String(other === radio)));
+            });
+        };
+      </script>
+    `);
+    const radixClosed = await adapter.observe(task);
+    assert.equal(radixClosed.actions.some(a => a.purpose === 'choose_model'), false);
+    const openRadix = radixClosed.actions.find(a => a.purpose === 'open_model_chooser')!;
+    assert.ok(openRadix, 'unmounted composer picker is a read-only disclosed candidate');
+    assert.equal((await adapter.act({ context: task, snapshotId: radixClosed.snapshotId,
+      actionRef: openRadix.actionRef, evidenceHash: openRadix.evidenceHash })).kind,
+    'authorization_required');
+    assert.equal(await page.evaluate(() => (window as any).radixRootOpens), 0);
+    assert.deepEqual(await adapter.act({ context: task, snapshotId: radixClosed.snapshotId,
+      actionRef: openRadix.actionRef, evidenceHash: openRadix.evidenceHash,
+      authorizedDecisionId: 'decision-model' }),
+    { kind: 'performed', effect: 'model_menu_opened' });
+    const radixEffort = await adapter.observe(task);
+    assert.equal(radixEffort.actions.some(a => a.purpose === 'choose_model'), false,
+      'the visible slider is not a model option');
+    const discloseRadix = radixEffort.actions.find(a => a.purpose === 'open_model_chooser')!;
+    assert.ok(discloseRadix, 'model list disclosure must be a separate authorized action');
+    assert.equal((await adapter.act({ context: task, snapshotId: radixEffort.snapshotId,
+      actionRef: discloseRadix.actionRef, evidenceHash: discloseRadix.evidenceHash })).kind,
+    'authorization_required');
+    assert.equal(await page.evaluate(() => (window as any).radixModelDisclosures), 0);
+    assert.deepEqual(await adapter.act({ context: task, snapshotId: radixEffort.snapshotId,
+      actionRef: discloseRadix.actionRef, evidenceHash: discloseRadix.evidenceHash,
+      authorizedDecisionId: 'decision-model' }),
+    { kind: 'performed', effect: 'model_menu_opened' });
+    const radixModels = await adapter.observe(task);
+    const radixChoice = radixModels.actions.find(a => a.purpose === 'choose_model')!;
+    assert.ok(radixChoice && radixChoice.input.kind === 'option');
+    if (radixChoice.input.kind !== 'option') throw new Error('Missing visible Radix model options');
+    assert.deepEqual(radixChoice.input.options.map(o => o.value), ['GPT-6', 'GPT-5.6 Sol']);
+    assert.equal(await page.evaluate(() => (window as any).radixSliderChanges), 0,
+      'no model enumeration may change reasoning effort');
+    assert.equal((await adapter.act({ context: task, snapshotId: radixModels.snapshotId,
+      actionRef: radixChoice.actionRef, evidenceHash: radixChoice.evidenceHash,
+      input: 'GPT-5.6 Sol' })).kind, 'authorization_required');
+    assert.equal(await page.evaluate(() => (window as any).radixModelChanges), 0);
+    assert.deepEqual(await adapter.act({ context: task, snapshotId: radixModels.snapshotId,
+      actionRef: radixChoice.actionRef, evidenceHash: radixChoice.evidenceHash,
+      input: 'GPT-5.6 Sol', authorizedDecisionId: 'decision-model' }),
+    { kind: 'performed', effect: 'model_selected' });
+    assert.equal(await page.evaluate(() => (window as any).radixModelChanges), 1);
+    assert.equal(await page.evaluate(() => (window as any).radixSliderChanges), 0);
+    await page.evaluate(() => document.querySelector('#radix-menu')!
+      .removeAttribute('aria-labelledby'));
+    const unlinkedRadix = await adapter.observe(task);
+    assert.equal(unlinkedRadix.actions.some(a => a.purpose === 'choose_model' ||
+      a.purpose === 'open_model_chooser'), false,
+      'a same-page but unlinked popover is not a trusted model chooser');
+
     // Reuse the exact last-turn stream-retry guard. An approved retry click
     // still cannot prove that generation resumed or a final answer exists.
     const retryTask = context(lease, 'user-b');
