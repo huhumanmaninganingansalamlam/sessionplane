@@ -27,6 +27,9 @@ export interface BackendJsonResponse {
 }
 
 export interface BackendJsonClient {
+  /** Stable identity of the authenticated request context. Rotate on account changes;
+   * wrappers for the same context may share this opaque identity. */
+  readonly authScope?: object;
   get(
     url: string,
     options: {
@@ -46,6 +49,7 @@ export interface ChatGptBackendRecoveryOptions {
 
 interface CachedToken {
   readonly origin: string;
+  readonly authScope: object;
   readonly value: string;
   readonly expiresAtMs: number;
 }
@@ -293,7 +297,9 @@ export class ChatGptBackendRecovery {
     observe?: (evidence: BackendRateLimitEvidence) => void,
   ): Promise<{ readonly token: string } | { readonly recovery: ProviderRecoveryResult; readonly httpStatus?: number; readonly endpointCategory?: 'auth-session' }> {
     const nowMs = this.#now().getTime();
-    if (this.#token !== null && this.#token.origin === origin && this.#token.expiresAtMs > nowMs) {
+    const authScope = client.authScope ?? client;
+    if (this.#token !== null && this.#token.origin === origin &&
+      this.#token.authScope === authScope && this.#token.expiresAtMs > nowMs) {
       return { token: this.#token.value };
     }
 
@@ -318,6 +324,7 @@ export class ChatGptBackendRecovery {
     }
     this.#token = {
       origin,
+      authScope,
       value: token,
       expiresAtMs: nowMs + this.#tokenCacheTtlMs,
     };

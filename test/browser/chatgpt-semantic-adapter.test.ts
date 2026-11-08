@@ -385,6 +385,20 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.match(ambiguous.reason ?? '', /composer-ambiguous/);
     assert.equal(ambiguous.actions.length, 0);
 
+    // Visible provider error and identity-check dialogs are read-only blockers.
+    // Neither an available Send button nor a writable composer overrides them.
+    for (const [dialogText, blocker] of [
+      ['Rate limit reached', 'rate_limit'],
+      ['Verify you are human', 'human_verification'],
+    ] as const) {
+      await page.setContent('<main><div role="alertdialog">' + dialogText + '</div>' +
+        '<div id="prompt-textarea" contenteditable="true"></div>' +
+        '<button data-testid="send-button">Send</button></main>');
+      const blocked = await adapter.observe(task);
+      assert.equal(blocked.blocker, blocker);
+      assert.equal(blocked.actions.length, 0, 'provider dialog cannot authorize a send');
+    }
+
     await page.setContent(NORMAL);
     const stale = await adapter.observe(task);
     const compose = stale.actions.find(a => a.purpose === 'compose')!;

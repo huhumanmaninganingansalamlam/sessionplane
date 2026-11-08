@@ -336,6 +336,50 @@ test('backend recovery never reuses an auth token across trusted ChatGPT origins
   ]);
 });
 
+test('backend auth cache never crosses different clients on the same trusted origin', async () => {
+  let clock = Date.parse('2026-11-08T00:00:00.000Z');
+  const authenticated: string[] = [];
+  const conversationReads: string[] = [];
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('exact-user', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('assistant', 'exact-user', finalAssistant('answer-1', 'Client-bound answer')),
+  ], 'assistant');
+  const client = (label: string): BackendJsonClient => ({ async get(url, options) {
+    if (url.endsWith('/api/auth/session')) {
+      authenticated.push(label);
+      return { status: 200, headers: {}, body: { accessToken: label + '-token' } };
+    }
+    conversationReads.push(label + ':' + options.headers?.authorization);
+    return { status: 200, headers: {}, body: payload };
+  } });
+  const recovery = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1_000, tokenCacheTtlMs: 60_000, now: () => new Date(clock),
+  });
+  const request = { session: sessionSnapshot(), generation: 1 } as const;
+  assert.equal((await recovery.recover(request, client('profile-a'), 'https://chatgpt.com')).kind, 'complete');
+  clock += 6_000;
+  assert.equal((await recovery.recover(request, client('profile-b'), 'https://chatgpt.com')).kind, 'complete');
+  assert.deepEqual(authenticated, ['profile-a', 'profile-b']);
+  assert.deepEqual(conversationReads, [
+    'profile-a:Bearer profile-a-token',
+    'profile-b:Bearer profile-b-token',
+  ]);
+  // The semantic adapter recreates transport wrappers for the same browser
+  // context. A stable authenticated scope retains the intended cache benefit.
+  const cookieJar = {};
+  const wrapped = (): BackendJsonClient => ({ ...client('profile-c'), authScope: cookieJar });
+  clock += 6_000;
+  assert.equal((await recovery.recover(request, wrapped(), 'https://chatgpt.com')).kind, 'complete');
+  clock += 6_000;
+  assert.equal((await recovery.recover(request, wrapped(), 'https://chatgpt.com')).kind, 'complete');
+  assert.deepEqual(authenticated, ['profile-a', 'profile-b', 'profile-c']);
+  assert.deepEqual(conversationReads.slice(2), [
+    'profile-c:Bearer profile-c-token',
+    'profile-c:Bearer profile-c-token',
+  ]);
+});
+
 test('auth GET429 keeps its own safe provenance and cannot leak or create a conversation request', async () => {
   const evidence: BackendRateLimitEvidence[] = [], urls: string[] = [];
   const recovery = new ChatGptBackendRecovery({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000,

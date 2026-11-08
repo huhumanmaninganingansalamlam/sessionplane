@@ -542,9 +542,11 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
 
   async #pageBackendClient(context: SemanticTaskContext): Promise<BackendJsonClient> {
     const { page } = await this.#exactPage(context);
+    const browserContext = page.context();
     return {
+      authScope: browserContext,
       async get(url, options) {
-        const response = await page.context().request.get(url, {
+        const response = await browserContext.request.get(url, {
           failOnStatusCode: false,
           ...(options.headers ? { headers: { ...options.headers } } : {}),
           timeout: options.timeoutMs,
