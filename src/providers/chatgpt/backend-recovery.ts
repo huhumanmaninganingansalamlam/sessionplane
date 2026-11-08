@@ -91,6 +91,33 @@ export class ChatGptBackendRecovery {
     });
   }
 
+  /**
+   * New semantic adapter entry point. Uses the same rate-limited, authenticated
+   * read-only backend transport as legacy recovery without fabricating a
+   * SessionSnapshot. No UI focus or submission is permitted here.
+   */
+  async recoverExactTurn(
+    identity: {
+      readonly conversationId: string | null;
+      readonly submittedUserMessageId: string | null;
+      readonly submittedUserTurnId: string | null;
+    },
+    client: BackendJsonClient,
+    origin: string,
+  ): Promise<ProviderRecoveryResult> {
+    if (identity.conversationId === null ||
+      (identity.submittedUserMessageId === null && identity.submittedUserTurnId === null)) {
+      return unavailable('backend-identity-incomplete');
+    }
+    const result = await this.#conversation(identity.conversationId, client, origin);
+    if ('recovery' in result) return result.recovery;
+    return recoverExactServerFinal(result.body, {
+      conversationId: identity.conversationId,
+      submittedUserMessageId: identity.submittedUserMessageId,
+      submittedUserTurnId: identity.submittedUserTurnId,
+    });
+  }
+
   async recoverAcknowledgement(
     conversationId: string, prompt: string, client: BackendJsonClient, origin: string,
     attempts?: readonly ProviderSubmissionAttempt[],
