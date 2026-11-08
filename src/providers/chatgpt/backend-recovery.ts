@@ -45,6 +45,7 @@ export interface ChatGptBackendRecoveryOptions {
 }
 
 interface CachedToken {
+  readonly origin: string;
   readonly value: string;
   readonly expiresAtMs: number;
 }
@@ -292,7 +293,7 @@ export class ChatGptBackendRecovery {
     observe?: (evidence: BackendRateLimitEvidence) => void,
   ): Promise<{ readonly token: string } | { readonly recovery: ProviderRecoveryResult; readonly httpStatus?: number; readonly endpointCategory?: 'auth-session' }> {
     const nowMs = this.#now().getTime();
-    if (this.#token !== null && this.#token.expiresAtMs > nowMs) {
+    if (this.#token !== null && this.#token.origin === origin && this.#token.expiresAtMs > nowMs) {
       return { token: this.#token.value };
     }
 
@@ -316,6 +317,7 @@ export class ChatGptBackendRecovery {
       return { recovery: unavailable('backend-access-token-missing'), httpStatus: response.status, endpointCategory: 'auth-session' };
     }
     this.#token = {
+      origin,
       value: token,
       expiresAtMs: nowMs + this.#tokenCacheTtlMs,
     };

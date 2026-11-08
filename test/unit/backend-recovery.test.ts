@@ -303,6 +303,39 @@ test('backend client caches access token in memory and classifies Retry-After 42
   );
 });
 
+test('backend recovery never reuses an auth token across trusted ChatGPT origins', async () => {
+  let clock = Date.parse('2026-11-08T00:00:00.000Z');
+  const authOrigins: string[] = [];
+  const authorizedRequests: string[] = [];
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('exact-user', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('assistant', 'exact-user', finalAssistant('answer-1', 'Origin-bound answer')),
+  ], 'assistant');
+  const client: BackendJsonClient = { async get(url, options) {
+    const origin = new URL(url).origin;
+    if (url.endsWith('/api/auth/session')) {
+      authOrigins.push(origin);
+      return { status: 200, headers: {}, body: { accessToken: origin === 'https://chatgpt.com'
+        ? 'chatgpt-origin-token' : 'legacy-origin-token' } };
+    }
+    authorizedRequests.push(origin + ':' + options.headers?.authorization);
+    return { status: 200, headers: {}, body: payload };
+  } };
+  const recovery = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1_000, tokenCacheTtlMs: 60_000, now: () => new Date(clock),
+  });
+  const request = { session: sessionSnapshot(), generation: 1 } as const;
+  assert.equal((await recovery.recover(request, client, 'https://chatgpt.com')).kind, 'complete');
+  clock += 6_000;
+  assert.equal((await recovery.recover(request, client, 'https://chat.openai.com')).kind, 'complete');
+  assert.deepEqual(authOrigins, ['https://chatgpt.com', 'https://chat.openai.com']);
+  assert.deepEqual(authorizedRequests, [
+    'https://chatgpt.com:Bearer chatgpt-origin-token',
+    'https://chat.openai.com:Bearer legacy-origin-token',
+  ]);
+});
+
 test('auth GET429 keeps its own safe provenance and cannot leak or create a conversation request', async () => {
   const evidence: BackendRateLimitEvidence[] = [], urls: string[] = [];
   const recovery = new ChatGptBackendRecovery({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000,
