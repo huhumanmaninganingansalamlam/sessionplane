@@ -249,12 +249,11 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         blocker = 'unsupported'; reason = 'submit-control-ambiguous';
         actions.length = 0; cached.clear();
       }
-      // This is a two-step, explicit *agent decision*. Read-only observe
-      // never opens menus. Only a linked, uniquely identified simple menu is
-      // supported; advanced Pro effort sliders remain typed unsupported.
+      // Model/effort configuration is an explicit agent decision. Read-only
+      // observe never opens either the root menu or a linked Pro submenu.
       if (blocker === 'none') {
         const model = await inspectSemanticChatGptModelMenu(page);
-        if (model?.status === 'closed') {
+        if (model?.status === 'closed' || model?.status === 'nested') {
           issue('open_model_chooser', 'Inspect currently offered model choices',
             'configuration_only', { kind: 'none' }, ui.fingerprint,
             null, model.evidenceHash);
@@ -333,7 +332,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         if (!model || model.evidenceHash !== action.modelHash ||
           !(await this.#authorized(request, action.purpose))) return 'stale' as const;
         if (action.purpose === 'open_model_chooser') {
-          if (model.status !== 'closed') return 'stale' as const;
+          if (model.status !== 'closed' && model.status !== 'nested') return 'stale' as const;
           await openExactChatGptModelMenu(page, model.evidenceHash);
           return 'model_menu_opened' as const;
         }

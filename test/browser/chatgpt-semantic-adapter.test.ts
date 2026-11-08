@@ -210,6 +210,121 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
       actionRef: choiceModel.actionRef, evidenceHash: choiceModel.evidenceHash,
       input: 'Pro', authorizedDecisionId: 'decision-model' })).kind, 'stale');
 
+    // The documented Pro Standard/Extended picker may sit under Pro.
+    // Both disclosure levels require a new journal-authorized action and a
+    // fresh linked-menu observation; no menu opens during observe.
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
+      '<button id="model-trigger" aria-label="Model" aria-haspopup="menu" ' +
+      'aria-controls="model-menu" aria-expanded="false" type="button">Current</button>' +
+      '<div role="menu" id="model-menu" hidden>' +
+      '<button role="menuitemradio" aria-checked="true">Instant</button>' +
+      '<button id="pro-trigger" role="menuitem" aria-haspopup="menu" ' +
+      'aria-controls="pro-effort" aria-expanded="false">Pro</button></div>' +
+      '<div role="menu" id="pro-effort" hidden>' +
+      '<button role="menuitemradio" aria-checked="true">Standard</button>' +
+      '<button role="menuitemradio" aria-checked="false">Extended</button></div>' +
+      '<button data-testid="send-button">Send</button></main><script>' +
+      'window.proRootOpens=0;window.proSubmenuOpens=0;window.proEffortChanges=0;' +
+      'document.querySelector("#model-trigger").onclick=()=>{' +
+      'window.proRootOpens++;document.querySelector("#model-trigger")' +
+      '.setAttribute("aria-expanded","true");' +
+      'document.querySelector("#model-menu").hidden=false;};' +
+      'document.querySelector("#pro-trigger").onclick=()=>{' +
+      'window.proSubmenuOpens++;document.querySelector("#pro-trigger")' +
+      '.setAttribute("aria-expanded","true");' +
+      'document.querySelector("#pro-effort").hidden=false;};' +
+      'document.querySelectorAll("#pro-effort [role=menuitemradio]")' +
+      '.forEach(button=>button.onclick=()=>{window.proEffortChanges++;' +
+      'document.querySelectorAll("#pro-effort [role=menuitemradio]")' +
+      '.forEach(other=>other.setAttribute("aria-checked",String(other===button)));});' +
+      '</script>');
+    const proClosed = await adapter.observe(task);
+    const openProRoot = proClosed.actions.find(a => a.purpose === 'open_model_chooser')!;
+    assert.ok(openProRoot);
+    assert.equal(await page.evaluate(() => (window as any).proRootOpens), 0);
+    assert.deepEqual(await adapter.act({ context: task, snapshotId: proClosed.snapshotId,
+      actionRef: openProRoot.actionRef, evidenceHash: openProRoot.evidenceHash,
+      authorizedDecisionId: 'decision-model' }),
+    { kind: 'performed', effect: 'model_menu_opened' });
+    const proNested = await adapter.observe(task);
+    assert.equal(proNested.actions.some(a => a.purpose === 'choose_model'), false,
+      'a Pro parent entry is not a verified reasoning level');
+    const openProEffort = proNested.actions.find(a => a.purpose === 'open_model_chooser')!;
+    assert.ok(openProEffort);
+    assert.equal(await page.evaluate(() => (window as any).proSubmenuOpens), 0);
+    assert.equal((await adapter.act({ context: task, snapshotId: proNested.snapshotId,
+      actionRef: openProEffort.actionRef, evidenceHash: openProEffort.evidenceHash })).kind,
+    'authorization_required');
+    assert.deepEqual(await adapter.act({ context: task, snapshotId: proNested.snapshotId,
+      actionRef: openProEffort.actionRef, evidenceHash: openProEffort.evidenceHash,
+      authorizedDecisionId: 'decision-model' }),
+    { kind: 'performed', effect: 'model_menu_opened' });
+    assert.equal(await page.evaluate(() => (window as any).proSubmenuOpens), 1);
+    const proEffort = await adapter.observe(task);
+    const selectEffort = proEffort.actions.find(a => a.purpose === 'choose_model')!;
+    assert.ok(selectEffort && selectEffort.input.kind === 'option');
+    if (selectEffort.input.kind !== 'option') throw new Error('Missing Pro level schema');
+    assert.deepEqual(selectEffort.input.options.map(o => o.value),
+      ['Pro Standard', 'Pro Extended']);
+    assert.deepEqual(await adapter.act({ context: task, snapshotId: proEffort.snapshotId,
+      actionRef: selectEffort.actionRef, evidenceHash: selectEffort.evidenceHash,
+      input: 'Pro Extended', authorizedDecisionId: 'decision-model' }),
+    { kind: 'performed', effect: 'model_selected' });
+    assert.equal(await page.evaluate(() => (window as any).proEffortChanges), 1);
+    assert.equal((await adapter.act({ context: task, snapshotId: proEffort.snapshotId,
+      actionRef: selectEffort.actionRef, evidenceHash: selectEffort.evidenceHash,
+      input: 'Pro Extended', authorizedDecisionId: 'decision-model' })).kind, 'stale');
+    // A portal may lazily mount the menu only after disclosure. Use the
+    // declared exact aria-controls ID, then verify the mounted menu afresh.
+    await page.evaluate(() => {
+      const root = document.querySelector<HTMLElement>('#model-menu')!;
+      const sub = document.querySelector<HTMLElement>('#pro-effort')!;
+      const opener = document.querySelector<HTMLButtonElement>('#model-trigger')!;
+      const trigger = document.querySelector<HTMLButtonElement>('#pro-trigger')!;
+      const main = document.querySelector<HTMLElement>('main')!;
+      root.hidden = true;
+      sub.hidden = true;
+      opener.setAttribute('aria-expanded', 'false');
+      trigger.setAttribute('aria-expanded', 'false');
+      root.remove();
+      sub.remove();
+      opener.onclick = () => {
+        opener.setAttribute('aria-expanded', 'true');
+        root.hidden = false;
+        main.append(root);
+      };
+      trigger.onclick = () => {
+        trigger.setAttribute('aria-expanded', 'true');
+        sub.hidden = false;
+        main.append(sub);
+      };
+    });
+    const lazyModel = await adapter.observe(task);
+    const lazyOpen = lazyModel.actions.find(a => a.purpose === 'open_model_chooser')!;
+    assert.ok(lazyOpen);
+    assert.deepEqual(await adapter.act({ context: task, snapshotId: lazyModel.snapshotId,
+      actionRef: lazyOpen.actionRef, evidenceHash: lazyOpen.evidenceHash,
+      authorizedDecisionId: 'decision-model' }),
+    { kind: 'performed', effect: 'model_menu_opened' });
+    const lazyParent = await adapter.observe(task);
+    assert.equal(lazyParent.actions.some(a => a.purpose === 'choose_model'), false);
+    const lazyDisclosure = lazyParent.actions.find(a => a.purpose === 'open_model_chooser')!;
+    assert.ok(lazyDisclosure);
+    assert.deepEqual(await adapter.act({ context: task, snapshotId: lazyParent.snapshotId,
+      actionRef: lazyDisclosure.actionRef, evidenceHash: lazyDisclosure.evidenceHash,
+      authorizedDecisionId: 'decision-model' }),
+    { kind: 'performed', effect: 'model_menu_opened' });
+    const lazyEffort = await adapter.observe(task);
+    const lazyChoice = lazyEffort.actions.find(a => a.purpose === 'choose_model')!;
+    assert.ok(lazyChoice && lazyChoice.input.kind === 'option');
+
+    // Missing submenu linkage is not a license to guess a Pro control.
+    await page.evaluate(() => document.querySelector('#pro-trigger')!
+      .removeAttribute('aria-controls'));
+    const brokenPro = await adapter.observe(task);
+    assert.equal(brokenPro.actions.some(a => a.purpose === 'choose_model' ||
+      a.purpose === 'open_model_chooser'), false);
+
     // Reuse the exact last-turn stream-retry guard. An approved retry click
     // still cannot prove that generation resumed or a final answer exists.
     const retryTask = context(lease, 'user-b');
