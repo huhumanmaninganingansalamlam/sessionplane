@@ -12,6 +12,7 @@ import { ChatGptBackendRecovery, type BackendJsonClient } from './backend-recove
 import { observeChatGptDialog } from './dialog-observer.ts';
 import { observeChatGptDom, observeChatGptAlerts } from './dom-observer.ts';
 import { inspectChatGptQuestion, answerChatGptQuestion } from './question.ts';
+import { inspectChatGptFreeTextQuestion, answerChatGptFreeTextQuestion } from './semantic-free-text-question.ts';
 import { observeChatGptSurface } from './surface.ts';
 
 const EDITORS = 'main :is(#prompt-textarea, [data-testid="prompt-textarea"], [contenteditable="true"], textarea, [role="textbox"])';
@@ -139,7 +140,10 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       blocker = 'provider_permission';
       reason = 'scoped-tool-permission-requires-reviewed-effect-and-arguments';
     }
-    const question = blocker === 'none' ? await inspectChatGptQuestion(page) : null;
+    const radioQuestion = blocker === 'none' ? await inspectChatGptQuestion(page) : null;
+    const freeTextQuestion = blocker === 'none' && radioQuestion === null
+      ? await inspectChatGptFreeTextQuestion(page) : null;
+    const question = radioQuestion ?? freeTextQuestion;
     if (question !== null) {
       blocker = 'provider_question';
       reason = question.available ? 'provider-question-requires-decision' : 'question-evidence-incomplete-or-draft';
@@ -168,10 +172,13 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     };
 
     if (blocker === 'provider_question' && question?.available) {
-      issue('answer_question', 'Answer the exact current provider question once',
-        'send_once', { kind: 'option', options: question.options.map(option => ({
+      const input = radioQuestion !== null
+        ? { kind: 'option' as const, options: radioQuestion.options.map(option => ({
           value: option.answer, enabled: !option.disabled,
-        })) }, ui.fingerprint, question.evidenceHash);
+        })) }
+        : { kind: 'text' as const, maxLength: 2_000 };
+      issue('answer_question', 'Answer the exact current provider question once',
+        'send_once', input, ui.fingerprint, question.evidenceHash);
     } else if (blocker === 'none') {
       // A retained human/provider draft is not disposable. Only an empty
       // editor may be filled; an existing draft can be submitted solely when
@@ -228,7 +235,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if (action.purpose === 'compose' && (!request.input || request.input.length > MAX_DRAFT)) {
       return { kind: 'unsupported', reason: 'invalid-draft-input' };
     }
-    if (action.purpose === 'answer_question' && (!request.input || request.input.length > 500)) {
+    if (action.purpose === 'answer_question' && (!request.input || request.input.length > 2_000)) {
       return { kind: 'unsupported', reason: 'question-option-required' };
     }
     if ((action.purpose === 'submit' || action.purpose === 'continue') &&
@@ -250,25 +257,42 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       const fresh = await captureUi(page);
       if (fresh.fingerprint !== action.uiFingerprint) return 'stale' as const;
       if (action.purpose === 'answer_question') {
-        const question = await inspectChatGptQuestion(page);
-        if (!question?.available || question.evidenceHash !== action.questionHash ||
-          !question.options.some(o => o.answer === request.input && !o.disabled)) {
+        const radio = await inspectChatGptQuestion(page);
+        const freeText = radio === null ? await inspectChatGptFreeTextQuestion(page) : null;
+        if (radio !== null) {
+          if (!radio.available || radio.evidenceHash !== action.questionHash ||
+            !radio.options.some(o => o.answer === request.input && !o.disabled)) {
+            return 'stale' as const;
+          }
+        } else if (!freeText?.available || freeText.evidenceHash !== action.questionHash ||
+          request.input!.length > 2_000) {
           return 'stale' as const;
         }
         if (!(await this.#authorized(request, action.purpose))) return 'stale' as const;
-        await answerChatGptQuestion(page, {
-          answer: request.input!, evidenceHash: action.questionHash!,
-        }, () => {
+        const checkLease = () => {
           if (!this.#options.isExactLease(lease)) throw new Error('Question lease expired');
-        });
+        };
+        if (radio !== null) {
+          await answerChatGptQuestion(page, {
+            answer: request.input!, evidenceHash: action.questionHash!,
+          }, checkLease);
+        } else {
+          await answerChatGptFreeTextQuestion(page, {
+            answer: request.input!, evidenceHash: action.questionHash!,
+          }, checkLease);
+        }
         return 'question_answered' as const;
       }
       if (fresh.editors.length !== 1) return 'stale' as const;
       if (action.purpose === 'compose') {
         if (fresh.editors[0]!.value.length !== 0) return 'stale' as const;
         const editor = await exactHandle(page, EDITORS, fresh.editors[0]!);
-        try { await editor.fill(request.input!, { timeout: 5_000 }); }
-        finally { await editor.dispose(); }
+        try {
+          const existing = await editor.evaluate(element => element instanceof HTMLTextAreaElement
+            ? element.value : element.innerText);
+          if (existing.length !== 0) return 'stale' as const;
+          await editor.fill(request.input!, { timeout: 5_000 });
+        } finally { await editor.dispose(); }
         return 'draft_updated' as const;
       }
       if (action.purpose !== 'submit' && action.purpose !== 'continue') return 'stale' as const;
@@ -282,8 +306,15 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         request.expectedContentSha256!);
       try {
         const button = await exactHandle(page, BUTTONS, fresh.buttons[0]!);
-        try { await button.click({ timeout: 5_000 }); }
-        finally { await button.dispose(); }
+        try {
+          const currentDraft = await page.locator(EDITORS).nth(fresh.editors[0]!.index)
+            .evaluate(element => element instanceof HTMLTextAreaElement
+              ? element.value : (element as HTMLElement).innerText);
+          if (sha(currentDraft.replaceAll('\r\n', '\n')) !== request.expectedContentSha256) {
+            return 'stale' as const;
+          }
+          await button.click({ timeout: 5_000 });
+        } finally { await button.dispose(); }
         capturedAttempts = await watch.collect(350);
       } finally {
         capturedAttempts = watch.snapshot();
@@ -322,15 +353,23 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if (conversationId === null || conversationId.length === 0) {
       return { kind: 'unavailable', reason: 'exact-conversation-id-required' };
     }
-    const client = this.#options.backendClient ?? await this.#pageBackendClient(id);
-    const origin = this.#options.backendOrigin ?? 'https://chatgpt.com';
+    if (query.kind === 'ack' && (!query.prompt || query.attempts?.length !== 1 ||
+      query.attempts[0]!.conversationId !== conversationId)) {
+      return { kind: 'unavailable', reason: 'exact-dispatch-correlation-required' };
+    }
+    let client: BackendJsonClient;
+    let origin: string;
+    try {
+      client = this.#options.backendClient ?? await this.#pageBackendClient(id);
+      origin = this.#options.backendOrigin ??
+        (this.#options.backendClient ? 'https://chatgpt.com'
+          : new URL((await this.#exactPage(id)).page.url()).origin);
+    } catch {
+      return { kind: 'unavailable', reason: 'backend-transport-unavailable' };
+    }
     if (query.kind === 'ack') {
-      if (!query.prompt || query.attempts?.length !== 1 ||
-        query.attempts[0]!.conversationId !== conversationId) {
-        return { kind: 'unavailable', reason: 'exact-dispatch-correlation-required' };
-      }
       let latestReason: string | null = null;
-      const ack = await this.#backend.recoverAcknowledgement(conversationId, query.prompt,
+      const ack = await this.#backend.recoverAcknowledgement(conversationId, query.prompt!,
         client, origin, query.attempts, evidence => { latestReason = evidence.reason; });
       return ack === null
         ? { kind: 'pending', reason: latestReason ?? 'canonical-ack-not-observed' }

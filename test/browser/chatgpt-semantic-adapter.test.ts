@@ -228,7 +228,7 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     const adapter = new ChatGptSemanticAdapter({
       isExactLease: candidate => candidate === lease,
       resolvePage: () => page,
-      isAuthorizedAttempt: input => input.attemptId === 'decision-once',
+      isAuthorizedAttempt: input => input.attemptId.startsWith('decision-'),
     });
     const task = context(lease);
     const observed = await adapter.observe(task);
@@ -253,6 +253,37 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     assert.equal((await adapter.act({ context: task, snapshotId: observed.snapshotId,
       actionRef: action.actionRef, evidenceHash: action.evidenceHash,
       input: 'Keep existing', authorizedAttemptId: 'decision-twice' })).kind, 'stale');
+
+    // A bounded free-text question is a distinct typed input; only a scoped
+    // provider panel may submit it, never an arbitrary form or chat editor.
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
+      '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
+      '<h3>Which repository should we inspect?</h3><form><textarea aria-label="Repository"></textarea>' +
+      '<button type="submit">Submit</button></form></section></main>' +
+      '<script>window.freeAnswer=null;document.querySelector("form").onsubmit=e=>{' +
+      'e.preventDefault();window.freeAnswer=document.querySelector("textarea").value;' +
+      'document.querySelector("section").remove();};</script>');
+    const free = await adapter.observe(task);
+    assert.equal(free.blocker, 'provider_question');
+    assert.match(free.questionText ?? '', /Which repository/);
+    const option = free.actions.find(a => a.purpose === 'answer_question')!;
+    assert.deepEqual(option.input, { kind: 'text', maxLength: 2_000 });
+    const answered = await adapter.act({ context: task, snapshotId: free.snapshotId,
+      actionRef: option.actionRef, evidenceHash: option.evidenceHash,
+      input: 'sessionplane', authorizedAttemptId: 'decision-free-text' });
+    assert.deepEqual(answered, { kind: 'performed', effect: 'question_answered' });
+    assert.equal(await page.evaluate(() => (window as any).freeAnswer), 'sessionplane');
+    assert.equal((await adapter.act({ context: task, snapshotId: free.snapshotId,
+      actionRef: option.actionRef, evidenceHash: option.evidenceHash,
+      input: 'other', authorizedAttemptId: 'decision-free-text' })).kind, 'stale');
+
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
+      '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
+      '<h3>Preserve this partial answer</h3><form><textarea>Human typed</textarea>' +
+      '<button type="submit">Submit</button></form></section></main>');
+    const held = await adapter.observe(task);
+    assert.equal(held.blocker, 'provider_question');
+    assert.equal(held.actions.length, 0, 'preexisting provider-question draft cannot be overwritten');
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });
