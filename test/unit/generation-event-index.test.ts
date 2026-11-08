@@ -31,10 +31,10 @@ test('generation history upgrade bounds original evidence lookups without changi
     assert.equal(before.anchor, null);
     assert.equal(before.absent, null);
     const records = db.prepare('SELECT * FROM events ORDER BY sequence').all();
-    assert.equal(runMigrations(db), 8);
+    assert.equal(runMigrations(db), 9);
     assert.deepEqual(read(), before);
     assert.deepEqual(db.prepare('SELECT * FROM events ORDER BY sequence').all(), records);
-    assert.equal(runMigrations(db), 8, 'ordinary reopen must not repeat the migration');
+    assert.equal(runMigrations(db), 9, 'ordinary reopen must not repeat the migration');
 
     const queries: string[] = [];
     const prepare = db.prepare.bind(db);

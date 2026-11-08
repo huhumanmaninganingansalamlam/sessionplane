@@ -8,6 +8,7 @@ import { teamOwnerIndexMigration } from './0005-team-owner-index.ts';
 import { pageTargetIdentityMigration } from './0006-page-target-identity.ts';
 import { conversationLoadRecoveryMigration } from './0007-conversation-load-recovery.ts';
 import { generationEventIndexMigration } from './0008-generation-event-index.ts';
+import { durableTaskKernelMigration } from './0009-durable-task-kernel.ts';
 
 export interface Migration {
   readonly version: number;
@@ -24,6 +25,7 @@ export const migrations: readonly Migration[] = [
   pageTargetIdentityMigration,
   conversationLoadRecoveryMigration,
   generationEventIndexMigration,
+  durableTaskKernelMigration,
 ];
 
 export function runMigrations(database: DatabaseSync, now: () => Date = () => new Date()): number {
