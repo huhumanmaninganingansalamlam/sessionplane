@@ -99,7 +99,8 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
           return { kind: 'uncertain', reason: failed(drafted) };
         }
         observation = await this.#adapter.observe(context);
-        if (observation.blocker !== 'none' || observation.progress === 'streaming') {
+        if (observation.providerKey !== this.providerKey ||
+          observation.blocker !== 'none' || observation.progress === 'streaming') {
           return { kind: 'uncertain', reason: 'semantic-observation-changed-after-draft' };
         }
       }

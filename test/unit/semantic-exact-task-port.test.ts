@@ -252,3 +252,37 @@ test('unbound new conversation is not submitted or re-created optimistically', a
   assert.equal((await kernel.recoverAck('task-1', 'alice', 'attempt-1')).state, 'uncertain');
   assert.equal(fake.recovered, 0);
 });
+
+test('semantic Core port rejects a foreign provider observation after drafting', async () => {
+  class DriftingProvider extends FakeSemanticProvider {
+    override async observe(context: SemanticTaskContext): Promise<SemanticObservation> {
+      const snapshot = await super.observe(context);
+      return this.observations === 2
+        ? { ...snapshot, providerKey: 'foreign-semantic' } : snapshot;
+    }
+  }
+  const adapter = new DriftingProvider();
+  const intent: ExactSendIntent = {
+    clientId: 'alice', projectId: 'project-1', slotId: 'main', slotRevision: 1,
+    providerConversationId: 'conv-1', taskId: 'task-1',
+    attemptId: 'attempt-1', kind: 'initial', content: 'original question 1',
+  };
+  let journalWrites = 0;
+  const port = new SemanticExactTaskPort({
+    adapter,
+    resolveContext: query => ({
+      projectId: query.projectId, slotId: query.slotId,
+      slotRevision: query.slotRevision, taskId: query.taskId,
+      providerConversationId: query.providerConversationId,
+      submittedUserMessageId: null, submittedUserTurnId: null, pageLease: null,
+    }),
+    dispatchJournal: {
+      record: () => { journalWrites++; },
+      read: () => null,
+    },
+  });
+  assert.equal((await port.sendOnce(intent)).kind, 'uncertain');
+  assert.equal(adapter.observations, 2);
+  assert.equal(adapter.sends, 0, 'never dispatch an action from a foreign provider snapshot');
+  assert.equal(journalWrites, 0);
+});
