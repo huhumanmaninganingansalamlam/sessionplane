@@ -41,8 +41,9 @@ async function exactRoot(page: Page, request: ProviderArtifactRequest, requireAn
     // its one-message assistant group. An ambiguous group cannot own it.
     const group = el.closest<HTMLElement>('[data-chatgpt-search-message-ids]');
     const selection = el.closest<HTMLElement>('[data-chatgpt-selection-message-id]');
+    const groupIds = [...new Set((group?.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/).filter(Boolean))];
     return group?.getAttribute('data-chatgpt-search-unit-key')?.endsWith(':assistant') === true &&
-      group.getAttribute('data-chatgpt-search-message-ids') === expected &&
+      groupIds.length === 1 && groupIds[0] === expected &&
       selection?.getAttribute('data-chatgpt-selection-message-id') === expected &&
       group.querySelectorAll('[data-dil-message-id]').length === 1 &&
       group.contains(selection)

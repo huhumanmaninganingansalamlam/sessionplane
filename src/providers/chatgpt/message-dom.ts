@@ -92,8 +92,9 @@ export async function readChatGptMessageObservation(page: Page, includeArtifacts
         // Widen only for a single uniquely bound message; never the page.
         const group = node.closest<HTMLElement>('[data-chatgpt-search-message-ids]');
         const selection = node.closest<HTMLElement>('[data-chatgpt-selection-message-id]');
+        const groupIds = [...new Set((group?.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/).filter(Boolean))];
         if (group?.getAttribute('data-chatgpt-search-unit-key')?.endsWith(':assistant') === true &&
-          group.getAttribute('data-chatgpt-search-message-ids') === messageId &&
+          groupIds.length === 1 && groupIds[0] === messageId &&
           selection?.getAttribute('data-chatgpt-selection-message-id') === messageId &&
           group.querySelectorAll('[data-dil-message-id]').length === 1 &&
           group.contains(selection)) artifactScope = group;

@@ -218,6 +218,13 @@ test('completed exact artifact discovery restores a virtualized answer through t
     assert.equal(await page.evaluate(() => (window as any).cardClicks), 0,
       'discovering a file card never activates its download');
     await page.locator('[data-chatgpt-search-unit-key="original-final:assistant"]')
+      .evaluate(node => node.setAttribute('data-chatgpt-search-message-ids', 'original-final original-final'));
+    assert.deepEqual((await adapter.discoverArtifacts(request)).map(file => file.name).sort(),
+      ['dil-card.md', 'dil-link.txt'],
+      'repeating one verified assistant ID does not create an ambiguous group');
+    assert.equal(await page.evaluate(() => (window as any).cardClicks), 0);
+
+    await page.locator('[data-chatgpt-search-unit-key="original-final:assistant"]')
       .evaluate(node => node.setAttribute('data-chatgpt-search-message-ids', 'original-final foreign-id'));
     assert.deepEqual((await adapter.discoverArtifacts(request)).map(file => file.name), [],
       'a group with multiple message IDs cannot own the exact answer artifacts');

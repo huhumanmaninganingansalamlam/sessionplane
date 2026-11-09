@@ -22,6 +22,7 @@ import { streamRetrySurface } from './stream-retry.ts';
 
 const EDITORS = 'main :is(#prompt-textarea, [data-testid="prompt-textarea"], [contenteditable="true"], textarea, [role="textbox"])';
 const BUTTONS = 'main :is(button, [role="button"])';
+const EMPTY_PROSEMIRROR_MARKER = ':scope > p.placeholder:only-child > br.ProseMirror-trailingBreak:only-child';
 const MAX_PACKET_BYTES = 12 * 1024;
 const MAX_DRAFT = 16_000;
 const REF_TTL_MS = 30_000;
@@ -411,8 +412,13 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         if (fresh.editors[0]!.value.length !== 0) return 'stale' as const;
         const editor = await exactHandle(page, EDITORS, fresh.editors[0]!);
         try {
-          const existing = await editor.evaluate(element => element instanceof HTMLTextAreaElement
-            ? element.value : element.innerText);
+          const existing = await editor.evaluate((element, marker) => {
+            if (element instanceof HTMLTextAreaElement) return element.value;
+            const raw = element.innerText;
+            const structuralPlaceholder = element.classList.contains('ProseMirror') && raw === '\n' &&
+              element.textContent === '' && element.querySelector(marker) !== null;
+            return structuralPlaceholder ? '' : raw === '' && element.textContent !== '' ? element.textContent : raw;
+          }, EMPTY_PROSEMIRROR_MARKER);
           if (existing.length !== 0) return 'stale' as const;
           await editor.fill(request.input!, { timeout: 5_000 });
         } finally { await editor.dispose(); }
@@ -632,7 +638,7 @@ function exactContext(context: SemanticTaskContext, lease: OwnedPageIdentity): b
  * indexes/selectors/DOM in the observation or actionRef.
  */
 async function captureUi(page: Page): Promise<UiSnapshot> {
-  const ui = await page.evaluate(({ editorsSelector, buttonSelector, sendPattern }) => {
+  const ui = await page.evaluate(({ editorsSelector, buttonSelector, sendPattern, emptyEditorMarker }) => {
     const visible = (element: Element) =>
       !element.closest('nav, aside, article, [role="navigation"], [role="search"], [aria-hidden="true"], [inert], [data-message-author-role], [data-chatgpt-search-message-ids], .markdown') &&
       element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
@@ -647,7 +653,12 @@ async function captureUi(page: Page): Promise<UiSnapshot> {
     const allEditors = [...document.querySelectorAll<HTMLElement>(editorsSelector)];
     const editors = allEditors.flatMap((e, index) => {
       if (!visible(e) || !enabled(e) || !(e.isContentEditable || e instanceof HTMLTextAreaElement)) return [];
-      const value = e instanceof HTMLTextAreaElement ? e.value : e.innerText;
+      const raw = e instanceof HTMLTextAreaElement ? e.value : e.innerText;
+      const structuralPlaceholder = !(e instanceof HTMLTextAreaElement) && e.classList.contains('ProseMirror') &&
+        raw === '\n' && e.textContent === '' && e.querySelector(emptyEditorMarker) !== null;
+      // innerText may collapse a human-entered whitespace-only paragraph to an
+      // empty string. textContent is the final guard against overwriting it.
+      const value = structuralPlaceholder ? '' : raw === '' && e.textContent !== '' ? e.textContent : raw;
       return [{ index, signature: signature(e), value, enabled: true }];
     });
     const editor = editors.length === 1 ? allEditors[editors[0]!.index] ?? null : null;
@@ -662,7 +673,8 @@ async function captureUi(page: Page): Promise<UiSnapshot> {
       return [{ index, signature: signature(e), value: label, enabled: enabled(e) }];
     });
     return { editors, buttons };
-  }, { editorsSelector: EDITORS, buttonSelector: BUTTONS, sendPattern: SEND_LABEL.source });
+  }, { editorsSelector: EDITORS, buttonSelector: BUTTONS, sendPattern: SEND_LABEL.source,
+    emptyEditorMarker: EMPTY_PROSEMIRROR_MARKER });
   const editor = ui.editors.length === 1 ? ui.editors[0]! : null;
   const draftSha256 = editor === null ? null : sha(editor.value.replaceAll('\r\n', '\n'));
   return {

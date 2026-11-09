@@ -10,6 +10,7 @@ import type { OwnedPageIdentity } from '../../src/browser/owned-page-lifecycle.t
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 import { ChatGptBackendRecovery, type BackendJsonClient } from '../../src/providers/chatgpt/backend-recovery.ts';
 import { ChatGptSemanticAdapter } from '../../src/providers/chatgpt/semantic-adapter.ts';
+import { inspectSemanticHostSpanPermission } from '../../src/providers/chatgpt/semantic-hostspan-permission.ts';
 import { observeChatGptDom } from '../../src/providers/chatgpt/dom-observer.ts';
 import type { SemanticTaskContext } from '../../src/providers/semantic-adapter.ts';
 
@@ -125,6 +126,40 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
         assert.equal(await page.evaluate(() => (window as any).foreignClicks), 0,
           'message-body buttons are not executable chat send controls');
     }
+
+    // The real Chat editor renders an empty ProseMirror paragraph as innerText '\n'.
+    // It is a structural placeholder, not a human-written draft.
+    await page.setContent('<main><section data-chatgpt-composer><div class="ProseMirror" role="textbox" contenteditable="true">' +
+      '<p class="placeholder before:composer-placeholder"><br class="ProseMirror-trailingBreak"></p></div>' +
+      '<button data-testid="send-button">Send</button></section></main>');
+    assert.equal(await page.locator('.ProseMirror').innerText(), '\n');
+    assert.equal(await page.locator('.ProseMirror').textContent(), '');
+    const placeholder = await adapter.observe(task);
+    assert.equal(placeholder.blocker, 'none');
+    const placeholderCompose = placeholder.actions.find(action => action.purpose === 'compose')!;
+    assert.ok(placeholderCompose, 'structurally empty ProseMirror must allow composing');
+    assert.equal((await adapter.act({ context: task, snapshotId: placeholder.snapshotId,
+      actionRef: placeholderCompose.actionRef, evidenceHash: placeholderCompose.evidenceHash,
+      input: 'Exact blank editor' })).kind, 'performed');
+    assert.equal(await page.locator('.ProseMirror').innerText(), 'Exact blank editor');
+    await page.setContent('<main><section data-chatgpt-composer><div class="ProseMirror" role="textbox" contenteditable="true">' +
+      '<p> </p></div><button data-testid="send-button">Send</button></section></main>');
+    const humanWhitespace = await adapter.observe(task);
+    assert.equal(humanWhitespace.actions.some(action => action.purpose === 'compose'), false,
+      'a literal human space remains a protected draft');
+
+    // If a person types after observation, the stale compose ref must not erase it.
+    await page.locator('.ProseMirror').evaluate(element => {
+      element.innerHTML = '<p class="placeholder"><br class="ProseMirror-trailingBreak"></p>';
+    });
+    const beforeTyping = await adapter.observe(task);
+    const pendingCompose = beforeTyping.actions.find(action => action.purpose === 'compose')!;
+    assert.ok(pendingCompose);
+    await page.locator('.ProseMirror').evaluate(element => { element.innerHTML = '<p> </p>'; });
+    assert.equal((await adapter.act({ context: task, snapshotId: beforeTyping.snapshotId,
+      actionRef: pendingCompose.actionRef, evidenceHash: pendingCompose.evidenceHash,
+      input: 'Must not replace a human draft' })).kind, 'stale');
+    assert.equal(await page.locator('.ProseMirror').textContent(), ' ');
 
     // Never overwrite a retained human draft just because the editor is
     // technically editable. Its submitted hash must instead match a journal.
@@ -785,6 +820,18 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     assert.equal(permission.permission?.detailState, 'not_visible');
     assert.equal(permission.permission?.canGrant, false);
     assert.equal(await page.evaluate(() => (window as any).grants), 0);
+
+    assert.equal((await inspectSemanticHostSpanPermission(page, 'user-b'))?.appName, 'hostspan-git');
+    const legacyUser = page.locator('[data-message-author-role="user"]');
+    await legacyUser.evaluate(node => node.setAttribute('data-dil-message-id', 'other-user'));
+    assert.equal(await inspectSemanticHostSpanPermission(page, 'user-b'), null,
+      'conflicting DIL ID cannot borrow the requested user identity');
+    await legacyUser.evaluate(node => {
+      node.setAttribute('data-message-id', 'other-user');
+      node.setAttribute('data-dil-message-id', 'user-b');
+    });
+    assert.equal(await inspectSemanticHostSpanPermission(page, 'user-b'), null,
+      'a foreign message cannot borrow the requested DIL identity');
 
     // The live DIL renderer places the user ID on an ancestor search group,
     // not on the visible user bubble; a real permission card must still bind.

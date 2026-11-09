@@ -43,15 +43,19 @@ export async function inspectSemanticHostSpanPermission(
           ids.length === 1 ? ids[0]! : null;
       }
       const identity = node.closest('[data-message-id], [data-turn-id], [data-dil-message-id]') ?? node;
-      const values = [
+      const messageIds = [...new Set([
         identity.getAttribute('data-message-id'),
-        identity.getAttribute('data-turn-id'),
         identity.getAttribute('data-dil-message-id'),
         node.getAttribute('data-message-id'),
         node.getAttribute('data-dil-message-id'),
         ...(node.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/),
-      ].filter(Boolean);
-      return values.length === 1 ? values[0] : values.includes(userId) ? userId : null;
+      ].filter((id): id is string => id !== null && id !== ''))];
+      if (messageIds.length > 0) return messageIds.length === 1 ? messageIds[0]! : null;
+      // A legacy turn ID may fill a missing message ID, never override one.
+      const turnIds = [...new Set([
+        identity.getAttribute('data-turn-id'), node.getAttribute('data-turn-id'),
+      ].filter((id): id is string => id !== null && id !== ''))];
+      return turnIds.length === 1 ? turnIds[0]! : null;
     };
     const users = [...document.querySelectorAll<HTMLElement>(
       '[data-message-author-role="user"], [data-user-message-bubble]',
