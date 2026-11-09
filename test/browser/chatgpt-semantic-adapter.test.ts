@@ -685,6 +685,42 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     assert.equal(permission.permission?.canGrant, false);
     assert.equal(await page.evaluate(() => (window as any).grants), 0);
 
+    // The live DIL renderer places the user ID on an ancestor search group,
+    // not on the visible user bubble; a real permission card must still bind.
+    await page.setContent(`<main>
+      <section data-talvt-turn-state="complete">
+        <div data-chatgpt-search-unit-key="user-b:user" data-chatgpt-search-message-ids="user-b">
+          <div data-user-message-bubble="true">Original task</div>
+        </div>
+        <div data-chatgpt-search-unit-key="answer-b:assistant" data-chatgpt-search-message-ids="answer-b">
+          <div data-chatgpt-selection-message-id="answer-b">
+            <div data-dil-message-id="answer-b">OK</div>
+          </div>
+        </div>
+      </section>
+      <div role="alert">hostspan-git requests access to repository read
+        <button type="button">Allow once</button>
+      </div>
+      <div id="prompt-textarea" contenteditable="true"></div>
+      <button data-testid="send-button">Send</button>
+    </main>`);
+    const dilPermission = await adapter.observe(context(lease, 'user-b'));
+    assert.equal(dilPermission.blocker, 'provider_permission');
+    assert.equal(dilPermission.permission?.appName, 'hostspan-git');
+    assert.equal(dilPermission.permission?.canGrant, false);
+    await page.evaluate(() => document.querySelector('[data-chatgpt-search-message-ids]')!
+      .setAttribute('data-chatgpt-search-message-ids', 'user-b other-user'));
+    const ambiguousDilPermission = await adapter.observe(context(lease, 'user-b'));
+    assert.equal(ambiguousDilPermission.permission, null,
+      'multiple ancestor message IDs cannot grant the original user identity');
+    await page.evaluate(() => {
+      const group = document.querySelector('[data-chatgpt-search-message-ids]')!;
+      group.setAttribute('data-chatgpt-search-message-ids', 'user-b');
+      group.setAttribute('data-chatgpt-search-unit-key', 'answer-b:assistant');
+    });
+    assert.equal((await adapter.observe(context(lease, 'user-b'))).permission, null,
+      'assistant search groups cannot anchor a user permission');
+
     // A visible sensitive argument is not silently shortened or leaked to
     // the agent packet. Redaction makes grant ineligible by construction.
     await page.setContent('<main><div data-message-author-role="user" ' +

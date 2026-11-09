@@ -32,6 +32,16 @@ export async function inspectSemanticHostSpanPermission(
       e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
       e.getBoundingClientRect().width > 0;
     const getId = (node: Element) => {
+      // Current DIL user bubbles carry identity on the enclosing transcript group.
+      // Only a single ID on an explicit user unit can anchor a permission.
+      const group = node.matches('[data-user-message-bubble]')
+        ? node.closest<HTMLElement>('[data-chatgpt-search-message-ids]') : null;
+      if (group !== null) {
+        const ids = [...new Set((group.getAttribute('data-chatgpt-search-message-ids') ?? '')
+          .split(/\s+/).filter(Boolean))];
+        return group.getAttribute('data-chatgpt-search-unit-key')?.endsWith(':user') === true &&
+          ids.length === 1 ? ids[0]! : null;
+      }
       const identity = node.closest('[data-message-id], [data-turn-id], [data-dil-message-id]') ?? node;
       const values = [
         identity.getAttribute('data-message-id'),
