@@ -231,6 +231,23 @@ test('completed exact artifact discovery restores a virtualized answer through t
     const dilLink = dilFiles.find(file => file.name === 'dil-link.txt')!;
     assert.equal(Buffer.from((await adapter.downloadArtifact(request, dilLink)).bytes).toString(),
       'DIL-LINK-BYTES');
+    await page.evaluate(() => {
+      (window as any).artifactFetches = 0;
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = (...args) => {
+        (window as any).artifactFetches++;
+        return originalFetch(...args);
+      };
+    });
+    for (const forgedLink of [
+      { ...dilLink, name: 'forged-link.txt' },
+      { ...dilLink, mediaType: 'text/plain' },
+    ]) {
+      await assert.rejects(() => adapter.downloadArtifact(request, forgedLink),
+        { errorCode: 'provider.artifacts-unavailable' });
+    }
+    assert.equal(await page.evaluate(() => (window as any).artifactFetches), 0,
+      'wrong link metadata must be rejected before fetch');
     assert.equal(await page.evaluate(() => (window as any).cardClicks), 0,
       'discovering a file card never activates its download');
     const foreignSource = 'data:text/plain,FOREIGN';

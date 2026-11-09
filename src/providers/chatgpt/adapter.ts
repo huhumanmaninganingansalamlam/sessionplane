@@ -510,7 +510,7 @@ export class ChatGptAdapter implements ProviderAdapter {
       const exactAnswer = await exactRoot(page, request);
       let result;
       try {
-        result = await exactAnswer.evaluate(async (root, { sourceUrl, selector }) => {
+        result = await exactAnswer.evaluate(async (root, { sourceUrl, selector, expectedName, expectedMediaType, fallbackName }) => {
           const links = [...root.querySelectorAll<HTMLAnchorElement | HTMLImageElement>(selector)];
           const matches = links.filter(element =>
             (element instanceof HTMLAnchorElement ? element.href : element.src) === sourceUrl);
@@ -522,6 +522,12 @@ export class ChatGptAdapter implements ProviderAdapter {
           const name = (element instanceof HTMLAnchorElement ? element.download : element.alt) ||
             element.textContent?.trim() || '';
           const mediaType = element instanceof HTMLImageElement ? 'image/*' : null;
+          const normalizedName = (name || fallbackName).trim().replaceAll(/[\\/\u0000]/g, '_');
+          if ((normalizedName || 'chatgpt-artifact').slice(0, 255) !== expectedName ||
+              mediaType !== expectedMediaType) {
+            return { sourceVerified: false, name, mediaType,
+              ok: false, status: 0, base64: '' };
+          }
           const response = await fetch(sourceUrl, { credentials: 'include' }).catch(() => null);
           if (response === null || !response.ok) {
             return { sourceVerified: root.isConnected, name, mediaType,
@@ -535,7 +541,9 @@ export class ChatGptAdapter implements ProviderAdapter {
           }
           return { sourceVerified: root.isConnected, name, mediaType,
             ok: true, status: response.status, base64: btoa(binary) };
-        }, { sourceUrl: candidate.sourceUrl, selector: CHATGPT_SELECTORS.artifactLinks.join(', ') });
+        }, { sourceUrl: candidate.sourceUrl, selector: CHATGPT_SELECTORS.artifactLinks.join(', '),
+          expectedName: candidate.name, expectedMediaType: candidate.mediaType,
+          fallbackName: nameFromSource(candidate.sourceUrl) });
       } finally { await exactAnswer.dispose(); }
       this.#requireExactArtifactPage(request);
       if (!result.sourceVerified ||
