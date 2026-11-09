@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { BrowserOwner } from '../../src/browser/browser-owner.ts';
+import { BrowserOwner, BrowserOwnerError } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
@@ -156,6 +156,13 @@ test('completed exact artifact discovery restores a virtualized answer through t
       return route.fulfill({ status: 200, contentType: 'text/html', body: '<main></main>' });
     });
     await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    let unownedActivations = 0;
+    await assert.rejects(() => owner.captureDownload(page, 'unowned.txt', async () => {
+      unownedActivations++;
+      throw new Error('Unowned download callback was invoked');
+    }), (error: unknown) => error instanceof BrowserOwnerError &&
+      error.errorCode === 'session.page-identity-unverified');
+    assert.equal(unownedActivations, 0, 'an unowned page must not be activated');
     registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
     await page.setContent(`<main><div id="turns"><article data-message-author-role="user" data-message-id="old">Old turn</article></div>
       <textarea></textarea><button aria-label="맨 아래로 스크롤">↓</button></main>`);

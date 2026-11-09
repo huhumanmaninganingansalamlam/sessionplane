@@ -345,6 +345,16 @@ export class BrowserOwner {
 
   async captureDownload(page: Page, name: string, activate: () => Promise<void>): Promise<Uint8Array> {
     if (this.#browser === null || this.#state !== 'ready') throw new BrowserOwnerError('browser.unavailable', 'Download owner is not ready');
+    // Only a currently owned Page from this exact browser can activate a download.
+    const owned = this.#pageRegistry.listBindings({ includeClosed: false }).filter(binding => {
+      if (binding.state !== 'owned' || binding.targetId === null) return false;
+      try { return this.#pageRegistry.pageForObservation(binding.pageKey, binding.bindingEpoch) === page; }
+      catch { return false; }
+    });
+    if (page.context() !== this.#requireContext() || owned.length !== 1) {
+      throw new BrowserOwnerError('session.page-identity-unverified', 'Download requires one exact owned page');
+    }
+    const exactOwner = owned[0]!;
     // noDefaults adoption intentionally skips Playwright's download setup. Restore
     // only the dedicated profile's download transport, without per-page overrides.
     const directory = path.join(this.#profileDir, 'sessionplane-downloads');
@@ -392,6 +402,13 @@ export class BrowserOwner {
     control.on('Browser.downloadProgress', onProgress);
     const timer = setTimeout(() => fail('No confirmed download completion'), 15_000);
     try {
+      const current = this.#pageRegistry.refreshPage(exactOwner.pageKey);
+      if (current.state !== 'owned' || current.bindingEpoch !== exactOwner.bindingEpoch ||
+          current.targetId !== exactOwner.targetId || current.sessionId !== exactOwner.sessionId ||
+          current.generation !== exactOwner.generation || current.conversationId !== exactOwner.conversationId ||
+          this.#pageRegistry.pageForObservation(exactOwner.pageKey, exactOwner.bindingEpoch) !== page) {
+        throw new BrowserOwnerError('session.page-identity-unverified', 'Download page ownership changed before activation');
+      }
       await activate();
       const result = await settled;
       if ('error' in result) throw result.error;
