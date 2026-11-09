@@ -10,6 +10,7 @@ import type { OwnedPageIdentity } from '../../src/browser/owned-page-lifecycle.t
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 import { ChatGptBackendRecovery, type BackendJsonClient } from '../../src/providers/chatgpt/backend-recovery.ts';
 import { ChatGptSemanticAdapter } from '../../src/providers/chatgpt/semantic-adapter.ts';
+import { observeChatGptDom } from '../../src/providers/chatgpt/dom-observer.ts';
 import type { SemanticTaskContext } from '../../src/providers/semantic-adapter.ts';
 
 const digest = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -426,6 +427,37 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(unlinkedRadix.actions.some(a => a.purpose === 'choose_model' ||
       a.purpose === 'open_model_chooser'), false,
       'a same-page but unlinked popover is not a trusted model chooser');
+
+    // The observed ChatGPT DIL renderer has no legacy author-role nodes.
+    // A complete turn wrapper is a UI hint, never canonical final evidence.
+    await page.setContent(`<main>
+      <section data-talvt-turn-state="complete">
+        <div data-chatgpt-search-unit-key="user-b:user" data-chatgpt-search-message-ids="user-b">
+          <div data-user-message-bubble="true">SessionPlane 연결 테스트입니다. OK만 답해주세요.</div>
+        </div>
+        <div data-chatgpt-search-unit-key="answer-b:assistant"
+          data-chatgpt-search-message-ids="answer-b">
+          <div data-chatgpt-selection-message-id="answer-b">
+            <div data-dil-message-id="answer-b" data-dil-response>
+              <p><span data-d-stream-run>OK</span></p>
+            </div>
+          </div>
+        </div>
+      </section>
+      <div id="prompt-textarea" contenteditable="true"></div>
+      <button data-testid="send-button">Send</button>
+    </main>`);
+    const dilTurn = await adapter.observe(context(lease, 'user-b'));
+    assert.equal(dilTurn.surface, 'chat');
+    assert.equal(dilTurn.turn.submittedUserFound, true);
+    assert.equal(dilTurn.turn.answerMessageId, 'answer-b');
+    assert.equal(dilTurn.turn.partialAnswer, 'OK');
+    const dilCandidate = await observeChatGptDom(page, {
+      submittedUserMessageId: 'user-b', submittedUserTurnId: null,
+    });
+    assert.equal(dilCandidate.candidate?.terminalMarker, false,
+      'provider turn wrapper alone is not canonical final evidence');
+    assert.equal(dilCandidate.candidate?.streamingMarker, false);
 
     // Reuse the exact last-turn stream-retry guard. An approved retry click
     // still cannot prove that generation resumed or a final answer exists.
