@@ -33,6 +33,13 @@ export async function readChatGptMessages(page: Page, includeArtifacts = false):
   return (await readChatGptMessageObservation(page, includeArtifacts)).messages;
 }
 
+/** Only a latest mounted assistant stream blocks a new, not-yet-anchored task. */
+export async function hasMountedChatGptStream(page: Page): Promise<boolean> {
+  const messages = await readChatGptMessages(page);
+  return messages.some((message, index) => message.role === 'assistant' && message.streamingMarker &&
+    !messages.slice(index + 1).some(next => next.rootIndex === message.rootIndex));
+}
+
 /** Diagnostics and parsed messages come from one renderer task, never a second DOM sample. */
 export async function readChatGptMessageObservation(page: Page, includeArtifacts = false, anchorIds: readonly string[] = []) {
   const identitySelector = '[data-message-id], [data-turn-id], [data-chatgpt-search-message-ids], [data-chatgpt-selection-message-id]';

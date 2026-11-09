@@ -705,6 +705,26 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(streaming.blocker, 'unsupported');
     assert.equal(streaming.reason, 'generation-active-preserve-current-turn');
     assert.equal(streaming.actions.length, 0);
+    const unboundDuringStream = await adapter.observe(task);
+    assert.equal(unboundDuringStream.blocker, 'unsupported',
+      'a new task cannot replace another active streamed answer');
+    assert.equal(unboundDuringStream.actions.length, 0);
+
+    // A previously issued draft action must also become stale if another
+    // streamed answer starts before mutation, with unchanged composer controls.
+    await page.setContent(NORMAL);
+    const beforeUnboundStream = await adapter.observe(task);
+    const unboundCompose = beforeUnboundStream.actions.find(a => a.purpose === 'compose')!;
+    assert.ok(unboundCompose);
+    await page.locator('main').evaluate(main => main.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="assistant" data-message-id="foreign-stream" data-is-streaming="true">Active answer</div>'));
+    const staleUnboundCompose = await adapter.act({
+      context: task, snapshotId: beforeUnboundStream.snapshotId,
+      actionRef: unboundCompose.actionRef, evidenceHash: unboundCompose.evidenceHash,
+      input: 'Must not replace an active answer',
+    });
+    assert.equal(staleUnboundCompose.kind, 'stale');
+    assert.equal(await page.locator('#prompt-textarea').innerText(), '');
 
     await page.setContent('<main><div data-chatgpt-composer>' +
       '<div role="textbox" contenteditable="true"></div>' +

@@ -12,6 +12,7 @@ import type {
 import { ChatGptBackendRecovery, type BackendJsonClient } from './backend-recovery.ts';
 import { observeChatGptDialog } from './dialog-observer.ts';
 import { observeChatGptDom, observeChatGptAlerts } from './dom-observer.ts';
+import { hasMountedChatGptStream } from './message-dom.ts';
 import { inspectChatGptQuestion, answerChatGptQuestion } from './question.ts';
 import { inspectChatGptFreeTextQuestion, answerChatGptFreeTextQuestion } from './semantic-free-text-question.ts';
 import { inspectSemanticHostSpanPermission } from './semantic-hostspan-permission.ts';
@@ -136,6 +137,10 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     const surface = await observeChatGptSurface(page);
     const dialog = await observeChatGptDialog(page);
     const ui = await captureUi(page);
+    const unboundStream = surface.mode === 'chat' &&
+      context.submittedUserMessageId === null && context.submittedUserTurnId === null &&
+      await hasMountedChatGptStream(page);
+    if (unboundStream) progress = 'streaming';
     if (context.submittedUserMessageId !== null || context.submittedUserTurnId !== null) {
       const dom = await observeChatGptDom(page, {
         submittedUserMessageId: context.submittedUserMessageId,
@@ -157,6 +162,9 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     } else if (dialog.kind !== null) {
       blocker = dialog.kind === 'rate_limit' ? 'rate_limit' : 'human_verification';
       reason = dialog.reason;
+    } else if (unboundStream) {
+      blocker = 'unsupported';
+      reason = 'generation-active-preserve-current-turn';
     } else if (turn.laterUserFound) {
       blocker = 'unsupported';
       reason = 'later-user-boundary';
@@ -343,6 +351,9 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       if (surface.mode !== 'chat' || (await observeChatGptDialog(page)).kind !== null) {
         return 'stale' as const;
       }
+      if (request.context.submittedUserMessageId === null &&
+          request.context.submittedUserTurnId === null &&
+          await hasMountedChatGptStream(page)) return 'stale' as const;
       // The composer may stay unchanged while its exact user anchor is
       // unmounted or followed by another user. Recheck before any mutation.
       if (request.context.submittedUserMessageId !== null ||
