@@ -210,6 +210,14 @@ test('completed exact artifact discovery restores a virtualized answer through t
       <textarea></textarea>
       <script>window.cardClicks=0;</script>
     </main>`);
+    await page.locator('button[aria-label="Download file"]').evaluate(button => {
+      button.addEventListener('click', () => {
+        const link = document.createElement('a');
+        link.download = 'dil-card.md';
+        link.href = 'data:text/plain,DIL-CARD-BYTES';
+        link.click();
+      });
+    });
     const dilFiles = await adapter.discoverArtifacts(request);
     assert.deepEqual(dilFiles.map(file => file.name).sort(), ['dil-card.md', 'dil-link.txt']);
     const dilLink = dilFiles.find(file => file.name === 'dil-link.txt')!;
@@ -219,15 +227,23 @@ test('completed exact artifact discovery restores a virtualized answer through t
       'discovering a file card never activates its download');
     await page.locator('[data-chatgpt-search-unit-key="original-final:assistant"]')
       .evaluate(node => node.setAttribute('data-chatgpt-search-message-ids', 'original-final original-final'));
-    assert.deepEqual((await adapter.discoverArtifacts(request)).map(file => file.name).sort(),
+    const repeatedFiles = await adapter.discoverArtifacts(request);
+    assert.deepEqual(repeatedFiles.map(file => file.name).sort(),
       ['dil-card.md', 'dil-link.txt'],
       'repeating one verified assistant ID does not create an ambiguous group');
     assert.equal(await page.evaluate(() => (window as any).cardClicks), 0);
+    const exactCard = repeatedFiles.find(file => file.name === 'dil-card.md')!;
+    assert.equal(Buffer.from((await adapter.downloadArtifact(request, exactCard)).bytes).toString(),
+      'DIL-CARD-BYTES', 'the exact file card downloads through the owned byte sink');
+    assert.equal(await page.evaluate(() => (window as any).cardClicks), 1);
 
     await page.locator('[data-chatgpt-search-unit-key="original-final:assistant"]')
       .evaluate(node => node.setAttribute('data-chatgpt-search-message-ids', 'original-final foreign-id'));
     assert.deepEqual((await adapter.discoverArtifacts(request)).map(file => file.name), [],
       'a group with multiple message IDs cannot own the exact answer artifacts');
+    await assert.rejects(() => adapter.downloadArtifact(request, exactCard));
+    assert.equal(await page.evaluate(() => (window as any).cardClicks), 1,
+      'a foreign ID must block download without clicking');
 
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
