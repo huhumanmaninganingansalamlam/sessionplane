@@ -726,6 +726,23 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(staleUnboundCompose.kind, 'stale');
     assert.equal(await page.locator('#prompt-textarea').innerText(), '');
 
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="user-b">Task</div>' +
+      '<div id="prompt-textarea" contenteditable="true"></div>' +
+      '<button data-testid="send-button">Send</button></main>');
+    const boundContext = context(lease, 'user-b');
+    const beforeBoundStream = await adapter.observe(boundContext);
+    const boundCompose = beforeBoundStream.actions.find(a => a.purpose === 'compose')!;
+    assert.ok(boundCompose);
+    await page.locator('main').evaluate(main => main.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="assistant" data-message-id="answer-b" data-is-streaming="true">Streaming</div>'));
+    const staleBoundCompose = await adapter.act({
+      context: boundContext, snapshotId: beforeBoundStream.snapshotId,
+      actionRef: boundCompose.actionRef, evidenceHash: boundCompose.evidenceHash,
+      input: 'Must not draft during newly active generation',
+    });
+    assert.equal(staleBoundCompose.kind, 'stale');
+    assert.equal(await page.locator('#prompt-textarea').innerText(), '');
+
     await page.setContent('<main><div data-chatgpt-composer>' +
       '<div role="textbox" contenteditable="true"></div>' +
       '<textarea></textarea><button aria-label="Send message">Send</button>' +
