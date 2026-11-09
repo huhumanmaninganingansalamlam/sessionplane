@@ -182,7 +182,8 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
         context, kind: 'ack', prompt: query.content, attempts: [evidence],
       });
       return ack.kind === 'verified_ack' && ack.messageId === evidence.messageId &&
-        (query.externalTurnId === null || query.externalTurnId === ack.externalTurnId)
+        (query.externalTurnId === null || query.externalTurnId === ack.externalTurnId) &&
+        (context.submittedUserTurnId === null || context.submittedUserTurnId === ack.externalTurnId)
         ? { kind: 'verified_ack', externalTurnId: ack.externalTurnId }
         : { kind: 'unavailable', reason: 'canonical-ack-not-yet-recovered' };
     } catch {

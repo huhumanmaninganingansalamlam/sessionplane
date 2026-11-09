@@ -337,3 +337,34 @@ test('semantic Core port requires a stable declared conversation capability befo
   assert.equal(fake.sends, 0);
   assert.equal(journalWrites, 0);
 });
+
+test('semantic ACK recovery rejects a turn conflicting with the exact task context', async () => {
+  const fake = new FakeSemanticProvider();
+  fake.ackReady = true;
+  const evidence: SemanticDispatchEvidence = {
+    conversationId: 'conv-1', messageId: 'message-1', parentMessageId: 'root-1',
+    textHash: hash('original question 1'), observedAt: SENT_AT,
+  };
+  const query: ExactTurnQuery = {
+    clientId: 'alice', projectId: 'project-1', slotId: 'main', slotRevision: 1,
+    providerConversationId: 'conv-1', taskId: 'task-1', attemptId: 'attempt-1',
+    kind: 'initial', content: 'original question 1', externalTurnId: null,
+  };
+  let resolvedTurn: string | null = 'foreign-turn';
+  const port = new SemanticExactTaskPort({
+    adapter: fake,
+    resolveContext: intent => ({
+      projectId: intent.projectId, slotId: intent.slotId, slotRevision: intent.slotRevision,
+      taskId: intent.taskId, providerConversationId: intent.providerConversationId,
+      submittedUserMessageId: 'message-1', submittedUserTurnId: resolvedTurn, pageLease: null,
+    }),
+    dispatchJournal: { record: () => { throw new Error('Recovery must not write'); }, read: () => evidence },
+  });
+  assert.equal((await port.recoverAck(query)).kind, 'unavailable',
+    'a canonical ACK cannot overwrite a conflicting bound turn');
+  resolvedTurn = 'turn-1';
+  assert.deepEqual(await port.recoverAck(query), { kind: 'verified_ack', externalTurnId: 'turn-1' });
+  resolvedTurn = null;
+  assert.deepEqual(await port.recoverAck(query), { kind: 'verified_ack', externalTurnId: 'turn-1' });
+  assert.equal(fake.sends, 0, 'ACK recovery remains read-only');
+});
