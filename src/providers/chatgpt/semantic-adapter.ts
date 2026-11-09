@@ -159,6 +159,10 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     } else if (turn.laterUserFound) {
       blocker = 'unsupported';
       reason = 'later-user-boundary';
+    } else if ((context.submittedUserMessageId !== null ||
+      context.submittedUserTurnId !== null) && !turn.submittedUserFound) {
+      blocker = 'unsupported';
+      reason = 'submitted-user-boundary-unverified';
     }
 
     const alerts = blocker === 'none' && (context.submittedUserMessageId !== null ||
@@ -331,6 +335,16 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       const surface = await observeChatGptSurface(page);
       if (surface.mode !== 'chat' || (await observeChatGptDialog(page)).kind !== null) {
         return 'stale' as const;
+      }
+      // The composer may stay unchanged while its exact user anchor is
+      // unmounted or followed by another user. Recheck before any mutation.
+      if (request.context.submittedUserMessageId !== null ||
+          request.context.submittedUserTurnId !== null) {
+        const boundary = await observeChatGptDom(page, {
+          submittedUserMessageId: request.context.submittedUserMessageId,
+          submittedUserTurnId: request.context.submittedUserTurnId,
+        });
+        if (!boundary.submittedUserFound || boundary.laterUserFound) return 'stale' as const;
       }
       const fresh = await captureUi(page);
       if (fresh.fingerprint !== action.uiFingerprint) return 'stale' as const;

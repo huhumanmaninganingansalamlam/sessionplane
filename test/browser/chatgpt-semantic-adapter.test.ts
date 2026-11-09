@@ -539,6 +539,27 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
       'provider turn wrapper alone is not canonical final evidence');
     assert.equal(dilCandidate.candidate?.streamingMarker, false);
 
+    // A matching conversation URL is insufficient if the submitted user
+    // anchor is no longer in the mounted transcript.
+    const missingAnchor = await adapter.observe(context(lease, 'missing-user-b'));
+    assert.equal(missingAnchor.turn.submittedUserFound, false);
+    assert.equal(missingAnchor.blocker, 'unsupported');
+    assert.equal(missingAnchor.reason, 'submitted-user-boundary-unverified');
+    assert.equal(missingAnchor.actions.length, 0);
+
+    // A transcript rerender after observation invalidates its pending actionRef.
+    const anchoredContext = context(lease, 'user-b');
+    const beforeUnmount = await adapter.observe(anchoredContext);
+    const staleCompose = beforeUnmount.actions.find(action => action.purpose === 'compose')!;
+    assert.ok(staleCompose);
+    await page.locator('[data-chatgpt-search-unit-key="user-b:user"]')
+      .evaluate(node => node.remove());
+    const staleBoundaryAction = await adapter.act({ context: anchoredContext,
+      snapshotId: beforeUnmount.snapshotId, actionRef: staleCompose.actionRef,
+      evidenceHash: staleCompose.evidenceHash, input: 'Must not fill after anchor loss' });
+    assert.equal(staleBoundaryAction.kind, 'stale');
+    assert.equal(await page.locator('#prompt-textarea').innerText(), '');
+
     // Reuse the exact last-turn stream-retry guard. An approved retry click
     // still cannot prove that generation resumed or a final answer exists.
     const retryTask = context(lease, 'user-b');
