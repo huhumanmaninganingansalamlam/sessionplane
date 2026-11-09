@@ -352,11 +352,12 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
           menu.setAttribute('role', 'menu');
           menu.setAttribute('aria-labelledby', 'radix-opener');
           menu.setAttribute('data-state', 'open');
+          menu.style.opacity = '0';
           menu.innerHTML = '<div role="group">' +
             '<div id="radix-effort-view">' +
               '<div role="menuitem" aria-label="모델 선택" id="radix-choose">Medium</div>' +
               '<div role="menuitem" aria-label="파워">' +
-                '<span role="slider" aria-valuenow="2" aria-valuemin="1" aria-valuemax="5" ' +
+                '<span role="slider" aria-valuenow="1" aria-valuemin="0" aria-valuemax="4" ' +
                 'style="display:inline-block;width:28px;height:28px"></span>' +
               '</div></div>' +
             '<div id="radix-model-view" style="display:none">' +
@@ -364,6 +365,7 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
               '<div role="menuitemradio" aria-checked="false">GPT-5.6 Sol</div>' +
             '</div></div>';
           document.querySelector('main').append(menu);
+          window.setTimeout(() => { menu.style.opacity = '1'; }, 900);
           document.querySelector('[role=slider]').onclick = () => window.radixSliderChanges++;
           document.getElementById('radix-choose').onclick = () => {
             window.radixModelDisclosures++;

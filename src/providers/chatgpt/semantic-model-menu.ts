@@ -207,6 +207,26 @@ export async function openExactChatGptModelMenu(page: Page, expectedHash: string
     if (!button) throw new Error('Model opener disappeared');
     try { await button.click({ timeout: 5_000 }); }
     finally { await button.dispose(); }
+    if (current.strategy === 'composer-radix') {
+      // The linked portal can mount transparent while its animation waits
+      // for a renderer frame. Observe readiness once; never click again.
+      await page.waitForFunction(({ openerId, priorMenuId }) => {
+        const opener = document.getElementById(openerId);
+        if (opener?.getAttribute('aria-expanded') !== 'true') return false;
+        const menuId = opener.getAttribute('aria-controls') ?? '';
+        if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(menuId) ||
+          (priorMenuId !== '' && menuId !== priorMenuId)) return false;
+        const linked = [...document.querySelectorAll<HTMLElement>('[role="menu"][id]')]
+          .filter(menu => menu.id === menuId &&
+            menu.getAttribute('aria-labelledby') === openerId);
+        return linked.length === 1 &&
+          linked[0]!.getAttribute('data-state') === 'open' &&
+          linked[0]!.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+          linked[0]!.getBoundingClientRect().width > 0;
+      }, { openerId: current.openerId, priorMenuId: current.menuId }, {
+        timeout: 5_000, polling: 200,
+      });
+    }
     const after = await inspectSemanticChatGptModelMenu(page);
     if (!after || after.strategy !== current.strategy ||
       after.openerId !== current.openerId ||
