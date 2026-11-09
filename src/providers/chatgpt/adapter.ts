@@ -1,5 +1,5 @@
 import { PageMutationMutex } from '../../browser/page-mutex.ts';
-import { discoverFileCards, downloadFileCard } from './file-cards.ts';
+import { discoverFileCards, downloadFileCard, exactRoot } from './file-cards.ts';
 import { createHash } from 'node:crypto';
 import type { Page } from 'playwright-core';
 import path from 'node:path';
@@ -501,30 +501,57 @@ export class ChatGptAdapter implements ProviderAdapter {
         return await downloadFileCard(page, request, candidate, () => { this.#requireExactArtifactPage(request); }, this.#browserOwner);
       });
     }
-    const result = await page.evaluate(async (sourceUrl) => {
-      const response = await fetch(sourceUrl, { credentials: 'include' }).catch(() => null);
-      if (response === null || !response.ok) {
-        return { ok: false as const, status: response?.status ?? 0, base64: '' };
+    return await this.#pageMutex.runExclusive(request.session.pageKey!, async () => {
+      this.#requireExactArtifactPage(request);
+      const expectedId = `chatgpt-link-${createHash('sha256').update(candidate.sourceUrl).digest('hex')}`;
+      if (candidate.providerArtifactId !== expectedId) {
+        throw new ProviderSubmissionError('provider.artifacts-unavailable', 'Artifact candidate identity is invalid');
       }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      let binary = '';
-      const chunkSize = 0x8000;
-      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-        binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+      const exactAnswer = await exactRoot(page, request);
+      let result;
+      try {
+        result = await exactAnswer.evaluate(async (root, { sourceUrl, selector }) => {
+          const links = [...root.querySelectorAll<HTMLAnchorElement | HTMLImageElement>(selector)];
+          const matches = links.filter(element =>
+            (element instanceof HTMLAnchorElement ? element.href : element.src) === sourceUrl);
+          if (!root.isConnected || matches.length !== 1) {
+            return { sourceVerified: false, name: '', mediaType: null as string | null,
+              ok: false, status: 0, base64: '' };
+          }
+          const element = matches[0]!;
+          const name = (element instanceof HTMLAnchorElement ? element.download : element.alt) ||
+            element.textContent?.trim() || '';
+          const mediaType = element instanceof HTMLImageElement ? 'image/*' : null;
+          const response = await fetch(sourceUrl, { credentials: 'include' }).catch(() => null);
+          if (response === null || !response.ok) {
+            return { sourceVerified: root.isConnected, name, mediaType,
+              ok: false, status: response?.status ?? 0, base64: '' };
+          }
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          let binary = '';
+          const chunkSize = 0x8000;
+          for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+          }
+          return { sourceVerified: root.isConnected, name, mediaType,
+            ok: true, status: response.status, base64: btoa(binary) };
+        }, { sourceUrl: candidate.sourceUrl, selector: CHATGPT_SELECTORS.artifactLinks.join(', ') });
+      } finally { await exactAnswer.dispose(); }
+      this.#requireExactArtifactPage(request);
+      if (!result.sourceVerified ||
+        candidate.name !== sanitizeArtifactName(result.name || nameFromSource(candidate.sourceUrl)) ||
+        candidate.mediaType !== result.mediaType) {
+        throw new ProviderSubmissionError('provider.artifacts-unavailable', 'Exact answer artifact source changed');
       }
-      return { ok: true as const, status: response.status, base64: btoa(binary) };
-    }, candidate.sourceUrl);
-    if (!result.ok) {
-      throw new ProviderSubmissionError(
-        'provider.artifact-download-failed',
-        `ChatGPT artifact download failed with status ${result.status}`,
-        { promptSubmitted: request.session.promptSubmitted },
-      );
-    }
-    return {
-      candidate,
-      bytes: Uint8Array.from(Buffer.from(result.base64, 'base64')),
-    };
+      if (!result.ok) {
+        throw new ProviderSubmissionError(
+          'provider.artifact-download-failed',
+          `ChatGPT artifact download failed with status ${result.status}`,
+          { promptSubmitted: request.session.promptSubmitted },
+        );
+      }
+      return { candidate, bytes: Uint8Array.from(Buffer.from(result.base64, 'base64')) };
+    });
   }
 
   async openStop(request: ProviderStopRequest): Promise<ProviderStopOperation> {

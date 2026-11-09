@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -232,6 +233,16 @@ test('completed exact artifact discovery restores a virtualized answer through t
       'DIL-LINK-BYTES');
     assert.equal(await page.evaluate(() => (window as any).cardClicks), 0,
       'discovering a file card never activates its download');
+    const foreignSource = 'data:text/plain,FOREIGN';
+    const forgedCandidate = {
+      ...dilLink,
+      sourceUrl: foreignSource,
+      name: 'foreign.txt',
+      providerArtifactId: `chatgpt-link-${createHash('sha256').update(foreignSource).digest('hex')}`,
+    };
+    await assert.rejects(() => adapter.downloadArtifact(request, forgedCandidate),
+      { errorCode: 'provider.artifacts-unavailable' },
+      'an unscoped source must not be fetched just because its candidate ID is well formed');
     await page.locator('[data-chatgpt-search-unit-key="original-final:assistant"]')
       .evaluate(node => node.setAttribute('data-chatgpt-search-message-ids', 'original-final original-final'));
     const repeatedFiles = await adapter.discoverArtifacts(request);

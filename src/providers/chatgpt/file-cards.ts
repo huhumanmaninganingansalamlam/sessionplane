@@ -11,7 +11,7 @@ function unavailable(message: string): never {
   throw new ProviderSubmissionError('provider.artifacts-unavailable', message);
 }
 
-async function exactRoot(page: Page, request: ProviderArtifactRequest, requireAnchor = true): Promise<ElementHandle<HTMLElement>> {
+export async function exactRoot(page: Page, request: ProviderArtifactRequest, requireAnchor = true): Promise<ElementHandle<HTMLElement>> {
   const messages = await readChatGptMessages(page, true);
   const answers = messages.filter(m => m.role === 'assistant' && m.messageId === request.session.responseMessageId);
   if (answers.length !== 1 || answers[0]?.elementIndex === undefined) unavailable('Exact artifact answer is not unique');
