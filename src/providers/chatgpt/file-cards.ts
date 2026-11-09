@@ -101,6 +101,9 @@ export async function downloadFileCard(page: Page, request: ProviderArtifactRequ
   try {
     const found = (await cards(root)).filter(c => source(request.session.responseMessageId!, c.name) === candidate.sourceUrl);
     if (found.length !== 1) unavailable('Exact file card is missing or ambiguous');
+    const sanitized = found[0]!.name.trim().replaceAll(/[\\/\u0000]/g, '_');
+    if (candidate.name !== (sanitized || 'chatgpt-artifact').slice(0, 255) ||
+        candidate.mediaType !== null) unavailable('Exact file card metadata changed');
     const buttons = await root.$$(downloadSelector);
     const button = buttons[found[0]!.index];
     if (!button || !await button.isVisible() || !await button.isEnabled()) unavailable('Exact download control is unavailable');

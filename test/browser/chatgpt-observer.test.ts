@@ -251,6 +251,17 @@ test('completed exact artifact discovery restores a virtualized answer through t
       'repeating one verified assistant ID does not create an ambiguous group');
     assert.equal(await page.evaluate(() => (window as any).cardClicks), 0);
     const exactCard = repeatedFiles.find(file => file.name === 'dil-card.md')!;
+    for (const forgedCard of [
+      { ...exactCard, providerArtifactId: 'forged-card-id' },
+      { ...exactCard, name: 'forged-card.md' },
+      { ...exactCard, mediaType: 'text/plain' },
+    ]) {
+      await assert.rejects(() => adapter.downloadArtifact(request, forgedCard),
+        { errorCode: 'provider.artifacts-unavailable' },
+        'a file card cannot download under a forged artifact identity or metadata');
+    }
+    assert.equal(await page.evaluate(() => (window as any).cardClicks), 0,
+      'forged file-card candidates must not activate the download');
     assert.equal(Buffer.from((await adapter.downloadArtifact(request, exactCard)).bytes).toString(),
       'DIL-CARD-BYTES', 'the exact file card downloads through the owned byte sink');
     assert.equal(await page.evaluate(() => (window as any).cardClicks), 1);

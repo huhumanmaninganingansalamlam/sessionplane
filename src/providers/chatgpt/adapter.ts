@@ -495,6 +495,10 @@ export class ChatGptAdapter implements ProviderAdapter {
     candidate: ProviderArtifactCandidate,
   ): Promise<ProviderArtifactDownload> {
     const page = this.#requireExactArtifactPage(request);
+    const expectedId = `chatgpt-link-${createHash('sha256').update(candidate.sourceUrl).digest('hex')}`;
+    if (candidate.providerArtifactId !== expectedId) {
+      throw new ProviderSubmissionError('provider.artifacts-unavailable', 'Artifact candidate identity is invalid');
+    }
     if (candidate.sourceUrl.startsWith('sessionplane-file-card:')) {
       return await this.#pageMutex.runExclusive(request.session.pageKey!, async () => {
         this.#requireExactArtifactPage(request);
@@ -503,10 +507,6 @@ export class ChatGptAdapter implements ProviderAdapter {
     }
     return await this.#pageMutex.runExclusive(request.session.pageKey!, async () => {
       this.#requireExactArtifactPage(request);
-      const expectedId = `chatgpt-link-${createHash('sha256').update(candidate.sourceUrl).digest('hex')}`;
-      if (candidate.providerArtifactId !== expectedId) {
-        throw new ProviderSubmissionError('provider.artifacts-unavailable', 'Artifact candidate identity is invalid');
-      }
       const exactAnswer = await exactRoot(page, request);
       let result;
       try {
