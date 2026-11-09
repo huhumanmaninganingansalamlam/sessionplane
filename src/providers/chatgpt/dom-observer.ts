@@ -1,7 +1,7 @@
 import type { Page } from 'playwright-core';
 
 import type { ProviderAssistantCandidate, ProviderWakeReason } from '../provider-adapter.ts';
-import { readChatGptMessageObservation, type ChatGptMessage } from './message-dom.ts';
+import { matchesSubmittedChatGptUser, readChatGptMessageObservation, type ChatGptMessage } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
 // Capacity blocks a new turn, not read-only collection of an existing exact answer.
@@ -35,9 +35,7 @@ export async function observeChatGptDom(
   let submittedUserFound = false;
   let laterUserFound = false;
   let candidate: ProviderAssistantCandidate | null = null;
-  const anchors = messages.filter(message => message.role === 'user' &&
-    ((identity.submittedUserMessageId !== null && message.messageId === identity.submittedUserMessageId) ||
-      (identity.submittedUserTurnId !== null && message.turnId === identity.submittedUserTurnId)));
+  const anchors = messages.filter(message => matchesSubmittedChatGptUser(message, identity));
   // Roots have no common message order. Never splice an answer from another root,
   // or choose among duplicate exact anchors in different mounted transcripts.
   const anchor = anchors.length === 1 ? anchors[0] : undefined;
@@ -51,9 +49,7 @@ export async function observeChatGptDom(
   for (const message of messages) {
     if (anchor === undefined || message.rootIndex !== anchor.rootIndex) continue;
     if (!submittedUserFound) {
-      if (message.role === 'user' &&
-        ((identity.submittedUserMessageId !== null && message.messageId === identity.submittedUserMessageId) ||
-          (identity.submittedUserTurnId !== null && message.turnId === identity.submittedUserTurnId))) {
+      if (matchesSubmittedChatGptUser(message, identity)) {
         submittedUserFound = true;
       }
       continue;

@@ -613,6 +613,27 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
       'provider turn wrapper alone is not canonical final evidence');
     assert.equal(dilCandidate.candidate?.streamingMarker, false);
 
+    // A renderer may omit turn IDs; when it explicitly exposes one, a
+    // conflicting turn or message identity must not anchor this submission.
+    const exactUser = page.locator('[data-chatgpt-search-unit-key="user-b:user"]');
+    await exactUser.evaluate(node => node.setAttribute('data-turn-id', 'foreign-turn'));
+    const wrongTurn = await adapter.observe(context(lease, 'user-b'));
+    assert.equal(wrongTurn.turn.submittedUserFound, false);
+    assert.equal(wrongTurn.blocker, 'unsupported');
+    assert.equal(wrongTurn.actions.length, 0);
+    await exactUser.evaluate(node => {
+      node.setAttribute('data-turn-id', 'turn-b');
+      node.setAttribute('data-chatgpt-search-message-ids', 'foreign-user');
+    });
+    const wrongMessage = await adapter.observe(context(lease, 'user-b'));
+    assert.equal(wrongMessage.turn.submittedUserFound, false);
+    assert.equal(wrongMessage.blocker, 'unsupported');
+    assert.equal(wrongMessage.actions.length, 0);
+    await exactUser.evaluate(node => {
+      node.removeAttribute('data-turn-id');
+      node.setAttribute('data-chatgpt-search-message-ids', 'user-b');
+    });
+
     // A matching conversation URL is insufficient if the submitted user
     // anchor is no longer in the mounted transcript.
     const missingAnchor = await adapter.observe(context(lease, 'missing-user-b'));

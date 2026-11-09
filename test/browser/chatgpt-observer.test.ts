@@ -279,6 +279,25 @@ test('completed exact artifact discovery restores a virtualized answer through t
     }
     assert.equal(await page.evaluate(() => (window as any).cardClicks), 0,
       'forged file-card candidates must not activate the download');
+    const explicitlyBound = { ...request, session: { ...session,
+      submittedUserMessageId: 'user-message-1', submittedUserTurnId: 'turn-expected' } };
+    const userRoot = page.locator('[data-chatgpt-search-unit-key="user-message-1:user"]');
+    await userRoot.evaluate(node => node.setAttribute('data-turn-id', 'foreign-turn'));
+    await assert.rejects(() => adapter.downloadArtifact(explicitlyBound, exactCard),
+      { errorCode: 'provider.artifacts-unavailable' },
+      'a matching message ID cannot override an explicitly conflicting turn ID');
+    await userRoot.evaluate(node => {
+      node.setAttribute('data-turn-id', 'turn-expected');
+      node.setAttribute('data-chatgpt-search-message-ids', 'foreign-user');
+    });
+    await assert.rejects(() => adapter.downloadArtifact(explicitlyBound, exactCard),
+      { errorCode: 'provider.artifacts-unavailable' },
+      'a matching turn ID cannot override a conflicting message ID');
+    assert.equal(await page.evaluate(() => (window as any).cardClicks), 0);
+    await userRoot.evaluate(node => {
+      node.removeAttribute('data-turn-id');
+      node.setAttribute('data-chatgpt-search-message-ids', 'user-message-1');
+    });
     assert.equal(Buffer.from((await adapter.downloadArtifact(request, exactCard)).bytes).toString(),
       'DIL-CARD-BYTES', 'the exact file card downloads through the owned byte sink');
     assert.equal(await page.evaluate(() => (window as any).cardClicks), 1);

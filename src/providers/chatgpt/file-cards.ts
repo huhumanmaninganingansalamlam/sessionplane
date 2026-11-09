@@ -1,7 +1,7 @@
 import type { ElementHandle, Page, Response } from 'playwright-core';
 import type { BrowserOwner } from '../../browser/browser-owner.ts';
 import { ProviderSubmissionError, type ProviderArtifactCandidate, type ProviderArtifactRequest } from '../provider-adapter.ts';
-import { readChatGptMessages } from './message-dom.ts';
+import { matchesSubmittedChatGptUser, readChatGptMessages } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
 const downloadSelector = 'button[aria-label="Download file"],button[aria-label="파일 다운로드"]';
@@ -16,9 +16,7 @@ export async function exactRoot(page: Page, request: ProviderArtifactRequest, re
   const answers = messages.filter(m => m.role === 'assistant' && m.messageId === request.session.responseMessageId);
   if (answers.length !== 1 || answers[0]?.elementIndex === undefined) unavailable('Exact artifact answer is not unique');
   const answer = answers[0];
-  const anchors = messages.filter(m => m.role === 'user' &&
-    ((request.session.submittedUserMessageId !== null && m.messageId === request.session.submittedUserMessageId) ||
-     (request.session.submittedUserTurnId !== null && m.turnId === request.session.submittedUserTurnId)));
+  const anchors = messages.filter(m => matchesSubmittedChatGptUser(m, request.session));
   if (requireAnchor && anchors.length !== 1) unavailable('Exact artifact user anchor is not unique');
   if (requireAnchor && anchors[0]!.rootIndex !== answer.rootIndex) unavailable('Artifact answer belongs to another DOM root');
   const start = messages.indexOf(anchors[0]!);

@@ -8,10 +8,25 @@ export interface ChatGptMessage {
   readonly role: 'user' | 'assistant';
   readonly messageId: string | null;
   readonly turnId: string | null;
+  readonly explicitTurnId: string | null;
   readonly text: string;
   readonly terminalMarker: boolean;
   readonly streamingMarker: boolean;
   readonly artifacts?: readonly { source: string; name: string; mediaType: string | null }[];
+}
+
+/** An absent renderer turn ID is not evidence that two canonical IDs disagree. */
+export function matchesSubmittedChatGptUser(
+  message: ChatGptMessage,
+  identity: { readonly submittedUserMessageId: string | null; readonly submittedUserTurnId: string | null },
+): boolean {
+  if (message.role !== 'user') return false;
+  if (identity.submittedUserMessageId !== null) {
+    return message.messageId === identity.submittedUserMessageId &&
+      (identity.submittedUserTurnId === null || message.explicitTurnId === null ||
+        message.explicitTurnId === identity.submittedUserTurnId);
+  }
+  return identity.submittedUserTurnId !== null && message.turnId === identity.submittedUserTurnId;
 }
 
 export async function readChatGptMessages(page: Page, includeArtifacts = false): Promise<ChatGptMessage[]> {
@@ -68,8 +83,8 @@ export async function readChatGptMessageObservation(page: Page, includeArtifacts
       const searchId = uniqueSearchIds.length === 1 ? uniqueSearchIds[0]! : null;
       const messageId = identityNode.getAttribute('data-message-id') ??
         node.getAttribute('data-message-id') ?? node.getAttribute('data-dil-message-id') ?? searchId;
-      const turnId = identityNode.getAttribute('data-turn-id') ??
-        node.getAttribute('data-turn-id') ?? messageId;
+      const explicitTurnId = identityNode.getAttribute('data-turn-id') ?? node.getAttribute('data-turn-id');
+      const turnId = explicitTurnId ?? messageId;
       const status = (identityNode.getAttribute('data-message-status') ??
         node.getAttribute('data-message-status') ??
         identityNode.getAttribute('data-status') ?? '').toLowerCase();
@@ -110,6 +125,7 @@ export async function readChatGptMessageObservation(page: Page, includeArtifacts
         role,
         messageId,
         turnId,
+        explicitTurnId,
         text: (role === 'assistant' ? assistantText(content) : renderedText(content)).replaceAll('\r\n', '\n'),
         terminalMarker: /^(complete|completed|finished|finished_successfully|success)$/.test(status) ||
           endTurn === 'true' || isStreaming === 'false',
