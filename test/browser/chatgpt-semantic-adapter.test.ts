@@ -436,6 +436,67 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
       a.purpose === 'open_model_chooser'), false,
       'a same-page but unlinked popover is not a trusted model chooser');
 
+    // If the provider never finishes its transition, a one-shot decision
+    // expires uncertain instead of clicking the disclosure again.
+    await page.evaluate(() => {
+      document.getElementById('radix-menu')!.setAttribute('aria-labelledby', 'radix-opener');
+      document.getElementById('radix-effort-view')!.style.display = 'block';
+      document.getElementById('radix-model-view')!.style.display = 'none';
+      (window as any).radixModelDisclosures = 0;
+      (document.getElementById('radix-choose') as HTMLElement).onclick = () => {
+        (window as any).radixModelDisclosures++;
+      };
+    });
+    const stalledView = await adapter.observe(task);
+    const stalledDisclosure = stalledView.actions.find(a => a.purpose === 'open_model_chooser')!;
+    assert.ok(stalledDisclosure);
+    const stalledViewResult = await adapter.act({ context: task, snapshotId: stalledView.snapshotId,
+      actionRef: stalledDisclosure.actionRef, evidenceHash: stalledDisclosure.evidenceHash,
+      authorizedDecisionId: 'decision-model' });
+    assert.equal(stalledViewResult.kind, 'uncertain', 'no successful action without visible model radios');
+    assert.equal(await page.evaluate(() => (window as any).radixModelDisclosures), 1);
+    assert.equal((await adapter.act({ context: task, snapshotId: stalledView.snapshotId,
+      actionRef: stalledDisclosure.actionRef, evidenceHash: stalledDisclosure.evidenceHash,
+      authorizedDecisionId: 'decision-model' })).kind, 'stale');
+
+    // Likewise, a Radix portal that stays unpainted must not be reopened.
+    await page.setContent(`
+      <main>
+        <div id="prompt-textarea" contenteditable="true"></div>
+        <button id="stalled-root-opener" aria-label="ChatGPT 모델 선택"
+          aria-haspopup="menu" aria-expanded="false" data-state="closed">Medium</button>
+        <button data-testid="send-button">Send</button>
+      </main>
+      <script>
+        window.stalledRootOpens = 0;
+        document.getElementById('stalled-root-opener').onclick = () => {
+          window.stalledRootOpens++;
+          const opener = document.getElementById('stalled-root-opener');
+          opener.setAttribute('aria-expanded', 'true');
+          opener.setAttribute('data-state', 'open');
+          opener.setAttribute('aria-controls', 'stalled-root-menu');
+          const menu = document.createElement('div');
+          menu.id = 'stalled-root-menu';
+          menu.setAttribute('role', 'menu');
+          menu.setAttribute('aria-labelledby', 'stalled-root-opener');
+          menu.setAttribute('data-state', 'open');
+          menu.style.cssText = 'width:160px;height:80px;opacity:0';
+          document.querySelector('main').append(menu);
+        };
+      </script>
+    `);
+    const stalledRoot = await adapter.observe(task);
+    const stalledOpen = stalledRoot.actions.find(a => a.purpose === 'open_model_chooser')!;
+    assert.ok(stalledOpen);
+    const stalledRootResult = await adapter.act({ context: task, snapshotId: stalledRoot.snapshotId,
+      actionRef: stalledOpen.actionRef, evidenceHash: stalledOpen.evidenceHash,
+      authorizedDecisionId: 'decision-model' });
+    assert.equal(stalledRootResult.kind, 'uncertain', 'no successful action without a painted root');
+    assert.equal(await page.evaluate(() => (window as any).stalledRootOpens), 1);
+    assert.equal((await adapter.act({ context: task, snapshotId: stalledRoot.snapshotId,
+      actionRef: stalledOpen.actionRef, evidenceHash: stalledOpen.evidenceHash,
+      authorizedDecisionId: 'decision-model' })).kind, 'stale');
+
     // The observed ChatGPT DIL renderer has no legacy author-role nodes.
     // A complete turn wrapper is a UI hint, never canonical final evidence.
     await page.setContent(`<main>
