@@ -183,6 +183,45 @@ test('completed exact artifact discovery restores a virtualized answer through t
     assert.equal(await page.locator('textarea').inputValue(), '');
     assert.deepEqual(session, original);
     assert.equal(registry.getBinding(binding.pageKey).sessionId, original.sessionId);
+
+    // Current ChatGPT DIL puts the exact answer ID on the inner authored
+    // node. A download link and a file card may be siblings in its uniquely
+    // bound assistant group; unrelated links outside it must never leak in.
+    await page.setContent(`<main>
+      <section>
+        <div data-chatgpt-search-unit-key="user-message-1:user"
+          data-chatgpt-search-message-ids="user-message-1">
+          <div data-user-message-bubble>Original question</div>
+        </div>
+        <div data-chatgpt-search-unit-key="original-final:assistant"
+          data-chatgpt-search-message-ids="original-final">
+          <div data-chatgpt-selection-message-id="original-final">
+            <div data-dil-message-id="original-final">Original final</div>
+            <a download="dil-link.txt" href="data:text/plain,DIL-LINK-BYTES">Download link</a>
+            <div>
+              <button aria-label="Open preview of dil-card.md">Preview</button>
+              <button aria-label="Download file"
+                onclick="window.cardClicks++">Download file card</button>
+            </div>
+          </div>
+        </div>
+      </section>
+      <a download="foreign.txt" href="data:text/plain,FOREIGN">Unrelated link</a>
+      <textarea></textarea>
+      <script>window.cardClicks=0;</script>
+    </main>`);
+    const dilFiles = await adapter.discoverArtifacts(request);
+    assert.deepEqual(dilFiles.map(file => file.name).sort(), ['dil-card.md', 'dil-link.txt']);
+    const dilLink = dilFiles.find(file => file.name === 'dil-link.txt')!;
+    assert.equal(Buffer.from((await adapter.downloadArtifact(request, dilLink)).bytes).toString(),
+      'DIL-LINK-BYTES');
+    assert.equal(await page.evaluate(() => (window as any).cardClicks), 0,
+      'discovering a file card never activates its download');
+    await page.locator('[data-chatgpt-search-unit-key="original-final:assistant"]')
+      .evaluate(node => node.setAttribute('data-chatgpt-search-message-ids', 'original-final foreign-id'));
+    assert.deepEqual((await adapter.discoverArtifacts(request)).map(file => file.name), [],
+      'a group with multiple message IDs cannot own the exact answer artifacts');
+
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -32,7 +32,22 @@ async function exactRoot(page: Page, request: ProviderArtifactRequest, requireAn
     return (root.getAttribute('data-message-id') ?? el.getAttribute('data-message-id') ?? el.getAttribute('data-dil-message-id') ?? (ids.length === 1 ? ids[0] : null)) === expected;
   }, request.session.responseMessageId);
   if (!stillExact) { await node.dispose(); unavailable('Artifact response identity changed'); }
-  const handle = await node.evaluateHandle(el => el.closest<HTMLElement>('[data-message-id], [data-turn-id]') ?? el as HTMLElement);
+  const handle = await node.evaluateHandle((el, expected) => {
+    const legacy = el.closest<HTMLElement>('[data-message-id], [data-turn-id]');
+    if (legacy !== null || expected === null || el.getAttribute('data-dil-message-id') !== expected) {
+      return legacy ?? (el as HTMLElement);
+    }
+    // The current DIL file card may sit beside the authored answer, inside
+    // its one-message assistant group. An ambiguous group cannot own it.
+    const group = el.closest<HTMLElement>('[data-chatgpt-search-message-ids]');
+    const selection = el.closest<HTMLElement>('[data-chatgpt-selection-message-id]');
+    return group?.getAttribute('data-chatgpt-search-unit-key')?.endsWith(':assistant') === true &&
+      group.getAttribute('data-chatgpt-search-message-ids') === expected &&
+      selection?.getAttribute('data-chatgpt-selection-message-id') === expected &&
+      group.querySelectorAll('[data-dil-message-id]').length === 1 &&
+      group.contains(selection)
+      ? group : (el as HTMLElement);
+  }, request.session.responseMessageId);
   await node.dispose();
   const root = handle.asElement();
   if (root === null) unavailable('Exact artifact answer disappeared');

@@ -85,10 +85,23 @@ export async function readChatGptMessageObservation(page: Page, includeArtifacts
         ) ?? node;
       const root = node.getRootNode();
       if (!roots.includes(root)) roots.push(root);
+      let artifactScope = identityNode;
+      if (includeArtifacts && renderedAssistant && messageId !== null) {
+        // Current DIL keeps authored text inside the answer ID, while
+        // attachment controls can be siblings in the exact assistant group.
+        // Widen only for a single uniquely bound message; never the page.
+        const group = node.closest<HTMLElement>('[data-chatgpt-search-message-ids]');
+        const selection = node.closest<HTMLElement>('[data-chatgpt-selection-message-id]');
+        if (group?.getAttribute('data-chatgpt-search-unit-key')?.endsWith(':assistant') === true &&
+          group.getAttribute('data-chatgpt-search-message-ids') === messageId &&
+          selection?.getAttribute('data-chatgpt-selection-message-id') === messageId &&
+          group.querySelectorAll('[data-dil-message-id]').length === 1 &&
+          group.contains(selection)) artifactScope = group;
+      }
       messages.push({
         rootIndex: roots.indexOf(root),
         ...(includeArtifacts ? { elementIndex } : {}),
-        ...(includeArtifacts ? { artifacts: [...identityNode.querySelectorAll(artifactSelector)].map((element) => ({
+        ...(includeArtifacts ? { artifacts: [...artifactScope.querySelectorAll(artifactSelector)].map((element) => ({
           source: element instanceof HTMLAnchorElement ? element.href : element instanceof HTMLImageElement ? element.src : '',
           name: (element instanceof HTMLAnchorElement ? element.download : element instanceof HTMLImageElement ? element.alt : '') || element.textContent?.trim() || '',
           mediaType: element instanceof HTMLImageElement ? 'image/*' : null,
