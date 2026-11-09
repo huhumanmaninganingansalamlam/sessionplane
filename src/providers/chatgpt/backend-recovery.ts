@@ -593,13 +593,14 @@ function isExactSubmittedUser(
     readStringField(message, 'turn_id') ??
     readStringField(metadata, 'turn_id') ??
     readStringField(metadata, 'turnId');
-  return (
-    (identity.submittedUserMessageId !== null &&
-      (messageId === identity.submittedUserMessageId ||
-        nodeId === identity.submittedUserMessageId)) ||
-    (identity.submittedUserTurnId !== null &&
-      (turnId === identity.submittedUserTurnId || nodeId === identity.submittedUserTurnId))
-  );
+  if (identity.submittedUserMessageId === null && identity.submittedUserTurnId === null) return false;
+  if (identity.submittedUserMessageId !== null &&
+      messageId !== identity.submittedUserMessageId &&
+      nodeId !== identity.submittedUserMessageId) return false;
+  if (identity.submittedUserTurnId !== null &&
+      turnId !== identity.submittedUserTurnId &&
+      nodeId !== identity.submittedUserTurnId) return false;
+  return true;
 }
 
 export function parseRetryAfterMs(

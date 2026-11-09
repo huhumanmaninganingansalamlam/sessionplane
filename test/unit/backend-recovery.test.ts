@@ -137,6 +137,26 @@ test('backend recovery accepts only an exact final on the current branch', () =>
   assert.equal(result.answerText, 'Exact server answer');
 });
 
+test('canonical FINAL requires both submitted message and turn identities when bound', () => {
+  const payload = (user: Record<string, unknown>) => conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', user),
+    node('answer-node', 'user-node', finalAssistant('answer', 'Do not adopt wrong turn')),
+  ], 'answer-node');
+  for (const foreign of [
+    userMessage('user-message-1', 'foreign-turn'),
+    userMessage('foreign-message', 'user-turn-1'),
+  ]) {
+    const result = recoverExactServerFinal(payload(foreign), identity());
+    assert.equal(result.kind, 'unverified', 'one correct ID cannot override the conflicting other ID');
+    assert.equal(result.answerText, null);
+  }
+  const withoutTurnField = { ...userMessage('user-message-1', 'unused'), turn_id: undefined };
+  assert.equal(recoverExactServerFinal(payload(withoutTurnField), {
+    ...identity(), submittedUserTurnId: 'user-node',
+  }).kind, 'complete', 'canonical node ID remains a valid exact turn fallback');
+});
+
 test('direct final and ACK reject missing or conflicting conversation aliases even with the same message ID', () => {
   const branch = conversationPayload([
     node('root', null, null), node('user', 'root', userMessage('user-message-1', 'user-turn-1')),
