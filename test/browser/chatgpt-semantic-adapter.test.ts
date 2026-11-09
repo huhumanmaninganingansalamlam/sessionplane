@@ -369,8 +369,10 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
           document.querySelector('[role=slider]').onclick = () => window.radixSliderChanges++;
           document.getElementById('radix-choose').onclick = () => {
             window.radixModelDisclosures++;
-            document.getElementById('radix-effort-view').style.display = 'none';
-            document.getElementById('radix-model-view').style.display = 'block';
+            window.setTimeout(() => {
+              document.getElementById('radix-effort-view').style.display = 'none';
+              document.getElementById('radix-model-view').style.display = 'block';
+            }, 900);
           };
           document.querySelectorAll('#radix-model-view [role=menuitemradio]')
             .forEach(radio => radio.onclick = () => {
@@ -393,6 +395,8 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
       actionRef: openRadix.actionRef, evidenceHash: openRadix.evidenceHash,
       authorizedDecisionId: 'decision-model' }),
     { kind: 'performed', effect: 'model_menu_opened' });
+    assert.equal(await page.evaluate(() => (window as any).radixRootOpens), 1,
+      'opening animation cannot cause a second root click');
     const radixEffort = await adapter.observe(task);
     assert.equal(radixEffort.actions.some(a => a.purpose === 'choose_model'), false,
       'the visible slider is not a model option');
@@ -406,6 +410,8 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
       actionRef: discloseRadix.actionRef, evidenceHash: discloseRadix.evidenceHash,
       authorizedDecisionId: 'decision-model' }),
     { kind: 'performed', effect: 'model_menu_opened' });
+    assert.equal(await page.evaluate(() => (window as any).radixModelDisclosures), 1,
+      'model view delay cannot cause a second disclosure click');
     const radixModels = await adapter.observe(task);
     const radixChoice = radixModels.actions.find(a => a.purpose === 'choose_model')!;
     assert.ok(radixChoice && radixChoice.input.kind === 'option');

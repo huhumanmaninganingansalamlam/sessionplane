@@ -191,6 +191,32 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
   };
 }
 
+// A composer menu may paint several seconds after its one authorized disclosure.
+// Wait for the exact linked view, then let the full semantic inspector verify it.
+async function waitForComposerMenuView(page: Page, openerId: string, priorMenuId: string,
+  view: 'root' | 'models'): Promise<void> {
+  await page.waitForFunction(({ openerId, priorMenuId, view }) => {
+    const opener = document.getElementById(openerId);
+    if (opener?.getAttribute('aria-expanded') !== 'true') return false;
+    const menuId = opener.getAttribute('aria-controls') ?? '';
+    if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(menuId) ||
+      (priorMenuId !== '' && menuId !== priorMenuId)) return false;
+    const linked = [...document.querySelectorAll<HTMLElement>('[role="menu"][id]')]
+      .filter(menu => menu.id === menuId && menu.getAttribute('aria-labelledby') === openerId);
+    if (linked.length !== 1) return false;
+    const menu = linked[0]!;
+    const visible = (element: Element) =>
+      element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+      element.getBoundingClientRect().width > 0;
+    if (menu.getAttribute('data-state') !== 'open' || !visible(menu)) return false;
+    if (view === 'root') return true;
+    const controls = (role: string) => [...menu.querySelectorAll<HTMLElement>('[role="' + role + '"]')]
+      .filter(element => element.closest('[role="menu"]') === menu && visible(element));
+    const radios = controls('menuitemradio');
+    return controls('menuitem').length === 0 && radios.length >= 2 && radios.length <= 20;
+  }, { openerId, priorMenuId, view }, { timeout: 5_000, polling: 200 });
+}
+
 export async function openExactChatGptModelMenu(page: Page, expectedHash: string): Promise<void> {
   const current = await inspectSemanticChatGptModelMenu(page);
   const validIdentity = current?.strategy === 'composer-radix'
@@ -208,24 +234,7 @@ export async function openExactChatGptModelMenu(page: Page, expectedHash: string
     try { await button.click({ timeout: 5_000 }); }
     finally { await button.dispose(); }
     if (current.strategy === 'composer-radix') {
-      // The linked portal can mount transparent while its animation waits
-      // for a renderer frame. Observe readiness once; never click again.
-      await page.waitForFunction(({ openerId, priorMenuId }) => {
-        const opener = document.getElementById(openerId);
-        if (opener?.getAttribute('aria-expanded') !== 'true') return false;
-        const menuId = opener.getAttribute('aria-controls') ?? '';
-        if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(menuId) ||
-          (priorMenuId !== '' && menuId !== priorMenuId)) return false;
-        const linked = [...document.querySelectorAll<HTMLElement>('[role="menu"][id]')]
-          .filter(menu => menu.id === menuId &&
-            menu.getAttribute('aria-labelledby') === openerId);
-        return linked.length === 1 &&
-          linked[0]!.getAttribute('data-state') === 'open' &&
-          linked[0]!.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
-          linked[0]!.getBoundingClientRect().width > 0;
-      }, { openerId: current.openerId, priorMenuId: current.menuId }, {
-        timeout: 5_000, polling: 200,
-      });
+      await waitForComposerMenuView(page, current.openerId, current.menuId, 'root');
     }
     const after = await inspectSemanticChatGptModelMenu(page);
     if (!after || after.strategy !== current.strategy ||
@@ -246,6 +255,7 @@ export async function openExactChatGptModelMenu(page: Page, expectedHash: string
       throw new Error('Composer model list disclosure changed');
     }
     await disclosure.click({ timeout: 5_000 });
+    await waitForComposerMenuView(page, current.openerId, current.menuId, 'models');
     const after = await inspectSemanticChatGptModelMenu(page);
     if (!after || after.strategy !== current.strategy ||
       after.openerId !== current.openerId || after.menuId !== current.menuId ||
