@@ -127,6 +127,45 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
           'message-body buttons are not executable chat send controls');
     }
 
+    // Async authorization can overlap on the same ref; only one click is allowed.
+    // Preserve the draft after click to expose a second unintended dispatch.
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true">Committed draft</div>' +
+      '<button data-testid="send-button" onclick="window.sends++">Send</button></main>' +
+      '<script>window.sends=0;</script>');
+    let releaseSlow!: () => void;
+    const slowAuthorization = new Promise<void>(resolve => { releaseSlow = resolve; });
+    let signalSlowEntered!: () => void;
+    const slowEntered = new Promise<void>(resolve => { signalSlowEntered = resolve; });
+    const overlapping = new ChatGptSemanticAdapter({
+      isExactLease: value => allowedLease === value,
+      resolvePage: value => registry.pageForObservation(value.pageKey, value.bindingEpoch),
+      isAuthorizedAttempt: async ({ attemptId }) => {
+        if (attemptId === 'journaled-attempt-slow') {
+          signalSlowEntered();
+          await slowAuthorization;
+        }
+        return true;
+      },
+    });
+    const overlapView = await overlapping.observe(task);
+    const overlapSend = overlapView.actions.find(a => a.purpose === 'submit')!;
+    assert.ok(overlapSend);
+    const sameRef = {
+      context: task, snapshotId: overlapView.snapshotId, actionRef: overlapSend.actionRef,
+      evidenceHash: overlapSend.evidenceHash, expectedContentSha256: digest('Committed draft'),
+    };
+    const delayed = overlapping.act({ ...sameRef, authorizedAttemptId: 'journaled-attempt-slow' });
+    await slowEntered;
+    let immediate;
+    try {
+      immediate = await overlapping.act({ ...sameRef, authorizedAttemptId: 'journaled-attempt-fast' });
+    } finally { releaseSlow(); }
+    assert.equal(immediate.kind, 'dispatched_unverified');
+    assert.equal((await delayed).kind, 'stale',
+      'a ref consumed while authorization was pending cannot dispatch again');
+    assert.equal(await page.evaluate(() => (window as any).sends), 1,
+      'an overlapping authorized action must not click Send twice');
+
     // The real Chat editor renders an empty ProseMirror paragraph as innerText '\n'.
     // It is a structural placeholder, not a human-written draft.
     await page.setContent('<main><section data-chatgpt-composer><div class="ProseMirror" role="textbox" contenteditable="true">' +

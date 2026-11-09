@@ -310,6 +310,12 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if (action.purpose !== 'compose' && !(await this.#authorized(request, action.purpose))) {
       return { kind: 'authorization_required', reason: 'journaled-action-authorization-unverified' };
     }
+    // Journal authorization can await I/O. Another caller or new observation
+    // may have consumed/superseded this ref while that check was pending.
+    if (this.#latest.get(lease.pageKey) !== snapshot ||
+      snapshot?.actions.get(request.actionRef) !== action) {
+      return { kind: 'stale', reason: 'action-ref-stale-or-foreign' };
+    }
     if (action.purpose === 'compose' && (!request.input || request.input.length > MAX_DRAFT)) {
       return { kind: 'unsupported', reason: 'invalid-draft-input' };
     }
