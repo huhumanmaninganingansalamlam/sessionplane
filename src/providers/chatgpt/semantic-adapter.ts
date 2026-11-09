@@ -5,8 +5,9 @@ import { PageOperationGate } from '../../browser/page-operation-gate.ts';
 import type { OwnedPageIdentity } from '../../browser/owned-page-lifecycle.ts';
 import type {
   SemanticActRequest, SemanticActResult, SemanticActionCandidate,
-  SemanticActionPurpose, SemanticDispatchEvidence, SemanticExactQuery, SemanticObservation,
-  SemanticProviderAdapter, SemanticTaskContext, SemanticVerification,
+  SemanticActionPurpose, SemanticCapabilityIssue, SemanticDispatchEvidence,
+  SemanticExactQuery, SemanticObservation, SemanticProviderAdapter,
+  SemanticTaskContext, SemanticVerification,
 } from '../semantic-adapter.ts';
 import { ChatGptBackendRecovery, type BackendJsonClient } from './backend-recovery.ts';
 import { observeChatGptDialog } from './dialog-observer.ts';
@@ -108,6 +109,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     const observedAt = new Date().toISOString();
     const snapshotId = randomUUID();
     const actions: SemanticActionCandidate[] = [];
+    const capabilityIssues: SemanticCapabilityIssue[] = [];
     const cached = new Map<string, CachedAction>();
     let blocker: SemanticObservation['blocker'] = 'none';
     let reason: string | null = null;
@@ -262,6 +264,10 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
             'configuration_only', { kind: 'option', options: model.options.map(o => ({
               value: o.value, enabled: o.enabled,
             })) }, ui.fingerprint, null, model.evidenceHash);
+        } else if (model?.status === 'unsupported') {
+          capabilityIssues.push({
+            capability: 'model_choice', reason: model.reason ?? 'model-menu-unverified',
+          });
         }
       }
     }
@@ -270,6 +276,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       providerKey: this.providerKey, surface: surface.mode, snapshotId, observedAt,
       capabilityManifest: this.capabilities, progress, blocker, reason, turn,
       questionText: question?.text ?? null, permission, actions, evidenceBytes: 0,
+      ...(capabilityIssues.length > 0 ? { capabilityIssues } : {}),
     };
     let bytes = Buffer.byteLength(JSON.stringify(observation));
     if (bytes > MAX_PACKET_BYTES) {

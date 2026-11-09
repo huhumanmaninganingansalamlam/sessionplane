@@ -66,6 +66,13 @@ export interface SemanticPermissionEvidence {
   readonly evidenceHash: string;
   readonly canGrant: false;
 }
+/** A single advertised capability may be unverified while other actions
+ * remain usable. It never authorizes an action or changes the top-level blocker.
+ */
+export interface SemanticCapabilityIssue {
+  readonly capability: SemanticCapability;
+  readonly reason: string;
+}
 export interface SemanticObservation {
   readonly providerKey: string;
   readonly surface: SemanticSurface;
@@ -80,6 +87,7 @@ export interface SemanticObservation {
   readonly questionText: string | null;
   readonly permission?: SemanticPermissionEvidence | null;
   readonly actions: readonly SemanticActionCandidate[];
+  readonly capabilityIssues?: readonly SemanticCapabilityIssue[];
   readonly evidenceBytes: number;
 }
 export interface SemanticActRequest {

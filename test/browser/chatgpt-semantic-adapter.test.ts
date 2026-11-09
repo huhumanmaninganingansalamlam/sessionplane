@@ -318,6 +318,7 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     const lazyEffort = await adapter.observe(task);
     const lazyChoice = lazyEffort.actions.find(a => a.purpose === 'choose_model')!;
     assert.ok(lazyChoice && lazyChoice.input.kind === 'option');
+    assert.equal(lazyEffort.capabilityIssues, undefined);
 
     // Missing submenu linkage is not a license to guess a Pro control.
     await page.evaluate(() => document.querySelector('#pro-trigger')!
@@ -325,6 +326,10 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     const brokenPro = await adapter.observe(task);
     assert.equal(brokenPro.actions.some(a => a.purpose === 'choose_model' ||
       a.purpose === 'open_model_chooser'), false);
+    assert.equal(brokenPro.blocker, 'none');
+    assert.deepEqual(brokenPro.capabilityIssues, [
+      { capability: 'model_choice', reason: 'pro-submenu-link-unverified' },
+    ]);
 
     // Observed ChatGPT composer picker: the root portal is lazy and gains
     // aria-controls only after opening. The effort slider and model radios
@@ -435,6 +440,12 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(unlinkedRadix.actions.some(a => a.purpose === 'choose_model' ||
       a.purpose === 'open_model_chooser'), false,
       'a same-page but unlinked popover is not a trusted model chooser');
+    assert.equal(unlinkedRadix.blocker, 'none');
+    assert.deepEqual(unlinkedRadix.capabilityIssues, [
+      { capability: 'model_choice', reason: 'composer-model-menu-link-or-controls-unverified' },
+    ]);
+    assert.ok(unlinkedRadix.actions.some(a => a.purpose === 'compose'),
+      'an unverified model menu must not disable unrelated chat composition');
 
     // If the provider never finishes its transition, a one-shot decision
     // expires uncertain instead of clicking the disclosure again.
