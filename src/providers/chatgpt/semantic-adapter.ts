@@ -363,7 +363,9 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           submittedUserTurnId: request.context.submittedUserTurnId,
         });
         if (!boundary.submittedUserFound || boundary.laterUserFound ||
-            boundary.candidate?.streamingMarker === true) return 'stale' as const;
+            (boundary.candidate?.streamingMarker === true && action.purpose !== 'answer_question')) {
+          return 'stale' as const;
+        }
       }
       const fresh = await captureUi(page);
       if (fresh.fingerprint !== action.uiFingerprint) return 'stale' as const;

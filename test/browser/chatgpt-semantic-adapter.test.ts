@@ -869,6 +869,28 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
       actionRef: action.actionRef, evidenceHash: action.evidenceHash,
       input: 'Keep existing', authorizedAttemptId: 'decision-twice' })).kind, 'stale');
 
+    // A question can interrupt the exact assistant stream; it is not a new chat draft.
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="user-b">Task</div>' +
+      '<div data-message-author-role="assistant" data-message-id="answer-b" data-is-streaming="true">Working</div>' +
+      '<div id="prompt-textarea" contenteditable="true"></div>' +
+      '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
+      '<h3>Choose during generation</h3><div role="radiogroup">' +
+      '<button type="button" role="radio" aria-label="Proceed" onclick="window.streamChoice=\'go\';this.closest(\'section\').remove()">Proceed</button>' +
+      '<button type="button" role="radio" aria-label="Decline" disabled>Decline</button>' +
+      '</div></section></main><script>window.streamChoice=null;</script>');
+    const streamingTask = context(lease, 'user-b');
+    const streamingQuestion = await adapter.observe(streamingTask);
+    assert.equal(streamingQuestion.progress, 'streaming');
+    assert.equal(streamingQuestion.blocker, 'provider_question');
+    const streamingAction = streamingQuestion.actions.find(a => a.purpose === 'answer_question')!;
+    assert.ok(streamingAction);
+    const streamingDecision = await adapter.act({ context: streamingTask,
+      snapshotId: streamingQuestion.snapshotId, actionRef: streamingAction.actionRef,
+      evidenceHash: streamingAction.evidenceHash, input: 'Proceed',
+      authorizedAttemptId: 'decision-streaming' });
+    assert.deepEqual(streamingDecision, { kind: 'performed', effect: 'question_answered' });
+    assert.equal(await page.evaluate(() => (window as any).streamChoice), 'go');
+
     // A bounded free-text question is a distinct typed input; only a scoped
     // provider panel may submit it, never an arbitrary form or chat editor.
     await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
