@@ -553,6 +553,9 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       query.attempts[0]!.conversationId !== conversationId)) {
       return { kind: 'unavailable', reason: 'exact-dispatch-correlation-required' };
     }
+    if (query.kind === 'final' && !id.submittedUserTurnId) {
+      return { kind: 'unavailable', reason: 'exact-submitted-user-turn-required' };
+    }
     let client: BackendJsonClient;
     let origin: string;
     try {
@@ -580,7 +583,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if (final.kind === 'complete' && final.answerText !== null) {
       return {
         kind: 'exact_final',
-        externalTurnId: id.submittedUserTurnId ?? id.submittedUserMessageId!,
+        externalTurnId: id.submittedUserTurnId!,
         answerText: final.answerText,
       };
     }

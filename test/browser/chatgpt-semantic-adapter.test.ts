@@ -1107,6 +1107,12 @@ test('canonical ACK and FINAL recovery works read-only without a page or foregro
     backendOrigin: 'https://chatgpt.com',
   };
   const readOnly = new ChatGptSemanticAdapter(options);
+  const unknownTurn = await new ChatGptSemanticAdapter(options).recover({
+    context: { ...context(null, userId), submittedUserTurnId: null }, kind: 'final',
+  });
+  assert.deepEqual(unknownTurn, { kind: 'unavailable', reason: 'exact-submitted-user-turn-required' },
+    'a canonical user message ID is not a substitute for its turn ID');
+  assert.equal(reads, 0, 'unbound turn cannot trigger an authenticated backend read');
   const exact = { ...context(null, userId), submittedUserTurnId: userTurn };
   const result = await readOnly.recover({ context: exact, kind: 'final' });
   assert.deepEqual(result, { kind: 'exact_final', externalTurnId: userTurn,
