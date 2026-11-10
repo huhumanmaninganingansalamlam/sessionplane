@@ -578,8 +578,8 @@ function exactServerFinal(
   ) {
     return null;
   }
-  const text = messageText(message).trim();
-  if (text.length === 0) {
+  const text = messageText(message);
+  if (text.trim().length === 0) {
     return null;
   }
   return {

@@ -139,6 +139,19 @@ test('backend recovery accepts only an exact final on the current branch', () =>
   assert.equal(result.answerText, 'Exact server answer');
 });
 
+test('canonical FINAL preserves significant leading and trailing whitespace', () => {
+  const exactText = '  Leading spaces\nStructured answer  \n\n';
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('assistant-node', 'user-node', finalAssistant('answer', exactText)),
+  ], 'assistant-node');
+  const result = recoverExactServerFinal(payload, identity());
+  assert.equal(result.kind, 'complete');
+  assert.equal(result.answerText, exactText,
+    'a canonical answer must not be silently trimmed during exact recovery');
+});
+
 test('backend FINAL rejects repeated or conflicting bound user IDs on the current branch', () => {
   for (const duplicate of [
     userMessage('user-message-1', 'user-turn-1'),
