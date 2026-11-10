@@ -875,6 +875,17 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(staleResult.kind, 'stale', 'changed evidence before dispatch is a fresh decision, not uncertain mutation');
     assert.equal(await page.locator('#prompt-textarea').innerText(), '');
 
+    // Page ownership may be revoked while observe awaits several DOM reads.
+    // Its final packet must not expose an executable ref from the old lease.
+    let leaseChecks = 0;
+    const revokedMidObservation = new ChatGptSemanticAdapter({
+      isExactLease: () => ++leaseChecks <= 2, resolvePage: () => page,
+    });
+    const revokedPacket = await revokedMidObservation.observe(task);
+    assert.equal(revokedPacket.blocker, 'unsupported');
+    assert.equal(revokedPacket.actions.length, 0);
+    assert.equal(revokedPacket.turn.partialAnswer, null);
+
     await page.setContent('<main><div role="radiogroup">' +
       '<button role="radio" aria-checked="false">Chat</button>' +
       '<button role="radio" aria-checked="true">Work</button></div>' +

@@ -126,10 +126,20 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     let blocker: SemanticObservation['blocker'] = 'none';
     let reason: string | null = null;
     let progress: SemanticObservation['progress'] = 'unknown';
-    let turn: SemanticObservation['turn'] = {
+    const unverifiedTurn: SemanticObservation['turn'] = {
       submittedUserFound: false, laterUserFound: false,
       submittedUserMessageId: context.submittedUserMessageId,
       answerMessageId: null, partialAnswer: null,
+    };
+    let turn = unverifiedTurn;
+    const deniedObservation = (denialReason: string): SemanticObservation => {
+      const denied: SemanticObservation = {
+        providerKey: this.providerKey, surface: 'unknown', snapshotId, observedAt,
+        capabilityManifest: this.capabilities, progress: 'unknown', blocker: 'unsupported',
+        reason: denialReason, turn: unverifiedTurn, questionText: null, permission: null,
+        actions: [], evidenceBytes: 0,
+      };
+      return { ...denied, evidenceBytes: observationBytes(denied) };
     };
 
     const conversationError = conversationBindingProblem(page, context);
@@ -137,12 +147,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       // Page ownership alone does not prove that this tab still points to the
       // bound ChatGPT conversation. Do not inspect a foreign transcript.
       this.#latest.delete(lease.pageKey);
-      const denied: SemanticObservation = {
-        providerKey: this.providerKey, surface: 'unknown', snapshotId, observedAt,
-        capabilityManifest: this.capabilities, progress: 'unknown', blocker: 'unsupported',
-        reason: conversationError, turn, questionText: null, permission: null, actions: [], evidenceBytes: 0,
-      };
-      return { ...denied, evidenceBytes: observationBytes(denied) };
+      return deniedObservation(conversationError);
     }
     const surface = await observeChatGptSurface(page);
     const dialog = await observeChatGptDialog(page);
@@ -296,6 +301,22 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       }
     }
 
+    // Ownership and conversation may change across asynchronous DOM reads.
+    let changedBinding: string | null = null;
+    if (!this.#options.isExactLease(lease)) {
+      changedBinding = 'page-lease-revoked-during-observation';
+    } else {
+      try {
+        this.#checkOrigin(page);
+        changedBinding = conversationBindingProblem(page, context);
+      } catch {
+        changedBinding = 'page-origin-changed-during-observation';
+      }
+    }
+    if (changedBinding !== null) {
+      this.#latest.delete(lease.pageKey);
+      return deniedObservation(changedBinding);
+    }
     let observation: SemanticObservation = {
       providerKey: this.providerKey, surface: surface.mode, snapshotId, observedAt,
       capabilityManifest: this.capabilities, progress, blocker, reason, turn,
