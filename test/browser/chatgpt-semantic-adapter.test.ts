@@ -979,11 +979,18 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
       '<button role="radio" aria-checked="false">Chat</button>' +
       '<button role="radio" aria-checked="true">Work</button></div>' +
       '<div id="prompt-textarea" contenteditable="true"></div>' +
+      '<article data-message-author-role="user" data-message-id="user-b" data-turn-id="turn-b">' +
+      'Work-only request</article>' +
+      '<article data-message-author-role="assistant" data-message-id="work-answer">' +
+      '<div class="markdown">Work-only answer</div></article>' +
       '<button aria-label="Send">Send</button></main>');
-    const work = await adapter.observe(task);
+    const work = await adapter.observe(context(lease, 'user-b'));
     assert.equal(work.surface, 'work');
     assert.equal(work.blocker, 'unsupported');
     assert.equal(work.actions.length, 0);
+    assert.equal(work.turn.submittedUserFound, false);
+    assert.equal(work.turn.answerMessageId, null);
+    assert.equal(work.turn.partialAnswer, null, 'unsupported Work transcript must not escape a Chat adapter');
 
     // Defense in depth: even if an external ownership implementation
     // mistakenly retains a lease after navigation, the semantic adapter

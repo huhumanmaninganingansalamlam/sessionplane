@@ -132,13 +132,14 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       answerMessageId: null, partialAnswer: null,
     };
     let turn = unverifiedTurn;
-    const deniedObservation = (denialReason: string): SemanticObservation => {
+    const deniedObservation = (denialReason: string,
+      deniedSurface: SemanticObservation['surface'] = 'unknown'): SemanticObservation => {
       const deniedTurn: SemanticObservation['turn'] = {
         submittedUserFound: false, laterUserFound: false,
         submittedUserMessageId: null, answerMessageId: null, partialAnswer: null,
       };
       const denied: SemanticObservation = {
-        providerKey: this.providerKey, surface: 'unknown', snapshotId, observedAt,
+        providerKey: this.providerKey, surface: deniedSurface, snapshotId, observedAt,
         capabilityManifest: this.capabilities, progress: 'unknown', blocker: 'unsupported',
         reason: denialReason, turn: deniedTurn, questionText: null, permission: null,
         actions: [], evidenceBytes: 0,
@@ -154,6 +155,11 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       return deniedObservation(conversationError);
     }
     const surface = await observeChatGptSurface(page);
+    if (surface.mode !== 'chat') {
+      this.#latest.delete(lease.pageKey);
+      return deniedObservation(surface.mode === 'work'
+        ? 'work-surface-observation-only' : 'chat-surface-unverified', surface.mode);
+    }
     const dialog = await observeChatGptDialog(page);
     const ui = await captureUi(page);
     const unboundStream = surface.mode === 'chat' &&
@@ -175,10 +181,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       progress = dom.candidate?.streamingMarker ? 'streaming'
         : dom.candidate?.terminalMarker ? 'idle' : dom.submittedUserFound ? 'idle' : 'unknown';
     }
-    if (surface.mode !== 'chat') {
-      blocker = 'unsupported';
-      reason = surface.mode === 'work' ? 'work-surface-observation-only' : 'chat-surface-unverified';
-    } else if (dialog.kind !== null) {
+    if (dialog.kind !== null) {
       blocker = dialog.kind === 'rate_limit' ? 'rate_limit' : 'human_verification';
       reason = dialog.reason;
     } else if (unboundStream) {
