@@ -996,6 +996,16 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(foreign.blocker, 'unsupported');
     assert.equal(foreign.reason, 'conversation-url-mismatch');
     assert.equal(foreign.actions.length, 0);
+    const oversizedForeign = await permissiveFixtureLease.observe({
+      ...task, submittedUserMessageId: 'm'.repeat(20_000),
+    });
+    assert.equal(oversizedForeign.blocker, 'unsupported');
+    assert.equal(oversizedForeign.reason, 'conversation-url-mismatch');
+    assert.equal(oversizedForeign.actions.length, 0);
+    assert.equal(oversizedForeign.turn.submittedUserMessageId, null);
+    assert.ok(oversizedForeign.evidenceBytes <= 12 * 1024,
+      'fail-closed observations must remain within the semantic evidence budget');
+    assert.equal(oversizedForeign.evidenceBytes, Buffer.byteLength(JSON.stringify(oversizedForeign)));
     const unbound = await permissiveFixtureLease.observe({
       ...task, providerConversationId: null,
     });

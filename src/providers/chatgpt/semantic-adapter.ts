@@ -133,10 +133,14 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     };
     let turn = unverifiedTurn;
     const deniedObservation = (denialReason: string): SemanticObservation => {
+      const deniedTurn: SemanticObservation['turn'] = {
+        submittedUserFound: false, laterUserFound: false,
+        submittedUserMessageId: null, answerMessageId: null, partialAnswer: null,
+      };
       const denied: SemanticObservation = {
         providerKey: this.providerKey, surface: 'unknown', snapshotId, observedAt,
         capabilityManifest: this.capabilities, progress: 'unknown', blocker: 'unsupported',
-        reason: denialReason, turn: unverifiedTurn, questionText: null, permission: null,
+        reason: denialReason, turn: deniedTurn, questionText: null, permission: null,
         actions: [], evidenceBytes: 0,
       };
       return { ...denied, evidenceBytes: observationBytes(denied) };
