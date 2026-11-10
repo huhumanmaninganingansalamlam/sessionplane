@@ -45,6 +45,14 @@ export async function answerChatGptQuestion(page: Page, input: { answer: string;
   // No default/recommended answer is selected by SessionPlane.
   const option = page.locator(QUESTION).getByRole('radio', { name: input.answer, exact: true });
   if (await option.count() !== 1) throw new SessionPlaneDomainError('provider.question-unverified', 'Question answer is ambiguous');
+  // The same label can be reused by a different provider question while the
+  // locator is resolving. Revalidate the complete exact question evidence
+  // after that asynchronous lookup and before any one-shot click.
+  const rechecked = await inspectChatGptQuestion(page);
+  if (!rechecked?.available || rechecked.evidenceHash !== observed.evidenceHash ||
+    !rechecked.options.some(choice => choice.answer === input.answer && !choice.disabled)) {
+    throw new SessionPlaneDomainError('provider.question-unverified', 'Provider question changed before the selected answer click');
+  }
   beforeClick();
   let clickError: unknown;
   try { await option.click({ timeout: 5000 }); }

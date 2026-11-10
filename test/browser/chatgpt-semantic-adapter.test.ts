@@ -9,6 +9,7 @@ import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import type { OwnedPageIdentity } from '../../src/browser/owned-page-lifecycle.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 import { ChatGptBackendRecovery, type BackendJsonClient } from '../../src/providers/chatgpt/backend-recovery.ts';
+import { inspectChatGptQuestion, answerChatGptQuestion } from '../../src/providers/chatgpt/question.ts';
 import { ChatGptSemanticAdapter } from '../../src/providers/chatgpt/semantic-adapter.ts';
 import { inspectSemanticHostSpanPermission } from '../../src/providers/chatgpt/semantic-hostspan-permission.ts';
 import { observeChatGptDom } from '../../src/providers/chatgpt/dom-observer.ts';
@@ -1163,6 +1164,62 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
       authorizedAttemptId: 'decision-streaming' });
     assert.deepEqual(streamingDecision, { kind: 'performed', effect: 'question_answered' });
     assert.equal(await page.evaluate(() => (window as any).streamChoice), 'go');
+
+    // A provider may replace the question after a fresh lookup but before
+    // the locator click. The same option label is not proof of the same task.
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
+      '<div data-message-author-role="user" data-message-id="user-b">Task</div>' +
+      '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
+      '<h3 id="race-question">Which repository?</h3><div role="radiogroup">' +
+      '<button type="button" role="radio" aria-label="Proceed" id="race-proceed">Proceed</button>' +
+      '<button type="button" role="radio" aria-label="Decline">Decline</button></div></section></main>' +
+      '<script>window.raceClicks=0;document.getElementById("race-proceed").onclick=()=>{' +
+      'window.raceClicks++;document.querySelector("section").remove();};</script>');
+    const radioBefore = await inspectChatGptQuestion(page);
+    assert.ok(radioBefore?.available);
+    let swapped = false;
+    const bound = (target: object, prop: PropertyKey) => {
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    };
+    const racedPage = new Proxy(page, { get(target, prop) {
+      if (prop !== 'locator') return bound(target, prop);
+      return (selector: string) => {
+        const locator = page.locator(selector);
+        if (selector !== '[data-codex-composer-request-navigation="true"][data-user-input-auto-resolution="true"]') {
+          return locator;
+        }
+        return new Proxy(locator, { get(loc, member) {
+          if (member !== 'getByRole') return bound(loc, member);
+          return (...args: Parameters<typeof loc.getByRole>) => {
+            const radio = loc.getByRole(...args);
+            return new Proxy(radio, { get(option, method) {
+              if (method !== 'count') return bound(option, method);
+              return async () => {
+                const count = await option.count();
+                if (!swapped) {
+                  swapped = true;
+                  await page.locator('#race-question').evaluate(element => {
+                    element.textContent = 'Which service should launch?';
+                  });
+                }
+                return count;
+              };
+            } });
+          };
+        } });
+      };
+    } });
+    let radioOutcome: unknown = null;
+    try {
+      radioOutcome = await answerChatGptQuestion(racedPage, {
+        answer: 'Proceed', evidenceHash: radioBefore.evidenceHash,
+      }, () => {});
+    } catch (error) { radioOutcome = error; }
+    assert.equal(swapped, true);
+    assert.equal(await page.evaluate(() => (window as any).raceClicks), 0,
+      'a retained radio label must not click after the provider question changes');
+    assert.ok(radioOutcome instanceof Error, 'changed radio question must remain unsubmitted');
 
     // A bounded free-text question is a distinct typed input; only a scoped
     // provider panel may submit it, never an arbitrary form or chat editor.
