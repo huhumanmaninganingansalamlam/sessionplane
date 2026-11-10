@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import type { SessionSnapshot } from '../../src/domain/session.ts';
+import { ChatGptSemanticAdapter } from '../../src/providers/chatgpt/semantic-adapter.ts';
 import type { ProviderAcknowledgementRecoveryEvidence } from '../../src/providers/provider-adapter.ts';
 import {
   ChatGptBackendRecovery,
@@ -700,6 +701,57 @@ test('canonical ACK evidence separates no match and access rejection from a reco
   assert.equal(recoverExactServerFinal(payload, acknowledgement!).answerText, 'Original result');
   assert.equal(evidence.length, 3, 'successful recovery does not retain a new failure');
 });
+
+test('ChatGPT semantic FINAL keeps backend 429 nonterminal and respects Retry-After', async () => {
+  let now = 100_000;
+  let detailReads = 0;
+  const backend = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 180_000, now: () => new Date(now),
+  });
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('final-node', 'user-node', finalAssistant('answer-1', 'Canonical final')),
+  ], 'final-node');
+  const client: BackendJsonClient = { async get(url) {
+    if (url.endsWith('/api/auth/session')) {
+      return { status: 200, headers: {}, body: { accessToken: 'synthetic-memory-token' } };
+    }
+    detailReads++;
+    return detailReads === 1
+      ? { status: 429, headers: { 'retry-after': '120' }, body: null }
+      : { status: 200, headers: {}, body: payload };
+  } };
+  const adapter = new ChatGptSemanticAdapter({
+    isExactLease: () => false,
+    resolvePage: () => { throw new Error('No live page should be read'); },
+    backendClient: client,
+    backendOrigin: 'https://chatgpt.com',
+    backendRecovery: backend,
+  });
+  const context = {
+    projectId: 'project-1', slotId: 'main', slotRevision: 1,
+    taskId: 'task-1', providerConversationId: CONVERSATION_ID,
+    submittedUserMessageId: 'user-message-1', submittedUserTurnId: 'user-turn-1',
+    pageLease: null,
+  } as const;
+  const recover = () => adapter.recover({ context, kind: 'final' });
+
+  assert.deepEqual(await recover(), { kind: 'pending', reason: 'backend-http-429' },
+    'temporary canonical GET deferral cannot become permanent unavailability');
+  assert.equal(detailReads, 1);
+  now += 1_000;
+  assert.deepEqual(await recover(), {
+    kind: 'pending', reason: 'backend-conversation-probe-paced',
+  }, 'same adapter must not repeat a deferred GET before the server delay');
+  assert.equal(detailReads, 1, 'no retry while the server is rate-limiting');
+  now += 120_001;
+  assert.deepEqual(await recover(), {
+    kind: 'exact_final', externalTurnId: 'user-turn-1', answerText: 'Canonical final',
+  });
+  assert.equal(detailReads, 2);
+});
+
 
 function identity() {
   return {

@@ -752,7 +752,9 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         answerText: final.answerText,
       };
     }
-    return final.kind === 'pending'
+    // A rate-limited canonical GET is deferred, not absent. Preserve its
+    // nonterminal state while backend recovery enforces Retry-After.
+    return final.kind === 'pending' || final.kind === 'deferred'
       ? { kind: 'pending', reason: final.reason }
       : { kind: 'unavailable', reason: final.reason };
   }
