@@ -1755,6 +1755,63 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
       'a retained radio label must not click after the provider question changes');
     assert.ok(radioOutcome instanceof Error, 'changed radio question must remain unsubmitted');
 
+    // A failed one-shot click stays uncertain even if the provider advances
+    // the question before the click error reaches SessionPlane.
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
+      '<div data-message-author-role="user" data-message-id="user-b">Task</div>' +
+      '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
+      '<h3>Original click-failure question</h3><div role="radiogroup">' +
+      '<button type="button" role="radio" aria-label="Proceed">Proceed</button>' +
+      '<button type="button" role="radio" aria-label="Decline">Decline</button>' +
+      '</div></section></main>');
+    const clickFailureBefore = await inspectChatGptQuestion(page);
+    assert.ok(clickFailureBefore?.available);
+    const clickFailurePage = new Proxy(page, { get(target, prop) {
+      if (prop !== 'locator') return bound(target, prop);
+      return (selector: string) => {
+        const locator = page.locator(selector);
+        if (selector !== '[data-codex-composer-request-navigation="true"][data-user-input-auto-resolution="true"]') {
+          return locator;
+        }
+        return new Proxy(locator, { get(loc, member) {
+          if (member !== 'getByRole') return bound(loc, member);
+          return (...args: Parameters<typeof loc.getByRole>) => {
+            const radio = loc.getByRole(...args);
+            return new Proxy(radio, { get(option, method) {
+              if (method !== 'elementHandle') return bound(option, method);
+              return async (..._args: unknown[]) => {
+                const handle = await option.elementHandle();
+                if (!handle) return null;
+                return new Proxy(handle, { get(original, handleMethod) {
+                  if (handleMethod !== 'click') return bound(original, handleMethod);
+                  return async (..._clickArgs: unknown[]) => {
+                    await page.locator('section').evaluate(panel => {
+                      panel.outerHTML = '<section data-codex-composer-request-navigation="true" ' +
+                        'data-user-input-auto-resolution="true"><h3>Replacement after failed click</h3>' +
+                        '<div role="radiogroup"><button type="button" role="radio" ' +
+                        'aria-label="Proceed">Proceed</button><button type="button" role="radio" ' +
+                        'aria-label="Decline">Decline</button></div></section>';
+                    });
+                    throw new Error('simulated click failure after provider advance');
+                  };
+                } });
+              };
+            } });
+          };
+        } });
+      };
+    } });
+    let clickFailureOutcome: unknown = null;
+    try {
+      clickFailureOutcome = await answerChatGptQuestion(clickFailurePage, {
+        answer: 'Proceed', evidenceHash: clickFailureBefore.evidenceHash,
+      }, () => {});
+    } catch (error) { clickFailureOutcome = error; }
+    assert.ok(clickFailureOutcome instanceof Error,
+      'a failed click must not become a successful question transition');
+    assert.equal((clickFailureOutcome as Error & { errorCode?: string }).errorCode,
+      'provider.action-unknown');
+
     // A bounded free-text question is a distinct typed input; only a scoped
     // provider panel may submit it, never an arbitrary form or chat editor.
     await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +

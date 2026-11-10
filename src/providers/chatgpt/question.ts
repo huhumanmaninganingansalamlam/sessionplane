@@ -54,7 +54,7 @@ export async function answerChatGptQuestion(page: Page, input: { answer: string;
     (element.getAttribute('aria-label') ?? '').trim() === expected.answer &&
     !element.matches(':disabled, [aria-disabled="true"]'),
   { questionSelector: QUESTION, answer: input.answer }).catch(() => false);
-  let clickError: unknown;
+  let clickFailed = false;
   try {
     // The same label can be reused by a different provider question while the
     // locator or the external exact-turn check awaits. Both semantic evidence
@@ -75,9 +75,13 @@ export async function answerChatGptQuestion(page: Page, input: { answer: string;
         'Provider question changed during the exact-turn check');
     }
     try { await handle.click({ timeout: 5000 }); }
-    catch (error) { clickError = error; }
+    catch { clickFailed = true; }
   } finally {
     await handle.dispose();
+  }
+  if (clickFailed) {
+    throw new SessionPlaneDomainError('provider.action-unknown',
+      'Question click outcome is unknown; inspect without repeating the answer');
   }
   const deadline = performance.now() + 1500;
   do {
@@ -91,6 +95,5 @@ export async function answerChatGptQuestion(page: Page, input: { answer: string;
     await page.waitForTimeout(100);
   } while (true);
   throw new SessionPlaneDomainError('provider.action-unknown',
-    clickError ? 'Question click outcome is unknown; inspect without repeating the answer'
-      : 'Question did not visibly advance after one answer click; inspect without repeating it');
+    'Question did not visibly advance after one answer click; inspect without repeating it');
 }
