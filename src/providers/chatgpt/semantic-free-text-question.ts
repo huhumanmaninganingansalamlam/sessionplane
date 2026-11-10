@@ -74,7 +74,7 @@ export async function inspectChatGptFreeTextQuestion(page: Page) {
 export async function answerChatGptFreeTextQuestion(
   page: Page,
   input: { readonly answer: string; readonly evidenceHash: string },
-  beforeMutation: () => void,
+  beforeMutation: () => void | Promise<void>,
 ): Promise<void> {
   if (!input.answer.trim() || input.answer.length > 2_000) {
     throw new Error('Free-text question answer must be bounded and nonempty');
@@ -105,7 +105,7 @@ export async function answerChatGptFreeTextQuestion(
       tag: observed.editor.tag, role: observed.editor.role,
       label: observed.editor.label, draft: observed.editor.draft,
     })) throw new Error('Question editor changed before fill');
-    beforeMutation();
+    await beforeMutation();
     await editor.fill(input.answer, { timeout: 5_000 });
     // Provider questions may advance while the input event is handled.
     // A filled editor is not evidence that the old question still owns Submit.
@@ -129,7 +129,7 @@ export async function answerChatGptFreeTextQuestion(
       buttonSignature.type !== observed.submit.type) {
       throw new Error('Question submission control changed after fill');
     }
-    beforeMutation();
+    await beforeMutation();
     await submit.click({ timeout: 5_000 });
   } finally {
     await editor.dispose(); await submit.dispose();

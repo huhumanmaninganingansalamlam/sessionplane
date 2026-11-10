@@ -501,14 +501,27 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           return 'stale' as const;
         }
         if (!(await this.#authorized(request, action.purpose))) return 'stale' as const;
+        const requireExactQuestionTurn = async () => {
+          requireExactMutationIdentity();
+          const boundary = await observeChatGptDom(page, {
+            submittedUserMessageId: request.context.submittedUserMessageId,
+            submittedUserTurnId: request.context.submittedUserTurnId,
+          });
+          if (!boundary.submittedUserFound || boundary.laterUserFound) {
+            throw new Error('Exact question user turn changed before mutation');
+          }
+          requireExactMutationIdentity();
+        };
+        try { await requireExactQuestionTurn(); }
+        catch { return 'stale' as const; }
         if (radio !== null) {
           await answerChatGptQuestion(page, {
             answer: request.input!, evidenceHash: action.questionHash!,
-          }, requireExactMutationIdentity);
+          }, requireExactQuestionTurn);
         } else {
           await answerChatGptFreeTextQuestion(page, {
             answer: request.input!, evidenceHash: action.questionHash!,
-          }, requireExactMutationIdentity);
+          }, requireExactQuestionTurn);
         }
         return 'question_answered' as const;
       }

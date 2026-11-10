@@ -35,7 +35,7 @@ export async function inspectChatGptQuestion(page: Page) {
   return { ...question, evidenceHash, available: !question.truncated && !question.draftPresent };
 }
 
-export async function answerChatGptQuestion(page: Page, input: { answer: string; evidenceHash: string }, beforeClick: () => void) {
+export async function answerChatGptQuestion(page: Page, input: { answer: string; evidenceHash: string }, beforeClick: () => void | Promise<void>) {
   const observed = await inspectChatGptQuestion(page);
   if (!observed?.available || observed.evidenceHash !== input.evidenceHash ||
       !observed.options.some(option => option.answer === input.answer && !option.disabled)) {
@@ -53,7 +53,7 @@ export async function answerChatGptQuestion(page: Page, input: { answer: string;
     !rechecked.options.some(choice => choice.answer === input.answer && !choice.disabled)) {
     throw new SessionPlaneDomainError('provider.question-unverified', 'Provider question changed before the selected answer click');
   }
-  beforeClick();
+  await beforeClick();
   let clickError: unknown;
   try { await option.click({ timeout: 5000 }); }
   catch (error) { clickError = error; }

@@ -1287,6 +1287,58 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     assert.equal(await page.locator('textarea').inputValue(), 'sessionplane',
       'the already entered answer remains a protected draft for fresh review');
 
+    // The user's conversation may advance while the second journal check
+    // awaits. An unchanged provider panel cannot authorize an old turn.
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
+      '<div data-message-author-role="user" data-message-id="user-b">Original task</div>' +
+      '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
+      '<h3>Which repository should be inspected?</h3>' +
+      '<form><textarea aria-label="Repository"></textarea><button type="submit">Submit</button></form>' +
+      '</section></main><script>window.laterQuestionSubmits=0;' +
+      'document.querySelector("form").onsubmit=e=>{e.preventDefault();' +
+      'window.laterQuestionSubmits++;document.querySelector("section").remove();};</script>');
+    let laterAuthorizationChecks = 0;
+    let signalLaterAuthorization!: () => void;
+    const laterAuthorizationEntered = new Promise<void>(resolve => {
+      signalLaterAuthorization = resolve;
+    });
+    let releaseLaterAuthorization!: () => void;
+    const laterAuthorization = new Promise<void>(resolve => {
+      releaseLaterAuthorization = resolve;
+    });
+    const laterUserAdapter = new ChatGptSemanticAdapter({
+      isExactLease: candidate => candidate === lease,
+      resolvePage: () => page,
+      isAuthorizedAttempt: async () => {
+        if (++laterAuthorizationChecks === 2) {
+          signalLaterAuthorization();
+          await laterAuthorization;
+        }
+        return true;
+      },
+    });
+    const laterOriginal = await laterUserAdapter.observe(task);
+    const laterAnswer = laterOriginal.actions.find(a => a.purpose === 'answer_question')!;
+    assert.ok(laterAnswer, 'the original question is available before the new user turn');
+    const pendingOldAnswer = laterUserAdapter.act({
+      context: task, snapshotId: laterOriginal.snapshotId,
+      actionRef: laterAnswer.actionRef, evidenceHash: laterAnswer.evidenceHash,
+      input: 'sessionplane', authorizedAttemptId: 'decision-later-user',
+    });
+    await laterAuthorizationEntered;
+    await page.locator('section').evaluate(panel => {
+      const newer = document.createElement('div');
+      newer.setAttribute('data-message-author-role', 'user');
+      newer.setAttribute('data-message-id', 'newer-user');
+      newer.textContent = 'A newer user request';
+      panel.before(newer);
+    });
+    releaseLaterAuthorization();
+    const oldAnswerResult = await pendingOldAnswer;
+    assert.notEqual(oldAnswerResult.kind, 'performed',
+      'a later user turn must revoke an old question even when its panel is unchanged');
+    assert.equal(await page.evaluate(() => (window as any).laterQuestionSubmits), 0);
+
     await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
       '<div data-message-author-role="user" data-message-id="user-b">Original task</div>' +
       '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
