@@ -298,8 +298,18 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       // Never truncate a material question/option and accidentally authorize it.
       actions.length = 0; cached.clear();
       observation = { ...observation, blocker: 'unsupported',
-        reason: 'semantic-packet-overflow-requires-bounded-expansion', actions: [] };
+        reason: 'semantic-packet-overflow-requires-bounded-expansion', actions: [],
+        turn: { ...observation.turn, partialAnswer: null } };
       bytes = Buffer.byteLength(JSON.stringify(observation));
+      if (bytes > MAX_PACKET_BYTES) {
+        // The question/permission cannot fit intact. Require a separate
+        // bounded evidence inspection; expose neither a partial grant nor ref.
+        observation = { ...observation, questionText: null, permission: null,
+          turn: { submittedUserFound: false, laterUserFound: false,
+            submittedUserMessageId: null, answerMessageId: null, partialAnswer: null },
+          capabilityIssues: [] };
+        bytes = Buffer.byteLength(JSON.stringify(observation));
+      }
     }
     observation = { ...observation, evidenceBytes: bytes };
     this.#latest.set(lease.pageKey, { snapshotId, actions: cached });

@@ -1028,6 +1028,33 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     assert.equal(held.blocker, 'provider_question');
     assert.equal(held.actions.length, 0, 'preexisting provider-question draft cannot be overwritten');
 
+    // An oversized combination of a partial answer and an exact provider
+    // question must not leak an unbounded semantic packet or executable ref.
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="user-b">Task</div>' +
+      '<div data-message-author-role="assistant" data-message-id="answer-b"></div>' +
+      '<div id="prompt-textarea" contenteditable="true"></div></main>');
+    await page.evaluate(() => {
+      document.querySelector('[data-message-id="answer-b"]')!.textContent = '가'.repeat(3000);
+      const panel = document.createElement('section');
+      panel.setAttribute('data-codex-composer-request-navigation', 'true');
+      panel.setAttribute('data-user-input-auto-resolution', 'true');
+      panel.innerHTML = '<h3></h3><div role="radiogroup">' +
+        '<button type="button" role="radio" aria-label="Proceed">Proceed</button>' +
+        '<button type="button" role="radio" aria-label="Pause">Pause</button></div>';
+      panel.querySelector('h3')!.textContent = 'Q'.repeat(3900);
+      document.querySelector('main')!.append(panel);
+    });
+    const oversized = await adapter.observe(task);
+    assert.equal(oversized.reason, 'semantic-packet-overflow-requires-bounded-expansion');
+    assert.equal(oversized.blocker, 'unsupported');
+    assert.equal(oversized.actions.length, 0);
+    assert.ok(oversized.evidenceBytes <= 12 * 1024,
+      'an unsupported packet still cannot exceed the semantic evidence budget');
+    assert.ok(Buffer.byteLength(JSON.stringify(oversized)) <= 12 * 1024,
+      'the actual encoded observation must fit, including its evidenceBytes field');
+    assert.equal(oversized.turn.partialAnswer, null);
+    assert.ok(oversized.questionText?.startsWith('Q'.repeat(3900)),
+      'retain the exact question when only incidental partial answer caused overflow');
     // Visible exact-work HostSpan permission is an agent review barrier,
     // never an authorization created by page text or an auto-Allow click.
     await page.setContent('<main><div data-message-author-role="user" ' +
