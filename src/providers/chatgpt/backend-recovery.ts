@@ -335,10 +335,10 @@ export class ChatGptBackendRecovery {
 function trustedOrigin(value: string): string | null {
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' &&
-      (url.hostname === 'chatgpt.com' || url.hostname === 'chat.openai.com')
-      ? url.origin
-      : null;
+    // Exact HTTPS origins only: a trusted hostname on another TLS port
+    // is not an authorized endpoint for fetching an account bearer token.
+    return url.origin === 'https://chatgpt.com' || url.origin === 'https://chat.openai.com'
+      ? url.origin : null;
   } catch {
     return null;
   }
@@ -457,16 +457,26 @@ export function recoverExactServerFinal(
   branchIds.reverse();
 
   let submittedIndex = -1;
+  let boundUserIndex = -1;
   for (let index = 0; index < branchIds.length; index += 1) {
     const nodeId = branchIds[index];
     if (nodeId === undefined) {
       continue;
     }
     const message = messageForNode(mapping[nodeId]);
-    if (message !== null && isExactSubmittedUser(nodeId, message, identity)) {
-      submittedIndex = index;
-      break;
+    if (message === null) continue;
+    // A duplicate of either bound identity component makes the entire
+    // current-branch ancestry ambiguous, even when the other component differs.
+    const matchesBoundId = isExactSubmittedUser(nodeId, message, {
+      submittedUserMessageId: identity.submittedUserMessageId, submittedUserTurnId: null,
+    }) || isExactSubmittedUser(nodeId, message, {
+      submittedUserMessageId: null, submittedUserTurnId: identity.submittedUserTurnId,
+    });
+    if (matchesBoundId) {
+      if (boundUserIndex >= 0) return unverified('backend-user-anchor-ambiguous-on-current-branch');
+      boundUserIndex = index;
     }
+    if (isExactSubmittedUser(nodeId, message, identity)) submittedIndex = index;
   }
   if (submittedIndex < 0) {
     const onOtherBranch = Object.entries(mapping).some(([nodeId, node]) => {

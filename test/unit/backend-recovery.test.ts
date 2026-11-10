@@ -137,6 +137,28 @@ test('backend recovery accepts only an exact final on the current branch', () =>
   assert.equal(result.answerText, 'Exact server answer');
 });
 
+test('backend FINAL rejects repeated or conflicting bound user IDs on the current branch', () => {
+  for (const duplicate of [
+    userMessage('user-message-1', 'user-turn-1'),
+    userMessage('user-message-1', 'foreign-turn'),
+    userMessage('foreign-message', 'user-turn-1'),
+  ]) {
+    const payload = conversationPayload([
+      node('root', null, null),
+      node('user-a', 'root', userMessage('user-message-1', 'user-turn-1')),
+      node('answer-a', 'user-a', finalAssistant('answer-a', 'First answer')),
+      node('user-b', 'answer-a', duplicate),
+      node('answer-b', 'user-b', finalAssistant('answer-b', 'Second answer')),
+    ], 'answer-b');
+    const result = recoverExactServerFinal(payload, identity());
+    assert.equal(result.kind, 'unverified', 'a conflicting bound ID cannot select the first answer');
+    assert.equal(result.reason, 'backend-user-anchor-ambiguous-on-current-branch');
+    assert.equal(result.answerText, null);
+    assert.equal(recoverExactServerAcknowledgement(payload, CONVERSATION_ID, 'Question'), null,
+      'ambiguous canonical user IDs are not exact ACK evidence');
+  }
+});
+
 test('canonical FINAL requires both submitted message and turn identities when bound', () => {
   const payload = (user: Record<string, unknown>) => conversationPayload([
     node('root', null, null),
@@ -356,6 +378,18 @@ test('backend recovery never reuses an auth token across trusted ChatGPT origins
   ]);
 });
 
+test('backend recovery rejects nonstandard ChatGPT ports before any authenticated GET', async () => {
+  const urls: string[] = [];
+  const client: BackendJsonClient = { async get(url) {
+    urls.push(url);
+    return { status: 200, headers: {}, body: { accessToken: 'synthetic-auth-token' } };
+  } };
+  const recovery = new ChatGptBackendRecovery({ requestTimeoutMs: 1_000, tokenCacheTtlMs: 60_000 });
+  const result = await recovery.recoverExactTurn(identity(), client, 'https://chatgpt.com:8443');
+  assert.equal(result.kind, 'unavailable');
+  assert.equal(result.reason, 'backend-origin-untrusted');
+  assert.deepEqual(urls, [], 'no auth/session or conversation request may target a custom port');
+});
 test('backend auth cache never crosses different clients on the same trusted origin', async () => {
   let clock = Date.parse('2026-11-08T00:00:00.000Z');
   const authenticated: string[] = [];
