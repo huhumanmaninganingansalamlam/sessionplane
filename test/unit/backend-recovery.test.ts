@@ -372,6 +372,27 @@ test('backend client caches access token in memory and classifies Retry-After 42
   );
 });
 
+test('oversized Retry-After remains a bounded deferral without a second GET', async () => {
+  const now = new Date('2026-11-10T00:00:00.000Z');
+  let conversationReads = 0;
+  const client: BackendJsonClient = { async get(url) {
+    if (url.endsWith('/api/auth/session')) return {
+      status: 200, headers: {}, body: { accessToken: 'synthetic-token' },
+    };
+    conversationReads++;
+    return { status: 429, headers: { 'retry-after': '1e308' }, body: null };
+  } };
+  const recovery = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1_000, tokenCacheTtlMs: 60_000, now: () => now,
+  });
+  const first = await recovery.recoverExactTurn(identity(), client, 'https://chatgpt.com');
+  assert.equal(first.kind, 'deferred');
+  assert.equal(first.retryAfterMs, null, 'overflow must be classified as invalid, not Infinity');
+  const second = await recovery.recoverExactTurn(identity(), client, 'https://chatgpt.com');
+  assert.equal(second.kind, 'deferred');
+  assert.equal(conversationReads, 1, 'a malformed server delay cannot trigger a repeated probe');
+});
+
 test('backend recovery never reuses an auth token across trusted ChatGPT origins', async () => {
   let clock = Date.parse('2026-11-08T00:00:00.000Z');
   const authOrigins: string[] = [];

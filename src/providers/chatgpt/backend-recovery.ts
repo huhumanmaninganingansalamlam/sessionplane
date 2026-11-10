@@ -629,7 +629,9 @@ export function parseRetryAfterMs(
   }
   const seconds = Number(value);
   if (Number.isFinite(seconds) && seconds >= 0) {
-    return Math.round(seconds * 1_000);
+    const durationMs = Math.round(seconds * 1_000);
+    return Number.isFinite(durationMs) && now.getTime() + durationMs <= 8.64e15
+      ? durationMs : null;
   }
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? Math.max(0, timestamp - now.getTime()) : null;
