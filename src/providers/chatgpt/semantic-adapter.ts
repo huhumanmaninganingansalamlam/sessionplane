@@ -782,7 +782,8 @@ async function captureUi(page: Page): Promise<UiSnapshot> {
     const buttons = allButtons.flatMap((e, index) => {
       if (!visible(e)) return [];
       const label = (e.getAttribute('aria-label') ?? e.innerText ?? '').replace(/\s+/g, ' ').trim();
-      const known = e.id === 'composer-submit-button' || e.getAttribute('data-testid') === 'send-button';
+      const known = (e.id === 'composer-submit-button' || e.getAttribute('data-testid') === 'send-button') &&
+        (composer === null || e.closest('[data-chatgpt-composer]') === composer);
       const nativeSubmit = e.getAttribute('type') === 'submit' && editor !== null &&
         e.closest('form') !== null && e.closest('form') === editor.closest('form');
       const labelledSubmit = composer !== null &&

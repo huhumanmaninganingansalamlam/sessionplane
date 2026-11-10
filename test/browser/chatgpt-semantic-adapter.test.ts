@@ -187,6 +187,15 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
       'an unrelated main control cannot become a send candidate from its label alone');
     assert.equal(await page.evaluate(() => (window as any).foreignSends), 0);
 
+    await page.setContent('<main><section data-chatgpt-composer>' +
+      '<div id="prompt-textarea" contenteditable="true">Protected draft</div></section>' +
+      '<section><button data-testid="send-button" onclick="window.foreignKnownSends++">Send</button></section></main>' +
+      '<script>window.foreignKnownSends=0;</script>');
+    const foreignKnown = await adapter.observe(task);
+    assert.equal(foreignKnown.actions.some(action => action.purpose === 'submit'), false,
+      'a send-button testid outside a known composer cannot authorize a foreign action');
+    assert.equal(await page.evaluate(() => (window as any).foreignKnownSends), 0);
+
     await page.setContent('<main><section data-chatgpt-composer><div id="prompt-textarea" contenteditable="true">Composer draft</div>' +
       '<button aria-label="Send message">Send</button></section></main>');
     assert.equal((await adapter.observe(task)).actions.some(action => action.purpose === 'submit'), true,
