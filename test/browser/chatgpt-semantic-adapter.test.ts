@@ -1336,9 +1336,48 @@ test('ChatGPT model action refuses an intervening user turn after authorization'
       'turn changes during observation must invalidate old semantic decisions');
     assert.equal(staleObservation.actions.length, 0);
 
+    // A Chat -> Work mode change during a slow semantic read must revoke
+    // the whole Chat snapshot, even with unchanged turn and composer.
+    await page.locator('[data-message-id="observed-later-user"]').evaluate(node => node.remove());
+    await page.locator('#model-turn-opener').evaluate(opener => {
+      const group = document.createElement('div');
+      group.setAttribute('role', 'group');
+      group.innerHTML = '<button aria-pressed="true">Chat</button>' +
+        '<button aria-pressed="false">Work</button>';
+      opener.before(group);
+    });
+    let changedMode = false;
+    const modeRacePage = new Proxy(page, { get(target, prop) {
+      if (prop === 'evaluate') return async (fn: unknown, arg: unknown) => {
+        const result = await page.evaluate(fn as never, arg as never);
+        if (!changedMode && typeof fn === 'function' &&
+            fn.toString().includes('openerSelector')) {
+          changedMode = true;
+          await page.locator('[role="group"]').evaluate(group => {
+            group.querySelectorAll('button').forEach(button => button.setAttribute(
+              'aria-pressed', String(button.textContent === 'Work')));
+          });
+        }
+        return result;
+      };
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const modeObserver = new ChatGptSemanticAdapter({
+      isExactLease: candidate => candidate === lease,
+      resolvePage: () => modeRacePage,
+    });
+    const modeRace = await modeObserver.observe(task);
+    assert.equal(changedMode, true, 'fixture must change the selected mode mid-read');
+    assert.equal(modeRace.blocker, 'unsupported');
+    assert.equal(modeRace.surface, 'work');
+    assert.equal(modeRace.actions.length, 0, 'Work cannot inherit Chat actionRefs');
+    assert.equal(modeRace.turn.partialAnswer, null);
+    await page.locator('[role="group"]').evaluate(group => group.remove());
+
+
     // Reordering a linked model opener between inspection and elementHandle
     // must not redirect a verified menu action to another in-main button.
-    await page.locator('[data-message-id="observed-later-user"]').evaluate(node => node.remove());
     await page.locator('#model-turn-opener').evaluate(opener => {
       opener.setAttribute('aria-expanded', 'false');
       document.getElementById('model-turn-menu')!.hidden = true;
@@ -1411,6 +1450,86 @@ test('ChatGPT model action refuses an intervening user turn after authorization'
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('ChatGPT permission facts do not outlive their exact user turn during observe', {
+  timeout: 35_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-b-permission-turn-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'disposable-profile'), pageRegistry: registry, headless: true,
+  });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({
+      contentType: 'text/html', body: '<main></main>',
+    }));
+    await page.goto('https://chatgpt.com/c/conversation-b');
+    registry.reservePage(binding.pageKey, {
+      sessionId: 'fixture-b', generation: 1, conversationId: 'conversation-b',
+    });
+    const current = registry.getBinding(binding.pageKey);
+    const lease: OwnedPageIdentity = {
+      projectId: 'project-b', slotId: 'main', slotRevision: 1, taskId: 'task-b',
+      pageKey: current.pageKey, targetId: current.targetId!, bindingEpoch: current.bindingEpoch,
+    };
+    await page.setContent('<main><div data-message-author-role="user" ' +
+      'data-message-id="user-b" data-turn-id="turn-b">Original task</div>' +
+      '<div role="alert">hostspan-git requests repository access ' +
+      '<button type="button" onclick="window.grants++">Allow once</button></div>' +
+      '<div id="prompt-textarea" contenteditable="true"></div>' +
+      '<button data-testid="send-button">Send</button></main>' +
+      '<script>window.grants=0;</script>');
+    let advanceDuringPermission = false;
+    let advanced = false;
+    const racedPage = new Proxy(page, { get(target, prop) {
+      if (prop === 'evaluate') return async (fn: unknown, arg: unknown) => {
+        const result = await page.evaluate(fn as never, arg as never);
+        if (advanceDuringPermission && typeof fn === 'function' &&
+          fn.toString().includes('maxSummary') && fn.toString().includes('userId')) {
+          advanceDuringPermission = false;
+          advanced = true;
+          await page.locator('#prompt-textarea').evaluate(editor => {
+            const later = document.createElement('article');
+            later.setAttribute('data-message-author-role', 'user');
+            later.setAttribute('data-message-id', 'later-user');
+            later.textContent = 'Human follow-up displaces the permission';
+            editor.before(later);
+          });
+        }
+        return result;
+      };
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const adapter = new ChatGptSemanticAdapter({
+      isExactLease: candidate => candidate === lease,
+      resolvePage: () => racedPage,
+    });
+    const task = context(lease, 'user-b');
+    const fresh = await adapter.observe(task);
+    assert.equal(fresh.blocker, 'provider_permission');
+    assert.equal(fresh.actions.length, 0);
+    assert.equal(fresh.permission?.canGrant, false);
+    advanceDuringPermission = true;
+    const stale = await adapter.observe(task);
+    assert.equal(advanced, true, 'fixture must advance after the permission was read');
+    assert.equal(stale.blocker, 'unsupported',
+      'no-action permission facts must be fenced like executable refs');
+    assert.equal(stale.reason, 'semantic-turn-boundary-changed-during-observation');
+    assert.equal(stale.permission, null);
+    assert.equal(stale.turn.submittedUserMessageId, null);
+    assert.equal(stale.turn.partialAnswer, null);
+    assert.equal(stale.actions.length, 0);
+    assert.equal(stale.evidenceBytes, Buffer.byteLength(JSON.stringify(stale)));
+    assert.equal(await page.evaluate(() => (window as any).grants), 0);
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 
 test('ChatGPT mutations revalidate exact controls after asynchronous turn checks', {
   timeout: 90_000,

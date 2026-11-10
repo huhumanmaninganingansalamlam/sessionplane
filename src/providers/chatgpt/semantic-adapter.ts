@@ -310,10 +310,12 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       }
     }
 
-    // Model, question, and retry inspections can await after the initial
-    // transcript read. Do not publish executable evidence for a displaced turn.
-    if (actions.length > 0 && (context.submittedUserMessageId !== null ||
-        context.submittedUserTurnId !== null)) {
+    // Every fact attributed to a previously verified user turn must still
+    // belong to that turn after asynchronous inspection. A permission or a
+    // blocked question has no actionRef but can still contain stale evidence.
+    if (turn.submittedUserFound && !turn.laterUserFound &&
+        (context.submittedUserMessageId !== null ||
+         context.submittedUserTurnId !== null)) {
       const boundary = await observeChatGptDom(page, {
         submittedUserMessageId: context.submittedUserMessageId,
         submittedUserTurnId: context.submittedUserTurnId,
@@ -322,6 +324,15 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         this.#latest.delete(lease.pageKey);
         return deniedObservation('semantic-turn-boundary-changed-during-observation');
       }
+    }
+    // Chat-only is a property of the published packet, not just the initial
+    // read. A slow question/model/permission inspection can cross a mode switch.
+    const finalSurface = await observeChatGptSurface(page);
+    if (finalSurface.mode !== 'chat') {
+      this.#latest.delete(lease.pageKey);
+      return deniedObservation(finalSurface.mode === 'work'
+        ? 'work-surface-changed-during-observation'
+        : 'chat-surface-changed-during-observation', finalSurface.mode);
     }
     // Ownership and conversation may change across asynchronous DOM reads.
     let changedBinding: string | null = null;
