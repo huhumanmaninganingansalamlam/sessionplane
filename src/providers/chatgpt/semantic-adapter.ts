@@ -204,8 +204,9 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       ? await inspectChatGptFreeTextQuestion(page) : null;
     const question = radioQuestion ?? freeTextQuestion;
     if (question !== null) {
-      blocker = 'provider_question';
-      reason = question.available ? 'provider-question-requires-decision' : 'question-evidence-incomplete-or-draft';
+      blocker = turn.submittedUserFound ? 'provider_question' : 'unsupported';
+      reason = !turn.submittedUserFound ? 'provider-question-turn-unverified'
+        : question.available ? 'provider-question-requires-decision' : 'question-evidence-incomplete-or-draft';
     } else if (blocker === 'none' && progress === 'streaming') {
       blocker = 'unsupported';
       reason = 'generation-active-preserve-current-turn';
@@ -288,7 +289,8 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     let observation: SemanticObservation = {
       providerKey: this.providerKey, surface: surface.mode, snapshotId, observedAt,
       capabilityManifest: this.capabilities, progress, blocker, reason, turn,
-      questionText: question?.text ?? null, permission, actions, evidenceBytes: 0,
+      questionText: blocker === 'provider_question' ? question?.text ?? null : null,
+      permission, actions, evidenceBytes: 0,
       ...(capabilityIssues.length > 0 ? { capabilityIssues } : {}),
     };
     let bytes = Buffer.byteLength(JSON.stringify(observation));
@@ -367,6 +369,26 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           return 'stale' as const;
         }
       }
+      // An intervening provider-owned question, permission card or exact retry
+      // invalidates a prior draft/send/configuration action. Composer-only
+      // fingerprints cannot detect these independent UI surfaces.
+      if (request.context.submittedUserMessageId !== null ||
+          request.context.submittedUserTurnId !== null) {
+        const alerts = await observeChatGptAlerts(page, {
+          submittedUserMessageId: request.context.submittedUserMessageId,
+          submittedUserTurnId: request.context.submittedUserTurnId,
+        });
+        if (alerts.some(alert => /^hostspan(?:-[a-z0-9_-]+)?\b/i.test(alert))) return 'stale' as const;
+        if (request.context.submittedUserMessageId !== null &&
+            await inspectSemanticHostSpanPermission(page, request.context.submittedUserMessageId) !== null) {
+          return 'stale' as const;
+        }
+      }
+      if (action.purpose !== 'retry' &&
+          (await inspectExactChatGptRetry(page, request.context)) !== null) return 'stale' as const;
+      if (action.purpose !== 'answer_question' &&
+          ((await inspectChatGptQuestion(page)) !== null ||
+            (await inspectChatGptFreeTextQuestion(page)) !== null)) return 'stale' as const;
       const fresh = await captureUi(page);
       if (fresh.fingerprint !== action.uiFingerprint) return 'stale' as const;
       if (action.purpose === 'open_model_chooser' || action.purpose === 'choose_model') {

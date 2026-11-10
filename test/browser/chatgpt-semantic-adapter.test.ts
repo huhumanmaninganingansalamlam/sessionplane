@@ -743,6 +743,62 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(staleBoundCompose.kind, 'stale');
     assert.equal(await page.locator('#prompt-textarea').innerText(), '');
 
+    // A provider question mounted after observation supersedes a draft
+    // action even if no composer control or fingerprint has changed.
+    await page.setContent(NORMAL);
+    const beforeQuestion = await adapter.observe(task);
+    const pendingDraftForQuestion = beforeQuestion.actions.find(a => a.purpose === 'compose')!;
+    assert.ok(pendingDraftForQuestion);
+    await page.locator('main').evaluate(main => main.insertAdjacentHTML('beforeend',
+      '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
+      '<div role="radiogroup"><button type="button" role="radio" aria-label="Proceed">Proceed</button>' +
+      '<button type="button" role="radio" aria-label="Pause">Pause</button></div></section>'));
+    const staleDraftForQuestion = await adapter.act({
+      context: task, snapshotId: beforeQuestion.snapshotId,
+      actionRef: pendingDraftForQuestion.actionRef, evidenceHash: pendingDraftForQuestion.evidenceHash,
+      input: 'Must not draft over a new question',
+    });
+    assert.equal(staleDraftForQuestion.kind, 'stale');
+    assert.equal(await page.locator('#prompt-textarea').innerText(), '');
+
+    // Likewise, an intervening scoped permission request must invalidate a
+    // previously authorized send without clicking Send or Allow.
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="user-b">Task</div>' +
+      '<div id="prompt-textarea" contenteditable="true">Committed reply</div>' +
+      '<button data-testid="send-button" onclick="window.sent++">Send</button></main>' +
+      '<script>window.sent=0;</script>');
+    const boundBeforePermission = context(lease, 'user-b');
+    const beforePermission = await adapter.observe(boundBeforePermission);
+    const pendingSend = beforePermission.actions.find(a => a.purpose === 'submit')!;
+    assert.ok(pendingSend);
+    await page.locator('main').evaluate(main => main.insertAdjacentHTML('beforeend',
+      '<div role="alert">hostspan-git requires repository read <button>Allow once</button></div>'));
+    const staleSendForPermission = await adapter.act({
+      context: boundBeforePermission, snapshotId: beforePermission.snapshotId,
+      actionRef: pendingSend.actionRef, evidenceHash: pendingSend.evidenceHash,
+      expectedContentSha256: digest('Committed reply'), authorizedAttemptId: 'journaled-attempt-permission',
+    });
+    assert.equal(staleSendForPermission.kind, 'stale');
+    assert.equal(await page.evaluate(() => (window as any).sent), 0);
+
+    // A newly mounted exact stream-error Retry also supersedes an old send,
+    // including when the retained draft itself makes Retry unavailable.
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="user-b">Task</div>' +
+      '<div id="prompt-textarea" contenteditable="true">Committed reply</div>' +
+      '<button data-testid="send-button" onclick="window.sent++">Send</button></main>' +
+      '<script>window.sent=0;</script>');
+    const beforeRetryAlert = await adapter.observe(boundBeforePermission);
+    const pendingSendForRetry = beforeRetryAlert.actions.find(a => a.purpose === 'submit')!;
+    assert.ok(pendingSendForRetry);
+    await page.locator('main').evaluate(main => main.insertAdjacentHTML('beforeend',
+      '<div role="alert">Error in message stream <button>Retry</button></div>'));
+    const staleSendForRetry = await adapter.act({
+      context: boundBeforePermission, snapshotId: beforeRetryAlert.snapshotId,
+      actionRef: pendingSendForRetry.actionRef, evidenceHash: pendingSendForRetry.evidenceHash,
+      expectedContentSha256: digest('Committed reply'), authorizedAttemptId: 'journaled-attempt-retry-alert',
+    });
+    assert.equal(staleSendForRetry.kind, 'stale');
+    assert.equal(await page.evaluate(() => (window as any).sent), 0);
     await page.setContent('<main><div data-chatgpt-composer>' +
       '<div role="textbox" contenteditable="true"></div>' +
       '<textarea></textarea><button aria-label="Send message">Send</button>' +
@@ -827,6 +883,7 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     const { page, binding } = await owner.createPage();
     await page.route('https://chatgpt.com/**', route => route.fulfill({
       contentType: 'text/html', body: '<main><div id="prompt-textarea" contenteditable="true"></div>' +
+        '<div data-message-author-role="user" data-message-id="user-b">Original task</div>' +
         '<div data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
         '<h3>Choose an implementation</h3><div role="radiogroup">' +
         '<button type="button" role="radio" aria-label="Keep existing" ' +
@@ -845,7 +902,13 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
       resolvePage: () => page,
       isAuthorizedAttempt: input => input.attemptId.startsWith('decision-'),
     });
-    const task = context(lease);
+    const unboundQuestion = await adapter.observe(context(lease));
+    assert.equal(unboundQuestion.blocker, 'unsupported',
+      'a provider question without an exact submitted user turn belongs to no new task');
+    assert.equal(unboundQuestion.reason, 'provider-question-turn-unverified');
+    assert.equal(unboundQuestion.actions.length, 0, 'unbound task must not answer an outstanding question');
+    assert.equal(unboundQuestion.questionText, null, 'foreign question content must not enter an unbound task packet');
+    const task = context(lease, 'user-b');
     const observed = await adapter.observe(task);
     assert.equal(observed.blocker, 'provider_question');
     assert.match(observed.questionText ?? '', /Choose an implementation/);
@@ -894,6 +957,7 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     // A bounded free-text question is a distinct typed input; only a scoped
     // provider panel may submit it, never an arbitrary form or chat editor.
     await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
+      '<div data-message-author-role="user" data-message-id="user-b">Original task</div>' +
       '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
       '<h3>Which repository should we inspect?</h3><form><textarea aria-label="Repository"></textarea>' +
       '<button type="submit">Submit</button></form></section></main>' +
@@ -915,6 +979,7 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
       input: 'other', authorizedAttemptId: 'decision-free-text' })).kind, 'stale');
 
     await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
+      '<div data-message-author-role="user" data-message-id="user-b">Original task</div>' +
       '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
       '<h3>Preserve this partial answer</h3><form><textarea>Human typed</textarea>' +
       '<button type="submit">Submit</button></form></section></main>');
