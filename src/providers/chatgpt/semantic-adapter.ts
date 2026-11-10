@@ -310,6 +310,19 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       }
     }
 
+    // Model, question, and retry inspections can await after the initial
+    // transcript read. Do not publish executable evidence for a displaced turn.
+    if (actions.length > 0 && (context.submittedUserMessageId !== null ||
+        context.submittedUserTurnId !== null)) {
+      const boundary = await observeChatGptDom(page, {
+        submittedUserMessageId: context.submittedUserMessageId,
+        submittedUserTurnId: context.submittedUserTurnId,
+      });
+      if (!boundary.submittedUserFound || boundary.laterUserFound) {
+        this.#latest.delete(lease.pageKey);
+        return deniedObservation('semantic-turn-boundary-changed-during-observation');
+      }
+    }
     // Ownership and conversation may change across asynchronous DOM reads.
     let changedBinding: string | null = null;
     if (!this.#options.isExactLease(lease)) {

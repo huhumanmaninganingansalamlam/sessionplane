@@ -1246,6 +1246,46 @@ test('ChatGPT model action refuses an intervening user turn after authorization'
       'a previous model selection cannot apply after a new user turn');
     assert.equal(await page.evaluate(() => (window as any).modelSelections), 0);
 
+    // The user may advance the transcript during the final model-menu read.
+    // An old observation must not publish fresh executable refs for that turn.
+    await page.locator('[data-message-id="next-user"]').evaluate(element => element.remove());
+    let releaseModelObservation!: () => void;
+    const modelObservationGate = new Promise<void>(resolve => { releaseModelObservation = resolve; });
+    let signalModelObservation!: () => void;
+    const modelObservationEntered = new Promise<void>(resolve => { signalModelObservation = resolve; });
+    let holdModelObservation = true;
+    const delayedPage = new Proxy(page, { get(target, prop) {
+      if (prop === 'evaluate') return async (fn: unknown, arg: unknown) => {
+        if (holdModelObservation && typeof fn === 'function' &&
+            fn.toString().includes('openerSelector')) {
+          holdModelObservation = false;
+          signalModelObservation();
+          await modelObservationGate;
+        }
+        return await page.evaluate(fn as never, arg as never);
+      };
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const delayedObserver = new ChatGptSemanticAdapter({
+      isExactLease: candidate => candidate === lease,
+      resolvePage: () => delayedPage,
+    });
+    const pendingObservation = delayedObserver.observe(task);
+    await modelObservationEntered;
+    await page.locator('#model-turn-opener').evaluate(opener => {
+      const later = document.createElement('div');
+      later.setAttribute('data-message-author-role', 'user');
+      later.setAttribute('data-message-id', 'observed-later-user');
+      later.textContent = 'Later user during slow observation';
+      opener.before(later);
+    });
+    releaseModelObservation();
+    const staleObservation = await pendingObservation;
+    assert.equal(staleObservation.blocker, 'unsupported',
+      'turn changes during observation must invalidate old semantic decisions');
+    assert.equal(staleObservation.actions.length, 0);
+
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });
