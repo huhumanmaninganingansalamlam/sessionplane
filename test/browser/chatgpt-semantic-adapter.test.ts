@@ -168,6 +168,30 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
           'message-body buttons are not executable chat send controls');
     }
 
+    // A generic dialog may contain its own Send-labelled control. It is not
+    // the chat composer submit target and must never become a semantic send.
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true">Protected draft</div>' +
+      '<div role="dialog"><p>Share this item?</p><button aria-label="Send" onclick="window.dialogSends++">Send</button></div></main>' +
+      '<script>window.dialogSends=0;</script>');
+    const foreignDialog = await adapter.observe(task);
+    assert.equal(foreignDialog.actions.some(action => action.purpose === 'submit'), false,
+      'dialog-local Send control cannot stand in for the composer submit control');
+    assert.equal(await page.evaluate(() => (window as any).dialogSends), 0);
+
+    await page.setContent('<main><section data-chatgpt-composer>' +
+      '<div id="prompt-textarea" contenteditable="true">Protected draft</div></section>' +
+      '<section><button aria-label="Send" onclick="window.foreignSends++">Send</button></section></main>' +
+      '<script>window.foreignSends=0;</script>');
+    const foreignSibling = await adapter.observe(task);
+    assert.equal(foreignSibling.actions.some(action => action.purpose === 'submit'), false,
+      'an unrelated main control cannot become a send candidate from its label alone');
+    assert.equal(await page.evaluate(() => (window as any).foreignSends), 0);
+
+    await page.setContent('<main><section data-chatgpt-composer><div id="prompt-textarea" contenteditable="true">Composer draft</div>' +
+      '<button aria-label="Send message">Send</button></section></main>');
+    assert.equal((await adapter.observe(task)).actions.some(action => action.purpose === 'submit'), true,
+      'a unique labelled fallback remains valid inside the exact composer region');
+
     // Async authorization can overlap on the same ref; only one click is allowed.
     // Preserve the draft after click to expose a second unintended dispatch.
     await page.setContent('<main><div id="prompt-textarea" contenteditable="true">Committed draft</div>' +

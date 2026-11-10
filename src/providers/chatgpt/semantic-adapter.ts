@@ -748,7 +748,7 @@ function exactContext(context: SemanticTaskContext, lease: OwnedPageIdentity): b
 async function captureUi(page: Page): Promise<UiSnapshot> {
   const ui = await page.evaluate(({ editorsSelector, buttonSelector, sendPattern, emptyEditorMarker }) => {
     const visible = (element: Element) =>
-      !element.closest('nav, aside, article, [role="navigation"], [role="search"], [aria-hidden="true"], [inert], [data-message-author-role], [data-chatgpt-search-message-ids], .markdown') &&
+      !element.closest('nav, aside, article, [role="navigation"], [role="search"], [role="dialog"], [role="alertdialog"], [aria-hidden="true"], [inert], [data-message-author-role], [data-chatgpt-search-message-ids], .markdown') &&
       element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
       element.getBoundingClientRect().width > 0;
     const enabled = (element: Element) => !element.matches(
@@ -770,6 +770,7 @@ async function captureUi(page: Page): Promise<UiSnapshot> {
       return [{ index, signature: signature(e), value, enabled: true }];
     });
     const editor = editors.length === 1 ? allEditors[editors[0]!.index] ?? null : null;
+    const composer = editor?.closest('[data-chatgpt-composer]') ?? null;
     const allButtons = [...document.querySelectorAll<HTMLElement>(buttonSelector)];
     const buttons = allButtons.flatMap((e, index) => {
       if (!visible(e)) return [];
@@ -777,7 +778,9 @@ async function captureUi(page: Page): Promise<UiSnapshot> {
       const known = e.id === 'composer-submit-button' || e.getAttribute('data-testid') === 'send-button';
       const nativeSubmit = e.getAttribute('type') === 'submit' && editor !== null &&
         e.closest('form') !== null && e.closest('form') === editor.closest('form');
-      if (!known && !nativeSubmit && !(new RegExp(sendPattern, 'i')).test(label)) return [];
+      const labelledSubmit = composer !== null &&
+        e.closest('[data-chatgpt-composer]') === composer && (new RegExp(sendPattern, 'i')).test(label);
+      if (!known && !nativeSubmit && !labelledSubmit) return [];
       return [{ index, signature: signature(e), value: label, enabled: enabled(e) }];
     });
     return { editors, buttons };
