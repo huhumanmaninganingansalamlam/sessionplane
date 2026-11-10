@@ -1191,6 +1191,48 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
       '<div data-message-author-role="user" data-message-id="user-b">Original task</div>' +
       '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
+      '<h3>Which description should be retained?</h3>' +
+      '<div id="answer-box" role="textbox" contenteditable="true" aria-label="Description"></div>' +
+      '<button id="confirm-box" type="button" aria-label="Confirm">Confirm</button></section></main>' +
+      '<script>window.editableAnswer=null;document.getElementById("confirm-box").onclick=()=>{' +
+      'window.editableAnswer=document.getElementById("answer-box").innerText;' +
+      'document.querySelector("section").remove();};</script>');
+    const editable = await adapter.observe(task);
+    assert.equal(editable.blocker, 'provider_question');
+    const editableAction = editable.actions.find(a => a.purpose === 'answer_question')!;
+    assert.ok(editableAction && editableAction.input.kind === 'text');
+    const editableResult = await adapter.act({ context: task, snapshotId: editable.snapshotId,
+      actionRef: editableAction.actionRef, evidenceHash: editableAction.evidenceHash,
+      input: 'sessionplane', authorizedAttemptId: 'decision-editable-question' });
+    assert.deepEqual(editableResult, { kind: 'performed', effect: 'question_answered' },
+      'a unique contenteditable question must remain usable after the shell recheck');
+    assert.equal(await page.evaluate(() => (window as any).editableAnswer), 'sessionplane');
+
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
+      '<div data-message-author-role="user" data-message-id="user-b">Original task</div>' +
+      '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
+      '<h3 id="question-title">Which repository should we inspect?</h3>' +
+      '<form><textarea aria-label="Repository"></textarea><button type="submit">Submit</button></form>' +
+      '</section></main><script>window.changedQuestionSubmits=0;' +
+      'document.querySelector("textarea").addEventListener("input",()=>{' +
+      'document.querySelector("#question-title").textContent="Which service should we deploy?";});' +
+      'document.querySelector("form").addEventListener("submit",e=>{e.preventDefault();' +
+      'window.changedQuestionSubmits++;document.querySelector("section").remove();});</script>');
+    const changing = await adapter.observe(task);
+    const changingAction = changing.actions.find(a => a.purpose === 'answer_question')!;
+    assert.ok(changingAction);
+    const changed = await adapter.act({ context: task, snapshotId: changing.snapshotId,
+      actionRef: changingAction.actionRef, evidenceHash: changingAction.evidenceHash,
+      input: 'sessionplane', authorizedAttemptId: 'decision-changing-question' });
+    assert.notEqual(changed.kind, 'performed',
+      'the original free-text answer cannot submit a different question appearing during fill');
+    assert.equal(await page.evaluate(() => (window as any).changedQuestionSubmits), 0);
+    assert.equal(await page.locator('textarea').inputValue(), 'sessionplane',
+      'the already entered answer remains a protected draft for fresh review');
+
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
+      '<div data-message-author-role="user" data-message-id="user-b">Original task</div>' +
+      '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
       '<h3>Preserve this partial answer</h3><form><textarea>Human typed</textarea>' +
       '<button type="submit">Submit</button></form></section></main>');
     const held = await adapter.observe(task);

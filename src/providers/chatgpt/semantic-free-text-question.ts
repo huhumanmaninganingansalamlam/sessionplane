@@ -38,8 +38,14 @@ export async function inspectChatGptFreeTextQuestion(page: Page) {
       return [{ index, tag: e.tagName.toLowerCase(), label, type: e.getAttribute('type') }];
     });
     const text = (panel as HTMLElement).innerText.trim();
+    // A fill changes editable text but must never change the question it answers.
+    // Clone only for a non-mutating fingerprint of the provider-owned panel.
+    const shell = panel.cloneNode(true) as HTMLElement;
+    shell.querySelectorAll(editorSelector + ', script, style, template').forEach(e => e.remove());
+    const shellText = (shell.textContent ?? '').replace(/\s+/g, ' ').trim();
     return {
       text: text.slice(0, 4_000), truncated: text.length > 4_000,
+      shellText: shellText.slice(0, 8_000), shellTruncated: shellText.length > 8_000,
       editor: candidateEditors.length === 1 ? candidateEditors[0] : null,
       submit: candidateButtons.length === 1 ? candidateButtons[0] : null,
       editorCount: candidateEditors.length,
@@ -48,13 +54,13 @@ export async function inspectChatGptFreeTextQuestion(page: Page) {
   }, { editorSelector: EDITOR, buttonSelector: BUTTON, labelPattern: CONTROL_LABEL.source });
   if (!observed) return null;
   const evidenceHash = createHash('sha256').update(JSON.stringify({
-    url: page.url(), text: observed.text, editor: observed.editor,
-    submit: observed.submit, editorCount: observed.editorCount,
+    url: page.url(), text: observed.text, shellText: observed.shellText,
+    editor: observed.editor, submit: observed.submit, editorCount: observed.editorCount,
     submitCount: observed.submitCount,
   })).digest('hex');
   return {
     ...observed, evidenceHash,
-    available: !observed.truncated && observed.text.length > 0 &&
+    available: !observed.truncated && !observed.shellTruncated && observed.text.length > 0 &&
       observed.editorCount === 1 && observed.submitCount === 1 &&
       observed.editor?.draft.length === 0,
   };
@@ -101,6 +107,17 @@ export async function answerChatGptFreeTextQuestion(
     })) throw new Error('Question editor changed before fill');
     beforeMutation();
     await editor.fill(input.answer, { timeout: 5_000 });
+    // Provider questions may advance while the input event is handled.
+    // A filled editor is not evidence that the old question still owns Submit.
+    const afterFill = await inspectChatGptFreeTextQuestion(page);
+    if (!afterFill || afterFill.shellTruncated || afterFill.shellText !== observed.shellText ||
+      afterFill.editorCount !== 1 || afterFill.submitCount !== 1 ||
+      afterFill.editor?.index !== observed.editor.index ||
+      afterFill.submit?.index !== observed.submit.index ||
+      afterFill.editor?.draft.replaceAll(/\r\n?/g, '\n') !==
+        input.answer.replaceAll(/\r\n?/g, '\n')) {
+      throw new Error('Free-text question or draft changed before submission');
+    }
     const buttonSignature = await submit.evaluate(e => ({
       tag: e.tagName.toLowerCase(),
       label: (e.getAttribute('aria-label') ?? (e as HTMLElement).innerText ?? '').replace(/\s+/g, ' ').trim(),
