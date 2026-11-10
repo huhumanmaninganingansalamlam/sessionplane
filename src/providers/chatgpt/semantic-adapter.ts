@@ -29,6 +29,16 @@ const MAX_DRAFT = 16_000;
 const REF_TTL_MS = 30_000;
 const SEND_LABEL = /^(send|send message|submit|전송|보내기|메시지 전송)$/i;
 
+/** JSON byte count includes the width of its own evidenceBytes number. */
+function observationBytes(packet: SemanticObservation): number {
+  let bytes = Buffer.byteLength(JSON.stringify(packet));
+  while (true) {
+    const actual = Buffer.byteLength(JSON.stringify({ ...packet, evidenceBytes: bytes }));
+    if (actual === bytes) return bytes;
+    bytes = actual;
+  }
+}
+
 interface Control {
   readonly index: number;
   readonly signature: string;
@@ -132,7 +142,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         capabilityManifest: this.capabilities, progress: 'unknown', blocker: 'unsupported',
         reason: conversationError, turn, questionText: null, permission: null, actions: [], evidenceBytes: 0,
       };
-      return { ...denied, evidenceBytes: Buffer.byteLength(JSON.stringify(denied)) };
+      return { ...denied, evidenceBytes: observationBytes(denied) };
     }
     const surface = await observeChatGptSurface(page);
     const dialog = await observeChatGptDialog(page);
@@ -293,14 +303,14 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       permission, actions, evidenceBytes: 0,
       ...(capabilityIssues.length > 0 ? { capabilityIssues } : {}),
     };
-    let bytes = Buffer.byteLength(JSON.stringify(observation));
+    let bytes = observationBytes(observation);
     if (bytes > MAX_PACKET_BYTES) {
       // Never truncate a material question/option and accidentally authorize it.
       actions.length = 0; cached.clear();
       observation = { ...observation, blocker: 'unsupported',
         reason: 'semantic-packet-overflow-requires-bounded-expansion', actions: [],
         turn: { ...observation.turn, partialAnswer: null } };
-      bytes = Buffer.byteLength(JSON.stringify(observation));
+      bytes = observationBytes(observation);
       if (bytes > MAX_PACKET_BYTES) {
         // The question/permission cannot fit intact. Require a separate
         // bounded evidence inspection; expose neither a partial grant nor ref.
@@ -308,7 +318,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           turn: { submittedUserFound: false, laterUserFound: false,
             submittedUserMessageId: null, answerMessageId: null, partialAnswer: null },
           capabilityIssues: [] };
-        bytes = Buffer.byteLength(JSON.stringify(observation));
+        bytes = observationBytes(observation);
       }
     }
     observation = { ...observation, evidenceBytes: bytes };

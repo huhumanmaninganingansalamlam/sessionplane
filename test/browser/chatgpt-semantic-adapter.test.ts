@@ -1055,6 +1055,29 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     assert.equal(oversized.turn.partialAnswer, null);
     assert.ok(oversized.questionText?.startsWith('Q'.repeat(3900)),
       'retain the exact question when only incidental partial answer caused overflow');
+    // Near 12 KiB, replacing evidenceBytes=0 with the actual byte count can
+    // overflow an otherwise eligible exact question and its action.
+    await page.evaluate(() => {
+      document.querySelector('[data-codex-composer-request-navigation] h3')!.textContent =
+        'Q'.repeat(1000);
+    });
+    const belowLimit = await adapter.observe(task);
+    assert.equal(belowLimit.blocker, 'provider_question');
+    const extraQuestionBytes = 12 * 1024 - 2 - belowLimit.evidenceBytes;
+    assert.ok(extraQuestionBytes > 0 && extraQuestionBytes < 3000,
+      'near-limit fixture must keep the exact provider question within the 4000-character cap');
+    await page.evaluate(count => {
+      document.querySelector('[data-codex-composer-request-navigation] h3')!.textContent =
+        'Q'.repeat(count);
+    }, 1000 + extraQuestionBytes);
+    const nearLimit = await adapter.observe(task);
+    assert.ok(Buffer.byteLength(JSON.stringify(nearLimit)) <= 12 * 1024,
+      'the actual encoded semantic packet must fit even at the byte boundary');
+    assert.equal(nearLimit.evidenceBytes, Buffer.byteLength(JSON.stringify(nearLimit)));
+    assert.equal(nearLimit.blocker, 'provider_question',
+      'an exact question remains actionable when the full serialized packet fits');
+    assert.equal(nearLimit.actions.filter(action => action.purpose === 'answer_question').length, 1);
+    assert.ok(nearLimit.questionText?.startsWith('Q'.repeat(1000 + extraQuestionBytes)));
     // Visible exact-work HostSpan permission is an agent review barrier,
     // never an authorization created by page text or an auto-Allow click.
     await page.setContent('<main><div data-message-author-role="user" ' +
