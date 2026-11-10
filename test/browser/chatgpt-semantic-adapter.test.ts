@@ -329,6 +329,57 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(await page.evaluate(() => (window as any).sends), 0,
       'revoked ownership must prevent the pending Send click');
 
+    // A later human user turn invalidates the original continuation, even if
+    // the composer retains the exact text and the journal check was authorized.
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="user-b">Original</div>' +
+      '<div id="prompt-textarea" contenteditable="true">계속</div>' +
+      '<button data-testid="send-button" onclick="window.sends++">Send</button></main>' +
+      '<script>window.sends=0;</script>');
+    let continueChecks = 0;
+    let signalContinueAuthorization!: () => void;
+    const continueAuthorizationEntered = new Promise<void>(resolve => {
+      signalContinueAuthorization = resolve;
+    });
+    let releaseContinueAuthorization!: () => void;
+    const continueAuthorization = new Promise<void>(resolve => {
+      releaseContinueAuthorization = resolve;
+    });
+    const continueAdapter = new ChatGptSemanticAdapter({
+      isExactLease: value => allowedLease === value,
+      resolvePage: value => registry.pageForObservation(value.pageKey, value.bindingEpoch),
+      isAuthorizedAttempt: async () => {
+        if (++continueChecks === 2) {
+          signalContinueAuthorization();
+          await continueAuthorization;
+        }
+        return true;
+      },
+    });
+    const continuedTask = context(lease, 'user-b');
+    const continuation = await continueAdapter.observe(continuedTask);
+    const continueAction = continuation.actions.find(a => a.purpose === 'continue')!;
+    assert.ok(continueAction, 'the exact continuation is available before the human follow-up');
+    const staleContinue = continueAdapter.act({
+      context: continuedTask, snapshotId: continuation.snapshotId,
+      actionRef: continueAction.actionRef, evidenceHash: continueAction.evidenceHash,
+      authorizedAttemptId: 'journaled-later-user-continue',
+      expectedContentSha256: digest('계속'),
+    });
+    await continueAuthorizationEntered;
+    await page.locator('#prompt-textarea').evaluate(editor => {
+      const later = document.createElement('div');
+      later.setAttribute('data-message-author-role', 'user');
+      later.setAttribute('data-message-id', 'later-user');
+      later.textContent = 'A newer user request';
+      editor.before(later);
+    });
+    releaseContinueAuthorization();
+    const continueOutcome = await staleContinue;
+    assert.notEqual(continueOutcome.kind, 'dispatched_unverified',
+      'a continuation for a displaced original turn must not dispatch');
+    assert.equal(await page.evaluate(() => (window as any).sends), 0,
+      'a newer user turn must prevent an already authorized Continue click');
+
     // The real Chat editor renders an empty ProseMirror paragraph as innerText '\n'.
     // It is a structural placeholder, not a human-written draft.
     await page.setContent('<main><section data-chatgpt-composer><div class="ProseMirror" role="textbox" contenteditable="true">' +

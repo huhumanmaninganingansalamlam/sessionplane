@@ -570,6 +570,17 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           if (sha(currentDraft.replaceAll('\r\n', '\n')) !== request.expectedContentSha256) {
             return 'stale' as const;
           }
+          // The journal can authorize a continuation just before a human
+          // adds another user turn. The draft hash alone is not turn identity.
+          if (request.context.submittedUserMessageId !== null ||
+              request.context.submittedUserTurnId !== null) {
+            const boundary = await observeChatGptDom(page, {
+              submittedUserMessageId: request.context.submittedUserMessageId,
+              submittedUserTurnId: request.context.submittedUserTurnId,
+            });
+            if (!boundary.submittedUserFound || boundary.laterUserFound ||
+                boundary.candidate?.streamingMarker === true) return 'stale' as const;
+          }
           requireExactMutationIdentity();
           await button.click({ timeout: 5_000 });
         } finally { await button.dispose(); }
