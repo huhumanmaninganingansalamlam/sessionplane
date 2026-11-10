@@ -93,43 +93,69 @@ export async function answerChatGptFreeTextQuestion(
     throw new Error('Exact free-text question controls disappeared');
   }
   try {
-    // Keep handles tied to the original controls; no re-resolving by a generic
-    // label after the editor rerenders or the panel changes identity.
-    const editorSignature = await editor.evaluate(e => ({
+    const normalize = (value: string) => value.replaceAll(/\r\n?/g, '\n');
+    const readEditor = async () => await editor.evaluate(e => ({
       tag: e.tagName.toLowerCase(), role: e.getAttribute('role'),
       label: e.getAttribute('aria-label') ?? '',
       draft: e instanceof HTMLInputElement || e instanceof HTMLTextAreaElement
         ? e.value : (e as HTMLElement).innerText,
-    }));
-    if (JSON.stringify(editorSignature) !== JSON.stringify({
-      tag: observed.editor.tag, role: observed.editor.role,
-      label: observed.editor.label, draft: observed.editor.draft,
-    })) throw new Error('Question editor changed before fill');
-    await beforeMutation();
-    await editor.fill(input.answer, { timeout: 5_000 });
-    // Provider questions may advance while the input event is handled.
-    // A filled editor is not evidence that the old question still owns Submit.
-    const afterFill = await inspectChatGptFreeTextQuestion(page);
-    if (!afterFill || afterFill.shellTruncated || afterFill.shellText !== observed.shellText ||
-      afterFill.editorCount !== 1 || afterFill.submitCount !== 1 ||
-      afterFill.editor?.index !== observed.editor.index ||
-      afterFill.submit?.index !== observed.submit.index ||
-      afterFill.editor?.draft.replaceAll(/\r\n?/g, '\n') !==
-        input.answer.replaceAll(/\r\n?/g, '\n')) {
-      throw new Error('Free-text question or draft changed before submission');
-    }
-    const buttonSignature = await submit.evaluate(e => ({
+      connected: e.isConnected &&
+        !e.matches(':disabled, [aria-disabled="true"], [readonly]'),
+    })).catch(() => null);
+    const readSubmit = async () => await submit.evaluate(e => ({
       tag: e.tagName.toLowerCase(),
-      label: (e.getAttribute('aria-label') ?? (e as HTMLElement).innerText ?? '').replace(/\s+/g, ' ').trim(),
+      label: (e.getAttribute('aria-label') ?? (e as HTMLElement).innerText ?? '')
+        .replace(/\s+/g, ' ').trim(),
       type: e.getAttribute('type'),
       connected: e.isConnected && !e.matches(':disabled, [aria-disabled="true"]'),
-    }));
-    if (!buttonSignature.connected || buttonSignature.tag !== observed.submit.tag ||
-      buttonSignature.label !== observed.submit.label ||
-      buttonSignature.type !== observed.submit.type) {
-      throw new Error('Question submission control changed after fill');
+    })).catch(() => null);
+    const exactControlsForDraft = async (expectedDraft: string,
+      expectedEvidenceHash: string | null): Promise<boolean> => {
+      const current = await inspectChatGptFreeTextQuestion(page);
+      if (!current || current.shellTruncated || current.shellText !== observed.shellText ||
+        current.editorCount !== 1 || current.submitCount !== 1 ||
+        current.editor?.index !== observed.editor!.index ||
+        current.submit?.index !== observed.submit!.index ||
+        current.editor.tag !== observed.editor!.tag ||
+        current.editor.role !== observed.editor!.role ||
+        current.editor.label !== observed.editor!.label ||
+        current.submit.tag !== observed.submit!.tag ||
+        current.submit.label !== observed.submit!.label ||
+        current.submit.type !== observed.submit!.type ||
+        normalize(current.editor.draft) !== normalize(expectedDraft) ||
+        (expectedEvidenceHash !== null &&
+          (!current.available || current.evidenceHash !== expectedEvidenceHash))) {
+        return false;
+      }
+      const [currentEditor, currentSubmit] = await Promise.all([readEditor(), readSubmit()]);
+      return currentEditor !== null && currentSubmit !== null &&
+        currentEditor.connected && currentSubmit.connected &&
+        currentEditor.tag === observed.editor!.tag &&
+        currentEditor.role === observed.editor!.role &&
+        currentEditor.label === observed.editor!.label &&
+        normalize(currentEditor.draft) === normalize(expectedDraft) &&
+        currentSubmit.tag === observed.submit!.tag &&
+        currentSubmit.label === observed.submit!.label &&
+        currentSubmit.type === observed.submit!.type;
+    };
+
+    // The external exact-turn check can await. Revalidate both the semantic
+    // question and the pinned original controls after it, before each mutation.
+    if (!(await exactControlsForDraft(observed.editor.draft, observed.evidenceHash))) {
+      throw new Error('Question controls changed before fill');
     }
     await beforeMutation();
+    if (!(await exactControlsForDraft(observed.editor.draft, observed.evidenceHash))) {
+      throw new Error('Question or human draft changed during the exact-turn check');
+    }
+    await editor.fill(input.answer, { timeout: 5_000 });
+    if (!(await exactControlsForDraft(input.answer, null))) {
+      throw new Error('Free-text question or draft changed before submission');
+    }
+    await beforeMutation();
+    if (!(await exactControlsForDraft(input.answer, null))) {
+      throw new Error('Free-text question or draft changed during the final exact-turn check');
+    }
     await submit.click({ timeout: 5_000 });
   } finally {
     await editor.dispose(); await submit.dispose();

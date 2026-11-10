@@ -560,14 +560,9 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         if (fresh.editors[0]!.value.length !== 0) return 'stale' as const;
         const editor = await exactHandle(page, EDITORS, fresh.editors[0]!);
         try {
-          const existing = await editor.evaluate((element, marker) => {
-            if (element instanceof HTMLTextAreaElement) return element.value;
-            const raw = element.innerText;
-            const structuralPlaceholder = element.classList.contains('ProseMirror') && raw === '\n' &&
-              element.textContent === '' && element.querySelector(marker) !== null;
-            return structuralPlaceholder ? '' : raw === '' && element.textContent !== '' ? element.textContent : raw;
-          }, EMPTY_PROSEMIRROR_MARKER);
-          if (existing.length !== 0) return 'stale' as const;
+          if (await readExactEditorValue(editor, fresh.editors[0]!) !== '') {
+            return 'stale' as const;
+          }
           // A human may have advanced the transcript since the earlier UI
           // fingerprint. The empty editor is not evidence of the old turn.
           if (request.context.submittedUserMessageId !== null ||
@@ -578,6 +573,11 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
             });
             if (!boundary.submittedUserFound || boundary.laterUserFound ||
                 boundary.candidate?.streamingMarker === true) return 'stale' as const;
+          }
+          // The exact-turn read can await while a human types into the same
+          // editor. Recheck the pinned control immediately before fill.
+          if (await readExactEditorValue(editor, fresh.editors[0]!) !== '') {
+            return 'stale' as const;
           }
           requireExactMutationIdentity();
           await editor.fill(request.input!, { timeout: 5_000 });
@@ -603,12 +603,13 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           }
         });
       try {
-        const button = await exactHandle(page, BUTTONS, fresh.buttons[0]!);
+        const editor = await exactHandle(page, EDITORS, fresh.editors[0]!);
+        let button: ElementHandle<HTMLElement> | null = null;
         try {
-          const currentDraft = await page.locator(EDITORS).nth(fresh.editors[0]!.index)
-            .evaluate(element => element instanceof HTMLTextAreaElement
-              ? element.value : (element as HTMLElement).innerText);
-          if (sha(currentDraft.replaceAll('\r\n', '\n')) !== request.expectedContentSha256) {
+          button = await exactHandle(page, BUTTONS, fresh.buttons[0]!);
+          const currentDraft = await readExactEditorValue(editor, fresh.editors[0]!);
+          if (currentDraft === null ||
+            sha(currentDraft.replaceAll('\r\n', '\n')) !== request.expectedContentSha256) {
             return 'stale' as const;
           }
           // The journal can authorize a continuation just before a human
@@ -622,9 +623,20 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
             if (!boundary.submittedUserFound || boundary.laterUserFound ||
                 boundary.candidate?.streamingMarker === true) return 'stale' as const;
           }
+          // The boundary read can await while the exact editor or Send control
+          // changes. Never click a committed hash from an earlier UI state.
+          const finalDraft = await readExactEditorValue(editor, fresh.editors[0]!);
+          if (finalDraft === null ||
+            sha(finalDraft.replaceAll('\r\n', '\n')) !== request.expectedContentSha256 ||
+            !(await exactControlReady(button, fresh.buttons[0]!))) {
+            return 'stale' as const;
+          }
           requireExactMutationIdentity();
           await button.click({ timeout: 5_000 });
-        } finally { await button.dispose(); }
+        } finally {
+          await editor.dispose();
+          await button?.dispose();
+        }
         capturedAttempts = await watch.collect(350);
       } finally {
         capturedAttempts = watch.snapshot();
@@ -887,6 +899,42 @@ async function exactHandle(page: Page, selector: string, expected: Control): Pro
     throw new Error('Semantic control was replaced during action');
   }
   return handle as ElementHandle<HTMLElement>;
+}
+
+async function readExactEditorValue(handle: ElementHandle<HTMLElement>,
+  expected: Control): Promise<string | null> {
+  return await handle.evaluate((element, input) => {
+    const signature = [
+      element.tagName.toLowerCase(), element.id, element.getAttribute('data-testid'),
+      element.getAttribute('role'), element.getAttribute('aria-label'),
+      element.getAttribute('placeholder'), element.getAttribute('type'),
+    ].join('|');
+    if (!element.isConnected || signature !== input.signature ||
+      element.matches(':disabled, [aria-disabled="true"], [readonly]')) return null;
+    if (element instanceof HTMLTextAreaElement) return element.value;
+    if (!element.isContentEditable) return null;
+    const raw = element.innerText;
+    const structuralPlaceholder = element.classList.contains('ProseMirror') && raw === '\n' &&
+      element.textContent === '' && element.querySelector(input.emptyEditorMarker) !== null;
+    return structuralPlaceholder ? '' :
+      raw === '' && element.textContent !== '' ? element.textContent : raw;
+  }, {
+    signature: expected.signature,
+    emptyEditorMarker: EMPTY_PROSEMIRROR_MARKER,
+  }).catch(() => null);
+}
+
+async function exactControlReady(handle: ElementHandle<HTMLElement>,
+  expected: Control): Promise<boolean> {
+  return await handle.evaluate((element, signature) =>
+    element.isConnected &&
+    !element.matches(':disabled, [aria-disabled="true"], [readonly]') &&
+    [
+      element.tagName.toLowerCase(), element.id, element.getAttribute('data-testid'),
+      element.getAttribute('role'), element.getAttribute('aria-label'),
+      element.getAttribute('placeholder'), element.getAttribute('type'),
+    ].join('|') === signature,
+  expected.signature).catch(() => false);
 }
 
 /** Capture only the exact outgoing user POST identity; this is attempt

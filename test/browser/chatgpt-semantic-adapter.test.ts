@@ -10,6 +10,7 @@ import type { OwnedPageIdentity } from '../../src/browser/owned-page-lifecycle.t
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 import { ChatGptBackendRecovery, type BackendJsonClient } from '../../src/providers/chatgpt/backend-recovery.ts';
 import { inspectChatGptQuestion, answerChatGptQuestion } from '../../src/providers/chatgpt/question.ts';
+import { inspectChatGptFreeTextQuestion, answerChatGptFreeTextQuestion } from '../../src/providers/chatgpt/semantic-free-text-question.ts';
 import { ChatGptSemanticAdapter } from '../../src/providers/chatgpt/semantic-adapter.ts';
 import { inspectSemanticHostSpanPermission } from '../../src/providers/chatgpt/semantic-hostspan-permission.ts';
 import { inspectSemanticChatGptModelMenu, openExactChatGptModelMenu, selectExactChatGptModelMenu } from '../../src/providers/chatgpt/semantic-model-menu.ts';
@@ -1405,6 +1406,209 @@ test('ChatGPT model action refuses an intervening user turn after authorization'
     assert.equal(await page.evaluate(() => (window as any).foreignModelSelections), 0,
       'a replacement with identical text cannot inherit the original action');
 
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('ChatGPT mutations revalidate exact controls after asynchronous turn checks', {
+  timeout: 90_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-b-mutation-race-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'disposable-profile'), pageRegistry: registry, headless: true,
+  });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({
+      contentType: 'text/html', body: '<main></main>',
+    }));
+    await page.goto('https://chatgpt.com/c/conversation-b');
+    registry.reservePage(binding.pageKey, {
+      sessionId: 'fixture-b', generation: 1, conversationId: 'conversation-b',
+    });
+    const current = registry.getBinding(binding.pageKey);
+    const lease: OwnedPageIdentity = {
+      projectId: 'project-b', slotId: 'main', slotRevision: 1, taskId: 'task-b',
+      pageKey: current.pageKey, targetId: current.targetId!, bindingEpoch: current.bindingEpoch,
+    };
+    const task = context(lease, 'user-b');
+    const bind = (target: object, prop: PropertyKey) => {
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    };
+    let mutateComposer: (() => Promise<void>) | null = null;
+    let messageObservations = 0;
+    const racedPage = new Proxy(page, { get(target, prop) {
+      if (prop !== 'locator') return bind(target, prop);
+      return (selector: string) => {
+        const locator = page.locator(selector);
+        return new Proxy(locator, { get(loc, member) {
+          if (member !== 'evaluateAll') return bind(loc, member);
+          return async (fn: unknown, arg: unknown) => {
+            const value = await locator.evaluateAll(fn as never, arg as never);
+            if (mutateComposer !== null && typeof fn === 'function' &&
+              fn.toString().includes('anchorAttributeMatches') && ++messageObservations === 2) {
+              const mutation = mutateComposer;
+              mutateComposer = null;
+              await mutation();
+            }
+            return value;
+          };
+        } });
+      };
+    } });
+    const adapter = new ChatGptSemanticAdapter({
+      isExactLease: candidate => candidate === lease,
+      resolvePage: () => racedPage,
+      isAuthorizedAttempt: () => true,
+    });
+
+    await page.setContent('<main><article data-message-author-role="user" ' +
+      'data-message-id="user-b" data-turn-id="turn-b">Task</article>' +
+      '<section data-chatgpt-composer><div id="prompt-textarea" role="textbox" ' +
+      'contenteditable="true"></div><button data-testid="send-button">Send</button></section></main>');
+    const composeObservation = await adapter.observe(task);
+    const composeAction = composeObservation.actions.find(action => action.purpose === 'compose')!;
+    assert.ok(composeAction);
+    messageObservations = 0;
+    mutateComposer = async () => {
+      await page.locator('#prompt-textarea').fill('Human compose draft');
+    };
+    const composeOutcome = await adapter.act({
+      context: task, snapshotId: composeObservation.snapshotId,
+      actionRef: composeAction.actionRef, evidenceHash: composeAction.evidenceHash,
+      input: 'Agent draft',
+    });
+    const composeDraft = await page.locator('#prompt-textarea').innerText();
+
+    await page.setContent('<main><article data-message-author-role="user" ' +
+      'data-message-id="user-b" data-turn-id="turn-b">Task</article>' +
+      '<section data-chatgpt-composer><div id="prompt-textarea" role="textbox" ' +
+      'contenteditable="true">Committed draft</div>' +
+      '<button data-testid="send-button" onclick="window.sends++;' +
+      'window.sent=document.querySelector(\'#prompt-textarea\').innerText">Send</button>' +
+      '</section></main><script>window.sends=0;window.sent=null;</script>');
+    const submitObservation = await adapter.observe(task);
+    const submitAction = submitObservation.actions.find(action => action.purpose === 'submit')!;
+    assert.ok(submitAction);
+    messageObservations = 0;
+    mutateComposer = async () => {
+      await page.locator('#prompt-textarea').fill('Human submit replacement');
+    };
+    const submitOutcome = await adapter.act({
+      context: task, snapshotId: submitObservation.snapshotId,
+      actionRef: submitAction.actionRef, evidenceHash: submitAction.evidenceHash,
+      authorizedAttemptId: 'journaled-raced-submit',
+      expectedContentSha256: digest('Committed draft'),
+    });
+    const submitted = await page.evaluate(() => ({
+      sends: (window as any).sends,
+      sent: (window as any).sent,
+      draft: document.getElementById('prompt-textarea')!.innerText,
+    }));
+
+    await page.setContent('<main><section data-codex-composer-request-navigation="true" ' +
+      'data-user-input-auto-resolution="true"><h3>Original question</h3>' +
+      '<div role="radiogroup"><button type="button" role="radio" ' +
+      'aria-label="Proceed">Proceed</button><button type="button" role="radio" ' +
+      'aria-label="Decline">Decline</button></div></section></main>' +
+      '<script>window.replacementClicks=0;</script>');
+    const radio = await inspectChatGptQuestion(page);
+    assert.ok(radio?.available);
+    let radioError: unknown;
+    try {
+      await answerChatGptQuestion(page, {
+        answer: 'Proceed', evidenceHash: radio.evidenceHash,
+      }, async () => {
+        await page.locator('section').evaluate(panel => {
+          panel.outerHTML = '<section data-codex-composer-request-navigation="true" ' +
+            'data-user-input-auto-resolution="true"><h3>Replacement question</h3>' +
+            '<div role="radiogroup"><button id="replacement-radio" type="button" ' +
+            'role="radio" aria-label="Proceed">Proceed</button><button type="button" ' +
+            'role="radio" aria-label="Decline">Decline</button></div></section>';
+          document.getElementById('replacement-radio')!.onclick = () => {
+            (window as any).replacementClicks++;
+            document.querySelector('section')!.remove();
+          };
+        });
+      });
+    } catch (error) { radioError = error; }
+    const replacementClicks = await page.evaluate(() => (window as any).replacementClicks);
+
+    await page.setContent('<main><section data-codex-composer-request-navigation="true" ' +
+      'data-user-input-auto-resolution="true"><h3>Which repository?</h3><form>' +
+      '<textarea aria-label="Repository"></textarea><button type="submit">Submit</button>' +
+      '</form></section></main><script>window.freeSubmits=0;' +
+      'document.querySelector("form").onsubmit=e=>{e.preventDefault();window.freeSubmits++;' +
+      'document.querySelector("section").remove();};</script>');
+    const free = await inspectChatGptFreeTextQuestion(page);
+    assert.ok(free?.available);
+    let freeCallbacks = 0;
+    let freeError: unknown;
+    try {
+      await answerChatGptFreeTextQuestion(page, {
+        answer: 'sessionplane', evidenceHash: free.evidenceHash,
+      }, async () => {
+        if (++freeCallbacks === 1) {
+          await page.locator('textarea').fill('Human draft during exact-turn check');
+        }
+      });
+    } catch (error) { freeError = error; }
+    const freeState = await page.evaluate(() => ({
+      submits: (window as any).freeSubmits,
+      draft: (document.querySelector('textarea') as HTMLTextAreaElement | null)?.value ?? null,
+    }));
+
+    await page.setContent('<main><section data-codex-composer-request-navigation="true" ' +
+      'data-user-input-auto-resolution="true"><h3>Which repository?</h3><form>' +
+      '<textarea aria-label="Repository"></textarea><button type="submit">Submit</button>' +
+      '</form></section></main><script>window.lateFreeSubmits=0;' +
+      'document.querySelector("form").onsubmit=e=>{e.preventDefault();window.lateFreeSubmits++;' +
+      'document.querySelector("section").remove();};</script>');
+    const lateFree = await inspectChatGptFreeTextQuestion(page);
+    assert.ok(lateFree?.available);
+    let lateFreeCallbacks = 0;
+    let lateFreeError: unknown;
+    try {
+      await answerChatGptFreeTextQuestion(page, {
+        answer: 'sessionplane', evidenceHash: lateFree.evidenceHash,
+      }, async () => {
+        if (++lateFreeCallbacks === 2) {
+          await page.locator('textarea').fill('Human revision before submit');
+        }
+      });
+    } catch (error) { lateFreeError = error; }
+    const lateFreeState = await page.evaluate(() => ({
+      submits: (window as any).lateFreeSubmits,
+      draft: (document.querySelector('textarea') as HTMLTextAreaElement | null)?.value ?? null,
+    }));
+
+    assert.notEqual(composeOutcome.kind, 'performed',
+      'a human draft written during the exact-turn read must not be overwritten');
+    assert.equal(composeDraft, 'Human compose draft');
+    assert.notEqual(submitOutcome.kind, 'dispatched_unverified',
+      'a changed draft after the exact-turn read must not be sent');
+    assert.deepEqual(submitted, {
+      sends: 0, sent: null, draft: 'Human submit replacement',
+    });
+    assert.ok(radioError instanceof Error,
+      'a replacement provider question must require a fresh exact action');
+    assert.equal(replacementClicks, 0,
+      'a same-label replacement radio cannot inherit the old authorization');
+    assert.ok(freeError instanceof Error,
+      'a human question draft entered during the exact-turn read must be preserved');
+    assert.deepEqual(freeState, {
+      submits: 0, draft: 'Human draft during exact-turn check',
+    });
+    assert.ok(lateFreeError instanceof Error,
+      'a changed question draft immediately before submit must remain unsubmitted');
+    assert.deepEqual(lateFreeState, {
+      submits: 0, draft: 'Human revision before submit',
+    });
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });

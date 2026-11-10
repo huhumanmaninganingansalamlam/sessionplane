@@ -45,18 +45,40 @@ export async function answerChatGptQuestion(page: Page, input: { answer: string;
   // No default/recommended answer is selected by SessionPlane.
   const option = page.locator(QUESTION).getByRole('radio', { name: input.answer, exact: true });
   if (await option.count() !== 1) throw new SessionPlaneDomainError('provider.question-unverified', 'Question answer is ambiguous');
-  // The same label can be reused by a different provider question while the
-  // locator is resolving. Revalidate the complete exact question evidence
-  // after that asynchronous lookup and before any one-shot click.
-  const rechecked = await inspectChatGptQuestion(page);
-  if (!rechecked?.available || rechecked.evidenceHash !== observed.evidenceHash ||
-    !rechecked.options.some(choice => choice.answer === input.answer && !choice.disabled)) {
-    throw new SessionPlaneDomainError('provider.question-unverified', 'Provider question changed before the selected answer click');
-  }
-  await beforeClick();
+  const handle = await option.elementHandle({ timeout: 2_000 });
+  if (!handle) throw new SessionPlaneDomainError('provider.question-unverified',
+    'Exact question answer disappeared before its one-shot click');
+  const exactOptionStillCurrent = async () => await handle.evaluate((element, expected) =>
+    element.isConnected && element.closest(expected.questionSelector) !== null &&
+    element.matches('button[role="radio"][type="button"]') &&
+    (element.getAttribute('aria-label') ?? '').trim() === expected.answer &&
+    !element.matches(':disabled, [aria-disabled="true"]'),
+  { questionSelector: QUESTION, answer: input.answer }).catch(() => false);
   let clickError: unknown;
-  try { await option.click({ timeout: 5000 }); }
-  catch (error) { clickError = error; }
+  try {
+    // The same label can be reused by a different provider question while the
+    // locator or the external exact-turn check awaits. Both semantic evidence
+    // and the pinned original control must still match before the one-shot click.
+    const rechecked = await inspectChatGptQuestion(page);
+    if (!rechecked?.available || rechecked.evidenceHash !== observed.evidenceHash ||
+      !rechecked.options.some(choice => choice.answer === input.answer && !choice.disabled) ||
+      !(await exactOptionStillCurrent())) {
+      throw new SessionPlaneDomainError('provider.question-unverified',
+        'Provider question changed before the selected answer click');
+    }
+    await beforeClick();
+    const final = await inspectChatGptQuestion(page);
+    if (!final?.available || final.evidenceHash !== observed.evidenceHash ||
+      !final.options.some(choice => choice.answer === input.answer && !choice.disabled) ||
+      !(await exactOptionStillCurrent())) {
+      throw new SessionPlaneDomainError('provider.question-unverified',
+        'Provider question changed during the exact-turn check');
+    }
+    try { await handle.click({ timeout: 5000 }); }
+    catch (error) { clickError = error; }
+  } finally {
+    await handle.dispose();
+  }
   const deadline = performance.now() + 1500;
   do {
     const current = await inspectChatGptQuestion(page);
