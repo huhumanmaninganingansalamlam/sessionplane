@@ -14,6 +14,7 @@ import { observeChatGptActivity } from '../../src/providers/chatgpt/activity-obs
 import { ExactFinalTracker } from '../../src/providers/chatgpt/exact-final.ts';
 import { inspectChatGptSubmissionCandidates, recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submission.ts';
 import { restoreLatestPosition } from '../../src/providers/chatgpt/latest-position-recovery.ts';
+import { streamRetrySurface } from '../../src/providers/chatgpt/stream-retry.ts';
 
 const CONVERSATION_ID = 'conversation-observer-123456';
 
@@ -309,6 +310,35 @@ test('completed exact artifact discovery restores a virtualized answer through t
     await assert.rejects(() => adapter.downloadArtifact(request, exactCard));
     assert.equal(await page.evaluate(() => (window as any).cardClicks), 1,
       'a foreign ID must block download without clicking');
+
+    // The live ChatGPT Outputs popover is a document surface, not a
+    // verified download card. A file-like title cannot silently disappear.
+    await page.setContent(`<main>
+      <article data-message-author-role="user" data-message-id="user-message-1">Create a file</article>
+      <article data-message-author-role="assistant" data-message-id="original-final">
+        Created and byte-verified sessionplane-output.txt</article>
+      <button type="button" aria-controls="outputs-dialog" aria-haspopup="dialog" aria-expanded="true"
+        style="position:fixed;left:12px;top:12px;width:120px;height:32px;z-index:10">요약 전환</button>
+      <div role="dialog" id="outputs-dialog" data-state="open"
+        style="position:fixed;left:12px;top:60px;background:white">
+        <button aria-expanded="true">출력</button>
+        <button aria-describedby="doc-kind" onclick="window.outputOpens++">sessionplane-output.txt 열기</button>
+        <span id="doc-kind">문서</span>
+      </div>
+      <textarea></textarea><script>window.outputOpens=0;</script></main>`);
+    const output = await page.evaluate(streamRetrySurface, { origin: 'https://chatgpt.com',
+      conversationId: CONVERSATION_ID, anchor: 'user-message-1', click: false, outputPanel: 'inspect' });
+    assert.equal(output.reason, 'output-popover-open', 'fixture matches the real document panel');
+    await page.locator('[data-message-id="original-final"]').evaluate(node =>
+      node.insertAdjacentHTML('beforeend', '<a download="linked.txt" href="data:text/plain,EXACT-LINK">Linked file</a>'));
+    assert.deepEqual((await adapter.discoverArtifacts(request)).map(file => file.name), ['linked.txt'],
+      'an exact answer-bound file link remains discoverable beside unrelated output chrome');
+    await page.locator('a[download="linked.txt"]').evaluate(node => node.remove());
+    await assert.rejects(() => adapter.discoverArtifacts(request),
+      { errorCode: 'provider.artifacts-unavailable' },
+      'an unbound output document must not be reported as zero verified artifacts');
+    assert.equal(await page.evaluate(() => (window as any).outputOpens), 0,
+      'discovery must never open a document whose exact artifact identity is missing');
 
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });

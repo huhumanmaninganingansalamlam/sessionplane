@@ -39,6 +39,7 @@ import { ChatGptNetworkObserver } from './network-observer.ts';
 import { readChatGptMessages } from './message-dom.ts';
 import { restoreLatestPosition } from './latest-position-recovery.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
+import { streamRetrySurface } from './stream-retry.ts';
 import { ChatGptSubmission, recoverChatGptAcknowledgement, inspectChatGptSubmissionCandidates } from './submission.ts';
 
 export interface ChatGptAdapterOptions {
@@ -470,6 +471,21 @@ export class ChatGptAdapter implements ProviderAdapter {
       return await discoverFileCards(page, request, () => { this.#requireExactArtifactPage(request); });
     });
     const rows = [...(message.artifacts ?? []), ...cards];
+    const { conversationId, submittedUserMessageId } = request.session;
+    if (rows.length === 0 && conversationId !== null && submittedUserMessageId !== null) {
+      // The provider's Outputs document list is not an answer-bound file
+      // card or download. Do not silently report zero verified artifacts.
+      this.#requireExactArtifactPage(request);
+      const output = await page.evaluate(streamRetrySurface, {
+        origin: new URL(page.url()).origin, conversationId,
+        anchor: submittedUserMessageId, click: false, outputPanel: 'inspect' as const,
+      });
+      this.#requireExactArtifactPage(request);
+      if (['output-popover-open', 'output-popover-closing', 'output-panel-inactive'].includes(output.reason)) {
+        throw new ProviderSubmissionError('provider.artifacts-unavailable',
+          'ChatGPT output document has no exact answer-bound downloadable artifact identity');
+      }
+    }
     const seen = new Set<string>();
     const candidates: ProviderArtifactCandidate[] = [];
     for (const row of rows) {
