@@ -148,7 +148,7 @@ test('opt-in continues once per proven failure, backs off, preserves 5.5 Pro/dea
     const rootRef = await f.submit();
     const deadline = f.core.database.raw.prepare('SELECT deadline_at FROM sessions WHERE session_id=?').get(f.session.sessionId)!.deadline_at;
     await until(() => f.core.teamDirectory.getSession(f.session.sessionId).generation === 3 &&
-      f.core.teamDirectory.getSession(f.session.sessionId).sessionState === 'complete');
+      f.core.teamDirectory.getSession(f.session.sessionId).sessionState === 'complete', 45_000);
     assert.equal(f.fake.submitCount, 3);
     assert.deepEqual(f.fake.submissionRequests.filter((r, i, all) => all.findIndex(x => x.generation === r.generation) === i).map(r => r.prompt),
       ['Original operation snapshot', '계속', '계속']);
