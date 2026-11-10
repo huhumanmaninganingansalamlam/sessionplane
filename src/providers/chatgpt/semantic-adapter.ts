@@ -848,7 +848,7 @@ function exactContext(context: SemanticTaskContext, lease: OwnedPageIdentity): b
  * indexes/selectors/DOM in the observation or actionRef.
  */
 async function captureUi(page: Page): Promise<UiSnapshot> {
-  const ui = await page.evaluate(({ editorsSelector, buttonSelector, sendPattern, emptyEditorMarker }) => {
+  const ui = await page.evaluate(async ({ editorsSelector, buttonSelector, sendPattern, emptyEditorMarker }) => {
     const visible = (element: Element) =>
       !element.closest('nav, aside, article, [role="navigation"], [role="search"], [role="dialog"], [role="alertdialog"], [aria-hidden="true"], [inert], [data-message-author-role], [data-chatgpt-search-message-ids], .markdown') &&
       element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
@@ -886,14 +886,31 @@ async function captureUi(page: Page): Promise<UiSnapshot> {
       if (!known && !nativeSubmit && !labelledSubmit) return [];
       return [{ index, signature: signature(e), value: label, enabled: enabled(e) }];
     });
-    return { editors, buttons };
+    // A not-yet-submitted Task has no canonical user ID. Pin its existing
+    // transcript boundary along with the composer, so a new human turn
+    // cannot inherit an old compose/submit actionRef. Keep user text inside
+    // the renderer and return only its digest.
+    const userNodes = [...document.querySelectorAll<HTMLElement>(
+      'main [data-message-author-role="user"], main [data-user-message-bubble]',
+    )].filter(node => node.parentElement?.closest(
+      '[data-message-author-role="user"], [data-user-message-bubble]') === null);
+    const userBoundary = JSON.stringify(userNodes.map(node => [
+      node.getAttribute('data-message-id'), node.getAttribute('data-turn-id'),
+      node.getAttribute('data-dil-message-id'),
+      node.closest('[data-chatgpt-search-message-ids]')?.getAttribute('data-chatgpt-search-message-ids'),
+      node.textContent,
+    ]));
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(userBoundary));
+    const userBoundarySha256 = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    return { editors, buttons, userBoundarySha256 };
   }, { editorsSelector: EDITORS, buttonSelector: BUTTONS, sendPattern: SEND_LABEL.source,
     emptyEditorMarker: EMPTY_PROSEMIRROR_MARKER });
   const editor = ui.editors.length === 1 ? ui.editors[0]! : null;
   const draftSha256 = editor === null ? null : sha(editor.value.replaceAll('\r\n', '\n'));
   return {
     ...ui, draftSha256,
-    fingerprint: sha(JSON.stringify({ editor: ui.editors, buttons: ui.buttons, draftSha256 })),
+    fingerprint: sha(JSON.stringify({ editor: ui.editors, buttons: ui.buttons,
+      draftSha256, userBoundarySha256: ui.userBoundarySha256 })),
   };
 }
 

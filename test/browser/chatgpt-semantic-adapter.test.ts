@@ -403,6 +403,31 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(humanWhitespace.actions.some(action => action.purpose === 'compose'), false,
       'a literal human space remains a protected draft');
 
+    // An unsubmitted Task has no canonical user ID yet. A later human turn
+    // must still invalidate its previously observed composer action.
+    await page.setContent('<main><article data-message-author-role="user" ' +
+      'data-message-id="history-user">Existing conversation</article>' +
+      '<div id="prompt-textarea" contenteditable="true"></div>' +
+      '<button data-testid="send-button">Send</button></main>');
+    const unboundBefore = await adapter.observe(task);
+    const unboundNewUserCompose = unboundBefore.actions.find(a => a.purpose === 'compose')!;
+    assert.ok(unboundNewUserCompose);
+    await page.locator('#prompt-textarea').evaluate(editor => {
+      const newer = document.createElement('article');
+      newer.setAttribute('data-message-author-role', 'user');
+      newer.setAttribute('data-message-id', 'human-new-turn');
+      newer.textContent = 'Human follow-up before the old Task drafts';
+      editor.before(newer);
+    });
+    const unboundAfter = await adapter.act({
+      context: task, snapshotId: unboundBefore.snapshotId,
+      actionRef: unboundNewUserCompose.actionRef, evidenceHash: unboundNewUserCompose.evidenceHash,
+      input: 'Must not draft on a human-advanced conversation',
+    });
+    assert.notEqual(unboundAfter.kind, 'performed');
+    assert.equal(await page.locator('#prompt-textarea').innerText(), '');
+
+
     // New user input after the final UI capture but before the draft fill
     // invalidates the old exact turn without changing the composer fingerprint.
     await page.setContent('<main><article data-message-author-role="user" ' +
