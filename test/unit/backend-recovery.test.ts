@@ -179,6 +179,18 @@ test('canonical FINAL requires both submitted message and turn identities when b
   assert.equal(recoverExactServerFinal(payload(withoutTurnField), {
     ...identity(), submittedUserTurnId: 'user-node',
   }).kind, 'complete', 'canonical node ID remains a valid exact turn fallback');
+  const withoutMessageField = { ...userMessage('unused', 'user-turn-1'), id: undefined };
+  assert.equal(recoverExactServerFinal(payload(withoutMessageField), {
+    ...identity(), submittedUserMessageId: 'user-node',
+  }).kind, 'complete', 'canonical node ID remains a valid exact message fallback');
+  assert.equal(recoverExactServerFinal(payload(userMessage('user-message-1', 'user-turn-1')), {
+    ...identity(), submittedUserTurnId: 'user-node',
+  }).kind, 'unverified',
+    'canonical node ID cannot override an explicit conflicting turn ID');
+  assert.equal(recoverExactServerFinal(payload(userMessage('user-message-1', 'user-turn-1')), {
+    ...identity(), submittedUserMessageId: 'user-node',
+  }).kind, 'unverified',
+    'canonical node ID cannot override an explicit conflicting message ID');
 });
 
 test('direct final and ACK reject missing or conflicting conversation aliases even with the same message ID', () => {

@@ -606,12 +606,14 @@ function isExactSubmittedUser(
     readStringField(metadata, 'turn_id') ??
     readStringField(metadata, 'turnId');
   if (identity.submittedUserMessageId === null && identity.submittedUserTurnId === null) return false;
-  if (identity.submittedUserMessageId !== null &&
-      messageId !== identity.submittedUserMessageId &&
-      nodeId !== identity.submittedUserMessageId) return false;
-  if (identity.submittedUserTurnId !== null &&
-      turnId !== identity.submittedUserTurnId &&
-      nodeId !== identity.submittedUserTurnId) return false;
+  if (identity.submittedUserMessageId !== null) {
+    const canonicalMessageId = messageId ?? nodeId;
+    if (canonicalMessageId !== identity.submittedUserMessageId) return false;
+  }
+  if (identity.submittedUserTurnId !== null) {
+    const canonicalTurnId = turnId ?? nodeId;
+    if (canonicalTurnId !== identity.submittedUserTurnId) return false;
+  }
   return true;
 }
 
