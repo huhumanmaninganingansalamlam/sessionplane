@@ -68,7 +68,7 @@ export async function inspectChatGptFreeTextQuestion(page: Page) {
 export async function answerChatGptFreeTextQuestion(
   page: Page,
   input: { readonly answer: string; readonly evidenceHash: string },
-  beforeSubmit: () => void,
+  beforeMutation: () => void,
 ): Promise<void> {
   if (!input.answer.trim() || input.answer.length > 2_000) {
     throw new Error('Free-text question answer must be bounded and nonempty');
@@ -99,8 +99,8 @@ export async function answerChatGptFreeTextQuestion(
       tag: observed.editor.tag, role: observed.editor.role,
       label: observed.editor.label, draft: observed.editor.draft,
     })) throw new Error('Question editor changed before fill');
+    beforeMutation();
     await editor.fill(input.answer, { timeout: 5_000 });
-    beforeSubmit();
     const buttonSignature = await submit.evaluate(e => ({
       tag: e.tagName.toLowerCase(),
       label: (e.getAttribute('aria-label') ?? (e as HTMLElement).innerText ?? '').replace(/\s+/g, ' ').trim(),
@@ -112,6 +112,7 @@ export async function answerChatGptFreeTextQuestion(
       buttonSignature.type !== observed.submit.type) {
       throw new Error('Question submission control changed after fill');
     }
+    beforeMutation();
     await submit.click({ timeout: 5_000 });
   } finally {
     await editor.dispose(); await submit.dispose();

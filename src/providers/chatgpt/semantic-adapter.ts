@@ -390,6 +390,15 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       const page = await this.#options.resolvePage(lease);
       this.#checkOrigin(page);
       if (conversationBindingProblem(page, request.context) !== null) return 'stale' as const;
+      const requireExactMutationIdentity = () => {
+        if (!this.#options.isExactLease(lease)) {
+          throw new Error('Page lease revoked before semantic mutation');
+        }
+        this.#checkOrigin(page);
+        if (conversationBindingProblem(page, request.context) !== null) {
+          throw new Error('Conversation changed before semantic mutation');
+        }
+      };
       const surface = await observeChatGptSurface(page);
       if (surface.mode !== 'chat' || (await observeChatGptDialog(page)).kind !== null) {
         return 'stale' as const;
@@ -438,22 +447,24 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           !(await this.#authorized(request, action.purpose))) return 'stale' as const;
         if (action.purpose === 'open_model_chooser') {
           if (model.status !== 'closed' && model.status !== 'nested') return 'stale' as const;
-          await openExactChatGptModelMenu(page, model.evidenceHash);
+          await openExactChatGptModelMenu(page, model.evidenceHash, requireExactMutationIdentity);
           return 'model_menu_opened' as const;
         }
         if (model.status !== 'open' ||
           !model.options.some(option => option.value === request.input && option.enabled)) {
           return 'stale' as const;
         }
-        await selectExactChatGptModelMenu(page, model.evidenceHash, request.input!);
+        await selectExactChatGptModelMenu(page, model.evidenceHash, request.input!,
+          requireExactMutationIdentity);
         return 'model_selected' as const;
       }
       if (action.purpose === 'retry') {
         const retry = await inspectExactChatGptRetry(page, request.context);
         if (!retry?.available || retry.evidenceHash !== action.retryHash ||
-          !(await this.#authorized(request, action.purpose)) || !this.#options.isExactLease(lease)) {
+          !(await this.#authorized(request, action.purpose))) {
           return 'stale' as const;
         }
+        requireExactMutationIdentity();
         const clicked = await page.evaluate(streamRetrySurface, {
           origin: new URL(page.url()).origin,
           conversationId: request.context.providerConversationId!,
@@ -476,17 +487,14 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           return 'stale' as const;
         }
         if (!(await this.#authorized(request, action.purpose))) return 'stale' as const;
-        const checkLease = () => {
-          if (!this.#options.isExactLease(lease)) throw new Error('Question lease expired');
-        };
         if (radio !== null) {
           await answerChatGptQuestion(page, {
             answer: request.input!, evidenceHash: action.questionHash!,
-          }, checkLease);
+          }, requireExactMutationIdentity);
         } else {
           await answerChatGptFreeTextQuestion(page, {
             answer: request.input!, evidenceHash: action.questionHash!,
-          }, checkLease);
+          }, requireExactMutationIdentity);
         }
         return 'question_answered' as const;
       }
@@ -503,6 +511,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
             return structuralPlaceholder ? '' : raw === '' && element.textContent !== '' ? element.textContent : raw;
           }, EMPTY_PROSEMIRROR_MARKER);
           if (existing.length !== 0) return 'stale' as const;
+          requireExactMutationIdentity();
           await editor.fill(request.input!, { timeout: 5_000 });
         } finally { await editor.dispose(); }
         return 'draft_updated' as const;
@@ -534,6 +543,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           if (sha(currentDraft.replaceAll('\r\n', '\n')) !== request.expectedContentSha256) {
             return 'stale' as const;
           }
+          requireExactMutationIdentity();
           await button.click({ timeout: 5_000 });
         } finally { await button.dispose(); }
         capturedAttempts = await watch.collect(350);

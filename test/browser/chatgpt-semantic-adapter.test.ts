@@ -207,6 +207,51 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(await page.evaluate(() => (window as any).sends), 1,
       'an overlapping authorized action must not click Send twice');
 
+    // Losing the exact lease while the second durable authorization check is
+    // pending must stop the side effect, not merely report uncertainty after
+    // clicking a page now owned by someone else.
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true">Committed lease draft</div>' +
+      '<button data-testid="send-button" onclick="window.sends++">Send</button></main>' +
+      '<script>window.sends=0;</script>');
+    let authorizationChecks = 0;
+    let signalMutationAuthorization!: () => void;
+    const mutationAuthorizationEntered = new Promise<void>(resolve => {
+      signalMutationAuthorization = resolve;
+    });
+    let releaseMutationAuthorization!: () => void;
+    const mutationAuthorization = new Promise<void>(resolve => {
+      releaseMutationAuthorization = resolve;
+    });
+    const revokedDuringAuthorization = new ChatGptSemanticAdapter({
+      isExactLease: value => allowedLease === value,
+      resolvePage: value => registry.pageForObservation(value.pageKey, value.bindingEpoch),
+      isAuthorizedAttempt: async () => {
+        authorizationChecks++;
+        if (authorizationChecks === 2) {
+          signalMutationAuthorization();
+          await mutationAuthorization;
+        }
+        return true;
+      },
+    });
+    const leaseView = await revokedDuringAuthorization.observe(task);
+    const leaseSend = leaseView.actions.find(action => action.purpose === 'submit')!;
+    assert.ok(leaseSend);
+    const pendingLeaseAction = revokedDuringAuthorization.act({
+      context: task, snapshotId: leaseView.snapshotId,
+      actionRef: leaseSend.actionRef, evidenceHash: leaseSend.evidenceHash,
+      authorizedAttemptId: 'journaled-attempt-revoked-lease',
+      expectedContentSha256: digest('Committed lease draft'),
+    });
+    await mutationAuthorizationEntered;
+    allowedLease = null;
+    releaseMutationAuthorization();
+    const revokedAction = await pendingLeaseAction;
+    allowedLease = lease;
+    assert.equal(revokedAction.kind, 'uncertain');
+    assert.equal(await page.evaluate(() => (window as any).sends), 0,
+      'revoked ownership must prevent the pending Send click');
+
     // The real Chat editor renders an empty ProseMirror paragraph as innerText '\n'.
     // It is a structural placeholder, not a human-written draft.
     await page.setContent('<main><section data-chatgpt-composer><div class="ProseMirror" role="textbox" contenteditable="true">' +

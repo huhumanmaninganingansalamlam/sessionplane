@@ -217,7 +217,9 @@ async function waitForComposerMenuView(page: Page, openerId: string, priorMenuId
   }, { openerId, priorMenuId, view }, { timeout: 5_000, polling: 200 });
 }
 
-export async function openExactChatGptModelMenu(page: Page, expectedHash: string): Promise<void> {
+export async function openExactChatGptModelMenu(
+  page: Page, expectedHash: string, beforeMutation: () => void,
+): Promise<void> {
   const current = await inspectSemanticChatGptModelMenu(page);
   const validIdentity = current?.strategy === 'composer-radix'
     ? ID.test(current.openerId) &&
@@ -231,8 +233,10 @@ export async function openExactChatGptModelMenu(page: Page, expectedHash: string
   if (current.status === 'closed') {
     const button = await page.locator(OPENER).nth(current.openerIndex).elementHandle();
     if (!button) throw new Error('Model opener disappeared');
-    try { await button.click({ timeout: 5_000 }); }
-    finally { await button.dispose(); }
+    try {
+      beforeMutation();
+      await button.click({ timeout: 5_000 });
+    } finally { await button.dispose(); }
     if (current.strategy === 'composer-radix') {
       await waitForComposerMenuView(page, current.openerId, current.menuId, 'root');
     }
@@ -254,6 +258,7 @@ export async function openExactChatGptModelMenu(page: Page, expectedHash: string
     if (await disclosure.count() !== 1 || !await disclosure.isEnabled()) {
       throw new Error('Composer model list disclosure changed');
     }
+    beforeMutation();
     await disclosure.click({ timeout: 5_000 });
     await waitForComposerMenuView(page, current.openerId, current.menuId, 'models');
     const after = await inspectSemanticChatGptModelMenu(page);
@@ -276,6 +281,7 @@ export async function openExactChatGptModelMenu(page: Page, expectedHash: string
     !await trigger.isEnabled()) {
     throw new Error('Pro submenu trigger changed before action');
   }
+  beforeMutation();
   await trigger.click({ timeout: 5_000 });
   const after = await inspectSemanticChatGptModelMenu(page);
   if (!after || after.status !== 'open' || after.menuId !== current.menuId ||
@@ -285,7 +291,7 @@ export async function openExactChatGptModelMenu(page: Page, expectedHash: string
 }
 
 export async function selectExactChatGptModelMenu(
-  page: Page, expectedHash: string, option: string,
+  page: Page, expectedHash: string, option: string, beforeMutation: () => void,
 ): Promise<void> {
   const current = await inspectSemanticChatGptModelMenu(page);
   const selected = current?.options.find(o => o.value === option && o.enabled);
@@ -302,6 +308,7 @@ export async function selectExactChatGptModelMenu(
   if (await choice.count() !== 1 || !await choice.isEnabled()) {
     throw new Error('Model option became ambiguous or disabled');
   }
+  beforeMutation();
   await choice.click({ timeout: 5_000 });
   const after = await inspectSemanticChatGptModelMenu(page);
   if (!after || after.strategy !== current.strategy ||
