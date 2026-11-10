@@ -76,6 +76,47 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     Object.defineProperty(page, 'bringToFront', {
       configurable: true, value: async () => { foregroundCalls++; throw new Error('Human focus forbidden'); },
     });
+    // E17: a mounted assistant message is not evidence that the stored
+    // canonical FINAL has the same text or response message identity.
+    await page.setContent('<main><div id="prompt-textarea" role="textbox" contenteditable="true"></div>' +
+      '<button data-testid="send-button">Send</button>' +
+      '<article data-message-author-role="user" data-message-id="user-b" data-turn-id="turn-b">Exact question</article>' +
+      '<article data-message-author-role="assistant" data-message-id="mounted-other" data-end-turn="true">' +
+      '<div class="markdown">Different mounted text</div></article></main>');
+    let canonicalReads = 0;
+    const canonicalClient: BackendJsonClient = { async get(url) {
+      canonicalReads++;
+      if (url.endsWith('/api/auth/session')) return {
+        status: 200, headers: {}, body: { accessToken: 'fixture-only' },
+      };
+      return { status: 200, headers: {}, body: {
+        id: 'conversation-b', current_node: 'assistant-node', mapping: {
+          root: { id: 'root', parent: null, children: [], message: null },
+          'user-node': { id: 'user-node', parent: 'root', children: [], message: {
+            id: 'user-b', turn_id: 'turn-b', author: { role: 'user' },
+            content: { parts: ['Exact question'] },
+          } },
+          'assistant-node': { id: 'assistant-node', parent: 'user-node', children: [], message: {
+            id: 'backend-answer', author: { role: 'assistant' }, channel: 'final',
+            status: 'finished_successfully', end_turn: true,
+            content: { parts: ['Canonical FINAL text'] }, metadata: {},
+          } },
+        },
+      } };
+    } };
+    const independent = new ChatGptSemanticAdapter({
+      isExactLease: value => allowedLease === value,
+      resolvePage: value => registry.pageForObservation(value.pageKey, value.bindingEpoch),
+      backendClient: canonicalClient, backendOrigin: 'https://chatgpt.com',
+    });
+    const bound = context(lease, 'user-b');
+    const mounted = await independent.observe(bound);
+    assert.equal(mounted.turn.answerMessageId, 'mounted-other');
+    assert.equal(mounted.turn.partialAnswer, 'Different mounted text');
+    assert.deepEqual(await independent.recover({ context: bound, kind: 'final' }),
+      { kind: 'exact_final', externalTurnId: 'turn-b', answerText: 'Canonical FINAL text' });
+    assert.equal(canonicalReads, 2, 'mounted observation cannot substitute for authenticated FINAL');
+    assert.equal(foregroundCalls, 0);
     for (const [label, html] of [
       ['known testids', NORMAL], ['renamed testid and wrapped editor / semantic form submit', DRIFT],
     ] as const) {
