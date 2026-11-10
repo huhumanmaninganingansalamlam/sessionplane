@@ -568,6 +568,17 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
             return structuralPlaceholder ? '' : raw === '' && element.textContent !== '' ? element.textContent : raw;
           }, EMPTY_PROSEMIRROR_MARKER);
           if (existing.length !== 0) return 'stale' as const;
+          // A human may have advanced the transcript since the earlier UI
+          // fingerprint. The empty editor is not evidence of the old turn.
+          if (request.context.submittedUserMessageId !== null ||
+              request.context.submittedUserTurnId !== null) {
+            const boundary = await observeChatGptDom(page, {
+              submittedUserMessageId: request.context.submittedUserMessageId,
+              submittedUserTurnId: request.context.submittedUserTurnId,
+            });
+            if (!boundary.submittedUserFound || boundary.laterUserFound ||
+                boundary.candidate?.streamingMarker === true) return 'stale' as const;
+          }
           requireExactMutationIdentity();
           await editor.fill(request.input!, { timeout: 5_000 });
         } finally { await editor.dispose(); }

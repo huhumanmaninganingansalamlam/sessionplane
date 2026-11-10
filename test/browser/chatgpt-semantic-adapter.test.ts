@@ -402,6 +402,54 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(humanWhitespace.actions.some(action => action.purpose === 'compose'), false,
       'a literal human space remains a protected draft');
 
+    // New user input after the final UI capture but before the draft fill
+    // invalidates the old exact turn without changing the composer fingerprint.
+    await page.setContent('<main><article data-message-author-role="user" ' +
+      'data-message-id="user-b" data-turn-id="turn-b">Original task</article>' +
+      '<div id="prompt-textarea" contenteditable="true"></div>' +
+      '<button data-testid="send-button">Send</button></main>');
+    let advanceOnCapture = false;
+    const racedPage = new Proxy(page, { get(target, prop) {
+      if (prop === 'evaluate') return async (fn: unknown, arg: unknown) => {
+        const value = await page.evaluate(fn as never, arg as never);
+        if (advanceOnCapture && typeof fn === 'function' &&
+          fn.toString().includes('editorsSelector')) {
+          advanceOnCapture = false;
+          await page.locator('#prompt-textarea').evaluate(editor => {
+            const later = document.createElement('article');
+            later.setAttribute('data-message-author-role', 'user');
+            later.setAttribute('data-message-id', 'later-user');
+            later.textContent = 'New human turn before draft fill';
+            editor.before(later);
+          });
+        }
+        return value;
+      };
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const draftRaceAdapter = new ChatGptSemanticAdapter({
+      isExactLease: candidate => allowedLease === candidate,
+      resolvePage: () => racedPage,
+    });
+    const originalTurn = context(lease, 'user-b');
+    const beforeAdvance = await draftRaceAdapter.observe(originalTurn);
+    const raceCompose = beforeAdvance.actions.find(a => a.purpose === 'compose')!;
+    assert.ok(raceCompose);
+    advanceOnCapture = true;
+    const raceOutcome = await draftRaceAdapter.act({
+      context: originalTurn, snapshotId: beforeAdvance.snapshotId,
+      actionRef: raceCompose.actionRef, evidenceHash: raceCompose.evidenceHash,
+      input: 'Must not draft after human follow-up',
+    });
+    assert.notEqual(raceOutcome.kind, 'performed',
+      'late human follow-up must revoke the old task before filling');
+    assert.equal(await page.locator('#prompt-textarea').innerText(), '',
+      'a displaced task cannot edit the live chat composer');
+
+    await page.setContent('<main><section data-chatgpt-composer><div class="ProseMirror" role="textbox" contenteditable="true">' +
+      '<p> </p></div><button data-testid="send-button">Send</button></section></main>');
+
     // If a person types after observation, the stale compose ref must not erase it.
     await page.locator('.ProseMirror').evaluate(element => {
       element.innerHTML = '<p class="placeholder"><br class="ProseMirror-trailingBreak"></p>';
