@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { Page } from 'playwright-core';
+import type { Locator, Page } from 'playwright-core';
 
 const OPENER = 'button[aria-haspopup="menu"]';
 const MODEL_LABEL = /(?:model|모델)/i;
@@ -218,6 +218,31 @@ async function waitForComposerMenuView(page: Page, openerId: string, priorMenuId
   }, { openerId, priorMenuId, view }, { timeout: 5_000, polling: 200 });
 }
 
+/** Pin the original control and recheck its linked menu after any async
+ * authorization wait. A same-label replacement must not inherit this click. */
+async function clickExactModelControl(
+  page: Page, expected: SemanticModelMenu, target: Locator,
+  beforeMutation: () => void | Promise<void>, expectedOpenerId: string | null = null,
+): Promise<void> {
+  const handle = await target.elementHandle();
+  if (!handle) throw new Error('Exact model control disappeared');
+  try {
+    if (expectedOpenerId !== null && await handle.getAttribute('id') !== expectedOpenerId) {
+      throw new Error('Model control changed while resolving the exact opener');
+    }
+    await beforeMutation();
+    const current = await inspectSemanticChatGptModelMenu(page);
+    if (!current || current.evidenceHash !== expected.evidenceHash) {
+      throw new Error('Model menu changed before exact control click');
+    }
+    const connected = await handle.evaluate((element, id) =>
+      element.isConnected && !element.matches(':disabled, [aria-disabled="true"]') &&
+      (id === null || (element.id === id && document.getElementById(id) === element)), expectedOpenerId);
+    if (!connected) throw new Error('Exact model control was replaced before click');
+    await handle.click({ timeout: 5_000 });
+  } finally { await handle.dispose(); }
+}
+
 export async function openExactChatGptModelMenu(
   page: Page, expectedHash: string, beforeMutation: () => void | Promise<void>,
 ): Promise<void> {
@@ -232,12 +257,8 @@ export async function openExactChatGptModelMenu(
     throw new Error('Model opener changed before action');
   }
   if (current.status === 'closed') {
-    const button = await page.locator(OPENER).nth(current.openerIndex).elementHandle();
-    if (!button) throw new Error('Model opener disappeared');
-    try {
-      await beforeMutation();
-      await button.click({ timeout: 5_000 });
-    } finally { await button.dispose(); }
+    await clickExactModelControl(page, current, page.locator(OPENER).nth(current.openerIndex),
+      beforeMutation, current.openerId);
     if (current.strategy === 'composer-radix') {
       await waitForComposerMenuView(page, current.openerId, current.menuId, 'root');
     }
@@ -259,8 +280,7 @@ export async function openExactChatGptModelMenu(
     if (await disclosure.count() !== 1 || !await disclosure.isEnabled()) {
       throw new Error('Composer model list disclosure changed');
     }
-    await beforeMutation();
-    await disclosure.click({ timeout: 5_000 });
+    await clickExactModelControl(page, current, disclosure, beforeMutation);
     await waitForComposerMenuView(page, current.openerId, current.menuId, 'models');
     const after = await inspectSemanticChatGptModelMenu(page);
     if (!after || after.strategy !== current.strategy ||
@@ -282,8 +302,7 @@ export async function openExactChatGptModelMenu(
     !await trigger.isEnabled()) {
     throw new Error('Pro submenu trigger changed before action');
   }
-  await beforeMutation();
-  await trigger.click({ timeout: 5_000 });
+  await clickExactModelControl(page, current, trigger, beforeMutation);
   const after = await inspectSemanticChatGptModelMenu(page);
   if (!after || after.status !== 'open' || after.menuId !== current.menuId ||
     after.optionMenuId !== current.submenuId || after.submenuId !== current.submenuId) {
@@ -309,8 +328,7 @@ export async function selectExactChatGptModelMenu(
   if (await choice.count() !== 1 || !await choice.isEnabled()) {
     throw new Error('Model option became ambiguous or disabled');
   }
-  await beforeMutation();
-  await choice.click({ timeout: 5_000 });
+  await clickExactModelControl(page, current, choice, beforeMutation);
   const after = await inspectSemanticChatGptModelMenu(page);
   if (!after || after.strategy !== current.strategy ||
     after.openerId !== current.openerId || after.menuId !== current.menuId ||

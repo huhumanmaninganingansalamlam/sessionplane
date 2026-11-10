@@ -12,6 +12,7 @@ import { ChatGptBackendRecovery, type BackendJsonClient } from '../../src/provid
 import { inspectChatGptQuestion, answerChatGptQuestion } from '../../src/providers/chatgpt/question.ts';
 import { ChatGptSemanticAdapter } from '../../src/providers/chatgpt/semantic-adapter.ts';
 import { inspectSemanticHostSpanPermission } from '../../src/providers/chatgpt/semantic-hostspan-permission.ts';
+import { inspectSemanticChatGptModelMenu, openExactChatGptModelMenu, selectExactChatGptModelMenu } from '../../src/providers/chatgpt/semantic-model-menu.ts';
 import { observeChatGptDom } from '../../src/providers/chatgpt/dom-observer.ts';
 import type { SemanticTaskContext } from '../../src/providers/semantic-adapter.ts';
 
@@ -1285,6 +1286,76 @@ test('ChatGPT model action refuses an intervening user turn after authorization'
     assert.equal(staleObservation.blocker, 'unsupported',
       'turn changes during observation must invalidate old semantic decisions');
     assert.equal(staleObservation.actions.length, 0);
+
+    // Reordering a linked model opener between inspection and elementHandle
+    // must not redirect a verified menu action to another in-main button.
+    await page.locator('[data-message-id="observed-later-user"]').evaluate(node => node.remove());
+    await page.locator('#model-turn-opener').evaluate(opener => {
+      opener.setAttribute('aria-expanded', 'false');
+      document.getElementById('model-turn-menu')!.hidden = true;
+    });
+    await page.evaluate(() => { (window as any).wrongModelOpens = 0; });
+    const beforeReorder = await inspectSemanticChatGptModelMenu(page);
+    assert.ok(beforeReorder && beforeReorder.status === 'closed');
+    const reorderedPage = new Proxy(page, { get(target, prop) {
+      if (prop === 'locator') return (selector: string) => {
+        if (selector !== 'button[aria-haspopup="menu"]') return page.locator(selector);
+        return { nth: (index: number) => ({ elementHandle: async () => {
+          await page.locator('#model-turn-opener').evaluate(opener => {
+            const wrong = document.createElement('button');
+            wrong.id = 'wrong-model-opener';
+            wrong.textContent = 'Other model';
+            wrong.setAttribute('aria-label', 'Model');
+            wrong.setAttribute('aria-haspopup', 'menu');
+            wrong.setAttribute('aria-controls', 'wrong-menu');
+            wrong.setAttribute('aria-expanded', 'false');
+            wrong.onclick = () => { (window as any).wrongModelOpens++; };
+            opener.before(wrong);
+          });
+          return page.locator(selector).nth(index).elementHandle();
+        } }) };
+      };
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    let openerError: unknown;
+    try {
+      await openExactChatGptModelMenu(reorderedPage, beforeReorder.evidenceHash, () => {});
+    } catch (error) { openerError = error; }
+    assert.ok(openerError instanceof Error, 'a reordered menu should require a new observation');
+    assert.equal(await page.evaluate(() => (window as any).wrongModelOpens), 0,
+      'the original menu index must never click the newly inserted wrong opener');
+
+    // Replacing a radio with the same accessible label during the async
+    // pre-click check cannot transfer this exact model choice to a new node.
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
+      '<button id="select-model-opener" aria-label="Model" aria-haspopup="menu" ' +
+      'aria-controls="select-model-menu" aria-expanded="true">Current</button>' +
+      '<div id="select-model-menu" role="menu">' +
+      '<button role="menuitemradio" aria-checked="true">Default</button>' +
+      '<button id="original-pro" role="menuitemradio" aria-checked="false">Pro</button>' +
+      '</div></main><script>window.foreignModelSelections=0;</script>');
+    const originalSelection = await inspectSemanticChatGptModelMenu(page);
+    assert.ok(originalSelection && originalSelection.status === 'open');
+    let selectionError: unknown;
+    try {
+      await selectExactChatGptModelMenu(page, originalSelection.evidenceHash, 'Pro', async () => {
+        await page.locator('#original-pro').evaluate(original => {
+          const replacement = original.cloneNode(true) as HTMLElement;
+          replacement.id = 'replacement-pro';
+          replacement.onclick = () => {
+            (window as any).foreignModelSelections++;
+            document.querySelectorAll('#select-model-menu [role="menuitemradio"]').forEach(other =>
+              other.setAttribute('aria-checked', String(other === replacement)));
+          };
+          original.replaceWith(replacement);
+        });
+      });
+    } catch (error) { selectionError = error; }
+    assert.ok(selectionError instanceof Error,
+      'a replaced radio requires fresh exact option authorization');
+    assert.equal(await page.evaluate(() => (window as any).foreignModelSelections), 0,
+      'a replacement with identical text cannot inherit the original action');
 
   } finally {
     await owner.close();
