@@ -117,6 +117,8 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
   }
 
   async observe(context: SemanticTaskContext): Promise<SemanticObservation> {
+    const snapshotAtStart = context.pageLease === null ? undefined
+      : this.#latest.get(context.pageLease.pageKey);
     const { lease, page } = await this.#exactPage(context);
     const observedAt = new Date().toISOString();
     const snapshotId = randomUUID();
@@ -323,6 +325,11 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if (changedBinding !== null) {
       this.#latest.delete(lease.pageKey);
       return deniedObservation(changedBinding);
+    }
+    // An overlapping act consumes its old snapshot. An older observe must
+    // not republish actionable evidence after that mutation.
+    if (this.#latest.get(lease.pageKey) !== snapshotAtStart || this.#gate.isBusy(lease.pageKey)) {
+      return deniedObservation('semantic-observation-superseded-by-page-operation');
     }
     let observation: SemanticObservation = {
       providerKey: this.providerKey, surface: surface.mode, snapshotId, observedAt,

@@ -240,6 +240,49 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(await page.evaluate(() => (window as any).sends), 1,
       'an overlapping authorized action must not click Send twice');
 
+    // A delayed observation cannot publish a new send ref after another
+    // authorized action has consumed the snapshot it began under.
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true">Retained race draft</div>' +
+      '<button data-testid="send-button" onclick="window.sends++">Send</button></main>' +
+      '<script>window.sends=0;</script>');
+    let holdResolution = false;
+    let releaseResolution!: () => void;
+    const resolution = new Promise<void>(resolve => { releaseResolution = resolve; });
+    let signalHeld!: () => void;
+    const held = new Promise<void>(resolve => { signalHeld = resolve; });
+    const racing = new ChatGptSemanticAdapter({
+      isExactLease: value => allowedLease === value,
+      resolvePage: async value => {
+        if (holdResolution) {
+          holdResolution = false;
+          signalHeld();
+          await resolution;
+        }
+        return registry.pageForObservation(value.pageKey, value.bindingEpoch);
+      },
+      isAuthorizedAttempt: () => true,
+    });
+    const beforeRace = await racing.observe(task);
+    const raceSend = beforeRace.actions.find(action => action.purpose === 'submit')!;
+    assert.ok(raceSend);
+    holdResolution = true;
+    const pendingObservation = racing.observe(task);
+    await held;
+    let racedSend;
+    try {
+      racedSend = await racing.act({
+        context: task, snapshotId: beforeRace.snapshotId,
+        actionRef: raceSend.actionRef, evidenceHash: raceSend.evidenceHash,
+        authorizedAttemptId: 'journaled-racing-send',
+        expectedContentSha256: digest('Retained race draft'),
+      });
+    } finally { releaseResolution(); }
+    assert.equal(racedSend.kind, 'dispatched_unverified');
+    const afterRace = await pendingObservation;
+    assert.equal(afterRace.blocker, 'unsupported', 'the pre-send observation was superseded');
+    assert.equal(afterRace.actions.length, 0);
+    assert.equal(await page.evaluate(() => (window as any).sends), 1);
+
     // Losing the exact lease while the second durable authorization check is
     // pending must stop the side effect, not merely report uncertainty after
     // clicking a page now owned by someone else.
