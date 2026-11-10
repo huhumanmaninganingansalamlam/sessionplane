@@ -357,6 +357,8 @@ export function recoverExactServerAcknowledgement(
     a.conversationId, a.messageId, a.parentMessageId, a.textHash]), a])).values()] : [];
   if (attempted.length > 1 || attempted.some(a => a.conversationId !== conversationId)) return null;
   const exactAttempt = attempted[0];
+  if (exactAttempt !== undefined &&
+    createHash('sha256').update(prompt.replaceAll('\r\n', '\n')).digest('hex') !== exactAttempt.textHash) return null;
   const matches = Object.entries(mapping).flatMap(([nodeId, node]) => {
     const message = messageForNode(node);
     if (message === null || messageRole(message) !== 'user') return [];

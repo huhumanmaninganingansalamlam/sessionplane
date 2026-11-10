@@ -1272,6 +1272,13 @@ test('canonical ACK and FINAL recovery works read-only without a page or foregro
     attempts: [{ conversationId: cid, messageId: userId, parentMessageId: 'root',
       textHash: digest(prompt), observedAt: new Date(0).toISOString() }] });
   assert.deepEqual(ack, { kind: 'verified_ack', externalTurnId: userTurn, messageId: userId });
+  const wrongPrompt = await new ChatGptSemanticAdapter(options).verify({ context: exact, kind: 'ack',
+    prompt: 'Different question',
+    attempts: [{ conversationId: cid, messageId: userId, parentMessageId: 'root',
+      textHash: digest(prompt), observedAt: new Date(0).toISOString() }] });
+  assert.deepEqual(wrongPrompt, {
+    kind: 'unavailable', reason: 'canonical-ack-prompt-hash-mismatch',
+  }, 'captured POST identity cannot prove an ACK for different query content');
   const invalid = await ackReader.verify({ context: exact, kind: 'ack', prompt });
   assert.equal(invalid.kind, 'unavailable', 'no attempt correlation cannot prove acceptance');
   assert.equal(reads, 4);

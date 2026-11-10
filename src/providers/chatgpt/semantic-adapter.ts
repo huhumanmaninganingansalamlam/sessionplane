@@ -604,6 +604,10 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       query.attempts[0]!.conversationId !== conversationId)) {
       return { kind: 'unavailable', reason: 'exact-dispatch-correlation-required' };
     }
+    if (query.kind === 'ack' &&
+      query.attempts![0]!.textHash !== sha(query.prompt!.replaceAll('\r\n', '\n'))) {
+      return { kind: 'unavailable', reason: 'canonical-ack-prompt-hash-mismatch' };
+    }
     if (query.kind === 'ack' && id.submittedUserMessageId !== null &&
       id.submittedUserMessageId !== query.attempts![0]!.messageId) {
       return { kind: 'unavailable', reason: 'canonical-ack-bound-message-mismatch' };

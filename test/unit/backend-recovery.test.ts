@@ -91,6 +91,8 @@ test('late ACK uses durable dispatch identity among duplicate questions, never r
   const ack = recover(payload);
   assert.equal(ack?.submittedUserMessageId, 'new-user');
   assert.equal(recoverExactServerFinal(payload, ack!).responseMessageId, 'new-answer');
+  assert.equal(recoverExactServerAcknowledgement(payload, CONVERSATION_ID, 'Different question', [attempt]), null,
+    'Captured POST identity cannot authorize a different recovery prompt');
   assert.equal(recover(payload, [{ ...attempt, parentMessageId: 'wrong-parent' }])?.dispatchParent?.matches, false,
     'Server acceptance of exact captured bytes is separate from parent provenance');
   assert.equal(recover(payload, [{ ...attempt, textHash: '0'.repeat(64) }]), null);
