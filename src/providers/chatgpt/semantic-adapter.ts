@@ -459,9 +459,26 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         const model = await inspectSemanticChatGptModelMenu(page);
         if (!model || model.evidenceHash !== action.modelHash ||
           !(await this.#authorized(request, action.purpose))) return 'stale' as const;
+        const requireExactModelTurn = async () => {
+          requireExactMutationIdentity();
+          if (request.context.submittedUserMessageId !== null ||
+              request.context.submittedUserTurnId !== null) {
+            const boundary = await observeChatGptDom(page, {
+              submittedUserMessageId: request.context.submittedUserMessageId,
+              submittedUserTurnId: request.context.submittedUserTurnId,
+            });
+            if (!boundary.submittedUserFound || boundary.laterUserFound ||
+                boundary.candidate?.streamingMarker === true) {
+              throw new Error('Model decision turn changed before mutation');
+            }
+          }
+          requireExactMutationIdentity();
+        };
+        try { await requireExactModelTurn(); }
+        catch { return 'stale' as const; }
         if (action.purpose === 'open_model_chooser') {
           if (model.status !== 'closed' && model.status !== 'nested') return 'stale' as const;
-          await openExactChatGptModelMenu(page, model.evidenceHash, requireExactMutationIdentity);
+          await openExactChatGptModelMenu(page, model.evidenceHash, requireExactModelTurn);
           return 'model_menu_opened' as const;
         }
         if (model.status !== 'open' ||
@@ -469,7 +486,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           return 'stale' as const;
         }
         await selectExactChatGptModelMenu(page, model.evidenceHash, request.input!,
-          requireExactMutationIdentity);
+          requireExactModelTurn);
         return 'model_selected' as const;
       }
       if (action.purpose === 'retry') {

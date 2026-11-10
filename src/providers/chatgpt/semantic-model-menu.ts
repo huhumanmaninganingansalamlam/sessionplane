@@ -219,7 +219,7 @@ async function waitForComposerMenuView(page: Page, openerId: string, priorMenuId
 }
 
 export async function openExactChatGptModelMenu(
-  page: Page, expectedHash: string, beforeMutation: () => void,
+  page: Page, expectedHash: string, beforeMutation: () => void | Promise<void>,
 ): Promise<void> {
   const current = await inspectSemanticChatGptModelMenu(page);
   const validIdentity = current?.strategy === 'composer-radix'
@@ -235,7 +235,7 @@ export async function openExactChatGptModelMenu(
     const button = await page.locator(OPENER).nth(current.openerIndex).elementHandle();
     if (!button) throw new Error('Model opener disappeared');
     try {
-      beforeMutation();
+      await beforeMutation();
       await button.click({ timeout: 5_000 });
     } finally { await button.dispose(); }
     if (current.strategy === 'composer-radix') {
@@ -259,7 +259,7 @@ export async function openExactChatGptModelMenu(
     if (await disclosure.count() !== 1 || !await disclosure.isEnabled()) {
       throw new Error('Composer model list disclosure changed');
     }
-    beforeMutation();
+    await beforeMutation();
     await disclosure.click({ timeout: 5_000 });
     await waitForComposerMenuView(page, current.openerId, current.menuId, 'models');
     const after = await inspectSemanticChatGptModelMenu(page);
@@ -282,7 +282,7 @@ export async function openExactChatGptModelMenu(
     !await trigger.isEnabled()) {
     throw new Error('Pro submenu trigger changed before action');
   }
-  beforeMutation();
+  await beforeMutation();
   await trigger.click({ timeout: 5_000 });
   const after = await inspectSemanticChatGptModelMenu(page);
   if (!after || after.status !== 'open' || after.menuId !== current.menuId ||
@@ -292,7 +292,7 @@ export async function openExactChatGptModelMenu(
 }
 
 export async function selectExactChatGptModelMenu(
-  page: Page, expectedHash: string, option: string, beforeMutation: () => void,
+  page: Page, expectedHash: string, option: string, beforeMutation: () => void | Promise<void>,
 ): Promise<void> {
   const current = await inspectSemanticChatGptModelMenu(page);
   const selected = current?.options.find(o => o.value === option && o.enabled);
@@ -309,7 +309,7 @@ export async function selectExactChatGptModelMenu(
   if (await choice.count() !== 1 || !await choice.isEnabled()) {
     throw new Error('Model option became ambiguous or disabled');
   }
-  beforeMutation();
+  await beforeMutation();
   await choice.click({ timeout: 5_000 });
   const after = await inspectSemanticChatGptModelMenu(page);
   if (!after || after.strategy !== current.strategy ||

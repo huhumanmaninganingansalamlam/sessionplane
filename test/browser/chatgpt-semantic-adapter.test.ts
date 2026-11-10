@@ -1132,6 +1132,126 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
   }
 });
 
+test('ChatGPT model action refuses an intervening user turn after authorization', {
+  timeout: 40_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-b-model-turn-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'disposable-profile'), pageRegistry: registry, headless: true,
+  });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({
+      contentType: 'text/html', body:
+        '<main><div data-message-author-role="user" data-message-id="user-b">Original task</div>' +
+        '<div id="prompt-textarea" contenteditable="true"></div>' +
+        '<button id="model-turn-opener" aria-label="Model" aria-haspopup="menu" ' +
+        'aria-controls="model-turn-menu" aria-expanded="false">Current</button>' +
+        '<div id="model-turn-menu" role="menu" hidden>' +
+        '<button role="menuitemradio" aria-checked="true">Default</button>' +
+        '<button role="menuitemradio" aria-checked="false">Pro</button></div></main>' +
+        '<script>window.modelOpens=0;document.querySelector("#model-turn-opener").onclick=()=>{' +
+        'window.modelOpens++;document.querySelector("#model-turn-opener")' +
+        '.setAttribute("aria-expanded","true");document.querySelector("#model-turn-menu").hidden=false;};</script>',
+    }));
+    await page.goto('https://chatgpt.com/c/conversation-b');
+    const current = registry.getBinding(binding.pageKey);
+    const lease: OwnedPageIdentity = {
+      projectId: 'project-b', slotId: 'main', slotRevision: 1, taskId: 'task-b',
+      pageKey: current.pageKey, targetId: current.targetId!, bindingEpoch: current.bindingEpoch,
+    };
+    let authorizationChecks = 0;
+    let entered!: () => void;
+    const authorizationEntered = new Promise<void>(resolve => { entered = resolve; });
+    let resume!: () => void;
+    const authorization = new Promise<void>(resolve => { resume = resolve; });
+    const adapter = new ChatGptSemanticAdapter({
+      isExactLease: candidate => candidate === lease,
+      resolvePage: () => page,
+      isAuthorizedDecision: async () => {
+        if (++authorizationChecks === 2) { entered(); await authorization; }
+        return true;
+      },
+    });
+    const task = context(lease, 'user-b');
+    const observed = await adapter.observe(task);
+    const action = observed.actions.find(a => a.purpose === 'open_model_chooser')!;
+    assert.ok(action, 'current task must have a unique model disclosure');
+    const pending = adapter.act({
+      context: task, snapshotId: observed.snapshotId,
+      actionRef: action.actionRef, evidenceHash: action.evidenceHash,
+      authorizedDecisionId: 'decision-model-after-user',
+    });
+    await authorizationEntered;
+    await page.locator('#model-turn-opener').evaluate(opener => {
+      const later = document.createElement('div');
+      later.setAttribute('data-message-author-role', 'user');
+      later.setAttribute('data-message-id', 'later-user');
+      later.textContent = 'New question overrides the original turn';
+      opener.before(later);
+    });
+    resume();
+    const result = await pending;
+    assert.notEqual(result.kind, 'performed',
+      'a previously authorized model action cannot mutate after another user turn');
+    assert.equal(await page.evaluate(() => (window as any).modelOpens), 0);
+    await page.locator('[data-message-id="later-user"]').evaluate(element => element.remove());
+    await page.locator('#model-turn-opener').evaluate(opener => {
+      opener.setAttribute('aria-expanded', 'true');
+      const menu = document.getElementById('model-turn-menu')!;
+      menu.hidden = false;
+      (window as any).modelSelections = 0;
+      menu.querySelectorAll('[role="menuitemradio"]').forEach(radio => {
+        (radio as HTMLElement).onclick = () => {
+          (window as any).modelSelections++;
+          menu.querySelectorAll('[role="menuitemradio"]').forEach(other =>
+            other.setAttribute('aria-checked', String(other === radio)));
+        };
+      });
+    });
+    let selectionChecks = 0;
+    let selectionEntered!: () => void;
+    const selectionWaiting = new Promise<void>(resolve => { selectionEntered = resolve; });
+    let allowSelection!: () => void;
+    const selectionAuthorization = new Promise<void>(resolve => { allowSelection = resolve; });
+    const selector = new ChatGptSemanticAdapter({
+      isExactLease: candidate => candidate === lease,
+      resolvePage: () => page,
+      isAuthorizedDecision: async () => {
+        if (++selectionChecks === 2) { selectionEntered(); await selectionAuthorization; }
+        return true;
+      },
+    });
+    const options = await selector.observe(task);
+    const selection = options.actions.find(a => a.purpose === 'choose_model')!;
+    assert.ok(selection, 'an open owned menu must expose the exact model choices');
+    const pendingSelection = selector.act({
+      context: task, snapshotId: options.snapshotId,
+      actionRef: selection.actionRef, evidenceHash: selection.evidenceHash,
+      input: 'Pro', authorizedDecisionId: 'decision-select-after-user',
+    });
+    await selectionWaiting;
+    await page.locator('#model-turn-opener').evaluate(opener => {
+      const later = document.createElement('div');
+      later.setAttribute('data-message-author-role', 'user');
+      later.setAttribute('data-message-id', 'next-user');
+      later.textContent = 'New question before model selection';
+      opener.before(later);
+    });
+    allowSelection();
+    const selected = await pendingSelection;
+    assert.notEqual(selected.kind, 'performed',
+      'a previous model selection cannot apply after a new user turn');
+    assert.equal(await page.evaluate(() => (window as any).modelSelections), 0);
+
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ChatGPT provider question offers enabled typed choices and runs once after exact evidence check', {
   timeout: 90_000,
 }, async () => {
