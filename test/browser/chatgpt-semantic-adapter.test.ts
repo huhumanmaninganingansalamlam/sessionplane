@@ -1128,4 +1128,17 @@ test('canonical ACK and FINAL recovery works read-only without a page or foregro
   const invalid = await ackReader.verify({ context: exact, kind: 'ack', prompt });
   assert.equal(invalid.kind, 'unavailable', 'no attempt correlation cannot prove acceptance');
   assert.equal(reads, 4);
+  const exactAttempt = { conversationId: cid, messageId: userId, parentMessageId: 'root',
+    textHash: digest(prompt), observedAt: new Date(0).toISOString() };
+  for (const mismatch of [
+    { context: { ...exact, submittedUserMessageId: 'foreign-user' }, reason: 'canonical-ack-bound-message-mismatch' },
+    { context: { ...exact, submittedUserTurnId: 'foreign-turn' }, reason: 'canonical-ack-bound-turn-mismatch' },
+  ]) {
+    const incompatible = await new ChatGptSemanticAdapter(options).recover({
+      context: mismatch.context, kind: 'ack', prompt, attempts: [exactAttempt],
+    });
+    assert.deepEqual(incompatible, { kind: 'unavailable', reason: mismatch.reason },
+      'an ACK for the captured POST cannot overwrite a conflicting bound identity');
+  }
+  assert.equal(reads, 6, 'known message conflict needs no GET; turn conflict requires canonical GET');
 });

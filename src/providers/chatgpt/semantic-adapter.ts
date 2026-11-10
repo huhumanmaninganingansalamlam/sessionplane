@@ -553,6 +553,10 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       query.attempts[0]!.conversationId !== conversationId)) {
       return { kind: 'unavailable', reason: 'exact-dispatch-correlation-required' };
     }
+    if (query.kind === 'ack' && id.submittedUserMessageId !== null &&
+      id.submittedUserMessageId !== query.attempts![0]!.messageId) {
+      return { kind: 'unavailable', reason: 'canonical-ack-bound-message-mismatch' };
+    }
     if (query.kind === 'final' && !id.submittedUserTurnId) {
       return { kind: 'unavailable', reason: 'exact-submitted-user-turn-required' };
     }
@@ -570,6 +574,10 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       let latestReason: string | null = null;
       const ack = await this.#backend.recoverAcknowledgement(conversationId, query.prompt!,
         client, origin, query.attempts, evidence => { latestReason = evidence.reason; });
+      if (ack !== null && id.submittedUserTurnId !== null &&
+        ack.submittedUserTurnId !== id.submittedUserTurnId) {
+        return { kind: 'unavailable', reason: 'canonical-ack-bound-turn-mismatch' };
+      }
       return ack === null
         ? { kind: 'pending', reason: latestReason ?? 'canonical-ack-not-observed' }
         : { kind: 'verified_ack', externalTurnId: ack.submittedUserTurnId,
