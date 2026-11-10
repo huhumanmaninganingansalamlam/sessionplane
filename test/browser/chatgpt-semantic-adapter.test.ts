@@ -350,6 +350,26 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.deepEqual(durablePostObservations, ['journaled-attempt-network:user-b'],
       'the exact outgoing POST invokes its durable journal hook before returning');
 
+    await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
+      '<div role="dialog"><button id="foreign-model" aria-label="Model" aria-haspopup="menu" ' +
+      'aria-controls="foreign-model-menu" aria-expanded="false">Details</button>' +
+      '<div role="menu" id="foreign-model-menu" hidden>' +
+      '<button role="menuitemradio" aria-checked="true">One</button>' +
+      '<button role="menuitemradio" aria-checked="false">Two</button></div></div></main>');
+    const foreignModel = await adapter.observe(task);
+    assert.equal(foreignModel.actions.some(action => action.purpose === 'open_model_chooser'), false,
+      'dialog-local model menu cannot become the chat configuration chooser');
+
+    await page.setContent('<button id="external-model" aria-label="Model" aria-haspopup="menu" ' +
+      'aria-controls="external-model-menu" aria-expanded="false">Details</button>' +
+      '<div role="menu" id="external-model-menu" hidden>' +
+      '<button role="menuitemradio" aria-checked="true">One</button>' +
+      '<button role="menuitemradio" aria-checked="false">Two</button></div>' +
+      '<main><div id="prompt-textarea" contenteditable="true"></div></main>');
+    const externalModel = await adapter.observe(task);
+    assert.equal(externalModel.actions.some(action => action.purpose === 'open_model_chooser'), false,
+      'model menu outside the chat main cannot become the composer configuration chooser');
+
     // Model choice is a separate, explicit two-step configuration decision.
     // Observe itself must not open the popup or change the current selection.
     await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +

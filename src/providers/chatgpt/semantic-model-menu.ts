@@ -33,13 +33,14 @@ export interface SemanticModelMenu {
 export async function inspectSemanticChatGptModelMenu(page: Page): Promise<SemanticModelMenu | null> {
   const data = await page.evaluate(({ openerSelector, labelPattern }) => {
     const visible = (e: Element) =>
-      e.closest('article, nav, aside, [data-message-author-role], [data-chatgpt-search-message-ids], [aria-hidden="true"], [inert]') === null &&
+      e.closest('article, nav, aside, [role="dialog"], [role="alertdialog"], [data-message-author-role], [data-chatgpt-search-message-ids], [aria-hidden="true"], [inert]') === null &&
       e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
       e.getBoundingClientRect().width > 0;
     const triggers = [...document.querySelectorAll<HTMLButtonElement>(openerSelector)];
     const selected = triggers.flatMap((element, index) => {
       const label = (element.getAttribute('aria-label') ?? element.innerText ?? '').trim();
-      return visible(element) && new RegExp(labelPattern, 'i').test(label)
+      return element.closest('main') !== null &&
+        visible(element) && new RegExp(labelPattern, 'i').test(label)
         ? [{ element, index, label }] : [];
     });
     const base = {
