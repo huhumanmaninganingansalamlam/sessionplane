@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { APIRequestContext, ElementHandle, Page, Request } from 'playwright-core';
 
 import { PageOperationGate } from '../../browser/page-operation-gate.ts';
+import type { PageMutationMutex } from '../../browser/page-mutex.ts';
 import type { OwnedPageIdentity } from '../../browser/owned-page-lifecycle.ts';
 import type {
   SemanticActRequest, SemanticActResult, SemanticActionCandidate,
@@ -69,6 +70,8 @@ export interface ChatGptSemanticAdapterOptions {
   /** Exact Task/slot/page lease from the Core, including binding epoch. */
   readonly isExactLease: (identity: OwnedPageIdentity) => boolean;
   readonly resolvePage: (identity: OwnedPageIdentity) => Promise<Page> | Page;
+  /** Share the same Core-owned page mutex as the legacy runtime during cutover. */
+  readonly pageMutationMutex?: PageMutationMutex;
   /** Production accepts only ChatGPT's trusted HTTPS origins. Test overrides are isolated fixtures. */
   readonly allowedPageOrigins?: readonly string[];
   readonly backendOrigin?: string;
@@ -112,7 +115,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
 
   constructor(options: ChatGptSemanticAdapterOptions) {
     this.#options = options;
-    this.#gate = new PageOperationGate(options.isExactLease);
+    this.#gate = new PageOperationGate(options.isExactLease, options.pageMutationMutex);
     this.#backend = options.backendRecovery ?? new ChatGptBackendRecovery({
       requestTimeoutMs: 15_000, tokenCacheTtlMs: 60_000,
     });

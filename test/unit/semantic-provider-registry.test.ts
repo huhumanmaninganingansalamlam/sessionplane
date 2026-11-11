@@ -91,6 +91,41 @@ test('Core composes the semantic ChatGPT provider without launching a separate b
       logger: { debug() {}, info() {}, warn() {}, error() {} },
     });
     assert.equal(core.browserOwner, null);
+    assert.ok(core.semanticTaskKernel, 'normal Core must assemble the durable semantic task execution port');
+    assert.ok(core.semanticTaskRepository, 'the kernel must use the Core-owned durable journal');
+    assert.equal(core.pageRegistry.listBindings().length, 0);
+    const store = core.semanticTaskRepository;
+    store.openProject({
+      projectId: 'kernel-project', projectKey: 'kernel-fixture', displayName: 'Kernel fixture',
+      clientId: 'kernel-client',
+    });
+    store.openSlot({
+      projectId: 'kernel-project', clientId: 'kernel-client', slotId: 'main',
+      roleKey: 'main', providerKey: 'chatgpt',
+    });
+    store.startTask({
+      taskId: 'kernel-task', projectId: 'kernel-project', slotId: 'main',
+      expectedSlotRevision: 1, clientId: 'kernel-client',
+      requestId: 'kernel-start', prompt: 'One exact prompt',
+    });
+    assert.equal(store.dispatchClientId('kernel-task'), 'kernel-client');
+    assert.equal(store.dispatchClientId('foreign-task'), null);
+    store.observeConversation({
+      projectId: 'kernel-project', clientId: 'kernel-client', slotId: 'main',
+      expectedRevision: 1, taskId: 'kernel-task',
+      providerConversationId: 'owned-conversation',
+    });
+    store.planAttempt({
+      taskId: 'kernel-task', clientId: 'kernel-client',
+      attemptId: 'kernel-attempt', kind: 'initial', turnKey: 'initial',
+      content: 'One exact prompt',
+    });
+    await core.semanticTaskKernel.dispatch('kernel-task', 'kernel-client', 'kernel-attempt');
+    assert.equal(store.getFullTask('kernel-task', 'kernel-client').attempts[0]?.state,
+      'uncertain', 'the attempt is consumed durably even without a browser');
+    await assert.rejects(core.semanticTaskKernel.dispatch(
+      'kernel-task', 'kernel-client', 'kernel-attempt'),
+    /Mutation already attempted/, 'Core must never replay a planned send after uncertainty');
     assert.equal(core.pageRegistry.listBindings().length, 0);
     const provider = core.semanticProviders.resolve('chatgpt', 'conversation');
     assert.equal(provider.kind, 'available',

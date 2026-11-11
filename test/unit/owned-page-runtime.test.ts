@@ -9,6 +9,7 @@ import {
 } from '../../src/browser/owned-page-lifecycle.ts';
 import type { OwnedPageIdentity } from '../../src/browser/owned-page-lifecycle.ts';
 import { PageOperationGate } from '../../src/browser/page-operation-gate.ts';
+import { KeyedMutex } from '../../src/scheduler/keyed-mutex.ts';
 
 const at = '2026-11-08T00:00:00.000Z';
 function lease(pageKey = 'page-one', epoch = 1): OwnedPageIdentity {
@@ -225,4 +226,43 @@ test('observation timeout/unavailable differs from possibly executed mutation', 
   assert.deepEqual(mutation, { kind: 'uncertain', reason: 'operation_error' });
   await assert.rejects(gate.run(identity, 'observe', async () => true, 0),
     /Invalid page operation deadline/);
+});
+test('semantic gate shares the Core page mutex, including timed-out browser operations', async () => {
+  const identity = lease();
+  const shared = new KeyedMutex();
+  const gate = new PageOperationGate(() => true, shared);
+  let enterCore!: () => void;
+  const entered = new Promise<void>(resolve => { enterCore = resolve; });
+  let leaveCore!: () => void;
+  const hold = new Promise<void>(resolve => { leaveCore = resolve; });
+  const currentCore = shared.runExclusive(identity.pageKey, async () => {
+    enterCore();
+    await hold;
+  });
+  await entered;
+  let browserMutations = 0;
+  assert.deepEqual(await gate.run(identity, 'mutate', async () => {
+    browserMutations++;
+    return 'wrong';
+  }, 50), { kind: 'busy' });
+  assert.equal(browserMutations, 0, 'legacy Core must keep exclusive ownership');
+  leaveCore();
+  await currentCore;
+
+  let settle!: (value: string) => void;
+  const pendingBrowser = new Promise<string>(resolve => { settle = resolve; });
+  assert.deepEqual(await gate.run(identity, 'mutate', () => pendingBrowser, 20),
+    { kind: 'uncertain', reason: 'timeout' });
+  assert.equal(shared.isBusy(identity.pageKey), true,
+    'Core page mutex remains held until an ambiguous browser mutation settles');
+  let futureCoreStarted = false;
+  const futureCore = shared.runExclusive(identity.pageKey, async () => {
+    futureCoreStarted = true;
+  });
+  await delay(0);
+  assert.equal(futureCoreStarted, false, 'legacy Core must not overlap an uncertain click');
+  settle('completed');
+  await futureCore;
+  assert.equal(futureCoreStarted, true);
+  assert.equal(shared.isBusy(identity.pageKey), false);
 });

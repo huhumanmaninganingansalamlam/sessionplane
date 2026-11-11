@@ -436,6 +436,16 @@ export class TaskKernelRepository {
     return this.#requireTask(taskId, clientId);
   }
 
+  /** Internal journal callback: resolve the immutable task initiator from
+   * SQLite, never from a browser page or a process-local caller cache.
+   * Public task reads continue to check the supplied client authorization.
+   */
+  dispatchClientId(taskId: string): string | null {
+    const row = this.#database.raw.prepare(
+      'SELECT client_id AS clientId FROM kernel_tasks WHERE task_id = ?',
+    ).get(taskId) as { clientId: string } | undefined;
+    return row?.clientId ?? null;
+  }
   getFullTask(taskId: string, clientId: string): FullTaskRecord {
     return this.#database.transaction(() => {
       const task = this.#requireTask(taskId, clientId);

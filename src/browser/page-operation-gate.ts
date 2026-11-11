@@ -17,11 +17,12 @@ export type PageOperationOutcome<T> =
  * settles; unrelated pages retain their opportunity to progress.
  */
 export class PageOperationGate {
-  readonly #mutex = new KeyedMutex();
+  readonly #mutex: KeyedMutex;
   readonly #isExactLease: (lease: OwnedPageIdentity) => boolean;
 
-  constructor(isExactLease: (lease: OwnedPageIdentity) => boolean) {
+  constructor(isExactLease: (lease: OwnedPageIdentity) => boolean, sharedMutex?: KeyedMutex) {
     this.#isExactLease = isExactLease;
+    this.#mutex = sharedMutex ?? new KeyedMutex();
   }
 
   isBusy(pageKey: string): boolean {
