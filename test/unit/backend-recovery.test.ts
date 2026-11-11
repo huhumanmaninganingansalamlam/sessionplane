@@ -861,3 +861,90 @@ function sessionSnapshot(): SessionSnapshot {
     promptSubmitted: true,
   };
 }
+test('backend pacing persistence failure never traps the read lock or permits an unjournaled GET', async () => {
+  let calls = 0;
+  let getCalls = 0;
+  let now = 100_000;
+  const recover = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 10_000,
+    now: () => new Date(now),
+    onConversationRetryAtMs: () => {
+      if (++calls === 1) throw new Error('fixture SQLite write refused');
+    },
+  });
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', userMessage('exact-user', 'exact-turn')),
+    node('answer-node', 'user-node', finalAssistant('exact-answer', 'Unlocked after recovery')),
+  ], 'answer-node');
+  const client: BackendJsonClient = {
+    async get(url) {
+      getCalls++;
+      return {
+        status: 200, headers: {},
+        body: url.endsWith('/api/auth/session')
+          ? { accessToken: 'fixture-token-only' } : payload,
+      };
+    },
+  };
+  const identity = {
+    conversationId: CONVERSATION_ID,
+    submittedUserMessageId: 'exact-user', submittedUserTurnId: 'exact-turn',
+  };
+  await assert.rejects(
+    recover.recoverExactTurn(identity, client, 'https://chatgpt.com'),
+    /fixture SQLite write refused/,
+  );
+  assert.equal(getCalls, 0, 'failed durable reservation must prevent any network read');
+  const premature = await recover.recoverExactTurn(identity, client, 'https://chatgpt.com');
+  assert.equal(premature.kind, 'deferred',
+    'local GET cooldown remains active even if SQLite persistence fails');
+  assert.equal(getCalls, 0);
+  now += 5_001;
+  const retried = await recover.recoverExactTurn(identity, client, 'https://chatgpt.com');
+  assert.equal(retried.kind, 'complete',
+    'the process-local in-flight lock must not stick after persistence failure');
+  assert.equal(getCalls, 2, 'the first completed read includes one auth and one detail GET');
+  assert.equal(calls, 2);
+});
+test('failed persistence after a real 429 cannot shorten the in-memory Retry-After', async () => {
+  let now = 100_000;
+  let reservations = 0, detailReads = 0;
+  const backend = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 180_000,
+    now: () => new Date(now),
+    onConversationRetryAtMs: () => {
+      if (++reservations === 2) throw new Error('fixture SQLite unavailable after 429');
+    },
+  });
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', userMessage('exact-user', 'exact-turn')),
+    node('answer-node', 'user-node', finalAssistant('exact-answer', 'Late verified final')),
+  ], 'answer-node');
+  const client: BackendJsonClient = {
+    async get(url) {
+      if (url.endsWith('/api/auth/session')) {
+        return { status: 200, headers: {}, body: { accessToken: 'fixture-memory-only' } };
+      }
+      detailReads++;
+      return detailReads === 1
+        ? { status: 429, headers: { 'retry-after': '120' }, body: null }
+        : { status: 200, headers: {}, body: payload };
+    },
+  };
+  const identity = {
+    conversationId: CONVERSATION_ID,
+    submittedUserMessageId: 'exact-user', submittedUserTurnId: 'exact-turn',
+  };
+  await assert.rejects(backend.recoverExactTurn(identity, client, 'https://chatgpt.com'),
+    /fixture SQLite unavailable after 429/);
+  assert.equal(detailReads, 1);
+  assert.equal((await backend.recoverExactTurn(identity, client, 'https://chatgpt.com')).kind,
+    'deferred', 'a persistence error after 429 must still preserve the provider cooldown');
+  assert.equal(detailReads, 1, 'no early second GET after a failed cooldown write');
+  now += 120_001;
+  assert.equal((await backend.recoverExactTurn(identity, client, 'https://chatgpt.com')).kind,
+    'complete', 'reads resume after the actual Retry-After');
+  assert.equal(detailReads, 2);
+});

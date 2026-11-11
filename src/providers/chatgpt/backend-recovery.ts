@@ -43,6 +43,8 @@ export interface ChatGptBackendRecoveryOptions {
   readonly requestTimeoutMs: number;
   readonly tokenCacheTtlMs: number;
   readonly acknowledgementRetryAtMs?: number;
+  /** Persist the GET cooldown before the next network request. */
+  readonly onConversationRetryAtMs?: (nextAllowedAtMs: number) => void;
   readonly now?: () => Date;
   readonly onRateLimit?: (request: ProviderRecoveryRequest, evidence: BackendRateLimitEvidence) => void;
 }
@@ -59,6 +61,7 @@ export class ChatGptBackendRecovery {
   readonly #tokenCacheTtlMs: number;
   readonly #now: () => Date;
   readonly #onRateLimit: ChatGptBackendRecoveryOptions['onRateLimit'];
+  readonly #onConversationRetryAtMs: ChatGptBackendRecoveryOptions['onConversationRetryAtMs'];
   #token: CachedToken | null = null;
   #conversationRetryAt = 0;
   readonly #conversationWaiting = new Map<string, { expiresAt: number; selected: boolean }>();
@@ -69,7 +72,17 @@ export class ChatGptBackendRecovery {
     this.#tokenCacheTtlMs = options.tokenCacheTtlMs;
     this.#now = options.now ?? (() => new Date());
     this.#onRateLimit = options.onRateLimit;
+    this.#onConversationRetryAtMs = options.onConversationRetryAtMs;
     this.#conversationRetryAt = options.acknowledgementRetryAtMs ?? 0;
+  }
+
+  #extendConversationRetryAt(nextAllowedAtMs: number): void {
+    if (nextAllowedAtMs <= this.#conversationRetryAt) return;
+    // Reserve locally first. A failed SQLite write still preserves the
+    // Retry-After barrier in this Core and never grants an early second GET.
+    this.#conversationRetryAt = nextAllowedAtMs;
+    // Persist before any network read; no tokens, bodies or task content.
+    this.#onConversationRetryAtMs?.(nextAllowedAtMs);
   }
 
   async recover(
@@ -226,11 +239,11 @@ export class ChatGptBackendRecovery {
     }
     this.#conversationWaiting.delete(conversationId);
     this.#conversationInFlight = true;
-    this.#conversationRetryAt = now + 5_000;
     try {
+      this.#extendConversationRetryAt(now + 5_000);
       const result = await this.#readConversation(conversationId, client, origin, observe);
       if ('recovery' in result && result.recovery.kind === 'deferred') {
-        this.#conversationRetryAt = this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0);
+        this.#extendConversationRetryAt(this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0));
         if (selected) this.#conversationWaiting.set(conversationId, {
           expiresAt: this.#conversationRetryAt + graceMs, selected: true,
         });

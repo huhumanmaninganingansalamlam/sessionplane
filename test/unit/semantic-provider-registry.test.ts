@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveConfig } from '../../src/config.ts';
+import { createSemanticCoreRuntime } from '../../src/core/semantic-core-runtime.ts';
+import type { BackendJsonClient } from '../../src/providers/chatgpt/backend-recovery.ts';
 import { startCore } from '../../src/main.ts';
 
 import { ChatGptSemanticAdapter } from '../../src/providers/chatgpt/semantic-adapter.ts';
@@ -142,6 +145,100 @@ test('Core composes the semantic ChatGPT provider without launching a separate b
     }), { kind: 'unavailable', reason: 'backend-transport-unavailable' },
     'without an owned browser, recovery must not invent a profile or backend identity');
     assert.equal(core.pageRegistry.listBindings().length, 0);
+  } finally {
+    await core?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+test('Core-owned semantic Retry-After survives restart without an extra backend GET', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sessionplane-semantic-restart-pacing-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const clientId = 'pacing-client', projectId = 'pacing-project', taskId = 'pacing-task';
+  const conversationId = 'pacing-conversation', attemptId = 'pacing-attempt';
+  const prompt = 'One original prompt';
+  let now = 100_000;
+  let conversationReads = 0;
+  let authReads = 0;
+  const client: BackendJsonClient = {
+    authScope: {},
+    async get(url) {
+      if (url.endsWith('/api/auth/session')) {
+        authReads++;
+        return { status: 200, headers: {}, body: { accessToken: 'test-memory-only' } };
+      }
+      conversationReads++;
+      if (conversationReads === 1) {
+        return { status: 429, headers: { 'retry-after': '120' }, body: null };
+      }
+      return { status: 200, headers: {}, body: {
+        id: conversationId, current_node: 'answer-node', mapping: {
+          root: { id: 'root', parent: null, message: null, children: [] },
+          'user-node': { id: 'user-node', parent: 'root', children: [],
+            message: { id: 'pacing-user', turn_id: 'pacing-turn',
+              author: { role: 'user' }, content: { parts: [prompt] } } },
+          'answer-node': { id: 'answer-node', parent: 'user-node', children: [],
+            message: { id: 'pacing-answer', author: { role: 'assistant' },
+              channel: 'final', status: 'finished_successfully', end_turn: true,
+              content: { parts: ['Recovered after due'] }, metadata: {} } },
+        },
+      } };
+    },
+  };
+  const logger = { debug() {}, info() {}, warn() {}, error() {} };
+  let core: Awaited<ReturnType<typeof startCore>> | null = null;
+  try {
+    core = await startCore({ config, startBrowser: false, logger });
+    const store = core.semanticTaskRepository;
+    store.openProject({ projectId, projectKey: 'retry-pacing.fixture',
+      displayName: 'Retry pacing fixture', clientId });
+    store.openSlot({ projectId, clientId, slotId: 'main', roleKey: 'main',
+      providerKey: 'chatgpt' });
+    store.startTask({ taskId, projectId, slotId: 'main', expectedSlotRevision: 1,
+      clientId, requestId: 'pacing-request', prompt });
+    store.observeConversation({ projectId, clientId, slotId: 'main',
+      expectedRevision: 1, taskId, providerConversationId: conversationId });
+    store.planAttempt({ taskId, clientId, attemptId, kind: 'initial',
+      turnKey: 'initial', content: prompt });
+    store.beginDispatch(taskId, clientId, attemptId);
+    store.recordDispatchEvidence({ taskId, clientId, attemptId, evidence: {
+      conversationId, messageId: 'pacing-user', parentMessageId: 'root',
+      textHash: createHash('sha256').update(prompt).digest('hex'),
+      observedAt: new Date(0).toISOString(),
+    } });
+    store.acknowledgeAttempt({ taskId, clientId, attemptId, externalTurnId: 'pacing-turn' });
+    const runtime = () => createSemanticCoreRuntime({
+      database: core!.database, browserOwner: null, pageRegistry: core!.pageRegistry,
+      teamDirectory: core!.teamDirectory, pageMutationMutex: core!.pageMutationMutex,
+      enabledProviders: ['chatgpt'], chatgptUrl: 'https://chatgpt.com',
+      backendClientProvider: () => client,
+      backendRecoveryNow: () => new Date(now),
+    });
+    const query = { taskId, clientId, attemptId, resultId: 'pacing-result', completeTask: true };
+    assert.equal(await runtime().kernel.observeFinal(query), null);
+    assert.equal(conversationReads, 1);
+    assert.equal(store.backendReadNotBeforeMs('chatgpt', 'https://chatgpt.com'), now + 120_000);
+    assert.equal(store.backendReadNotBeforeMs('chatgpt', 'https://chat.openai.com'), 0,
+      'one origin must not inherit another origin\'s cooldown');
+    assert.equal(store.extendBackendReadNotBeforeMs('chatgpt', 'https://chatgpt.com', now + 1_000),
+      now + 120_000, 'an old caller cannot shorten a durable cooldown');
+    assert.throws(() => store.extendBackendReadNotBeforeMs('chatgpt',
+      'https://chatgpt.com', Number.MAX_SAFE_INTEGER + 1), /safe integer/);
+    await core.close();
+    core = null;
+
+    core = await startCore({ config, startBrowser: false, logger });
+    assert.equal(core.semanticTaskRepository.backendReadNotBeforeMs('chatgpt', 'https://chatgpt.com'),
+      now + 120_000, 'pacing watermark is recovered from the same Core-owned SQLite');
+    assert.equal(await runtime().kernel.observeFinal(query), null,
+      'a restarted Core must preserve the original Retry-After, not query twice');
+    assert.equal(conversationReads, 1, 'no backend GET before persisted Retry-After');
+    assert.equal(authReads, 1, 'no auth GET needed during persisted backend cooldown');
+    assert.equal(core.semanticTaskRepository.getTask(taskId, clientId).state, 'working');
+    now += 120_001;
+    const final = await runtime().kernel.observeFinal(query);
+    assert.equal(final?.answerText, 'Recovered after due');
+    assert.equal(conversationReads, 2);
+    assert.equal(core.semanticTaskRepository.getTask(taskId, clientId).state, 'completed');
   } finally {
     await core?.close();
     rmSync(root, { recursive: true, force: true });

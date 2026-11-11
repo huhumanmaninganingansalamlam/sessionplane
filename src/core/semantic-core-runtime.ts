@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import type { BrowserOwner } from '../browser/browser-owner.ts';
 import type { OwnedPageIdentity } from '../browser/owned-page-lifecycle.ts';
 import type { PageMutationMutex } from '../browser/page-mutex.ts';
-import type { ChatGptBackendRecovery, BackendJsonClient } from '../providers/chatgpt/backend-recovery.ts';
+import { ChatGptBackendRecovery, type BackendJsonClient } from '../providers/chatgpt/backend-recovery.ts';
 import type { PageRegistry } from '../browser/page-registry.ts';
 import { ChatGptSemanticAdapter, chatGptBackendJsonClient } from '../providers/chatgpt/semantic-adapter.ts';
 import { SemanticProviderRegistry } from '../providers/semantic-provider-registry.ts';
@@ -60,6 +60,8 @@ export function createSemanticCoreRuntime(input: {
   readonly chatgptUrl: string;
   readonly backendClientProvider?: () => BackendJsonClient | Promise<BackendJsonClient>;
   readonly backendRecovery?: ChatGptBackendRecovery;
+  /** Deterministic backend pacing clock for isolated recovery tests. */
+  readonly backendRecoveryNow?: () => Date;
 }): SemanticCoreRuntime {
   const repository = new TaskKernelRepository(input.database);
   const bindAttemptSession = (owner: {
@@ -224,9 +226,19 @@ export function createSemanticCoreRuntime(input: {
       return repository.consumeDecisionAction(context.taskId, clientId, approval.decisionId);
     } catch { return false; }
   };
+  const backendOrigin = new URL(input.chatgptUrl).origin;
+  // Profile-local SQLite retains backend GET cooldowns after an owner restart.
+  // Auth tokens and conversation payloads always remain ephemeral.
+  const backendRecovery = input.backendRecovery ?? new ChatGptBackendRecovery({
+    requestTimeoutMs: 15_000, tokenCacheTtlMs: 60_000,
+    acknowledgementRetryAtMs: repository.backendReadNotBeforeMs('chatgpt', backendOrigin),
+    onConversationRetryAtMs: atMs =>
+      repository.extendBackendReadNotBeforeMs('chatgpt', backendOrigin, atMs),
+    ...(input.backendRecoveryNow ? { now: input.backendRecoveryNow } : {}),
+  });
   const providers = new SemanticProviderRegistry(input.enabledProviders.includes('chatgpt') ? [
     new ChatGptSemanticAdapter({
-      ...(input.backendRecovery ? { backendRecovery: input.backendRecovery } : {}),
+      backendRecovery,
       isExactLease,
       resolvePage: identity => input.pageRegistry.pageForObservation(identity.pageKey, identity.bindingEpoch),
       pageMutationMutex: input.pageMutationMutex,
@@ -241,7 +253,7 @@ export function createSemanticCoreRuntime(input: {
         if (input.browserOwner === null) throw new Error('Owned browser context unavailable');
         return chatGptBackendJsonClient(input.browserOwner.recoveryRequestContext());
       }),
-      backendOrigin: new URL(input.chatgptUrl).origin,
+      backendOrigin,
     }),
   ] : []);
   const chat = providers.resolve('chatgpt', 'conversation');

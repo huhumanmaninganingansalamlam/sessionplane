@@ -454,6 +454,34 @@ export class TaskKernelRepository {
     ).get(taskId) as { clientId: string } | undefined;
     return row?.clientId ?? null;
   }
+  /** Shared, profile-scoped backend cooldown; no token, body, or task data. */
+  backendReadNotBeforeMs(providerKey: string, origin: string): number {
+    requireNonempty(providerKey, 'providerKey');
+    requireNonempty(origin, 'origin');
+    const row = this.#database.raw.prepare(
+      'SELECT next_allowed_at_ms AS nextAllowedAtMs FROM kernel_backend_read_pacing' +
+      ' WHERE provider_key=? AND endpoint_origin=?',
+    ).get(providerKey, origin) as { nextAllowedAtMs: number } | undefined;
+    return row?.nextAllowedAtMs ?? 0;
+  }
+
+  /** Atomic monotonic fence: concurrent readers cannot shorten Retry-After. */
+  extendBackendReadNotBeforeMs(providerKey: string, origin: string, atMs: number): number {
+    requireNonempty(providerKey, 'providerKey');
+    requireNonempty(origin, 'origin');
+    if (!Number.isSafeInteger(atMs) || atMs < 0) {
+      throw new Error('Backend pacing timestamp must be a nonnegative safe integer');
+    }
+    this.#database.raw.prepare(
+      'INSERT INTO kernel_backend_read_pacing' +
+      ' (provider_key,endpoint_origin,next_allowed_at_ms,updated_at) VALUES(?,?,?,?)' +
+      ' ON CONFLICT(provider_key,endpoint_origin) DO UPDATE SET' +
+      ' next_allowed_at_ms=excluded.next_allowed_at_ms,updated_at=excluded.updated_at' +
+      ' WHERE excluded.next_allowed_at_ms > kernel_backend_read_pacing.next_allowed_at_ms',
+    ).run(providerKey, origin, atMs, this.#now());
+    return this.backendReadNotBeforeMs(providerKey, origin);
+  }
+
 /** Bind each journaled send attempt to one durable owned session generation.
    * Page key/epoch may be recovered, but the session generation cannot drift.
    */
