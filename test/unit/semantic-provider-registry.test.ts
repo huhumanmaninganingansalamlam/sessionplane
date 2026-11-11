@@ -125,10 +125,14 @@ test('Core composes the semantic ChatGPT provider without launching a separate b
     });
     await core.semanticTaskKernel.dispatch('kernel-task', 'kernel-client', 'kernel-attempt');
     assert.equal(store.getFullTask('kernel-task', 'kernel-client').attempts[0]?.state,
-      'uncertain', 'the attempt is consumed durably even without a browser');
-    await assert.rejects(core.semanticTaskKernel.dispatch(
-      'kernel-task', 'kernel-client', 'kernel-attempt'),
-    /Mutation already attempted/, 'Core must never replay a planned send after uncertainty');
+      'planned', 'absence of an owned page is known before an external attempt');
+    assert.equal(store.getFullTask('kernel-task', 'kernel-client').events
+      .filter(event => event.event.type === 'attempt.dispatched').length, 0);
+    await core.semanticTaskKernel.dispatch('kernel-task', 'kernel-client', 'kernel-attempt');
+    assert.equal(store.getFullTask('kernel-task', 'kernel-client').attempts[0]?.state,
+      'planned', 'repeated preflight failures preserve one future safe send');
+    assert.equal(store.getFullTask('kernel-task', 'kernel-client').events
+      .filter(event => event.event.type === 'observation.deferred').length, 1);
     assert.equal(core.pageRegistry.listBindings().length, 0);
     const provider = core.semanticProviders.resolve('chatgpt', 'conversation');
     assert.equal(provider.kind, 'available',

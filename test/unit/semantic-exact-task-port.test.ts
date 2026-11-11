@@ -258,10 +258,13 @@ test('unbound new conversation is not submitted or re-created optimistically', a
     },
   });
   const kernel = new DurableTaskKernel(store, [port]);
-  assert.equal((await kernel.dispatch('task-1', 'alice', 'attempt-1')).state, 'uncertain');
+  assert.equal((await kernel.dispatch('task-1', 'alice', 'attempt-1')).state, 'working');
+  assert.equal(store.getFullTask('task-1', 'alice').attempts[0]!.state, 'planned',
+    'known unbound conversation remains safely sendable after preparation');
   assert.equal(fake.sends, 0);
   assert.equal(fake.observations, 0);
-  assert.equal((await kernel.recoverAck('task-1', 'alice', 'attempt-1')).state, 'uncertain');
+  await assert.rejects(kernel.recoverAck('task-1', 'alice', 'attempt-1'),
+    /Only previously dispatched attempts/, 'a planned attempt needs preparation, not ACK recovery');
   assert.equal(fake.recovered, 0);
 });
 

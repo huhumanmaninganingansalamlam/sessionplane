@@ -126,6 +126,12 @@ test('Core-assembled semantic ChatGPT sends once, persists exact ACK and FINAL w
         now: () => new Date(virtualNow),
       }),
     });
+    await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-once');
+    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts[0]!.state,
+      'planned', 'the same exact request cannot be spent before its session binding');
+    assert.equal(await page.evaluate(() => (window as any).sends), 0);
+    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').events
+      .filter(event => event.event.type === 'observation.deferred').length, 1);
     const attemptBinding = runtime.bindAttemptSession({
       taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-once',
       sessionId: session.sessionId, generation: 1, conversationId: 'core-conv',

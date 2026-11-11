@@ -39,6 +39,12 @@ export type FinalObservation =
 
 export interface ExactTaskProviderPort {
   readonly providerKey: string;
+  /** Read-only readiness check before committing an irreversible attempt.
+   * This check never grants send authority: sendOnce revalidates all identity.
+   */
+  preflight?(intent: ExactSendIntent): Promise<
+    { readonly kind: 'ready' } | { readonly kind: 'unavailable'; readonly reason: string }
+  >;
   sendOnce(intent: ExactSendIntent): Promise<SendOutcome>;
   recoverAck(query: ExactTurnQuery): Promise<RecoveryOutcome>;
   observeFinal(query: ExactTurnQuery): Promise<FinalObservation>;
@@ -62,6 +68,20 @@ export class DurableTaskKernel {
   async dispatch(taskId: string, clientId: string, attemptId: string): Promise<TaskRecord> {
     const { attempt, provider, intent } = this.#resolve(taskId, clientId, attemptId);
     if (attempt.state !== 'planned') throw new Error('Mutation already attempted; no replay');
+    // A known missing page/conversation is NOT an ambiguous external send.
+    // Preserve planned for the same caller when preparation later succeeds.
+    if (provider.preflight) {
+      let ready: { kind: 'ready' } | { kind: 'unavailable'; reason: string };
+      try { ready = await provider.preflight(intent); }
+      catch { ready = { kind: 'unavailable', reason: 'provider-preflight-unavailable' }; }
+      if (ready.kind !== 'ready') {
+        const reason = /^[a-z0-9_.:-]{1,100}$/i.test(ready.reason)
+          ? ready.reason : 'provider-preflight-unverified';
+        this.#storage.recordObservationDeferred(taskId, clientId,
+          `preflight:${attemptId}:${reason}`);
+        return this.#storage.getTask(taskId, clientId);
+      }
+    }
     this.#storage.beginDispatch(taskId, clientId, attemptId);
     try {
       const outcome = await provider.sendOnce(intent);

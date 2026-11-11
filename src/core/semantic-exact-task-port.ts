@@ -85,6 +85,39 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
     this.#journal = input.dispatchJournal;
   }
 
+  /** No DOM mutation and no irreversible attempt journal. Absence of a
+   * verified owned tab is known-not-attempted, not a potentially sent POST.
+   */
+  async preflight(intent: ExactSendIntent): Promise<
+    { kind: 'ready' } | { kind: 'unavailable'; reason: string }
+  > {
+    if (intent.kind === 'stop') {
+      return { kind: 'unavailable', reason: 'stop-requires-explicit-provider-evidence' };
+    }
+    if (!intent.providerConversationId) {
+      return { kind: 'unavailable', reason: 'canonical-conversation-binding-required-before-send' };
+    }
+    if (!supportsConversation(this.#adapter)) {
+      return { kind: 'unavailable', reason: 'semantic-conversation-capability-unavailable' };
+    }
+    try {
+      const context = await this.#context(intent);
+      if (!sameTask(intent, context)) {
+        return { kind: 'unavailable', reason: 'semantic-context-does-not-match-task-binding' };
+      }
+      if (this.#adapter.capabilities.browserRequired && context.pageLease === null) {
+        return { kind: 'unavailable', reason: 'owned-page-lease-not-ready' };
+      }
+      if (intent.kind === 'continuation' &&
+          (context.submittedUserMessageId === null || context.submittedUserTurnId === null)) {
+        return { kind: 'unavailable', reason: 'continuation-exact-turn-not-ready' };
+      }
+      return { kind: 'ready' };
+    } catch {
+      return { kind: 'unavailable', reason: 'semantic-context-unavailable' };
+    }
+  }
+
   async sendOnce(intent: ExactSendIntent): Promise<SendOutcome> {
     if (intent.kind === 'stop') {
       return { kind: 'uncertain', reason: 'stop-requires-explicit-provider-evidence' };
