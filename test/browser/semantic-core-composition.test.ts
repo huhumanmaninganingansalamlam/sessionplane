@@ -273,3 +273,197 @@ test('Core never sends a previous semantic Task after the owned session generati
     rmSync(root, { recursive: true, force: true });
   }
 });
+test('Core accepts only the exact resolved question decision once', {
+  timeout: 45_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sessionplane-semantic-decision-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({
+    config, browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  try {
+    const clientId = 'decision-owner';
+    const team = core.teamDirectory.createTeam({ clientId });
+    const roleKey = team.primaryRoleKey;
+    const session = core.teamDirectory.createSession({
+      teamId: team.teamId, roleKey, provider: 'chatgpt',
+    });
+    await core.actorScheduler.startGeneration({
+      sessionId: session.sessionId, teamBriefVersion: 0, promptHash: sha('Question prompt'),
+    });
+    const created = await core.browserOwner!.createPage();
+    const page = created.page;
+    await page.route('https://chatgpt.com/**', route => route.fulfill({
+      contentType: 'text/html',
+      body: '<main><div data-message-author-role="user" data-message-id="decision-user" ' +
+        'data-turn-id="decision-turn">Question prompt</div>' +
+        '<section data-codex-composer-request-navigation="true" ' +
+        'data-user-input-auto-resolution="true"><h3>Choose implementation</h3>' +
+        '<div role="radiogroup"><button type="button" role="radio" aria-label="Proceed" ' +
+        'onclick="window.applied++;this.closest(\'section\').remove()">Proceed</button>' +
+        '<button type="button" role="radio" aria-label="Decline" disabled>Decline</button>' +
+        '</div></section><div id="prompt-textarea" contenteditable="true"></div></main>' +
+        '<script>window.applied=0;</script>',
+    }));
+    await page.goto('https://chatgpt.com/c/decision-conv');
+    const binding = core.pageRegistry.reservePage(created.binding.pageKey, {
+      sessionId: session.sessionId, generation: 1, conversationId: 'decision-conv',
+    });
+    await core.actorScheduler.updateGeneration(session.sessionId, 1, {
+      conversationId: 'decision-conv', pageKey: binding.pageKey,
+      submittedUserMessageId: 'decision-user', submittedUserTurnId: 'decision-turn',
+      sessionState: 'observing', providerState: 'question', submissionState: 'submitted',
+      promptSubmitted: true,
+    });
+    const store = core.semanticTaskRepository;
+    store.openProject({
+      projectId: team.teamId, projectKey: 'decision-core', displayName: 'Decision Core',
+      clientId,
+    });
+    store.openSlot({ projectId: team.teamId, clientId, slotId: roleKey,
+      roleKey, providerKey: 'chatgpt' });
+    store.startTask({ taskId: 'decision-task', projectId: team.teamId, clientId,
+      slotId: roleKey, expectedSlotRevision: 1, requestId: 'decision-request',
+      prompt: 'Question prompt' });
+    store.observeConversation({ taskId: 'decision-task', projectId: team.teamId,
+      clientId, slotId: roleKey, expectedRevision: 1,
+      providerConversationId: 'decision-conv' });
+    store.planAttempt({ taskId: 'decision-task', clientId, attemptId: 'decision-attempt',
+      kind: 'initial', turnKey: 'initial', content: 'Question prompt' });
+    core.semanticTaskBindAttemptSession({
+      taskId: 'decision-task', clientId, attemptId: 'decision-attempt',
+      sessionId: session.sessionId, generation: 1, conversationId: 'decision-conv',
+    });
+    store.beginDispatch('decision-task', clientId, 'decision-attempt');
+    store.recordDispatchEvidence({
+      taskId: 'decision-task', clientId, attemptId: 'decision-attempt',
+      evidence: { conversationId: 'decision-conv', messageId: 'decision-user',
+        parentMessageId: 'root', textHash: sha('Question prompt'),
+        observedAt: new Date().toISOString() },
+    });
+    store.acknowledgeAttempt({
+      taskId: 'decision-task', clientId, attemptId: 'decision-attempt',
+      externalTurnId: 'decision-turn',
+    });
+    const decisionContext = {
+      projectId: team.teamId, slotId: roleKey, slotRevision: 1, taskId: 'decision-task',
+      providerConversationId: 'decision-conv', submittedUserMessageId: 'decision-user',
+      submittedUserTurnId: 'decision-turn',
+      pageLease: { projectId: team.teamId, slotId: roleKey, slotRevision: 1,
+        taskId: 'decision-task', pageKey: binding.pageKey, targetId: binding.targetId!,
+        bindingEpoch: binding.bindingEpoch },
+    };
+    const resolved = core.semanticProviders.resolve('chatgpt', 'question');
+    assert.equal(resolved.kind, 'available');
+    if (resolved.kind !== 'available') throw new Error('Question provider not registered');
+    const adapter = resolved.adapter;
+    const observation = await adapter.observe(decisionContext);
+    assert.equal(observation.blocker, 'provider_question');
+    const action = observation.actions.find(a => a.purpose === 'answer_question')!;
+    assert.ok(action);
+    const makeContext = () => JSON.stringify({
+      kind: 'semantic_action', context: decisionContext, purpose: action.purpose,
+      snapshotId: observation.snapshotId, actionRef: action.actionRef,
+      evidenceHash: action.evidenceHash,
+    });
+    const selected = 'Proceed';
+    store.requireDecision({ taskId: 'decision-task', clientId,
+      decisionId: 'wrong-option', audience: 'agent', contextJson: makeContext() });
+    store.resolveDecision({ taskId: 'decision-task', clientId,
+      decisionId: 'wrong-option', resolutionJson: JSON.stringify({
+        kind: 'semantic_action', input: 'Decline',
+      }) });
+    const denied = await adapter.act({
+      context: decisionContext, snapshotId: observation.snapshotId,
+      actionRef: action.actionRef, evidenceHash: action.evidenceHash,
+      input: selected, authorizedDecisionId: 'wrong-option',
+    });
+    assert.equal(denied.kind, 'authorization_required');
+    assert.equal(await page.evaluate(() => (window as any).applied), 0);
+    store.requireDecision({ taskId: 'decision-task', clientId,
+      decisionId: 'approved-choice', audience: 'agent', contextJson: makeContext() });
+    store.resolveDecision({ taskId: 'decision-task', clientId,
+      decisionId: 'approved-choice', resolutionJson: JSON.stringify({
+        kind: 'semantic_action', input: selected,
+      }) });
+    const applied = await adapter.act({
+      context: decisionContext, snapshotId: observation.snapshotId,
+      actionRef: action.actionRef, evidenceHash: action.evidenceHash,
+      input: selected, authorizedDecisionId: 'approved-choice',
+    });
+    assert.deepEqual(applied, { kind: 'performed', effect: 'question_answered' });
+    assert.equal(await page.evaluate(() => (window as any).applied), 1);
+    assert.equal(store.getFullTask('decision-task', clientId).decisions
+      .find(d => d.decisionId === 'approved-choice')?.actionConsumed, true);
+    assert.equal((await adapter.act({ context: decisionContext,
+      snapshotId: observation.snapshotId, actionRef: action.actionRef,
+      evidenceHash: action.evidenceHash, input: selected,
+      authorizedDecisionId: 'approved-choice' })).kind, 'stale');
+    assert.equal(await page.evaluate(() => (window as any).applied), 1);
+    // Model disclosure and selection require two distinct durable decisions.
+    // A question decision cannot silently authorize a model change.
+    await page.setContent('<main><div data-message-author-role="user" ' +
+      'data-message-id="decision-user" data-turn-id="decision-turn">Question prompt</div>' +
+      '<div id="prompt-textarea" contenteditable="true"></div>' +
+      '<button id="model-trigger" aria-label="Model" aria-haspopup="menu" ' +
+      'aria-controls="model-menu" aria-expanded="false" type="button">Current</button>' +
+      '<div role="menu" id="model-menu" hidden>' +
+      '<button role="menuitemradio" aria-checked="true">Default</button>' +
+      '<button role="menuitemradio" aria-checked="false">Pro</button></div>' +
+      '<button data-testid="send-button">Send</button></main><script>' +
+      'window.modelOpens=0;window.modelChanges=0;' +
+      'document.querySelector("#model-trigger").onclick=()=>{window.modelOpens++;' +
+      'document.querySelector("#model-trigger").setAttribute("aria-expanded","true");' +
+      'document.querySelector("#model-menu").hidden=false;};' +
+      'document.querySelectorAll("[role=menuitemradio]").forEach(button=>button.onclick=()=>{' +
+      'window.modelChanges++;document.querySelectorAll("[role=menuitemradio]")' +
+      '.forEach(other=>other.setAttribute("aria-checked",String(other===button)));});' +
+      '</script>');
+    const closedModel = await adapter.observe(decisionContext);
+    assert.equal(closedModel.blocker, 'none');
+    const openModel = closedModel.actions.find(a => a.purpose === 'open_model_chooser')!;
+    assert.ok(openModel);
+    store.requireDecision({ taskId: 'decision-task', clientId,
+      decisionId: 'model-open', audience: 'agent', contextJson: JSON.stringify({
+        kind: 'semantic_action', context: decisionContext, purpose: openModel.purpose,
+        snapshotId: closedModel.snapshotId, actionRef: openModel.actionRef,
+        evidenceHash: openModel.evidenceHash,
+      }) });
+    store.resolveDecision({ taskId: 'decision-task', clientId,
+      decisionId: 'model-open', resolutionJson: JSON.stringify({
+        kind: 'semantic_action', input: null,
+      }) });
+    assert.deepEqual(await adapter.act({
+      context: decisionContext, snapshotId: closedModel.snapshotId,
+      actionRef: openModel.actionRef, evidenceHash: openModel.evidenceHash,
+      authorizedDecisionId: 'model-open',
+    }), { kind: 'performed', effect: 'model_menu_opened' });
+    assert.equal(await page.evaluate(() => (window as any).modelOpens), 1);
+    const openedModel = await adapter.observe(decisionContext);
+    const chooseModel = openedModel.actions.find(a => a.purpose === 'choose_model')!;
+    assert.ok(chooseModel && chooseModel.input.kind === 'option');
+    store.requireDecision({ taskId: 'decision-task', clientId,
+      decisionId: 'model-select', audience: 'agent', contextJson: JSON.stringify({
+        kind: 'semantic_action', context: decisionContext, purpose: chooseModel.purpose,
+        snapshotId: openedModel.snapshotId, actionRef: chooseModel.actionRef,
+        evidenceHash: chooseModel.evidenceHash,
+      }) });
+    store.resolveDecision({ taskId: 'decision-task', clientId,
+      decisionId: 'model-select', resolutionJson: JSON.stringify({
+        kind: 'semantic_action', input: 'Pro',
+      }) });
+    assert.deepEqual(await adapter.act({
+      context: decisionContext, snapshotId: openedModel.snapshotId,
+      actionRef: chooseModel.actionRef, evidenceHash: chooseModel.evidenceHash,
+      input: 'Pro', authorizedDecisionId: 'model-select',
+    }), { kind: 'performed', effect: 'model_selected' });
+    assert.equal(await page.evaluate(() => (window as any).modelChanges), 1);
+    const finalDecisions = store.getFullTask('decision-task', clientId).decisions;
+    assert.ok(['model-open', 'model-select'].every(id =>
+      finalDecisions.find(d => d.decisionId === id)?.actionConsumed));
+  } finally {
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

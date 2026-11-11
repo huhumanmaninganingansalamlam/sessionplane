@@ -1246,7 +1246,7 @@ test('ChatGPT model action refuses an intervening user turn after authorization'
       isExactLease: candidate => candidate === lease,
       resolvePage: () => page,
       isAuthorizedDecision: async () => {
-        if (++authorizationChecks === 2) { entered(); await authorization; }
+        if (++authorizationChecks === 1) { entered(); await authorization; }
         return true;
       },
     });
@@ -1295,7 +1295,7 @@ test('ChatGPT model action refuses an intervening user turn after authorization'
       isExactLease: candidate => candidate === lease,
       resolvePage: () => page,
       isAuthorizedDecision: async () => {
-        if (++selectionChecks === 2) { selectionEntered(); await selectionAuthorization; }
+        if (++selectionChecks === 1) { selectionEntered(); await selectionAuthorization; }
         return true;
       },
     });
@@ -1842,7 +1842,7 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     const adapter = new ChatGptSemanticAdapter({
       isExactLease: candidate => candidate === lease,
       resolvePage: () => page,
-      isAuthorizedAttempt: input => input.attemptId.startsWith('decision-'),
+      isAuthorizedDecision: input => input.decisionId.startsWith('decision-'),
     });
     const unboundQuestion = await adapter.observe(context(lease));
     assert.equal(unboundQuestion.blocker, 'unsupported',
@@ -1867,12 +1867,12 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     assert.equal(denied.kind, 'authorization_required');
     const applied = await adapter.act({ context: task, snapshotId: observed.snapshotId,
       actionRef: action.actionRef, evidenceHash: action.evidenceHash,
-      input: 'Keep existing', authorizedAttemptId: 'decision-once' });
+      input: 'Keep existing', authorizedDecisionId: 'decision-once' });
     assert.deepEqual(applied, { kind: 'performed', effect: 'question_answered' });
     assert.equal(await page.evaluate(() => (window as any).choice), 'existing');
     assert.equal((await adapter.act({ context: task, snapshotId: observed.snapshotId,
       actionRef: action.actionRef, evidenceHash: action.evidenceHash,
-      input: 'Keep existing', authorizedAttemptId: 'decision-twice' })).kind, 'stale');
+      input: 'Keep existing', authorizedDecisionId: 'decision-twice' })).kind, 'stale');
 
     // A question can interrupt the exact assistant stream; it is not a new chat draft.
     await page.setContent('<main><div data-message-author-role="user" data-message-id="user-b">Task</div>' +
@@ -1892,7 +1892,7 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     const streamingDecision = await adapter.act({ context: streamingTask,
       snapshotId: streamingQuestion.snapshotId, actionRef: streamingAction.actionRef,
       evidenceHash: streamingAction.evidenceHash, input: 'Proceed',
-      authorizedAttemptId: 'decision-streaming' });
+      authorizedDecisionId: 'decision-streaming' });
     assert.deepEqual(streamingDecision, { kind: 'performed', effect: 'question_answered' });
     assert.equal(await page.evaluate(() => (window as any).streamChoice), 'go');
 
@@ -2026,12 +2026,12 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     assert.deepEqual(option.input, { kind: 'text', maxLength: 2_000 });
     const answered = await adapter.act({ context: task, snapshotId: free.snapshotId,
       actionRef: option.actionRef, evidenceHash: option.evidenceHash,
-      input: 'sessionplane', authorizedAttemptId: 'decision-free-text' });
+      input: 'sessionplane', authorizedDecisionId: 'decision-free-text' });
     assert.deepEqual(answered, { kind: 'performed', effect: 'question_answered' });
     assert.equal(await page.evaluate(() => (window as any).freeAnswer), 'sessionplane');
     assert.equal((await adapter.act({ context: task, snapshotId: free.snapshotId,
       actionRef: option.actionRef, evidenceHash: option.evidenceHash,
-      input: 'other', authorizedAttemptId: 'decision-free-text' })).kind, 'stale');
+      input: 'other', authorizedDecisionId: 'decision-free-text' })).kind, 'stale');
 
     await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
       '<div data-message-author-role="user" data-message-id="user-b">Original task</div>' +
@@ -2048,7 +2048,7 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     assert.ok(editableAction && editableAction.input.kind === 'text');
     const editableResult = await adapter.act({ context: task, snapshotId: editable.snapshotId,
       actionRef: editableAction.actionRef, evidenceHash: editableAction.evidenceHash,
-      input: 'sessionplane', authorizedAttemptId: 'decision-editable-question' });
+      input: 'sessionplane', authorizedDecisionId: 'decision-editable-question' });
     assert.deepEqual(editableResult, { kind: 'performed', effect: 'question_answered' },
       'a unique contenteditable question must remain usable after the shell recheck');
     assert.equal(await page.evaluate(() => (window as any).editableAnswer), 'sessionplane');
@@ -2068,15 +2068,15 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     assert.ok(changingAction);
     const changed = await adapter.act({ context: task, snapshotId: changing.snapshotId,
       actionRef: changingAction.actionRef, evidenceHash: changingAction.evidenceHash,
-      input: 'sessionplane', authorizedAttemptId: 'decision-changing-question' });
+      input: 'sessionplane', authorizedDecisionId: 'decision-changing-question' });
     assert.notEqual(changed.kind, 'performed',
       'the original free-text answer cannot submit a different question appearing during fill');
     assert.equal(await page.evaluate(() => (window as any).changedQuestionSubmits), 0);
     assert.equal(await page.locator('textarea').inputValue(), 'sessionplane',
       'the already entered answer remains a protected draft for fresh review');
 
-    // The user's conversation may advance while the second journal check
-    // awaits. An unchanged provider panel cannot authorize an old turn.
+    // The user's conversation may advance while the one-shot durable decision
+    // check awaits. An unchanged provider panel cannot authorize an old turn.
     await page.setContent('<main><div id="prompt-textarea" contenteditable="true"></div>' +
       '<div data-message-author-role="user" data-message-id="user-b">Original task</div>' +
       '<section data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">' +
@@ -2097,8 +2097,8 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     const laterUserAdapter = new ChatGptSemanticAdapter({
       isExactLease: candidate => candidate === lease,
       resolvePage: () => page,
-      isAuthorizedAttempt: async () => {
-        if (++laterAuthorizationChecks === 2) {
+      isAuthorizedDecision: async () => {
+        if (++laterAuthorizationChecks === 1) {
           signalLaterAuthorization();
           await laterAuthorization;
         }
@@ -2111,7 +2111,7 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     const pendingOldAnswer = laterUserAdapter.act({
       context: task, snapshotId: laterOriginal.snapshotId,
       actionRef: laterAnswer.actionRef, evidenceHash: laterAnswer.evidenceHash,
-      input: 'sessionplane', authorizedAttemptId: 'decision-later-user',
+      input: 'sessionplane', authorizedDecisionId: 'decision-later-user',
     });
     await laterAuthorizationEntered;
     await page.locator('section').evaluate(panel => {

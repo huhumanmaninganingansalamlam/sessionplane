@@ -86,10 +86,11 @@ export interface ChatGptSemanticAdapterOptions {
     context: SemanticTaskContext; attemptId: string;
     evidence: SemanticDispatchEvidence;
   }) => void;
-  /** Must check the Core's journaled exact model configuration decision. */
+  /** Consume one exact journaled model/question decision before an external effect. */
   readonly isAuthorizedDecision?: (input: {
-    context: SemanticTaskContext; purpose: 'open_model_chooser' | 'choose_model';
-    decisionId: string; input: string | null;
+    context: SemanticTaskContext;
+    purpose: 'open_model_chooser' | 'choose_model' | 'answer_question';
+    decisionId: string; snapshotId: string; actionRef: string; evidenceHash: string; input: string | null;
   }) => boolean | Promise<boolean>;
   readonly isAuthorizedAttempt?: (input: {
     context: SemanticTaskContext; purpose: SemanticActionPurpose;
@@ -401,15 +402,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       action.evidenceHash !== request.evidenceHash || Date.now() > action.expiresAtMs) {
       return { kind: 'stale', reason: 'action-ref-stale-or-foreign' };
     }
-    if (action.purpose !== 'compose' && !(await this.#authorized(request, action.purpose))) {
-      return { kind: 'authorization_required', reason: 'journaled-action-authorization-unverified' };
-    }
-    // Journal authorization can await I/O. Another caller or new observation
-    // may have consumed/superseded this ref while that check was pending.
-    if (this.#latest.get(lease.pageKey) !== snapshot ||
-      snapshot?.actions.get(request.actionRef) !== action) {
-      return { kind: 'stale', reason: 'action-ref-stale-or-foreign' };
-    }
+    // Validate input before consuming a durable one-shot decision.
     if (action.purpose === 'compose' && (!request.input || request.input.length > MAX_DRAFT)) {
       return { kind: 'unsupported', reason: 'invalid-draft-input' };
     }
@@ -422,6 +415,17 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if ((action.purpose === 'submit' || action.purpose === 'continue') &&
       (!request.expectedContentSha256 || !/^[a-f0-9]{64}$/.test(request.expectedContentSha256))) {
       return { kind: 'authorization_required', reason: 'exact-committed-content-hash-required' };
+    }
+    // A model/question decision is consumed once before the UI effect; a
+    // stale or failed click never grants permission to replay the decision.
+    if (action.purpose !== 'compose' && !(await this.#authorized(request, action.purpose))) {
+      return { kind: 'authorization_required', reason: 'journaled-action-authorization-unverified' };
+    }
+    // Journal authorization can await I/O. Another caller or new observation
+    // may have consumed/superseded this ref while that check was pending.
+    if (this.#latest.get(lease.pageKey) !== snapshot ||
+      snapshot?.actions.get(request.actionRef) !== action) {
+      return { kind: 'stale', reason: 'action-ref-stale-or-foreign' };
     }
     let capturedAttempts: SemanticDispatchEvidence[] = [];
     let dispatchSinkFailed = false;
@@ -486,8 +490,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       if (fresh.fingerprint !== action.uiFingerprint) return 'stale' as const;
       if (action.purpose === 'open_model_chooser' || action.purpose === 'choose_model') {
         const model = await inspectSemanticChatGptModelMenu(page);
-        if (!model || model.evidenceHash !== action.modelHash ||
-          !(await this.#authorized(request, action.purpose))) return 'stale' as const;
+        if (!model || model.evidenceHash !== action.modelHash) return 'stale' as const;
         const requireExactModelTurn = async () => {
           requireExactMutationIdentity();
           if (request.context.submittedUserMessageId !== null ||
@@ -546,7 +549,6 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           request.input!.length > 2_000) {
           return 'stale' as const;
         }
-        if (!(await this.#authorized(request, action.purpose))) return 'stale' as const;
         const requireExactQuestionTurn = async () => {
           requireExactMutationIdentity();
           const boundary = await observeChatGptDom(page, {
@@ -681,11 +683,13 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
 
   async #authorized(request: SemanticActRequest, purpose: SemanticActionPurpose): Promise<boolean> {
     if (purpose === 'compose') return true;
-    if (purpose === 'open_model_chooser' || purpose === 'choose_model') {
+    if (purpose === 'open_model_chooser' || purpose === 'choose_model' ||
+        purpose === 'answer_question') {
       if (!request.authorizedDecisionId || !this.#options.isAuthorizedDecision) return false;
       try {
         return await this.#options.isAuthorizedDecision({
           context: request.context, purpose, decisionId: request.authorizedDecisionId,
+          snapshotId: request.snapshotId, actionRef: request.actionRef, evidenceHash: request.evidenceHash,
           input: request.input ?? null,
         });
       } catch { return false; }

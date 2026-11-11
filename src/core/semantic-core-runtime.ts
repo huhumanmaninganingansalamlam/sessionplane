@@ -24,6 +24,28 @@ export interface SemanticCoreRuntime {
   }) => AttemptSessionBindingRecord;
 }
 
+/** Decision packets carry exact Task and UI snapshot identity, not a selector. */
+function sameDecisionContext(expected: SemanticTaskContext, actual: unknown): boolean {
+  if (actual === null || typeof actual !== 'object') return false;
+  const packet = actual as Partial<SemanticTaskContext>;
+  const original = expected.pageLease;
+  const retained = packet.pageLease;
+  if (!original || !retained || typeof retained !== 'object') return false;
+  return packet.projectId === expected.projectId &&
+    packet.slotId === expected.slotId && packet.slotRevision === expected.slotRevision &&
+    packet.taskId === expected.taskId &&
+    packet.providerConversationId === expected.providerConversationId &&
+    packet.submittedUserMessageId === expected.submittedUserMessageId &&
+    packet.submittedUserTurnId === expected.submittedUserTurnId &&
+    retained.projectId === original.projectId &&
+    retained.slotId === original.slotId &&
+    retained.slotRevision === original.slotRevision &&
+    retained.taskId === original.taskId &&
+    retained.pageKey === original.pageKey &&
+    retained.targetId === original.targetId &&
+    retained.bindingEpoch === original.bindingEpoch;
+}
+
 /** One journal, browser owner, and page mutex for the new Core path.
  * This assembly never creates another browser/DB writer or registers a
  * competing legacy RPC route.
@@ -165,6 +187,39 @@ export function createSemanticCoreRuntime(input: {
         createHash('sha256').update(attempt.content.replaceAll('\r\n', '\n')).digest('hex') === contentSha256;
     } catch { return false; }
   };
+  // A resolved decision, not provider DOM, authorizes model/question effects.
+  // Consume it durably before a potentially irreversible click.
+  const authorizedDecision = (approval: {
+    context: SemanticTaskContext;
+    purpose: 'open_model_chooser' | 'choose_model' | 'answer_question';
+    decisionId: string; snapshotId: string; actionRef: string;
+    evidenceHash: string; input: string | null;
+  }): boolean => {
+    const { context } = approval;
+    if (!context.pageLease || !isExactLease(context.pageLease)) return false;
+    const clientId = repository.dispatchClientId(context.taskId);
+    if (!clientId) return false;
+    try {
+      const full = repository.getFullTask(context.taskId, clientId);
+      if (full.task.cancelRequested ||
+          full.task.state === 'completed' || full.task.state === 'failed' ||
+          full.task.state === 'canceled') return false;
+      const row = full.decisions.find(entry => entry.decisionId === approval.decisionId);
+      if (!row || row.status !== 'resolved' || row.actionConsumed ||
+          row.resolutionJson === null) return false;
+      const envelope = JSON.parse(row.contextJson);
+      const resolution = JSON.parse(row.resolutionJson);
+      if (envelope?.kind !== 'semantic_action' ||
+          !sameDecisionContext(context, envelope.context) ||
+          envelope.purpose !== approval.purpose ||
+          envelope.snapshotId !== approval.snapshotId ||
+          envelope.actionRef !== approval.actionRef ||
+          envelope.evidenceHash !== approval.evidenceHash ||
+          resolution?.kind !== 'semantic_action' ||
+          resolution.input !== approval.input) return false;
+      return repository.consumeDecisionAction(context.taskId, clientId, approval.decisionId);
+    } catch { return false; }
+  };
   const providers = new SemanticProviderRegistry(input.enabledProviders.includes('chatgpt') ? [
     new ChatGptSemanticAdapter({
       ...(input.backendRecovery ? { backendRecovery: input.backendRecovery } : {}),
@@ -172,6 +227,7 @@ export function createSemanticCoreRuntime(input: {
       resolvePage: identity => input.pageRegistry.pageForObservation(identity.pageKey, identity.bindingEpoch),
       pageMutationMutex: input.pageMutationMutex,
       isAuthorizedAttempt: authorizedAttempt,
+      isAuthorizedDecision: authorizedDecision,
       onDispatchObserved: ({ context, attemptId, evidence }) => {
         const clientId = repository.dispatchClientId(context.taskId);
         if (!clientId) throw new Error('Dispatch task owner unavailable');
