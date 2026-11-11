@@ -808,3 +808,240 @@ test('Core recovers historical ChatGPT ACK and FINAL after cancel and slot repla
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+
+test('Core-owned approved 20-minute continuation sends one exact POST without a waiting client', {
+  timeout: 60_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sessionplane-core-managed-browser-'));
+  const core = await startCore({
+    config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }),
+    browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  try {
+    const clientId = 'managed-browser-owner';
+    const team = core.teamDirectory.createTeam({ clientId });
+    const slotId = team.primaryRoleKey;
+    const session = core.teamDirectory.createSession({
+      teamId: team.teamId, roleKey: slotId, provider: 'chatgpt',
+    });
+    await core.actorScheduler.startGeneration({
+      sessionId: session.sessionId, teamBriefVersion: 0, promptHash: sha('Root question'),
+    });
+    const owned = await core.browserOwner!.createPage();
+    const page = owned.page;
+    await page.route('https://chatgpt.com/**', route => {
+      if (route.request().method() === 'POST') {
+        return route.fulfill({ status: 202, contentType: 'application/json', body: '{}' });
+      }
+      return route.fulfill({
+        contentType: 'text/html',
+        body: '<main><article data-message-author-role="user" ' +
+          'data-message-id="user-root" data-turn-id="turn-root">Root question</article>' +
+          '<section data-chatgpt-composer><div id="prompt-textarea" ' +
+          'contenteditable="true" role="textbox"></div>' +
+          '<button data-testid="send-button" type="button">Send</button></section>' +
+          '</main><script>window.sends=0;' +
+          'document.querySelector("button").onclick=()=>{' +
+          'const editor=document.querySelector("#prompt-textarea");' +
+          'const text=editor.innerText;window.sends++;' +
+          'fetch("/backend-api/f/conversation",{method:"POST",' +
+          'headers:{"Content-Type":"application/json"},body:JSON.stringify({' +
+          'action:"next",conversation_id:"managed-conversation",parent_message_id:"assistant-root",' +
+          'messages:[{id:"user-managed",author:{role:"user"},' +
+          'content:{content_type:"text",parts:[text]}}]})});editor.textContent="";};</script>',
+      });
+    });
+    await page.goto('https://chatgpt.com/c/managed-conversation');
+    const bound = core.pageRegistry.reservePage(owned.binding.pageKey, {
+      sessionId: session.sessionId, generation: 1, conversationId: 'managed-conversation',
+    });
+    assert.equal(bound.state, 'owned');
+    await core.actorScheduler.updateGeneration(session.sessionId, 1, {
+      conversationId: 'managed-conversation', pageKey: bound.pageKey,
+      sessionState: 'ready', providerState: 'idle',
+    });
+    const repository = core.semanticTaskRepository;
+    repository.openProject({
+      projectId: team.teamId, projectKey: 'managed-browser-fixture',
+      displayName: 'Managed browser fixture', clientId,
+    });
+    repository.openSlot({
+      projectId: team.teamId, clientId, slotId, roleKey: slotId, providerKey: 'chatgpt',
+    });
+    repository.startTask({
+      taskId: 'managed-task', projectId: team.teamId, slotId,
+      expectedSlotRevision: 1, clientId,
+      requestId: 'managed-start', prompt: 'Root question',
+    });
+    repository.observeConversation({
+      projectId: team.teamId, clientId, slotId, expectedRevision: 1,
+      taskId: 'managed-task', providerConversationId: 'managed-conversation',
+    });
+    repository.planAttempt({
+      taskId: 'managed-task', clientId, attemptId: 'managed-original',
+      kind: 'initial', turnKey: 'original', content: 'Root question',
+    });
+    core.semanticTaskBindAttemptSession({
+      taskId: 'managed-task', clientId, attemptId: 'managed-original',
+      sessionId: session.sessionId, generation: 1, conversationId: 'managed-conversation',
+    });
+    repository.beginDispatch('managed-task', clientId, 'managed-original');
+    repository.recordDispatchEvidence({
+      taskId: 'managed-task', clientId, attemptId: 'managed-original',
+      evidence: {
+        conversationId: 'managed-conversation', messageId: 'user-root',
+        parentMessageId: 'root', textHash: sha('Root question'),
+        observedAt: new Date().toISOString(),
+      },
+    });
+    repository.acknowledgeAttempt({
+      taskId: 'managed-task', clientId, attemptId: 'managed-original',
+      externalTurnId: 'turn-root',
+    });
+    repository.recordFinal({
+      taskId: 'managed-task', clientId, attemptId: 'managed-original',
+      externalTurnId: 'turn-root', resultId: 'managed-original-result',
+      answerText: 'More work remains', completeTask: false,
+    });
+    const payload = {
+      id: 'managed-conversation', current_node: 'assistant-managed',
+      mapping: {
+        root: { id: 'root', parent: null, children: [], message: null },
+        'user-root-node': {
+          id: 'user-root-node', parent: 'root', children: [],
+          message: { id: 'user-root', turn_id: 'turn-root',
+            author: { role: 'user' }, content: { parts: ['Root question'] } },
+        },
+        'assistant-root': {
+          id: 'assistant-root', parent: 'user-root-node', children: [],
+          message: { id: 'assistant-root', author: { role: 'assistant' },
+            channel: 'final', status: 'finished_successfully', end_turn: true,
+            content: { parts: ['More work remains'] }, metadata: {} },
+        },
+        'user-managed-node': {
+          id: 'user-managed-node', parent: 'assistant-root', children: [],
+          message: { id: 'user-managed', turn_id: 'turn-managed',
+            author: { role: 'user' }, content: { parts: ['계속'] } },
+        },
+        'assistant-managed': {
+          id: 'assistant-managed', parent: 'user-managed-node', children: [],
+          message: { id: 'assistant-managed', author: { role: 'assistant' },
+            channel: 'final', status: 'finished_successfully', end_turn: true,
+            content: { parts: ['Managed final response'] }, metadata: {} },
+        },
+      },
+    };
+    const backend: BackendJsonClient = {
+      async get(url) {
+        return url.endsWith('/api/auth/session')
+          ? { status: 200, headers: {}, body: { accessToken: 'fixture-only' } }
+          : { status: 200, headers: {}, body: payload };
+      },
+    };
+    const prior = repository.getFullTask('managed-task', clientId).attempts[0]!;
+    let clock = Date.parse(prior.acknowledgedAt!);
+    const runtime = createSemanticCoreRuntime({
+      database: core.database, browserOwner: core.browserOwner,
+      pageRegistry: core.pageRegistry, teamDirectory: core.teamDirectory,
+      pageMutationMutex: core.pageMutationMutex,
+      enabledProviders: ['chatgpt'], chatgptUrl: 'https://chatgpt.com',
+      backendClientProvider: () => backend, continuationNow: () => new Date(clock),
+      backendRecovery: new ChatGptBackendRecovery({
+        requestTimeoutMs: 500, tokenCacheTtlMs: 10_000,
+        now: () => new Date(clock),
+      }),
+    });
+    assert.throws(() => runtime.managedContinuation.activate({
+      taskId: 'managed-task', clientId, sourceAttemptId: 'managed-original',
+      approvalRef: 'explicit-approved-continuation', message: 'Change the model',
+    }), /exact approved literal/, 'ChatGPT cannot turn an approved Continue into another prompt');
+    const due = runtime.managedContinuation.activate({
+      taskId: 'managed-task', clientId, sourceAttemptId: 'managed-original',
+      approvalRef: 'explicit-approved-continuation', message: '계속',
+    });
+    assert.equal(Date.parse(due.dueAt), clock + 1_200_000);
+    clock += 1_200_000 - 1;
+    assert.equal((await runtime.managedContinuation.tick()).timersClaimed, 0);
+    assert.equal(await page.evaluate(() => (window as any).sends), 0);
+    clock++;
+    assert.deepEqual(await runtime.managedContinuation.tick(), {
+      timersClaimed: 1, dispatchesAttempted: 1, deferred: 0,
+    });
+    assert.equal(await page.evaluate(() => (window as any).sends), 1);
+    const exact = repository.getFullTask('managed-task', clientId).attempts[1]!;
+    assert.equal(exact.kind, 'continuation');
+    assert.equal(exact.content, '계속');
+    assert.equal(exact.state, 'acknowledged');
+    assert.equal(exact.externalTurnId, 'turn-managed');
+    assert.equal(repository.getAttemptSessionBinding({
+      taskId: 'managed-task', clientId, attemptId: exact.attemptId,
+    })?.sessionId, session.sessionId);
+    assert.equal(repository.getDispatchEvidence({
+      taskId: 'managed-task', clientId, attemptId: exact.attemptId,
+    })?.messageId, 'user-managed');
+    clock += 5_001; // independent canonical FINAL GET after the ACK read interval
+    const final = await runtime.kernel.observeFinal({
+      taskId: 'managed-task', clientId, attemptId: exact.attemptId,
+      resultId: 'managed-final', completeTask: true,
+    });
+    assert.equal(final?.answerText, 'Managed final response');
+    assert.equal(repository.getTask('managed-task', clientId).state, 'completed');
+    assert.equal((await runtime.managedContinuation.tick()).timersClaimed, 0);
+    assert.equal(await page.evaluate(() => (window as any).sends), 1);
+    await runtime.managedContinuation.close();
+  } finally {
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test('Core restart marks interrupted semantic dispatch uncertain without a new POST', {
+  timeout: 45_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sessionplane-semantic-restart-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const logger = { debug() {}, info() {}, warn() {}, error() {} };
+  let core = await startCore({ config, startBrowser: false, logger });
+  try {
+    const store = core.semanticTaskRepository;
+    store.openProject({
+      projectId: 'crash-project', projectKey: 'semantic-restart-fixture',
+      displayName: 'Crash fixture', clientId: 'alice',
+    });
+    store.openSlot({
+      projectId: 'crash-project', clientId: 'alice',
+      slotId: 'main', roleKey: 'Main', providerKey: 'chatgpt',
+    });
+    store.startTask({
+      taskId: 'crashed-task', projectId: 'crash-project',
+      slotId: 'main', expectedSlotRevision: 1, clientId: 'alice',
+      requestId: 'crashed-request', prompt: 'Do not replay',
+    });
+    store.planAttempt({
+      taskId: 'crashed-task', clientId: 'alice',
+      attemptId: 'crashed-attempt', kind: 'initial', turnKey: 'root',
+      content: 'Do not replay',
+    });
+    store.beginDispatch('crashed-task', 'alice', 'crashed-attempt');
+    assert.equal(store.getFullTask('crashed-task', 'alice').attempts[0]!.state,
+      'dispatched');
+    await core.close();
+    core = await startCore({ config, startBrowser: false, logger });
+    const recovered = core.semanticTaskRepository.getFullTask('crashed-task', 'alice');
+    assert.equal(recovered.attempts[0]!.state, 'uncertain');
+    assert.equal(recovered.task.state, 'uncertain');
+    assert.equal(recovered.events
+      .filter(event => event.event.type === 'attempt.uncertain').length, 1);
+    await assert.rejects(core.semanticTaskKernel.dispatch(
+      'crashed-task', 'alice', 'crashed-attempt',
+    ), /Mutation already attempted/, 'Core restart cannot send the original prompt');
+    assert.equal(core.semanticTaskRepository.getFullTask(
+      'crashed-task', 'alice').attempts.length, 1);
+  } finally {
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

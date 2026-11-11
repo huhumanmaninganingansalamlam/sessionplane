@@ -12,6 +12,7 @@ import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { TaskKernelRepository, type AttemptSessionBindingRecord } from '../storage/task-kernel-repository.ts';
 import { DurableTaskKernel, type ExactSendIntent } from './durable-task-kernel.ts';
 import { SemanticDecisionGateway } from './semantic-decision-gateway.ts';
+import { ManagedContinuationService } from './managed-continuation.ts';
 import { SemanticExactTaskPort } from './semantic-exact-task-port.ts';
 import type { TeamDirectory } from './team-directory.ts';
 
@@ -20,6 +21,7 @@ export interface SemanticCoreRuntime {
   readonly repository: TaskKernelRepository;
   readonly kernel: DurableTaskKernel;
   readonly decisionGateway: SemanticDecisionGateway;
+  readonly managedContinuation: ManagedContinuationService;
   readonly bindAttemptSession: (input: {
     taskId: string; clientId: string; attemptId: string;
     sessionId: string; generation: number; conversationId: string;
@@ -64,6 +66,9 @@ export function createSemanticCoreRuntime(input: {
   readonly backendRecovery?: ChatGptBackendRecovery;
   /** Deterministic backend pacing clock for isolated recovery tests. */
   readonly backendRecoveryNow?: () => Date;
+  /** Dedicated deterministic due clock for isolated Core timer tests. */
+  readonly continuationNow?: () => Date;
+  readonly canRunContinuation?: () => boolean;
 }): SemanticCoreRuntime {
   const repository = new TaskKernelRepository(input.database);
   const bindAttemptSession = (owner: {
@@ -300,6 +305,22 @@ export function createSemanticCoreRuntime(input: {
       }),
     },
   })] : [];
-  return { providers, repository, kernel: new DurableTaskKernel(repository, ports),
+  const kernel = new DurableTaskKernel(repository, ports);
+  const managedContinuation = new ManagedContinuationService({
+    repository, kernel,
+    ...(input.continuationNow ? { now: input.continuationNow } : {}),
+    ...(input.canRunContinuation ? { canRun: input.canRunContinuation } : {}),
+    bindAttempt: ({ taskId, clientId, attemptId, sourceAttemptId }) => {
+      const prior = repository.getAttemptSessionBinding({
+        taskId, clientId, attemptId: sourceAttemptId,
+      });
+      if (!prior) throw new Error('Managed continuation has no exact source session binding');
+      bindAttemptSession({
+        taskId, clientId, attemptId, sessionId: prior.sessionId,
+        generation: prior.generation, conversationId: prior.conversationId,
+      });
+    },
+  });
+  return { providers, repository, kernel, managedContinuation,
     decisionGateway, bindAttemptSession };
 }

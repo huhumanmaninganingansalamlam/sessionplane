@@ -1090,14 +1090,16 @@ export class TaskKernelRepository {
    * independently inspect task/attempt state before issuing a new mutation.
    * A second Core after restart cannot fire the same timer twice.
    */
-  claimDueTimers(nowIso: string, limit = 50): readonly TimerRecord[] {
+  claimDueTimers(nowIso: string, limit = 50, kind?: string): readonly TimerRecord[] {
     const now = new Date(nowIso).toISOString();
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('Invalid timer limit');
+    if (kind !== undefined) requireNonempty(kind, 'timer kind');
     return this.#database.transaction(() => {
       const rows = this.#database.raw.prepare(
         `SELECT ${TIMER_COLUMNS} FROM kernel_timers
-          WHERE status='pending' AND due_at<=? ORDER BY due_at,timer_id LIMIT ?`,
-      ).all(now, limit) as Row[];
+          WHERE status='pending' AND due_at<=?${kind === undefined ? '' : ' AND kind=?'}
+          ORDER BY due_at,timer_id LIMIT ?`,
+      ).all(...(kind === undefined ? [now, limit] : [now, kind, limit])) as Row[];
       const claimed: TimerRecord[] = [];
       for (const row of rows) {
         const timer = timerFromRow(row);
@@ -1136,6 +1138,17 @@ export class TaskKernelRepository {
       this.markUncertain(row.taskId, row.clientId, row.attemptId, reason);
     }
     return rows.length;
+  }
+
+  /** Core-owned timer scanner; task ownership is read from SQLite, not a client subscription. */
+  listContinuationTaskOwners(): readonly { taskId: string; clientId: string }[] {
+    return this.#database.raw.prepare(
+      `SELECT DISTINCT t.task_id AS taskId,t.client_id AS clientId
+        FROM kernel_tasks t JOIN kernel_timers timer ON timer.task_id=t.task_id
+        WHERE timer.kind='continuation_due' AND t.cancel_requested=0
+          AND t.state NOT IN ('completed','failed','canceled')
+        ORDER BY t.task_id`,
+    ).all() as Array<{ taskId: string; clientId: string }>;
   }
 
   listPendingDecisions(projectId: string, clientId: string): readonly DecisionRecord[] {

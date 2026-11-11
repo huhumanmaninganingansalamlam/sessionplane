@@ -77,6 +77,7 @@ export interface CoreService {
   readonly semanticTaskRepository: TaskKernelRepository;
   readonly semanticTaskKernel: DurableTaskKernel;
   readonly semanticDecisionGateway: SemanticCoreRuntime['decisionGateway'];
+  readonly semanticManagedContinuation: SemanticCoreRuntime['managedContinuation'];
   readonly semanticTaskBindAttemptSession: SemanticCoreRuntime['bindAttemptSession'];
   readonly observationService: ObservationService;
   readonly thinkingFailureRecovery: ThinkingFailureRecovery;
@@ -212,10 +213,18 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   const { providers: semanticProviders, repository: semanticTaskRepository,
     kernel: semanticTaskKernel,
     decisionGateway: semanticDecisionGateway,
+    managedContinuation: semanticManagedContinuation,
     bindAttemptSession: semanticTaskBindAttemptSession } = createSemanticCoreRuntime({
     database, browserOwner, pageRegistry, teamDirectory, pageMutationMutex,
     enabledProviders: config.enabledProviders, chatgptUrl: config.chatgptUrl,
+    canRunContinuation: () => !maintenance.paused,
   });
+  // Reconcile only attempts which irreversibly entered dispatch before the
+  // previous Core died. A missing ACK is uncertain, never permission to send.
+  const interruptedSemantic = semanticTaskRepository.recoverInterruptedDispatches();
+  if (interruptedSemantic > 0) {
+    logger.warn('semantic.dispatch.recovered_uncertain', { attempts: interruptedSemantic });
+  }
   const probeCoordinator = new ProbeCoordinator({
     database,
     successIntervalMs: config.probeSuccessIntervalMs,
@@ -483,6 +492,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       ).finally(release);
   }, 5_000);
   browserRecoveryTimer?.unref();
+  semanticManagedContinuation.start();
   return {
     maintenance,
     config,
@@ -504,6 +514,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     semanticTaskRepository,
     semanticTaskKernel,
     semanticDecisionGateway,
+    semanticManagedContinuation,
     semanticTaskBindAttemptSession,
     observationService,
     thinkingFailureRecovery,
@@ -520,6 +531,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
         return;
       }
       closed = true;
+      await semanticManagedContinuation.close();
       maintenance.resume();
       if (browserRecoveryTimer !== null) clearInterval(browserRecoveryTimer);
       await browserRecovery?.catch(() => undefined);
