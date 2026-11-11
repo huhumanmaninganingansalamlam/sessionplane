@@ -9,7 +9,7 @@ import { ChatGptSemanticAdapter, chatGptBackendJsonClient } from '../providers/c
 import { SemanticProviderRegistry } from '../providers/semantic-provider-registry.ts';
 import type { SemanticTaskContext } from '../providers/semantic-adapter.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
-import { TaskKernelRepository } from '../storage/task-kernel-repository.ts';
+import { TaskKernelRepository, type AttemptSessionBindingRecord } from '../storage/task-kernel-repository.ts';
 import { DurableTaskKernel, type ExactSendIntent } from './durable-task-kernel.ts';
 import { SemanticExactTaskPort } from './semantic-exact-task-port.ts';
 import type { TeamDirectory } from './team-directory.ts';
@@ -18,6 +18,10 @@ export interface SemanticCoreRuntime {
   readonly providers: SemanticProviderRegistry;
   readonly repository: TaskKernelRepository;
   readonly kernel: DurableTaskKernel;
+  readonly bindAttemptSession: (input: {
+    taskId: string; clientId: string; attemptId: string;
+    sessionId: string; generation: number; conversationId: string;
+  }) => AttemptSessionBindingRecord;
 }
 
 /** One journal, browser owner, and page mutex for the new Core path.
@@ -36,6 +40,31 @@ export function createSemanticCoreRuntime(input: {
   readonly backendRecovery?: ChatGptBackendRecovery;
 }): SemanticCoreRuntime {
   const repository = new TaskKernelRepository(input.database);
+  const bindAttemptSession = (owner: {
+    taskId: string; clientId: string; attemptId: string;
+    sessionId: string; generation: number; conversationId: string;
+  }): AttemptSessionBindingRecord => {
+    const task = repository.getTask(owner.taskId, owner.clientId);
+    const slot = repository.getSlot(task.projectId, task.slotId, owner.clientId);
+    const session = input.teamDirectory.getSession(owner.sessionId);
+    if (slot.activeTaskId !== task.taskId ||
+        task.slotRevision !== slot.revision || slot.providerKey !== 'chatgpt' ||
+        session.teamId !== task.projectId || session.roleKey !== task.slotId ||
+        session.provider !== 'chatgpt' || session.generation !== owner.generation ||
+        session.conversationId !== owner.conversationId || session.pageKey === null ||
+        slot.providerConversationId !== owner.conversationId) {
+      throw new Error('Attempt does not own this exact ChatGPT session generation');
+    }
+    const binding = input.pageRegistry.getBinding(session.pageKey);
+    if (binding.state !== 'owned' || binding.targetId === null ||
+        binding.sessionId !== owner.sessionId ||
+        binding.generation !== owner.generation ||
+        binding.conversationId !== owner.conversationId ||
+        binding.expectedConversationId !== owner.conversationId) {
+      throw new Error('Attempt session generation is not bound to one owned page');
+    }
+    return repository.bindAttemptSession(owner);
+  };
   const activeTask = (identity: OwnedPageIdentity) => {
     const clientId = repository.dispatchClientId(identity.taskId);
     if (!clientId) return null;
@@ -46,7 +75,16 @@ export function createSemanticCoreRuntime(input: {
         task.slotRevision !== identity.slotRevision ||
         slot.activeTaskId !== identity.taskId || slot.revision !== identity.slotRevision ||
         slot.providerKey !== 'chatgpt' || slot.providerConversationId === null) return null;
-      return { clientId, slot };
+      const full = repository.getFullTask(identity.taskId, clientId);
+      const unresolved = full.attempts.filter(attempt =>
+        attempt.kind !== 'stop' && attempt.state !== 'failed_before_dispatch' &&
+        !full.results.some(result => result.attemptId === attempt.attemptId));
+      if (unresolved.length !== 1) return null;
+      const sessionBinding = repository.getAttemptSessionBinding({
+        taskId: identity.taskId, clientId, attemptId: unresolved[0]!.attemptId,
+      });
+      if (sessionBinding?.conversationId !== slot.providerConversationId) return null;
+      return { clientId, slot, sessionBinding };
     } catch { return null; }
   };
   const isExactLease = (identity: OwnedPageIdentity): boolean => {
@@ -57,12 +95,13 @@ export function createSemanticCoreRuntime(input: {
       if (binding.state !== 'owned' || binding.targetId !== identity.targetId ||
         binding.bindingEpoch !== identity.bindingEpoch ||
         binding.conversationId !== task.slot.providerConversationId ||
-        binding.sessionId === null) return false;
+        binding.sessionId !== task.sessionBinding.sessionId ||
+        binding.generation !== task.sessionBinding.generation) return false;
       const session = input.teamDirectory.getSession(binding.sessionId);
       return session.teamId === identity.projectId && session.roleKey === identity.slotId &&
         session.provider === 'chatgpt' && session.pageKey === binding.pageKey &&
         session.conversationId === binding.conversationId &&
-        session.generation === binding.generation;
+        session.generation === task.sessionBinding.generation;
     } catch { return false; }
   };
   const resolveContext = (intent: ExactSendIntent): SemanticTaskContext => {
@@ -77,9 +116,15 @@ export function createSemanticCoreRuntime(input: {
       slot.providerConversationId !== intent.providerConversationId) {
       throw new Error('Semantic context differs from the current journaled task');
     }
-    const matches = intent.providerConversationId === null ? [] :
+    const attemptBinding = repository.getAttemptSessionBinding({
+      taskId: intent.taskId, clientId: intent.clientId, attemptId: intent.attemptId,
+    });
+    const matches = intent.providerConversationId === null || attemptBinding === null ? [] :
       input.pageRegistry.findByConversation(intent.providerConversationId)
-        .filter(found => found.state === 'owned' && found.targetId !== null);
+        .filter(found => found.state === 'owned' && found.targetId !== null &&
+          found.sessionId === attemptBinding.sessionId &&
+          found.generation === attemptBinding.generation &&
+          found.conversationId === attemptBinding.conversationId);
     const candidate: OwnedPageIdentity | null = matches.length === 1 ? {
       projectId: intent.projectId, slotId: intent.slotId, slotRevision: intent.slotRevision,
       taskId: intent.taskId, pageKey: matches[0]!.pageKey,
@@ -151,5 +196,5 @@ export function createSemanticCoreRuntime(input: {
       }),
     },
   })] : [];
-  return { providers, repository, kernel: new DurableTaskKernel(repository, ports) };
+  return { providers, repository, kernel: new DurableTaskKernel(repository, ports), bindAttemptSession };
 }

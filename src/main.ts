@@ -43,7 +43,7 @@ import { PageBindingRepository } from './storage/page-binding-repository.ts';
 import { ReceiptRepository } from './storage/receipt-repository.ts';
 import { RuntimeMetrics } from './telemetry/metrics.ts';
 import { ChatGptAdapter } from './providers/chatgpt/adapter.ts';
-import { createSemanticCoreRuntime } from './core/semantic-core-runtime.ts';
+import { createSemanticCoreRuntime, type SemanticCoreRuntime } from './core/semantic-core-runtime.ts';
 import type { DurableTaskKernel } from './core/durable-task-kernel.ts';
 import type { SemanticProviderRegistry } from './providers/semantic-provider-registry.ts';
 import type { TaskKernelRepository } from './storage/task-kernel-repository.ts';
@@ -76,6 +76,7 @@ export interface CoreService {
   readonly semanticProviders: SemanticProviderRegistry;
   readonly semanticTaskRepository: TaskKernelRepository;
   readonly semanticTaskKernel: DurableTaskKernel;
+  readonly semanticTaskBindAttemptSession: SemanticCoreRuntime['bindAttemptSession'];
   readonly observationService: ObservationService;
   readonly thinkingFailureRecovery: ThinkingFailureRecovery;
   readonly conversationLoadRecovery: ConversationLoadRecovery;
@@ -208,7 +209,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     ),
   );
   const { providers: semanticProviders, repository: semanticTaskRepository,
-    kernel: semanticTaskKernel } = createSemanticCoreRuntime({
+    kernel: semanticTaskKernel,
+    bindAttemptSession: semanticTaskBindAttemptSession } = createSemanticCoreRuntime({
     database, browserOwner, pageRegistry, teamDirectory, pageMutationMutex,
     enabledProviders: config.enabledProviders, chatgptUrl: config.chatgptUrl,
   });
@@ -499,6 +501,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     semanticProviders,
     semanticTaskRepository,
     semanticTaskKernel,
+    semanticTaskBindAttemptSession,
     observationService,
     thinkingFailureRecovery,
     conversationLoadRecovery,

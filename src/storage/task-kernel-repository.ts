@@ -69,6 +69,14 @@ export interface AttemptRecord {
 /** Durable, bounded POST provenance. The prompt body remains only in the
  * existing attempt record; evidence stores its hash and exact message edges.
  */
+export interface AttemptSessionBindingRecord {
+  readonly attemptId: string;
+  readonly taskId: string;
+  readonly sessionId: string;
+  readonly generation: number;
+  readonly conversationId: string;
+  readonly boundAt: string;
+}
 export interface DispatchEvidenceRecord {
   readonly conversationId: string;
   readonly messageId: string;
@@ -446,6 +454,68 @@ export class TaskKernelRepository {
     ).get(taskId) as { clientId: string } | undefined;
     return row?.clientId ?? null;
   }
+/** Bind each journaled send attempt to one durable owned session generation.
+   * Page key/epoch may be recovered, but the session generation cannot drift.
+   */
+  bindAttemptSession(input: {
+    taskId: string; clientId: string; attemptId: string;
+    sessionId: string; generation: number; conversationId: string;
+  }): AttemptSessionBindingRecord {
+    for (const name of ['taskId', 'clientId', 'attemptId', 'sessionId', 'conversationId'] as const) {
+      requireNonempty(input[name], name);
+    }
+    if (!Number.isSafeInteger(input.generation) || input.generation < 1) {
+      throw new Error('Attempt session generation must be a positive integer');
+    }
+    return this.#database.transaction(() => {
+      const task = this.#requireTask(input.taskId, input.clientId);
+      const attempt = this.#requireAttempt(input.attemptId, input.taskId);
+      const slot = this.#requireSlot(task.projectId, task.slotId);
+      const immutable = this.getBindingAtRevision(task.projectId, task.slotId,
+        task.slotRevision, input.clientId);
+      if (slot.activeTaskId !== task.taskId || slot.revision !== task.slotRevision ||
+          immutable.providerConversationId !== input.conversationId ||
+          slot.providerConversationId !== input.conversationId) {
+        throw new Error('Attempt lost its exact active conversation lease');
+      }
+      const old = this.getAttemptSessionBinding(input);
+      if (old !== null) {
+        if (old.sessionId !== input.sessionId || old.generation !== input.generation ||
+            old.conversationId !== input.conversationId) {
+          throw new Error('Attempt session generation cannot be rebound');
+        }
+        return old;
+      }
+      if (attempt.state !== 'planned') {
+        throw new Error('Only a planned attempt can bind its session generation');
+      }
+      this.#database.raw.prepare(
+        'INSERT INTO kernel_attempt_session_bindings(attempt_id,task_id,session_id,' +
+        ' generation,provider_conversation_id,bound_at) VALUES(?,?,?,?,?,?)',
+      ).run(input.attemptId, input.taskId, input.sessionId, input.generation,
+        input.conversationId, this.#now());
+      return this.getAttemptSessionBinding(input)!;
+    });
+  }
+
+  getAttemptSessionBinding(input: {
+    taskId: string; clientId: string; attemptId: string;
+  }): AttemptSessionBindingRecord | null {
+    this.#requireTask(input.taskId, input.clientId);
+    this.#requireAttempt(input.attemptId, input.taskId);
+    const row = this.#database.raw.prepare(
+      'SELECT attempt_id AS attemptId, task_id AS taskId, session_id AS sessionId,' +
+      ' generation, provider_conversation_id AS conversationId, bound_at AS boundAt' +
+      ' FROM kernel_attempt_session_bindings WHERE attempt_id=? AND task_id=?',
+    ).get(input.attemptId, input.taskId) as Row | undefined;
+    return row ? {
+      attemptId: String(row.attemptId), taskId: String(row.taskId),
+      sessionId: String(row.sessionId), generation: Number(row.generation),
+      conversationId: String(row.conversationId), boundAt: String(row.boundAt),
+    } : null;
+  }
+
+
   getFullTask(taskId: string, clientId: string): FullTaskRecord {
     return this.#database.transaction(() => {
       const task = this.#requireTask(taskId, clientId);
