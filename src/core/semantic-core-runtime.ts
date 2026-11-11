@@ -11,6 +11,7 @@ import type { SemanticTaskContext } from '../providers/semantic-adapter.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { TaskKernelRepository, type AttemptSessionBindingRecord } from '../storage/task-kernel-repository.ts';
 import { DurableTaskKernel, type ExactSendIntent } from './durable-task-kernel.ts';
+import { SemanticDecisionGateway } from './semantic-decision-gateway.ts';
 import { SemanticExactTaskPort } from './semantic-exact-task-port.ts';
 import type { TeamDirectory } from './team-directory.ts';
 
@@ -18,6 +19,7 @@ export interface SemanticCoreRuntime {
   readonly providers: SemanticProviderRegistry;
   readonly repository: TaskKernelRepository;
   readonly kernel: DurableTaskKernel;
+  readonly decisionGateway: SemanticDecisionGateway;
   readonly bindAttemptSession: (input: {
     taskId: string; clientId: string; attemptId: string;
     sessionId: string; generation: number; conversationId: string;
@@ -290,5 +292,9 @@ export function createSemanticCoreRuntime(input: {
       }),
     },
   })] : [];
-  return { providers, repository, kernel: new DurableTaskKernel(repository, ports), bindAttemptSession };
+  const decisionGateway = new SemanticDecisionGateway({
+    repository, providers, resolveContext,
+  });
+  return { providers, repository, kernel: new DurableTaskKernel(repository, ports),
+    decisionGateway, bindAttemptSession };
 }

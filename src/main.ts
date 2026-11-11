@@ -76,6 +76,7 @@ export interface CoreService {
   readonly semanticProviders: SemanticProviderRegistry;
   readonly semanticTaskRepository: TaskKernelRepository;
   readonly semanticTaskKernel: DurableTaskKernel;
+  readonly semanticDecisionGateway: SemanticCoreRuntime['decisionGateway'];
   readonly semanticTaskBindAttemptSession: SemanticCoreRuntime['bindAttemptSession'];
   readonly observationService: ObservationService;
   readonly thinkingFailureRecovery: ThinkingFailureRecovery;
@@ -210,6 +211,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   );
   const { providers: semanticProviders, repository: semanticTaskRepository,
     kernel: semanticTaskKernel,
+    decisionGateway: semanticDecisionGateway,
     bindAttemptSession: semanticTaskBindAttemptSession } = createSemanticCoreRuntime({
     database, browserOwner, pageRegistry, teamDirectory, pageMutationMutex,
     enabledProviders: config.enabledProviders, chatgptUrl: config.chatgptUrl,
@@ -501,6 +503,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     semanticProviders,
     semanticTaskRepository,
     semanticTaskKernel,
+    semanticDecisionGateway,
     semanticTaskBindAttemptSession,
     observationService,
     thinkingFailureRecovery,

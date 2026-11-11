@@ -488,25 +488,28 @@ test('Core accepts only the exact resolved question decision once', {
     });
     assert.equal(denied.kind, 'authorization_required');
     assert.equal(await page.evaluate(() => (window as any).applied), 0);
-    store.requireDecision({ taskId: 'decision-task', clientId,
-      decisionId: 'approved-choice', audience: 'agent', contextJson: makeContext() });
-    store.resolveDecision({ taskId: 'decision-task', clientId,
-      decisionId: 'approved-choice', resolutionJson: JSON.stringify({
-        kind: 'semantic_action', input: selected,
-      }) });
-    const applied = await adapter.act({
-      context: decisionContext, snapshotId: observation.snapshotId,
-      actionRef: action.actionRef, evidenceHash: action.evidenceHash,
-      input: selected, authorizedDecisionId: 'approved-choice',
+    // Production Core now publishes a durable agent packet rather than
+    // requiring the caller to hand-assemble provider selector evidence.
+    const packet = await core.semanticDecisionGateway.inspect({
+      taskId: 'decision-task', clientId, attemptId: 'decision-attempt',
     });
+    assert.equal(packet?.kind, 'provider_question');
+    assert.equal(packet?.humanOnly, false);
+    assert.deepEqual(core.semanticDecisionGateway.get('decision-task', clientId), packet);
+    assert.equal(packet?.options[0]?.purpose, 'answer_question');
+    assert.equal(packet?.options[0]?.inputSchema.kind, 'option');
+    const choice = {
+      taskId: 'decision-task', clientId, attemptId: 'decision-attempt',
+      requestId: 'approved-choice', decisionId: packet!.decisionId,
+      actionRef: packet!.options[0]!.actionRef, input: selected,
+    };
+    const applied = await core.semanticDecisionGateway.decide(choice);
     assert.deepEqual(applied, { kind: 'performed', effect: 'question_answered' });
     assert.equal(await page.evaluate(() => (window as any).applied), 1);
     assert.equal(store.getFullTask('decision-task', clientId).decisions
-      .find(d => d.decisionId === 'approved-choice')?.actionConsumed, true);
-    assert.equal((await adapter.act({ context: decisionContext,
-      snapshotId: observation.snapshotId, actionRef: action.actionRef,
-      evidenceHash: action.evidenceHash, input: selected,
-      authorizedDecisionId: 'approved-choice' })).kind, 'stale');
+      .find(d => d.decisionId === packet!.decisionId)?.actionConsumed, true);
+    assert.deepEqual(await core.semanticDecisionGateway.decide(choice),
+      { kind: 'previously_resolved', actionConsumed: true });
     assert.equal(await page.evaluate(() => (window as any).applied), 1);
     // Model disclosure and selection require two distinct durable decisions.
     // A question decision cannot silently authorize a model change.
