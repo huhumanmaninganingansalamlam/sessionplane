@@ -702,6 +702,46 @@ test('canonical ACK evidence separates no match and access rejection from a reco
   assert.equal(evidence.length, 3, 'successful recovery does not retain a new failure');
 });
 
+test('ChatGPT semantic FINAL uses the owned auth context after the page is gone', async () => {
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', userMessage('exact-user', 'exact-turn')),
+    node('answer-node', 'user-node', finalAssistant('exact-answer', 'Page-less canonical FINAL')),
+  ], 'answer-node');
+  let authReads = 0;
+  let detailReads = 0;
+  const contextIdentity = {};
+  const client: BackendJsonClient = {
+    authScope: contextIdentity,
+    async get(url) {
+      if (url.endsWith('/api/auth/session')) {
+        authReads++;
+        return { status: 200, headers: {}, body: { accessToken: 'synthetic-only' } };
+      }
+      detailReads++;
+      return { status: 200, headers: {}, body: payload };
+    },
+  };
+  const adapter = new ChatGptSemanticAdapter({
+    isExactLease: () => false,
+    resolvePage: () => { throw new Error('A missing page must never be reopened'); },
+    backendClientProvider: () => client,
+    backendOrigin: 'https://chatgpt.com',
+  });
+  assert.deepEqual(await adapter.recover({
+    kind: 'final',
+    context: {
+      projectId: 'project', slotId: 'main', slotRevision: 1, taskId: 'exact-task',
+      providerConversationId: CONVERSATION_ID,
+      submittedUserMessageId: 'exact-user', submittedUserTurnId: 'exact-turn',
+      pageLease: null,
+    },
+  }), {
+    kind: 'exact_final', externalTurnId: 'exact-turn', answerText: 'Page-less canonical FINAL',
+  }, 'recovery must not require the UI or a retained Page lease');
+  assert.equal(authReads, 1);
+  assert.equal(detailReads, 1);
+});
 test('ChatGPT semantic FINAL keeps backend 429 nonterminal and respects Retry-After', async () => {
   let now = 100_000;
   let detailReads = 0;

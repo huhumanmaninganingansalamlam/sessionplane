@@ -43,6 +43,8 @@ import { PageBindingRepository } from './storage/page-binding-repository.ts';
 import { ReceiptRepository } from './storage/receipt-repository.ts';
 import { RuntimeMetrics } from './telemetry/metrics.ts';
 import { ChatGptAdapter } from './providers/chatgpt/adapter.ts';
+import { ChatGptSemanticAdapter, chatGptBackendJsonClient } from './providers/chatgpt/semantic-adapter.ts';
+import { SemanticProviderRegistry } from './providers/semantic-provider-registry.ts';
 import { GeminiAdapter } from './providers/gemini/adapter.ts';
 import { GrokAdapter } from './providers/grok/adapter.ts';
 import {
@@ -69,6 +71,7 @@ export interface CoreService {
   readonly metrics: RuntimeMetrics;
   readonly pageBindings: PageBindingRepository;
   readonly providerAdapters: ProviderAdapterRegistry;
+  readonly semanticProviders: SemanticProviderRegistry;
   readonly observationService: ObservationService;
   readonly thinkingFailureRecovery: ThinkingFailureRecovery;
   readonly conversationLoadRecovery: ConversationLoadRecovery;
@@ -199,6 +202,37 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     configuredAdapters.filter((adapter) =>
       config.enabledProviders.includes(adapter.provider as ProviderName),
     ),
+  );
+  // Compose the new semantic provider in the Core that owns the page registry
+  // and authenticated Chrome context. It does not launch a second browser or
+  // publish a competing writer while the legacy RPC path remains installed.
+  const semanticProviders = new SemanticProviderRegistry(
+    config.enabledProviders.includes('chatgpt') ? [
+      new ChatGptSemanticAdapter({
+        isExactLease: (identity) => {
+          try {
+            const binding = pageRegistry.getBinding(identity.pageKey);
+            const session = binding.sessionId === null ? null : teamDirectory.getSession(binding.sessionId);
+            return binding.state === 'owned' &&
+              binding.targetId === identity.targetId &&
+              binding.bindingEpoch === identity.bindingEpoch &&
+              binding.conversationId !== null &&
+              session?.teamId === identity.projectId &&
+              session.roleKey === identity.slotId &&
+              session.provider === 'chatgpt' &&
+              session.pageKey === binding.pageKey &&
+              session.conversationId === binding.conversationId &&
+              session.generation === binding.generation;
+          } catch { return false; }
+        },
+        resolvePage: identity => pageRegistry.pageForObservation(identity.pageKey, identity.bindingEpoch),
+        backendClientProvider: () => {
+          if (browserOwner === null) throw new Error('Owned browser context unavailable');
+          return chatGptBackendJsonClient(browserOwner.recoveryRequestContext());
+        },
+        backendOrigin: new URL(config.chatgptUrl).origin,
+      }),
+    ] : [],
   );
   const probeCoordinator = new ProbeCoordinator({
     database,
@@ -484,6 +518,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     metrics,
     pageBindings,
     providerAdapters,
+    semanticProviders,
     observationService,
     thinkingFailureRecovery,
     conversationLoadRecovery,

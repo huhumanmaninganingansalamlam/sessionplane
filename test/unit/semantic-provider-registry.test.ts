@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { resolveConfig } from '../../src/config.ts';
+import { startCore } from '../../src/main.ts';
 
 import { ChatGptSemanticAdapter } from '../../src/providers/chatgpt/semantic-adapter.ts';
 import { SemanticProviderRegistry } from '../../src/providers/semantic-provider-registry.ts';
@@ -75,4 +80,35 @@ test('ChatGPT B-first and future browserless providers share a capability-negoti
   });
   assert.throws(() => new SemanticProviderRegistry([chatgpt, chatgpt]),
     /Duplicate semantic provider/);
+});
+test('Core composes the semantic ChatGPT provider without launching a separate browser', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sessionplane-semantic-composition-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  let core: Awaited<ReturnType<typeof startCore>> | null = null;
+  try {
+    core = await startCore({
+      config, startBrowser: false,
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
+    });
+    assert.equal(core.browserOwner, null);
+    assert.equal(core.pageRegistry.listBindings().length, 0);
+    const provider = core.semanticProviders.resolve('chatgpt', 'conversation');
+    assert.equal(provider.kind, 'available',
+      'normal Core composition must actually register the new semantic adapter');
+    if (provider.kind !== 'available') throw new Error('semantic provider unregistered');
+    assert.equal(provider.adapter.capabilities.contractVersion, 1);
+    assert.deepEqual(await provider.adapter.recover({
+      kind: 'final',
+      context: {
+        projectId: 'project', slotId: 'main', slotRevision: 1, taskId: 'task',
+        providerConversationId: 'conversation', submittedUserMessageId: 'user',
+        submittedUserTurnId: 'turn', pageLease: null,
+      },
+    }), { kind: 'unavailable', reason: 'backend-transport-unavailable' },
+    'without an owned browser, recovery must not invent a profile or backend identity');
+    assert.equal(core.pageRegistry.listBindings().length, 0);
+  } finally {
+    await core?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

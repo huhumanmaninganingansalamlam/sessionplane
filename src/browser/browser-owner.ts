@@ -14,7 +14,7 @@ import {
 import { createServer } from 'node:net';
 import path from 'node:path';
 
-import { chromium, type Browser, type BrowserContext, type CDPSession, type Page } from 'playwright-core';
+import { chromium, type APIRequestContext, type Browser, type BrowserContext, type CDPSession, type Page } from 'playwright-core';
 
 import {
   findHostBrowser,
@@ -163,6 +163,12 @@ export class BrowserOwner {
   }
 
   get teamGroupsBusy(): boolean { return this.#groupSync !== null; }
+  /** Reuse the current dedicated profile for page-less authenticated recovery.
+   * This is an internal GET transport, not a tab or a second browser owner.
+   */
+  recoveryRequestContext(): APIRequestContext {
+    return this.#requireContext().request;
+  }
 
   async syncTeamGroups(): Promise<void> {
     this.#scheduleGroups();

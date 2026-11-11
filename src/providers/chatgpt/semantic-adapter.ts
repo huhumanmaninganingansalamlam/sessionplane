@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { ElementHandle, Page, Request } from 'playwright-core';
+import type { APIRequestContext, ElementHandle, Page, Request } from 'playwright-core';
 
 import { PageOperationGate } from '../../browser/page-operation-gate.ts';
 import type { OwnedPageIdentity } from '../../browser/owned-page-lifecycle.ts';
@@ -73,6 +73,8 @@ export interface ChatGptSemanticAdapterOptions {
   readonly allowedPageOrigins?: readonly string[];
   readonly backendOrigin?: string;
   readonly backendClient?: BackendJsonClient;
+  /** Rebind to the current Core-owned auth context when a page is missing. */
+  readonly backendClientProvider?: () => BackendJsonClient | Promise<BackendJsonClient>;
   readonly backendRecovery?: ChatGptBackendRecovery;
   /** Synchronous durable callback on the exact page POST, before an ACK probe.
    * It must never send, modify the UI, or log the message content.
@@ -722,9 +724,11 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     let client: BackendJsonClient;
     let origin: string;
     try {
-      client = this.#options.backendClient ?? await this.#pageBackendClient(id);
+      client = this.#options.backendClient ??
+        (this.#options.backendClientProvider
+          ? await this.#options.backendClientProvider() : await this.#pageBackendClient(id));
       origin = this.#options.backendOrigin ??
-        (this.#options.backendClient ? 'https://chatgpt.com'
+        (this.#options.backendClient || this.#options.backendClientProvider ? 'https://chatgpt.com'
           : new URL((await this.#exactPage(id)).page.url()).origin);
     } catch {
       return { kind: 'unavailable', reason: 'backend-transport-unavailable' };
@@ -783,22 +787,28 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
 
   async #pageBackendClient(context: SemanticTaskContext): Promise<BackendJsonClient> {
     const { page } = await this.#exactPage(context);
-    const browserContext = page.context();
-    return {
-      authScope: browserContext,
-      async get(url, options) {
-        const response = await browserContext.request.get(url, {
-          failOnStatusCode: false,
-          ...(options.headers ? { headers: { ...options.headers } } : {}),
-          timeout: options.timeoutMs,
-        });
-        try {
-          return { status: response.status(), headers: response.headers(),
-            body: await response.json().catch(() => null) };
-        } finally { await response.dispose(); }
-      },
-    };
+    return chatGptBackendJsonClient(page.context().request);
   }
+}
+
+/** GET-only transport bound to the current authenticated BrowserContext.
+ * A replaced request context gets a different auth scope without any Page.
+ */
+export function chatGptBackendJsonClient(request: APIRequestContext): BackendJsonClient {
+  return {
+    authScope: request,
+    async get(url, options) {
+      const response = await request.get(url, {
+        failOnStatusCode: false,
+        ...(options.headers ? { headers: { ...options.headers } } : {}),
+        timeout: options.timeoutMs,
+      });
+      try {
+        return { status: response.status(), headers: response.headers(),
+          body: await response.json().catch(() => null) };
+      } finally { await response.dispose(); }
+    },
+  };
 }
 
 /** Uses the existing exact stream-error guard in read-only mode. It checks
