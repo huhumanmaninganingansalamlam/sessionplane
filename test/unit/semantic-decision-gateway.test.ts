@@ -31,6 +31,8 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
   observed = 0;
   clicks = 0;
   currentActionRef: string | null = null;
+  throwAfterConsume = false;
+  holdAction: Promise<void> | null = null;
 
   constructor(store: TaskKernelRepository) { this.store = store; }
 
@@ -98,6 +100,8 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
       return { kind: 'authorization_required', reason: 'unconsumed-decision' };
     }
     this.clicks++;
+    if (this.throwAfterConsume) throw new Error('Injected crash after durable action consumption');
+    if (this.holdAction) await this.holdAction;
     return { kind: 'performed', effect: this.mode === 'model'
       ? 'model_menu_opened' : 'question_answered' };
   }
@@ -184,7 +188,7 @@ test('agent question persists, rejects disabled options and consumes one exact t
   assert.equal(adapter.clicks, 1);
   assert.equal(env.store.getTask('task-1', 'alice').state, 'working');
   assert.deepEqual(await gateway.decide({ ...request, input: 'Proceed' }),
-    { kind: 'previously_resolved', actionConsumed: true });
+    { kind: 'performed', effect: 'question_answered' });
   assert.equal(adapter.clicks, 1);
   await assert.rejects(gateway.decide({ ...request,
     requestId: 'different-request', input: 'Proceed' }), /different request/);
@@ -310,4 +314,147 @@ test('model choices require explicit inspection; unrelated idle chat does not cr
     decisionId: packet.decisionId, actionRef: packet.options[0]!.actionRef,
     requestId: 'open-model',
   }), { kind: 'performed', effect: 'model_menu_opened' });
+});
+
+test('replayed successful decision returns its exact durable effect after Core reopen', async t => {
+  const env = fixture(t);
+  const adapter = new FakeSemanticAdapter(env.store);
+  const gateway = env.getGateway(adapter);
+  const packet = (await gateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+  }))!;
+  const request = {
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    decisionId: packet.decisionId, requestId: 'exact-request',
+    actionRef: packet.options[0]!.actionRef, input: 'Proceed',
+  };
+  assert.deepEqual(await gateway.decide(request),
+    { kind: 'performed', effect: 'question_answered' });
+  assert.equal(adapter.clicks, 1);
+  env.reopen();
+  const fresh = new FakeSemanticAdapter(env.store);
+  const resumed = env.getGateway(fresh);
+  assert.deepEqual(await resumed.decide(request),
+    { kind: 'performed', effect: 'question_answered' },
+    'idempotent replay must return the original durable success, not a generic resolved marker');
+  assert.equal(fresh.clicks, 0, 'replay cannot run a provider action again');
+  assert.equal(env.store.getFullTask('task-1', 'alice').events
+    .filter(event => event.event.type === 'decision.outcome_recorded').length, 1);
+});
+
+test('resolved decision with no effect receipt is uncertain, even after restart', async t => {
+  const env = fixture(t);
+  const adapter = new FakeSemanticAdapter(env.store);
+  const gateway = env.getGateway(adapter);
+  const packet = (await gateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+  }))!;
+  const request = {
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    decisionId: packet.decisionId, requestId: 'crashed-after-reservation',
+    actionRef: packet.options[0]!.actionRef, input: 'Proceed',
+  };
+  env.store.resolveDecision({
+    taskId: request.taskId, clientId: request.clientId, decisionId: request.decisionId,
+    resolutionJson: JSON.stringify({
+      kind: 'semantic_action', requestId: request.requestId,
+      actionRef: request.actionRef, input: request.input,
+    }),
+  });
+  env.reopen();
+  const resumedAdapter = new FakeSemanticAdapter(env.store);
+  const resumed = env.getGateway(resumedAdapter);
+  assert.deepEqual(await resumed.decide(request),
+    { kind: 'uncertain', reason: 'decision-effect-receipt-pending' },
+    'durable reservation is not proof that the provider acted');
+  assert.equal(resumedAdapter.clicks, 0);
+  assert.equal(env.store.getFullTask('task-1', 'alice').decisions[0]?.actionConsumed, false);
+});
+
+test('concurrent matching decide calls execute once and never claim premature success', async t => {
+  const env = fixture(t);
+  const adapter = new FakeSemanticAdapter(env.store);
+  const gateway = env.getGateway(adapter);
+  const packet = (await gateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+  }))!;
+  const request = {
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    decisionId: packet.decisionId, requestId: 'concurrent-request',
+    actionRef: packet.options[0]!.actionRef, input: 'Proceed',
+  };
+  let finish!: () => void;
+  adapter.holdAction = new Promise<void>(resolve => { finish = resolve; });
+  const first = gateway.decide(request);
+  assert.equal(adapter.clicks, 1, 'the first request reserved the exact action');
+  assert.deepEqual(await gateway.decide(request),
+    { kind: 'uncertain', reason: 'decision-effect-receipt-pending' },
+    'a concurrent duplicate must not claim success before the effect is known');
+  assert.equal(adapter.clicks, 1);
+  finish();
+  assert.deepEqual(await first, { kind: 'performed', effect: 'question_answered' });
+  assert.deepEqual(await gateway.decide(request),
+    { kind: 'performed', effect: 'question_answered' });
+  assert.equal(adapter.clicks, 1);
+});
+
+test('provider error after durable consumption persists uncertain receipt without replay', async t => {
+  const env = fixture(t);
+  const adapter = new FakeSemanticAdapter(env.store);
+  adapter.throwAfterConsume = true;
+  const gateway = env.getGateway(adapter);
+  const packet = (await gateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+  }))!;
+  const request = {
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    decisionId: packet.decisionId, requestId: 'provider-throws',
+    actionRef: packet.options[0]!.actionRef, input: 'Proceed',
+  };
+  const first = await gateway.decide(request);
+  assert.deepEqual(first, { kind: 'uncertain', reason: 'semantic-decision-effect-unverified' });
+  assert.equal(adapter.clicks, 1);
+  env.reopen();
+  const reopened = new FakeSemanticAdapter(env.store);
+  assert.deepEqual(await env.getGateway(reopened).decide(request), first);
+  assert.equal(reopened.clicks, 0);
+});
+
+test('a changed unconsumed provider action yields exactly one fresh durable packet', async t => {
+  const env = fixture(t);
+  const adapter = new FakeSemanticAdapter(env.store);
+  const gateway = env.getGateway(adapter);
+  const packet = (await gateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+  }))!;
+  const request = {
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    decisionId: packet.decisionId, requestId: 'now-stale',
+    actionRef: packet.options[0]!.actionRef, input: 'Proceed',
+  };
+  adapter.currentActionRef = 'different-action';
+  const first = await gateway.decide(request);
+  assert.equal(first.kind, 'refresh_required');
+  if (first.kind !== 'refresh_required') throw new Error('Expected fresh packet');
+  assert.notEqual(first.packet?.decisionId, packet.decisionId);
+  assert.equal(adapter.clicks, 0);
+  assert.deepEqual(await gateway.decide(request), first,
+    'the same request receives its exact persisted refresh outcome');
+  assert.equal(adapter.observed, 2, 'replay must not inspect provider a third time');
+});
+
+test('decision refuses a mismatched attempt before consuming its one-shot action', async t => {
+  const env = fixture(t);
+  const adapter = new FakeSemanticAdapter(env.store);
+  const gateway = env.getGateway(adapter);
+  const packet = (await gateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+  }))!;
+  await assert.rejects(gateway.decide({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'foreign-attempt',
+    decisionId: packet.decisionId, requestId: 'wrong-attempt',
+    actionRef: packet.options[0]!.actionRef, input: 'Proceed',
+  }), /attempt/i);
+  assert.equal(adapter.clicks, 0);
+  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
 });

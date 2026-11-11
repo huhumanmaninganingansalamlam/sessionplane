@@ -33,6 +33,7 @@ export type TaskEvent =
   | { readonly type: 'decision.required'; readonly decisionId: string; readonly audience: DecisionAudience }
   | { readonly type: 'decision.resolved'; readonly decisionId: string }
   | { readonly type: 'decision.action_consumed'; readonly decisionId: string }
+  | { readonly type: 'decision.outcome_recorded'; readonly decisionId: string }
   | { readonly type: 'turn.final'; readonly attemptId: string; readonly completeTask: boolean }
   | { readonly type: 'cancel.requested' }
   | { readonly type: 'cancel.confirmed' }
@@ -110,6 +111,7 @@ export function reduceTaskProjection(
     case 'timer.scheduled':
     case 'timer.fired':
     case 'decision.action_consumed':
+    case 'decision.outcome_recorded':
     case 'attempt.dispatch_evidence_recorded':
     case 'observation.deferred':
       return current;

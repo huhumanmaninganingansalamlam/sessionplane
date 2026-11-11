@@ -550,7 +550,7 @@ test('Core accepts only the exact resolved question decision once', {
     assert.equal(store.getFullTask('decision-task', clientId).decisions
       .find(d => d.decisionId === packet!.decisionId)?.actionConsumed, true);
     assert.deepEqual(await core.semanticDecisionGateway.decide(choice),
-      { kind: 'previously_resolved', actionConsumed: true });
+      { kind: 'performed', effect: 'question_answered' });
     assert.equal(await page.evaluate(() => (window as any).applied), 1);
     // Model disclosure and selection require two distinct durable decisions.
     // A question decision cannot silently authorize a model change.

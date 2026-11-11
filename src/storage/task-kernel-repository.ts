@@ -918,6 +918,62 @@ export class TaskKernelRepository {
     });
   }
 
+  /**
+   * Record the externally observed decision effect as an idempotent receipt.
+   * The initial resolution reserves the one-shot action; after a crash before
+   * this receipt, the caller must see uncertainty rather than fabricated
+   * success. Store the outcome and Task revision atomically.
+   */
+  recordDecisionOutcome(input: {
+    taskId: string; clientId: string; decisionId: string;
+    requestId: string; actionRef: string; inputValue: string | null;
+    outcomeJson: string;
+  }): DecisionRecord {
+    return this.#database.transaction(() => {
+      const task = this.#requireTask(input.taskId, input.clientId);
+      const decision = this.#requireDecision(input.decisionId, task.taskId);
+      if (decision.status !== 'resolved' || decision.resolutionJson === null) {
+        throw new Error('Only an exact resolved decision can record an outcome');
+      }
+      const receipt = JSON.parse(decision.resolutionJson) as Record<string, unknown>;
+      if (receipt.kind !== 'semantic_action' ||
+          receipt.requestId !== input.requestId ||
+          receipt.actionRef !== input.actionRef ||
+          receipt.input !== input.inputValue) {
+        throw new Error('Decision outcome request identity conflict');
+      }
+      if (Buffer.byteLength(input.outcomeJson, 'utf8') > 24 * 1024) {
+        throw new Error('Decision outcome receipt exceeds bound');
+      }
+      const outcome: unknown = JSON.parse(input.outcomeJson);
+      if (!outcome || typeof outcome !== 'object' ||
+          Array.isArray(outcome) ||
+          !['performed', 'uncertain', 'refresh_required'].includes(
+            (outcome as { kind?: unknown }).kind as string)) {
+        throw new Error('Invalid decision outcome receipt');
+      }
+      if (receipt.outcome !== undefined) {
+        if (JSON.stringify(receipt.outcome) !== JSON.stringify(outcome)) {
+          throw new Error('Conflicting exact decision outcome receipt');
+        }
+        return decision;
+      }
+      if ((outcome as { kind: string }).kind === 'performed' && !decision.actionConsumed) {
+        throw new Error('Unconsumed decision cannot record a performed effect');
+      }
+      const updated = JSON.stringify({ ...receipt, outcome });
+      const result = this.#database.raw.prepare(
+        "UPDATE kernel_decisions SET resolution_json=? WHERE decision_id=?" +
+        " AND status='resolved' AND resolution_json=?",
+      ).run(updated, input.decisionId, decision.resolutionJson);
+      if (result.changes !== 1) {
+        throw new Error('Concurrent decision outcome identity changed');
+      }
+      this.#appendEvent(task, { type: 'decision.outcome_recorded', decisionId: input.decisionId });
+      return this.#requireDecision(input.decisionId, task.taskId);
+    });
+  }
+
   consumeDecisionAction(taskId: string, clientId: string, decisionId: string): boolean {
     return this.#database.transaction(() => {
       const task = this.#requireTask(taskId, clientId);

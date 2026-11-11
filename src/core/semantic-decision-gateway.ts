@@ -46,6 +46,7 @@ export interface AgentDecisionPacket {
 interface StoredDecision {
   readonly kind: 'semantic_action';
   readonly context: SemanticTaskContext;
+  readonly attemptId: string;
   readonly purpose: SemanticActionPurpose | null;
   readonly snapshotId: string | null;
   readonly actionRef: string | null;
@@ -55,7 +56,6 @@ interface StoredDecision {
 
 export type AgentDecisionOutcome =
   | { readonly kind: 'performed'; readonly effect: string }
-  | { readonly kind: 'previously_resolved'; readonly actionConsumed: boolean }
   | { readonly kind: 'refresh_required'; readonly packet: AgentDecisionPacket | null }
   | { readonly kind: 'uncertain'; readonly reason: string };
 
@@ -112,6 +112,39 @@ function storedContext(value: string): StoredDecision {
     throw new Error('Invalid durable semantic decision envelope');
   }
   return parsed as StoredDecision;
+}
+
+function replayDecisionOutcome(
+  resolutionJson: string | null,
+  input: { requestId: string; actionRef: string; inputValue: string | null },
+): AgentDecisionOutcome {
+  const value: unknown = resolutionJson === null ? null : JSON.parse(resolutionJson);
+  if (!value || typeof value !== 'object') {
+    throw new Error('Decision already resolved by a different request');
+  }
+  const receipt = value as Record<string, unknown>;
+  if (receipt.kind !== 'semantic_action' || receipt.requestId !== input.requestId ||
+      receipt.actionRef !== input.actionRef || receipt.input !== input.inputValue) {
+    throw new Error('Decision already resolved by a different request');
+  }
+  // The decision grant is irreversibly reserved before the adapter acts.
+  // Neither a consumed bit nor the resolution alone proves its effect.
+  const recorded = receipt.outcome;
+  if (!recorded || typeof recorded !== 'object') {
+    return { kind: 'uncertain', reason: 'decision-effect-receipt-pending' };
+  }
+  const outcome = recorded as Record<string, unknown>;
+  if (outcome.kind === 'performed' && typeof outcome.effect === 'string') {
+    return { kind: 'performed', effect: outcome.effect };
+  }
+  if (outcome.kind === 'uncertain' && typeof outcome.reason === 'string') {
+    return { kind: 'uncertain', reason: outcome.reason };
+  }
+  if (outcome.kind === 'refresh_required' &&
+      (outcome.packet === null || (outcome.packet && typeof outcome.packet === 'object'))) {
+    return { kind: 'refresh_required', packet: outcome.packet as AgentDecisionPacket | null };
+  }
+  throw new Error('Invalid persisted decision outcome');
 }
 
 /**
@@ -225,7 +258,7 @@ export class SemanticDecisionGateway {
     }
     const actionable = packet.options.length === 1 ? packet.options[0]! : null;
     const envelope: StoredDecision = {
-      kind: 'semantic_action', context,
+      kind: 'semantic_action', context, attemptId: input.attemptId,
       purpose: actionable?.purpose ?? null,
       snapshotId: packet.snapshotId,
       actionRef: actionable?.actionRef ?? null,
@@ -275,18 +308,15 @@ export class SemanticDecisionGateway {
     const decision = full.decisions.find(row => row.decisionId === input.decisionId);
     if (!decision) throw new Error('Unknown decision identity');
     const stored = storedContext(decision.contextJson);
+    if (stored.attemptId !== input.attemptId ||
+        !full.attempts.some(attempt => attempt.attemptId === input.attemptId)) {
+      throw new Error('Decision belongs to another exact attempt');
+    }
     const normalized = input.input ?? null;
     if (decision.status === 'resolved') {
-      const original: unknown = decision.resolutionJson === null ? null
-        : JSON.parse(decision.resolutionJson);
-      if (original && typeof original === 'object') {
-        const receipt = original as Record<string, unknown>;
-        if (receipt.kind === 'semantic_action' && receipt.requestId === input.requestId &&
-            receipt.actionRef === input.actionRef && receipt.input === normalized) {
-          return { kind: 'previously_resolved', actionConsumed: decision.actionConsumed };
-        }
-      }
-      throw new Error('Decision already resolved by a different request');
+      return replayDecisionOutcome(decision.resolutionJson, {
+        requestId: input.requestId, actionRef: input.actionRef, inputValue: normalized,
+      });
     }
     if (decision.status !== 'pending' || full.task.pendingDecisionId !== input.decisionId ||
         full.task.cancelRequested) throw new Error('Decision is not pending on this Task');
@@ -315,13 +345,26 @@ export class SemanticDecisionGateway {
         (provider.adapter.capabilities.browserRequired && stored.context.pageLease === null)) {
       throw new Error('Executable decision provider/page is unavailable');
     }
-    this.#repository.resolveDecision({
-      taskId: input.taskId, clientId: input.clientId, decisionId: input.decisionId,
-      resolutionJson: JSON.stringify({
-        kind: 'semantic_action', requestId: input.requestId,
-        actionRef: input.actionRef, input: normalized,
-      }),
-    });
+    try {
+      this.#repository.resolveDecision({
+        taskId: input.taskId, clientId: input.clientId, decisionId: input.decisionId,
+        resolutionJson: JSON.stringify({
+          kind: 'semantic_action', requestId: input.requestId,
+          actionRef: input.actionRef, input: normalized,
+        }),
+      });
+    } catch (error) {
+      // Concurrent matching callers may race at this exact SQLite reservation.
+      // The loser can only replay/read the committed receipt, never act again.
+      const current = this.#repository.getFullTask(input.taskId, input.clientId)
+        .decisions.find(row => row.decisionId === input.decisionId);
+      if (current?.status === 'resolved') {
+        return replayDecisionOutcome(current.resolutionJson, {
+          requestId: input.requestId, actionRef: input.actionRef, inputValue: normalized,
+        });
+      }
+      throw error;
+    }
     let result: SemanticActResult;
     try {
       result = await provider.adapter.act({
@@ -335,23 +378,44 @@ export class SemanticDecisionGateway {
     }
     const accepted = this.#repository.getFullTask(input.taskId, input.clientId)
       .decisions.find(row => row.decisionId === input.decisionId);
+    let outcome: AgentDecisionOutcome;
     if (result.kind === 'performed' && accepted?.actionConsumed) {
-      return { kind: 'performed', effect: result.effect };
-    }
-    if (accepted?.actionConsumed || result.kind === 'uncertain' ||
+      outcome = { kind: 'performed', effect: result.effect };
+    } else if (accepted?.actionConsumed || result.kind === 'uncertain' ||
         result.kind === 'dispatched_unverified') {
       const reason = result.kind === 'uncertain' ? boundedReason(result.reason) :
         'semantic-decision-effect-unverified';
-      this.#repository.recordObservationDeferred(input.taskId, input.clientId,
-        'decision:' + input.decisionId + ':uncertain:' + reason);
-      return { kind: 'uncertain', reason };
+      outcome = { kind: 'uncertain', reason };
+    } else {
+      // No durable consumption: never replay this action. The new snapshot
+      // receives a distinct decisionId and a fresh provider action reference.
+      try {
+        const packet = await this.inspect({
+          taskId: input.taskId, clientId: input.clientId, attemptId: input.attemptId,
+          modelChoice: stored.packet.kind === 'model_choice',
+        });
+        outcome = { kind: 'refresh_required', packet };
+      } catch {
+        outcome = { kind: 'uncertain', reason: 'decision-refresh-unavailable' };
+      }
     }
-    // No durable action consumption: nothing was authorized to click. A fresh
-    // packet can be issued without replaying the old action or user prompt.
-    const packet = await this.inspect({
-      taskId: input.taskId, clientId: input.clientId, attemptId: input.attemptId,
-      modelChoice: stored.packet.kind === 'model_choice',
-    });
-    return { kind: 'refresh_required', packet };
+    try {
+      this.#repository.recordDecisionOutcome({
+        taskId: input.taskId, clientId: input.clientId, decisionId: input.decisionId,
+        requestId: input.requestId, actionRef: input.actionRef, inputValue: normalized,
+        outcomeJson: JSON.stringify(outcome),
+      });
+    } catch {
+      // The external effect might have happened even if this final SQLite
+      // receipt could not commit. Never fabricate a success or repeat it.
+      return { kind: 'uncertain', reason: 'decision-outcome-receipt-unavailable' };
+    }
+    if (outcome.kind === 'uncertain') {
+      try {
+        this.#repository.recordObservationDeferred(input.taskId, input.clientId,
+          'decision:' + input.decisionId + ':uncertain:' + outcome.reason);
+      } catch { /* The outcome receipt above is already durable. */ }
+    }
+    return outcome;
   }
 }
