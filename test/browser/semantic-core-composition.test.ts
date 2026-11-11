@@ -22,6 +22,8 @@ test('Core-assembled semantic ChatGPT sends once, persists exact ACK and FINAL w
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   });
   try {
+    assert.equal(core.semanticProviders.resolve('chatgpt', 'permission').kind, 'available',
+      'a provider can report a scoped permission without granting it');
     const team = core.teamDirectory.createTeam({ clientId: 'fixture-alice' });
     const roleKey = team.primaryRoleKey;
     const session = core.teamDirectory.createSession({

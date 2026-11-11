@@ -106,7 +106,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
   readonly providerKey = 'chatgpt';
   readonly capabilities = Object.freeze({
     providerKey: 'chatgpt', browserRequired: true, contractVersion: 1 as const,
-    supports: ['conversation', 'question', 'continuation', 'model_choice'] as const,
+    supports: ['conversation', 'question', 'permission', 'continuation', 'model_choice'] as const,
   });
   readonly #options: ChatGptSemanticAdapterOptions;
   readonly #gate: PageOperationGate;

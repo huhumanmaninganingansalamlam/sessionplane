@@ -1535,6 +1535,7 @@ test('ChatGPT permission facts do not outlive their exact user turn during obser
     const task = context(lease, 'user-b');
     const fresh = await adapter.observe(task);
     assert.equal(fresh.blocker, 'provider_permission');
+    assert.ok(fresh.capabilityManifest.supports.includes('permission'));
     assert.equal(fresh.actions.length, 0);
     assert.equal(fresh.permission?.canGrant, false);
     advanceDuringPermission = true;
