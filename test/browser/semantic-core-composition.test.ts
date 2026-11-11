@@ -1067,6 +1067,7 @@ test('public task.start uses Core-owned verified existing conversation for one i
         provider: 'chatgpt', surfaceIntent: 'chat',
       }, timeoutMs: 10_000,
     });
+    assert.equal(project.modelIntent, 'Pro', 'ChatGPT projects default to Pro intent');
     const task = await callRpc<any>({
       socketPath: config.socketPath, method: 'task.start',
       params: {
@@ -1140,7 +1141,13 @@ test('public task.start uses Core-owned verified existing conversation for one i
         '<section data-chatgpt-composer>' +
         '<div id="prompt-textarea" role="textbox" contenteditable="true"></div>' +
         '<button data-testid="send-button" type="button">Send</button>' +
-        '</section></main><script>' +
+        '</section>' +
+        '<button id="model-trigger" aria-label="Model" aria-haspopup="menu" ' +
+        'aria-controls="model-menu" aria-expanded="true" type="button">Pro</button>' +
+        '<div id="model-menu" role="menu">' +
+        '<button role="menuitemradio" aria-checked="false">Default</button>' +
+        '<button role="menuitemradio" aria-checked="true">Pro</button></div>' +
+        '</main><script>' +
         'window.sends=0;document.querySelector("button").onclick=()=>{' +
         'const editor=document.querySelector("#prompt-textarea");' +
         'window.sends++;fetch("/backend-api/f/conversation",{method:"POST",' +

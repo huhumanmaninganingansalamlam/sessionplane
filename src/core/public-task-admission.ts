@@ -93,7 +93,12 @@ export class PublicTaskAdmissionService {
 
   openProject(input: PublicProjectInput): PublicProjectMapping {
     const key = normalizedKey(input.projectKey);
-    const model = input.modelIntent?.trim() || null;
+    // The public product contract defaults ChatGPT projects to Pro, not an
+    // unspecified model which could silently inherit another UI selection.
+    const requested = input.modelIntent?.trim() || null;
+    const model = requested === null
+      ? (input.provider === 'chatgpt' ? 'Pro' : null)
+      : requested.toLowerCase() === 'pro' ? 'Pro' : requested;
     const payloadHash = hash([
       key, input.displayName, input.provider, input.surfaceIntent, model,
     ]);

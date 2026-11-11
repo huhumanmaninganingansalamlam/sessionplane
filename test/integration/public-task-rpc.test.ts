@@ -203,7 +203,7 @@ test('project.open is owner-scoped and persists one canonical Main identity and 
   assert.equal(first.mainConversationSlotId, 'main');
   assert.equal(first.conversationRevision, 1);
   assert.equal(first.provider, 'chatgpt');
-  assert.equal(first.modelIntent, 'pro');
+  assert.equal(first.modelIntent, 'Pro', 'public Pro intent is canonicalized');
   assert.equal(first.currentTaskId, null);
   const repeated = await rpc<any>('project.open', {
     clientId: 'alice', requestId: 'open-project-1',
