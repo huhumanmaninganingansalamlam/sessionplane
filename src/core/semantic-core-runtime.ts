@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import type { BrowserOwner } from '../browser/browser-owner.ts';
 import type { OwnedPageIdentity } from '../browser/owned-page-lifecycle.ts';
 import type { PageMutationMutex } from '../browser/page-mutex.ts';
+import type { ChatGptBackendRecovery, BackendJsonClient } from '../providers/chatgpt/backend-recovery.ts';
 import type { PageRegistry } from '../browser/page-registry.ts';
 import { ChatGptSemanticAdapter, chatGptBackendJsonClient } from '../providers/chatgpt/semantic-adapter.ts';
 import { SemanticProviderRegistry } from '../providers/semantic-provider-registry.ts';
@@ -31,6 +32,8 @@ export function createSemanticCoreRuntime(input: {
   readonly pageMutationMutex: PageMutationMutex;
   readonly enabledProviders: readonly string[];
   readonly chatgptUrl: string;
+  readonly backendClientProvider?: () => BackendJsonClient | Promise<BackendJsonClient>;
+  readonly backendRecovery?: ChatGptBackendRecovery;
 }): SemanticCoreRuntime {
   const repository = new TaskKernelRepository(input.database);
   const activeTask = (identity: OwnedPageIdentity) => {
@@ -119,6 +122,7 @@ export function createSemanticCoreRuntime(input: {
   };
   const providers = new SemanticProviderRegistry(input.enabledProviders.includes('chatgpt') ? [
     new ChatGptSemanticAdapter({
+      ...(input.backendRecovery ? { backendRecovery: input.backendRecovery } : {}),
       isExactLease,
       resolvePage: identity => input.pageRegistry.pageForObservation(identity.pageKey, identity.bindingEpoch),
       pageMutationMutex: input.pageMutationMutex,
@@ -128,10 +132,10 @@ export function createSemanticCoreRuntime(input: {
         if (!clientId) throw new Error('Dispatch task owner unavailable');
         repository.recordDispatchEvidence({ taskId: context.taskId, clientId, attemptId, evidence });
       },
-      backendClientProvider: () => {
+      backendClientProvider: input.backendClientProvider ?? (() => {
         if (input.browserOwner === null) throw new Error('Owned browser context unavailable');
         return chatGptBackendJsonClient(input.browserOwner.recoveryRequestContext());
-      },
+      }),
       backendOrigin: new URL(input.chatgptUrl).origin,
     }),
   ] : []);
