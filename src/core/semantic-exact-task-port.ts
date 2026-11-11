@@ -112,6 +112,18 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
           (context.submittedUserMessageId === null || context.submittedUserTurnId === null)) {
         return { kind: 'unavailable', reason: 'continuation-exact-turn-not-ready' };
       }
+      if (this.#adapter.capabilities.browserRequired) {
+        // Observe only. Existing provider questions, permission cards, retry
+        // barriers and active streams are known BEFORE beginDispatch; the
+        // subsequent sendOnce must obtain a fresh observation independently.
+        const observation = await this.#adapter.observe(context);
+        if (!isConversationObservation(observation, this.#adapter)) {
+          return { kind: 'unavailable', reason: 'semantic-preflight-capability-unverified' };
+        }
+        if (observation.blocker !== 'none' || observation.progress === 'streaming') {
+          return { kind: 'unavailable', reason: 'semantic-preflight-blocked-or-generating' };
+        }
+      }
       return { kind: 'ready' };
     } catch {
       return { kind: 'unavailable', reason: 'semantic-context-unavailable' };

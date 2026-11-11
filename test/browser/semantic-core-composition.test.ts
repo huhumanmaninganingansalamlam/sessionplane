@@ -137,6 +137,35 @@ test('Core-assembled semantic ChatGPT sends once, persists exact ACK and FINAL w
       sessionId: session.sessionId, generation: 1, conversationId: 'core-conv',
     });
     assert.equal(attemptBinding.generation, 1);
+    // A provider-owned question can arrive before any send. The same planned
+    // attempt must survive until the blocker is resolved: no POST happened.
+    await page.locator('main').evaluate(main => {
+      const panel = document.createElement('section');
+      panel.setAttribute('data-codex-composer-request-navigation', 'true');
+      panel.setAttribute('data-user-input-auto-resolution', 'true');
+      panel.innerHTML = '<h3>Provider choice pending</h3>' +
+        '<div role="radiogroup"><button type="button" role="radio" aria-label="Proceed">Proceed</button>' +
+        '<button type="button" role="radio" aria-label="Pause">Pause</button></div>';
+      main.append(panel);
+    });
+    await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-once');
+    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts[0]!.state,
+      'planned', 'a visible provider question before POST cannot consume the attempt');
+    assert.equal(await page.evaluate(() => (window as any).sends), 0);
+    await page.locator('[data-codex-composer-request-navigation]').evaluate(panel => panel.remove());
+    await page.locator('main').evaluate(main => {
+      const stream = document.createElement('article');
+      stream.setAttribute('data-message-author-role', 'assistant');
+      stream.setAttribute('data-message-id', 'ongoing-provider-stream');
+      stream.setAttribute('data-is-streaming', 'true');
+      stream.textContent = 'Generating';
+      main.append(stream);
+    });
+    await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-once');
+    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts[0]!.state,
+      'planned', 'an already generating provider cannot consume a future send');
+    assert.equal(await page.evaluate(() => (window as any).sends), 0);
+    await page.locator('[data-message-id="ongoing-provider-stream"]').evaluate(node => node.remove());
     const dispatched = await runtime.kernel.dispatch(
       'exact-task', 'fixture-alice', 'attempt-once',
     );
