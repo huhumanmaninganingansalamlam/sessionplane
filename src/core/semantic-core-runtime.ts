@@ -132,16 +132,20 @@ export function createSemanticCoreRuntime(input: {
     const binding = repository.getBindingAtRevision(intent.projectId, intent.slotId,
       intent.slotRevision, intent.clientId);
     if (task.projectId !== intent.projectId || task.slotId !== intent.slotId ||
-      task.slotRevision !== intent.slotRevision || slot.activeTaskId !== intent.taskId ||
-      slot.revision !== intent.slotRevision || slot.providerKey !== 'chatgpt' ||
-      binding.providerConversationId !== intent.providerConversationId ||
-      slot.providerConversationId !== intent.providerConversationId) {
-      throw new Error('Semantic context differs from the current journaled task');
+      task.slotRevision !== intent.slotRevision || binding.providerKey !== 'chatgpt' ||
+      binding.providerConversationId !== intent.providerConversationId) {
+      throw new Error('Semantic context differs from the immutable task binding');
     }
+    // Historical ACK/FINAL must survive cancellation and a slot replacement.
+    // Only the still-active exact slot may gain an actionable Page lease.
+    const activeSlot = slot.activeTaskId === intent.taskId &&
+      slot.revision === intent.slotRevision && slot.providerKey === 'chatgpt' &&
+      slot.providerConversationId === intent.providerConversationId;
     const attemptBinding = repository.getAttemptSessionBinding({
       taskId: intent.taskId, clientId: intent.clientId, attemptId: intent.attemptId,
     });
-    const matches = intent.providerConversationId === null || attemptBinding === null ? [] :
+    const matches = !activeSlot || intent.providerConversationId === null ||
+      attemptBinding === null ? [] :
       input.pageRegistry.findByConversation(intent.providerConversationId)
         .filter(found => found.state === 'owned' && found.targetId !== null &&
           found.sessionId === attemptBinding.sessionId &&
@@ -162,7 +166,7 @@ export function createSemanticCoreRuntime(input: {
       taskId: intent.taskId, providerConversationId: intent.providerConversationId,
       submittedUserMessageId: evidence?.messageId ?? null,
       submittedUserTurnId: attempt?.externalTurnId ?? null,
-      pageLease: candidate !== null && isExactLease(candidate) ? candidate : null,
+      pageLease: activeSlot && candidate !== null && isExactLease(candidate) ? candidate : null,
     };
   };
   const authorizedAttempt = (input: {

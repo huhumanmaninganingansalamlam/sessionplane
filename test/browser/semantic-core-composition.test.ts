@@ -506,3 +506,148 @@ test('Core accepts only the exact resolved question decision once', {
     rmSync(root, { recursive: true, force: true });
   }
 });
+test('Core recovers historical ChatGPT ACK and FINAL after cancel and slot replacement without a page', {
+  timeout: 25_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sessionplane-semantic-historical-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({
+    config, startBrowser: false,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  try {
+    const clientId = 'historical-client';
+    const team = core.teamDirectory.createTeam({ clientId });
+    const slotId = team.primaryRoleKey;
+    const session = core.teamDirectory.createSession({
+      teamId: team.teamId, roleKey: slotId, provider: 'chatgpt',
+    });
+    const store = core.semanticTaskRepository;
+    store.openProject({
+      projectId: team.teamId, projectKey: 'historical-final', displayName: 'Historical',
+      clientId,
+    });
+    store.openSlot({
+      projectId: team.teamId, clientId, slotId, roleKey: slotId, providerKey: 'chatgpt',
+    });
+    store.startTask({
+      taskId: 'historical-task', projectId: team.teamId, slotId, clientId,
+      expectedSlotRevision: 1, requestId: 'historical-request',
+      prompt: 'Historical task prompt',
+    });
+    store.observeConversation({
+      taskId: 'historical-task', projectId: team.teamId, slotId, clientId,
+      expectedRevision: 1, providerConversationId: 'historical-conversation',
+    });
+    store.planAttempt({
+      taskId: 'historical-task', clientId, attemptId: 'historical-attempt',
+      kind: 'initial', turnKey: 'initial', content: 'Historical task prompt',
+    });
+    // An original send has already occurred; no browser is needed for recovery.
+    store.bindAttemptSession({
+      taskId: 'historical-task', clientId, attemptId: 'historical-attempt',
+      sessionId: session.sessionId, generation: 1, conversationId: 'historical-conversation',
+    });
+    store.beginDispatch('historical-task', clientId, 'historical-attempt');
+    store.recordDispatchEvidence({
+      taskId: 'historical-task', clientId, attemptId: 'historical-attempt',
+      evidence: {
+        conversationId: 'historical-conversation', messageId: 'historical-user',
+        parentMessageId: 'root', textHash: sha('Historical task prompt'),
+        observedAt: '2026-11-11T09:00:00.000Z',
+      },
+    });
+    store.markUncertain('historical-task', clientId, 'historical-attempt', 'lost-ack');
+    store.requestCancel('historical-task', clientId);
+    store.planAttempt({
+      taskId: 'historical-task', clientId, attemptId: 'historical-stop',
+      kind: 'stop', turnKey: 'stop', content: '',
+    });
+    store.beginDispatch('historical-task', clientId, 'historical-stop');
+    store.acknowledgeAttempt({
+      taskId: 'historical-task', clientId, attemptId: 'historical-stop',
+      externalTurnId: 'confirmed-stop',
+    });
+    store.confirmCancel('historical-task', clientId);
+    const replacement = store.replaceBinding({
+      projectId: team.teamId, clientId, slotId, expectedRevision: 1,
+      providerKey: 'alternate-provider', providerConversationId: 'different-conversation',
+    });
+    assert.equal(replacement.revision, 2);
+    const successor = store.startTask({
+      taskId: 'successor-task', projectId: team.teamId, slotId, clientId,
+      expectedSlotRevision: 2, requestId: 'successor-request',
+      prompt: 'Unrelated new prompt',
+    });
+    assert.equal(store.getSlot(team.teamId, slotId, clientId).activeTaskId, 'successor-task');
+    let detailReads = 0;
+    const payload = {
+      id: 'historical-conversation', current_node: 'answer-node',
+      mapping: {
+        root: { id: 'root', parent: null, children: [], message: null },
+        'user-node': { id: 'user-node', parent: 'root', children: [], message: {
+          id: 'historical-user', turn_id: 'historical-turn',
+          author: { role: 'user' }, content: { parts: ['Historical task prompt'] },
+        } },
+        'answer-node': { id: 'answer-node', parent: 'user-node', children: [],
+          message: {
+            id: 'historical-answer', author: { role: 'assistant' },
+            channel: 'final', status: 'finished_successfully', end_turn: true,
+            content: { parts: ['Late exact answer'] }, metadata: {},
+          },
+        },
+      },
+    };
+    const client: BackendJsonClient = {
+      authScope: {},
+      async get(url) {
+        if (url.endsWith('/api/auth/session')) {
+          return { status: 200, headers: {}, body: { accessToken: 'fixture-only' } };
+        }
+        assert.ok(url.includes('historical-conversation'),
+          'a replacement conversation must never supply the old answer');
+        detailReads++;
+        return { status: 200, headers: {}, body: payload };
+      },
+    };
+    let virtualNow = 100_000;
+    const runtime = createSemanticCoreRuntime({
+      database: core.database, browserOwner: null,
+      pageRegistry: core.pageRegistry, teamDirectory: core.teamDirectory,
+      pageMutationMutex: core.pageMutationMutex,
+      enabledProviders: ['chatgpt'], chatgptUrl: 'https://chatgpt.com',
+      backendClientProvider: () => client,
+      backendRecovery: new ChatGptBackendRecovery({
+        requestTimeoutMs: 500, tokenCacheTtlMs: 10_000,
+        now: () => new Date(virtualNow),
+      }),
+    });
+    assert.equal(core.pageRegistry.listBindings().length, 0);
+    await runtime.kernel.recoverAck('historical-task', clientId, 'historical-attempt');
+    assert.equal(store.getFullTask('historical-task', clientId).attempts
+      .find(a => a.attemptId === 'historical-attempt')?.state, 'acknowledged',
+    'late original ACK must attach despite another current slot revision');
+    const deferred = await runtime.kernel.observeFinal({
+      taskId: 'historical-task', clientId, attemptId: 'historical-attempt',
+      resultId: 'historical-result', completeTask: true,
+    });
+    assert.equal(deferred, null, 'back-to-back FINAL reads honor backend pacing');
+    assert.equal(detailReads, 1, 'a waiting FINAL never consumes another backend slot');
+    virtualNow += 5_001;
+    const final = await runtime.kernel.observeFinal({
+      taskId: 'historical-task', clientId, attemptId: 'historical-attempt',
+      resultId: 'historical-result', completeTask: true,
+    });
+    assert.equal(final?.answerText, 'Late exact answer');
+    assert.equal(store.getTask('historical-task', clientId).state, 'canceled');
+    assert.equal(store.getTask('successor-task', clientId).state, successor.state);
+    assert.equal(store.getSlot(team.teamId, slotId, clientId).activeTaskId, 'successor-task');
+    assert.equal(store.getSlot(team.teamId, slotId, clientId).providerConversationId,
+      'different-conversation');
+    assert.ok(detailReads >= 2, 'ACK and FINAL each use the historical identity');
+    assert.equal(core.pageRegistry.listBindings().length, 0);
+  } finally {
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
