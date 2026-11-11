@@ -181,11 +181,16 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
       const ack = await this.#adapter.recover({
         context, kind: 'ack', prompt: query.content, attempts: [evidence],
       });
-      return ack.kind === 'verified_ack' && ack.messageId === evidence.messageId &&
-        (query.externalTurnId === null || query.externalTurnId === ack.externalTurnId) &&
-        (context.submittedUserTurnId === null || context.submittedUserTurnId === ack.externalTurnId)
-        ? { kind: 'verified_ack', externalTurnId: ack.externalTurnId }
-        : { kind: 'unavailable', reason: 'canonical-ack-not-yet-recovered' };
+      if (ack.kind === 'verified_ack') {
+        return ack.messageId === evidence.messageId &&
+          (query.externalTurnId === null || query.externalTurnId === ack.externalTurnId) &&
+          (context.submittedUserTurnId === null || context.submittedUserTurnId === ack.externalTurnId)
+          ? { kind: 'verified_ack', externalTurnId: ack.externalTurnId }
+          : { kind: 'unavailable', reason: 'canonical-ack-bound-identity-mismatch' };
+      }
+      return ack.kind === 'pending' || ack.kind === 'unavailable'
+        ? { kind: ack.kind, reason: ack.reason }
+        : { kind: 'unavailable', reason: 'canonical-ack-invalid-result-kind' };
     } catch {
       return { kind: 'unavailable', reason: 'semantic-read-only-recovery-unavailable' };
     }

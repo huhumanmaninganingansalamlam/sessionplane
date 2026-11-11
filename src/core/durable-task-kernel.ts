@@ -30,6 +30,7 @@ export type SendOutcome =
   | { readonly kind: 'uncertain'; readonly reason: string };
 export type RecoveryOutcome =
   | { readonly kind: 'verified_ack'; readonly externalTurnId: string }
+  | { readonly kind: 'pending'; readonly reason: string }
   | { readonly kind: 'unavailable'; readonly reason: string };
 export type FinalObservation =
   | { readonly kind: 'exact_final'; readonly externalTurnId: string; readonly answerText: string }
@@ -96,6 +97,11 @@ export class DurableTaskKernel {
       });
     } else {
       this.#storage.markUncertain(taskId, clientId, attemptId, outcome.reason);
+      const reason = /^[a-z0-9_.:-]{1,100}$/i.test(outcome.reason)
+        ? outcome.reason : 'provider-ack-unverified';
+      // Exact ACK deferrals are durable observations, never a send receipt.
+      this.#storage.recordObservationDeferred(taskId, clientId,
+        `ack:${attemptId}:${outcome.kind}:${reason}`);
     }
     return this.#storage.getTask(taskId, clientId);
   }

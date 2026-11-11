@@ -162,6 +162,18 @@ test('semantic Core bridge persists exact dispatch evidence and recovers ACK/FIN
   assert.equal(store.getDispatchEvidence({
     taskId: 'task-1', clientId: 'alice', attemptId: 'attempt-1',
   })?.messageId, 'message-1', 'provider request evidence survives Core restart');
+  kernel = new DurableTaskKernel(store, [port()]);
+  const pendingAck = await kernel.recoverAck('task-1', 'alice', 'attempt-1');
+  assert.equal(pendingAck.state, 'uncertain', 'read-only pending ACK cannot resubmit');
+  const deferrals = store.getFullTask('task-1', 'alice').events
+    .filter(row => row.event.type === 'observation.deferred');
+  assert.equal(deferrals.length, 1, 'the actual backend ACK reason must survive Core restart');
+  assert.equal((deferrals[0]!.event as { reason: string }).reason,
+    'ack:attempt-1:pending:not-yet-visible');
+  await kernel.recoverAck('task-1', 'alice', 'attempt-1');
+  assert.equal(store.getTask('task-1', 'alice').revision, pendingAck.revision,
+    'repeated identical paced ACK checks cannot flood the journal');
+  assert.equal(adapter.sends, 1, 'ACK reconciliation must never replay an original POST');
   adapter.ackReady = true;
   kernel = new DurableTaskKernel(store, [port()]);
   const observedBefore = adapter.observations;

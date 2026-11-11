@@ -244,3 +244,93 @@ test('Core-owned semantic Retry-After survives restart without an extra backend 
     rmSync(root, { recursive: true, force: true });
   }
 });
+test('Core-owned semantic late ACK preserves 429 evidence across restart without replay', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sessionplane-semantic-late-ack-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const clientId = 'ack-client', projectId = 'ack-project', taskId = 'ack-task';
+  const attemptId = 'ack-attempt', conversationId = 'ack-conversation';
+  const prompt = 'Exact original question';
+  let now = 100_000;
+  let conversationReads = 0;
+  const client: BackendJsonClient = {
+    authScope: {},
+    async get(url) {
+      if (url.endsWith('/api/auth/session')) {
+        return { status: 200, headers: {}, body: { accessToken: 'fixture-only-memory' } };
+      }
+      conversationReads++;
+      if (conversationReads === 1) {
+        return { status: 429, headers: { 'retry-after': '120' }, body: null };
+      }
+      return { status: 200, headers: {}, body: {
+        id: conversationId, current_node: 'answer-node',
+        mapping: {
+          root: { id: 'root', parent: null, children: [], message: null },
+          'user-node': { id: 'user-node', parent: 'root', children: [],
+            message: { id: 'ack-user', turn_id: 'ack-turn', author: { role: 'user' },
+              content: { parts: [prompt] } } },
+          'answer-node': { id: 'answer-node', parent: 'user-node', children: [],
+            message: { id: 'ack-answer', author: { role: 'assistant' },
+              channel: 'final', status: 'finished_successfully', end_turn: true,
+              content: { parts: ['Late ACK final'] }, metadata: {} } },
+        },
+      } };
+    },
+  };
+  const logger = { debug() {}, info() {}, warn() {}, error() {} };
+  let core: Awaited<ReturnType<typeof startCore>> | null = null;
+  try {
+    core = await startCore({ config, startBrowser: false, logger });
+    const store = core.semanticTaskRepository;
+    store.openProject({ projectId, clientId, projectKey: 'late-ack-fixture',
+      displayName: 'Late ACK fixture' });
+    store.openSlot({ projectId, clientId, slotId: 'main', roleKey: 'main',
+      providerKey: 'chatgpt' });
+    store.startTask({ taskId, projectId, clientId, slotId: 'main',
+      expectedSlotRevision: 1, requestId: 'ack-request', prompt });
+    store.observeConversation({ taskId, projectId, clientId, slotId: 'main',
+      expectedRevision: 1, providerConversationId: conversationId });
+    store.planAttempt({ taskId, clientId, attemptId, kind: 'initial',
+      turnKey: 'initial', content: prompt });
+    store.beginDispatch(taskId, clientId, attemptId);
+    store.recordDispatchEvidence({ taskId, clientId, attemptId, evidence: {
+      conversationId, messageId: 'ack-user', parentMessageId: 'root',
+      textHash: createHash('sha256').update(prompt).digest('hex'),
+      observedAt: new Date(0).toISOString(),
+    } });
+    store.markUncertain(taskId, clientId, attemptId, 'lost-ack');
+    const runtime = () => createSemanticCoreRuntime({
+      database: core!.database, browserOwner: null,
+      pageRegistry: core!.pageRegistry, teamDirectory: core!.teamDirectory,
+      pageMutationMutex: core!.pageMutationMutex,
+      enabledProviders: ['chatgpt'], chatgptUrl: 'https://chatgpt.com',
+      backendClientProvider: () => client, backendRecoveryNow: () => new Date(now),
+    });
+    const first = await runtime().kernel.recoverAck(taskId, clientId, attemptId);
+    assert.equal(first.state, 'uncertain');
+    assert.equal(conversationReads, 1);
+    assert.ok(store.getFullTask(taskId, clientId).events.some(event =>
+      event.event.type === 'observation.deferred' &&
+      event.event.reason === 'ack:ack-attempt:pending:backend-http-429'));
+    await core.close();
+    core = null;
+
+    core = await startCore({ config, startBrowser: false, logger });
+    const waiting = await runtime().kernel.recoverAck(taskId, clientId, attemptId);
+    assert.equal(waiting.state, 'uncertain');
+    assert.equal(conversationReads, 1,
+      'a restarted ACK collector cannot bypass a persisted Retry-After');
+    now += 120_001;
+    const recovered = await runtime().kernel.recoverAck(taskId, clientId, attemptId);
+    assert.equal(recovered.state, 'working');
+    assert.equal(core.semanticTaskRepository.getFullTask(taskId, clientId).attempts[0]?.externalTurnId,
+      'ack-turn', 'only the original durable attempt receives its late ACK');
+    assert.equal(conversationReads, 2, 'ACK never triggers a second POST');
+    await runtime().kernel.recoverAck(taskId, clientId, attemptId);
+    assert.equal(conversationReads, 2, 'acknowledged attempts are not probed again');
+    assert.equal(core.pageRegistry.listBindings().length, 0);
+  } finally {
+    await core?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
