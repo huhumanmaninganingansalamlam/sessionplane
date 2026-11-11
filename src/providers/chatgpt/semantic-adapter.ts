@@ -113,6 +113,8 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
   readonly #gate: PageOperationGate;
   readonly #backend: ChatGptBackendRecovery;
   readonly #latest = new Map<string, ActiveSnapshot>();
+  /** Monotonic identity token: a published+consumed snapshot cannot ABA to absent. */
+  readonly #revision = new Map<string, object>();
 
   constructor(options: ChatGptSemanticAdapterOptions) {
     this.#options = options;
@@ -125,6 +127,8 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
   async observe(context: SemanticTaskContext): Promise<SemanticObservation> {
     const snapshotAtStart = context.pageLease === null ? undefined
       : this.#latest.get(context.pageLease.pageKey);
+    const revisionAtStart = context.pageLease === null ? undefined
+      : this.#revision.get(context.pageLease.pageKey);
     const { lease, page } = await this.#exactPage(context);
     const observedAt = new Date().toISOString();
     const snapshotId = randomUUID();
@@ -158,7 +162,8 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     // Compare-and-revoke: a slow denied observation can invalidate only the
     // snapshot it saw at entry, never a newer observation for the same page.
     const revokeStartSnapshot = (): void => {
-      if (this.#latest.get(lease.pageKey) === snapshotAtStart) this.#latest.delete(lease.pageKey);
+      if (this.#latest.get(lease.pageKey) === snapshotAtStart &&
+          this.#latest.delete(lease.pageKey)) this.#revision.set(lease.pageKey, {});
     };
 
     const conversationError = conversationBindingProblem(page, context);
@@ -364,7 +369,9 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     }
     // An overlapping act consumes its old snapshot. An older observe must
     // not republish actionable evidence after that mutation.
-    if (this.#latest.get(lease.pageKey) !== snapshotAtStart || this.#gate.isBusy(lease.pageKey)) {
+    if (this.#revision.get(lease.pageKey) !== revisionAtStart ||
+        this.#latest.get(lease.pageKey) !== snapshotAtStart ||
+        this.#gate.isBusy(lease.pageKey)) {
       return deniedObservation('semantic-observation-superseded-by-page-operation');
     }
     let observation: SemanticObservation = {
@@ -394,6 +401,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     }
     observation = { ...observation, evidenceBytes: bytes };
     this.#latest.set(lease.pageKey, { snapshotId, actions: cached });
+    this.#revision.set(lease.pageKey, {});
     return observation;
   }
 
@@ -439,6 +447,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     // uncertain external side effect via this actionRef or another requestId.
     snapshot!.actions.delete(request.actionRef);
     this.#latest.delete(lease.pageKey);
+    this.#revision.set(lease.pageKey, {});
     const result = await this.#gate.run(lease, 'mutate', async () => {
       const page = await this.#options.resolvePage(lease);
       this.#checkOrigin(page);

@@ -2418,3 +2418,76 @@ test('a stale denied ChatGPT observation cannot invalidate a newer actionable sn
     rmSync(root, { recursive: true, force: true });
   }
 });
+test('ChatGPT observation revision rejects ABA after a newer action consumes its snapshot', {
+  timeout: 35_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-semantic-aba-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'disposable-profile'), pageRegistry: registry, headless: true,
+  });
+  let release!: () => void;
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({
+      contentType: 'text/html', body: '<main><div id="prompt-textarea" ' +
+        'contenteditable="true" role="textbox"></div>' +
+        '<button data-testid="send-button">Send</button></main>',
+    }));
+    await page.goto('https://chatgpt.com/c/conversation-b');
+    const current = registry.getBinding(binding.pageKey);
+    const lease: OwnedPageIdentity = {
+      projectId: 'project-b', slotId: 'main', slotRevision: 1, taskId: 'task-b',
+      pageKey: current.pageKey, targetId: current.targetId!, bindingEpoch: current.bindingEpoch,
+    };
+    let enter!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const released = new Promise<void>(resolve => { release = resolve; });
+    let captureOnce = true;
+    const racedPage = new Proxy(page, { get(target, prop) {
+      if (prop === 'evaluate') return async (fn: unknown, arg: unknown) => {
+        const captured = await page.evaluate(fn as never, arg as never);
+        if (captureOnce && typeof fn === 'function' &&
+            fn.toString().includes('emptyEditorMarker') &&
+            fn.toString().includes('editorsSelector')) {
+          captureOnce = false;
+          enter();
+          await released;
+          // A captured an empty composer, but B will draft meanwhile.
+        }
+        return captured;
+      };
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const adapter = new ChatGptSemanticAdapter({
+      isExactLease: candidate => candidate === lease,
+      resolvePage: () => racedPage,
+    });
+    const task = context(lease);
+    const older = adapter.observe(task);
+    await entered;
+    const newer = await adapter.observe(task);
+    assert.equal(newer.blocker, 'none');
+    const compose = newer.actions.find(a => a.purpose === 'compose')!;
+    assert.ok(compose);
+    assert.deepEqual(await adapter.act({
+      context: task, snapshotId: newer.snapshotId,
+      actionRef: compose.actionRef, evidenceHash: compose.evidenceHash,
+      input: 'Newer committed draft',
+    }), { kind: 'performed', effect: 'draft_updated' });
+    assert.equal(await page.locator('#prompt-textarea').innerText(), 'Newer committed draft');
+    release();
+    const oldResult = await older;
+    assert.equal(oldResult.blocker, 'unsupported');
+    assert.equal(oldResult.reason, 'semantic-observation-superseded-by-page-operation');
+    assert.equal(oldResult.actions.length, 0,
+      'an ABA-empty snapshot map cannot publish controls captured before a mutation');
+    assert.equal(await page.locator('#prompt-textarea').innerText(), 'Newer committed draft');
+  } finally {
+    release?.();
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
