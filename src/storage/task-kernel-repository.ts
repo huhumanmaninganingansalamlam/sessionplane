@@ -1151,6 +1151,29 @@ export class TaskKernelRepository {
     return rows.length;
   }
 
+  /** Exact public ACKs awaiting a canonical FINAL. The Core may observe
+   * these without a connected RPC/MCP client or a subscriber lifecycle.
+   */
+  listPendingPublicFinals(limit = 32): readonly {
+    taskId: string; clientId: string; attemptId: string; policyJson: string;
+  }[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error('Invalid public final scan limit');
+    }
+    return this.#database.raw.prepare(
+      `SELECT t.task_id AS taskId,t.client_id AS clientId,
+          a.attempt_id AS attemptId,p.policy_json AS policyJson
+        FROM kernel_tasks t JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+        JOIN kernel_attempts a ON a.task_id=t.task_id
+        LEFT JOIN kernel_results r ON r.attempt_id=a.attempt_id
+        WHERE t.cancel_requested=0 AND t.state='working'
+          AND a.kind!='stop' AND a.state='acknowledged' AND r.result_id IS NULL
+        ORDER BY t.updated_at,a.sequence LIMIT ?`,
+    ).all(limit) as Array<{
+      taskId: string; clientId: string; attemptId: string; policyJson: string;
+    }>;
+  }
+
   /** Standing policy is durable Task admission data, never a client wait.
    * The policy is inert until a later exact ACK permits timer activation.
    */

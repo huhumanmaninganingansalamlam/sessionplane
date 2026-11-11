@@ -183,6 +183,26 @@ export class ManagedContinuationService {
         } catch { /* Never reinterpret unknown dispatch as safe to replay. */ }
       }
     }
+    // A standalone public Task must finish even when every client has exited.
+    // This read-only observer never takes over the provider or retries a POST.
+    // Process due sends first; a slow FINAL GET cannot starve another Task's due.
+    for (const pending of this.#repository.listPendingPublicFinals(8)) {
+      try {
+        const policy: unknown = JSON.parse(pending.policyJson);
+        const managed = policy !== null && typeof policy === 'object' &&
+          (policy as { enabled?: unknown }).enabled === true;
+        await this.#kernel.observeFinal({
+          taskId: pending.taskId, clientId: pending.clientId,
+          attemptId: pending.attemptId, resultId: 'public-final:' + pending.attemptId,
+          completeTask: !managed,
+        });
+      } catch {
+        try {
+          this.#repository.recordObservationDeferred(pending.taskId, pending.clientId,
+            'public-exact-final-observation-unavailable');
+        } catch { /* Do not convert read failure into task completion. */ }
+      }
+    }
     return { timersClaimed: claimed.length, dispatchesAttempted, deferred };
   }
 

@@ -7,6 +7,8 @@ import test, { type TestContext } from 'node:test';
 
 import { callRpc } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
+import { createSemanticCoreRuntime } from '../../src/core/semantic-core-runtime.ts';
+import { ChatGptBackendRecovery, type BackendJsonClient } from '../../src/providers/chatgpt/backend-recovery.ts';
 import { startCore } from '../../src/main.ts';
 import { getMcpTool, invokeMcpTool } from '../../src/mcp/tools.ts';
 
@@ -354,4 +356,255 @@ test('approved task.start policy automatically arms on exact ACK without any cli
   });
   assert.equal(cancellation.cancelRequested, true);
   assert.equal(store.getFullTask(started.taskId, 'alice').timers[0]?.status, 'canceled');
+});
+
+
+test('Core independently retrieves exact public FINAL after ACK with no client wait or browser', async t => {
+  const { core, rpc, store } = await fixture(t);
+  const project = await rpc<any>('project.open', {
+    clientId: 'alice', requestId: 'open-autonomous-final',
+    projectKey: 'autonomous-final', displayName: 'Autonomous final',
+    provider: 'chatgpt', surfaceIntent: 'chat',
+  });
+  const started = await rpc<any>('task.start', {
+    clientId: 'alice', requestId: 'start-autonomous-final',
+    projectId: project.projectId,
+    expectedConversationRevision: project.conversationRevision,
+    prompt: 'Exact public final prompt',
+  });
+  const attempt = store.getFullTask(started.taskId, 'alice').attempts[0]!;
+  store.observeConversation({
+    projectId: project.projectId, slotId: 'main', expectedRevision: 1,
+    clientId: 'alice', taskId: started.taskId,
+    providerConversationId: 'public-fixture-conversation',
+  });
+  store.beginDispatch(started.taskId, 'alice', attempt.attemptId);
+  store.recordDispatchEvidence({
+    taskId: started.taskId, clientId: 'alice', attemptId: attempt.attemptId,
+    evidence: {
+      conversationId: 'public-fixture-conversation',
+      messageId: 'public-user-one', parentMessageId: 'root',
+      textHash: createHash('sha256').update('Exact public final prompt').digest('hex'),
+      observedAt: new Date().toISOString(),
+    },
+  });
+  store.acknowledgeAttempt({
+    taskId: started.taskId, clientId: 'alice', attemptId: attempt.attemptId,
+    externalTurnId: 'public-turn-one',
+  });
+  const payload = {
+    id: 'public-fixture-conversation', current_node: 'assistant-one',
+    mapping: {
+      root: { id: 'root', parent: null, children: [], message: null },
+      'public-user-node': {
+        id: 'public-user-node', parent: 'root', children: [],
+        message: { id: 'public-user-one', turn_id: 'public-turn-one',
+          author: { role: 'user' }, content: { parts: ['Exact public final prompt'] } },
+      },
+      'assistant-one': {
+        id: 'assistant-one', parent: 'public-user-node', children: [],
+        message: { id: 'assistant-one', author: { role: 'assistant' },
+          channel: 'final', status: 'finished_successfully', end_turn: true,
+          content: { parts: ['Autonomous exact FINAL 🌟'] }, metadata: {} },
+      },
+    },
+  };
+  let reads = 0;
+  const backend: BackendJsonClient = {
+    authScope: {},
+    async get(url) {
+      reads++;
+      return url.endsWith('/api/auth/session')
+        ? { status: 200, headers: {}, body: { accessToken: 'fixture-token' } }
+        : { status: 200, headers: {}, body: payload };
+    },
+  };
+  const runtime = createSemanticCoreRuntime({
+    database: core.database,
+    browserOwner: null, pageRegistry: core.pageRegistry,
+    teamDirectory: core.teamDirectory, pageMutationMutex: core.pageMutationMutex,
+    enabledProviders: ['chatgpt'], chatgptUrl: 'https://chatgpt.com',
+    backendClientProvider: () => backend,
+    backendRecovery: new ChatGptBackendRecovery({
+      requestTimeoutMs: 500, tokenCacheTtlMs: 10_000,
+    }),
+  });
+  assert.equal(store.getTask(started.taskId, 'alice').state, 'working');
+  assert.equal((await runtime.managedContinuation.tick()).dispatchesAttempted, 0);
+  const exact = await rpc<any>('task.get', {
+    clientId: 'alice', taskId: started.taskId, view: 'result',
+  });
+  assert.equal(exact.state, 'completed');
+  assert.equal(exact.result.answerText, 'Autonomous exact FINAL 🌟');
+  assert.equal(exact.result.completesTask, true);
+  assert.equal(store.getFullTask(started.taskId, 'alice').attempts.length, 1,
+    'the Final observer cannot create another POST attempt');
+  const before = reads;
+  await runtime.managedContinuation.tick();
+  assert.equal(reads, before, 'completed public task is not read again');
+  await runtime.managedContinuation.close();
+});
+
+
+test('approved public Task collects exact FINAL but preserves the next due and does not auto-continue early', async t => {
+  const { core, rpc, store } = await fixture(t);
+  const project = await rpc<any>('project.open', {
+    clientId: 'alice', requestId: 'open-managed-public-final',
+    projectKey: 'managed-public-final', displayName: 'Managed exact final',
+    provider: 'chatgpt', surfaceIntent: 'chat',
+  });
+  const started = await rpc<any>('task.start', {
+    clientId: 'alice', requestId: 'start-managed-public-final',
+    projectId: project.projectId,
+    expectedConversationRevision: project.conversationRevision,
+    prompt: 'Continue pending project',
+    continuationPolicy: {
+      enabled: true, approvalRef: 'user-authorized-task',
+      intervalMs: 1_200_000, message: '계속',
+    },
+  });
+  const attempt = store.getFullTask(started.taskId, 'alice').attempts[0]!;
+  store.observeConversation({
+    projectId: project.projectId, slotId: 'main',
+    expectedRevision: 1, clientId: 'alice', taskId: started.taskId,
+    providerConversationId: 'managed-public-conversation',
+  });
+  store.beginDispatch(started.taskId, 'alice', attempt.attemptId);
+  store.recordDispatchEvidence({
+    taskId: started.taskId, clientId: 'alice', attemptId: attempt.attemptId,
+    evidence: {
+      conversationId: 'managed-public-conversation',
+      messageId: 'managed-public-user', parentMessageId: 'root',
+      textHash: createHash('sha256').update('Continue pending project').digest('hex'),
+      observedAt: new Date().toISOString(),
+    },
+  });
+  store.acknowledgeAttempt({
+    taskId: started.taskId, clientId: 'alice', attemptId: attempt.attemptId,
+    externalTurnId: 'managed-public-turn',
+  });
+  const payload = {
+    id: 'managed-public-conversation', current_node: 'assistant-final',
+    mapping: {
+      root: { id: 'root', parent: null, children: [], message: null },
+      question: {
+        id: 'question', parent: 'root', children: [],
+        message: { id: 'managed-public-user', turn_id: 'managed-public-turn',
+          author: { role: 'user' }, content: { parts: ['Continue pending project'] } },
+      },
+      'assistant-final': {
+        id: 'assistant-final', parent: 'question', children: [],
+        message: { id: 'answer-managed', author: { role: 'assistant' },
+          channel: 'final', status: 'finished_successfully', end_turn: true,
+          content: { parts: ['Current stage done, policy still approved'] }, metadata: {} },
+      },
+    },
+  };
+  let conversationReads = 0;
+  const backend: BackendJsonClient = {
+    authScope: {},
+    async get(url) {
+      if (url.endsWith('/api/auth/session')) {
+        return { status: 200, headers: {}, body: { accessToken: 'fixture-token' } };
+      }
+      conversationReads++;
+      return { status: 200, headers: {}, body: payload };
+    },
+  };
+  const runtime = createSemanticCoreRuntime({
+    database: core.database, browserOwner: null,
+    pageRegistry: core.pageRegistry, teamDirectory: core.teamDirectory,
+    pageMutationMutex: core.pageMutationMutex,
+    enabledProviders: ['chatgpt'], chatgptUrl: 'https://chatgpt.com',
+    backendClientProvider: () => backend,
+    backendRecovery: new ChatGptBackendRecovery({
+      requestTimeoutMs: 500, tokenCacheTtlMs: 10_000,
+    }),
+  });
+  const result = await runtime.managedContinuation.tick();
+  assert.equal(result.dispatchesAttempted, 0);
+  assert.equal(conversationReads, 1);
+  const exact = await rpc<any>('task.get', {
+    clientId: 'alice', taskId: started.taskId, view: 'result',
+  });
+  assert.equal(exact.state, 'working');
+  assert.equal(exact.result.answerText, 'Current stage done, policy still approved');
+  assert.equal(exact.result.completesTask, false,
+    'an approved long-running Task must retain the continuation policy');
+  const acknowledged = store.getFullTask(started.taskId, 'alice').attempts[0]!;
+  const dueAt = Date.parse(acknowledged.acknowledgedAt!) + 1_200_000;
+  assert.equal(Date.parse(exact.nextAutomaticActionAt), dueAt);
+  assert.equal(store.getFullTask(started.taskId, 'alice').attempts.length, 1,
+    'no client and no active page mean no early continuation POST');
+  await runtime.managedContinuation.tick();
+  assert.equal(conversationReads, 1, 'exact FINAL is not re-read on the next tick');
+  await runtime.managedContinuation.close();
+});
+
+test('public exact FINAL 429 remains working, without fabricated answer or new attempt', async t => {
+  const { core, rpc, store } = await fixture(t);
+  const project = await rpc<any>('project.open', {
+    clientId: 'alice', requestId: 'open-final-429',
+    projectKey: 'public-final-429', displayName: 'Rate limit fixture',
+    provider: 'chatgpt', surfaceIntent: 'chat',
+  });
+  const started = await rpc<any>('task.start', {
+    clientId: 'alice', requestId: 'start-final-429',
+    projectId: project.projectId,
+    expectedConversationRevision: project.conversationRevision,
+    prompt: 'Do not infer a final',
+  });
+  const attempt = store.getFullTask(started.taskId, 'alice').attempts[0]!;
+  store.observeConversation({
+    projectId: project.projectId, slotId: 'main',
+    expectedRevision: 1, clientId: 'alice', taskId: started.taskId,
+    providerConversationId: 'final-429-conversation',
+  });
+  store.beginDispatch(started.taskId, 'alice', attempt.attemptId);
+  store.recordDispatchEvidence({
+    taskId: started.taskId, clientId: 'alice', attemptId: attempt.attemptId,
+    evidence: {
+      conversationId: 'final-429-conversation', messageId: 'final-user',
+      parentMessageId: 'root',
+      textHash: createHash('sha256').update('Do not infer a final').digest('hex'),
+      observedAt: new Date().toISOString(),
+    },
+  });
+  store.acknowledgeAttempt({
+    taskId: started.taskId, clientId: 'alice', attemptId: attempt.attemptId,
+    externalTurnId: 'final-user-turn',
+  });
+  let detailReads = 0;
+  const backend: BackendJsonClient = {
+    authScope: {},
+    async get(url) {
+      if (url.endsWith('/api/auth/session')) {
+        return { status: 200, headers: {}, body: { accessToken: 'fixture-token' } };
+      }
+      detailReads++;
+      return { status: 429, headers: { 'retry-after': '120' }, body: {} };
+    },
+  };
+  const runtime = createSemanticCoreRuntime({
+    database: core.database, browserOwner: null,
+    pageRegistry: core.pageRegistry, teamDirectory: core.teamDirectory,
+    pageMutationMutex: core.pageMutationMutex,
+    enabledProviders: ['chatgpt'], chatgptUrl: 'https://chatgpt.com',
+    backendClientProvider: () => backend,
+    backendRecovery: new ChatGptBackendRecovery({
+      requestTimeoutMs: 500, tokenCacheTtlMs: 10_000,
+    }),
+  });
+  await runtime.managedContinuation.tick();
+  const pending = await rpc<any>('task.get', {
+    clientId: 'alice', taskId: started.taskId, view: 'result',
+  });
+  assert.equal(pending.state, 'working');
+  assert.equal(pending.result, null);
+  assert.equal(pending.resultAvailable, false);
+  assert.equal(store.getFullTask(started.taskId, 'alice').attempts.length, 1);
+  assert.equal(detailReads, 1);
+  await runtime.managedContinuation.tick();
+  assert.equal(detailReads, 1, 'Retry-After prevents premature repeated GET');
+  await runtime.managedContinuation.close();
 });
