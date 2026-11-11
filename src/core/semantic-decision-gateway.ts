@@ -39,6 +39,7 @@ export interface AgentDecisionPacket {
   readonly snapshotId: string | null;
   readonly questionText: string | null;
   readonly permission: SemanticPermissionEvidence | null;
+  readonly requestedModel: string | null;
   readonly options: readonly AgentDecisionOption[];
   readonly evidenceBytes: number;
 }
@@ -183,7 +184,13 @@ export class SemanticDecisionGateway {
   async inspect(input: {
     taskId: string; clientId: string; attemptId: string;
     modelChoice?: boolean;
+    modelIntent?: string;
   }): Promise<AgentDecisionPacket | null> {
+    if (input.modelIntent !== undefined &&
+        (input.modelChoice !== true ||
+         input.modelIntent.trim().length === 0 || input.modelIntent.length > 200)) {
+      throw new Error('Invalid bounded model intent');
+    }
     const full = this.#repository.getFullTask(input.taskId, input.clientId);
     if (full.task.pendingDecisionId !== null) return this.get(input.taskId, input.clientId);
     if (full.task.state !== 'working' || full.task.cancelRequested) return null;
@@ -247,6 +254,7 @@ export class SemanticDecisionGateway {
       snapshotId: observation?.snapshotId ?? null,
       questionText: kind === 'provider_question' ? observation?.questionText ?? null : null,
       permission: kind === 'tool_permission' ? observation?.permission ?? null : null,
+      requestedModel: kind === 'model_choice' ? input.modelIntent ?? null : null,
       options: option, evidenceBytes: 0,
     };
     packet = countBytes(packet);
@@ -289,13 +297,21 @@ export class SemanticDecisionGateway {
     if (full.task.pendingDecisionId !== input.decisionId) {
       throw new Error('Only the current pending decision may be refreshed');
     }
+    const current = full.decisions.find(row => row.decisionId === input.decisionId);
+    if (!current) throw new Error('Missing exact decision for refresh');
+    const original = storedContext(current.contextJson);
+    if (original.attemptId !== input.attemptId) {
+      throw new Error('Decision refresh belongs to another exact attempt');
+    }
+    const requestedModel = original.packet.requestedModel;
     this.#repository.resolveDecision({
       taskId: input.taskId, clientId: input.clientId, decisionId: input.decisionId,
       resolutionJson: JSON.stringify({ kind: 'read_only_refresh' }),
     });
     return await this.inspect({ taskId: input.taskId, clientId: input.clientId,
       attemptId: input.attemptId,
-      ...(input.modelChoice === undefined ? {} : { modelChoice: input.modelChoice }) });
+      modelChoice: original.packet.kind === 'model_choice' || input.modelChoice === true,
+      ...(requestedModel ? { modelIntent: requestedModel } : {}) });
   }
 
   /** Public decision entry point: the exact attempt stays server-owned.
@@ -410,6 +426,8 @@ export class SemanticDecisionGateway {
         const packet = await this.inspect({
           taskId: input.taskId, clientId: input.clientId, attemptId: input.attemptId,
           modelChoice: stored.packet.kind === 'model_choice',
+          ...(stored.packet.requestedModel
+            ? { modelIntent: stored.packet.requestedModel } : {}),
         });
         outcome = { kind: 'refresh_required', packet };
       } catch {

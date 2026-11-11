@@ -310,6 +310,28 @@ export function createSemanticCoreRuntime(input: {
     repository, kernel,
     ...(input.continuationNow ? { now: input.continuationNow } : {}),
     ...(input.canRunContinuation ? { canRun: input.canRunContinuation } : {}),
+    inspectModelIntent: async ({ taskId, clientId, attemptId, modelIntent }) => {
+      await decisionGateway.inspect({
+        taskId, clientId, attemptId, modelChoice: true, modelIntent,
+      });
+    },
+    bindInitialAttempt: ({ taskId, clientId, attemptId }) => {
+      const task = repository.getTask(taskId, clientId);
+      const slot = repository.getSlot(task.projectId, task.slotId, clientId);
+      if (slot.activeTaskId !== taskId || slot.providerConversationId === null ||
+          slot.revision !== task.slotRevision) {
+        throw new Error('Public initial Task has no verified active conversation');
+      }
+      const session = input.teamDirectory.getCurrentSession(task.projectId, task.slotId);
+      if (session.conversationId !== slot.providerConversationId ||
+          session.pageKey === null || session.generation < 1) {
+        throw new Error('Public initial has no owned current session generation');
+      }
+      bindAttemptSession({
+        taskId, clientId, attemptId, sessionId: session.sessionId,
+        generation: session.generation, conversationId: slot.providerConversationId,
+      });
+    },
     bindAttempt: ({ taskId, clientId, attemptId, sourceAttemptId }) => {
       const prior = repository.getAttemptSessionBinding({
         taskId, clientId, attemptId: sourceAttemptId,

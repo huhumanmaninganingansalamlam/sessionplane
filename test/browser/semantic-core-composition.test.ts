@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import { resolveConfig } from '../../src/config.ts';
+import { callRpc } from '../../src/cli/client.ts';
 import { createSemanticCoreRuntime } from '../../src/core/semantic-core-runtime.ts';
 import { startCore } from '../../src/main.ts';
 import { ChatGptBackendRecovery, type BackendJsonClient } from '../../src/providers/chatgpt/backend-recovery.ts';
@@ -1040,6 +1041,231 @@ test('Core restart marks interrupted semantic dispatch uncertain without a new P
     ), /Mutation already attempted/, 'Core restart cannot send the original prompt');
     assert.equal(core.semanticTaskRepository.getFullTask(
       'crashed-task', 'alice').attempts.length, 1);
+  } finally {
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test('public task.start uses Core-owned verified existing conversation for one initial POST', {
+  timeout: 70_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sessionplane-public-owned-initial-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({
+    config, browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  try {
+    const clientId = 'public-sender-fixture';
+    const project = await callRpc<any>({
+      socketPath: config.socketPath, method: 'project.open',
+      params: {
+        clientId, requestId: 'create-owned-project',
+        projectKey: 'owned-conversation-project', displayName: 'Owned project',
+        provider: 'chatgpt', surfaceIntent: 'chat',
+      }, timeoutMs: 10_000,
+    });
+    const task = await callRpc<any>({
+      socketPath: config.socketPath, method: 'task.start',
+      params: {
+        clientId, requestId: 'start-once-owned',
+        projectId: project.projectId,
+        expectedConversationRevision: project.conversationRevision,
+        prompt: 'Public exact first question',
+      }, timeoutMs: 10_000,
+    });
+    const store = core.semanticTaskRepository;
+    const attempt = store.getFullTask(task.taskId, clientId).attempts[0]!;
+    assert.equal(attempt.state, 'planned');
+    // A new project without a verified provider conversation cannot send.
+    let virtualNow = 1_000_000;
+    const payload = {
+      id: 'public-owned-conversation', current_node: 'answer-node',
+      mapping: {
+        root: { id: 'root', parent: null, children: [], message: null },
+        'user-node': {
+          id: 'user-node', parent: 'root', children: [],
+          message: { id: 'public-exact-message', turn_id: 'public-exact-turn',
+            author: { role: 'user' },
+            content: { parts: ['Public exact first question'] } },
+        },
+        'answer-node': {
+          id: 'answer-node', parent: 'user-node', children: [],
+          message: { id: 'answer', author: { role: 'assistant' },
+            channel: 'final', status: 'finished_successfully', end_turn: true,
+            content: { parts: ['Public answer produced once'] }, metadata: {} },
+        },
+      },
+    };
+    const backend: BackendJsonClient = {
+      authScope: {},
+      async get(url) {
+        return url.endsWith('/api/auth/session')
+          ? { status: 200, headers: {}, body: { accessToken: 'fixture-only' } }
+          : { status: 200, headers: {}, body: payload };
+      },
+    };
+    const runtime = createSemanticCoreRuntime({
+      database: core.database, browserOwner: core.browserOwner,
+      pageRegistry: core.pageRegistry, teamDirectory: core.teamDirectory,
+      pageMutationMutex: core.pageMutationMutex,
+      enabledProviders: ['chatgpt'], chatgptUrl: 'https://chatgpt.com',
+      backendClientProvider: () => backend,
+      backendRecovery: new ChatGptBackendRecovery({
+        requestTimeoutMs: 500, tokenCacheTtlMs: 10_000,
+        now: () => new Date(virtualNow),
+      }),
+      continuationNow: () => new Date(virtualNow),
+    });
+    await runtime.managedContinuation.tick();
+    assert.equal(store.getFullTask(task.taskId, clientId).attempts[0]!.state, 'planned');
+    const session = core.teamDirectory.getCurrentSession(project.projectId, 'main');
+    await core.actorScheduler.startGeneration({
+      sessionId: session.sessionId, teamBriefVersion: 0,
+      promptHash: sha('Public exact first question'),
+    });
+    const owned = await core.browserOwner!.createPage();
+    const page = owned.page;
+    await page.route('https://chatgpt.com/**', route => {
+      if (route.request().method() === 'POST') {
+        return route.fulfill({
+          status: 202, contentType: 'application/json', body: '{}',
+        });
+      }
+      return route.fulfill({ contentType: 'text/html', body:
+        '<main><article data-message-author-role="user" ' +
+        'data-message-id="previous-user">Previous content</article>' +
+        '<section data-chatgpt-composer>' +
+        '<div id="prompt-textarea" role="textbox" contenteditable="true"></div>' +
+        '<button data-testid="send-button" type="button">Send</button>' +
+        '</section></main><script>' +
+        'window.sends=0;document.querySelector("button").onclick=()=>{' +
+        'const editor=document.querySelector("#prompt-textarea");' +
+        'window.sends++;fetch("/backend-api/f/conversation",{method:"POST",' +
+        'headers:{"Content-Type":"application/json"},body:JSON.stringify({' +
+        'action:"next",conversation_id:"public-owned-conversation",' +
+        'parent_message_id:"root",messages:[{id:"public-exact-message",' +
+        'author:{role:"user"},content:{content_type:"text",parts:[editor.innerText]}}]' +
+        '})});editor.textContent="";};</script>',
+      });
+    });
+    await page.goto('https://chatgpt.com/c/public-owned-conversation');
+    core.pageRegistry.reservePage(owned.binding.pageKey, {
+      sessionId: session.sessionId, generation: 1,
+      conversationId: 'public-owned-conversation',
+    });
+    await core.actorScheduler.updateGeneration(session.sessionId, 1, {
+      conversationId: 'public-owned-conversation', pageKey: owned.binding.pageKey,
+      sessionState: 'ready', providerState: 'idle',
+    });
+    store.observeConversation({
+      projectId: project.projectId, slotId: 'main', expectedRevision: 1,
+      clientId, taskId: task.taskId,
+      providerConversationId: 'public-owned-conversation',
+    });
+    await runtime.managedContinuation.tick();
+    const dispatched = store.getFullTask(task.taskId, clientId).attempts[0]!;
+    assert.equal(dispatched.state, 'acknowledged',
+      'no caller manually binds attempt or dispatches a provider POST');
+    assert.equal(dispatched.externalTurnId, 'public-exact-turn');
+    assert.equal(await page.evaluate(() => (window as any).sends), 1);
+    assert.equal(store.getDispatchEvidence({
+      taskId: task.taskId, clientId, attemptId: attempt.attemptId,
+    })?.messageId, 'public-exact-message');
+    virtualNow += 5_001;
+    await runtime.managedContinuation.tick();
+    assert.equal(store.getTask(task.taskId, clientId).state, 'completed');
+    assert.equal(store.getFullTask(task.taskId, clientId).results[0]?.answerText,
+      'Public answer produced once');
+    await runtime.managedContinuation.tick();
+    assert.equal(await page.evaluate(() => (window as any).sends), 1);
+    await runtime.managedContinuation.close();
+  } finally {
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test('public task.start with explicit Pro intent emits agent model decision before any POST', {
+  timeout: 45_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sessionplane-public-pro-intent-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({
+    config, browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  try {
+    const clientId = 'public-model-agent';
+    const project = await callRpc<any>({
+      socketPath: config.socketPath, method: 'project.open',
+      params: {
+        clientId, requestId: 'open-model-project',
+        projectKey: 'model-pro-project', displayName: 'Requested Pro',
+        provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'Pro',
+      }, timeoutMs: 10_000,
+    });
+    const task = await callRpc<any>({
+      socketPath: config.socketPath, method: 'task.start',
+      params: {
+        clientId, requestId: 'start-model-task',
+        projectId: project.projectId,
+        expectedConversationRevision: project.conversationRevision,
+        prompt: 'Do not submit under an unknown model',
+      }, timeoutMs: 10_000,
+    });
+    const session = core.teamDirectory.getCurrentSession(project.projectId, 'main');
+    await core.actorScheduler.startGeneration({
+      sessionId: session.sessionId, teamBriefVersion: 0,
+      promptHash: sha('Do not submit under an unknown model'),
+    });
+    const owned = await core.browserOwner!.createPage();
+    const page = owned.page;
+    await page.route('https://chatgpt.com/**', route => route.fulfill({
+      contentType: 'text/html', body:
+        '<main><article data-message-author-role="user">Prior chat</article>' +
+        '<section data-chatgpt-composer><div id="prompt-textarea" ' +
+        'role="textbox" contenteditable="true"></div>' +
+        '<button data-testid="send-button" type="button" ' +
+        'onclick="window.sends++">Send</button></section>' +
+        '<button id="model-trigger" aria-label="Model" aria-haspopup="menu" ' +
+        'aria-controls="model-menu" aria-expanded="false" type="button">Current</button>' +
+        '<div id="model-menu" role="menu" hidden>' +
+        '<button role="menuitemradio" aria-checked="true">Default</button>' +
+        '<button role="menuitemradio" aria-checked="false">Pro</button></div>' +
+        '</main><script>window.sends=0;</script>',
+    }));
+    await page.goto('https://chatgpt.com/c/public-pro-conversation');
+    core.pageRegistry.reservePage(owned.binding.pageKey, {
+      sessionId: session.sessionId, generation: 1,
+      conversationId: 'public-pro-conversation',
+    });
+    await core.actorScheduler.updateGeneration(session.sessionId, 1, {
+      conversationId: 'public-pro-conversation',
+      pageKey: owned.binding.pageKey, sessionState: 'ready', providerState: 'idle',
+    });
+    core.semanticTaskRepository.observeConversation({
+      projectId: project.projectId, slotId: 'main', expectedRevision: 1,
+      clientId, taskId: task.taskId,
+      providerConversationId: 'public-pro-conversation',
+    });
+    await core.semanticManagedContinuation.tick();
+    const full = core.semanticTaskRepository.getFullTask(task.taskId, clientId);
+    assert.equal(full.task.state, 'agent_input_required');
+    assert.equal(full.attempts[0]!.state, 'planned');
+    assert.equal(await page.evaluate(() => (window as any).sends), 0);
+    const packet = core.semanticDecisionGateway.get(task.taskId, clientId);
+    assert.equal(packet?.kind, 'model_choice');
+    assert.equal(packet?.requestedModel, 'Pro');
+    assert.equal(packet?.options[0]?.purpose, 'open_model_chooser');
+    assert.equal(packet?.humanOnly, false);
+    await core.semanticManagedContinuation.tick();
+    assert.equal(core.semanticDecisionGateway.get(task.taskId, clientId)?.decisionId,
+      packet?.decisionId);
+    assert.equal(await page.evaluate(() => (window as any).sends), 0);
   } finally {
     await core.close();
     rmSync(root, { recursive: true, force: true });

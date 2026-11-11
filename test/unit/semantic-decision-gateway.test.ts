@@ -458,3 +458,27 @@ test('decision refuses a mismatched attempt before consuming its one-shot action
   assert.equal(adapter.clicks, 0);
   assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
 });
+
+
+test('model intent appears in bounded agent packet and survives explicit refresh', async t => {
+  const env = fixture(t);
+  const adapter = new FakeSemanticAdapter(env.store);
+  adapter.mode = 'model';
+  const gateway = env.getGateway(adapter);
+  const packet = (await gateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    modelChoice: true, modelIntent: 'Pro',
+  }))!;
+  assert.equal(packet.kind, 'model_choice');
+  assert.equal(packet.requestedModel, 'Pro');
+  assert.equal(packet.options[0]?.purpose, 'open_model_chooser');
+  assert.equal(packet.evidenceBytes, Buffer.byteLength(JSON.stringify(packet)));
+  const next = (await gateway.refresh({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    decisionId: packet.decisionId,
+  }))!;
+  assert.notEqual(next.decisionId, packet.decisionId);
+  assert.equal(next.requestedModel, 'Pro',
+    'refresh must not accidentally drop the requested model');
+  assert.equal(adapter.clicks, 0, 'model inspection does not click');
+});

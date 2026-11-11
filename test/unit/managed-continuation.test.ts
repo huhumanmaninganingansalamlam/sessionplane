@@ -72,8 +72,27 @@ function fixture(t: TestContext) {
   const createService = () => new ManagedContinuationService({
     repository: store, kernel, now: () => new Date(current),
   });
+  const seedPublicPolicy = (taskId: string, enabled = false) => {
+    database.raw.prepare(
+      'INSERT INTO kernel_public_task_policies' +
+      '(task_id,policy_json,input_sha256,accepted_revision,created_at)' +
+      ' VALUES(?,?,?,?,?)',
+    ).run(taskId, JSON.stringify(enabled ? {
+      enabled: true, approvalRef: 'approved-public',
+      message: '계속', intervalMs: CONTINUATION_INTERVAL_MS,
+    } : { enabled: false }), 'fixture-hash', 1, new Date(current).toISOString());
+  };
+  const seedModelIntent = (model: string) => {
+    database.raw.prepare(
+      'INSERT INTO kernel_public_project_intents' +
+      '(project_id,owner_client_id,public_project_key,provider_key,' +
+      'surface_intent,model_intent,main_slot_id,created_at)' +
+      ' VALUES(?,?,?,?,?,?,?,?)',
+    ).run('project', 'alice', 'fixture-project',
+      fake.providerKey, 'chat', model, 'main', new Date(current).toISOString());
+  };
   return {
-    fake, startTask, ack, createService,
+    fake, startTask, ack, createService, seedPublicPolicy, seedModelIntent,
     get store() { return store; },
     get kernel() { return kernel; },
     get now() { return current; },
@@ -277,4 +296,54 @@ test('Core restart after continuation ACK but before next timer rearm restores o
     timer.timerId === 'continuation-due:' + plannedId).length, 1,
     'exact ACK restores its next due without reissuing the POST');
   assert.equal(env.fake.sends.length, 2);
+});
+
+
+test('Core drives one planned public initial send after exact bound conversation becomes ready', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  env.seedPublicPolicy('task-a');
+  const service = env.createService();
+  env.fake.blocked.add('task-a');
+  await service.tick();
+  assert.equal(env.fake.sends.length, 0);
+  assert.equal(env.store.getFullTask('task-a', 'alice').attempts[0]!.state, 'planned');
+  env.fake.blocked.delete('task-a');
+  await service.tick();
+  assert.equal(env.fake.sends.length, 1);
+  assert.equal(env.fake.sends[0]!.content, 'Question task-a');
+  assert.equal(env.fake.sends[0]!.kind, 'initial');
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'completed',
+    'Core also observes exact FINAL for the public standalone task');
+  await service.tick();
+  assert.equal(env.fake.sends.length, 1, 'completed public initial never resubmits');
+});
+
+test('Core public initial scanner never dispatches canceled public work', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  env.seedPublicPolicy('task-a');
+  env.store.requestCancel('task-a', 'alice');
+  const service = env.createService();
+  await service.tick();
+  assert.equal(env.fake.sends.length, 0);
+  assert.equal(env.store.getFullTask('task-a', 'alice').attempts[0]!.state, 'planned');
+});
+
+
+test('explicit project model intent never silently sends the initial prompt with another model', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  env.seedPublicPolicy('task-a');
+  env.seedModelIntent('Pro');
+  const service = env.createService();
+  await service.tick();
+  assert.equal(env.fake.sends.length, 0,
+    'configured model intent requires exact observed model verification');
+  assert.equal(env.store.getFullTask('task-a', 'alice').attempts[0]!.state, 'planned');
+  assert.ok(env.store.getFullTask('task-a', 'alice').events.some(event =>
+    event.event.type === 'observation.deferred' &&
+    event.event.reason === 'public-initial-model-intent-unverified'));
+  await service.tick();
+  assert.equal(env.fake.sends.length, 0, 'repeated review never substitutes a model');
 });

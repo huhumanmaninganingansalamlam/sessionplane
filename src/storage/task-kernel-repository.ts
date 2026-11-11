@@ -1151,6 +1151,36 @@ export class TaskKernelRepository {
     return rows.length;
   }
 
+  /**
+   * Admitted public Task initials ready for Core-owned dispatch. Conversation
+   * identity must already be verified and bound to the current active slot;
+   * a new/unprepared ChatGPT page is not an invented conversation ID.
+   * Only PLANNED work is eligible: dispatched/uncertain is never replayed.
+   */
+  listPendingPublicInitials(limit = 16): readonly {
+    taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
+  }[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error('Invalid public initial scan limit');
+    }
+    return this.#database.raw.prepare(
+      `SELECT t.task_id AS taskId,t.client_id AS clientId,
+          a.attempt_id AS attemptId,i.model_intent AS modelIntent
+        FROM kernel_tasks t
+        JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+        JOIN kernel_attempts a ON a.task_id=t.task_id
+        JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
+          AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
+        LEFT JOIN kernel_public_project_intents i ON i.project_id=t.project_id
+        WHERE t.cancel_requested=0 AND t.state='working'
+          AND t.pending_decision_id IS NULL AND s.provider_conversation_id IS NOT NULL
+          AND a.kind='initial' AND a.state='planned'
+        ORDER BY t.created_at,t.task_id LIMIT ?`,
+    ).all(limit) as Array<{
+      taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
+    }>;
+  }
+
   /** Exact public ACKs awaiting a canonical FINAL. The Core may observe
    * these without a connected RPC/MCP client or a subscriber lifecycle.
    */

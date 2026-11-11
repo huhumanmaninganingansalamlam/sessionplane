@@ -34,6 +34,12 @@ export class ManagedContinuationService {
   readonly #bindAttempt: (input: {
     taskId: string; clientId: string; attemptId: string; sourceAttemptId: string;
   }) => void | Promise<void>;
+  readonly #bindInitialAttempt: ((input: {
+    taskId: string; clientId: string; attemptId: string;
+  }) => void | Promise<void>) | undefined;
+  readonly #inspectModelIntent: ((input: {
+    taskId: string; clientId: string; attemptId: string; modelIntent: string;
+  }) => void | Promise<void>) | undefined;
   #interval: ReturnType<typeof setInterval> | null = null;
   #active: Promise<ContinuationReviewReport> | null = null;
   #closed = false;
@@ -46,12 +52,20 @@ export class ManagedContinuationService {
     bindAttempt?: (input: {
       taskId: string; clientId: string; attemptId: string; sourceAttemptId: string;
     }) => void | Promise<void>;
+    bindInitialAttempt?: (input: {
+      taskId: string; clientId: string; attemptId: string;
+    }) => void | Promise<void>;
+    inspectModelIntent?: (input: {
+      taskId: string; clientId: string; attemptId: string; modelIntent: string;
+    }) => void | Promise<void>;
   }) {
     this.#repository = input.repository;
     this.#kernel = input.kernel;
     this.#now = input.now ?? (() => new Date());
     this.#canRun = input.canRun ?? (() => true);
     this.#bindAttempt = input.bindAttempt ?? (() => undefined);
+    this.#bindInitialAttempt = input.bindInitialAttempt;
+    this.#inspectModelIntent = input.inspectModelIntent;
   }
 
   /** Called only by a trusted Core caller with explicit user delegation.
@@ -132,6 +146,32 @@ export class ManagedContinuationService {
 
   async #run(): Promise<ContinuationReviewReport> {
     const now = this.#now().toISOString();
+    // Fresh public initial work requires a verified, retained conversation.
+    // Preparation still owns missing conversations; never fabricate one or
+    // spend the initial attempt merely because a client asked to start.
+    for (const planned of this.#repository.listPendingPublicInitials(8)) {
+      try {
+        await this.#bindInitialAttempt?.(planned);
+        if (planned.modelIntent !== null) {
+          // A requested model is not a hint to silently use whichever model
+          // happens to be selected. Require explicit observed configuration
+          // evidence before this initial POST may consume its attempt.
+          await this.#inspectModelIntent?.({
+            taskId: planned.taskId, clientId: planned.clientId,
+            attemptId: planned.attemptId, modelIntent: planned.modelIntent,
+          });
+          this.#repository.recordObservationDeferred(planned.taskId, planned.clientId,
+            'public-initial-model-intent-unverified');
+          continue;
+        }
+        await this.#kernel.dispatch(planned.taskId, planned.clientId, planned.attemptId);
+      } catch {
+        try {
+          this.#repository.recordObservationDeferred(planned.taskId, planned.clientId,
+            'public-initial-exact-preparation-unavailable');
+        } catch { /* Another Task may independently become terminal. */ }
+      }
+    }
     // An approved public Task is admitted before any provider send. Once its
     // exact ACK lands, Core (not task.wait or a connected client) turns that
     // persisted approval into the first durable 20-minute timer.
