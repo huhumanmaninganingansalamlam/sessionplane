@@ -209,7 +209,12 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
       // permission to repeat a click or the original user question.
       this.#journal.record(intent, evidence);
       const ack = await this.#adapter.verify({
-        context, kind: 'ack', prompt: intent.content, attempts: [evidence],
+        // Before continuation POST, context anchors the prior ACK for UI
+        // safety. The new ACK must instead identify this attempt's exact POST
+        // message; the new turn ID is unknown until canonical verification.
+        context: { ...context, submittedUserMessageId: evidence.messageId,
+          submittedUserTurnId: null },
+        kind: 'ack', prompt: intent.content, attempts: [evidence],
       });
       return ack.kind === 'verified_ack' && ack.messageId === evidence.messageId
         ? { kind: 'verified_ack', externalTurnId: ack.externalTurnId }

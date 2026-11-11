@@ -297,10 +297,16 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       }
       if (ui.buttons.length === 1 && ui.buttons[0]!.enabled &&
         ui.editors[0]!.value.trim().length > 0) {
-        const continuation = ui.editors[0]!.value === '계속';
-        issue(continuation ? 'continue' : 'submit',
-          continuation ? 'Submit the existing exact continuation draft once' : 'Submit the existing exact chat draft once',
+        // Draft text is not Task intent. An initial user prompt can itself be
+        // exactly "계속"; only the durable attempt kind authorizes the click.
+        issue('submit', 'Submit the existing exact chat draft once',
           'send_once', { kind: 'none' }, ui.fingerprint);
+        if (ui.editors[0]!.value === '계속' &&
+            context.submittedUserMessageId !== null &&
+            context.submittedUserTurnId !== null) {
+          issue('continue', 'Submit the existing exact continuation draft once',
+            'send_once', { kind: 'none' }, ui.fingerprint);
+        }
       }
       if (ui.buttons.length > 1) {
         blocker = 'unsupported'; reason = 'submit-control-ambiguous';

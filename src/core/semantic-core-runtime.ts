@@ -161,13 +161,35 @@ export function createSemanticCoreRuntime(input: {
     const evidence = repository.getDispatchEvidence({
       taskId: intent.taskId, clientId: intent.clientId, attemptId: intent.attemptId,
     });
-    const attempt = repository.getFullTask(intent.taskId, intent.clientId).attempts
-      .find(row => row.attemptId === intent.attemptId);
+    const full = repository.getFullTask(intent.taskId, intent.clientId);
+    const attempt = full.attempts.find(row => row.attemptId === intent.attemptId);
+    let submittedUserMessageId = evidence?.messageId ?? null;
+    let submittedUserTurnId = attempt?.externalTurnId ?? null;
+    if (attempt?.kind === 'continuation' && evidence === null &&
+        submittedUserTurnId === null) {
+      // Before this continuation has its own POST, bind observation to the
+      // nearest earlier ACK with a recorded exact FINAL, never an arbitrary
+      // mounted user turn. After POST, current attempt evidence takes over.
+      const previous = [...full.attempts].reverse().find(row =>
+        row.sequence < attempt.sequence && row.kind !== 'stop' &&
+        row.state === 'acknowledged' && row.externalTurnId !== null &&
+        full.results.some(result => result.attemptId === row.attemptId &&
+          result.externalTurnId === row.externalTurnId));
+      if (previous) {
+        const precedingEvidence = repository.getDispatchEvidence({
+          taskId: intent.taskId, clientId: intent.clientId, attemptId: previous.attemptId,
+        });
+        if (precedingEvidence?.conversationId === intent.providerConversationId) {
+          submittedUserMessageId = precedingEvidence.messageId;
+          submittedUserTurnId = previous.externalTurnId;
+        }
+      }
+    }
     return {
       projectId: intent.projectId, slotId: intent.slotId, slotRevision: intent.slotRevision,
       taskId: intent.taskId, providerConversationId: intent.providerConversationId,
-      submittedUserMessageId: evidence?.messageId ?? null,
-      submittedUserTurnId: attempt?.externalTurnId ?? null,
+      submittedUserMessageId,
+      submittedUserTurnId,
       pageLease: activeSlot && candidate !== null && isExactLease(candidate) ? candidate : null,
     };
   };

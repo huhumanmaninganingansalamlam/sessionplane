@@ -12,7 +12,7 @@ import { ChatGptBackendRecovery, type BackendJsonClient } from '../../src/provid
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 
-test('Core-assembled semantic ChatGPT sends once, persists exact ACK and FINAL with one owned page', {
+test('Core-assembled semantic ChatGPT sends initial and continuation once each with exact ACK and FINAL', {
   timeout: 90_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'sessionplane-semantic-core-integration-'));
@@ -48,10 +48,12 @@ test('Core-assembled semantic ChatGPT sends once, persists exact ACK and FINAL w
         '<button data-testid="send-button">Send</button></section></main><script>' +
         'window.sends=0;document.querySelector("button").onclick=()=>{' +
         'const editor=document.querySelector("#prompt-textarea");const text=editor.innerText;' +
-        'window.sends++;fetch("/backend-api/f/conversation",{method:"POST",' +
+        'window.sends++;const messageId=window.sends===1?"user-core":"user-continue";' +
+        'const parentId=window.sends===1?"root":"assistant-node";' +
+        'fetch("/backend-api/f/conversation",{method:"POST",' +
         'headers:{"Content-Type":"application/json"},body:JSON.stringify({' +
-        'action:"next",conversation_id:"core-conv",parent_message_id:"root",' +
-        'messages:[{id:"user-core",author:{role:"user"},content:{content_type:"text",parts:[text]}}]' +
+        'action:"next",conversation_id:"core-conv",parent_message_id:parentId,' +
+        'messages:[{id:messageId,author:{role:"user"},content:{content_type:"text",parts:[text]}}]' +
         '})});editor.textContent="";};</script>',
       });
     });
@@ -102,6 +104,24 @@ test('Core-assembled semantic ChatGPT sends once, persists exact ACK and FINAL w
         } },
       },
     };
+    const continuationPayload = {
+      ...payload, current_node: 'assistant-continue-node',
+      mapping: {
+        ...payload.mapping,
+        'user-continue-node': {
+          id: 'user-continue-node', parent: 'assistant-node', children: [],
+          message: { id: 'user-continue', turn_id: 'turn-continue',
+            author: { role: 'user' }, content: { parts: ['계속'] } },
+        },
+        'assistant-continue-node': {
+          id: 'assistant-continue-node', parent: 'user-continue-node', children: [],
+          message: { id: 'assistant-continue', author: { role: 'assistant' },
+            channel: 'final', status: 'finished_successfully', end_turn: true,
+            content: { parts: ['Continued exact answer'] }, metadata: {} },
+        },
+      },
+    };
+    let continuedBackend = false;
     const client: BackendJsonClient = {
       authScope: {},
       async get(url) {
@@ -110,7 +130,7 @@ test('Core-assembled semantic ChatGPT sends once, persists exact ACK and FINAL w
         }
         assert.ok(url.includes('core-conv'));
         detailReads++;
-        return { status: 200, headers: {}, body: payload };
+        return { status: 200, headers: {}, body: continuedBackend ? continuationPayload : payload };
       },
     };
     // The production factory is the same one used by startCore; only the
@@ -196,13 +216,55 @@ test('Core-assembled semantic ChatGPT sends once, persists exact ACK and FINAL w
     virtualNow += 5_001;
     const final = await runtime.kernel.observeFinal({
       taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-once',
-      resultId: 'exact-result', completeTask: true,
+      resultId: 'exact-result', completeTask: false,
     });
     assert.equal(final?.answerText, 'Exact integrated answer');
-    assert.equal(runtime.repository.getTask('exact-task', 'fixture-alice').state, 'completed');
+    assert.equal(runtime.repository.getTask('exact-task', 'fixture-alice').state, 'working');
     assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts.length, 1);
     assert.equal(await page.evaluate(() => (window as any).sends), 1);
     assert.ok(detailReads >= 2, 'ACK and FINAL are independent reads');
+
+    // A continuation must inherit the exact previous ACK only before its own
+    // POST. Its new ACK and FINAL then bind to the new attempt, not the parent.
+    await page.locator('main').evaluate(main => {
+      const submitted = document.createElement('article');
+      submitted.setAttribute('data-message-author-role', 'user');
+      submitted.setAttribute('data-message-id', 'user-core');
+      submitted.setAttribute('data-turn-id', 'turn-core');
+      submitted.textContent = 'Exact integrated prompt';
+      main.querySelector('[data-message-id="previous-user"]')!.after(submitted);
+    });
+    runtime.repository.planAttempt({
+      taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-continue',
+      kind: 'continuation', turnKey: 'continue-1', content: '계속',
+    });
+    runtime.bindAttemptSession({
+      taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-continue',
+      sessionId: session.sessionId, generation: 1, conversationId: 'core-conv',
+    });
+    continuedBackend = true;
+    virtualNow += 5_001;
+    await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-continue');
+    const continued = runtime.repository.getFullTask('exact-task', 'fixture-alice')
+      .attempts.find(row => row.attemptId === 'attempt-continue')!;
+    assert.equal(continued.state, 'acknowledged',
+      'a planned continuation must use the previously finalized turn as its UI anchor');
+    assert.equal(continued.externalTurnId, 'turn-continue');
+    assert.equal(await page.evaluate(() => (window as any).sends), 2);
+    const continuationEvidence = runtime.repository.getDispatchEvidence({
+      taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-continue',
+    });
+    assert.equal(continuationEvidence?.messageId, 'user-continue');
+    assert.equal(continuationEvidence?.textHash, sha('계속'));
+    virtualNow += 5_001;
+    const continuedFinal = await runtime.kernel.observeFinal({
+      taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-continue',
+      resultId: 'continued-result', completeTask: true,
+    });
+    assert.equal(continuedFinal?.answerText, 'Continued exact answer');
+    assert.equal(runtime.repository.getTask('exact-task', 'fixture-alice').state, 'completed');
+    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts.length, 2);
+    assert.equal(await page.evaluate(() => (window as any).sends), 2);
   } finally {
     await core.close();
     rmSync(root, { recursive: true, force: true });

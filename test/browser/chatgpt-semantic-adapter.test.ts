@@ -39,6 +39,75 @@ const DRIFT = '<main><section data-chatgpt-composer><form id="new-layout">' +
   'document.querySelector("form").addEventListener("submit",e=>{e.preventDefault();window.sends++;' +
   'document.querySelector("[role=textbox]").textContent="";});</script>';
 
+test('a literal initial prompt 계속 is a submit, not an inferred continuation', {
+  timeout: 30_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-literal-initial-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'disposable-profile'), pageRegistry: registry, headless: true,
+  });
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    const page = created.page;
+    await page.route('https://chatgpt.com/**', route => route.fulfill({
+      contentType: 'text/html', body: NORMAL,
+    }));
+    await page.goto('https://chatgpt.com/c/conversation-b');
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'fixture-initial', generation: 1, conversationId: 'conversation-b',
+    });
+    const binding = registry.getBinding(created.binding.pageKey);
+    const lease: OwnedPageIdentity = {
+      projectId: 'project-b', slotId: 'main', slotRevision: 1, taskId: 'task-b',
+      pageKey: binding.pageKey, targetId: binding.targetId!, bindingEpoch: binding.bindingEpoch,
+    };
+    const task = context(lease);
+    const adapter = new ChatGptSemanticAdapter({
+      isExactLease: value => value === lease,
+      resolvePage: value => registry.pageForObservation(value.pageKey, value.bindingEpoch),
+      isAuthorizedAttempt: input => input.contentSha256 === digest('계속') &&
+        ((input.purpose === 'submit' && input.attemptId === 'journaled-initial') ||
+          (input.purpose === 'continue' && input.attemptId === 'journaled-continue')),
+    });
+    await page.locator('#prompt-textarea').fill('계속');
+    const observed = await adapter.observe(task);
+    const submit = observed.actions.find(action => action.purpose === 'submit');
+    assert.ok(submit, 'an ordinary initial question cannot be classified by literal text');
+    assert.equal(observed.actions.some(action => action.purpose === 'continue'), false,
+      'no prior acknowledged turn exists to continue');
+    const dispatched = await adapter.act({
+      context: task, snapshotId: observed.snapshotId,
+      actionRef: submit.actionRef, evidenceHash: submit.evidenceHash,
+      authorizedAttemptId: 'journaled-initial', expectedContentSha256: digest('계속'),
+    });
+    assert.deepEqual(dispatched, { kind: 'dispatched_unverified', effect: 'send', attempts: [] });
+    assert.equal(await page.evaluate(() => (window as any).sends), 1);
+    // The same visible word is a continuation only when an exact previous
+    // user turn exists and a distinct continuation attempt authorizes it.
+    await page.setContent('<main>' +
+      '<article data-message-author-role="user" data-message-id="original" data-turn-id="turn-b">Previous</article>' +
+      '<div id="prompt-textarea" role="textbox" contenteditable="true">계속</div>' +
+      '<button data-testid="send-button" onclick="window.sends++">Send</button></main>' +
+      '<script>window.sends=0;</script>');
+    const continuing = context(lease, 'original');
+    const next = await adapter.observe(continuing);
+    const continuation = next.actions.find(action => action.purpose === 'continue');
+    assert.ok(continuation, 'the exact previously submitted turn can offer continue');
+    const continued = await adapter.act({
+      context: continuing, snapshotId: next.snapshotId,
+      actionRef: continuation.actionRef, evidenceHash: continuation.evidenceHash,
+      authorizedAttemptId: 'journaled-continue', expectedContentSha256: digest('계속'),
+    });
+    assert.deepEqual(continued, { kind: 'dispatched_unverified', effect: 'send', attempts: [] });
+    assert.equal(await page.evaluate(() => (window as any).sends), 1);
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ChatGPT semantic observe/act uses exact draft and one-shot send across structural/testid drift', {
   timeout: 90_000,
 }, async () => {
