@@ -298,6 +298,23 @@ export class SemanticDecisionGateway {
       ...(input.modelChoice === undefined ? {} : { modelChoice: input.modelChoice }) });
   }
 
+  /** Public decision entry point: the exact attempt stays server-owned.
+   * Caller supplies only the current Task/decision/action identities.
+   */
+  async decideCurrent(input: {
+    taskId: string; clientId: string; decisionId: string;
+    requestId: string; actionRef: string; input?: string;
+  }): Promise<AgentDecisionOutcome> {
+    const full = this.#repository.getFullTask(input.taskId, input.clientId);
+    const row = full.decisions.find(decision => decision.decisionId === input.decisionId);
+    if (!row) throw new Error('Unknown decision identity');
+    const bound = storedContext(row.contextJson);
+    if (typeof bound.attemptId !== 'string' || bound.attemptId.length === 0) {
+      throw new Error('Decision has no exact durable attempt binding');
+    }
+    return await this.decide({ ...input, attemptId: bound.attemptId });
+  }
+
   /** Validated typed selection. The provider consumes the durable grant itself. */
   async decide(input: {
     taskId: string; clientId: string; attemptId: string; decisionId: string;

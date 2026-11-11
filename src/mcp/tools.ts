@@ -2,6 +2,7 @@ import { MAX_WORKFLOW_WAIT_MS } from '../domain/workflow-wait.ts';
 import type { RemoteConnection } from '../config.ts';
 import { z } from 'zod';
 import { workflowSchemas } from '../rpc/methods/workflow.ts';
+import { taskSchemas } from '../rpc/methods/task.ts';
 import { callRpc, RpcClientError } from '../cli/client.ts';
 
 export interface McpToolDefinition {
@@ -52,18 +53,40 @@ const descriptions: Record<keyof typeof workflowSchemas, string> = {
   stop: 'Cancel preparation or attempt one provider stop for this exact requestRef without affecting a newer request. provider.stop-unavailable means no mutation was attempted; provider.stop-unknown means an unacknowledged attempt, not confirmed cancellation. Observe the same request read-only; never repeat an uncertain stop under another requestId. Get/wait expose stopOutcome.state unknown across restart.',
 };
 
-export const MCP_TOOLS: readonly McpToolDefinition[] = Object.entries(workflowSchemas).map(([name, schema]) => ({
-  name: 'sessionplane_' + name,
-  rpcMethod: 'workflow.' + name,
-  description: descriptions[name as keyof typeof workflowSchemas],
-  inputSchema: { ...z.toJSONSchema(schema, { io: 'input' }), type: 'object' },
-  annotations: {
-    readOnlyHint: name === 'team_get',
-    destructiveHint: ['team_delete', 'role_retire', 'session_replace', 'session_delete', 'stop'].includes(name),
-    idempotentHint: true,
-    openWorldHint: true,
-  },
-}));
+const taskDescriptions: Record<keyof typeof taskSchemas, string> = {
+  get: 'Read the current durable Task state and pending agent decision. view:result returns the complete exact answer; evidence includes exact attempt/timer identities. Never sends or focuses a page.',
+  wait: 'Wait for a newer Task revision without owning the Task, provider, timers or continuation. Client disconnect does not cancel work. Reconnect with afterRevision.',
+  decide: 'Use exactly one current durable decisionId/actionRef. Optional input must match its advertised input schema. Matching replay returns the exact stored outcome without a new provider action.',
+  cancel: 'Record Task cancellation intent immediately and revoke future managed Continue. Never infer provider stop from a local cancel; unfinished external work remains uncertain.',
+};
+export const TASK_MCP_TOOLS: readonly McpToolDefinition[] =
+  Object.entries(taskSchemas).map(([name, schema]) => ({
+    name: 'sessionplane_task_' + name,
+    rpcMethod: 'task.' + name,
+    description: taskDescriptions[name as keyof typeof taskSchemas],
+    inputSchema: { ...z.toJSONSchema(schema, { io: 'input' }), type: 'object' },
+    annotations: {
+      readOnlyHint: name === 'get' || name === 'wait',
+      destructiveHint: name === 'cancel',
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  }));
+export const MCP_TOOLS: readonly McpToolDefinition[] = [
+  ...Object.entries(workflowSchemas).map(([name, schema]) => ({
+    name: 'sessionplane_' + name,
+    rpcMethod: 'workflow.' + name,
+    description: descriptions[name as keyof typeof workflowSchemas],
+    inputSchema: { ...z.toJSONSchema(schema, { io: 'input' }), type: 'object' },
+    annotations: {
+      readOnlyHint: name === 'team_get',
+      destructiveHint: ['team_delete', 'role_retire', 'session_replace', 'session_delete', 'stop'].includes(name),
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  })),
+  ...TASK_MCP_TOOLS,
+];
 
 export function getMcpTool(name: string): McpToolDefinition | null {
   return MCP_TOOLS.find((candidate) => candidate.name === name) ?? null;

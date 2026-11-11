@@ -87,7 +87,7 @@ async function callRpcOnce<Result>(options: RpcCallOptions): Promise<Result> {
 }
 
 async function callTransport<Result>(options: RpcCallOptions, connection?: { socket: Duplex; ready: boolean; error: Error | undefined }): Promise<Result> {
-  const readWait = ['workflow.wait', 'session.wait', 'team.wait'].includes(options.method) &&
+  const readWait = ['workflow.wait', 'session.wait', 'team.wait', 'task.wait'].includes(options.method) &&
     Number((options.params as { waitMs?: number } | undefined)?.waitMs) > 0;
   let deadline: number | undefined;
   let deferred = false;

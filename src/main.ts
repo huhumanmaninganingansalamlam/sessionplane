@@ -36,6 +36,7 @@ import { registerSendMethods } from './rpc/methods/send.ts';
 import { registerStopMethods } from './rpc/methods/stop.ts';
 import { registerTeamMethods } from './rpc/methods/team.ts';
 import { registerWaitMethods } from './rpc/methods/wait.ts';
+import { registerTaskMethods } from './rpc/methods/task.ts';
 import { ActorScheduler } from './scheduler/actor-scheduler.ts';
 import { ProbeCoordinator } from './scheduler/probe-coordinator.ts';
 import { SessionPlaneDatabase } from './storage/database.ts';
@@ -435,6 +436,9 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   registerSendMethods(router, submissionService);
   registerStopMethods(router, stopService);
   registerWaitMethods(router, teamDirectory, actorScheduler);
+  registerTaskMethods(router, {
+    repository: semanticTaskRepository, gateway: semanticDecisionGateway,
+  });
 
   const rpcServer = new RpcServer({
     socketPath: config.socketPath,
