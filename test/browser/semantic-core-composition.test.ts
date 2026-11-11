@@ -462,6 +462,45 @@ test('Core accepts only the exact resolved question decision once', {
     const finalDecisions = store.getFullTask('decision-task', clientId).decisions;
     assert.ok(['model-open', 'model-select'].every(id =>
       finalDecisions.find(d => d.decisionId === id)?.actionConsumed));
+    // A provider stream Retry is also a one-shot external effect, not a
+    // repeat of the journaled prompt or a general model decision.
+    await page.setContent('<main><div data-message-author-role="user" ' +
+      'data-message-id="decision-user" data-turn-id="decision-turn">Question prompt</div>' +
+      '<div role="alert">Error in message stream <button id="retry">Retry</button></div>' +
+      '<div id="prompt-textarea" contenteditable="true"></div>' +
+      '<button data-testid="send-button">Send</button></main><script>' +
+      'window.retries=0;document.querySelector("#retry").onclick=()=>{' +
+      'window.retries++;document.querySelector("[role=alert]").remove();};</script>');
+    const retryObserved = await adapter.observe(decisionContext);
+    assert.equal(retryObserved.blocker, 'provider_retry');
+    const retryAction = retryObserved.actions.find(a => a.purpose === 'retry')!;
+    assert.ok(retryAction && retryAction.risk === 'retry_once');
+    store.requireDecision({ taskId: 'decision-task', clientId,
+      decisionId: 'stream-retry', audience: 'agent', contextJson: JSON.stringify({
+        kind: 'semantic_action', context: decisionContext, purpose: retryAction.purpose,
+        snapshotId: retryObserved.snapshotId, actionRef: retryAction.actionRef,
+        evidenceHash: retryAction.evidenceHash,
+      }) });
+    store.resolveDecision({ taskId: 'decision-task', clientId,
+      decisionId: 'stream-retry', resolutionJson: JSON.stringify({
+        kind: 'semantic_action', input: null,
+      }) });
+    const retried = await adapter.act({
+      context: decisionContext, snapshotId: retryObserved.snapshotId,
+      actionRef: retryAction.actionRef, evidenceHash: retryAction.evidenceHash,
+      authorizedDecisionId: 'stream-retry',
+    });
+    assert.deepEqual(retried, {
+      kind: 'uncertain', reason: 'retry-clicked-provider-progress-unverified',
+    });
+    assert.equal(await page.evaluate(() => (window as any).retries), 1);
+    assert.equal(store.getFullTask('decision-task', clientId).decisions
+      .find(d => d.decisionId === 'stream-retry')?.actionConsumed, true);
+    assert.equal((await adapter.act({
+      context: decisionContext, snapshotId: retryObserved.snapshotId,
+      actionRef: retryAction.actionRef, evidenceHash: retryAction.evidenceHash,
+      authorizedDecisionId: 'stream-retry',
+    })).kind, 'stale');
   } finally {
     await core.close();
     rmSync(root, { recursive: true, force: true });

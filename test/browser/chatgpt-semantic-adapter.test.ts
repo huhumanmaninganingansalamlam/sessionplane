@@ -72,7 +72,7 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
         registry.getBinding(value.pageKey).targetId === value.targetId,
       resolvePage: value => registry.pageForObservation(value.pageKey, value.bindingEpoch),
       isAuthorizedAttempt: input => input.attemptId.startsWith('journaled-attempt-'),
-      isAuthorizedDecision: input => input.decisionId === 'decision-model',
+      isAuthorizedDecision: input => ['decision-model', 'decision-retry'].includes(input.decisionId),
     });
     const task = context(lease);
     let foregroundCalls = 0;
@@ -983,13 +983,13 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(await page.evaluate(() => (window as any).retries), 0);
     const clickedRetry = await adapter.act({ context: retryTask,
       snapshotId: retryObserved.snapshotId, actionRef: retryAction.actionRef,
-      evidenceHash: retryAction.evidenceHash, authorizedAttemptId: 'journaled-attempt-retry' });
+      evidenceHash: retryAction.evidenceHash, authorizedDecisionId: 'decision-retry' });
     assert.deepEqual(clickedRetry, { kind: 'uncertain',
       reason: 'retry-clicked-provider-progress-unverified' });
     assert.equal(await page.evaluate(() => (window as any).retries), 1);
     assert.equal((await adapter.act({ context: retryTask,
       snapshotId: retryObserved.snapshotId, actionRef: retryAction.actionRef,
-      evidenceHash: retryAction.evidenceHash, authorizedAttemptId: 'journaled-attempt-retry' })).kind,
+      evidenceHash: retryAction.evidenceHash, authorizedDecisionId: 'decision-retry' })).kind,
     'stale', 'exact Retry cannot be replayed after uncertain click');
 
     await page.setContent('<main><div data-message-author-role="user" data-message-id="user-b">Task</div>' +

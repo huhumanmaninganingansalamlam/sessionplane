@@ -86,10 +86,10 @@ export interface ChatGptSemanticAdapterOptions {
     context: SemanticTaskContext; attemptId: string;
     evidence: SemanticDispatchEvidence;
   }) => void;
-  /** Consume one exact journaled model/question decision before an external effect. */
+  /** Consume one exact journaled model/question/stream-retry decision before its effect. */
   readonly isAuthorizedDecision?: (input: {
     context: SemanticTaskContext;
-    purpose: 'open_model_chooser' | 'choose_model' | 'answer_question';
+    purpose: 'open_model_chooser' | 'choose_model' | 'answer_question' | 'retry';
     decisionId: string; snapshotId: string; actionRef: string; evidenceHash: string; input: string | null;
   }) => boolean | Promise<boolean>;
   readonly isAuthorizedAttempt?: (input: {
@@ -523,8 +523,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       }
       if (action.purpose === 'retry') {
         const retry = await inspectExactChatGptRetry(page, request.context);
-        if (!retry?.available || retry.evidenceHash !== action.retryHash ||
-          !(await this.#authorized(request, action.purpose))) {
+        if (!retry?.available || retry.evidenceHash !== action.retryHash) {
           return 'stale' as const;
         }
         requireExactMutationIdentity();
@@ -684,7 +683,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
   async #authorized(request: SemanticActRequest, purpose: SemanticActionPurpose): Promise<boolean> {
     if (purpose === 'compose') return true;
     if (purpose === 'open_model_chooser' || purpose === 'choose_model' ||
-        purpose === 'answer_question') {
+        purpose === 'answer_question' || purpose === 'retry') {
       if (!request.authorizedDecisionId || !this.#options.isAuthorizedDecision) return false;
       try {
         return await this.#options.isAuthorizedDecision({
