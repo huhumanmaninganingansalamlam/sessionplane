@@ -166,6 +166,16 @@ test('Core-assembled semantic ChatGPT sends once, persists exact ACK and FINAL w
       'planned', 'an already generating provider cannot consume a future send');
     assert.equal(await page.evaluate(() => (window as any).sends), 0);
     await page.locator('[data-message-id="ongoing-provider-stream"]').evaluate(node => node.remove());
+    await page.locator('#prompt-textarea').fill('Human-owned draft');
+    await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-once');
+    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts[0]!.state,
+      'planned', 'a foreign draft with no exact content proof cannot consume the attempt');
+    assert.equal(await page.evaluate(() => (window as any).sends), 0,
+      'preflight must not click a foreign draft');
+    await page.locator('#prompt-textarea').evaluate(editor => {
+      editor.replaceChildren();
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContent' }));
+    });
     const dispatched = await runtime.kernel.dispatch(
       'exact-task', 'fixture-alice', 'attempt-once',
     );

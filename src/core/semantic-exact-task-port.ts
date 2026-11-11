@@ -123,6 +123,18 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
         if (observation.blocker !== 'none' || observation.progress === 'streaming') {
           return { kind: 'unavailable', reason: 'semantic-preflight-blocked-or-generating' };
         }
+        // A non-empty existing draft has no Core-owned content proof. It is a
+        // known-not-sent state, so do not consume beginDispatch merely for the
+        // later sendOnce hash check to reject it. Only an exact empty-composer
+        // draft action is sufficient readiness; sendOnce still re-observes.
+        const compose = one(observation.actions, 'compose');
+        if (compose === null || compose.risk !== 'draft_only' ||
+            compose.input.kind !== 'text') {
+          return { kind: 'unavailable', reason: 'semantic-preflight-exact-compose-required' };
+        }
+        if (intent.content.length > compose.input.maxLength) {
+          return { kind: 'unavailable', reason: 'exact-prompt-exceeds-composer-schema' };
+        }
       }
       return { kind: 'ready' };
     } catch {
