@@ -618,3 +618,24 @@ test('aborting one transient wait never cancels another slot or its durable time
   assert.deepEqual(env.store.claimDueTimers('2026-11-08T00:20:00Z')
     .map(timer => timer.timerId), ['still-due']);
 });
+test('consecutive identical FINAL deferrals remain one durable event across Core reopen', t => {
+  const env = fixture(t);
+  seed(env.store);
+  start(env.store, 1);
+  const reason = 'final:attempt-1-initial:pending:backend-conversation-pacing';
+  const first = env.store.recordObservationDeferred('task-1', 'alice', reason);
+  const second = env.store.recordObservationDeferred('task-1', 'alice', reason);
+  assert.equal(second.revision, first.revision,
+    'the same paced FINAL cannot flood a durable Task with repeated events');
+  const changed = env.store.recordObservationDeferred('task-1', 'alice',
+    'final:attempt-1-initial:unavailable:backend-http-429');
+  assert.equal(changed.revision, first.revision + 1,
+    'a materially different read reason must still be retained');
+  env.reopen();
+  assert.deepEqual(env.store.getFullTask('task-1', 'alice').events
+    .filter(e => e.event.type === 'observation.deferred')
+    .map(e => (e.event as { reason: string }).reason), [
+      reason, 'final:attempt-1-initial:unavailable:backend-http-429',
+    ]);
+  assert.equal(env.store.getTask('task-1', 'alice').state, 'working');
+});

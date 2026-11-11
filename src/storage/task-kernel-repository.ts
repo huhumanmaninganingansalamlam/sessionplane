@@ -769,6 +769,16 @@ export class TaskKernelRepository {
     requireNonempty(reason, 'reason');
     return this.#database.transaction(() => {
       const task = this.#requireTask(taskId, clientId);
+      // Repeated reads inside one provider pacing window must not grow the
+      // Task event journal or wake subscribers with identical evidence.
+      const latest = this.#database.raw.prepare(
+        'SELECT event_type AS eventType, payload_json AS payload FROM kernel_events' +
+        ' WHERE task_id=? ORDER BY task_revision DESC LIMIT 1',
+      ).get(taskId) as { eventType: string; payload: string } | undefined;
+      if (latest?.eventType === 'observation.deferred') {
+        const previous = JSON.parse(latest.payload) as { reason?: unknown };
+        if (previous.reason === reason) return task;
+      }
       return this.#appendEvent(task, { type: 'observation.deferred', reason });
     });
   }

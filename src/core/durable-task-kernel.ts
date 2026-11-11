@@ -33,7 +33,7 @@ export type RecoveryOutcome =
   | { readonly kind: 'unavailable'; readonly reason: string };
 export type FinalObservation =
   | { readonly kind: 'exact_final'; readonly externalTurnId: string; readonly answerText: string }
-  | { readonly kind: 'pending' }
+  | { readonly kind: 'pending'; readonly reason?: string }
   | { readonly kind: 'unavailable'; readonly reason: string };
 
 export interface ExactTaskProviderPort {
@@ -115,7 +115,15 @@ export class DurableTaskKernel {
     const observation = await provider.observeFinal({
       ...intent, externalTurnId: attempt.externalTurnId,
     });
-    if (observation.kind !== 'exact_final') return null;
+    if (observation.kind !== 'exact_final') {
+      // Preserve the exact attempt's nonterminal read reason. A missing FINAL
+      // is never task completion or permission to replay the original POST.
+      const code = observation.reason && /^[a-z0-9_.:-]{1,100}$/i.test(observation.reason)
+        ? observation.reason : 'provider-final-unverified';
+      this.#storage.recordObservationDeferred(input.taskId, input.clientId,
+        `final:${input.attemptId}:${observation.kind}:${code}`);
+      return null;
+    }
     if (observation.externalTurnId !== attempt.externalTurnId) {
       throw new Error('Provider returned FINAL for wrong turn; reject evidence');
     }

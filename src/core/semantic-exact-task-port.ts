@@ -225,8 +225,9 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
           answerText: final.answerText };
       }
       return final.kind === 'pending'
-        ? { kind: 'pending' }
-        : { kind: 'unavailable', reason: 'exact-semantic-final-not-recovered' };
+        ? { kind: 'pending', reason: final.reason }
+        : { kind: 'unavailable',
+          reason: final.kind === 'unavailable' ? final.reason : 'exact-semantic-final-not-recovered' };
     } catch {
       return { kind: 'unavailable', reason: 'semantic-final-recovery-unavailable' };
     }

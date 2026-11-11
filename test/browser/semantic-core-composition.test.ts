@@ -633,6 +633,12 @@ test('Core recovers historical ChatGPT ACK and FINAL after cancel and slot repla
     });
     assert.equal(deferred, null, 'back-to-back FINAL reads honor backend pacing');
     assert.equal(detailReads, 1, 'a waiting FINAL never consumes another backend slot');
+    const deferredEvents = store.getFullTask('historical-task', clientId).events
+      .filter(entry => entry.event.type === 'observation.deferred');
+    assert.equal(deferredEvents.length, 1,
+      'a paced canonical FINAL must leave one durable per-attempt reason');
+    assert.match((deferredEvents[0]!.event as { reason: string }).reason,
+      /^final:historical-attempt:pending:/);
     virtualNow += 5_001;
     const final = await runtime.kernel.observeFinal({
       taskId: 'historical-task', clientId, attemptId: 'historical-attempt',
