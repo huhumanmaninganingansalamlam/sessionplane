@@ -155,16 +155,22 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       return { ...denied, evidenceBytes: observationBytes(denied) };
     };
 
+    // Compare-and-revoke: a slow denied observation can invalidate only the
+    // snapshot it saw at entry, never a newer observation for the same page.
+    const revokeStartSnapshot = (): void => {
+      if (this.#latest.get(lease.pageKey) === snapshotAtStart) this.#latest.delete(lease.pageKey);
+    };
+
     const conversationError = conversationBindingProblem(page, context);
     if (conversationError !== null) {
       // Page ownership alone does not prove that this tab still points to the
       // bound ChatGPT conversation. Do not inspect a foreign transcript.
-      this.#latest.delete(lease.pageKey);
+      revokeStartSnapshot();
       return deniedObservation(conversationError);
     }
     const surface = await observeChatGptSurface(page);
     if (surface.mode !== 'chat') {
-      this.#latest.delete(lease.pageKey);
+      revokeStartSnapshot();
       return deniedObservation(surface.mode === 'work'
         ? 'work-surface-observation-only' : 'chat-surface-unverified', surface.mode);
     }
@@ -327,7 +333,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         submittedUserTurnId: context.submittedUserTurnId,
       });
       if (!boundary.submittedUserFound || boundary.laterUserFound) {
-        this.#latest.delete(lease.pageKey);
+        revokeStartSnapshot();
         return deniedObservation('semantic-turn-boundary-changed-during-observation');
       }
     }
@@ -335,7 +341,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     // read. A slow question/model/permission inspection can cross a mode switch.
     const finalSurface = await observeChatGptSurface(page);
     if (finalSurface.mode !== 'chat') {
-      this.#latest.delete(lease.pageKey);
+      revokeStartSnapshot();
       return deniedObservation(finalSurface.mode === 'work'
         ? 'work-surface-changed-during-observation'
         : 'chat-surface-changed-during-observation', finalSurface.mode);
@@ -353,7 +359,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       }
     }
     if (changedBinding !== null) {
-      this.#latest.delete(lease.pageKey);
+      revokeStartSnapshot();
       return deniedObservation(changedBinding);
     }
     // An overlapping act consumes its old snapshot. An older observe must

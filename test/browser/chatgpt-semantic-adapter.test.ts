@@ -2348,3 +2348,73 @@ test('canonical ACK and FINAL recovery works read-only without a page or foregro
   }
   assert.equal(reads, 6, 'known message conflict needs no GET; turn conflict requires canonical GET');
 });
+test('a stale denied ChatGPT observation cannot invalidate a newer actionable snapshot', {
+  timeout: 35_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-semantic-overlap-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'disposable-profile'), pageRegistry: registry, headless: true,
+  });
+  let release!: () => void;
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({
+      contentType: 'text/html', body: '<main><div id="prompt-textarea" ' +
+        'contenteditable="true" role="textbox"></div>' +
+        '<button data-testid="send-button">Send</button></main>',
+    }));
+    await page.goto('https://chatgpt.com/c/conversation-b');
+    const current = registry.getBinding(binding.pageKey);
+    const lease: OwnedPageIdentity = {
+      projectId: 'project-b', slotId: 'main', slotRevision: 1, taskId: 'task-b',
+      pageKey: current.pageKey, targetId: current.targetId!, bindingEpoch: current.bindingEpoch,
+    };
+    let enter!: () => void;
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    const released = new Promise<void>(resolve => { release = resolve; });
+    let firstSurface = true;
+    const racedPage = new Proxy(page, { get(target, prop) {
+      if (prop === 'evaluate') return async (fn: unknown, arg: unknown) => {
+        if (firstSurface && typeof fn === 'function' &&
+            fn.name === 'inspectChatGptSurfaceDocument') {
+          firstSurface = false;
+          enter();
+          await released;
+          // An earlier observation read a transient stale Work status.
+          // The newer observation has already verified the current Chat UI.
+          return { mode: 'work', source: 'selected-control', modeControls: [] };
+        }
+        return page.evaluate(fn as never, arg as never);
+      };
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const adapter = new ChatGptSemanticAdapter({
+      isExactLease: candidate => candidate === lease,
+      resolvePage: () => racedPage,
+    });
+    const task = context(lease);
+    const older = adapter.observe(task);
+    await entered;
+    const newer = await adapter.observe(task);
+    assert.equal(newer.blocker, 'none');
+    const compose = newer.actions.find(a => a.purpose === 'compose')!;
+    assert.ok(compose, 'latest Chat observation must retain an exact composer action');
+    release();
+    const stale = await older;
+    assert.equal(stale.blocker, 'unsupported');
+    assert.equal(stale.surface, 'work');
+    assert.deepEqual(await adapter.act({
+      context: task, snapshotId: newer.snapshotId, actionRef: compose.actionRef,
+      evidenceHash: compose.evidenceHash, input: 'Latest exact Chat draft',
+    }), { kind: 'performed', effect: 'draft_updated' },
+    'an obsolete denied observation must not erase a different, newer exact actionRef');
+    assert.equal(await page.locator('#prompt-textarea').innerText(), 'Latest exact Chat draft');
+  } finally {
+    release?.();
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
