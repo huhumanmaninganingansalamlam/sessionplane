@@ -301,6 +301,17 @@ export class TaskKernelRepository {
     return this.#requireSlot(projectId, slotId);
   }
 
+  /** Public revision is advanced by admitted tasks, separate from the
+   * immutable provider binding revision used for ACK/FINAL correlation.
+   */
+  getConversationRevision(projectId: string, slotId: string, clientId: string): number {
+    this.#requireAccess(projectId, clientId);
+    const row = this.#database.raw.prepare(
+      'SELECT revision FROM kernel_public_slot_revisions WHERE project_id=? AND slot_id=?',
+    ).get(projectId, slotId) as { revision: number } | undefined;
+    return row?.revision ?? this.#requireSlot(projectId, slotId).revision;
+  }
+
   getBindingAtRevision(
     projectId: string, slotId: string, revision: number, clientId: string,
   ): SlotBindingRecord {

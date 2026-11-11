@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 import type { SemanticDecisionGateway } from '../../core/semantic-decision-gateway.ts';
+import type { PublicTaskAdmissionService } from '../../core/public-task-admission.ts';
 import { waitForTaskRevision } from '../../core/task-wait.ts';
 import type { TaskKernelRepository } from '../../storage/task-kernel-repository.ts';
 import type { RpcRouter } from '../router.ts';
@@ -12,11 +13,36 @@ const requestId = z.string().trim().min(1).max(300);
 const decisionId = z.string().uuid();
 const actionRef = z.string().trim().min(1).max(512);
 const view = z.enum(['summary', 'result', 'evidence']).default('summary');
+export const projectOpenSchema = z.object({
+  clientId, requestId,
+  projectKey: z.string().trim().min(1).max(300),
+  displayName: z.string().trim().min(1).max(500),
+  provider: z.enum(['chatgpt', 'gemini', 'grok']).default('chatgpt'),
+  surfaceIntent: z.literal('chat').default('chat'),
+  modelIntent: z.string().trim().min(1).max(200).optional(),
+}).strict();
+const continuationPolicy = z.discriminatedUnion('enabled', [
+  z.object({ enabled: z.literal(false) }).strict(),
+  z.object({
+    enabled: z.literal(true),
+    intervalMs: z.literal(1_200_000),
+    message: z.string().min(1).max(4_096),
+    approvalRef: z.string().trim().min(1).max(512),
+  }).strict(),
+]);
 
 /** Source-of-truth public task surface. MCP and CLI derive schemas from here;
  * they are transport clients, never lifecycle or timer owners.
  */
 export const taskSchemas = {
+  start: z.object({
+    clientId, requestId,
+    projectId: z.string().uuid(),
+    conversationSlotId: z.string().trim().min(1).max(200).optional(),
+    expectedConversationRevision: z.number().int().positive(),
+    prompt: z.string().min(1).max(200_000),
+    continuationPolicy: continuationPolicy.optional(),
+  }).strict(),
   get: z.object({
     clientId, taskId, view,
   }).strict(),
@@ -51,7 +77,8 @@ export function readTaskSummary(
     taskId: full.task.taskId,
     projectId: full.task.projectId,
     conversationSlotId: full.task.slotId,
-    conversationRevision: full.task.slotRevision,
+    conversationRevision: store.getConversationRevision(
+      full.task.projectId, full.task.slotId, clientIdValue),
     revision: full.task.revision,
     state: full.task.state,
     cancelRequested: full.task.cancelRequested,
@@ -100,9 +127,15 @@ export function readTaskSummary(
 export function registerTaskMethods(
   router: RpcRouter,
   input: { readonly repository: TaskKernelRepository;
-    readonly gateway: SemanticDecisionGateway },
+    readonly gateway: SemanticDecisionGateway;
+    readonly admission: PublicTaskAdmissionService },
 ): void {
-  const { repository, gateway } = input;
+  const { repository, gateway, admission } = input;
+
+  router.register('project.open', projectOpenSchema, params =>
+    admission.openProject(params));
+  router.register('task.start', taskSchemas.start, params =>
+    admission.startTask(params));
 
   router.register('task.get', taskSchemas.get, params =>
     readTaskSummary(repository, gateway, params.taskId, params.clientId, params.view));

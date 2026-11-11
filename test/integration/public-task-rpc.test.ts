@@ -188,3 +188,118 @@ test('Task decide rejects arbitrary selector, stale decision and invalid typed i
     /Internal error|selected input/i);
   assert.equal(store.getTask(taskId, clientId).pendingDecisionId, decisionId);
 });
+
+
+test('project.open is owner-scoped and persists one canonical Main identity and intent', async t => {
+  const { config, rpc } = await fixture(t);
+  const first = await rpc<any>('project.open', {
+    clientId: 'alice', requestId: 'open-project-1',
+    projectKey: 'Project Alpha', displayName: 'Alpha',
+    provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'pro',
+  });
+  assert.match(first.projectId, /^[0-9a-f-]{36}$/i);
+  assert.equal(first.mainConversationSlotId, 'main');
+  assert.equal(first.conversationRevision, 1);
+  assert.equal(first.provider, 'chatgpt');
+  assert.equal(first.modelIntent, 'pro');
+  assert.equal(first.currentTaskId, null);
+  const repeated = await rpc<any>('project.open', {
+    clientId: 'alice', requestId: 'open-project-1',
+    projectKey: 'Project Alpha', displayName: 'Alpha',
+    provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'pro',
+  });
+  assert.deepEqual(repeated, first);
+  const renamed = await rpc<any>('project.open', {
+    clientId: 'alice', requestId: 'open-project-2',
+    projectKey: 'project alpha', displayName: 'Another display name',
+    provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'pro',
+  });
+  assert.equal(renamed.projectId, first.projectId);
+  assert.equal(renamed.displayName, 'Alpha', 'reopening a key does not create a second project');
+  const other = await rpc<any>('project.open', {
+    clientId: 'bob', requestId: 'open-project-1',
+    projectKey: 'Project Alpha', displayName: 'Bob Alpha',
+    provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'pro',
+  });
+  assert.notEqual(other.projectId, first.projectId,
+    'a project key is scoped by owner, not a global shared alias');
+  await assert.rejects(rpc('task.start', {
+    clientId: 'bob', requestId: 'unauthorized-task',
+    projectId: first.projectId, expectedConversationRevision: 1,
+    prompt: 'Not your project',
+  }), /access denied|Internal error/i);
+  await assert.rejects(rpc('project.open', {
+    clientId: 'alice', requestId: 'open-project-1',
+    projectKey: 'Another key', displayName: 'Alpha',
+    provider: 'chatgpt', surfaceIntent: 'chat',
+  }), /conflict|Internal error/i);
+  await assert.rejects(rpc('project.open', {
+    clientId: 'alice', requestId: 'open-project-3',
+    projectKey: 'project alpha', displayName: 'Alpha',
+    provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'different-model',
+  }), /conflict|Internal error/i);
+  const mcp = await invokeMcpTool({
+    name: 'sessionplane_project_open',
+    arguments: { clientId: 'alice', requestId: 'open-project-1',
+      projectKey: 'Project Alpha', displayName: 'Alpha',
+      provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'pro' },
+    socketPath: config.socketPath, timeoutMs: 5_000, maxLineBytes: 2 * 1024 * 1024,
+  });
+  assert.equal(mcp.isError, false);
+  assert.equal(mcp.structuredContent.projectId, first.projectId);
+});
+
+test('task.start atomically plans one original attempt and returns current slot revision', async t => {
+  const { rpc, store, config } = await fixture(t);
+  const project = await rpc<any>('project.open', {
+    clientId: 'alice', requestId: 'open-for-task',
+    projectKey: 'fresh-start', displayName: 'Fresh',
+    provider: 'chatgpt', surfaceIntent: 'chat',
+  });
+  const input = {
+    clientId: 'alice', requestId: 'submit-first',
+    projectId: project.projectId,
+    expectedConversationRevision: project.conversationRevision,
+    prompt: 'Exact new substantive question',
+    continuationPolicy: {
+      enabled: true, intervalMs: 1_200_000,
+      message: '계속', approvalRef: 'user-delegated-review',
+    },
+  };
+  const started = await rpc<any>('task.start', input);
+  assert.match(started.taskId, /^[0-9a-f-]{36}$/i);
+  assert.equal(started.conversationSlotId, 'main');
+  assert.equal(started.conversationRevision, 2);
+  assert.equal(started.state, 'working');
+  assert.equal(started.submission.attempted, false);
+  assert.equal(started.preparation, 'not_bound',
+    'without a verified provider conversation Task persists before any POST');
+  const full = store.getFullTask(started.taskId, 'alice');
+  assert.equal(full.attempts.length, 1);
+  assert.equal(full.attempts[0]!.state, 'planned');
+  assert.equal(full.attempts[0]!.content, input.prompt);
+  assert.equal((await rpc<any>('task.get', {
+    clientId: 'alice', taskId: started.taskId,
+  })).conversationRevision, 2);
+  assert.deepEqual(await rpc('task.start', input), started);
+  assert.equal(store.getFullTask(started.taskId, 'alice').attempts.length, 1,
+    'a replay must not submit the initial prompt or plan a duplicate attempt');
+  await assert.rejects(rpc('task.start', {
+    ...input, requestId: 'competing-start',
+  }), /busy|Internal error/i);
+  await assert.rejects(rpc('task.start', {
+    ...input, requestId: 'different-prompt', expectedConversationRevision: 1,
+  }), /conflict|Internal error/i);
+  await assert.rejects(rpc('task.start', {
+    ...input, prompt: 'Change the original question under one requestId',
+  }), /conflict|Internal error/i);
+  await assert.rejects(rpc('task.start', {
+    ...input, continuationPolicy: { ...input.continuationPolicy, message: 'not exact 계속' },
+  }), /conflict|Internal error/i);
+  const mcp = await invokeMcpTool({
+    name: 'sessionplane_task_start', arguments: input,
+    socketPath: config.socketPath, timeoutMs: 5_000, maxLineBytes: 2 * 1024 * 1024,
+  });
+  assert.equal(mcp.isError, false);
+  assert.equal(mcp.structuredContent.taskId, started.taskId);
+});

@@ -2,7 +2,7 @@ import { MAX_WORKFLOW_WAIT_MS } from '../domain/workflow-wait.ts';
 import type { RemoteConnection } from '../config.ts';
 import { z } from 'zod';
 import { workflowSchemas } from '../rpc/methods/workflow.ts';
-import { taskSchemas } from '../rpc/methods/task.ts';
+import { taskSchemas, projectOpenSchema } from '../rpc/methods/task.ts';
 import { callRpc, RpcClientError } from '../cli/client.ts';
 
 export interface McpToolDefinition {
@@ -54,6 +54,7 @@ const descriptions: Record<keyof typeof workflowSchemas, string> = {
 };
 
 const taskDescriptions: Record<keyof typeof taskSchemas, string> = {
+  start: 'Create a durable task and initial attempt in the named project/slot. Returns the admitted Task and current slot revision; missing provider binding is preparation, never proof of a POST. Reuse the same requestId for identical inputs.',
   get: 'Read the current durable Task state and pending agent decision. view:result returns the complete exact answer; evidence includes exact attempt/timer identities. Never sends or focuses a page.',
   wait: 'Wait for a newer Task revision without owning the Task, provider, timers or continuation. Client disconnect does not cancel work. Reconnect with afterRevision.',
   decide: 'Use exactly one current durable decisionId/actionRef. Optional input must match its advertised input schema. Matching replay returns the exact stored outcome without a new provider action.',
@@ -72,6 +73,16 @@ export const TASK_MCP_TOOLS: readonly McpToolDefinition[] =
       openWorldHint: false,
     },
   }));
+export const PROJECT_MCP_TOOL: McpToolDefinition = {
+  name: 'sessionplane_project_open',
+  rpcMethod: 'project.open',
+  description: 'Atomically open one owner-scoped durable project and stable Main slot with persisted provider/model intent. No browser or provider mutation occurs. Reuse requestId for identical arguments.',
+  inputSchema: { ...z.toJSONSchema(projectOpenSchema, { io: 'input' }), type: 'object' },
+  annotations: {
+    readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false,
+  },
+};
+
 export const MCP_TOOLS: readonly McpToolDefinition[] = [
   ...Object.entries(workflowSchemas).map(([name, schema]) => ({
     name: 'sessionplane_' + name,
@@ -85,6 +96,7 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
       openWorldHint: true,
     },
   })),
+  PROJECT_MCP_TOOL,
   ...TASK_MCP_TOOLS,
 ];
 

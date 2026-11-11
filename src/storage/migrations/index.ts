@@ -12,6 +12,7 @@ import { durableTaskKernelMigration } from './0009-durable-task-kernel.ts';
 import { kernelDispatchEvidenceMigration } from './0010-kernel-dispatch-evidence.ts';
 import { kernelAttemptSessionBindingMigration } from './0011-kernel-attempt-session-binding.ts';
 import { kernelBackendReadPacingMigration } from './0012-kernel-backend-read-pacing.ts';
+import { publicTaskAdmissionMigration } from './0013-public-task-admission.ts';
 
 export interface Migration {
   readonly version: number;
@@ -32,6 +33,7 @@ export const migrations: readonly Migration[] = [
   kernelDispatchEvidenceMigration,
   kernelAttemptSessionBindingMigration,
   kernelBackendReadPacingMigration,
+  publicTaskAdmissionMigration,
 ];
 
 export function runMigrations(database: DatabaseSync, now: () => Date = () => new Date()): number {
