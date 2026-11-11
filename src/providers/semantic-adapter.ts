@@ -25,6 +25,8 @@ export interface SemanticTaskContext {
   readonly submittedUserMessageId: string | null;
   readonly submittedUserTurnId: string | null;
   readonly pageLease: OwnedPageIdentity | null;
+  /** Project's retained exact model intent, when explicitly configured. */
+  readonly requiredModel?: string | null;
 }
 export interface SemanticCapabilityManifest {
   readonly providerKey: string;
@@ -87,6 +89,8 @@ export interface SemanticObservation {
   readonly questionText: string | null;
   readonly permission?: SemanticPermissionEvidence | null;
   readonly actions: readonly SemanticActionCandidate[];
+  /** Selected exactly one current radio option in an authenticated open model menu. */
+  readonly verifiedModel?: string | null;
   readonly capabilityIssues?: readonly SemanticCapabilityIssue[];
   readonly evidenceBytes: number;
 }

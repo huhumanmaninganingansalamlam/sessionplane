@@ -136,6 +136,9 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
           }
           return { kind: 'unavailable', reason: 'semantic-preflight-blocked-or-generating' };
         }
+        if (context.requiredModel && observation.verifiedModel !== context.requiredModel) {
+          return { kind: 'unavailable', reason: 'requested-model-not-currently-verified' };
+        }
         // A non-empty existing draft has no Core-owned content proof. It is a
         // known-not-sent state, so do not consume beginDispatch merely for the
         // later sendOnce hash check to reject it. Only an exact empty-composer
@@ -175,6 +178,9 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
         observation.blocker !== 'none' || observation.progress === 'streaming') {
         return { kind: 'uncertain', reason: 'semantic-observation-blocked-or-generating' };
       }
+      if (context.requiredModel && observation.verifiedModel !== context.requiredModel) {
+        return { kind: 'uncertain', reason: 'requested-model-changed-after-preflight' };
+      }
       const compose = one(observation.actions, 'compose');
       if (compose !== null) {
         if (compose.input.kind !== 'text' || intent.content.length > compose.input.maxLength) {
@@ -191,6 +197,9 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
         if (!isConversationObservation(observation, this.#adapter) ||
           observation.blocker !== 'none' || observation.progress === 'streaming') {
           return { kind: 'uncertain', reason: 'semantic-observation-changed-after-draft' };
+        }
+        if (context.requiredModel && observation.verifiedModel !== context.requiredModel) {
+          return { kind: 'uncertain', reason: 'requested-model-changed-after-draft' };
         }
       }
       const purpose = intent.kind === 'continuation' ? 'continue' : 'submit';

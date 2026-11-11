@@ -180,6 +180,45 @@ export class SemanticDecisionGateway {
       taskRevision: full.task.revision };
   }
 
+  /**
+   * One read-only fresh model-state check before an initial send. Failure is
+   * converted into an agent packet; a previous successful chooser click does
+   * not authorize a later Submit by itself.
+   */
+  async verifyModelIntent(input: {
+    taskId: string; clientId: string; attemptId: string; modelIntent: string;
+  }): Promise<boolean> {
+    const full = this.#repository.getFullTask(input.taskId, input.clientId);
+    if (full.task.state !== 'working' || full.task.cancelRequested ||
+        full.task.pendingDecisionId !== null) return false;
+    const attempt = full.attempts.find(a => a.attemptId === input.attemptId);
+    const slot = this.#repository.getSlot(full.task.projectId, full.task.slotId, input.clientId);
+    if (!attempt || attempt.kind !== 'initial' || attempt.state !== 'planned' ||
+        slot.activeTaskId !== input.taskId || slot.revision !== full.task.slotRevision ||
+        !slot.providerConversationId) return false;
+    const provider = this.#providers.resolve(slot.providerKey, 'conversation');
+    if (provider.kind !== 'available') return false;
+    const context = await this.#resolveContext({
+      taskId: input.taskId, clientId: input.clientId,
+      projectId: full.task.projectId, slotId: full.task.slotId,
+      slotRevision: full.task.slotRevision,
+      providerConversationId: slot.providerConversationId,
+      attemptId: attempt.attemptId, kind: attempt.kind, content: attempt.content,
+    });
+    if (context.requiredModel !== input.modelIntent || context.pageLease === null) {
+      return false;
+    }
+    try {
+      const observed = await provider.adapter.observe(context);
+      if (observed.providerKey === provider.adapter.providerKey &&
+          observed.surface === 'chat' && observed.blocker === 'none' &&
+          observed.progress !== 'streaming' &&
+          observed.verifiedModel === input.modelIntent) return true;
+    } catch { /* Re-examine the latest observed blocker as an agent decision. */ }
+    await this.inspect({ ...input, modelChoice: true });
+    return false;
+  }
+
   /** Only a blocker or an explicitly requested model choice creates a packet. */
   async inspect(input: {
     taskId: string; clientId: string; attemptId: string;

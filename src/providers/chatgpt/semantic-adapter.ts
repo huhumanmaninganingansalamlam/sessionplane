@@ -138,6 +138,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     let blocker: SemanticObservation['blocker'] = 'none';
     let reason: string | null = null;
     let progress: SemanticObservation['progress'] = 'unknown';
+    let verifiedModel: string | null = null;
     const unverifiedTurn: SemanticObservation['turn'] = {
       submittedUserFound: false, laterUserFound: false,
       submittedUserMessageId: context.submittedUserMessageId,
@@ -321,6 +322,8 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
             'configuration_only', { kind: 'none' }, ui.fingerprint,
             null, model.evidenceHash);
         } else if (model?.status === 'open') {
+          const checked = model.options.filter(option => option.selected && option.enabled);
+          verifiedModel = checked.length === 1 ? checked[0]!.value : null;
           issue('choose_model', 'Select one verified model menu option',
             'configuration_only', { kind: 'option', options: model.options.map(o => ({
               value: o.value, enabled: o.enabled,
@@ -384,7 +387,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       providerKey: this.providerKey, surface: surface.mode, snapshotId, observedAt,
       capabilityManifest: this.capabilities, progress, blocker, reason, turn,
       questionText: blocker === 'provider_question' ? question?.text ?? null : null,
-      permission, actions, evidenceBytes: 0,
+      permission, actions, verifiedModel, evidenceBytes: 0,
       ...(capabilityIssues.length > 0 ? { capabilityIssues } : {}),
     };
     let bytes = observationBytes(observation);
@@ -630,6 +633,18 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         return 'stale' as const;
       }
       if (!(await this.#authorized(request, action.purpose))) return 'stale' as const;
+      if (request.context.requiredModel) {
+        // The model selected at inspection may have changed before Submit.
+        // Re-read exact current configuration immediately inside the same
+        // owned-page mutation, rather than treating an earlier decision as proof.
+        const currentModel = await inspectSemanticChatGptModelMenu(page);
+        const selected = currentModel?.options.filter(
+          option => option.selected && option.enabled) ?? [];
+        if (currentModel?.status !== 'open' || selected.length !== 1 ||
+            selected[0]!.value !== request.context.requiredModel) {
+          return 'stale' as const;
+        }
+      }
       const watch = watchExactDispatch(page, request.context.providerConversationId!,
         request.expectedContentSha256!, evidence => {
           if (!this.#options.onDispatchObserved) return;

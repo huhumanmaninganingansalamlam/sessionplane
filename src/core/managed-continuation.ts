@@ -39,7 +39,7 @@ export class ManagedContinuationService {
   }) => void | Promise<void>) | undefined;
   readonly #inspectModelIntent: ((input: {
     taskId: string; clientId: string; attemptId: string; modelIntent: string;
-  }) => void | Promise<void>) | undefined;
+  }) => boolean | Promise<boolean>) | undefined;
   #interval: ReturnType<typeof setInterval> | null = null;
   #active: Promise<ContinuationReviewReport> | null = null;
   #closed = false;
@@ -57,7 +57,7 @@ export class ManagedContinuationService {
     }) => void | Promise<void>;
     inspectModelIntent?: (input: {
       taskId: string; clientId: string; attemptId: string; modelIntent: string;
-    }) => void | Promise<void>;
+    }) => boolean | Promise<boolean>;
   }) {
     this.#repository = input.repository;
     this.#kernel = input.kernel;
@@ -156,13 +156,15 @@ export class ManagedContinuationService {
           // A requested model is not a hint to silently use whichever model
           // happens to be selected. Require explicit observed configuration
           // evidence before this initial POST may consume its attempt.
-          await this.#inspectModelIntent?.({
+          const verified = await this.#inspectModelIntent?.({
             taskId: planned.taskId, clientId: planned.clientId,
             attemptId: planned.attemptId, modelIntent: planned.modelIntent,
           });
-          this.#repository.recordObservationDeferred(planned.taskId, planned.clientId,
-            'public-initial-model-intent-unverified');
-          continue;
+          if (verified !== true) {
+            this.#repository.recordObservationDeferred(planned.taskId, planned.clientId,
+              'public-initial-model-intent-unverified');
+            continue;
+          }
         }
         await this.#kernel.dispatch(planned.taskId, planned.clientId, planned.attemptId);
       } catch {

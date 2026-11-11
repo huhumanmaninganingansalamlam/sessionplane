@@ -1224,20 +1224,39 @@ test('public task.start with explicit Pro intent emits agent model decision befo
     });
     const owned = await core.browserOwner!.createPage();
     const page = owned.page;
-    await page.route('https://chatgpt.com/**', route => route.fulfill({
-      contentType: 'text/html', body:
-        '<main><article data-message-author-role="user">Prior chat</article>' +
-        '<section data-chatgpt-composer><div id="prompt-textarea" ' +
-        'role="textbox" contenteditable="true"></div>' +
-        '<button data-testid="send-button" type="button" ' +
-        'onclick="window.sends++">Send</button></section>' +
-        '<button id="model-trigger" aria-label="Model" aria-haspopup="menu" ' +
-        'aria-controls="model-menu" aria-expanded="false" type="button">Current</button>' +
-        '<div id="model-menu" role="menu" hidden>' +
-        '<button role="menuitemradio" aria-checked="true">Default</button>' +
-        '<button role="menuitemradio" aria-checked="false">Pro</button></div>' +
-        '</main><script>window.sends=0;</script>',
-    }));
+    await page.route('https://chatgpt.com/**', route => {
+      if (route.request().method() === 'POST') {
+        return route.fulfill({ status: 202, contentType: 'application/json', body: '{}' });
+      }
+      return route.fulfill({
+        contentType: 'text/html', body:
+          '<main><article data-message-author-role="user">Prior chat</article>' +
+          '<section data-chatgpt-composer><div id="prompt-textarea" ' +
+          'role="textbox" contenteditable="true"></div>' +
+          '<button data-testid="send-button" type="button">Send</button></section>' +
+          '<button id="model-trigger" aria-label="Model" aria-haspopup="menu" ' +
+          'aria-controls="model-menu" aria-expanded="false" type="button">Current</button>' +
+          '<div id="model-menu" role="menu" hidden>' +
+          '<button role="menuitemradio" aria-checked="true">Default</button>' +
+          '<button role="menuitemradio" aria-checked="false">Pro</button></div>' +
+          '</main><script>window.sends=0;' +
+          'const trigger=document.querySelector("#model-trigger");' +
+          'trigger.onclick=()=>{trigger.setAttribute("aria-expanded","true");' +
+          'document.getElementById("model-menu").hidden=false;};' +
+          'document.querySelectorAll("[role=menuitemradio]").forEach(button=>{' +
+          'button.onclick=()=>{document.querySelectorAll("[role=menuitemradio]")' +
+          '.forEach(item=>item.setAttribute("aria-checked","false"));' +
+          'button.setAttribute("aria-checked","true");};});' +
+          'document.querySelector("[data-testid=send-button]").onclick=()=>{' +
+          'const editor=document.querySelector("#prompt-textarea");' +
+          'window.sends++;fetch("/backend-api/f/conversation",{method:"POST",' +
+          'headers:{"Content-Type":"application/json"},body:JSON.stringify({' +
+          'action:"next",conversation_id:"public-pro-conversation",' +
+          'parent_message_id:"root",messages:[{id:"model-pro-user",' +
+          'author:{role:"user"},content:{content_type:"text",parts:[editor.innerText]}}]' +
+          '})});editor.textContent="";};</script>',
+      });
+    });
     await page.goto('https://chatgpt.com/c/public-pro-conversation');
     core.pageRegistry.reservePage(owned.binding.pageKey, {
       sessionId: session.sessionId, generation: 1,
@@ -1252,20 +1271,100 @@ test('public task.start with explicit Pro intent emits agent model decision befo
       clientId, taskId: task.taskId,
       providerConversationId: 'public-pro-conversation',
     });
-    await core.semanticManagedContinuation.tick();
+    let virtualNow = 100_000;
+    const backend: BackendJsonClient = {
+      authScope: {},
+      async get(url) {
+        if (url.endsWith('/api/auth/session')) {
+          return { status: 200, headers: {}, body: { accessToken: 'fixture-only' } };
+        }
+        return { status: 200, headers: {}, body: {
+          id: 'public-pro-conversation', current_node: 'assistant-pro',
+          mapping: {
+            root: { id: 'root', parent: null, children: [], message: null },
+            'user-pro-node': {
+              id: 'user-pro-node', parent: 'root', children: [],
+              message: { id: 'model-pro-user', turn_id: 'pro-turn',
+                author: { role: 'user' },
+                content: { parts: ['Do not submit under an unknown model'] } },
+            },
+            'assistant-pro': {
+              id: 'assistant-pro', parent: 'user-pro-node', children: [],
+              message: { id: 'assistant-pro', author: { role: 'assistant' },
+                channel: 'final', status: 'finished_successfully', end_turn: true,
+                content: { parts: ['Exact Pro answer'] }, metadata: {} },
+            },
+          },
+        } };
+      },
+    };
+    const runtime = createSemanticCoreRuntime({
+      database: core.database, browserOwner: core.browserOwner,
+      pageRegistry: core.pageRegistry, teamDirectory: core.teamDirectory,
+      pageMutationMutex: core.pageMutationMutex,
+      enabledProviders: ['chatgpt'], chatgptUrl: 'https://chatgpt.com',
+      backendClientProvider: () => backend,
+      backendRecovery: new ChatGptBackendRecovery({
+        requestTimeoutMs: 500, tokenCacheTtlMs: 10_000,
+        now: () => new Date(virtualNow),
+      }),
+    });
+    await runtime.managedContinuation.tick();
     const full = core.semanticTaskRepository.getFullTask(task.taskId, clientId);
     assert.equal(full.task.state, 'agent_input_required');
     assert.equal(full.attempts[0]!.state, 'planned');
     assert.equal(await page.evaluate(() => (window as any).sends), 0);
-    const packet = core.semanticDecisionGateway.get(task.taskId, clientId);
+    const packet = runtime.decisionGateway.get(task.taskId, clientId);
     assert.equal(packet?.kind, 'model_choice');
     assert.equal(packet?.requestedModel, 'Pro');
     assert.equal(packet?.options[0]?.purpose, 'open_model_chooser');
     assert.equal(packet?.humanOnly, false);
-    await core.semanticManagedContinuation.tick();
-    assert.equal(core.semanticDecisionGateway.get(task.taskId, clientId)?.decisionId,
+    await runtime.managedContinuation.tick();
+    assert.equal(runtime.decisionGateway.get(task.taskId, clientId)?.decisionId,
       packet?.decisionId);
     assert.equal(await page.evaluate(() => (window as any).sends), 0);
+    assert.deepEqual(await runtime.decisionGateway.decideCurrent({
+      taskId: task.taskId, clientId, decisionId: packet!.decisionId,
+      requestId: 'open-exact-model', actionRef: packet!.options[0]!.actionRef,
+    }), { kind: 'performed', effect: 'model_menu_opened' });
+    await runtime.managedContinuation.tick();
+    const selection = runtime.decisionGateway.get(task.taskId, clientId);
+    assert.equal(selection?.kind, 'model_choice');
+    assert.equal(selection?.requestedModel, 'Pro');
+    assert.equal(selection?.options[0]?.purpose, 'choose_model');
+    assert.equal(await page.evaluate(() => (window as any).sends), 0);
+    assert.deepEqual(await runtime.decisionGateway.decideCurrent({
+      taskId: task.taskId, clientId, decisionId: selection!.decisionId,
+      requestId: 'choose-exact-pro', actionRef: selection!.options[0]!.actionRef,
+      input: 'Pro',
+    }), { kind: 'performed', effect: 'model_selected' });
+    // A person can change the model between the successful decision and
+    // the next Core tick. Previous decision success is not current evidence.
+    await page.locator('[role="menuitemradio"]').first().click();
+    await runtime.managedContinuation.tick();
+    assert.equal(await page.evaluate(() => (window as any).sends), 0,
+      'model drift must never silently consume the original public POST');
+    const corrected = runtime.decisionGateway.get(task.taskId, clientId);
+    assert.equal(corrected?.kind, 'model_choice');
+    assert.equal(corrected?.requestedModel, 'Pro');
+    assert.equal(corrected?.options[0]?.purpose, 'choose_model');
+    assert.deepEqual(await runtime.decisionGateway.decideCurrent({
+      taskId: task.taskId, clientId, decisionId: corrected!.decisionId,
+      requestId: 'restore-exact-pro', actionRef: corrected!.options[0]!.actionRef,
+      input: 'Pro',
+    }), { kind: 'performed', effect: 'model_selected' });
+    await runtime.managedContinuation.tick();
+    const sent = core.semanticTaskRepository.getFullTask(task.taskId, clientId).attempts[0]!;
+    assert.equal(sent.state, 'acknowledged');
+    assert.equal(sent.externalTurnId, 'pro-turn');
+    assert.equal(await page.evaluate(() => (window as any).sends), 1);
+    virtualNow += 5_001;
+    await runtime.managedContinuation.tick();
+    assert.equal(core.semanticTaskRepository.getTask(task.taskId, clientId).state, 'completed');
+    assert.equal(core.semanticTaskRepository.getFullTask(task.taskId, clientId)
+      .results[0]?.answerText, 'Exact Pro answer');
+    assert.equal(await page.evaluate(() => (window as any).sends), 1);
+    await runtime.managedContinuation.close();
   } finally {
     await core.close();
     rmSync(root, { recursive: true, force: true });

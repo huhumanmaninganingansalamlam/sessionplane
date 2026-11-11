@@ -197,6 +197,8 @@ export function createSemanticCoreRuntime(input: {
       taskId: intent.taskId, providerConversationId: intent.providerConversationId,
       submittedUserMessageId,
       submittedUserTurnId,
+      ...(repository.publicModelIntent(intent.projectId, intent.clientId)
+        ? { requiredModel: repository.publicModelIntent(intent.projectId, intent.clientId) } : {}),
       pageLease: activeSlot && candidate !== null && isExactLease(candidate) ? candidate : null,
     };
   };
@@ -310,11 +312,8 @@ export function createSemanticCoreRuntime(input: {
     repository, kernel,
     ...(input.continuationNow ? { now: input.continuationNow } : {}),
     ...(input.canRunContinuation ? { canRun: input.canRunContinuation } : {}),
-    inspectModelIntent: async ({ taskId, clientId, attemptId, modelIntent }) => {
-      await decisionGateway.inspect({
-        taskId, clientId, attemptId, modelChoice: true, modelIntent,
-      });
-    },
+    inspectModelIntent: async ({ taskId, clientId, attemptId, modelIntent }) =>
+      await decisionGateway.verifyModelIntent({ taskId, clientId, attemptId, modelIntent }),
     bindInitialAttempt: ({ taskId, clientId, attemptId }) => {
       const task = repository.getTask(taskId, clientId);
       const slot = repository.getSlot(task.projectId, task.slotId, clientId);

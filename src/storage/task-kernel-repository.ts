@@ -1157,6 +1157,16 @@ export class TaskKernelRepository {
    * a new/unprepared ChatGPT page is not an invented conversation ID.
    * Only PLANNED work is eligible: dispatched/uncertain is never replayed.
    */
+  /** Exact model intent is stored at project admission, not inferred from UI. */
+  publicModelIntent(projectId: string, clientId: string): string | null {
+    this.#requireAccess(projectId, clientId);
+    const row = this.#database.raw.prepare(
+      'SELECT model_intent AS modelIntent FROM kernel_public_project_intents' +
+      ' WHERE project_id=?',
+    ).get(projectId) as { modelIntent: string | null } | undefined;
+    return row?.modelIntent ?? null;
+  }
+
   listPendingPublicInitials(limit = 16): readonly {
     taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
   }[] {
