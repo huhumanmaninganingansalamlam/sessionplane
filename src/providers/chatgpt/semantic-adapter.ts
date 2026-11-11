@@ -587,7 +587,8 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           }
           // The exact-turn read can await while a human types into the same
           // editor. Recheck the pinned control immediately before fill.
-          if (await readExactEditorValue(editor, fresh.editors[0]!) !== '') {
+          if (await readExactEditorValue(editor, fresh.editors[0]!) !== '' ||
+              (await captureUi(page)).fingerprint !== fresh.fingerprint) {
             return 'stale' as const;
           }
           requireExactMutationIdentity();
@@ -639,7 +640,8 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           const finalDraft = await readExactEditorValue(editor, fresh.editors[0]!);
           if (finalDraft === null ||
             sha(finalDraft.replaceAll('\r\n', '\n')) !== request.expectedContentSha256 ||
-            !(await exactControlReady(button, fresh.buttons[0]!))) {
+            !(await exactControlReady(button, fresh.buttons[0]!)) ||
+            (await captureUi(page)).fingerprint !== fresh.fingerprint) {
             return 'stale' as const;
           }
           requireExactMutationIdentity();

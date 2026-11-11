@@ -1655,6 +1655,58 @@ test('ChatGPT mutations revalidate exact controls after asynchronous turn checks
       draft: document.getElementById('prompt-textarea')!.innerText,
     }));
 
+    // An original control can be moved into unrelated provider chrome while
+    // the exact-turn read awaits; retained element handles alone are not scope.
+    await page.setContent('<main><article data-message-author-role="user" ' +
+      'data-message-id="user-b" data-turn-id="turn-b">Task</article>' +
+      '<section data-chatgpt-composer><div id="prompt-textarea" role="textbox" ' +
+      'contenteditable="true"></div><button data-testid="send-button">Send</button>' +
+      '</section></main><div id="foreign-panel" role="dialog"></div>');
+    const movedComposeBefore = await adapter.observe(task);
+    const movedComposeAction = movedComposeBefore.actions.find(a => a.purpose === 'compose')!;
+    assert.ok(movedComposeAction);
+    messageObservations = 0;
+    mutateComposer = async () => {
+      await page.locator('#prompt-textarea').evaluate(editor =>
+        document.querySelector('#foreign-panel')!.append(editor));
+    };
+    const movedCompose = await adapter.act({
+      context: task, snapshotId: movedComposeBefore.snapshotId,
+      actionRef: movedComposeAction.actionRef, evidenceHash: movedComposeAction.evidenceHash,
+      input: 'Draft must remain in the actual Chat composer',
+    });
+    const foreignDraft = await page.locator('#foreign-panel #prompt-textarea').innerText();
+
+    await page.setContent('<main><article data-message-author-role="user" ' +
+      'data-message-id="user-b" data-turn-id="turn-b">Task</article>' +
+      '<section data-chatgpt-composer><div id="prompt-textarea" role="textbox" ' +
+      'contenteditable="true">Committed draft</div><button data-testid="send-button" ' +
+      'onclick="window.foreignClicks++">Send</button></section></main>' +
+      '<div id="foreign-panel" role="dialog"></div>' +
+      '<script>window.foreignClicks=0;</script>');
+    const movedSubmitBefore = await adapter.observe(task);
+    const movedSubmitAction = movedSubmitBefore.actions.find(a => a.purpose === 'submit')!;
+    assert.ok(movedSubmitAction);
+    messageObservations = 0;
+    mutateComposer = async () => {
+      await page.locator('[data-testid="send-button"]').evaluate(button =>
+        document.querySelector('#foreign-panel')!.append(button));
+    };
+    const movedSubmit = await adapter.act({
+      context: task, snapshotId: movedSubmitBefore.snapshotId,
+      actionRef: movedSubmitAction.actionRef, evidenceHash: movedSubmitAction.evidenceHash,
+      authorizedAttemptId: 'journaled-moved-control',
+      expectedContentSha256: digest('Committed draft'),
+    });
+    const foreignClicks = await page.evaluate(() => (window as any).foreignClicks);
+    assert.notEqual(movedCompose.kind, 'performed',
+      'an editor moved outside Chat must not receive an old compose authorization');
+    assert.equal(foreignDraft, '', 'the foreign dialog must remain unchanged');
+    assert.notEqual(movedSubmit.kind, 'dispatched_unverified',
+      'a Send control moved to another scope must not use a committed attempt');
+    assert.equal(foreignClicks, 0, 'the foreign Send control must not be clicked');
+
+
     await page.setContent('<main><section data-codex-composer-request-navigation="true" ' +
       'data-user-input-auto-resolution="true"><h3>Original question</h3>' +
       '<div role="radiogroup"><button type="button" role="radio" ' +
