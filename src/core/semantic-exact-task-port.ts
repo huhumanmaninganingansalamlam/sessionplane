@@ -73,16 +73,19 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
   readonly #adapter: SemanticProviderAdapter;
   readonly #context: SemanticContextResolver;
   readonly #journal: SemanticDispatchJournal;
+  readonly #onDecisionRequired: ((intent: ExactSendIntent) => Promise<void>) | undefined;
 
   constructor(input: {
     adapter: SemanticProviderAdapter;
     resolveContext: SemanticContextResolver;
     dispatchJournal: SemanticDispatchJournal;
+    onDecisionRequired?: (intent: ExactSendIntent) => Promise<void>;
   }) {
     this.#adapter = input.adapter;
     this.providerKey = input.adapter.providerKey;
     this.#context = input.resolveContext;
     this.#journal = input.dispatchJournal;
+    this.#onDecisionRequired = input.onDecisionRequired;
   }
 
   /** No DOM mutation and no irreversible attempt journal. Absence of a
@@ -121,6 +124,16 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
           return { kind: 'unavailable', reason: 'semantic-preflight-capability-unverified' };
         }
         if (observation.blocker !== 'none' || observation.progress === 'streaming') {
+          // The same blocked attempt remains planned. A verified provider
+          // decision must become a durable agent packet, not a guessed click.
+          if (observation.progress !== 'streaming' && (
+            observation.blocker === 'provider_question' ||
+            observation.blocker === 'provider_permission' ||
+            observation.blocker === 'provider_retry' ||
+            observation.blocker === 'human_verification')) {
+            try { await this.#onDecisionRequired?.(intent); }
+            catch { return { kind: 'unavailable', reason: 'agent-decision-publication-unavailable' }; }
+          }
           return { kind: 'unavailable', reason: 'semantic-preflight-blocked-or-generating' };
         }
         // A non-empty existing draft has no Core-owned content proof. It is a

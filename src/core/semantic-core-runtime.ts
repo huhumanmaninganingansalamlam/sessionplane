@@ -281,8 +281,16 @@ export function createSemanticCoreRuntime(input: {
     }),
   ] : []);
   const chat = providers.resolve('chatgpt', 'conversation');
+  const decisionGateway = new SemanticDecisionGateway({
+    repository, providers, resolveContext,
+  });
   const ports = chat.kind === 'available' ? [new SemanticExactTaskPort({
     adapter: chat.adapter, resolveContext,
+    onDecisionRequired: async intent => {
+      await decisionGateway.inspect({
+        taskId: intent.taskId, clientId: intent.clientId, attemptId: intent.attemptId,
+      });
+    },
     dispatchJournal: {
       record: (intent, evidence) => repository.recordDispatchEvidence({
         taskId: intent.taskId, clientId: intent.clientId, attemptId: intent.attemptId, evidence,
@@ -292,9 +300,6 @@ export function createSemanticCoreRuntime(input: {
       }),
     },
   })] : [];
-  const decisionGateway = new SemanticDecisionGateway({
-    repository, providers, resolveContext,
-  });
   return { providers, repository, kernel: new DurableTaskKernel(repository, ports),
     decisionGateway, bindAttemptSession };
 }

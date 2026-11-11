@@ -68,6 +68,20 @@ export class DurableTaskKernel {
   async dispatch(taskId: string, clientId: string, attemptId: string): Promise<TaskRecord> {
     const { attempt, provider, intent } = this.#resolve(taskId, clientId, attemptId);
     if (attempt.state !== 'planned') throw new Error('Mutation already attempted; no replay');
+    if (attempt.kind !== 'stop') {
+      const current = this.#storage.getTask(taskId, clientId);
+      if (current.pendingDecisionId !== null &&
+          (current.state === 'agent_input_required' ||
+           current.state === 'human_input_required')) {
+        // The packet's actionRef remains executable until the agent decides
+        // or explicitly refreshes it. Another preflight observe would revoke
+        // that snapshot without changing the provider.
+        return current;
+      }
+      if (current.state !== 'working' || current.cancelRequested) {
+        throw new Error('Task is not eligible for another provider dispatch');
+      }
+    }
     // A known missing page/conversation is NOT an ambiguous external send.
     // Preserve planned for the same caller when preparation later succeeds.
     if (provider.preflight) {

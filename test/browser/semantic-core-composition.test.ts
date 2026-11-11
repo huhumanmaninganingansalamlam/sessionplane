@@ -242,6 +242,47 @@ test('Core-assembled semantic ChatGPT sends initial and continuation once each w
       taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-continue',
       sessionId: session.sessionId, generation: 1, conversationId: 'core-conv',
     });
+    // While the next send is still planned, a provider-owned question must
+    // suspend dispatch and automatically publish one agent-owned decision.
+    await page.locator('main').evaluate(main => {
+      (window as any).decisionClicks = 0;
+      const panel = document.createElement('section');
+      panel.setAttribute('data-codex-composer-request-navigation', 'true');
+      panel.setAttribute('data-user-input-auto-resolution', 'true');
+      panel.innerHTML = '<h3>Provider choice pending</h3>' +
+        '<div role="radiogroup"><button type="button" role="radio" ' +
+        'aria-label="Proceed">Proceed</button>' +
+        '<button type="button" role="radio" aria-label="Decline" disabled>Decline</button></div>';
+      panel.querySelector('button')!.addEventListener('click', () => {
+        (window as any).decisionClicks++;
+        panel.remove();
+      });
+      main.append(panel);
+    });
+    await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-continue');
+    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts
+      .find(attempt => attempt.attemptId === 'attempt-continue')?.state, 'planned');
+    assert.equal(runtime.repository.getTask('exact-task', 'fixture-alice').state,
+      'agent_input_required');
+    assert.equal(await page.evaluate(() => (window as any).sends), 1,
+      'a pending agent question never consumes or sends the continuation');
+    const pendingQuestion = runtime.decisionGateway.get('exact-task', 'fixture-alice');
+    assert.equal(pendingQuestion?.kind, 'provider_question');
+    assert.equal(pendingQuestion?.options[0]?.purpose, 'answer_question');
+    // A repeated dispatch while the agent is deciding must not re-observe
+    // and invalidate the packet's still-live actionRef.
+    await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-continue');
+    assert.equal(runtime.decisionGateway.get('exact-task', 'fixture-alice')?.decisionId,
+      pendingQuestion?.decisionId);
+    assert.equal(await page.evaluate(() => (window as any).sends), 1);
+    assert.equal(await page.evaluate(() => (window as any).decisionClicks), 0);
+    assert.deepEqual(await runtime.decisionGateway.decide({
+      taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-continue',
+      decisionId: pendingQuestion!.decisionId, requestId: 'choose-before-continue',
+      actionRef: pendingQuestion!.options[0]!.actionRef, input: 'Proceed',
+    }), { kind: 'performed', effect: 'question_answered' });
+    assert.equal(await page.evaluate(() => (window as any).decisionClicks), 1);
+    assert.equal(runtime.repository.getTask('exact-task', 'fixture-alice').state, 'working');
     continuedBackend = true;
     virtualNow += 5_001;
     await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-continue');
