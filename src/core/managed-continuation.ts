@@ -132,6 +132,30 @@ export class ManagedContinuationService {
 
   async #run(): Promise<ContinuationReviewReport> {
     const now = this.#now().toISOString();
+    // An approved public Task is admitted before any provider send. Once its
+    // exact ACK lands, Core (not task.wait or a connected client) turns that
+    // persisted approval into the first durable 20-minute timer.
+    for (const candidate of this.#repository.listApprovedContinuationPolicies()) {
+      try {
+        const policy: unknown = JSON.parse(candidate.policyJson);
+        if (!policy || typeof policy !== 'object') continue;
+        const approved = policy as {
+          enabled?: unknown; intervalMs?: unknown;
+          approvalRef?: unknown; message?: unknown;
+        };
+        if (approved.enabled !== true || approved.intervalMs !== CONTINUATION_INTERVAL_MS ||
+            typeof approved.approvalRef !== 'string' ||
+            typeof approved.message !== 'string') continue;
+        const full = this.#repository.getFullTask(candidate.taskId, candidate.clientId);
+        const latest = full.attempts.filter(row => row.kind !== 'stop').at(-1);
+        if (latest?.state !== 'acknowledged') continue;
+        this.activate({
+          taskId: candidate.taskId, clientId: candidate.clientId,
+          sourceAttemptId: latest.attemptId, approvalRef: approved.approvalRef,
+          message: approved.message,
+        });
+      } catch { /* One unready Task must not block any other due slot. */ }
+    }
     // Reconcile an ACK after a Core crash between its exact journal write and
     // next timer scheduling. There is one idempotent timer per ACK.
     for (const owner of this.#repository.listContinuationTaskOwners()) {

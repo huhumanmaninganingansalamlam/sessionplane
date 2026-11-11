@@ -303,3 +303,55 @@ test('task.start atomically plans one original attempt and returns current slot 
   assert.equal(mcp.isError, false);
   assert.equal(mcp.structuredContent.taskId, started.taskId);
 });
+
+
+test('approved task.start policy automatically arms on exact ACK without any client wait', async t => {
+  const { core, store, rpc } = await fixture(t);
+  const project = await rpc<any>('project.open', {
+    clientId: 'alice', requestId: 'open-policy',
+    projectKey: 'managed-admission', displayName: 'Managed',
+    provider: 'chatgpt', surfaceIntent: 'chat',
+  });
+  const started = await rpc<any>('task.start', {
+    clientId: 'alice', requestId: 'start-policy', projectId: project.projectId,
+    expectedConversationRevision: project.conversationRevision,
+    prompt: 'Long-running approved task',
+    continuationPolicy: {
+      enabled: true, intervalMs: 1_200_000,
+      message: '계속', approvalRef: 'explicit-delegation',
+    },
+  });
+  const attempt = store.getFullTask(started.taskId, 'alice').attempts[0]!;
+  assert.equal((await core.semanticManagedContinuation.tick()).timersClaimed, 0);
+  assert.equal(store.getFullTask(started.taskId, 'alice').timers.length, 0,
+    'approval alone cannot create a timer before provider ACK');
+  store.observeConversation({
+    projectId: project.projectId, clientId: 'alice',
+    slotId: 'main', expectedRevision: 1, taskId: started.taskId,
+    providerConversationId: 'verified-fixture-conversation',
+  });
+  store.beginDispatch(started.taskId, 'alice', attempt.attemptId);
+  store.acknowledgeAttempt({
+    taskId: started.taskId, clientId: 'alice',
+    attemptId: attempt.attemptId, externalTurnId: 'verified-turn',
+  });
+  const acknowledged = store.getFullTask(started.taskId, 'alice').attempts[0]!;
+  const expectedDue = new Date(
+    Date.parse(acknowledged.acknowledgedAt!) + 1_200_000).toISOString();
+  assert.equal((await core.semanticManagedContinuation.tick()).timersClaimed, 0);
+  const tasks = store.getFullTask(started.taskId, 'alice');
+  assert.equal(tasks.timers.length, 1);
+  assert.equal(tasks.timers[0]?.dueAt, expectedDue);
+  assert.equal(tasks.timers[0]?.status, 'pending');
+  assert.equal((await rpc<any>('task.get', {
+    clientId: 'alice', taskId: started.taskId,
+  })).nextAutomaticActionAt, expectedDue);
+  assert.equal((await core.semanticManagedContinuation.tick()).timersClaimed, 0);
+  assert.equal(store.getFullTask(started.taskId, 'alice').timers.length, 1,
+    'same ACK does not create a second continuation timer');
+  const cancellation = await rpc<any>('task.cancel', {
+    clientId: 'alice', taskId: started.taskId, requestId: 'cancel-approved-task',
+  });
+  assert.equal(cancellation.cancelRequested, true);
+  assert.equal(store.getFullTask(started.taskId, 'alice').timers[0]?.status, 'canceled');
+});

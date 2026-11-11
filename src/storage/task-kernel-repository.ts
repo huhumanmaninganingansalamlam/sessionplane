@@ -1151,6 +1151,21 @@ export class TaskKernelRepository {
     return rows.length;
   }
 
+  /** Standing policy is durable Task admission data, never a client wait.
+   * The policy is inert until a later exact ACK permits timer activation.
+   */
+  listApprovedContinuationPolicies(): readonly {
+    taskId: string; clientId: string; policyJson: string;
+  }[] {
+    return this.#database.raw.prepare(
+      `SELECT t.task_id AS taskId,t.client_id AS clientId,
+          p.policy_json AS policyJson
+        FROM kernel_tasks t JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+        WHERE t.cancel_requested=0 AND t.state='working'
+        ORDER BY t.created_at,t.task_id`,
+    ).all() as Array<{ taskId: string; clientId: string; policyJson: string }>;
+  }
+
   /** Core-owned timer scanner; task ownership is read from SQLite, not a client subscription. */
   listContinuationTaskOwners(): readonly { taskId: string; clientId: string }[] {
     return this.#database.raw.prepare(
