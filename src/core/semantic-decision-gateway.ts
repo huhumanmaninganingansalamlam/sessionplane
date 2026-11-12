@@ -330,7 +330,7 @@ export class SemanticDecisionGateway {
   /** Explicit read-only refresh after restart/expiry; never replays an action. */
   async refresh(input: {
     taskId: string; clientId: string; attemptId: string; decisionId: string;
-    modelChoice?: boolean;
+    modelChoice?: boolean; requestId?: string;
   }): Promise<AgentDecisionPacket | null> {
     const full = this.#repository.getFullTask(input.taskId, input.clientId);
     if (full.task.pendingDecisionId !== input.decisionId) {
@@ -345,12 +345,81 @@ export class SemanticDecisionGateway {
     const requestedModel = original.packet.requestedModel;
     this.#repository.resolveDecision({
       taskId: input.taskId, clientId: input.clientId, decisionId: input.decisionId,
-      resolutionJson: JSON.stringify({ kind: 'read_only_refresh' }),
+      resolutionJson: JSON.stringify({ kind: 'read_only_refresh',
+        ...(input.requestId ? { requestId: input.requestId } : {}) }),
     });
     return await this.inspect({ taskId: input.taskId, clientId: input.clientId,
       attemptId: input.attemptId,
       modelChoice: original.packet.kind === 'model_choice' || input.modelChoice === true,
       ...(requestedModel ? { modelIntent: requestedModel } : {}) });
+  }
+
+  /**
+   * Public read-only reinspection of an unactionable or expired model packet.
+   * No browser click, permission, retry or submission can be granted here.
+   * The request identity is durable so a lost response never repeats an effect.
+   */
+  async refreshCurrent(input: {
+    taskId: string; clientId: string; decisionId: string; requestId: string;
+  }): Promise<AgentDecisionOutcome> {
+    const full = this.#repository.getFullTask(input.taskId, input.clientId);
+    const row = full.decisions.find(decision => decision.decisionId === input.decisionId);
+    if (!row) throw new SessionPlaneDomainError('stale_decision', 'Unknown decision identity');
+    const original = storedContext(row.contextJson);
+    if (!original.attemptId ||
+        !full.attempts.some(attempt => attempt.attemptId === original.attemptId)) {
+      throw new SessionPlaneDomainError('stale_decision', 'Decision lost its exact attempt');
+    }
+    const receipt = row.resolutionJson === null ? null
+      : JSON.parse(row.resolutionJson) as Record<string, unknown>;
+    if (row.status === 'resolved') {
+      if (receipt?.kind !== 'read_only_refresh' || receipt.requestId !== input.requestId) {
+        throw new SessionPlaneDomainError('stale_decision', 'Decision refreshed by a different request');
+      }
+      // A crash after the durable receipt but before reinspection cannot strand
+      // this Task. A replay can only observe, never perform a provider action.
+      const originalAttempt = full.attempts.find(
+        attempt => attempt.attemptId === original.attemptId);
+      const next = this.get(input.taskId, input.clientId) ??
+        (full.task.state === 'working' && !full.task.cancelRequested &&
+         originalAttempt?.state === 'planned' ? await this.inspect({
+          taskId: input.taskId, clientId: input.clientId, attemptId: original.attemptId,
+          modelChoice: true,
+          ...(original.packet.requestedModel
+            ? { modelIntent: original.packet.requestedModel } : {}),
+        }) : null);
+      return { kind: 'refresh_required', packet: next };
+    }
+    const packet = original.packet;
+    const option = packet.options[0];
+    if (row.status !== 'pending' || full.task.pendingDecisionId !== input.decisionId ||
+        full.task.cancelRequested || packet.kind !== 'model_choice' ||
+        packet.humanOnly || !packet.requestedModel || packet.options.length > 1 ||
+        (option !== undefined &&
+          (!Number.isFinite(Date.parse(option.expiresAt)) ||
+           Date.now() <= Date.parse(option.expiresAt)))) {
+      throw new SessionPlaneDomainError('stale_decision', 'Current decision is not refreshable');
+    }
+    const slot = this.#repository.getSlot(full.task.projectId, full.task.slotId, input.clientId);
+    if (slot.activeTaskId !== input.taskId || slot.revision !== full.task.slotRevision) {
+      throw new SessionPlaneDomainError('stale_decision', 'Decision lost its active slot');
+    }
+    try {
+      const next = await this.refresh({ ...input, attemptId: original.attemptId });
+      return { kind: 'refresh_required', packet: next };
+    } catch (error) {
+      // Concurrent identical refreshes may race the SQLite reservation. Only
+      // the winning exact request may retrieve the newly observed decision.
+      const latest = this.#repository.getFullTask(input.taskId, input.clientId)
+        .decisions.find(decision => decision.decisionId === input.decisionId);
+      const resolved = latest?.resolutionJson
+        ? (JSON.parse(latest.resolutionJson) as Record<string, unknown>) : null;
+      if (latest?.status === 'resolved' &&
+          resolved?.kind === 'read_only_refresh' && resolved.requestId === input.requestId) {
+        return { kind: 'refresh_required', packet: this.get(input.taskId, input.clientId) };
+      }
+      throw error;
+    }
   }
 
   /** Public decision entry point: the exact attempt stays server-owned.

@@ -24,7 +24,7 @@ interface ParsedArgs {
 
 const FLAG_OPTIONS = new Set([
   'json', 'prompt-stdin', 'continuation-approved', 'until-change',
-  'manual', 'resume', 'full', 'link', 'force',
+  'manual', 'resume', 'full', 'link', 'force', 'refresh',
 ]);
 const VALUE_OPTIONS = new Set([
   'view', 'remote', 'remote-executable', 'remote-socket', 'remote-control-path',
@@ -247,13 +247,17 @@ async function runPublicTaskCommand(
       }), waitMs + 5_000);
     }
     case 'decide': {
-      publicCommandOptions(parsed, 'task decide', 5, ['request-id', 'input']);
+      const refresh = parsed.options.refresh === 'true';
+      publicCommandOptions(parsed, 'task decide', refresh ? 4 : 5,
+        refresh ? ['request-id', 'refresh'] : ['request-id', 'input']);
       return await printRpc(io, parsed, config, 'task.decide', taskSchemas.decide.parse({
         clientId: owner, taskId: requirePositional(parsed.words, 2, 'taskId'),
         decisionId: requirePositional(parsed.words, 3, 'decisionId'),
-        actionRef: requirePositional(parsed.words, 4, 'actionRef'),
         requestId: requireOption(parsed, 'request-id'),
-        ...(parsed.options.input === undefined ? {} : { input: parsed.options.input }),
+        ...(refresh ? { refresh: true } : {
+          actionRef: requirePositional(parsed.words, 4, 'actionRef'),
+          ...(parsed.options.input === undefined ? {} : { input: parsed.options.input }),
+        }),
       }));
     }
     case 'cancel': {
@@ -382,6 +386,7 @@ function helpText(): string {
     '  sessplane task get TASK_ID [--view summary|result|evidence] --json',
     '  sessplane task wait TASK_ID --after-revision N [--wait-ms 30000] --json',
     '  sessplane task decide TASK_ID DECISION_ID ACTION_REF --request-id ID [--input TEXT] --json',
+    '  sessplane task decide TASK_ID DECISION_ID --refresh --request-id ID --json',
     '  sessplane task cancel TASK_ID --request-id ID --json',
     '  sessplane mcp',
     '',

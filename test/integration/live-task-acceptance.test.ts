@@ -299,6 +299,73 @@ test('resumed L3 runner performs only exact current Pro semantic decisions befor
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
+test('cold root chooser hydrates after one read-only refresh, then exact Pro actions unblock L3', async () => {
+  const f = makeFixture();
+  const decisions: any[] = [];
+  const expiresAt = new Date(Date.now() + 120_000).toISOString();
+  let stage = 0;
+  const call = async (method: string, params: any) => {
+    if (method === 'task.decide') {
+      decisions.push(params);
+      if (stage === 0) {
+        assert.deepEqual({ refresh: params.refresh, actionRef: params.actionRef },
+          { refresh: true, actionRef: undefined });
+        stage++;
+        return { kind: 'refresh_required', packet: null };
+      }
+      assert.equal(params.refresh, undefined);
+      if (stage === 1) {
+        assert.equal(params.actionRef, 'live-hydrated-opener');
+        assert.equal(params.input, undefined);
+      } else if (stage === 2) {
+        assert.equal(params.actionRef, 'live-hydrated-pro-choice');
+        assert.equal(params.input, 'Pro');
+      } else {
+        throw new Error('Unbounded model action attempted');
+      }
+      stage++;
+      return { kind: 'performed', effect: 'model_selected' };
+    }
+    const base = await f.call(method, params);
+    if (method === 'task.get' && !params.view &&
+        f.records.size === 1 && stage < 3) {
+      return {
+        ...base, state: 'agent_input_required', revision: 10 + stage,
+        decision: {
+          decisionId: '00000000-0000-4000-8000-0000000000' + (91 + stage),
+          kind: 'model_choice', humanOnly: false, requestedModel: 'Pro',
+          options: stage === 0 ? [] : [{
+            actionRef: stage === 1 ? 'live-hydrated-opener' : 'live-hydrated-pro-choice',
+            purpose: stage === 1 ? 'open_model_chooser' : 'choose_model',
+            risk: 'configuration_only', expiresAt,
+            inputSchema: stage === 1 ? { kind: 'none' } : {
+              kind: 'option', options: [
+                { value: 'Instant', enabled: true }, { value: 'Pro', enabled: true },
+              ],
+            },
+          }],
+        },
+      };
+    }
+    return base;
+  };
+  try {
+    await runLiveTaskAcceptance(options(f.dir, call, 'start'));
+    const completed = await runLiveTaskAcceptance({
+      ...options(f.dir, call, 'resume'), maxWaitMs: 5000,
+    });
+    assert.equal(completed.status, 'three_turns_canonical_final_verified');
+    assert.equal(stage, 3);
+    assert.equal(decisions.length, 3);
+    assert.deepEqual(decisions.map(d => d.requestId), [
+      'l3-refresh-00000000-0000-4000-8000-000000000091',
+      'l3-pro-00000000-0000-4000-8000-000000000092',
+      'l3-pro-00000000-0000-4000-8000-000000000093',
+    ]);
+    assert.equal(f.calls.filter(c => c.method === 'task.start').length, 3);
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test('a human-only permission or unrelated decision is never auto-executed by the L3 runner', async () => {
   const f = makeFixture();
   let attempted = 0;
@@ -371,11 +438,16 @@ test('a paced/429 provider wait retains one initial attempt without any client r
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
-test('expired model action is not retried or substituted by an unverified model choice', async () => {
+test('expired model actions are refreshed read-only, never clicked with a stale actionRef', async () => {
   const f = makeFixture();
+  const refreshes: any[] = [];
   let acted = 0;
   const call = async (method: string, params: any) => {
     if (method === 'task.decide') {
+      if (params.refresh === true) {
+        refreshes.push(params);
+        return { kind: 'refresh_required', packet: null };
+      }
       acted++;
       throw new Error('Expired model action must never be executed');
     }
@@ -402,6 +474,10 @@ test('expired model action is not retried or substituted by an unverified model 
     assert.equal(result.status, 'read_only_reconnect_pending');
     assert.equal(result.taskState, 'agent_input_required');
     assert.equal(acted, 0);
+    assert.equal(refreshes.length, 1, 'Only one bounded read-only refresh is issued');
+    assert.equal(refreshes[0].actionRef, undefined);
+    assert.equal(refreshes[0].requestId,
+      'l3-refresh-00000000-0000-4000-8000-000000000123');
     assert.equal(f.records.size, 1);
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });

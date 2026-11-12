@@ -52,10 +52,13 @@ export const taskSchemas = {
     waitMs: z.number().int().min(0).max(120_000).default(30_000),
     view,
   }).strict(),
-  decide: z.object({
+  decide: z.union([z.object({
     clientId, taskId, decisionId, requestId, actionRef,
     input: z.string().min(1).max(2_000).optional(),
-  }).strict(),
+  }).strict(), z.object({
+    // Read-only reinspection, never a provider action or permission grant.
+    clientId, taskId, decisionId, requestId, refresh: z.literal(true),
+  }).strict()]),
   cancel: z.object({
     clientId, taskId, requestId,
   }).strict(),
@@ -172,6 +175,12 @@ export function registerTaskMethods(
   });
 
   router.register('task.decide', taskSchemas.decide, async params => {
+    if ('refresh' in params) {
+      return await gateway.refreshCurrent({
+        taskId: params.taskId, clientId: params.clientId,
+        decisionId: params.decisionId, requestId: params.requestId,
+      });
+    }
     return await gateway.decideCurrent({
       taskId: params.taskId, clientId: params.clientId,
       decisionId: params.decisionId, requestId: params.requestId,

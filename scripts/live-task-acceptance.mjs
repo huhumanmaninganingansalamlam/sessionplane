@@ -173,10 +173,54 @@ async function acceptOneTask({ plan, state, index, call, receiptDir, limitMs, wa
   });
   const expiresAt = Date.now() + limitMs;
   let modelDecisions = 0;
+  let modelRefreshes = 0;
   while (Date.now() < expiresAt) {
     if (summary.state === 'agent_input_required') {
       const action = exactProModelAction(summary.decision);
-      if (!action || modelDecisions >= 4) break;
+      if (!action) {
+        const decision = summary.decision;
+        const option = decision?.options?.[0];
+        // A cold new-chat root may report no model action before hydration.
+        // Request a bounded Core-owned read-only reinspection, never a
+        // guessed DOM click or repeat of the original provider POST.
+        const refreshable = decision?.kind === 'model_choice' &&
+          decision.humanOnly === false && decision.requestedModel === 'Pro' &&
+          Array.isArray(decision.options) && decision.options.length <= 1 &&
+          (decision.options.length === 0 ||
+            (Number.isFinite(Date.parse(option?.expiresAt)) &&
+             Date.now() > Date.parse(option.expiresAt)));
+        if (!refreshable || modelRefreshes >= 6) break;
+        const requestId = 'l3-refresh-' + decision.decisionId;
+        row.modelRefresh = { decisionId: decision.decisionId, requestId };
+        saveState(receiptDir, state);
+        const refreshed = await call('task.decide', {
+          clientId: plan.clientId, taskId: row.taskId,
+          decisionId: decision.decisionId, requestId, refresh: true,
+        });
+        row.modelRefreshResult = refreshed?.kind ?? 'unknown';
+        saveState(receiptDir, state);
+        modelRefreshes++;
+        if (refreshed?.kind !== 'refresh_required') break;
+        const previous = summary;
+        summary = await call('task.get', {
+          clientId: plan.clientId, taskId: row.taskId,
+        });
+        if (summary.revision === previous.revision &&
+            summary.decision?.decisionId === previous.decision?.decisionId) break;
+        if (summary.state === 'agent_input_required' &&
+            summary.decision?.kind === 'model_choice' &&
+            summary.decision?.options?.length === 0) {
+          // Pace slow root hydration through a bounded read-only Core wait.
+          // Do not burn the refresh budget or fabricate a chooser action.
+          summary = await call('task.wait', {
+            clientId: plan.clientId, taskId: row.taskId,
+            afterRevision: summary.revision,
+            waitMs: Math.min(1500, Math.max(0, expiresAt - Date.now())),
+          });
+        }
+        continue;
+      }
+      if (modelDecisions >= 4) break;
       // Store the exact request identity before the external UI effect.
       if (row.modelDecision?.decisionId === action.decisionId &&
           (row.modelDecision.actionRef !== action.actionRef ||

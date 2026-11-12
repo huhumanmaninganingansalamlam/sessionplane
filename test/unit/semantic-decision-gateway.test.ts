@@ -20,7 +20,7 @@ const MANIFEST: SemanticCapabilityManifest = {
   supports: ['conversation', 'question', 'permission', 'model_choice'],
 };
 
-type Mode = 'question' | 'free_text' | 'model' | 'permission' |
+type Mode = 'question' | 'free_text' | 'model' | 'model-unready' | 'permission' |
   'human' | 'oversized' | 'none';
 
 class FakeSemanticAdapter implements SemanticProviderAdapter {
@@ -42,7 +42,8 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
     this.currentActionRef = actionRef;
     const blocker = this.mode === 'permission' ? 'provider_permission'
       : this.mode === 'human' ? 'human_verification'
-        : this.mode === 'none' || this.mode === 'model' ? 'none'
+        : this.mode === 'none' || this.mode === 'model' ||
+          this.mode === 'model-unready' ? 'none'
           : 'provider_question';
     const action = this.mode === 'question' || this.mode === 'free_text' ||
       this.mode === 'model' || this.mode === 'oversized' ? [{
@@ -243,6 +244,10 @@ test('permission remains read-only; human verification is agent-delivered, not f
   assert.equal(pending.permission?.canGrant, false);
   assert.equal(pending.permission?.detailState, 'redacted');
   assert.deepEqual(pending.options, []);
+  await assert.rejects(gateway.refreshCurrent({
+    taskId: 'task-1', clientId: 'alice',
+    decisionId: pending.decisionId, requestId: 'no-permission-refresh',
+  }), /not refreshable/, 'Empty permission packets are not model-refresh grants');
   await assert.rejects(gateway.decide({
     taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
     decisionId: pending.decisionId, requestId: 'not-authorized',
@@ -259,6 +264,46 @@ test('permission remains read-only; human verification is agent-delivered, not f
   assert.deepEqual(changed.options, []);
   assert.equal(env.store.getTask('task-1', 'alice').state, 'human_input_required');
   assert.deepEqual(gateway.get('task-1', 'alice'), changed);
+});
+
+test('public model reinspection recovers an unready root exactly once, never grants an action', async t => {
+  const env = fixture(t);
+  const adapter = new FakeSemanticAdapter(env.store);
+  adapter.mode = 'model-unready';
+  const gateway = env.getGateway(adapter);
+  const stale = (await gateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    modelChoice: true, modelIntent: 'Pro',
+  }))!;
+  assert.equal(stale.kind, 'model_choice');
+  assert.equal(stale.requestedModel, 'Pro');
+  assert.deepEqual(stale.options, []);
+  assert.equal(adapter.clicks, 0);
+  adapter.mode = 'model';
+  const refreshInput = {
+    taskId: 'task-1', clientId: 'alice',
+    decisionId: stale.decisionId, requestId: 'read-only-refresh-once',
+  };
+  const refreshed = await gateway.refreshCurrent(refreshInput);
+  assert.equal(refreshed.kind, 'refresh_required');
+  if (refreshed.kind !== 'refresh_required') throw new Error('Missing refresh packet');
+  assert.equal(refreshed.packet?.kind, 'model_choice');
+  assert.equal(refreshed.packet?.requestedModel, 'Pro');
+  assert.equal(refreshed.packet?.options[0]?.purpose, 'open_model_chooser');
+  assert.notEqual(refreshed.packet?.decisionId, stale.decisionId);
+  assert.equal(adapter.observed, 2);
+  assert.equal(adapter.clicks, 0, 'A read-only refresh must never act on the UI');
+  const replay = await gateway.refreshCurrent(refreshInput);
+  assert.equal(replay.kind, 'refresh_required');
+  if (replay.kind !== 'refresh_required') throw new Error('Missing replay packet');
+  assert.equal(replay.packet?.decisionId, refreshed.packet?.decisionId);
+  assert.equal(adapter.observed, 2, 'A matching requestId cannot reobserve twice');
+  await assert.rejects(gateway.refreshCurrent({ ...refreshInput, requestId: 'other-request' }),
+    /different request/);
+  await assert.rejects(gateway.refreshCurrent({
+    ...refreshInput, decisionId: refreshed.packet!.decisionId,
+  }), /not refreshable/, 'A still-valid actionable model choice must not be revoked');
+  assert.equal(adapter.clicks, 0);
 });
 
 test('bounded free-text and oversized evidence never broaden a provider action', async t => {

@@ -39,7 +39,7 @@ const taskDescriptions: Record<keyof typeof taskSchemas, string> = {
   start: 'Start one exact project conversation Task. Core owns preparation, dispatch, canonical ACK, FINAL and approved continuation. Reuse requestId only for an identical request.',
   get: 'Read the durable Task. Select view=result for the complete exact answer or view=evidence for bounded provenance; never invokes provider mutation.',
   wait: 'Wait once, bounded by waitMs, for a newer Task revision. A client disconnect never cancels Core work.',
-  decide: 'Consume the current decisionId/actionRef once. Input is permitted only if advertised in its bounded input schema.',
+  decide: 'Consume an exact decisionId/actionRef once, or use refresh:true only for read-only reinspection of an unactionable/expired model decision. Never grants permission or replays a provider POST.',
   cancel: 'Persist Task cancellation intent and revoke future Continue; ambiguous external stop remains uncertain.',
 };
 
