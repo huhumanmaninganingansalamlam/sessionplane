@@ -275,7 +275,8 @@ export class SemanticDecisionGateway {
     if (kind === null) return null;
     const purposes: SemanticActionPurpose[] = kind === 'provider_question'
       ? ['answer_question'] : kind === 'model_choice'
-        ? ['open_model_chooser', 'choose_model'] : kind === 'recovery_choice'
+        ? ['open_model_chooser', 'close_model_chooser',
+          'choose_model', 'choose_reasoning_effort'] : kind === 'recovery_choice'
           ? ['retry'] : [];
     const action = observation ? oneAction(observation, purposes) : null;
     const now = new Date().toISOString();

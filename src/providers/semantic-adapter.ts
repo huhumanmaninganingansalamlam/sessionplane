@@ -38,7 +38,8 @@ export function semanticConfigurationMatches(
 }
 
 export type SemanticActionPurpose =
-  | 'compose' | 'submit' | 'open_model_chooser' | 'choose_model' | 'answer_question'
+  | 'compose' | 'submit' | 'open_model_chooser' | 'close_model_chooser'
+  | 'choose_model' | 'choose_reasoning_effort' | 'answer_question'
   | 'grant_permission' | 'retry' | 'continue';
 export type SemanticActionRisk =
   | 'draft_only' | 'configuration_only' | 'send_once'
@@ -138,7 +139,8 @@ export interface SemanticActRequest {
 }
 export type SemanticActResult =
   | { readonly kind: 'performed'; readonly effect: 'draft_updated' | 'question_answered' |
-      'model_menu_opened' | 'model_selected' }
+      'model_menu_opened' | 'model_menu_closed' | 'model_selected' |
+      'reasoning_effort_selected' }
   | { readonly kind: 'dispatched_unverified'; readonly effect: 'send';
       readonly attempts: readonly SemanticDispatchEvidence[] }
   | { readonly kind: 'root_dispatched_unverified'; readonly effect: 'send';

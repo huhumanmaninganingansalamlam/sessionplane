@@ -292,6 +292,71 @@ test('resumed L3 runner opens a safe chooser before Core-verified Pro and three-
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
+test('L3 runner consumes exact model-view close, reopen, one Pro effort selection and final close before any new Task', async () => {
+  const f = makeFixture();
+  const sequence = [
+    { purpose: 'close_model_chooser', effect: 'model_menu_closed' },
+    { purpose: 'open_model_chooser', effect: 'model_menu_opened' },
+    { purpose: 'choose_reasoning_effort', effect: 'reasoning_effort_selected' },
+    { purpose: 'close_model_chooser', effect: 'model_menu_closed' },
+  ];
+  const decisions: any[] = [];
+  let stage = 0;
+  const call = async (method: string, params: any) => {
+    if (method === 'task.decide') {
+      assert.equal(params.refresh, undefined);
+      assert.equal(params.clientId, clientId);
+      assert.equal(params.input, undefined, 'the pointer choice uses no guessed numeric input');
+      assert.equal(params.actionRef, 'exact-power-stage-' + stage);
+      decisions.push(params);
+      const current = sequence[stage]!;
+      stage++;
+      return { kind: 'performed', effect: current.effect };
+    }
+    const base = await f.call(method, params);
+    if (method === 'task.get' && !params.view &&
+        f.records.size === 1 && stage < sequence.length) {
+      return {
+        ...base, state: 'agent_input_required', revision: 10 + stage,
+        submission: { attempted: false, acknowledged: false },
+        decision: {
+          decisionId: '00000000-0000-4000-8000-0000000000' + (91 + stage),
+          kind: 'model_choice', humanOnly: false,
+          requestedModel: 'Pro', options: [{
+            actionRef: 'exact-power-stage-' + stage,
+            purpose: sequence[stage]!.purpose, risk: 'configuration_only',
+            expiresAt: new Date(Date.now() + 120_000).toISOString(),
+            inputSchema: { kind: 'none' },
+          }],
+        },
+      };
+    }
+    if (method === 'task.start' && f.records.size > 1) {
+      assert.equal(stage, sequence.length,
+        'no follow-up Task before the four exact configuration actions');
+    }
+    return base;
+  };
+  try {
+    const started = await runLiveTaskAcceptance(options(f.dir, call, 'start'));
+    assert.equal(started.status, 'owner_client_exited_after_initial');
+    assert.equal(stage, 0);
+    const result = await runLiveTaskAcceptance({
+      ...options(f.dir, call, 'resume'), maxWaitMs: 5000,
+    });
+    assert.equal(result.status, 'three_turns_canonical_final_verified');
+    assert.equal(stage, sequence.length);
+    assert.equal(decisions.length, sequence.length);
+    assert.deepEqual(decisions.map(d => d.requestId), [
+      'l3-pro-00000000-0000-4000-8000-000000000091',
+      'l3-pro-00000000-0000-4000-8000-000000000092',
+      'l3-pro-00000000-0000-4000-8000-000000000093',
+      'l3-pro-00000000-0000-4000-8000-000000000094',
+    ]);
+    assert.equal(f.records.size, 3);
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test('cold root chooser hydrates after one read-only refresh; Core independently verifies Pro', async () => {
   const f = makeFixture();
   const decisions: any[] = [];

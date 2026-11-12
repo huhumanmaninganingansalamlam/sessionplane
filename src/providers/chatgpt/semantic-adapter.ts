@@ -19,6 +19,7 @@ import { inspectChatGptQuestion, answerChatGptQuestion } from './question.ts';
 import { inspectChatGptFreeTextQuestion, answerChatGptFreeTextQuestion } from './semantic-free-text-question.ts';
 import { inspectSemanticHostSpanPermission } from './semantic-hostspan-permission.ts';
 import { inspectSemanticChatGptModelMenu, openExactChatGptModelMenu,
+  closeExactChatGptModelMenu, selectExactChatGptProReasoningLevel,
   selectExactChatGptModelMenu } from './semantic-model-menu.ts';
 import { observeChatGptSurface } from './surface.ts';
 import { streamRetrySurface } from './stream-retry.ts';
@@ -101,7 +102,8 @@ export interface ChatGptSemanticAdapterOptions {
   /** Consume one exact journaled model/question/stream-retry decision before its effect. */
   readonly isAuthorizedDecision?: (input: {
     context: SemanticTaskContext;
-    purpose: 'open_model_chooser' | 'choose_model' | 'answer_question' | 'retry';
+    purpose: 'open_model_chooser' | 'close_model_chooser' |
+      'choose_model' | 'choose_reasoning_effort' | 'answer_question' | 'retry';
     decisionId: string; snapshotId: string; actionRef: string; evidenceHash: string; input: string | null;
   }) => boolean | Promise<boolean>;
   readonly isAuthorizedAttempt?: (input: {
@@ -339,13 +341,27 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           verifiedReasoningLevel = model.status === 'closed'
             ? model.verifiedReasoningLevel : null;
           if (requiredEffort && model.status === 'nested') {
-            // Live ChatGPT's Power menu may be disabled or have only an
-            // unlabeled numeric slider. Neither is an exact Pro target.
-            const why = model.reasoningControlState === 'disabled'
-              ? 'reasoning-effort-control-disabled'
-              : 'reasoning-effort-pro-target-unverified';
-            capabilityIssues.push({ capability: 'model_choice', reason: why });
-            reason = why;
+            if (model.strategy === 'composer-radix' &&
+                model.verifiedReasoningLevel === 'Pro') {
+              // No send while the chooser remains open, even after Pro proof.
+              issue('close_model_chooser', 'Close verified Pro composer chooser',
+                'configuration_only', { kind: 'none' }, ui.fingerprint,
+                null, model.evidenceHash);
+            } else if (model.strategy === 'composer-radix' &&
+                       model.reasoningControlState === 'enabled' &&
+                       model.fiveLevelPowerScaleVerified) {
+              // One verified five-step pointer control; final proof is
+              // the literal Pro trigger, never a guessed numeric thumb.
+              issue('choose_reasoning_effort', 'Select and verify Pro effort',
+                'configuration_only', { kind: 'none' }, ui.fingerprint,
+                null, model.evidenceHash);
+            } else {
+              const why = model.reasoningControlState === 'disabled'
+                ? 'reasoning-effort-control-disabled'
+                : 'reasoning-effort-pro-target-unverified';
+              capabilityIssues.push({ capability: 'model_choice', reason: why });
+              reason = why;
+            }
           } else if (!requiredEffort || verifiedReasoningLevel !== 'Pro') {
             issue('open_model_chooser', 'Inspect currently offered model controls',
               'configuration_only', { kind: 'none' }, ui.fingerprint,
@@ -355,13 +371,17 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           const checked = model.options.filter(option => option.selected && option.enabled);
           verifiedModel = checked.length === 1 ? checked[0]!.value : null;
           if (requiredEffort) {
-            // GPT-6 and GPT-5.6 Sol are model radios, not Pro effort.
-            // Do not offer a wrong-target choice or touch a Power slider.
-            const why = model.reasoningControlState === 'disabled'
-              ? 'reasoning-effort-control-disabled'
-              : 'reasoning-effort-pro-target-unverified';
-            capabilityIssues.push({ capability: 'model_choice', reason: why });
-            reason = why;
+            // The model-radio view must first close; radio names cannot
+            // substitute for a Pro reasoning-level selection.
+            if (model.strategy === 'composer-radix') {
+              issue('close_model_chooser', 'Return to exact composer effort selector',
+                'configuration_only', { kind: 'none' }, ui.fingerprint,
+                null, model.evidenceHash);
+            } else {
+              capabilityIssues.push({ capability: 'model_choice',
+                reason: 'reasoning-effort-pro-target-unverified' });
+              reason = 'reasoning-effort-pro-target-unverified';
+            }
           } else {
             issue('choose_model', 'Select one verified model menu option',
               'configuration_only', { kind: 'option', options: model.options.map(o => ({
@@ -491,6 +511,13 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           'reasoning_effort') {
       return { kind: 'unsupported', reason: 'reasoning-effort-is-not-model-radio' };
     }
+    if ((action.purpose === 'choose_reasoning_effort' ||
+         action.purpose === 'close_model_chooser') &&
+        (!request.context.requiredModel ||
+         semanticConfigurationIntent(this.providerKey, request.context.requiredModel).kind !==
+           'reasoning_effort' || request.input !== undefined)) {
+      return { kind: 'unsupported', reason: 'exact-reasoning-effort-decision-required' };
+    }
     if (action.purpose === 'choose_model' && (!request.input || request.input.length > 160)) {
       return { kind: 'unsupported', reason: 'exact-model-option-required' };
     }
@@ -582,7 +609,10 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
             (await inspectChatGptFreeTextQuestion(page)) !== null)) return 'stale' as const;
       const fresh = await captureUi(page);
       if (fresh.fingerprint !== action.uiFingerprint) return 'stale' as const;
-      if (action.purpose === 'open_model_chooser' || action.purpose === 'choose_model') {
+      if (action.purpose === 'open_model_chooser' ||
+          action.purpose === 'close_model_chooser' ||
+          action.purpose === 'choose_reasoning_effort' ||
+          action.purpose === 'choose_model') {
         const model = await inspectSemanticChatGptModelMenu(page);
         if (!model || model.evidenceHash !== action.modelHash) return 'stale' as const;
         const requireExactModelTurn = async () => {
@@ -606,6 +636,20 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           if (model.status !== 'closed' && model.status !== 'nested') return 'stale' as const;
           await openExactChatGptModelMenu(page, model.evidenceHash, requireExactModelTurn);
           return 'model_menu_opened' as const;
+        }
+        if (action.purpose === 'close_model_chooser') {
+          if (model.strategy !== 'composer-radix' ||
+              !['open', 'nested'].includes(model.status)) return 'stale' as const;
+          await closeExactChatGptModelMenu(page, model.evidenceHash, requireExactModelTurn);
+          return 'model_menu_closed' as const;
+        }
+        if (action.purpose === 'choose_reasoning_effort') {
+          if (model.strategy !== 'composer-radix' || model.status !== 'nested' ||
+              model.reasoningControlState !== 'enabled' ||
+              !model.fiveLevelPowerScaleVerified) return 'stale' as const;
+          await selectExactChatGptProReasoningLevel(
+            page, model.evidenceHash, requireExactModelTurn);
+          return 'reasoning_effort_selected' as const;
         }
         if (model.status !== 'open' ||
           !model.options.some(option => option.value === request.input && option.enabled)) {
@@ -815,7 +859,8 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
 
   async #authorized(request: SemanticActRequest, purpose: SemanticActionPurpose): Promise<boolean> {
     if (purpose === 'compose') return true;
-    if (purpose === 'open_model_chooser' || purpose === 'choose_model' ||
+    if (purpose === 'open_model_chooser' || purpose === 'close_model_chooser' ||
+        purpose === 'choose_model' || purpose === 'choose_reasoning_effort' ||
         purpose === 'answer_question' || purpose === 'retry') {
       if (!request.authorizedDecisionId || !this.#options.isAuthorizedDecision) return false;
       try {

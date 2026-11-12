@@ -26,7 +26,11 @@ export interface SemanticModelMenu {
   /** Explicit composer reasoning level; separate from model radios. */
   readonly verifiedReasoningLevel: 'Medium' | 'Pro' | null;
   /** The visible Power control can be disabled even when the model menu works. */
-  readonly reasoningControlState: 'disabled' | 'unverified';
+  readonly reasoningControlState: 'enabled' | 'disabled' | 'unverified';
+  /** Five live, ordered Power ticks and a second-of-five Medium announcement.
+   * This establishes a unique *control*, never proof that Pro was selected.
+   */
+  readonly fiveLevelPowerScaleVerified: boolean;
 }
 
 /**
@@ -55,7 +59,8 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
       options: [] as Array<{ value: string; controlLabel: string;
         enabled: boolean; selected: boolean }>,
       verifiedReasoningLevel: null as 'Medium' | 'Pro' | null,
-      reasoningControlState: 'unverified' as 'disabled' | 'unverified',
+      reasoningControlState: 'unverified' as 'enabled' | 'disabled' | 'unverified',
+      fiveLevelPowerScaleVerified: false,
     };
     if (selected.length === 0) return null;
     if (selected.length !== 1) return { ...base,
@@ -138,18 +143,69 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
           .filter(control => control.closest('[role="menu"]') === root && visible(control));
       const items = inRoot('[role="menuitem"]');
       const sliders = inRoot('[role="slider"]');
-      // ChatGPT's slider thumb is aria-hidden from accessibility, despite
-      // being structurally present inside the visible Power item. Recognize
-      // it only as non-actionable layout evidence, never as a model option.
+      // The keyboard menuitem can be aria-disabled while the nested pointer
+      // slider itself explicitly says aria-disabled=false and data-locked=false.
+      // Distinguish these separate controls. The numeric thumb is never a
+      // model option or evidence that a particular effort is selected.
       const powerItems = items.filter(item => item.getAttribute('aria-label') === '파워');
+      const structuralSliders = [...root.querySelectorAll<HTMLElement>('[role="slider"]')]
+        .filter(slider => slider.closest('[role="menu"]') === root);
       const allPowerItems = [...root.querySelectorAll<HTMLElement>(
         '[role="menuitem"][aria-label="파워"]')]
         .filter(item => item.closest('[role="menu"]') === root);
-      const composerEvidence = { ...trusted, reasoningControlState:
-        allPowerItems.length === 1 && allPowerItems[0]!.getAttribute('aria-disabled') === 'true'
-          ? 'disabled' as const : 'unverified' as const };
-      const structuralSliders = [...root.querySelectorAll<HTMLElement>('[role="slider"]')]
-        .filter(slider => slider.closest('[role="menu"]') === root);
+      const pointerControls = allPowerItems.length === 1
+        ? [...allPowerItems[0]!.querySelectorAll<HTMLElement>(
+          '[data-model-picker-power-slider] > span[aria-disabled][data-locked]')] : [];
+      const pointer = pointerControls.length === 1 ? pointerControls[0]! : null;
+      const headers = [...root.querySelectorAll<HTMLElement>('[data-power-disabled]')];
+      const header = headers.length === 1 ? headers[0]! : null;
+      const explicitlyDisabled = pointer?.getAttribute('aria-disabled') === 'true' ||
+        pointer?.getAttribute('data-locked') === 'true' ||
+        header?.getAttribute('data-power-disabled') === 'true';
+      const pointerEnabled = !!pointer && !!header &&
+        pointer.getAttribute('aria-disabled') === 'false' &&
+        pointer.getAttribute('data-locked') === 'false' &&
+        header.getAttribute('data-power-disabled') === 'false';
+      const reasoningControlState = explicitlyDisabled ? 'disabled' as const
+        : pointerEnabled ? 'enabled' as const : 'unverified' as const;
+      const ticks = pointer ? [...pointer.querySelectorAll<HTMLElement>(
+        'span[data-selected]')] : [];
+      const statuses = [...root.querySelectorAll<HTMLElement>(
+        '[role="status"][aria-live="polite"]')];
+      const thumb = structuralSliders.length === 1 ? structuralSliders[0]! : null;
+      // https://help.openai.com/en/articles/20001354-gpt-6-and-other-models-in-chatgpt
+      // The five levels are documented in order: Instant, Medium, High,
+      // Extra High, Pro. The *observed* UI independently says Medium is the
+      // second of five. Selection is still not accepted until the composer
+      // trigger itself reads literally Pro after one trusted pointer click.
+      const fiveLevelPowerScaleVerified = strategy === 'composer-radix' &&
+        powerItems.length === 1 && pointerEnabled &&
+        verifiedReasoningLevel === 'Medium' &&
+        header?.textContent?.replace(/\s+/g, ' ').trim() === 'Medium' &&
+        statuses.length === 1 &&
+        statuses[0]!.textContent?.replace(/\s+/g, ' ').trim() ===
+          'Medium, 5개 중 2번째입니다.' &&
+        thumb?.getAttribute('aria-hidden') === 'true' &&
+        thumb.getAttribute('aria-orientation') === 'horizontal' &&
+        thumb.getAttribute('aria-valuemin') === '0' &&
+        thumb.getAttribute('aria-valuemax') === '4' &&
+        thumb.getAttribute('aria-valuenow') === '1' &&
+        ticks.length === 5 &&
+        ticks.every((tick, i) => tick.getAttribute('data-selected') ===
+          (i < 2 ? 'true' : 'false')) &&
+        ticks.every((tick, i) => {
+          const bounds = tick.getBoundingClientRect();
+          const center = bounds.x + bounds.width / 2;
+          const prior = i === 0 ? null : ticks[i - 1]!.getBoundingClientRect();
+          return bounds.width > 0 && bounds.height > 0 &&
+            Number.isFinite(center) &&
+            (prior === null || center > prior.x + prior.width / 2 + 1);
+        }) &&
+        new Set(ticks.map(tick => tick.parentElement)).size === 1 &&
+        ticks[0]!.parentElement?.parentElement?.getAttribute('data-orientation') ===
+          'horizontal';
+      const composerEvidence = { ...trusted, reasoningControlState,
+        fiveLevelPowerScaleVerified };
       const powerSliderVerified = powerItems.length === 1 && structuralSliders.length === 1 &&
         structuralSliders[0]!.closest('[role="menuitem"]') === powerItems[0] &&
         structuralSliders[0]!.checkVisibility({
@@ -239,7 +295,8 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
     menuId: data.menuId, optionMenuId: data.optionMenuId,
     submenuId: data.submenuId, submenuTriggerIndex: data.submenuTriggerIndex,
     options: data.options, verifiedReasoningLevel: data.verifiedReasoningLevel,
-    reasoningControlState: data.reasoningControlState, evidenceHash,
+    reasoningControlState: data.reasoningControlState,
+    fiveLevelPowerScaleVerified: data.fiveLevelPowerScaleVerified, evidenceHash,
   };
 }
 
@@ -443,5 +500,142 @@ export async function selectExactChatGptModelMenu(
     // Provider may close its menu on selection. Without a trustworthy final
     // selected-state read, do not report successful Pro configuration.
     throw new Error('Model selection clicked but selected state is unverified');
+  }
+}
+
+/** Close only the linked composer menu, never a global/foreground menu.
+ * One trusted click; a lost effect remains uncertain and is not retried.
+ */
+export async function closeExactChatGptModelMenu(
+  page: Page, expectedHash: string, beforeMutation: () => void | Promise<void>,
+): Promise<void> {
+  const current = await inspectSemanticChatGptModelMenu(page);
+  if (!current || current.strategy !== 'composer-radix' ||
+      !['nested', 'open'].includes(current.status) ||
+      !ID.test(current.openerId) || !ID.test(current.menuId) ||
+      current.evidenceHash !== expectedHash) {
+    throw new Error('Exact composer menu is not verified open');
+  }
+  const opener = page.locator(OPENER + '[id="' + current.openerId + '"]');
+  if (await opener.count() !== 1) throw new Error('Composer opener lost before close');
+  await clickExactModelControl(page, current, opener, beforeMutation, current.openerId);
+  const end = Date.now() + 5_000;
+  while (Date.now() < end) {
+    const after = await inspectSemanticChatGptModelMenu(page);
+    if (after?.strategy === current.strategy &&
+        after.openerId === current.openerId && after.status === 'closed') return;
+    await new Promise<void>(resolve => setTimeout(resolve, 150));
+  }
+  throw new Error('Exact composer did not close after one trusted click');
+}
+
+/** Choose the documented highest Power step on the uniquely verified 5-level
+ * pointer slider. No numeric slider value is treated as Pro proof: only an
+ * exact Pro composer-trigger observation AFTER the one click can prove that.
+ */
+export async function selectExactChatGptProReasoningLevel(
+  page: Page, expectedHash: string, beforeMutation: () => void | Promise<void>,
+): Promise<void> {
+  const expected = await inspectSemanticChatGptModelMenu(page);
+  if (!expected || expected.strategy !== 'composer-radix' ||
+      expected.status !== 'nested' ||
+      expected.verifiedReasoningLevel !== 'Medium' ||
+      expected.reasoningControlState !== 'enabled' ||
+      expected.fiveLevelPowerScaleVerified !== true ||
+      expected.evidenceHash !== expectedHash ||
+      !ID.test(expected.openerId) || !ID.test(expected.menuId)) {
+    throw new Error('Exact five-level Power selection not verified');
+  }
+  const pinnedTick = await page.locator(
+    '[role="menu"][id="' + expected.menuId +
+    '"] [data-model-picker-power-slider] span[data-selected]').nth(4).elementHandle();
+  if (!pinnedTick) throw new Error('Exact Power tick disappeared');
+  try {
+    await beforeMutation();
+    const current = await inspectSemanticChatGptModelMenu(page);
+    if (!current || current.evidenceHash !== expectedHash) {
+      throw new Error('Power selection evidence changed before click');
+    }
+    const point = await page.evaluate(({ openerId, menuId }) => {
+      const opener = document.getElementById(openerId);
+      const menu = document.getElementById(menuId);
+      if (!opener || !menu || opener.getAttribute('aria-controls') !== menuId ||
+          opener.getAttribute('aria-expanded') !== 'true' ||
+          menu.getAttribute('role') !== 'menu' ||
+          menu.getAttribute('data-state') !== 'open' ||
+          menu.getAttribute('aria-labelledby') !== openerId ||
+          menu.querySelector('[data-model-picker-view="advanced"]') === null) return null;
+      const controls = [...menu.querySelectorAll<HTMLElement>(
+        '[role="menuitem"][aria-label="파워"][data-reasoning-slider="true"]')]
+        .filter(item => item.closest('[role="menu"]') === menu &&
+          !item.closest('[aria-hidden="true"], [inert]'));
+      if (controls.length !== 1) return null;
+      const panel = controls[0]!;
+      const pointer = panel.querySelector<HTMLElement>(
+        '[data-model-picker-power-slider] > span[aria-disabled="false"][data-locked="false"]');
+      if (!pointer || panel.querySelectorAll('[data-model-picker-power-slider]').length !== 1)
+        return null;
+      const thumb = panel.querySelector<HTMLElement>('[role="slider"][aria-hidden="true"]');
+      const status = [...menu.querySelectorAll<HTMLElement>(
+        '[role="status"][aria-live="polite"]')];
+      const headers = [...menu.querySelectorAll<HTMLElement>('[data-power-disabled]')];
+      if (headers.length !== 1 || headers[0]!.getAttribute('data-power-disabled') !== 'false' ||
+          headers[0]!.textContent?.trim() !== 'Medium' ||
+          status.length !== 1 ||
+          status[0]!.textContent?.replace(/\s+/g, ' ').trim() !==
+            'Medium, 5개 중 2번째입니다.' ||
+          !thumb || thumb.getAttribute('aria-valuemin') !== '0' ||
+          thumb.getAttribute('aria-valuemax') !== '4' ||
+          thumb.getAttribute('aria-valuenow') !== '1') return null;
+      const ticks = [...pointer.querySelectorAll<HTMLElement>('span[data-selected]')];
+      if (ticks.length !== 5 || ticks.some((tick, i) =>
+        tick.getAttribute('data-selected') !== (i < 2 ? 'true' : 'false')) ||
+          new Set(ticks.map(tick => tick.parentElement)).size !== 1) return null;
+      const target = ticks[4]!;
+      if (!target.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) ||
+          !pointer.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return null;
+      const rect = target.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      if (!Number.isFinite(x) || !Number.isFinite(y) ||
+          rect.width <= 0 || rect.height <= 0 ||
+          x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null;
+      const hit = document.elementFromPoint(x, y);
+      if (!hit || !(hit === target || target.contains(hit))) return null;
+      return { x, y };
+    }, { openerId: expected.openerId, menuId: expected.menuId });
+    if (!point) throw new Error('Exact Pro Power position failed hit test');
+    await beforeMutation();
+    const last = await inspectSemanticChatGptModelMenu(page);
+    if (!last || last.evidenceHash !== expectedHash) {
+      throw new Error('Power choice changed before one trusted click');
+    }
+    // Reconfirm the original exact DOM tick, geometry and hit-test after
+    // authorization I/O. A same-looking replacement cannot inherit this click.
+    const pinnedValid = await pinnedTick.evaluate((tick, pos) => {
+      const bounds = tick.getBoundingClientRect();
+      const hit = document.elementFromPoint(pos.x, pos.y);
+      return tick.isConnected &&
+        tick.closest('[role="menu"]')?.id === pos.menuId &&
+        tick.getAttribute('data-selected') === 'false' &&
+        bounds.width > 0 && bounds.height > 0 &&
+        Math.abs(bounds.x + bounds.width / 2 - pos.x) < 1 &&
+        Math.abs(bounds.y + bounds.height / 2 - pos.y) < 1 &&
+        (hit === tick || tick.contains(hit));
+    }, { ...point, menuId: expected.menuId });
+    if (!pinnedValid) throw new Error('Power target replaced before trusted click');
+    await page.mouse.click(point.x, point.y, { button: 'left', clickCount: 1 });
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const after = await inspectSemanticChatGptModelMenu(page);
+      if (after?.strategy === 'composer-radix' &&
+          after.openerId === expected.openerId &&
+          ['closed', 'nested'].includes(after.status) &&
+          after.verifiedReasoningLevel === 'Pro') return;
+      await new Promise<void>(resolve => setTimeout(resolve, 150));
+    }
+    throw new Error('Pro effort not verified by exact composer label after one click');
+  } finally {
+    await pinnedTick.dispose();
   }
 }

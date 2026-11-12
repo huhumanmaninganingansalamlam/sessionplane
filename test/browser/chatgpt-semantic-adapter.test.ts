@@ -922,16 +922,19 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     const proOnly = await adapter.observe({ ...task, requiredModel: 'Pro' });
     const proMenu = await inspectSemanticChatGptModelMenu(page);
     assert.equal(proMenu?.verifiedReasoningLevel, 'Medium');
-    assert.equal(proMenu?.reasoningControlState, 'disabled');
+    assert.equal(proMenu?.reasoningControlState, 'unverified',
+      'a keyboard-disabled row without a proven pointer root is not a Power lock');
     assert.equal(proOnly.verifiedModel, 'GPT-5.6 Sol');
     assert.equal(proOnly.verifiedReasoningLevel, null,
       'an open radio view cannot establish a closed Pro effort selection');
-    assert.equal(proOnly.reason, 'reasoning-effort-control-disabled');
+    assert.equal(proOnly.reason, null);
     assert.equal(proOnly.actions.some(a => a.purpose === 'choose_model'), false,
       'literal GPT radios must never become a Pro reasoning decision');
-    assert.deepEqual(proOnly.capabilityIssues, [
-      { capability: 'model_choice', reason: 'reasoning-effort-control-disabled' },
-    ]);
+    const backToPower = proOnly.actions.filter(a => a.purpose === 'close_model_chooser');
+    assert.equal(backToPower.length, 1,
+      'an exact menu closure, not a GPT radio, is the only next configuration action');
+    assert.equal(backToPower[0]!.input.kind, 'none');
+    assert.equal(proOnly.capabilityIssues, undefined);
     await page.evaluate(() => document.querySelector('#radix-menu')!
       .removeAttribute('aria-labelledby'));
     const unlinkedRadix = await adapter.observe(task);

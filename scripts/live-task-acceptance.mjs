@@ -100,8 +100,9 @@ function saveState(dir, state) {
 }
 
 /**
- * Only a uniquely verified chooser disclosure can be automated for the legacy
- * ChatGPT Pro reasoning-effort requirement. Permissions, provider questions, retries and every
+ * Only exact configuration-only chooser/Power actions can be automated for
+ * ChatGPT Pro effort. Each action is journaled once and never substitutes
+ * for Core's fresh selected-effort verification before provider POST. Permissions, provider questions, retries and every
  * human-only decision remain external barriers. No DOM selectors are used.
  */
 function exactProModelAction(decision) {
@@ -110,7 +111,8 @@ function exactProModelAction(decision) {
       decision.options.length !== 1 || !decision.decisionId) return null;
   const action = decision.options[0];
   if (!action || !action.actionRef || action.risk !== 'configuration_only' ||
-      action.purpose !== 'open_model_chooser') {
+      !['open_model_chooser', 'close_model_chooser',
+        'choose_reasoning_effort'].includes(action.purpose)) {
     return null;
   }
   if (!Number.isFinite(Date.parse(action.expiresAt)) || Date.now() > Date.parse(action.expiresAt)) {
@@ -118,8 +120,7 @@ function exactProModelAction(decision) {
   }
   // The legacy 'Pro' intent means reasoning effort on ChatGPT.
   // GPT model radios (even one literally called Pro) cannot satisfy it.
-  if (action.purpose !== 'open_model_chooser' ||
-      action.inputSchema?.kind !== 'none') return null;
+  if (action.inputSchema?.kind !== 'none') return null;
   return {
     decisionId: decision.decisionId, actionRef: action.actionRef,
     requestId: 'l3-pro-' + decision.decisionId,

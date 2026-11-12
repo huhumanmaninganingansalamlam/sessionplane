@@ -349,7 +349,8 @@ export function createSemanticCoreRuntime(input: {
   // Consume it durably before a potentially irreversible click.
   const authorizedDecision = (approval: {
     context: SemanticTaskContext;
-    purpose: 'open_model_chooser' | 'choose_model' | 'answer_question' | 'retry';
+    purpose: 'open_model_chooser' | 'close_model_chooser' |
+      'choose_model' | 'choose_reasoning_effort' | 'answer_question' | 'retry';
     decisionId: string; snapshotId: string; actionRef: string;
     evidenceHash: string; input: string | null;
   }): boolean => {
