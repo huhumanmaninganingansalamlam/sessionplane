@@ -238,3 +238,86 @@ test('a historical explicitly owned slot without public revision metadata is adm
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('replacing an authorized provider conversation atomically invalidates stale public revisions', {
+  timeout: 30_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sp-public-rebinding-revision-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const clientId = 'public-binding-owner';
+  let core = await startCore({ config, startBrowser: false, logger });
+  const rpc = (method: string, params: Record<string, unknown>) => callRpc<any>({
+    socketPath: config.socketPath, method, params, timeoutMs: 10_000,
+    maxLineBytes: config.rpcMaxLineBytes,
+  });
+  try {
+    const openInput = {
+      clientId, projectKey: 'rebinding-stale-fence',
+      requestId: 'rebinding-project-open',
+      displayName: 'Rebinding exact provider conversation',
+      provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'Pro',
+    };
+    const project = await rpc('project.open', openInput);
+    assert.equal(project.conversationRevision, 1);
+    const projectId = project.projectId;
+    core.teamDirectory.createRole({
+      teamId: projectId, roleKey: 'reviewer',
+      roleType: 'reviewer', reportsToRoleKey: 'main',
+    });
+    core.semanticTaskRepository.openSlot({
+      projectId, clientId, slotId: 'reviewer',
+      roleKey: 'reviewer', providerKey: 'chatgpt',
+    });
+    assert.equal(core.semanticTaskRepository.getConversationRevision(
+      projectId, 'reviewer', clientId), 1);
+
+    const replaced = core.semanticTaskRepository.replaceBinding({
+      projectId, clientId, slotId: 'main', expectedRevision: 1,
+      providerKey: 'chatgpt', providerConversationId: 'verified-new-conversation',
+    });
+    assert.equal(replaced.revision, 2);
+    assert.equal(replaced.providerConversationId, 'verified-new-conversation');
+    assert.equal(core.semanticTaskRepository.getConversationRevision(projectId, 'main', clientId), 2,
+      'An independently replaced provider conversation must advance the public CAS');
+    assert.equal(core.semanticTaskRepository.getConversationRevision(
+      projectId, 'reviewer', clientId), 1,
+      'Changing Main cannot invalidate an unrelated reviewer slot');
+
+    await core.close();
+    core = await startCore({ config, startBrowser: false, logger });
+    const reopened = await rpc('project.open', openInput);
+    assert.equal(reopened.conversationRevision, 2,
+      'The replacement fence must survive a fresh Core and replayed open');
+    const stale = {
+      clientId, projectId, expectedConversationRevision: 1,
+      requestId: 'stale-sender-request',
+      prompt: 'Never send into a replaced conversation under an old revision',
+    };
+    await assert.rejects(rpc('task.start', stale), (error: any) => {
+      assert.equal(error.data?.errorCode, 'conversation_conflict');
+      return true;
+    });
+    assert.equal(core.database.raw.prepare(
+      'SELECT COUNT(*) AS n FROM kernel_tasks WHERE client_id=? AND request_id=?',
+    ).get(clientId, stale.requestId)!.n, 0,
+    'Rejected stale send cannot create an original attempt');
+    const fresh = await rpc('task.start', {
+      ...stale, requestId: 'fresh-sender-request',
+      expectedConversationRevision: 2,
+    });
+    assert.equal(fresh.conversationRevision, 3);
+    assert.equal(fresh.submission.attempted, false);
+    assert.equal(core.semanticTaskRepository.getConversationRevision(projectId, 'main', clientId), 3);
+    assert.equal(core.semanticTaskRepository.getConversationRevision(
+      projectId, 'reviewer', clientId), 1);
+    assert.equal(core.semanticTaskRepository.getFullTask(fresh.taskId, clientId).attempts.length, 1);
+    assert.equal(core.semanticTaskRepository.getBindingAtRevision(
+      projectId, 'main', 1, clientId).providerConversationId, null);
+    assert.equal(core.semanticTaskRepository.getBindingAtRevision(
+      projectId, 'main', 2, clientId).providerConversationId,
+      'verified-new-conversation');
+  } finally {
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

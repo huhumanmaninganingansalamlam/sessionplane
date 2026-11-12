@@ -110,3 +110,16 @@ new cross-project collisions as idempotency_conflict, and does not advance the
 other project's Main revision or create another provider attempt.
 This is independently asserted in RPC integration and installed package
 smoke, without changing existing live callers or their account profile.
+
+## Public conversation revision follows an explicit provider rebinding
+
+An isolated Core reproduction showed a dangerous stale-revision admission:
+after authorized provider binding replacement advanced the immutable binding
+revision to 2, the public conversationRevision incorrectly remained at 1.
+The previous public caller could therefore start an unintended Task in the
+replacement conversation without re-reading it. The same SQLite transaction
+now advances the selected slot's public revision and immutable binding
+revision, leaving other slots untouched. A new integration test validates
+Core restart, stale request conflict, exactly one freshly authorized Task
+and immutable historical bindings. The installed-tarball Core smoke repeats
+the stale and fresh revision checks after restart.

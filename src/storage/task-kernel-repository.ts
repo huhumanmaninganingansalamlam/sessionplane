@@ -450,6 +450,17 @@ export class TaskKernelRepository {
           provider_conversation_id,observed_at) VALUES(?,?,?,?,?,?)`,
       ).run(input.projectId, input.slotId, slot.revision + 1,
         input.providerKey, input.providerConversationId, this.#now());
+      // A deliberate provider conversation replacement is a public
+      // conversation revision even when no new Task is being admitted.
+      // Otherwise a caller holding an old revision can accidentally send
+      // into a different conversation. Advance this slot's admission CAS
+      // atomically with its immutable binding history. Old schema-12 slots
+      // without public metadata begin from the new binding revision.
+      this.#database.raw.prepare(
+        'INSERT INTO kernel_public_slot_revisions(project_id,slot_id,revision)' +
+        ' VALUES(?,?,?) ON CONFLICT(project_id,slot_id)' +
+        ' DO UPDATE SET revision=revision+1',
+      ).run(input.projectId, input.slotId, slot.revision + 1);
       return this.#requireSlot(input.projectId, input.slotId);
     });
   }

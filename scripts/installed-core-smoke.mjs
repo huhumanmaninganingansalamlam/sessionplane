@@ -73,6 +73,20 @@ try {
     provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'Pro',
   };
   const unrelated = await rpc('project.open', unrelatedProjectInput);
+  const replacementInput = {
+    clientId, requestId: 'installed-replacement-open',
+    projectKey: 'installed-replacement-project',
+    displayName: 'Isolated replaced provider binding',
+    provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'Pro',
+  };
+  const replacement = await rpc('project.open', replacementInput);
+  core.semanticTaskRepository.replaceBinding({
+    projectId: replacement.projectId, clientId, slotId: 'main',
+    expectedRevision: 1, providerKey: 'chatgpt',
+    providerConversationId: 'verified-fixture-replacement-only',
+  });
+  assert.equal((await rpc('project.open', replacementInput)).conversationRevision, 2,
+    'Replacing a provider binding must advance its public revision');
   await assert.rejects(rpc('task.start', {
     ...start, projectId: unrelated.projectId,
     prompt: 'A different project must never share an original requestId',
@@ -231,6 +245,23 @@ try {
   assert.equal(core.semanticTaskRepository.getConversationRevision(
     project.projectId, 'reviewer', clientId), 2);
 
+  assert.equal((await rpc('project.open', replacementInput)).conversationRevision, 2);
+  const replacedStart = {
+    clientId, projectId: replacement.projectId,
+    requestId: 'replaced-binding-new-task',
+    expectedConversationRevision: 1,
+    prompt: 'This stale revision must not send after a conversation switch',
+  };
+  await assert.rejects(rpc('task.start', replacedStart),
+    error => error?.data?.errorCode === 'conversation_conflict');
+  const rebound = await rpc('task.start', {
+    ...replacedStart, expectedConversationRevision: 2,
+  });
+  assert.equal(rebound.conversationRevision, 3);
+  assert.equal(rebound.submission.attempted, false);
+  assert.equal(core.semanticTaskRepository.getFullTask(
+    rebound.taskId, clientId).attempts.length, 1);
+
   console.log(JSON.stringify({
     requestOk: true, gate: 'installed-core-public-task-smoke',
     schemaVersion: resumedHealth.schemaVersion, toolCount: MCP_TOOLS.length,
@@ -241,6 +272,7 @@ try {
     secondSlotRevisionIndependentAfterRestart: true,
     historicalSlotRecoveredAfterRestart: true,
     crossProjectRequestCollisionRejected: true,
+    staleBindingReplacementRejectedAfterRestart: true,
   }));
 } finally {
   await core?.close().catch(() => undefined);
