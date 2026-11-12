@@ -55,6 +55,7 @@ const FLAG_OPTIONS = new Set([
   'preserve-conversation',
   'discard-unresolved',
   'until-change',
+  'public',
 ]);
 const MULTI_VALUE_OPTIONS = new Set(['file', 'skill']);
 const VALUE_OPTIONS = new Set([
@@ -253,6 +254,9 @@ export async function runCli(
   });
 
   try {
+    if (parsed.options.public === 'true' && command !== 'mcp') {
+      throw new Error('--public is supported only by sessplane mcp');
+    }
     if (INTERNAL_BROWSER_COMMANDS.has(command)) {
       throw new Error(
         `Generic browser command is not part of the public SessionPlane runtime: ${command}. ` +
@@ -339,7 +343,11 @@ export async function runCli(
       case 'skills':
         return await runSkillsCommand(io, parsed);
       case 'mcp':
-        await runMcpServer({ input: io.stdin, output: io.stdout, error: io.stderr, config });
+        if (parsed.words.length !== 1) throw new Error('Usage: sessplane mcp [--public]');
+        await runMcpServer({
+          input: io.stdin, output: io.stdout, error: io.stderr, config,
+          publicOnly: parsed.options.public === 'true',
+        });
         return 0;
       case 'tabs':
       case 'browser-status':
@@ -1601,7 +1609,8 @@ Skill distribution:
   sessplane skills path [SKILL]
   sessplane skills install --target DIR [--skill NAME ...] [--link] [--force]
 
-  sessplane mcp
+  sessplane mcp --public    Six project/task MCP tools only (recommended for new clients)
+  sessplane mcp             Legacy workflow catalog retained for existing clients
 
 Global options:
   --client-id ID       Stable caller identity

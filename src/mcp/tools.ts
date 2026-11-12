@@ -83,6 +83,13 @@ export const PROJECT_MCP_TOOL: McpToolDefinition = {
   },
 };
 
+/** Opt-in public catalog excludes the old roleRef/requestRef workflow.
+ * The default legacy catalog remains intact for already-connected callers.
+ */
+export const PUBLIC_MCP_TOOLS: readonly McpToolDefinition[] = [
+  PROJECT_MCP_TOOL, ...TASK_MCP_TOOLS,
+];
+
 export const MCP_TOOLS: readonly McpToolDefinition[] = [
   ...Object.entries(workflowSchemas).map(([name, schema]) => ({
     name: 'sessionplane_' + name,
@@ -100,20 +107,22 @@ export const MCP_TOOLS: readonly McpToolDefinition[] = [
   ...TASK_MCP_TOOLS,
 ];
 
-export function getMcpTool(name: string): McpToolDefinition | null {
-  return MCP_TOOLS.find((candidate) => candidate.name === name) ?? null;
+export function getMcpTool(name: string, publicOnly = false): McpToolDefinition | null {
+  return (publicOnly ? PUBLIC_MCP_TOOLS : MCP_TOOLS)
+    .find(candidate => candidate.name === name) ?? null;
 }
 
 export async function invokeMcpTool(options: {
   readonly name: string;
   readonly arguments: unknown;
+  readonly publicOnly?: boolean;
   readonly socketPath: string;
   readonly remote?: RemoteConnection | undefined;
   readonly timeoutMs: number;
   readonly maxLineBytes: number;
   readonly signal?: AbortSignal;
 }): Promise<McpToolInvocationResult> {
-  const definition = getMcpTool(options.name);
+  const definition = getMcpTool(options.name, options.publicOnly === true);
   if (definition === null) {
     throw new McpToolNotFoundError(options.name);
   }

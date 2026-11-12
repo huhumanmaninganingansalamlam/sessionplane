@@ -21,6 +21,7 @@ import {
 } from './schemas.ts';
 import {
   MCP_TOOLS,
+  PUBLIC_MCP_TOOLS,
   McpToolNotFoundError,
   invokeMcpTool,
   resolveMcpToolTimeoutMs,
@@ -31,6 +32,10 @@ export interface McpServerOptions {
   readonly output?: NodeJS.WritableStream;
   readonly error?: NodeJS.WritableStream;
   readonly config?: SessionPlaneConfig;
+  /** Explicit opt-in: expose only public project/task tools, preserving
+   * the legacy catalog for existing connectors in other MCP processes.
+   */
+  readonly publicOnly?: boolean;
 }
 
 type ProtocolMode = 'modern' | 'legacy';
@@ -40,7 +45,7 @@ export async function runMcpServer(options: McpServerOptions = {}): Promise<void
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
   const error = options.error ?? process.stderr;
-  const server = new SessionPlaneMcpServer({ config, output, error });
+  const server = new SessionPlaneMcpServer({ config, output, error, publicOnly: options.publicOnly === true });
   const lines = readline.createInterface({ input, crlfDelay: Infinity });
 
   const operations = new Set<Promise<void>>();
@@ -62,6 +67,7 @@ class SessionPlaneMcpServer {
   readonly #config: SessionPlaneConfig;
   readonly #output: NodeJS.WritableStream;
   readonly #error: NodeJS.WritableStream;
+  readonly #publicOnly: boolean;
   readonly #inFlight = new Map<string, AbortController>();
   #legacyInitialized = false;
   #writeTail: Promise<void> = Promise.resolve();
@@ -70,10 +76,12 @@ class SessionPlaneMcpServer {
     readonly config: SessionPlaneConfig;
     readonly output: NodeJS.WritableStream;
     readonly error: NodeJS.WritableStream;
+    readonly publicOnly: boolean;
   }) {
     this.#config = options.config;
     this.#output = options.output;
     this.#error = options.error;
+    this.#publicOnly = options.publicOnly;
   }
 
   async handleLine(line: string): Promise<void> {
@@ -140,7 +148,7 @@ class SessionPlaneMcpServer {
         return modernResult({
           supportedVersions: [MCP_MODERN_PROTOCOL_VERSION],
           capabilities: { tools: { listChanged: false } },
-          instructions: serverInstructions(),
+          instructions: serverInstructions(this.#publicOnly),
           ttlMs: 300_000,
           cacheScope: 'public',
         });
@@ -150,7 +158,8 @@ class SessionPlaneMcpServer {
       case 'tools/list': {
         const mode = this.#requestMode(request.params);
         const result = {
-          tools: MCP_TOOLS.map(({ rpcMethod: _rpcMethod, ...definition }) => definition),
+          tools: (this.#publicOnly ? PUBLIC_MCP_TOOLS : MCP_TOOLS)
+            .map(({ rpcMethod: _rpcMethod, ...definition }) => definition),
         };
         return mode === 'modern' ? modernResult(result) : result;
       }
@@ -183,7 +192,7 @@ class SessionPlaneMcpServer {
       protocolVersion: MCP_LEGACY_PROTOCOL_VERSIONS.includes(requested) ? requested : MCP_LEGACY_PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: false } },
       serverInfo: MCP_SERVER_INFO,
-      instructions: serverInstructions(),
+      instructions: serverInstructions(this.#publicOnly),
     };
   }
 
@@ -217,6 +226,7 @@ class SessionPlaneMcpServer {
         }),
         maxLineBytes: this.#config.rpcMaxLineBytes,
         signal: controller.signal,
+        publicOnly: this.#publicOnly,
       });
       const result = callToolResult(invocation.structuredContent, invocation.isError);
       return mode === 'modern' ? modernResult(result) : result;
@@ -304,7 +314,18 @@ function callToolResult(
   };
 }
 
-function serverInstructions(): string {
+function serverInstructions(publicOnly = false): string {
+  if (publicOnly) {
+    return [
+      'Use project.open to retain the exact owner-scoped project and Main slot.',
+      'Use task.start with a stable caller/requestId and current conversationRevision.',
+      'Core alone prepares and sends the first prompt, recovers canonical ACK and FINAL, and schedules approved continuation.',
+      'Read task.get or task.wait for the durable state; waits never own work.',
+      'Use task.decide with the current decisionId/actionRef and only advertised typed input.',
+      'Use task.cancel to revoke future work; an attempted external mutation stays uncertain until proven.',
+      'Never repeat a potentially dispatched prompt. A missing ACK is not evidence of a failed send.',
+    ].join(' ');
+  }
   return [
     'Keep teamId; copy roleRef for sends and requestRef for all request controls. Use stable unique requestId values and reuse only identical mutations.',
     'team_get defaults to compact stored summary without provider probes. Use view:result for the exact answer and view:evidence for fresh UI, original prompt/candidates and controls. Stored ACK, connected collector, tool evidence and final answer are separate facts.',
