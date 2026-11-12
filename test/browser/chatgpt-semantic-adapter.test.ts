@@ -858,6 +858,19 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
       'Dynamic sidebar buttons cannot invalidate the ID-anchored canonical composer');
     const openRadix = radixClosed.actions.find(a => a.purpose === 'open_model_chooser')!;
     assert.ok(openRadix, 'unmounted composer picker is a read-only disclosed candidate');
+    assert.equal(await page.evaluate(() => Object.prototype.hasOwnProperty.call(
+      document, 'visibilityState')), false);
+    await page.evaluate(() => {
+      // Exercise the real Chromium hidden-tab input path without stealing focus
+      // from another page or modifying an operational Chrome profile.
+      Object.defineProperty(document, 'visibilityState', {
+        configurable: true, get: () => 'hidden',
+      });
+      (window as any).radixTrustedOpens = 0;
+      document.getElementById('radix-opener')!.addEventListener('click', event => {
+        if (event.isTrusted) (window as any).radixTrustedOpens++;
+      });
+    });
     assert.equal((await adapter.act({ context: task, snapshotId: radixClosed.snapshotId,
       actionRef: openRadix.actionRef, evidenceHash: openRadix.evidenceHash })).kind,
     'authorization_required');
@@ -868,6 +881,9 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     { kind: 'performed', effect: 'model_menu_opened' });
     assert.equal(await page.evaluate(() => (window as any).radixRootOpens), 1,
       'opening animation cannot cause a second root click');
+    assert.equal(await page.evaluate(() => (window as any).radixTrustedOpens), 1,
+      'Hidden composer action must deliver one trusted browser click');
+    await page.evaluate(() => { Reflect.deleteProperty(document, 'visibilityState'); });
     const radixEffort = await adapter.observe(task);
     assert.equal(radixEffort.actions.some(a => a.purpose === 'choose_model'), false,
       'the visible slider is not a model option');

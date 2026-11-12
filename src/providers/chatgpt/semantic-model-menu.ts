@@ -218,26 +218,22 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
 // Wait for the exact linked view, then let the full semantic inspector verify it.
 async function waitForComposerMenuView(page: Page, openerId: string, priorMenuId: string,
   view: 'root' | 'models'): Promise<void> {
-  await page.waitForFunction(({ openerId, priorMenuId, view }) => {
-    const opener = document.getElementById(openerId);
-    if (opener?.getAttribute('aria-expanded') !== 'true') return false;
-    const menuId = opener.getAttribute('aria-controls') ?? '';
-    if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(menuId) ||
-      (priorMenuId !== '' && menuId !== priorMenuId)) return false;
-    const linked = [...document.querySelectorAll<HTMLElement>('[role="menu"][id]')]
-      .filter(menu => menu.id === menuId && menu.getAttribute('aria-labelledby') === openerId);
-    if (linked.length !== 1) return false;
-    const menu = linked[0]!;
-    const visible = (element: Element) =>
-      element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
-      element.getBoundingClientRect().width > 0;
-    if (menu.getAttribute('data-state') !== 'open' || !visible(menu)) return false;
-    if (view === 'root') return true;
-    const controls = (role: string) => [...menu.querySelectorAll<HTMLElement>('[role="' + role + '"]')]
-      .filter(element => element.closest('[role="menu"]') === menu && visible(element));
-    const radios = controls('menuitemradio');
-    return controls('menuitem').length === 0 && radios.length >= 2 && radios.length <= 20;
-  }, { openerId, priorMenuId, view }, { timeout: 5_000, polling: 200 });
+  // Poll from Core, not with a hidden Chrome tab's throttled renderer timer.
+  // Every sample still verifies the menu is linked to the unique exact opener.
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const current = await inspectSemanticChatGptModelMenu(page);
+    if (current?.strategy === 'composer-radix' &&
+        current.openerId === openerId && ID.test(current.menuId) &&
+        (priorMenuId === '' || current.menuId === priorMenuId) &&
+        (view === 'root' ? ['nested', 'open'].includes(current.status)
+          : current.status === 'open' && current.optionMenuId === current.menuId &&
+            current.options.length >= 2)) {
+      return;
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 200));
+  }
+  throw new Error('Exact linked model menu view was not verified');
 }
 
 /** Pin the original control and recheck its linked menu after any async
@@ -261,7 +257,40 @@ async function clickExactModelControl(
       element.isConnected && !element.matches(':disabled, [aria-disabled="true"]') &&
       (id === null || (element.id === id && document.getElementById(id) === element)), expectedOpenerId);
     if (!connected) throw new Error('Exact model control was replaced before click');
-    await handle.click({ timeout: 5_000 });
+    // Playwright's actionability click waits for renderer animation frames.
+    // A long-hidden provider tab may stop those frames entirely. For the
+    // uniquely identified closed composer picker only, use one trusted CDP
+    // mouse click after revalidating the exact hit-tested button and lease.
+    // Never fall back after a timed-out click: its effect could be unknown.
+    const hiddenComposer = expected.strategy === 'composer-radix' &&
+      expected.status === 'closed' &&
+      await page.evaluate(() => document.visibilityState === 'hidden');
+    if (hiddenComposer) {
+      await beforeMutation();
+      const latest = await inspectSemanticChatGptModelMenu(page);
+      if (!latest || latest.evidenceHash !== expected.evidenceHash) {
+        throw new Error('Hidden model control changed before exact click');
+      }
+      const point = await handle.evaluate((element, id) => {
+        const rect = element.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        const y = rect.top + rect.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        if (!element.isConnected || element.id !== id ||
+            document.getElementById(id!) !== element ||
+            !element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) ||
+            element.matches(':disabled, [aria-disabled="true"]') ||
+            !Number.isFinite(x) || !Number.isFinite(y) ||
+            !(rect.width > 0 && rect.height > 0) ||
+            x < 0 || y < 0 || x >= innerWidth || y >= innerHeight ||
+            !(hit === element || element.contains(hit))) return null;
+        return { x, y };
+      }, expectedOpenerId);
+      if (!point) throw new Error('Hidden model picker failed exact hit test');
+      await page.mouse.click(point.x, point.y, { button: 'left', clickCount: 1 });
+    } else {
+      await handle.click({ timeout: 5_000 });
+    }
   } finally { await handle.dispose(); }
 }
 
