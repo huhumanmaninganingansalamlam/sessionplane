@@ -62,6 +62,17 @@ observation and the **submit-time** model recheck; the verified
 closed model label must be re-read immediately before an exact
 POST, not merely when the decision was originally offered.
 
+A stronger isolated four-project **end-to-end send** fixture now drives the
+current public project.open/task.start RPC into disposable Chromium
+POSTs and the existing Core-owned recovery journal. It verifies all four
+independent project/Main/browser identities, exactly four initial POST
+attempts, four distinct canonical ACK conversation bindings, four separate
+exact FINAL answers, zero native focus actions, and no cross-project result
+reuse. A controlled HTTP 429 is injected for one conversation's canonical GET:
+that project eventually completes after pacing without a second POST and
+without starving the other three. This is L2 and never claims a real account's
+four simultaneous live provider generations.
+
 ## Important incomplete acceptance
 
 The installed Core still reports schema 8 and does not expose new

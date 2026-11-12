@@ -66,3 +66,12 @@ after **each** gate and again with the emitted build identity. Any concurrent
 commit, uncommitted tree mutation or build-source mismatch invalidates that
 run with explicit reason codes. All green tests cannot be attached to a
 source tree that changed during their execution.
+
+## Four independent canonical POST/ACK/FINAL fixtures
+
+The acceptance chromium-composition gate now includes one Core dispatching exactly
+four disposable background initial POSTs into four separate provider conversation
+fixtures, each with exact canonical ACK and unique FINAL. A scoped GET 429 for one
+project defers the read and never authorizes an original POST replay. All four
+answer/project bindings and zero native focus actions are asserted. This is L2,
+not four actual authenticated ChatGPT projects (L3 remains pending).
