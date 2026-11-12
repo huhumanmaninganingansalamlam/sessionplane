@@ -814,7 +814,7 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
             '<div id="radix-effort-view">' +
               '<div role="menuitem" aria-label="모델 선택" id="radix-choose">Medium</div>' +
               '<div role="menuitem" aria-label="파워">' +
-                '<span role="slider" aria-valuenow="1" aria-valuemin="0" aria-valuemax="4" ' +
+                '<span role="slider" aria-hidden="true" aria-valuenow="1" aria-valuemin="0" aria-valuemax="4" ' +
                 'style="display:inline-block;width:28px;height:28px"></span>' +
               '</div></div>' +
             '<div id="radix-model-view" style="display:none">' +
@@ -888,7 +888,10 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.equal(radixEffort.actions.some(a => a.purpose === 'choose_model'), false,
       'the visible slider is not a model option');
     const discloseRadix = radixEffort.actions.find(a => a.purpose === 'open_model_chooser')!;
-    assert.ok(discloseRadix, 'model list disclosure must be a separate authorized action');
+    assert.ok(discloseRadix,
+      'a structurally verified aria-hidden Power thumb is not a model choice');
+    assert.equal(radixEffort.actions.some(a => a.purpose === 'choose_model'), false,
+      'hidden slider must never be exposed as an actionable Pro selection');
     assert.equal((await adapter.act({ context: task, snapshotId: radixEffort.snapshotId,
       actionRef: discloseRadix.actionRef, evidenceHash: discloseRadix.evidenceHash })).kind,
     'authorization_required');

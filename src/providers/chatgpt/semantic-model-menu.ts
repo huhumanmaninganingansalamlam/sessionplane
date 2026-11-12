@@ -132,6 +132,23 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
           .filter(control => control.closest('[role="menu"]') === root && visible(control));
       const items = inRoot('[role="menuitem"]');
       const sliders = inRoot('[role="slider"]');
+      // ChatGPT's slider thumb is aria-hidden from accessibility, despite
+      // being structurally present inside the visible Power item. Recognize
+      // it only as non-actionable layout evidence, never as a model option.
+      const powerItems = items.filter(item => item.getAttribute('aria-label') === '파워');
+      const structuralSliders = [...root.querySelectorAll<HTMLElement>('[role="slider"]')]
+        .filter(slider => slider.closest('[role="menu"]') === root);
+      const powerSliderVerified = powerItems.length === 1 && structuralSliders.length === 1 &&
+        structuralSliders[0]!.closest('[role="menuitem"]') === powerItems[0] &&
+        structuralSliders[0]!.checkVisibility({
+          checkOpacity: true, checkVisibilityCSS: true,
+        }) && structuralSliders[0]!.getBoundingClientRect().width > 0 &&
+        ['aria-valuemin', 'aria-valuemax', 'aria-valuenow'].every(attribute => {
+          const value = structuralSliders[0]!.getAttribute(attribute);
+          return value !== null && value.trim() !== '' && Number.isFinite(Number(value));
+        }) &&
+        (visible(structuralSliders[0]!) ||
+          structuralSliders[0]!.getAttribute('aria-hidden') === 'true');
       const inputs = inRoot('input, textarea');
       const modelRadios = inRoot('[role="menuitemradio"]');
       const options = radios(root);
@@ -142,9 +159,8 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
         return { ...initial, status: 'unsupported' as const,
           reason: 'composer-model-menu-link-or-controls-unverified' };
       }
-      if (modelRadios.length === 0 && items.length === 2 && sliders.length === 1 &&
-        items.filter(item => item.getAttribute('aria-label') === '모델 선택').length === 1 &&
-        items.filter(item => item.getAttribute('aria-label') === '파워').length === 1) {
+      if (modelRadios.length === 0 && items.length === 2 && powerSliderVerified &&
+        items.filter(item => item.getAttribute('aria-label') === '모델 선택').length === 1) {
         return { ...initial, status: 'nested' as const, reason: null };
       }
       if (items.length === 0 && sliders.length === 0 && optionsValid(options) &&
@@ -259,11 +275,10 @@ async function clickExactModelControl(
     if (!connected) throw new Error('Exact model control was replaced before click');
     // Playwright's actionability click waits for renderer animation frames.
     // A long-hidden provider tab may stop those frames entirely. For the
-    // uniquely identified closed composer picker only, use one trusted CDP
-    // mouse click after revalidating the exact hit-tested button and lease.
+    // uniquely identified composer opener or linked menu option only, use one
+    // trusted CDP mouse click after exact hit-test, evidence and lease checks.
     // Never fall back after a timed-out click: its effect could be unknown.
     const hiddenComposer = expected.strategy === 'composer-radix' &&
-      expected.status === 'closed' &&
       await page.evaluate(() => document.visibilityState === 'hidden');
     if (hiddenComposer) {
       await beforeMutation();
@@ -271,21 +286,27 @@ async function clickExactModelControl(
       if (!latest || latest.evidenceHash !== expected.evidenceHash) {
         throw new Error('Hidden model control changed before exact click');
       }
-      const point = await handle.evaluate((element, id) => {
+      const point = await handle.evaluate((element, identity) => {
         const rect = element.getBoundingClientRect();
         const x = rect.left + rect.width / 2;
         const y = rect.top + rect.height / 2;
         const hit = document.elementFromPoint(x, y);
-        if (!element.isConnected || element.id !== id ||
-            document.getElementById(id!) !== element ||
+        const isOpener = identity.openerId !== null &&
+          element.id === identity.openerId &&
+          document.getElementById(identity.openerId) === element;
+        const linkedItem = identity.openerId === null &&
+          element.closest('[role="menu"]')?.id === identity.menuId &&
+          ['menuitem', 'menuitemradio'].includes(element.getAttribute('role') ?? '');
+        if (!element.isConnected || (!isOpener && !linkedItem) ||
             !element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) ||
+            element.closest('[aria-hidden="true"], [inert]') ||
             element.matches(':disabled, [aria-disabled="true"]') ||
             !Number.isFinite(x) || !Number.isFinite(y) ||
             !(rect.width > 0 && rect.height > 0) ||
             x < 0 || y < 0 || x >= innerWidth || y >= innerHeight ||
             !(hit === element || element.contains(hit))) return null;
         return { x, y };
-      }, expectedOpenerId);
+      }, { openerId: expectedOpenerId, menuId: expected.menuId });
       if (!point) throw new Error('Hidden model picker failed exact hit test');
       await page.mouse.click(point.x, point.y, { button: 'left', clickCount: 1 });
     } else {
