@@ -358,21 +358,28 @@ test('L3 runner consumes exact model-view close, reopen, one Pro effort selectio
 });
 
 test('an uncertain or lost Pro configuration result never causes a second action after runner reconnect', async () => {
-  for (const variant of ['uncertain', 'lost'] as const) {
+  for (const variant of ['uncertain', 'lost', 'lost-after-success'] as const) {
     const f = makeFixture();
     let decisions = 0;
     const call = async (method: string, params: any) => {
       if (method === 'task.decide') {
         decisions++;
-        if (decisions > 1) {
+        if (decisions > (variant === 'lost-after-success' ? 2 : 1)) {
           throw new Error('Unsafe configuration retry after an ambiguous external effect');
         }
-        if (variant === 'lost') throw new Error('Lost configuration RPC reply');
+        const savedBefore = JSON.parse(
+          readFileSync(join(f.dir, 'receipt', 'state.json'), 'utf8'));
+        assert.equal(savedBefore.tasks[0].modelDecisionResult, 'pending',
+          'the next decision must clear the prior success before any RPC');
+        if (variant === 'lost-after-success' && decisions === 1) {
+          return { kind: 'performed', effect: 'model_menu_closed' };
+        }
+        if (variant !== 'uncertain') throw new Error('Lost configuration RPC reply');
         return { kind: 'uncertain', reason: 'pro-effort-click-outcome-unverified' };
       }
       const base = await f.call(method, params);
       if (method === 'task.get' && !params.view && f.records.size === 1) {
-        const suffix = decisions === 0 ? '91' : '92';
+        const suffix = decisions === 0 ? '91' : decisions === 1 ? '92' : '93';
         return {
           ...base, state: 'agent_input_required', revision: 30 + decisions,
           submission: { attempted: false, acknowledged: false },
@@ -393,20 +400,22 @@ test('an uncertain or lost Pro configuration result never causes a second action
     try {
       await runLiveTaskAcceptance(options(f.dir, call, 'start'));
       const resume = { ...options(f.dir, call, 'resume'), maxWaitMs: 200 };
-      if (variant === 'lost') {
-        await assert.rejects(runLiveTaskAcceptance(resume), /Lost configuration RPC reply/);
-      } else {
+      if (variant === 'uncertain') {
         const first = await runLiveTaskAcceptance(resume);
         assert.equal(first.status, 'read_only_reconnect_pending');
+      } else {
+        await assert.rejects(runLiveTaskAcceptance(resume), /Lost configuration RPC reply/);
       }
       const saved = JSON.parse(readFileSync(join(f.dir, 'receipt', 'state.json'), 'utf8'));
-      assert.equal(saved.tasks[0].modelDecision.actionRef, 'pro-pointer-91');
+      assert.equal(saved.tasks[0].modelDecision.actionRef,
+        variant === 'lost-after-success' ? 'pro-pointer-92' : 'pro-pointer-91');
       assert.equal(saved.tasks[0].modelDecisionResult,
-        variant === 'lost' ? undefined : 'uncertain');
+        variant === 'uncertain' ? 'uncertain' : 'pending');
       const after = await runLiveTaskAcceptance(resume);
       assert.equal(after.status, 'read_only_reconnect_pending');
       assert.equal(after.taskState, 'agent_input_required');
-      assert.equal(decisions, 1, 'a new decision identity is never a replay authorization');
+      assert.equal(decisions, variant === 'lost-after-success' ? 2 : 1,
+        'a new decision identity is never a replay authorization');
       assert.equal(f.calls.filter(x => x.method === 'task.start').length, 1);
       assert.equal(saved.conversationId, null);
     } finally { rmSync(f.dir, { recursive: true, force: true }); }

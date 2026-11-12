@@ -245,6 +245,10 @@ async function acceptOneTask({ plan, state, index, call, receiptDir, limitMs, wa
         throw new Error('A previously issued model choice changed without a new decisionId');
       }
       row.modelDecision = { ...action, input: action.input ?? null };
+      // Overwrite the preceding action's success *before* any new external
+      // RPC. A process crash/lost reply must not inherit 'performed' from a
+      // different decisionId and click the next Power control on reconnect.
+      row.modelDecisionResult = 'pending';
       saveState(receiptDir, state);
       modelDecisions++;
       const decisionResult = await call('task.decide', {
