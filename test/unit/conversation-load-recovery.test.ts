@@ -1,4 +1,6 @@
 import { ProbeBudgetRepository } from '../../src/storage/probe-budget-repository.ts';
+import { randomUUID } from 'node:crypto';
+import { callRpc } from '../../src/cli/client.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,7 +20,6 @@ import { ConversationLoadRecoveryRepository } from '../../src/storage/conversati
 import { startCore } from '../../src/main.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
-import { OutboxRepository } from '../../src/storage/outbox-repository.ts';
 import { PassThrough } from 'node:stream';
 import { runMcpServer } from '../../src/mcp/server.ts';
 
@@ -136,73 +137,115 @@ test('99 to100 never clicks101, exhaustion notice is durable and emitted once', 
   } finally { await f.dispose(service); }
 });
 
-test('isolated MCP get/wait displays required user review without terminalizing or resending', async () => {
+test('public MCP get/wait carries a durable human review packet without terminalizing or resending', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-load-notice-mcp-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
-  const core = await startCore({ config, startBrowser: false, logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const core = await startCore({
+    config, startBrowser: false,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  const clientId = 'notice-public-fixture';
+  const rpc = (method: string, params: Record<string, unknown>) => callRpc<any>({
+    socketPath: config.socketPath, method, params,
+    timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes,
+  });
   try {
-    const team = core.teamDirectory.createTeam({ clientId: 'notice-fixture' });
-    const session = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
-    const generation = await core.actorScheduler.startGeneration({ sessionId: session.sessionId, teamBriefVersion: 0, promptHash: 'original-hash' });
-    await core.actorScheduler.updateGeneration(session.sessionId, generation.generation, {
-      sessionState: 'observing', providerState: 'unknown', submissionState: 'submission_unknown',
-      promptSubmitted: true, submittedUserMessageId: 'original-anchor', conversationId: 'fixture-conversation',
-      answerText: 'retained-partial'.repeat(5000),
+    const project = await rpc('project.open', {
+      clientId, requestId: 'review-project-once',
+      projectKey: 'review-fixture', displayName: 'Human review test',
+      provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'Pro',
     });
-    const request = new OutboxRepository(core.database).insert({ clientId: 'notice-fixture', requestId: 'original-request',
-      teamId: team.teamId, roleId: session.roleId, sessionId: session.sessionId, generation: generation.generation,
-      payloadJson: '{}', requestHash: 'original-request-hash', createdAt: new Date().toISOString() });
-    const repo = core.conversationLoadRecovery.repository;
-    const record = { conversationId: 'fixture-conversation', url: 'https://chatgpt.com/c/fixture-conversation',
-      sessionId: session.sessionId, pageKey: 'fixture-page', bindingEpoch: 1, attempts: 100,
-      state: 'exhausted' as const, reason: '100-load-retries-exhausted', lastOutcome: 'clicked' as const,
-      lastCheckedAt: '2026-10-06T00:00:00Z', lastAttemptAt: '2026-10-06T00:00:00Z', notifiedAt: '2026-10-06T00:01:00Z' };
-    repo.save(record);
-    const scopedUntil = new Date(Date.now() + 60_000).toISOString();
-    new ProbeBudgetRepository(core.database.raw).save({ scope: 'chatgpt:conversation-detail:fixture-conversation',
-      nextAllowedAt: scopedUntil, blockedUntil: scopedUntil, backoffLevel: 1, consecutiveFailures: 1,
-      updatedAt: new Date().toISOString() });
-    const before = core.database.raw.prepare('SELECT * FROM generations').all();
-    const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: `sessionplane_${name}`,
-      arguments: args, socketPath: config.socketPath, timeoutMs: 3000, maxLineBytes: config.rpcMaxLineBytes });
-    const teamResult = await invoke('team_get', { teamId: team.teamId });
-    const required = (teamResult.structuredContent.roles as Record<string, any>[])[0]!;
-    assert.equal(required.requestRef, request.outboxId); assert.equal(required.recovery.url, record.url);
-    assert.match(JSON.stringify(teamResult.structuredContent), /User review required/);
-    const exact = await invoke('team_get', { view: 'evidence', teamId: team.teamId, requestRef: request.outboxId });
-    const waited = await invoke('wait', { teamId: team.teamId, requestRefs: [request.outboxId], waitMs: 30_000 });
-    for (const result of [exact.structuredContent.request, (waited.structuredContent.results as Record<string, unknown>[])[0]!]) {
-      const value = result as Record<string, any>;
-      assert.equal(value.status, 'recovery_required'); assert.equal(value.recovery.state, 'exhausted');
-      assert.equal(value.userActionRequired, true); assert.equal(value.recovery.url, record.url);
-      assert.equal(value.recovery.attempts, 100); assert.equal(value.recovery.reason, '100-load-retries-exhausted');
-      assert.equal(value.submissionState, 'submission_unknown');
-      assert.equal(value.promptSubmitted, true); assert.equal(value.terminal, false);
-      assert.equal(value.submittedUserMessageId, 'original-anchor'); assert.equal(value.waitExpired, false);
-      assert.equal(value.conversationLoadRecovery.nextAllowedAt, scopedUntil,
-        'exact get/wait must display this conversation hold rather than the unrelated global UI deadline');
+    const task = await rpc('task.start', {
+      clientId, projectId: project.projectId,
+      expectedConversationRevision: project.conversationRevision,
+      requestId: 'review-original-once',
+      prompt: 'Original retained, unacknowledged test question',
+    });
+    const store = core.semanticTaskRepository;
+    const initial = store.getFullTask(task.taskId, clientId);
+    assert.equal(initial.attempts.length, 1);
+    assert.equal(initial.attempts[0]!.state, 'planned');
+    const decisionId = randomUUID();
+    const packet = {
+      taskId: task.taskId, taskRevision: initial.task.revision + 1,
+      decisionId, kind: 'human_verification',
+      reason: '100-load-retries-exhausted',
+      humanOnly: true,
+      observedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 20_000).toISOString(),
+      snapshotId: null, questionText: null, permission: null,
+      requestedModel: null, options: [], evidenceBytes: 250,
+    };
+    // A bounded agent/human escalation is a separately persisted Task
+    // decision; old workflow.team_get and per-session collectors are gone.
+    store.requireDecision({
+      taskId: task.taskId, clientId, decisionId, audience: 'human',
+      contextJson: JSON.stringify({
+        kind: 'semantic_action', attemptId: initial.attempts[0]!.attemptId,
+        context: {
+          projectId: project.projectId, slotId: 'main', slotRevision: 1,
+          taskId: task.taskId, providerConversationId: null,
+          submittedUserMessageId: null, submittedUserTurnId: null,
+          pageLease: null,
+        },
+        purpose: null, snapshotId: null, actionRef: null,
+        evidenceHash: null, packet,
+      }),
+    });
+    const before = store.getFullTask(task.taskId, clientId);
+    assert.equal(before.task.state, 'human_input_required');
+
+    const invoke = (name: string, args: Record<string, unknown>) =>
+      invokeMcpTool({
+        name: 'sessionplane_' + name,
+        arguments: args, socketPath: config.socketPath,
+        timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes,
+      });
+    const read = await invoke('task_get', {
+      clientId, taskId: task.taskId, view: 'evidence',
+    });
+    const wait = await invoke('task_wait', {
+      clientId, taskId: task.taskId,
+      afterRevision: (read.structuredContent.revision as number),
+      waitMs: 0,
+    });
+    for (const result of [read, wait]) {
+      assert.equal(result.isError, false);
+      const value = result.structuredContent as Record<string, any>;
+      assert.equal(value.state, 'human_input_required');
+      assert.equal(value.decision?.kind, 'human_verification');
+      assert.equal(value.decision?.humanOnly, true);
+      assert.equal(value.decision?.reason, '100-load-retries-exhausted');
+      assert.equal(value.decision?.decisionId, decisionId);
+      assert.deepEqual(value.decision?.options, []);
+      assert.equal(value.submission.attempted, false);
+      assert.equal(value.submission.acknowledged, false);
+      assert.equal(value.resultAvailable, false);
     }
-    assert.deepEqual(core.database.raw.prepare('SELECT * FROM generations').all(), before);
-    assert.equal(core.database.raw.prepare('SELECT count(*) AS n FROM outbox').get()!.n, 1);
     const input = new PassThrough(), output = new PassThrough(), error = new PassThrough();
-    let wire = ''; output.on('data', chunk => { wire += String(chunk); });
+    let wire = '';
+    output.on('data', chunk => { wire += String(chunk); });
     const server = runMcpServer({ config, input, output, error });
     input.end([
-      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26' } },
-      { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'sessionplane_team_get', arguments: { view: 'evidence', teamId: team.teamId, requestRef: request.outboxId } } },
-    ].map(value => JSON.stringify(value) + '\n').join(''));
+      { jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: { protocolVersion: '2025-03-26' } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/call',
+        params: { name: 'sessionplane_task_get',
+          arguments: { clientId, taskId: task.taskId, view: 'evidence' } } },
+    ].map(item => JSON.stringify(item) + '\n').join(''));
     await server;
-    const response = wire.trim().split('\n').map(line => JSON.parse(line)).find(value => value.id === 2);
-    const visible = JSON.parse(response.result.content[0].text);
-    assert.equal(visible.truncatedInText, true);
-    assert.equal(visible.recoveryRequired.length, 1, 'role and exact result display the same required user review');
-    assert.equal(visible.recoveryRequired[0].userActionRequired, true);
-    assert.equal(visible.recoveryRequired[0].recovery.url, record.url);
-    assert.match(visible.recoveryRequired[0].message, /Review the original conversation/);
-    assert.equal(response.result.structuredContent.request.submittedUserMessageId, 'original-anchor');
-    repo.save({ ...record, state: 'recovered', reason: 'conversation-rendered' });
-    assert.equal(((await invoke('team_get', { teamId: team.teamId })).structuredContent.roles as Record<string, any>[])[0]!.userActionRequired, undefined);
-  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+    const response = wire.trim().split('\n').map(line => JSON.parse(line))
+      .find(value => value.id === 2);
+    assert.equal(response.result?.structuredContent?.decision?.reason,
+      '100-load-retries-exhausted');
+    assert.equal(response.result?.structuredContent?.state, 'human_input_required');
+    assert.ok(response.result?.content?.[0]?.text.includes('human_input_required'));
+    assert.deepEqual(store.getFullTask(task.taskId, clientId), before,
+      'get/wait and MCP reconnect may not mutate a pending review, attempt or result');
+  } finally {
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('restart and page rebinding retain attempt count, global deadline and fair next tab', async () => {
