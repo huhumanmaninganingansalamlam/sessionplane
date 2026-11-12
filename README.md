@@ -148,6 +148,18 @@ Core; it refuses every mutation until the installed Core matches the candidate
 schema and verified source identity. It does not by itself prove a natural
 20-minute Continue or multi-project foreground invariance.
 
+## Reproducible candidate acceptance
+
+For a clean committed dev candidate, run:
+
+    npm run test:candidate -- --live-readonly
+
+This checks Core, Chromium, four background project tabs, installed tarball,
+offline migration and source/tree/package checksum. Its read-only live
+preflight does not restart or replace the existing Core. An L1/L2/L4
+candidate pass is not a live v15 Core pass or release approval. See
+docs/verification/sessionplane-candidate-acceptance-gates.md.
+
 ## Development
 
 Requires Node.js 24.15–24.x and a Chromium-family browser for browser tests.

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -24,10 +25,12 @@ try {
     cwd: sourceRoot,
     capture: true,
   }).trim().split(/\r?\n/).at(-1);
+  const bytes = readFileSync(tarball);
   if (repeatName !== filename ||
-      !readFileSync(tarball).equals(readFileSync(path.join(repeatDir, repeatName)))) {
+      !bytes.equals(readFileSync(path.join(repeatDir, repeatName)))) {
     throw new Error('release package is not byte-for-byte reproducible');
   }
+  const packageSha256 = createHash('sha256').update(bytes).digest('hex');
 
   run('npm', ['install', '-g', '--prefix', prefix, tarball], { cwd: sourceRoot });
 
@@ -141,12 +144,15 @@ try {
   if (installedCore.requestOk !== true ||
       installedCore.gate !== 'installed-core-public-task-smoke' ||
       installedCore.toolCount !== 6 || installedCore.originalProviderPosts !== 0 ||
-      installedCore.isolatedBrowserStarted !== false) {
-    throw new Error('Installed Core public Task functional smoke failed');
+      installedCore.isolatedBrowserStarted !== false ||
+      installedCore.installedCoreRestarted !== true ||
+      installedCore.requestIdentitySurvivedRestart !== true ||
+      installedCore.originalAttemptCountAfterRestart !== 1) {
+    throw new Error('Installed Core public Task/restart functional smoke failed');
   }
 
   process.stdout.write(
-    `${JSON.stringify({ requestOk: true, gate: 'package-smoke', filename })}\n`,
+    `${JSON.stringify({ requestOk: true, gate: 'package-smoke', filename, packageSha256 })}\n`,
   );
 } finally {
   rmSync(temporaryRoot, { recursive: true, force: true });

@@ -98,11 +98,53 @@ try {
     clientId, taskId: first.taskId, requestId: 'package-cancel-once',
   });
   assert.deepEqual(replayCancel, canceled);
+
+  // An installed package must really reopen its own durable SQLite
+  // state and recover the exact same identities, rather than merely passing
+  // while all caches and MCP processes are still resident.
+  await core.close();
+  core = undefined;
+  core = await startCore({
+    config, startBrowser: false,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  assert.equal(core.browserOwner, null);
+  const resumedHealth = await rpc('system.health', {});
+  assert.equal(resumedHealth.schemaVersion, health.schemaVersion);
+  assert.equal(resumedHealth.sourceCommit, health.sourceCommit);
+  assert.equal(resumedHealth.sourceTree, health.sourceTree);
+  assert.equal(resumedHealth.packageSha256, null,
+    'External package provenance cannot be guessed by the embedded runtime');
+  const resumed = await rpc('task.get', {
+    clientId, taskId: first.taskId, view: 'evidence',
+  });
+  assert.equal(resumed.taskId, first.taskId);
+  assert.equal(resumed.state, 'canceled');
+  assert.equal(resumed.submission.attempted, false);
+  assert.equal(resumed.evidence.attempts.length, 1,
+    'Core restart cannot create a duplicate original prompt attempt');
+  assert.equal((await rpc('project.open', open)).projectId, project.projectId);
+  assert.equal((await rpc('task.start', start)).taskId, first.taskId);
+  assert.deepEqual(await rpc('task.cancel', {
+    clientId, taskId: first.taskId, requestId: 'package-cancel-once',
+  }), canceled, 'Cancellation receipt must replay byte-for-byte after Core restart');
+  const resumedMcp = await invokeMcpTool({
+    name: 'sessionplane_task_get',
+    arguments: { clientId, taskId: first.taskId, view: 'evidence' },
+    socketPath: config.socketPath, timeoutMs: 10_000,
+    maxLineBytes: config.rpcMaxLineBytes,
+  });
+  assert.equal(resumedMcp.isError, false);
+  assert.equal(resumedMcp.structuredContent.taskId, first.taskId);
+  assert.equal(resumedMcp.structuredContent.state, 'canceled');
+
   console.log(JSON.stringify({
     requestOk: true, gate: 'installed-core-public-task-smoke',
-    schemaVersion: health.schemaVersion, toolCount: MCP_TOOLS.length,
+    schemaVersion: resumedHealth.schemaVersion, toolCount: MCP_TOOLS.length,
     sameTaskAcrossRpcAndMcp: true, originalProviderPosts: 0,
     cancelReceiptReplayed: true, isolatedBrowserStarted: false,
+    installedCoreRestarted: true, requestIdentitySurvivedRestart: true,
+    originalAttemptCountAfterRestart: resumed.evidence.attempts.length,
   }));
 } finally {
   await core?.close().catch(() => undefined);
