@@ -106,6 +106,15 @@ read-only; changed sources or output hashes fail closed.
 
     node scripts/offline-state-rehearsal.mjs rollback --migration REHEARSAL_DIR --candidate REHEARSAL_DIR/candidate.sqlite --destination ROLLBACK_DIR
 
+The sealed original can also be checked without the removed workflow runtime:
+
+    node scripts/offline-state-rehearsal.mjs inspect --migration REHEARSAL_DIR
+
+The installed npm tarball includes scripts/offline-state-rehearsal.mjs.
+Its inspector verifies the SQLite source snapshot SHA-256, integrity,
+row counts/hashes and old submission-state counts without disclosing
+stored conversation bodies or starting a Core/browser.
+
 Rollback preserves every post-migration candidate fact in a separate
 evidence snapshot before restoring the original to another destination.
 It never replaces the candidate in place. Run synthetic tests:

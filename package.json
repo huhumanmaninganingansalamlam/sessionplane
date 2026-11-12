@@ -15,7 +15,8 @@
     "bin/runtime-state.mjs",
     "dist",
     "skills",
-    "README.md"
+    "README.md",
+    "scripts/offline-state-rehearsal.mjs"
   ],
   "scripts": {
     "prepack": "npm run build",

@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:f
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 const sourceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -129,6 +130,36 @@ try {
       throw new Error('retired public surface remains in installed ' + file);
     }
   }
+  // The removed legacy runtime must not be necessary to inspect a sealed
+  // archive or migrate a synthetic old database from the installed tarball.
+  const archiveHelper = path.join(installedRoot, 'scripts', 'offline-state-rehearsal.mjs');
+  if (!existsSync(archiveHelper)) {
+    throw new Error('Installed package omits the current read-only archive inspector');
+  }
+  const archiveSource = path.join(temporaryRoot, 'archive-source.sqlite');
+  const archiveCandidate = path.join(temporaryRoot, 'archive-candidate');
+  const archiveDb = new DatabaseSync(archiveSource);
+  try {
+    archiveDb.exec('CREATE TABLE archived_fact (id TEXT PRIMARY KEY, status TEXT, text TEXT) STRICT');
+    archiveDb.prepare('INSERT INTO archived_fact VALUES(?,?,?)')
+      .run('one', 'submission_unknown', 'A test-only stored, unacknowledged POST');
+  } finally { archiveDb.close(); }
+  const upgradedArchive = JSON.parse(run(process.execPath, [
+    archiveHelper, 'migrate', '--source', archiveSource,
+    '--destination', archiveCandidate,
+  ], { cwd: temporaryRoot, env: runtimeEnv, capture: true }).trim());
+  const inspectedArchive = JSON.parse(run(process.execPath, [
+    archiveHelper, 'inspect', '--migration', archiveCandidate,
+  ], { cwd: temporaryRoot, env: runtimeEnv, capture: true }).trim());
+  if (inspectedArchive.completeOriginalFactsVerified !== true ||
+      inspectedArchive.sourceOpenedReadOnly !== true ||
+      inspectedArchive.legacyRuntimeRequired !== false ||
+      inspectedArchive.conversationBodiesReturned !== false ||
+      inspectedArchive.snapshotSha256 !== upgradedArchive.snapshotSha256 ||
+      inspectedArchive.tables.find(row => row.name === 'archived_fact')?.count !== 1) {
+    throw new Error('Installed archive provenance/inspection failed without old workflow');
+  }
+
   const doctor = JSON.parse(run(sessplane, ['doctor', '--json'], {
     cwd: temporaryRoot,
     env: runtimeEnv,

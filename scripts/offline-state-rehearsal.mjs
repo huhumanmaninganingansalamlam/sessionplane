@@ -7,7 +7,11 @@ import path from 'node:path';
 import { backup, DatabaseSync } from 'node:sqlite';
 import { pathToFileURL } from 'node:url';
 
-import { SessionPlaneDatabase } from '../src/storage/database.ts';
+// Source checkout and installed tarball use the same current schema engine.
+ // The archived v8 state is never opened by an old workflow runtime.
+const databaseModule = existsSync(new URL('../src/storage/database.ts', import.meta.url))
+  ? '../src/storage/database.ts' : '../dist/storage/database.js';
+const { SessionPlaneDatabase } = await import(databaseModule);
 
 const KIND = 'sessionplane-offline-state-rehearsal-v1';
 const ROLLBACK_KIND = 'sessionplane-offline-rollback-v1';
