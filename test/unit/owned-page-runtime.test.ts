@@ -198,6 +198,29 @@ test('stale leases and changed epochs reject mutations before and after dispatch
     { kind: 'stale' });
 });
 
+test('a mutation accepts only an explicitly verified successor lease', async () => {
+  const identity = lease();
+  let current = identity;
+  let successorProved = false;
+  const gate = new PageOperationGate(expected => current === expected);
+  const accepted = gate.run(identity, 'mutate', async () => {
+    current = { ...identity, bindingEpoch: 2 };
+    successorProved = true;
+    return 'root-post-observed';
+  }, 100, () => successorProved && current.pageKey === identity.pageKey &&
+    current.targetId === identity.targetId && current.bindingEpoch === 2);
+  assert.deepEqual(await accepted, { kind: 'ok', value: 'root-post-observed' });
+
+  current = identity;
+  const rejected = gate.run(identity, 'mutate', async () => {
+    current = { ...identity, targetId: 'foreign-target', bindingEpoch: 2 };
+    return 'foreign-transition';
+  }, 100, () => false);
+  assert.deepEqual(await rejected, {
+    kind: 'uncertain', reason: 'lease_changed_during_mutation',
+  });
+});
+
 test('lease revoked in the queued microtask cannot execute a browser mutation', async () => {
   const identity = lease();
   let current = identity;

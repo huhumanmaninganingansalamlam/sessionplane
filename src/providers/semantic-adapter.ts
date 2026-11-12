@@ -112,6 +112,8 @@ export type SemanticActResult =
       'model_menu_opened' | 'model_selected' }
   | { readonly kind: 'dispatched_unverified'; readonly effect: 'send';
       readonly attempts: readonly SemanticDispatchEvidence[] }
+  | { readonly kind: 'root_dispatched_unverified'; readonly effect: 'send';
+      readonly rootPosts: readonly SemanticRootPostEvidence[] }
   | { readonly kind: 'stale' | 'busy' | 'unsupported' | 'authorization_required'; readonly reason: string }
   | { readonly kind: 'uncertain'; readonly reason: string;
       readonly attempts?: readonly SemanticDispatchEvidence[] };
@@ -122,14 +124,27 @@ export interface SemanticDispatchEvidence {
   readonly textHash: string;
   readonly observedAt: string;
 }
+export interface SemanticRootPostEvidence {
+  readonly requestConversationId: string | null;
+  readonly messageId: string;
+  readonly parentMessageId: string;
+  readonly textHash: string;
+  readonly observedAt: string;
+}
 export interface SemanticExactQuery {
   readonly context: SemanticTaskContext;
   readonly kind: 'ack' | 'final';
   readonly prompt?: string;
   readonly attempts?: readonly SemanticDispatchEvidence[];
+  /** Exact first POST observed before the provider assigned a conversation. */
+  readonly rootPost?: SemanticRootPostEvidence;
+  /** URL-derived candidate only; canonical GET must still verify it. */
+  readonly candidateConversationId?: string;
 }
 export type SemanticVerification =
   | { readonly kind: 'verified_ack'; readonly externalTurnId: string; readonly messageId: string }
+  | { readonly kind: 'verified_root_ack'; readonly conversationId: string;
+      readonly externalTurnId: string; readonly messageId: string }
   | { readonly kind: 'exact_final'; readonly externalTurnId: string; readonly answerText: string }
   | { readonly kind: 'pending' | 'unavailable'; readonly reason: string };
 export interface SemanticProviderAdapter {

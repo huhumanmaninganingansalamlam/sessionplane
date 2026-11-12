@@ -1379,7 +1379,7 @@ test('public task.start with explicit Pro intent emits agent model decision befo
 });
 
 
-test('new public Task prepares exactly one Core-owned ChatGPT root without POST or fabricated conversation', {
+test('new public Task prepares exact Core-owned roots and blocks foreign navigation before first POST', {
   timeout: 60_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'sessionplane-root-page-prep-'));
@@ -1388,7 +1388,15 @@ test('new public Task prepares exactly one Core-owned ChatGPT root without POST 
     config, browserHeadless: true,
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   });
+  let runtime: ReturnType<typeof createSemanticCoreRuntime> | undefined;
   try {
+    await core.semanticManagedContinuation.close();
+    runtime = createSemanticCoreRuntime({
+      database: core.database, browserOwner: core.browserOwner,
+      pageRegistry: core.pageRegistry, teamDirectory: core.teamDirectory,
+      actorScheduler: core.actorScheduler, pageMutationMutex: core.pageMutationMutex,
+      enabledProviders: ['chatgpt'], chatgptUrl: 'https://chatgpt.com',
+    });
     const bootstrap = await core.browserOwner!.createPage();
     let sendPosts = 0;
     await bootstrap.page.context().route('https://chatgpt.com/**', route => {
@@ -1439,7 +1447,7 @@ test('new public Task prepares exactly one Core-owned ChatGPT root without POST 
     assert.equal(core.semanticTaskRepository.getSlot(
       project.projectId, 'main', clientId).providerConversationId, null);
 
-    const report = await core.semanticManagedContinuation.tick();
+    const report = await runtime.managedContinuation.tick();
     assert.equal(report.dispatchesAttempted, 0);
     const prepared = core.teamDirectory.getCurrentSession(project.projectId, 'main');
     assert.equal(prepared.generation, 1);
@@ -1482,7 +1490,7 @@ test('new public Task prepares exactly one Core-owned ChatGPT root without POST 
         prompt: 'Another first question',
       }, timeoutMs: 10_000,
     });
-    await core.semanticManagedContinuation.tick();
+    await runtime.managedContinuation.tick();
     const otherSession = core.teamDirectory.getCurrentSession(other.projectId, 'main');
     assert.equal(otherSession.generation, 1);
     assert.notEqual(otherSession.pageKey, prepared.pageKey);
@@ -1493,7 +1501,7 @@ test('new public Task prepares exactly one Core-owned ChatGPT root without POST 
       rootChoice?.decisionId);
     assert.equal(sendPosts, 0);
 
-    await core.semanticManagedContinuation.tick();
+    await runtime.managedContinuation.tick();
     const reused = core.teamDirectory.getCurrentSession(project.projectId, 'main');
     assert.equal(reused.generation, 1);
     assert.equal(reused.pageKey, prepared.pageKey);
@@ -1501,22 +1509,51 @@ test('new public Task prepares exactly one Core-owned ChatGPT root without POST 
       page.sessionId === prepared.sessionId && page.state === 'reserved').length, 1);
     assert.equal(sendPosts, 0, 'root preparation never consumes a send attempt');
 
-    assert.deepEqual(await core.semanticDecisionGateway.decideCurrent({
+    // Observation refreshes may rotate the one-shot semantic actionRef while
+    // retaining the same durable decision. Always act on the latest packet.
+    const openChoice = core.semanticDecisionGateway.get(started.taskId, clientId);
+    assert.equal(openChoice?.decisionId, rootChoice?.decisionId);
+    assert.equal(openChoice?.options[0]?.purpose, 'open_model_chooser');
+    let opened = await core.semanticDecisionGateway.decideCurrent({
       taskId: started.taskId, clientId,
-      decisionId: rootChoice!.decisionId, requestId: 'root-open-model',
-      actionRef: rootChoice!.options[0]!.actionRef,
-    }), { kind: 'performed', effect: 'model_menu_opened' });
-    await core.semanticManagedContinuation.tick();
+      decisionId: openChoice!.decisionId, requestId: 'root-open-model',
+      actionRef: openChoice!.options[0]!.actionRef,
+    });
+    if (opened.kind === 'refresh_required') {
+      const refreshed = opened.packet;
+      assert.equal(refreshed?.kind, 'model_choice');
+      assert.equal(refreshed?.options[0]?.purpose, 'open_model_chooser');
+      opened = await core.semanticDecisionGateway.decideCurrent({
+        taskId: started.taskId, clientId,
+        decisionId: refreshed!.decisionId, requestId: 'root-open-model-refreshed',
+        actionRef: refreshed!.options[0]!.actionRef,
+      });
+    }
+    assert.deepEqual(opened, { kind: 'performed', effect: 'model_menu_opened' });
+    await runtime.managedContinuation.tick();
     const choose = core.semanticDecisionGateway.get(started.taskId, clientId);
     assert.equal(choose?.kind, 'model_choice');
     assert.equal(choose?.requestedModel, 'Pro');
     assert.equal(choose?.options[0]?.purpose, 'choose_model');
-    assert.deepEqual(await core.semanticDecisionGateway.decideCurrent({
+    let selected = await core.semanticDecisionGateway.decideCurrent({
       taskId: started.taskId, clientId,
       decisionId: choose!.decisionId, requestId: 'root-choose-pro',
       actionRef: choose!.options[0]!.actionRef, input: 'Pro',
-    }), { kind: 'performed', effect: 'model_selected' });
-    await core.semanticManagedContinuation.tick();
+    });
+    if (selected.kind === 'refresh_required') {
+      const refreshed = selected.packet;
+      assert.equal(refreshed?.kind, 'model_choice');
+      assert.equal(refreshed?.options[0]?.purpose, 'choose_model');
+      selected = await core.semanticDecisionGateway.decideCurrent({
+        taskId: started.taskId, clientId,
+        decisionId: refreshed!.decisionId, requestId: 'root-choose-pro-refreshed',
+        actionRef: refreshed!.options[0]!.actionRef, input: 'Pro',
+      });
+    }
+    assert.deepEqual(selected, { kind: 'performed', effect: 'model_selected' });
+    // The next Core tick is now allowed to consume the first attempt. Move the
+    // retained target first to prove foreign navigation cannot become an ACK
+    // or cause a POST on the wrong conversation.
     assert.equal(core.semanticTaskRepository.getTask(started.taskId, clientId).state, 'working');
     assert.equal(core.semanticDecisionGateway.get(started.taskId, clientId), null);
     assert.equal(core.semanticTaskRepository.getFullTask(
@@ -1526,7 +1563,7 @@ test('new public Task prepares exactly one Core-owned ChatGPT root without POST 
     assert.equal(sendPosts, 0, 'a prepared root model is not a canonical first conversation');
     const rootPage = core.pageRegistry.pageForObservation(prepared.pageKey!);
     await rootPage.goto('https://chatgpt.com/c/foreign-before-first-post');
-    await core.semanticManagedContinuation.tick();
+    await runtime.managedContinuation.tick();
     assert.equal(core.semanticTaskRepository.getSlot(
       project.projectId, 'main', clientId).providerConversationId, null,
       'foreign navigation is not canonical Task conversation evidence');
@@ -1547,11 +1584,243 @@ test('new public Task prepares exactly one Core-owned ChatGPT root without POST 
       }, timeoutMs: 10_000,
     });
     assert.equal(canceled.state, 'canceled');
-    await core.semanticManagedContinuation.tick();
+    await runtime.managedContinuation.tick();
     assert.equal(sendPosts, 0);
     assert.equal(core.semanticTaskRepository.getFullTask(
       started.taskId, clientId).attempts[0]!.state, 'planned');
   } finally {
+    await runtime?.managedContinuation.close();
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('new public Task sends one root POST and binds only a canonical exact ACK after restart', {
+  timeout: 90_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sessionplane-root-canonical-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({
+    config, browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  let runtime: ReturnType<typeof createSemanticCoreRuntime> | undefined;
+  let restarted: ReturnType<typeof createSemanticCoreRuntime> | undefined;
+  try {
+    await core.semanticManagedContinuation.close();
+    const bootstrap = await core.browserOwner!.createPage();
+    let sendPosts = 0;
+    const postedBodies: unknown[] = [];
+    await bootstrap.page.context().route('https://chatgpt.com/**', route => {
+      const request = route.request();
+      if (request.method() === 'POST') {
+        sendPosts++;
+        postedBodies.push(request.postDataJSON());
+        return route.fulfill({ status: 202, contentType: 'application/json', body: '{}' });
+      }
+      return route.fulfill({ contentType: 'text/html', body: `
+        <main>
+          <section data-chatgpt-composer>
+            <div id="prompt-textarea" role="textbox" contenteditable="true"></div>
+            <button data-testid="send-button" type="button">Send</button>
+          </section>
+          <button id="model-trigger" aria-label="Model" aria-haspopup="menu"
+            aria-controls="model-menu" aria-expanded="true" type="button">Pro</button>
+          <div id="model-menu" role="menu">
+            <button role="menuitemradio" aria-checked="false">Default</button>
+            <button role="menuitemradio" aria-checked="true">Pro</button>
+          </div>
+        </main>
+        <script>
+          window.sends = 0;
+          document.querySelector('[data-testid=send-button]').onclick = () => {
+            const editor = document.querySelector('#prompt-textarea');
+            window.sends++;
+            fetch('/backend-api/f/conversation', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                action: 'next', parent_message_id: 'root-parent',
+                messages: [{ id: 'root-user-message', author: { role: 'user' },
+                  content: { content_type: 'text', parts: [editor.innerText] } }],
+              }),
+            });
+            history.pushState({}, '', '/c/root-canonical');
+            editor.textContent = '';
+          };
+        </script>` });
+    });
+
+    const clientId = 'root-canonical-owner';
+    const prompt = 'First exact root question';
+    const project = await callRpc<any>({
+      socketPath: config.socketPath, method: 'project.open',
+      params: {
+        clientId, requestId: 'open-canonical-root',
+        projectKey: 'canonical-root-project', displayName: 'Canonical root',
+        provider: 'chatgpt', surfaceIntent: 'chat',
+      }, timeoutMs: 10_000,
+    });
+    const startParams = {
+      clientId, requestId: 'start-canonical-root', projectId: project.projectId,
+      expectedConversationRevision: project.conversationRevision, prompt,
+    };
+    const task = await callRpc<any>({
+      socketPath: config.socketPath, method: 'task.start',
+      params: startParams, timeoutMs: 10_000,
+    });
+    assert.equal((await callRpc<any>({
+      socketPath: config.socketPath, method: 'task.start',
+      params: startParams, timeoutMs: 10_000,
+    })).taskId, task.taskId, 'idempotent start returns the same Task before any POST');
+
+    let virtualNow = 1_000_000;
+    let detailReads = 0;
+    const payload = (conversationId: string, messageId: string) => ({
+      id: conversationId, current_node: 'root-answer-node',
+      mapping: {
+        'root-parent': { id: 'root-parent', parent: null, children: [], message: null },
+        'root-user-node': {
+          id: 'root-user-node', parent: 'root-parent', children: [],
+          message: { id: messageId, turn_id: 'root-turn',
+            author: { role: 'user' }, content: { parts: [prompt] } },
+        },
+        'root-answer-node': {
+          id: 'root-answer-node', parent: 'root-user-node', children: [],
+          message: { id: 'root-answer', author: { role: 'assistant' },
+            channel: 'final', status: 'finished_successfully', end_turn: true,
+            content: { parts: ['Canonical root answer'] }, metadata: {} },
+        },
+      },
+    });
+    const backend: BackendJsonClient = {
+      authScope: {},
+      async get(url) {
+        if (url.endsWith('/api/auth/session')) {
+          return { status: 200, headers: {}, body: { accessToken: 'fixture-only' } };
+        }
+        detailReads++;
+        if (detailReads === 1) {
+          return { status: 429, headers: { 'retry-after': '2' }, body: null };
+        }
+        if (detailReads === 2) {
+          return { status: 200, headers: {},
+            body: payload('foreign-conversation', 'root-user-message') };
+        }
+        if (detailReads === 3) {
+          return { status: 200, headers: {},
+            body: payload('root-canonical', 'foreign-user-message') };
+        }
+        return { status: 200, headers: {},
+          body: payload('root-canonical', 'root-user-message') };
+      },
+    };
+    const createRuntime = () => createSemanticCoreRuntime({
+      database: core.database, browserOwner: core.browserOwner,
+      pageRegistry: core.pageRegistry, teamDirectory: core.teamDirectory,
+      actorScheduler: core.actorScheduler, pageMutationMutex: core.pageMutationMutex,
+      enabledProviders: ['chatgpt'], chatgptUrl: 'https://chatgpt.com',
+      backendClientProvider: () => backend,
+      backendRecovery: new ChatGptBackendRecovery({
+        requestTimeoutMs: 500, tokenCacheTtlMs: 10_000,
+        now: () => new Date(virtualNow),
+      }),
+      continuationNow: () => new Date(virtualNow),
+    });
+    runtime = createRuntime();
+    await runtime.managedContinuation.tick();
+    let full = core.semanticTaskRepository.getFullTask(task.taskId, clientId);
+    assert.equal(full.attempts.length, 1);
+    assert.equal(full.attempts[0]!.state, 'planned');
+    const prepared = core.teamDirectory.getCurrentSession(project.projectId, 'main');
+    assert.equal(prepared.generation, 1);
+    assert.ok(prepared.pageKey);
+    assert.equal(core.pageRegistry.getBinding(prepared.pageKey!).state, 'reserved');
+    assert.equal(core.semanticDecisionGateway.get(task.taskId, clientId), null,
+      'the prepared root already proves the requested Pro model');
+
+    await runtime.managedContinuation.tick();
+    full = core.semanticTaskRepository.getFullTask(task.taskId, clientId);
+    const attempt = full.attempts[0]!;
+    assert.equal(attempt.state, 'uncertain', '429 cannot be mistaken for an ACK');
+    assert.equal(sendPosts, 1);
+    assert.equal(detailReads, 1);
+    assert.deepEqual(postedBodies, [{
+      action: 'next', parent_message_id: 'root-parent',
+      messages: [{ id: 'root-user-message', author: { role: 'user' },
+        content: { content_type: 'text', parts: [prompt] } }],
+    }]);
+    const recorded = core.semanticTaskRepository.getRootPost({
+      taskId: task.taskId, clientId, attemptId: attempt.attemptId,
+    });
+    assert.equal(recorded?.messageId, 'root-user-message');
+    assert.equal(recorded?.requestConversationId, null);
+    assert.equal(recorded?.observationCount, 1);
+    assert.equal(recorded?.ambiguous, false);
+    assert.equal(recorded?.canonicalConversationId, null);
+    assert.equal(core.semanticTaskRepository.getSlot(
+      project.projectId, 'main', clientId).providerConversationId, null);
+
+    // Restart the Core semantic runtime after the irreversible POST. Durable
+    // evidence must recover read-only and must never click Send again.
+    await runtime.managedContinuation.close();
+    runtime = undefined;
+    restarted = createRuntime();
+    await restarted.managedContinuation.tick();
+    assert.equal(detailReads, 2);
+    assert.equal(sendPosts, 1);
+    assert.equal(core.semanticTaskRepository.getFullTask(
+      task.taskId, clientId).attempts[0]!.state, 'uncertain',
+    'a different canonical conversation cannot promote the root');
+
+    virtualNow += 5_001;
+    await restarted.managedContinuation.tick();
+    assert.equal(detailReads, 3);
+    assert.equal(sendPosts, 1);
+    assert.equal(core.semanticTaskRepository.getFullTask(
+      task.taskId, clientId).attempts[0]!.state, 'uncertain',
+    'a different canonical message cannot promote the root');
+
+    virtualNow += 5_001;
+    await restarted.managedContinuation.tick();
+    full = core.semanticTaskRepository.getFullTask(task.taskId, clientId);
+    assert.equal(full.attempts[0]!.state, 'acknowledged');
+    assert.equal(full.attempts[0]!.externalTurnId, 'root-turn');
+    assert.equal(sendPosts, 1);
+    assert.equal(core.semanticTaskRepository.getRootPost({
+      taskId: task.taskId, clientId, attemptId: attempt.attemptId,
+    })?.canonicalConversationId, 'root-canonical');
+    assert.equal(core.semanticTaskRepository.getSlot(
+      project.projectId, 'main', clientId).providerConversationId, 'root-canonical');
+    const boundSession = core.teamDirectory.getCurrentSession(project.projectId, 'main');
+    assert.equal(boundSession.conversationId, 'root-canonical');
+    assert.equal(boundSession.submittedUserMessageId, 'root-user-message');
+    assert.equal(boundSession.submittedUserTurnId, 'root-turn');
+    assert.equal(boundSession.promptSubmitted, true);
+    const boundPage = core.pageRegistry.getBinding(boundSession.pageKey!);
+    assert.equal(boundPage.state, 'owned');
+    assert.equal(boundPage.conversationId, 'root-canonical');
+    assert.equal(boundPage.targetId, recorded?.targetId);
+
+    virtualNow += 5_001;
+    await restarted.managedContinuation.tick();
+    const exact = await callRpc<any>({
+      socketPath: config.socketPath, method: 'task.get',
+      params: { clientId, taskId: task.taskId, view: 'result' }, timeoutMs: 10_000,
+    });
+    assert.equal(exact.state, 'completed');
+    assert.equal(exact.result.answerText, 'Canonical root answer');
+    assert.equal(exact.result.externalTurnId, 'root-turn');
+    assert.equal(sendPosts, 1);
+    assert.equal(core.semanticTaskRepository.getFullTask(
+      task.taskId, clientId).attempts.length, 1);
+    assert.equal((await callRpc<any>({
+      socketPath: config.socketPath, method: 'task.start',
+      params: startParams, timeoutMs: 10_000,
+    })).taskId, task.taskId);
+    assert.equal(sendPosts, 1, 'idempotent public replay never creates a second POST');
+  } finally {
+    await runtime?.managedContinuation.close();
+    await restarted?.managedContinuation.close();
     await core.close();
     rmSync(root, { recursive: true, force: true });
   }

@@ -7,7 +7,7 @@ import type { OwnedPageIdentity } from '../../browser/owned-page-lifecycle.ts';
 import type {
   SemanticActRequest, SemanticActResult, SemanticActionCandidate,
   SemanticActionPurpose, SemanticCapabilityIssue, SemanticDispatchEvidence,
-  SemanticExactQuery, SemanticObservation, SemanticProviderAdapter,
+  SemanticRootPostEvidence, SemanticExactQuery, SemanticObservation, SemanticProviderAdapter,
   SemanticTaskContext, SemanticVerification,
 } from '../semantic-adapter.ts';
 import { ChatGptBackendRecovery, type BackendJsonClient } from './backend-recovery.ts';
@@ -86,6 +86,17 @@ export interface ChatGptSemanticAdapterOptions {
     context: SemanticTaskContext; attemptId: string;
     evidence: SemanticDispatchEvidence;
   }) => void;
+  /** Root POST identity is durable before a canonical conversation is known. */
+  readonly onRootDispatchObserved?: (input: {
+    context: SemanticTaskContext; attemptId: string;
+    evidence: SemanticRootPostEvidence;
+  }) => void;
+  /** Accept the root page's one expected identity transition only after the
+   * exact observed POST has been committed durably by the Core.
+   */
+  readonly isRootDispatchTransition?: (input: {
+    context: SemanticTaskContext; attemptId: string; lease: OwnedPageIdentity;
+  }) => boolean;
   /** Consume one exact journaled model/question/stream-retry decision before its effect. */
   readonly isAuthorizedDecision?: (input: {
     context: SemanticTaskContext;
@@ -335,6 +346,21 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           });
         }
       }
+      // First-root send is separately journaled and cannot be offered until
+      // the exact project model is visibly selected. No unrelated Task may
+      // borrow this root lease or mutate its draft.
+      if (blocker === 'none' && context.providerConversationId === null &&
+          context.requiredModel && verifiedModel === context.requiredModel) {
+        if (ui.editors[0]!.value.length === 0) {
+          issue('compose', 'Prepare exact first public prompt on new chat root',
+            'draft_only', { kind: 'text', maxLength: MAX_DRAFT }, ui.fingerprint);
+        }
+        if (ui.buttons.length === 1 && ui.buttons[0]!.enabled &&
+            ui.editors[0]!.value.trim().length > 0) {
+          issue('submit', 'Create one exact root conversation from committed Task prompt',
+            'send_once', { kind: 'none' }, ui.fingerprint);
+        }
+      }
     }
 
     // Every fact attributed to a previously verified user turn must still
@@ -452,12 +478,20 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       return { kind: 'stale', reason: 'action-ref-stale-or-foreign' };
     }
     let capturedAttempts: SemanticDispatchEvidence[] = [];
+    let capturedRootPosts: SemanticRootPostEvidence[] = [];
     let dispatchSinkFailed = false;
     // One consumption even if the renderer returns late. No replay of an
     // uncertain external side effect via this actionRef or another requestId.
     snapshot!.actions.delete(request.actionRef);
     this.#latest.delete(lease.pageKey);
     this.#revision.set(lease.pageKey, {});
+    const acceptRootDispatchTransition =
+      request.context.providerConversationId === null && action.purpose === 'submit' &&
+      request.authorizedAttemptId && this.#options.isRootDispatchTransition
+        ? () => this.#options.isRootDispatchTransition!({
+            context: request.context, attemptId: request.authorizedAttemptId!, lease,
+          })
+        : undefined;
     const result = await this.#gate.run(lease, 'mutate', async () => {
       const page = await this.#options.resolvePage(lease);
       this.#checkOrigin(page);
@@ -646,7 +680,8 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           return 'stale' as const;
         }
       }
-      const watch = watchExactDispatch(page, request.context.providerConversationId!,
+      const isRoot = request.context.providerConversationId === null;
+      const watch = !isRoot ? watchExactDispatch(page, request.context.providerConversationId!,
         request.expectedContentSha256!, evidence => {
           if (!this.#options.onDispatchObserved) return;
           try {
@@ -656,7 +691,21 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           } catch {
             dispatchSinkFailed = true;
           }
-        });
+        }) : null;
+      const rootWatch = isRoot ? watchExactRootDispatch(
+        page, request.expectedContentSha256!, evidence => {
+          if (!this.#options.onRootDispatchObserved) {
+            dispatchSinkFailed = true;
+            return;
+          }
+          try {
+            this.#options.onRootDispatchObserved({
+              context: request.context, attemptId: request.authorizedAttemptId!, evidence,
+            });
+          } catch {
+            dispatchSinkFailed = true;
+          }
+        }) : null;
       try {
         const editor = await exactHandle(page, EDITORS, fresh.editors[0]!);
         let button: ElementHandle<HTMLElement> | null = null;
@@ -693,13 +742,16 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
           await editor.dispose();
           await button?.dispose();
         }
-        capturedAttempts = await watch.collect(350);
+        capturedAttempts = watch ? await watch.collect(350) : [];
+        capturedRootPosts = rootWatch ? await rootWatch.collect(350) : [];
       } finally {
-        capturedAttempts = watch.snapshot();
-        watch.stop();
+        capturedAttempts = watch?.snapshot() ?? [];
+        capturedRootPosts = rootWatch?.snapshot() ?? [];
+        watch?.stop();
+        rootWatch?.stop();
       }
-      return 'send' as const;
-    }, 8_000);
+      return isRoot ? 'root_send' as const : 'send' as const;
+    }, 8_000, acceptRootDispatchTransition);
     if (result.kind === 'stale') return { kind: 'stale', reason: 'lease-revoked' };
     if (result.kind === 'busy') return { kind: 'busy', reason: 'page-operation-in-flight' };
     if (result.kind !== 'ok') return { kind: 'uncertain', reason: result.reason,
@@ -708,9 +760,13 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if (result.value === 'retry_clicked_unverified') return {
       kind: 'uncertain', reason: 'retry-clicked-provider-progress-unverified',
     };
-    if (result.value === 'send' && dispatchSinkFailed) return {
+    if ((result.value === 'send' || result.value === 'root_send') &&
+        dispatchSinkFailed) return {
       kind: 'uncertain', reason: 'durable-dispatch-evidence-write-failed',
       attempts: capturedAttempts,
+    };
+    if (result.value === 'root_send') return {
+      kind: 'root_dispatched_unverified', effect: 'send', rootPosts: capturedRootPosts,
     };
     if (result.value === 'send') return { kind: 'dispatched_unverified', effect: 'send',
       attempts: capturedAttempts };
@@ -745,19 +801,31 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
 
   async recover(query: SemanticExactQuery): Promise<SemanticVerification> {
     const id = query.context;
-    const conversationId = id.providerConversationId;
-    if (conversationId === null || conversationId.length === 0) {
-      return { kind: 'unavailable', reason: 'exact-conversation-id-required' };
+    const rootAck = query.kind === 'ack' && id.providerConversationId === null;
+    const conversationId = rootAck
+      ? query.candidateConversationId ?? null : id.providerConversationId;
+    if (conversationId === null || !/^[A-Za-z0-9_-]{1,160}$/.test(conversationId)) {
+      return { kind: 'unavailable', reason: rootAck
+        ? 'root-conversation-candidate-required' : 'exact-conversation-id-required' };
     }
-    if (query.kind === 'ack' && (!query.prompt || query.attempts?.length !== 1 ||
+    if (rootAck) {
+      const root = query.rootPost;
+      if (!query.prompt || !root || query.attempts !== undefined ||
+          id.submittedUserMessageId !== null || id.submittedUserTurnId !== null ||
+          root.textHash !== sha(query.prompt.replaceAll('\r\n', '\n')) ||
+          (root.requestConversationId !== null &&
+            root.requestConversationId !== conversationId)) {
+        return { kind: 'unavailable', reason: 'exact-root-dispatch-correlation-required' };
+      }
+    } else if (query.kind === 'ack' && (!query.prompt || query.attempts?.length !== 1 ||
       query.attempts[0]!.conversationId !== conversationId)) {
       return { kind: 'unavailable', reason: 'exact-dispatch-correlation-required' };
     }
-    if (query.kind === 'ack' &&
+    if (!rootAck && query.kind === 'ack' &&
       query.attempts![0]!.textHash !== sha(query.prompt!.replaceAll('\r\n', '\n'))) {
       return { kind: 'unavailable', reason: 'canonical-ack-prompt-hash-mismatch' };
     }
-    if (query.kind === 'ack' && id.submittedUserMessageId !== null &&
+    if (!rootAck && query.kind === 'ack' && id.submittedUserMessageId !== null &&
       id.submittedUserMessageId !== query.attempts![0]!.messageId) {
       return { kind: 'unavailable', reason: 'canonical-ack-bound-message-mismatch' };
     }
@@ -777,17 +845,37 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       return { kind: 'unavailable', reason: 'backend-transport-unavailable' };
     }
     if (query.kind === 'ack') {
+      const root = rootAck ? query.rootPost! : null;
+      const attempts = root === null ? query.attempts : [{
+        conversationId,
+        messageId: root.messageId,
+        parentMessageId: root.parentMessageId,
+        textHash: root.textHash,
+        observedAt: root.observedAt,
+      }];
       let latestReason: string | null = null;
       const ack = await this.#backend.recoverAcknowledgement(conversationId, query.prompt!,
-        client, origin, query.attempts, evidence => { latestReason = evidence.reason; });
+        client, origin, attempts, evidence => { latestReason = evidence.reason; },
+        root?.messageId);
       if (ack !== null && id.submittedUserTurnId !== null &&
         ack.submittedUserTurnId !== id.submittedUserTurnId) {
         return { kind: 'unavailable', reason: 'canonical-ack-bound-turn-mismatch' };
       }
-      return ack === null
-        ? { kind: 'pending', reason: latestReason ?? 'canonical-ack-not-observed' }
-        : { kind: 'verified_ack', externalTurnId: ack.submittedUserTurnId,
+      if (ack === null) {
+        return { kind: 'pending', reason: latestReason ?? 'canonical-ack-not-observed' };
+      }
+      if (root !== null) {
+        if (ack.conversationId !== conversationId ||
+            ack.submittedUserMessageId !== root.messageId ||
+            ack.dispatchParent?.matches !== true) {
+          return { kind: 'unavailable', reason: 'canonical-root-ack-identity-mismatch' };
+        }
+        return { kind: 'verified_root_ack', conversationId,
+          externalTurnId: ack.submittedUserTurnId,
           messageId: ack.submittedUserMessageId };
+      }
+      return { kind: 'verified_ack', externalTurnId: ack.submittedUserTurnId,
+        messageId: ack.submittedUserMessageId };
     }
     const final = await this.#backend.recoverExactTurn({
       conversationId,
@@ -1028,6 +1116,66 @@ async function exactControlReady(handle: ElementHandle<HTMLElement>,
       element.getAttribute('placeholder'), element.getAttribute('type'),
     ].join('|') === signature,
   expected.signature).catch(() => false);
+}
+
+/** One exact root request before provider conversation binding. The POST
+ * identity is never an ACK; incoming provider URL/body must be reconciled by
+ * a separate authenticated canonical GET.
+ */
+function watchExactRootDispatch(page: Page, expectedSha256: string,
+  onObserved?: (evidence: SemanticRootPostEvidence) => void) {
+  const posts: SemanticRootPostEvidence[] = [];
+  let wake: (() => void) | null = null;
+  const onRequest = (request: Request) => {
+    if (request.method() !== 'POST') return;
+    try {
+      const url = new URL(request.url());
+      if (url.origin !== new URL(page.url()).origin ||
+          !/^\/backend-api\/(?:f\/)?conversation$/.test(url.pathname)) return;
+      const body: unknown = request.postDataJSON();
+      if (!isRecord(body) || body.action !== 'next' ||
+          (body.conversation_id !== null && body.conversation_id !== undefined &&
+            (typeof body.conversation_id !== 'string' ||
+              !/^[A-Za-z0-9_-]{1,160}$/.test(body.conversation_id))) ||
+          typeof body.parent_message_id !== 'string' || !body.parent_message_id ||
+          !Array.isArray(body.messages)) return;
+      const users = body.messages.filter(message => isRecord(message) &&
+        isRecord(message.author) && message.author.role === 'user');
+      if (users.length !== 1) return;
+      const user = users[0];
+      if (!isRecord(user) || typeof user.id !== 'string' || !user.id ||
+          !isRecord(user.content) || user.content.content_type !== 'text' ||
+          !Array.isArray(user.content.parts) ||
+          !user.content.parts.every(part => typeof part === 'string')) return;
+      const textHash = sha(user.content.parts.join('\n').replaceAll('\r\n', '\n'));
+      if (textHash !== expectedSha256) return;
+      const evidence: SemanticRootPostEvidence = {
+        requestConversationId: typeof body.conversation_id === 'string'
+          ? body.conversation_id : null,
+        messageId: user.id, parentMessageId: body.parent_message_id,
+        textHash, observedAt: new Date().toISOString(),
+      };
+      posts.push(evidence);
+      onObserved?.(evidence);
+      wake?.();
+    } catch { /* Malformed/foreign requests never authorize a root send. */ }
+  };
+  page.on('request', onRequest);
+  return {
+    snapshot: () => [...posts],
+    stop: () => page.off('request', onRequest),
+    async collect(timeoutMs: number): Promise<SemanticRootPostEvidence[]> {
+      if (posts.length === 0) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await new Promise<void>(resolve => {
+          wake = resolve; timer = setTimeout(resolve, timeoutMs);
+        });
+        clearTimeout(timer);
+        wake = null;
+      }
+      return this.snapshot();
+    },
+  };
 }
 
 /** Capture only the exact outgoing user POST identity; this is attempt

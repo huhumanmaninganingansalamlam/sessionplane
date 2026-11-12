@@ -169,6 +169,71 @@ export function createSemanticCoreRuntime(input: {
         session.generation === task.sessionBinding.generation;
     } catch { return false; }
   };
+  const exactRootDispatchPage = (owner: {
+    context: SemanticTaskContext; attemptId: string; lease: OwnedPageIdentity;
+  }) => {
+    const { context, attemptId, lease } = owner;
+    if (context.providerConversationId !== null || context.pageLease === null ||
+        context.projectId !== lease.projectId || context.slotId !== lease.slotId ||
+        context.slotRevision !== lease.slotRevision || context.taskId !== lease.taskId ||
+        context.pageLease.pageKey !== lease.pageKey ||
+        context.pageLease.targetId !== lease.targetId ||
+        context.pageLease.bindingEpoch !== lease.bindingEpoch) return null;
+    const clientId = repository.dispatchClientId(context.taskId);
+    if (!clientId) return null;
+    try {
+      const full = repository.getFullTask(context.taskId, clientId);
+      const task = full.task;
+      const attempt = full.attempts.find(row => row.attemptId === attemptId);
+      const slot = repository.getSlot(context.projectId, context.slotId, clientId);
+      if (task.projectId !== context.projectId || task.slotId !== context.slotId ||
+          task.slotRevision !== context.slotRevision || slot.activeTaskId !== task.taskId ||
+          slot.revision !== task.slotRevision || slot.providerKey !== 'chatgpt' ||
+          slot.providerConversationId !== null || attempt?.kind !== 'initial' ||
+          !['dispatched', 'uncertain', 'acknowledged'].includes(attempt.state)) return null;
+      const session = input.teamDirectory.getCurrentSession(context.projectId, context.slotId);
+      const binding = input.pageRegistry.refreshPage(lease.pageKey);
+      if (session.provider !== 'chatgpt' || session.generation < 1 ||
+          session.pageKey !== binding.pageKey || session.conversationId !== null ||
+          binding.targetId !== lease.targetId || binding.sessionId !== session.sessionId ||
+          binding.generation !== session.generation ||
+          binding.expectedConversationId !== null) return null;
+      const url = new URL(binding.url);
+      const origin = new URL(input.chatgptUrl).origin;
+      if (url.origin !== origin || url.search !== '' || url.hash !== '') return null;
+      if (binding.state === 'reserved' && binding.bindingEpoch === lease.bindingEpoch &&
+          binding.conversationId === null && url.pathname === '/') {
+        return { clientId, session, binding, conversationId: null as string | null };
+      }
+      const conversationId = binding.conversationId;
+      if (binding.state !== 'identity_lost' ||
+          binding.bindingEpoch !== lease.bindingEpoch + 1 ||
+          conversationId === null || !/^[A-Za-z0-9_-]{1,160}$/.test(conversationId) ||
+          url.pathname !== `/c/${encodeURIComponent(conversationId)}` ||
+          input.pageRegistry.findByConversation(conversationId).length !== 1) return null;
+      return { clientId, session, binding, conversationId };
+    } catch { return null; }
+  };
+  const isRootDispatchTransition = (owner: {
+    context: SemanticTaskContext; attemptId: string; lease: OwnedPageIdentity;
+  }): boolean => {
+    const exact = exactRootDispatchPage(owner);
+    if (!exact?.conversationId) return false;
+    try {
+      const root = repository.getRootPost({
+        taskId: owner.context.taskId, clientId: exact.clientId,
+        attemptId: owner.attemptId,
+      });
+      return root !== null && !root.ambiguous && root.observationCount === 1 &&
+        root.canonicalConversationId === null && root.pageKey === owner.lease.pageKey &&
+        root.targetId === owner.lease.targetId &&
+        root.bindingEpoch === owner.lease.bindingEpoch &&
+        root.sessionId === exact.session.sessionId &&
+        root.generation === exact.session.generation &&
+        (root.requestConversationId === null ||
+          root.requestConversationId === exact.conversationId);
+    } catch { return false; }
+  };
   const resolveContext = (intent: ExactSendIntent): SemanticTaskContext => {
     const task = repository.getTask(intent.taskId, intent.clientId);
     const slot = repository.getSlot(intent.projectId, intent.slotId, intent.clientId);
@@ -205,7 +270,8 @@ export function createSemanticCoreRuntime(input: {
     const full = repository.getFullTask(intent.taskId, intent.clientId);
     const attempt = full.attempts.find(row => row.attemptId === intent.attemptId);
     if (candidate === null && activeSlot && intent.providerConversationId === null &&
-        attempt?.kind === 'initial' && attempt.state === 'planned') {
+        attempt?.kind === 'initial' &&
+        ['planned', 'dispatched', 'uncertain'].includes(attempt.state)) {
       try {
         const session = input.teamDirectory.getCurrentSession(intent.projectId, intent.slotId);
         const root = session.pageKey === null ? null :
@@ -312,6 +378,109 @@ export function createSemanticCoreRuntime(input: {
       return repository.consumeDecisionAction(context.taskId, clientId, approval.decisionId);
     } catch { return false; }
   };
+  const rootPageCandidate = (owner: {
+    taskId: string; clientId: string; attemptId: string;
+  }, expectedConversationId: string | null = null) => {
+    const root = repository.getRootPost(owner);
+    if (!root || root.ambiguous || root.observationCount !== 1) return null;
+    const retained = input.pageRegistry.listBindings({ includeClosed: false })
+      .filter(binding => binding.targetId === root.targetId);
+    if (retained.length !== 1) return null;
+    let binding = input.pageRegistry.refreshPage(retained[0]!.pageKey);
+    if (binding.targetId !== root.targetId) return null;
+    if (binding.state === 'unbound' && binding.sessionId === null &&
+        binding.generation === null && binding.conversationId !== null) {
+      binding = input.pageRegistry.reserveUnknownConversationCandidate(binding.pageKey, {
+        sessionId: root.sessionId, generation: root.generation, targetId: root.targetId,
+      });
+    }
+    if (binding.state === 'identity_lost') {
+      binding = input.pageRegistry.unknownConversationCandidate(binding.pageKey, {
+        sessionId: root.sessionId, generation: root.generation,
+      }).binding;
+    } else if (binding.state !== 'owned' || binding.sessionId !== root.sessionId ||
+        binding.generation !== root.generation || binding.conversationId === null ||
+        binding.expectedConversationId !== binding.conversationId ||
+        input.pageRegistry.findByConversation(binding.conversationId).length !== 1) {
+      return null;
+    }
+    const conversationId = binding.conversationId;
+    if (conversationId === null || !/^[A-Za-z0-9_-]{1,160}$/.test(conversationId) ||
+        (root.requestConversationId !== null &&
+          root.requestConversationId !== conversationId) ||
+        (expectedConversationId !== null && expectedConversationId !== conversationId)) {
+      return null;
+    }
+    try {
+      const url = new URL(binding.url);
+      if (url.origin !== new URL(input.chatgptUrl).origin ||
+          url.pathname !== `/c/${encodeURIComponent(conversationId)}` ||
+          url.search !== '' || url.hash !== '') return null;
+    } catch { return null; }
+    return { root, binding, conversationId };
+  };
+  const bindRootAttempt = async (owner: {
+    taskId: string; clientId: string; attemptId: string;
+  }): Promise<void> => {
+    if (!input.actorScheduler) throw new Error('Root ACK actor scheduler unavailable');
+    const full = repository.getFullTask(owner.taskId, owner.clientId);
+    const attempt = full.attempts.find(row => row.attemptId === owner.attemptId);
+    const root = repository.getRootPost(owner);
+    if (!attempt || attempt.state !== 'acknowledged' || attempt.externalTurnId === null ||
+        !root?.canonicalConversationId) {
+      throw new Error('Canonical root ACK is not durable');
+    }
+    const task = full.task;
+    const slot = repository.getSlot(task.projectId, task.slotId, owner.clientId);
+    if (slot.activeTaskId !== task.taskId || slot.revision !== task.slotRevision ||
+        slot.providerKey !== 'chatgpt' ||
+        slot.providerConversationId !== root.canonicalConversationId) {
+      throw new Error('Canonical root ACK lost its exact active slot');
+    }
+    const candidate = rootPageCandidate(owner, root.canonicalConversationId);
+    if (!candidate) throw new Error('Canonical root page target is unavailable');
+    const owned = candidate.binding.state === 'owned'
+      ? candidate.binding
+      : input.pageRegistry.bindPage(candidate.binding.pageKey, {
+          sessionId: root.sessionId, generation: root.generation,
+          conversationId: root.canonicalConversationId,
+        });
+    if (owned.state !== 'owned' || owned.targetId !== root.targetId ||
+        owned.sessionId !== root.sessionId || owned.generation !== root.generation ||
+        owned.conversationId !== root.canonicalConversationId ||
+        owned.expectedConversationId !== root.canonicalConversationId) {
+      throw new Error('Canonical root page ownership could not be established');
+    }
+    const session = input.teamDirectory.getSession(root.sessionId);
+    if (session.teamId !== task.projectId || session.roleKey !== task.slotId ||
+        session.provider !== 'chatgpt' || session.generation !== root.generation ||
+        (session.conversationId !== null &&
+          session.conversationId !== root.canonicalConversationId) ||
+        (session.pageKey !== null && session.pageKey !== owned.pageKey) ||
+        (session.submittedUserMessageId !== null &&
+          session.submittedUserMessageId !== root.messageId) ||
+        (session.submittedUserTurnId !== null &&
+          session.submittedUserTurnId !== attempt.externalTurnId)) {
+      throw new Error('Canonical root ACK conflicts with the current session actor');
+    }
+    const alreadyBound = session.conversationId === root.canonicalConversationId &&
+      session.pageKey === owned.pageKey &&
+      session.submittedUserMessageId === root.messageId &&
+      session.submittedUserTurnId === attempt.externalTurnId &&
+      session.submissionState === 'submitted' && session.promptSubmitted;
+    if (alreadyBound) return;
+    await input.actorScheduler.updateGeneration(root.sessionId, root.generation, {
+      ...(session.terminal ? {} : {
+        sessionState: 'submitted' as const,
+        providerState: 'generating' as const,
+        observationTransport: 'fresh' as const,
+      }),
+      submissionState: 'submitted', conversationId: root.canonicalConversationId,
+      pageKey: owned.pageKey, submittedUserMessageId: root.messageId,
+      submittedUserTurnId: attempt.externalTurnId, promptSubmitted: true,
+      reason: 'canonical-root-acknowledgement', errorCode: null,
+    }, 'public.task.root-acknowledged');
+  };
   const backendOrigin = new URL(input.chatgptUrl).origin;
   // Profile-local SQLite retains backend GET cooldowns after an owner restart.
   // Auth tokens and conversation payloads always remain ephemeral.
@@ -335,6 +504,28 @@ export function createSemanticCoreRuntime(input: {
         if (!clientId) throw new Error('Dispatch task owner unavailable');
         repository.recordDispatchEvidence({ taskId: context.taskId, clientId, attemptId, evidence });
       },
+      onRootDispatchObserved: ({ context, attemptId, evidence }) => {
+        const lease = context.pageLease;
+        if (lease === null) throw new Error('Root dispatch page lease unavailable');
+        const exact = exactRootDispatchPage({ context, attemptId, lease });
+        if (!exact || (evidence.requestConversationId !== null &&
+            exact.conversationId !== null &&
+            evidence.requestConversationId !== exact.conversationId)) {
+          throw new Error('Root dispatch left the exact prepared session generation');
+        }
+        repository.recordRootPost({
+          taskId: context.taskId, clientId: exact.clientId, attemptId,
+          evidence: {
+            sessionId: exact.session.sessionId, generation: exact.session.generation,
+            pageKey: exact.binding.pageKey, targetId: lease.targetId,
+            bindingEpoch: lease.bindingEpoch,
+            messageId: evidence.messageId, parentMessageId: evidence.parentMessageId,
+            textHash: evidence.textHash, observedAt: evidence.observedAt,
+            requestConversationId: evidence.requestConversationId,
+          },
+        });
+      },
+      isRootDispatchTransition,
       backendClientProvider: input.backendClientProvider ?? (() => {
         if (input.browserOwner === null) throw new Error('Owned browser context unavailable');
         return chatGptBackendJsonClient(input.browserOwner.recoveryRequestContext());
@@ -360,6 +551,20 @@ export function createSemanticCoreRuntime(input: {
       read: query => repository.getDispatchEvidence({
         taskId: query.taskId, clientId: query.clientId, attemptId: query.attemptId,
       }),
+      readRoot: query => {
+        const root = repository.getRootPost({
+          taskId: query.taskId, clientId: query.clientId, attemptId: query.attemptId,
+        });
+        return root === null ? null : {
+          requestConversationId: root.requestConversationId,
+          messageId: root.messageId, parentMessageId: root.parentMessageId,
+          textHash: root.textHash, observedAt: root.observedAt,
+          observationCount: root.observationCount, ambiguous: root.ambiguous,
+        };
+      },
+      resolveRootCandidate: query => rootPageCandidate({
+        taskId: query.taskId, clientId: query.clientId, attemptId: query.attemptId,
+      })?.conversationId ?? null,
     },
   })] : [];
   const kernel = new DurableTaskKernel(repository, ports);
@@ -391,6 +596,7 @@ export function createSemanticCoreRuntime(input: {
     } } : {}),
     inspectModelIntent: async ({ taskId, clientId, attemptId, modelIntent }) =>
       await decisionGateway.verifyModelIntent({ taskId, clientId, attemptId, modelIntent }),
+    ...(input.actorScheduler ? { bindRootAttempt } : {}),
     bindInitialAttempt: ({ taskId, clientId, attemptId }) => {
       const task = repository.getTask(taskId, clientId);
       const slot = repository.getSlot(task.projectId, task.slotId, clientId);

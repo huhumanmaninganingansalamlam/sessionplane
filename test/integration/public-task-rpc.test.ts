@@ -608,3 +608,76 @@ test('public exact FINAL 429 remains working, without fabricated answer or new a
   assert.equal(detailReads, 1, 'Retry-After prevents premature repeated GET');
   await runtime.managedContinuation.close();
 });
+
+
+test('three independent public questions reuse one Main conversation and never splice old answers', async t => {
+  const { rpc, store, clientId } = await fixture(t);
+  const project = await rpc<any>('project.open', {
+    clientId, requestId: 'multi-main-project',
+    projectKey: 'multi-main-reuse', displayName: 'Main reuse',
+    provider: 'chatgpt', surfaceIntent: 'chat',
+  });
+  const questions = ['First work', 'Second work', 'Third work'];
+  let revision = project.conversationRevision;
+  const ids: string[] = [];
+  for (let i = 0; i < questions.length; i++) {
+    const requestId = 'multi-start-' + i;
+    const started = await rpc<any>('task.start', {
+      clientId, requestId, projectId: project.projectId,
+      expectedConversationRevision: revision, prompt: questions[i],
+    });
+    ids.push(started.taskId);
+    revision = started.conversationRevision;
+    assert.equal(started.conversationSlotId, 'main');
+    assert.equal(started.state, 'working');
+    assert.equal(started.submission.attempted, false);
+    if (i === 0) {
+      store.observeConversation({
+        projectId: project.projectId, slotId: 'main', clientId,
+        expectedRevision: 1, taskId: started.taskId,
+        providerConversationId: 'single-provider-conversation',
+      });
+    } else {
+      assert.equal(store.getSlot(project.projectId, 'main', clientId)
+        .providerConversationId, 'single-provider-conversation');
+    }
+    const initial = store.getFullTask(started.taskId, clientId).attempts[0]!;
+    assert.equal(initial.kind, 'initial');
+    assert.equal(initial.content, questions[i]);
+    store.beginDispatch(started.taskId, clientId, initial.attemptId);
+    store.acknowledgeAttempt({
+      taskId: started.taskId, clientId, attemptId: initial.attemptId,
+      externalTurnId: 'turn-' + i,
+    });
+    store.recordFinal({
+      taskId: started.taskId, clientId, attemptId: initial.attemptId,
+      externalTurnId: 'turn-' + i, resultId: 'final-' + i,
+      answerText: 'Answer to ' + questions[i], completeTask: true,
+    });
+    const done = await rpc<any>('task.get', {
+      clientId, taskId: started.taskId, view: 'result',
+    });
+    assert.equal(done.state, 'completed');
+    assert.equal(done.result.answerText, 'Answer to ' + questions[i]);
+    assert.equal(done.result.externalTurnId, 'turn-' + i);
+    assert.equal(store.getSlot(project.projectId, 'main', clientId)
+      .activeTaskId, null, 'terminal Task releases only the slot lease');
+    assert.equal((await rpc<any>('task.start', {
+      clientId, requestId, projectId: project.projectId,
+      expectedConversationRevision: revision - 1, prompt: questions[i],
+    })).taskId, started.taskId, 'idempotent replay still resolves the original Task');
+    const projectRead = await rpc<any>('project.open', {
+      clientId, requestId: 'reopen-multi-' + i,
+      projectKey: 'multi-main-reuse', displayName: 'Main reuse',
+      provider: 'chatgpt', surfaceIntent: 'chat',
+    });
+    assert.equal(projectRead.currentTaskId, null);
+    assert.equal(projectRead.conversationRevision, revision);
+  }
+  assert.equal(new Set(ids).size, questions.length);
+  for (let i = 0; i < ids.length; i++) {
+    assert.equal((await rpc<any>('task.get', {
+      clientId, taskId: ids[i], view: 'result',
+    })).result.answerText, 'Answer to ' + questions[i]);
+  }
+});

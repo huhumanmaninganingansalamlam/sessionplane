@@ -84,6 +84,22 @@ export interface DispatchEvidenceRecord {
   readonly textHash: string;
   readonly observedAt: string;
 }
+/** The unique first POST before the provider creates/binds its conversation. */
+export interface RootDispatchEvidenceRecord {
+  readonly sessionId: string;
+  readonly generation: number;
+  readonly pageKey: string;
+  readonly targetId: string;
+  readonly bindingEpoch: number;
+  readonly observationCount: number;
+  readonly ambiguous: boolean;
+  readonly messageId: string;
+  readonly parentMessageId: string;
+  readonly textHash: string;
+  readonly observedAt: string;
+  readonly requestConversationId: string | null;
+  readonly canonicalConversationId: string | null;
+}
 export interface DecisionRecord {
   readonly decisionId: string;
   readonly taskId: string;
@@ -738,6 +754,210 @@ export class TaskKernelRepository {
     });
   }
 
+  /** Unique observed POST before ChatGPT has provided a canonical conversation. */
+  recordRootPost(input: {
+    taskId: string; clientId: string; attemptId: string;
+    evidence: Omit<RootDispatchEvidenceRecord,
+      'canonicalConversationId' | 'observationCount' | 'ambiguous'>;
+  }): RootDispatchEvidenceRecord {
+    let conflict = false;
+    const recorded = this.#database.transaction(() => {
+      const task = this.#requireTask(input.taskId, input.clientId);
+      const attempt = this.#requireAttempt(input.attemptId, input.taskId);
+      const e = input.evidence;
+      if (attempt.kind !== 'initial' ||
+          !['dispatched', 'uncertain', 'acknowledged'].includes(attempt.state)) {
+        throw new Error('Root POST requires a previously dispatched initial');
+      }
+      for (const value of [e.pageKey, e.targetId, e.sessionId, e.messageId,
+        e.parentMessageId]) {
+        if (!value || Buffer.byteLength(value, 'utf8') > 512) {
+          throw new Error('Invalid root POST identity');
+        }
+      }
+      if (!Number.isSafeInteger(e.bindingEpoch) || e.bindingEpoch < 1 ||
+          !Number.isSafeInteger(e.generation) || e.generation < 1 ||
+          Number.isNaN(Date.parse(e.observedAt)) ||
+          (e.requestConversationId !== null &&
+            !/^[A-Za-z0-9_-]{1,160}$/.test(e.requestConversationId))) {
+        throw new Error('Invalid root POST epoch, timestamp or conversation');
+      }
+      const textHash = createHash('sha256').update(
+        attempt.content.replaceAll('\r\n', '\n')).digest('hex');
+      if (textHash !== e.textHash) throw new Error('Root POST exact content hash differs');
+      const old = this.getRootPost(input);
+      if (old) {
+        const same = old.sessionId === e.sessionId && old.generation === e.generation &&
+          old.pageKey === e.pageKey && old.targetId === e.targetId &&
+          old.bindingEpoch === e.bindingEpoch && old.messageId === e.messageId &&
+          old.parentMessageId === e.parentMessageId && old.textHash === e.textHash &&
+          old.observedAt === e.observedAt &&
+          old.requestConversationId === e.requestConversationId;
+        if (!same && old.canonicalConversationId === null && !old.ambiguous) {
+          this.#database.raw.prepare(
+            'UPDATE kernel_root_dispatch_evidence' +
+            ' SET observation_count=observation_count+1,ambiguous=1' +
+            ' WHERE attempt_id=? AND canonical_conversation_id IS NULL',
+          ).run(input.attemptId);
+        }
+        if (!same || old.ambiguous) {
+          conflict = true;
+          return this.getRootPost(input)!;
+        }
+        return old;
+      }
+      const slot = this.#requireSlot(task.projectId, task.slotId);
+      const binding = this.getBindingAtRevision(task.projectId, task.slotId,
+        task.slotRevision, input.clientId);
+      if (attempt.state !== 'dispatched' ||
+          slot.activeTaskId !== task.taskId || slot.revision !== task.slotRevision ||
+          slot.providerConversationId !== null || binding.providerConversationId !== null) {
+        throw new Error('Root POST requires an exact active unbound dispatched initial');
+      }
+      this.#database.raw.prepare(
+        'INSERT INTO kernel_root_dispatch_evidence' +
+        '(attempt_id,task_id,provider_key,page_key,target_id,session_id,generation,' +
+        'binding_epoch,observation_count,ambiguous,message_id,parent_message_id,' +
+        'text_hash,observed_at,request_conversation_id,canonical_conversation_id)' +
+        ' VALUES(?,?,?,?,?,?,?,?,1,0,?,?,?,?,?,NULL)',
+      ).run(input.attemptId, task.taskId, binding.providerKey,
+        e.pageKey, e.targetId, e.sessionId, e.generation, e.bindingEpoch,
+        e.messageId, e.parentMessageId, e.textHash, e.observedAt, e.requestConversationId);
+      this.#appendEvent(task, { type: 'attempt.root_post_recorded', attemptId: input.attemptId });
+      return this.getRootPost(input)!;
+    });
+    if (conflict) throw new Error('Conflicting root POST evidence');
+    return recorded;
+  }
+
+  /** Read-only root POST identity across Core restart; never sends or creates a turn. */
+  getRootPost(input: {
+    taskId: string; clientId: string; attemptId: string;
+  }): RootDispatchEvidenceRecord | null {
+    const task = this.#requireTask(input.taskId, input.clientId);
+    this.#requireAttempt(input.attemptId, input.taskId);
+    const row = this.#database.raw.prepare(
+      'SELECT provider_key AS providerKey,page_key AS pageKey,target_id AS targetId,' +
+      'session_id AS sessionId,generation,binding_epoch AS bindingEpoch,' +
+      'observation_count AS observationCount,ambiguous,' +
+      'message_id AS messageId,parent_message_id AS parentMessageId,' +
+      'text_hash AS textHash,observed_at AS observedAt,' +
+      'request_conversation_id AS requestConversationId,' +
+      'canonical_conversation_id AS canonicalConversationId' +
+      ' FROM kernel_root_dispatch_evidence WHERE attempt_id=? AND task_id=?',
+    ).get(input.attemptId, input.taskId) as Row | undefined;
+    if (!row) return null;
+    const binding = this.getBindingAtRevision(task.projectId, task.slotId,
+      task.slotRevision, input.clientId);
+    if (binding.providerKey !== String(row.providerKey)) {
+      throw new Error('Root POST provider conflict');
+    }
+    return {
+      sessionId: String(row.sessionId), generation: Number(row.generation),
+      pageKey: String(row.pageKey), targetId: String(row.targetId),
+      bindingEpoch: Number(row.bindingEpoch),
+      observationCount: Number(row.observationCount),
+      ambiguous: Number(row.ambiguous) === 1,
+      messageId: String(row.messageId), parentMessageId: String(row.parentMessageId),
+      textHash: String(row.textHash), observedAt: String(row.observedAt),
+      requestConversationId: row.requestConversationId === null
+        ? null : String(row.requestConversationId),
+      canonicalConversationId: row.canonicalConversationId === null
+        ? null : String(row.canonicalConversationId),
+    };
+  }
+
+  /** Promote *canonical server verified* root identity atomically to a
+   * normal exact dispatch, Task/session binding and final user ACK.
+   */
+  promoteRootPost(input: {
+    taskId: string; clientId: string; attemptId: string;
+    conversationId: string; messageId: string; externalTurnId: string;
+  }): AttemptRecord {
+    if (!/^[A-Za-z0-9_-]{1,160}$/.test(input.conversationId) ||
+        !input.messageId || !input.externalTurnId ||
+        input.messageId.length > 512 || input.externalTurnId.length > 512) {
+      throw new Error('Invalid canonical root ACK identity');
+    }
+    return this.#database.transaction(() => {
+      const task = this.#requireTask(input.taskId, input.clientId);
+      const attempt = this.#requireAttempt(input.attemptId, input.taskId);
+      const root = this.getRootPost(input);
+      if (!root || root.messageId !== input.messageId) {
+        throw new Error('Canonical root ACK does not match the recorded POST');
+      }
+      if (root.ambiguous || root.observationCount !== 1) {
+        throw new Error('Canonical root ACK requires one unambiguous observed POST');
+      }
+      if (root.requestConversationId !== null &&
+          root.requestConversationId !== input.conversationId) {
+        throw new Error('Root request used a different conversation');
+      }
+      if (root.canonicalConversationId !== null) {
+        if (root.canonicalConversationId !== input.conversationId ||
+            attempt.externalTurnId !== input.externalTurnId ||
+            attempt.state !== 'acknowledged') {
+          throw new Error('Conflicting prior root canonical ACK');
+        }
+        return attempt;
+      }
+      if (attempt.kind !== 'initial' ||
+          !['dispatched', 'uncertain'].includes(attempt.state)) {
+        throw new Error('Canonical root ACK requires an attempted initial');
+      }
+      const slot = this.#requireSlot(task.projectId, task.slotId);
+      const binding = this.getBindingAtRevision(task.projectId, task.slotId,
+        task.slotRevision, input.clientId);
+      if (slot.revision !== task.slotRevision || slot.activeTaskId !== task.taskId ||
+          slot.providerConversationId !== null || binding.providerConversationId !== null) {
+        throw new Error('Root Task lost its unbound conversation lease');
+      }
+      const at = this.#now();
+      const slotChanged = this.#database.raw.prepare(
+        'UPDATE kernel_slots SET provider_conversation_id=?,updated_at=?' +
+        ' WHERE project_id=? AND slot_id=? AND revision=?' +
+        ' AND active_task_id=? AND provider_conversation_id IS NULL',
+      ).run(input.conversationId, at, task.projectId, task.slotId,
+        task.slotRevision, task.taskId);
+      const historyChanged = this.#database.raw.prepare(
+        'UPDATE kernel_slot_bindings SET provider_conversation_id=?,observed_at=?' +
+        ' WHERE project_id=? AND slot_id=? AND revision=?' +
+        ' AND provider_conversation_id IS NULL',
+      ).run(input.conversationId, at, task.projectId, task.slotId, task.slotRevision);
+      if (slotChanged.changes !== 1 || historyChanged.changes !== 1) {
+        throw new Error('Concurrent canonical root conversation binding changed');
+      }
+      this.#database.raw.prepare(
+        'INSERT INTO kernel_dispatch_evidence' +
+        '(attempt_id,task_id,provider_key,provider_conversation_id,message_id,' +
+        'parent_message_id,text_hash,observed_at) VALUES(?,?,?,?,?,?,?,?)',
+      ).run(input.attemptId, task.taskId, binding.providerKey,
+        input.conversationId, root.messageId, root.parentMessageId,
+        root.textHash, root.observedAt);
+      this.#database.raw.prepare(
+        'INSERT INTO kernel_attempt_session_bindings' +
+        '(attempt_id,task_id,session_id,generation,provider_conversation_id,bound_at)' +
+        ' VALUES(?,?,?,?,?,?)',
+      ).run(input.attemptId, task.taskId, root.sessionId, root.generation,
+        input.conversationId, at);
+      this.#database.raw.prepare(
+        'UPDATE kernel_root_dispatch_evidence SET canonical_conversation_id=?' +
+        ' WHERE attempt_id=? AND canonical_conversation_id IS NULL',
+      ).run(input.conversationId, input.attemptId);
+      const afterEvidence = this.#appendEvent(task, {
+        type: 'attempt.dispatch_evidence_recorded', attemptId: input.attemptId,
+      });
+      this.#appendEvent(afterEvidence, {
+        type: 'attempt.acknowledged', attemptId: input.attemptId, kind: attempt.kind,
+      });
+      this.#database.raw.prepare(
+        "UPDATE kernel_attempts SET state='acknowledged'," +
+        'external_turn_id=?,acknowledged_at=? WHERE attempt_id=?',
+      ).run(input.externalTurnId, at, input.attemptId);
+      return this.#requireAttempt(input.attemptId, input.taskId);
+    });
+  }
+
   /** Exact lookup across Core restart; never authorizes a new POST. */
   getDispatchEvidence(input: {
     taskId: string; clientId: string; attemptId: string;
@@ -1187,6 +1407,64 @@ export class TaskKernelRepository {
         ORDER BY t.task_id LIMIT ?`,
     ).all(afterTaskId, afterTaskId, limit) as Array<{
       taskId: string; clientId: string; attemptId: string; providerKey: string;
+    }>;
+  }
+
+  /** Prepared root initials remain unbound until their one exact POST is observed. */
+  listPendingPublicRootInitials(limit = 16): readonly {
+    taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
+  }[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error('Invalid public root initial scan limit');
+    }
+    return this.#database.raw.prepare(
+      `SELECT t.task_id AS taskId,t.client_id AS clientId,
+          a.attempt_id AS attemptId,i.model_intent AS modelIntent
+        FROM kernel_tasks t
+        JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+        JOIN kernel_attempts a ON a.task_id=t.task_id
+        JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
+          AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
+        LEFT JOIN kernel_public_project_intents i ON i.project_id=t.project_id
+        LEFT JOIN kernel_root_dispatch_evidence r ON r.attempt_id=a.attempt_id
+        WHERE t.cancel_requested=0 AND t.state='working'
+          AND t.pending_decision_id IS NULL AND s.provider_conversation_id IS NULL
+          AND a.kind='initial' AND a.state='planned' AND r.attempt_id IS NULL
+        ORDER BY t.created_at,t.task_id LIMIT ?`,
+    ).all(limit) as Array<{
+      taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
+    }>;
+  }
+
+  /** Root POSTs are reconciled read-only until canonical ACK, then rebound
+   * idempotently to the retained page/session generation after a Core restart.
+   */
+  listPendingPublicRootReconciliations(limit = 32): readonly {
+    taskId: string; clientId: string; attemptId: string;
+    canonicalConversationId: string | null;
+  }[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error('Invalid public root reconciliation scan limit');
+    }
+    return this.#database.raw.prepare(
+      `SELECT t.task_id AS taskId,t.client_id AS clientId,
+          a.attempt_id AS attemptId,
+          r.canonical_conversation_id AS canonicalConversationId
+        FROM kernel_tasks t
+        JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+        JOIN kernel_attempts a ON a.task_id=t.task_id
+        JOIN kernel_root_dispatch_evidence r ON r.attempt_id=a.attempt_id
+        JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
+          AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
+        WHERE t.state IN ('working','uncertain','canceled') AND a.kind='initial'
+          AND ((r.canonical_conversation_id IS NULL
+                AND a.state IN ('dispatched','uncertain'))
+            OR (r.canonical_conversation_id IS NOT NULL
+                AND a.state='acknowledged'))
+        ORDER BY t.updated_at,t.task_id LIMIT ?`,
+    ).all(limit) as Array<{
+      taskId: string; clientId: string; attemptId: string;
+      canonicalConversationId: string | null;
     }>;
   }
 

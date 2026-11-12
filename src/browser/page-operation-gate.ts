@@ -34,6 +34,11 @@ export class PageOperationGate {
     mode: PageOperationMode,
     operation: () => Promise<T>,
     timeoutMs: number,
+    /** A mutation may intentionally consume its exact lease by producing a
+     * separately verified successor identity. The callback is evaluated only
+     * after the operation and only when the original lease is no longer exact.
+     */
+    acceptMutationLeaseChange?: () => boolean,
   ): Promise<PageOperationOutcome<T>> {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
       throw new Error('Invalid page operation deadline');
@@ -61,9 +66,16 @@ export class PageOperationGate {
           if (!this.#isExactLease(lease)) return { kind: 'stale' } as const;
           const value = await operation();
           if (!this.#isExactLease(lease)) {
-            return mode === 'mutate'
-              ? { kind: 'uncertain', reason: 'lease_changed_during_mutation' } as const
-              : { kind: 'stale' } as const;
+            let acceptedTransition = false;
+            if (mode === 'mutate' && acceptMutationLeaseChange) {
+              try { acceptedTransition = acceptMutationLeaseChange(); }
+              catch { acceptedTransition = false; }
+            }
+            if (!acceptedTransition) {
+              return mode === 'mutate'
+                ? { kind: 'uncertain', reason: 'lease_changed_during_mutation' } as const
+                : { kind: 'stale' } as const;
+            }
           }
           return { kind: 'ok', value } as const;
         })

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -638,4 +639,120 @@ test('consecutive identical FINAL deferrals remain one durable event across Core
       reason, 'final:attempt-1-initial:unavailable:backend-http-429',
     ]);
   assert.equal(env.store.getTask('task-1', 'alice').state, 'working');
+});
+
+test('root POST provenance survives restart and promotes only matching canonical ACK', t => {
+  const env = fixture(t);
+  seed(env.store);
+  // Session generation is owned by the same project. The production public
+  // admission path creates these through TeamDirectory before first POST.
+  env.database.raw.prepare(
+    'INSERT INTO teams(team_id,owner_client_id,team_state,created_at,updated_at)' +
+    ' VALUES(?,?,?,?,?)',
+  ).run('project-1', 'alice', 'active', '2026-11-08T00:00:00.000Z',
+    '2026-11-08T00:00:00.000Z');
+  env.database.raw.prepare(
+    'INSERT INTO team_roles(role_id,team_id,role_key,role_type,role_state,created_at)' +
+    ' VALUES(?,?,?,?,?,?)',
+  ).run('role-1', 'project-1', 'main', 'actor', 'active',
+    '2026-11-08T00:00:00.000Z');
+  env.database.raw.prepare(
+    'INSERT INTO sessions(session_id,team_id,role_id,provider,session_state,' +
+    'provider_state,observation_transport,current_generation,created_at,updated_at)' +
+    ' VALUES(?,?,?,?,?,?,?,?,?,?)',
+  ).run('session-1', 'project-1', 'role-1', 'chatgpt-fixture',
+    'ready', 'idle', 'dom', 1,
+    '2026-11-08T00:00:00.000Z', '2026-11-08T00:00:00.000Z');
+  start(env.store, 1);
+  initial(env.store, 1);
+  env.store.beginDispatch('task-1', 'alice', 'attempt-1-initial');
+  const root = {
+    pageKey: 'root-page-1', targetId: 'target-1', sessionId: 'session-1',
+    generation: 1, bindingEpoch: 3,
+    messageId: 'root-user-1', parentMessageId: 'root-parent',
+    textHash: createHash('sha256').update('original question 1').digest('hex'),
+    observedAt: '2026-11-08T00:00:00.000Z', requestConversationId: null,
+  };
+  const query = { taskId: 'task-1', clientId: 'alice', attemptId: 'attempt-1-initial' };
+  const stored = env.store.recordRootPost({ ...query, evidence: root });
+  assert.deepEqual(stored, { ...root, observationCount: 1, ambiguous: false,
+    canonicalConversationId: null });
+  assert.deepEqual(env.store.recordRootPost({ ...query, evidence: root }), stored);
+  assert.throws(() => env.store.recordRootPost({
+    ...query, clientId: 'mallory', evidence: root,
+  }), /access denied/);
+  assert.equal(env.store.getSlot('project-1', 'main', 'alice').providerConversationId, null);
+  assert.equal(env.store.getFullTask('task-1', 'alice').attempts[0]!.state, 'dispatched');
+  assert.equal(env.store.getFullTask('task-1', 'alice').events.filter(event =>
+    event.event.type === 'attempt.root_post_recorded').length, 1);
+  env.reopen();
+  assert.deepEqual(env.store.getRootPost(query), stored);
+  assert.throws(() => env.store.promoteRootPost({
+    ...query, conversationId: 'canonical-conversation', messageId: 'different-message',
+    externalTurnId: 'canonical-turn',
+  }), /does not match/);
+  assert.equal(env.store.getSlot('project-1', 'main', 'alice').providerConversationId, null);
+  env.store.markUncertain('task-1', 'alice', 'attempt-1-initial',
+    'core_crashed_after_root_request');
+  const promoted = env.store.promoteRootPost({
+    ...query, conversationId: 'canonical-conversation',
+    messageId: 'root-user-1', externalTurnId: 'canonical-turn',
+  });
+  assert.equal(promoted.state, 'acknowledged');
+  assert.equal(promoted.externalTurnId, 'canonical-turn');
+  assert.equal(env.store.getRootPost(query)?.canonicalConversationId, 'canonical-conversation');
+  assert.equal(env.store.getSlot('project-1', 'main', 'alice').providerConversationId,
+    'canonical-conversation');
+  assert.equal(env.store.getDispatchEvidence(query)?.conversationId, 'canonical-conversation');
+  assert.equal(env.store.getDispatchEvidence(query)?.messageId, 'root-user-1');
+  assert.equal(env.store.getAttemptSessionBinding(query)?.generation, 1);
+  assert.equal(env.store.getAttemptSessionBinding(query)?.sessionId, 'session-1');
+  assert.equal(env.store.getTask('task-1', 'alice').state, 'working');
+  assert.deepEqual(env.store.promoteRootPost({
+    ...query, conversationId: 'canonical-conversation',
+    messageId: 'root-user-1', externalTurnId: 'canonical-turn',
+  }), promoted, 'canonical ACK replay is read-only and idempotent');
+  assert.throws(() => env.store.recordRootPost({
+    ...query, evidence: { ...root, messageId: 'foreign-user' },
+  }), /Conflicting root POST/);
+  assert.throws(() => env.store.promoteRootPost({
+    ...query, conversationId: 'another-conversation',
+    messageId: 'root-user-1', externalTurnId: 'canonical-turn',
+  }), /conflict|different/i);
+  const full = env.store.getFullTask('task-1', 'alice');
+  assert.equal(full.events.filter(event =>
+    event.event.type === 'attempt.dispatch_evidence_recorded').length, 1);
+  assert.equal(full.events.filter(event =>
+    event.event.type === 'attempt.acknowledged').length, 1);
+});
+
+test('competing root POST evidence is durable ambiguity and can never promote', t => {
+  const env = fixture(t);
+  seed(env.store);
+  start(env.store, 1);
+  initial(env.store, 1);
+  env.store.beginDispatch('task-1', 'alice', 'attempt-1-initial');
+  const query = { taskId: 'task-1', clientId: 'alice', attemptId: 'attempt-1-initial' };
+  const base = {
+    pageKey: 'root-page-1', targetId: 'target-1', sessionId: 'session-1',
+    generation: 1, bindingEpoch: 3,
+    messageId: 'root-user-1', parentMessageId: 'root-parent',
+    textHash: createHash('sha256').update('original question 1').digest('hex'),
+    observedAt: '2026-11-08T00:00:00.000Z', requestConversationId: null,
+  };
+  env.store.recordRootPost({ ...query, evidence: base });
+  assert.throws(() => env.store.recordRootPost({
+    ...query, evidence: { ...base, messageId: 'root-user-2' },
+  }), /Conflicting root POST/);
+  assert.deepEqual(env.store.getRootPost(query), {
+    ...base, observationCount: 2, ambiguous: true, canonicalConversationId: null,
+  });
+  env.reopen();
+  assert.equal(env.store.getRootPost(query)?.ambiguous, true);
+  assert.throws(() => env.store.promoteRootPost({
+    ...query, conversationId: 'canonical-conversation',
+    messageId: 'root-user-1', externalTurnId: 'canonical-turn',
+  }), /unambiguous observed POST/);
+  assert.equal(env.store.getSlot('project-1', 'main', 'alice').providerConversationId, null);
+  assert.equal(env.store.getFullTask('task-1', 'alice').attempts[0]!.state, 'dispatched');
 });

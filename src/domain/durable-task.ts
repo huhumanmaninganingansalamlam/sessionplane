@@ -27,6 +27,7 @@ export type TaskEvent =
   | { readonly type: 'attempt.planned'; readonly attemptId: string; readonly kind: AttemptKind }
   | { readonly type: 'attempt.dispatched'; readonly attemptId: string; readonly kind: AttemptKind }
   | { readonly type: 'attempt.dispatch_evidence_recorded'; readonly attemptId: string }
+  | { readonly type: 'attempt.root_post_recorded'; readonly attemptId: string }
   | { readonly type: 'attempt.acknowledged'; readonly attemptId: string; readonly kind: AttemptKind }
   | { readonly type: 'attempt.uncertain'; readonly attemptId: string; readonly reason: string }
   | { readonly type: 'attempt.failed_before_dispatch'; readonly attemptId: string; readonly reason: string }
@@ -113,6 +114,7 @@ export function reduceTaskProjection(
     case 'decision.action_consumed':
     case 'decision.outcome_recorded':
     case 'attempt.dispatch_evidence_recorded':
+    case 'attempt.root_post_recorded':
     case 'observation.deferred':
       return current;
   }

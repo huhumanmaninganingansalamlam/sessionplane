@@ -30,6 +30,8 @@ export type SendOutcome =
   | { readonly kind: 'uncertain'; readonly reason: string };
 export type RecoveryOutcome =
   | { readonly kind: 'verified_ack'; readonly externalTurnId: string }
+  | { readonly kind: 'verified_root_ack'; readonly conversationId: string;
+      readonly messageId: string; readonly externalTurnId: string }
   | { readonly kind: 'pending'; readonly reason: string }
   | { readonly kind: 'unavailable'; readonly reason: string };
 export type FinalObservation =
@@ -125,7 +127,14 @@ export class DurableTaskKernel {
     const outcome = await provider.recoverAck({
       ...intent, externalTurnId: attempt.externalTurnId,
     });
-    if (outcome.kind === 'verified_ack') {
+    if (outcome.kind === 'verified_root_ack') {
+      this.#storage.promoteRootPost({
+        taskId, clientId, attemptId,
+        conversationId: outcome.conversationId,
+        messageId: outcome.messageId,
+        externalTurnId: outcome.externalTurnId,
+      });
+    } else if (outcome.kind === 'verified_ack') {
       this.#storage.acknowledgeAttempt({
         taskId, clientId, attemptId, externalTurnId: outcome.externalTurnId,
       });

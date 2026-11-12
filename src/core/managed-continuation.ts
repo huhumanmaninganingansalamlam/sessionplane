@@ -37,6 +37,9 @@ export class ManagedContinuationService {
   readonly #bindInitialAttempt: ((input: {
     taskId: string; clientId: string; attemptId: string;
   }) => void | Promise<void>) | undefined;
+  readonly #bindRootAttempt: ((input: {
+    taskId: string; clientId: string; attemptId: string;
+  }) => void | Promise<void>) | undefined;
   readonly #inspectModelIntent: ((input: {
     taskId: string; clientId: string; attemptId: string; modelIntent: string;
   }) => boolean | Promise<boolean>) | undefined;
@@ -56,6 +59,9 @@ export class ManagedContinuationService {
     bindInitialAttempt?: (input: {
       taskId: string; clientId: string; attemptId: string;
     }) => void | Promise<void>;
+    bindRootAttempt?: (input: {
+      taskId: string; clientId: string; attemptId: string;
+    }) => void | Promise<void>;
     inspectModelIntent?: (input: {
       taskId: string; clientId: string; attemptId: string; modelIntent: string;
     }) => boolean | Promise<boolean>;
@@ -67,6 +73,7 @@ export class ManagedContinuationService {
     this.#canRun = input.canRun ?? (() => true);
     this.#bindAttempt = input.bindAttempt ?? (() => undefined);
     this.#bindInitialAttempt = input.bindInitialAttempt;
+    this.#bindRootAttempt = input.bindRootAttempt;
     this.#inspectModelIntent = input.inspectModelIntent;
     this.#preparePublicTask = input.preparePublicTask;
   }
@@ -149,6 +156,29 @@ export class ManagedContinuationService {
 
   async #run(): Promise<ContinuationReviewReport> {
     const now = this.#now().toISOString();
+    // A precisely-owned new-chat root may consume only its one journaled
+    // initial attempt. The POST remains uncertain until canonical recovery.
+    for (const planned of this.#repository.listPendingPublicRootInitials(8)) {
+      try {
+        if (planned.modelIntent !== null) {
+          const verified = await this.#inspectModelIntent?.({
+            taskId: planned.taskId, clientId: planned.clientId,
+            attemptId: planned.attemptId, modelIntent: planned.modelIntent,
+          });
+          if (verified !== true) {
+            this.#repository.recordObservationDeferred(planned.taskId, planned.clientId,
+              'public-root-initial-model-intent-unverified');
+            continue;
+          }
+        }
+        await this.#kernel.dispatch(planned.taskId, planned.clientId, planned.attemptId);
+      } catch {
+        try {
+          this.#repository.recordObservationDeferred(planned.taskId, planned.clientId,
+            'public-root-initial-exact-preparation-unavailable');
+        } catch { /* Another Task may independently become terminal. */ }
+      }
+    }
     // Fresh public initial work requires a verified, retained conversation.
     // Preparation still owns missing conversations; never fabricate one or
     // spend the initial attempt merely because a client asked to start.
@@ -175,6 +205,34 @@ export class ManagedContinuationService {
           this.#repository.recordObservationDeferred(planned.taskId, planned.clientId,
             'public-initial-exact-preparation-unavailable');
         } catch { /* Another Task may independently become terminal. */ }
+      }
+    }
+    // A root POST is never replayed. The retained target contributes only a
+    // candidate conversation ID; authenticated canonical GET proves the ACK.
+    // After promotion, restore exact page/session ownership idempotently.
+    for (const pending of this.#repository.listPendingPublicRootReconciliations(16)) {
+      try {
+        let full = this.#repository.getFullTask(pending.taskId, pending.clientId);
+        let attempt = full.attempts.find(row => row.attemptId === pending.attemptId);
+        let root = this.#repository.getRootPost(pending);
+        if (!attempt || !root) continue;
+        if (root.canonicalConversationId === null &&
+            (attempt.state === 'dispatched' || attempt.state === 'uncertain')) {
+          await this.#kernel.recoverAck(
+            pending.taskId, pending.clientId, pending.attemptId);
+          full = this.#repository.getFullTask(pending.taskId, pending.clientId);
+          attempt = full.attempts.find(row => row.attemptId === pending.attemptId);
+          root = this.#repository.getRootPost(pending);
+        }
+        if (attempt?.state === 'acknowledged' &&
+            root?.canonicalConversationId !== null) {
+          await this.#bindRootAttempt?.(pending);
+        }
+      } catch {
+        try {
+          this.#repository.recordObservationDeferred(pending.taskId, pending.clientId,
+            'public-root-canonical-reconciliation-unavailable');
+        } catch { /* Read-only recovery remains pending for the next Core tick. */ }
       }
     }
     // An approved public Task is admitted before any provider send. Once its
