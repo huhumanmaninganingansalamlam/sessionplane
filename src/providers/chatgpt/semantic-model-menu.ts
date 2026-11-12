@@ -265,6 +265,20 @@ async function clickExactModelControl(
   } finally { await handle.dispose(); }
 }
 
+// Report only the bounded failing phase and error type; never log provider
+// text, selection content, DOM or page URL. A consumed action is still uncertain.
+async function checkedModelStage<T>(phase: 'opener_click' | 'linked_root_wait',
+  operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    const name = error instanceof Error ? error.name.replace(/[^A-Za-z]/g, '').slice(0, 32)
+      : 'unknown';
+    console.error('[SessionPlane model action] phase=' + phase + ' class=' + name);
+    throw error;
+  }
+}
+
 export async function openExactChatGptModelMenu(
   page: Page, expectedHash: string, beforeMutation: () => void | Promise<void>,
 ): Promise<void> {
@@ -285,9 +299,11 @@ export async function openExactChatGptModelMenu(
       ? page.locator(OPENER + '[id="' + current.openerId + '"]')
       : page.locator(OPENER).nth(current.openerIndex);
     if (await opener.count() !== 1) throw new Error('Exact model opener no longer unique');
-    await clickExactModelControl(page, current, opener, beforeMutation, current.openerId);
+    await checkedModelStage('opener_click', () =>
+      clickExactModelControl(page, current, opener, beforeMutation, current.openerId));
     if (current.strategy === 'composer-radix') {
-      await waitForComposerMenuView(page, current.openerId, current.menuId, 'root');
+      await checkedModelStage('linked_root_wait', () =>
+        waitForComposerMenuView(page, current.openerId, current.menuId, 'root'));
     }
     const after = await inspectSemanticChatGptModelMenu(page);
     if (!after || after.strategy !== current.strategy ||

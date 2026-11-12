@@ -20,7 +20,7 @@ const MANIFEST: SemanticCapabilityManifest = {
   supports: ['conversation', 'question', 'permission', 'model_choice'],
 };
 
-type Mode = 'question' | 'free_text' | 'model' | 'model-unready' | 'permission' |
+type Mode = 'question' | 'free_text' | 'model' | 'model-unready' | 'page_race' | 'permission' |
   'human' | 'oversized' | 'none';
 
 class FakeSemanticAdapter implements SemanticProviderAdapter {
@@ -40,7 +40,8 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
     this.observed++;
     const actionRef = 'action-' + this.observed;
     this.currentActionRef = actionRef;
-    const blocker = this.mode === 'permission' ? 'provider_permission'
+    const blocker = this.mode === 'page_race' ? 'unsupported'
+      : this.mode === 'permission' ? 'provider_permission'
       : this.mode === 'human' ? 'human_verification'
         : this.mode === 'none' || this.mode === 'model' ||
           this.mode === 'model-unready' ? 'none'
@@ -65,7 +66,9 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
       snapshotId: 'snapshot-' + this.observed,
       observedAt: new Date().toISOString(),
       blocker, progress: 'idle',
-      reason: blocker === 'none' ? null : this.mode === 'human'
+      reason: this.mode === 'page_race'
+        ? 'semantic-observation-superseded-by-page-operation'
+        : blocker === 'none' ? null : this.mode === 'human'
         ? 'human-verification-required' : this.mode === 'permission'
           ? 'tool-arguments-unverified' : 'provider-question-requires-decision',
       turn: { submittedUserFound: true, laterUserFound: false,
@@ -304,6 +307,58 @@ test('public model reinspection recovers an unready root exactly once, never gra
     ...refreshInput, decisionId: refreshed.packet!.decisionId,
   }), /not refreshable/, 'A still-valid actionable model choice must not be revoked');
   assert.equal(adapter.clicks, 0);
+});
+
+test('transient unsubmitted Pro root page race can be refreshed read-only, not clicked', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'sessionplane-model-race-'));
+  const db = SessionPlaneDatabase.open(join(directory, 'state.sqlite'));
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  const store = new TaskKernelRepository(db);
+  store.openProject({ projectId: 'project-race', projectKey: 'root-race',
+    displayName: 'Race', clientId: 'alice' });
+  store.openSlot({ projectId: 'project-race', slotId: 'main',
+    roleKey: 'Main', providerKey: 'fixture-provider', clientId: 'alice' });
+  store.startTask({ taskId: 'task-race', projectId: 'project-race', slotId: 'main',
+    expectedSlotRevision: 1, clientId: 'alice', requestId: 'root-1', prompt: 'Only once' });
+  store.planAttempt({ taskId: 'task-race', clientId: 'alice',
+    attemptId: 'attempt-race', kind: 'initial', turnKey: 'root', content: 'Only once' });
+  const context: SemanticTaskContext = {
+    taskId: 'task-race', projectId: 'project-race', slotId: 'main', slotRevision: 1,
+    providerConversationId: null, submittedUserMessageId: null,
+    submittedUserTurnId: null, requiredModel: 'Pro',
+    pageLease: { projectId: 'project-race', slotId: 'main', slotRevision: 1,
+      taskId: 'task-race', pageKey: 'isolated-root', targetId: 'single-target',
+      bindingEpoch: 1 },
+  };
+  const adapter = new FakeSemanticAdapter(store);
+  adapter.mode = 'page_race';
+  const gateway = new SemanticDecisionGateway({
+    repository: store, providers: new SemanticProviderRegistry([adapter]),
+    resolveContext: () => context,
+  });
+  const first = (await gateway.inspect({ taskId: 'task-race', clientId: 'alice',
+    attemptId: 'attempt-race', modelChoice: true, modelIntent: 'Pro' }))!;
+  assert.equal(first.kind, 'adapter_unsupported');
+  assert.equal(first.reason, 'semantic-observation-superseded-by-page-operation');
+  assert.deepEqual(first.options, []);
+  adapter.mode = 'model';
+  const request = {
+    taskId: 'task-race', clientId: 'alice',
+    decisionId: first.decisionId, requestId: 'read-only-reobserve-1',
+  };
+  const refreshed = await gateway.refreshCurrent(request);
+  assert.equal(refreshed.kind, 'refresh_required');
+  if (refreshed.kind !== 'refresh_required') throw new Error('Missing refreshed packet');
+  assert.equal(refreshed.packet?.kind, 'model_choice');
+  assert.equal(refreshed.packet?.requestedModel, 'Pro');
+  assert.equal(refreshed.packet?.options[0]?.purpose, 'open_model_chooser');
+  assert.equal(adapter.clicks, 0, 'A race refresh must not mutate the provider UI');
+  const previousObserved = adapter.observed;
+  assert.equal((await gateway.refreshCurrent(request)).kind, 'refresh_required');
+  assert.equal(adapter.observed, previousObserved);
+  await assert.rejects(gateway.refreshCurrent({ ...request, requestId: 'different-id' }),
+    /different request/);
+  assert.equal(store.getFullTask('task-race', 'alice').attempts[0]?.state, 'planned');
 });
 
 test('bounded free-text and oversized evidence never broaden a provider action', async t => {

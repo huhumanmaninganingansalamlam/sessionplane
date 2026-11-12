@@ -366,6 +366,45 @@ test('cold root chooser hydrates after one read-only refresh, then exact Pro act
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
+test('L3 read-only refresh of a superseded root observation never repeats Task or POST', async () => {
+  const f = makeFixture();
+  const refreshes: any[] = [];
+  const call = async (method: string, params: any) => {
+    if (method === 'task.decide') {
+      assert.equal(params.refresh, true);
+      assert.equal(params.actionRef, undefined);
+      refreshes.push(params);
+      return { kind: 'refresh_required', packet: null };
+    }
+    const baseline = await f.call(method, params);
+    if (method === 'task.get' && !params.view &&
+        f.records.size === 1 && refreshes.length === 0) {
+      return {
+        ...baseline, state: 'agent_input_required',
+        revision: 4, submission: { attempted: false, acknowledged: false },
+        decision: {
+          decisionId: '00000000-0000-4000-8000-000000000131',
+          kind: 'adapter_unsupported',
+          reason: 'semantic-observation-superseded-by-page-operation',
+          humanOnly: false, requestedModel: null, options: [],
+        },
+      };
+    }
+    return baseline;
+  };
+  try {
+    await runLiveTaskAcceptance(options(f.dir, call, 'start'));
+    const completed = await runLiveTaskAcceptance({
+      ...options(f.dir, call, 'resume'), maxWaitMs: 1500,
+    });
+    assert.equal(completed.status, 'three_turns_canonical_final_verified');
+    assert.equal(refreshes.length, 1);
+    assert.equal(refreshes[0].requestId,
+      'l3-refresh-00000000-0000-4000-8000-000000000131');
+    assert.equal(f.calls.filter(x => x.method === 'task.start').length, 3);
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test('a human-only permission or unrelated decision is never auto-executed by the L3 runner', async () => {
   const f = makeFixture();
   let attempted = 0;

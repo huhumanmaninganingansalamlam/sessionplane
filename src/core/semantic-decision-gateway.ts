@@ -342,7 +342,8 @@ export class SemanticDecisionGateway {
     if (original.attemptId !== input.attemptId) {
       throw new Error('Decision refresh belongs to another exact attempt');
     }
-    const requestedModel = original.packet.requestedModel;
+    const requestedModel = original.packet.requestedModel ??
+      (input.modelChoice === true ? original.context.requiredModel ?? null : null);
     this.#repository.resolveDecision({
       taskId: input.taskId, clientId: input.clientId, decisionId: input.decisionId,
       resolutionJson: JSON.stringify({ kind: 'read_only_refresh',
@@ -366,10 +367,23 @@ export class SemanticDecisionGateway {
     const row = full.decisions.find(decision => decision.decisionId === input.decisionId);
     if (!row) throw new SessionPlaneDomainError('stale_decision', 'Unknown decision identity');
     const original = storedContext(row.contextJson);
-    if (!original.attemptId ||
-        !full.attempts.some(attempt => attempt.attemptId === original.attemptId)) {
+    const originalAttempt = full.attempts.find(
+      attempt => attempt.attemptId === original.attemptId);
+    if (!original.attemptId || !originalAttempt) {
       throw new SessionPlaneDomainError('stale_decision', 'Decision lost its exact attempt');
     }
+    // The only unsupported packet allowed a public read-only refresh is the
+    // exact unsubmitted Pro-root observation raced by a page operation.
+    const transientModelRace =
+      original.packet.kind === 'adapter_unsupported' &&
+      original.packet.reason === 'semantic-observation-superseded-by-page-operation' &&
+      original.packet.options.length === 0 && !original.packet.humanOnly &&
+      original.context.requiredModel === 'Pro' &&
+      original.context.providerConversationId === null &&
+      original.context.submittedUserMessageId === null &&
+      original.context.submittedUserTurnId === null &&
+      original.context.pageLease !== null &&
+      originalAttempt.kind === 'initial' && originalAttempt.state === 'planned';
     const receipt = row.resolutionJson === null ? null
       : JSON.parse(row.resolutionJson) as Record<string, unknown>;
     if (row.status === 'resolved') {
@@ -378,23 +392,25 @@ export class SemanticDecisionGateway {
       }
       // A crash after the durable receipt but before reinspection cannot strand
       // this Task. A replay can only observe, never perform a provider action.
-      const originalAttempt = full.attempts.find(
-        attempt => attempt.attemptId === original.attemptId);
       const next = this.get(input.taskId, input.clientId) ??
         (full.task.state === 'working' && !full.task.cancelRequested &&
-         originalAttempt?.state === 'planned' ? await this.inspect({
+         originalAttempt.state === 'planned' ? await this.inspect({
           taskId: input.taskId, clientId: input.clientId, attemptId: original.attemptId,
-          modelChoice: true,
-          ...(original.packet.requestedModel
-            ? { modelIntent: original.packet.requestedModel } : {}),
+          modelChoice: original.packet.kind === 'model_choice' || transientModelRace,
+          ...(original.packet.requestedModel || (transientModelRace ? original.context.requiredModel : null)
+            ? { modelIntent: (original.packet.requestedModel ??
+              original.context.requiredModel)! } : {}),
         }) : null);
       return { kind: 'refresh_required', packet: next };
     }
     const packet = original.packet;
     const option = packet.options[0];
     if (row.status !== 'pending' || full.task.pendingDecisionId !== input.decisionId ||
-        full.task.cancelRequested || packet.kind !== 'model_choice' ||
-        packet.humanOnly || !packet.requestedModel || packet.options.length > 1 ||
+        full.task.cancelRequested ||
+        (packet.kind !== 'model_choice' && !transientModelRace) ||
+        packet.humanOnly ||
+        (packet.kind === 'model_choice' && !packet.requestedModel) ||
+        packet.options.length > 1 ||
         (option !== undefined &&
           (!Number.isFinite(Date.parse(option.expiresAt)) ||
            Date.now() <= Date.parse(option.expiresAt)))) {
@@ -405,7 +421,8 @@ export class SemanticDecisionGateway {
       throw new SessionPlaneDomainError('stale_decision', 'Decision lost its active slot');
     }
     try {
-      const next = await this.refresh({ ...input, attemptId: original.attemptId });
+      const next = await this.refresh({ ...input, attemptId: original.attemptId,
+        modelChoice: transientModelRace });
       return { kind: 'refresh_required', packet: next };
     } catch (error) {
       // Concurrent identical refreshes may race the SQLite reservation. Only

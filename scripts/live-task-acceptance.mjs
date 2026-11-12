@@ -183,12 +183,19 @@ async function acceptOneTask({ plan, state, index, call, receiptDir, limitMs, wa
         // A cold new-chat root may report no model action before hydration.
         // Request a bounded Core-owned read-only reinspection, never a
         // guessed DOM click or repeat of the original provider POST.
-        const refreshable = decision?.kind === 'model_choice' &&
+        const transientRootRace = index === 0 &&
+          state.conversationId === null && summary.submission?.attempted === false &&
+          decision?.kind === 'adapter_unsupported' &&
+          decision.reason === 'semantic-observation-superseded-by-page-operation' &&
+          decision.humanOnly === false && decision.requestedModel === null &&
+          Array.isArray(decision.options) && decision.options.length === 0;
+        const expiredOrEmptyModel = decision?.kind === 'model_choice' &&
           decision.humanOnly === false && decision.requestedModel === 'Pro' &&
           Array.isArray(decision.options) && decision.options.length <= 1 &&
           (decision.options.length === 0 ||
             (Number.isFinite(Date.parse(option?.expiresAt)) &&
              Date.now() > Date.parse(option.expiresAt)));
+        const refreshable = transientRootRace || expiredOrEmptyModel;
         if (!refreshable || modelRefreshes >= 6) break;
         const requestId = 'l3-refresh-' + decision.decisionId;
         row.modelRefresh = { decisionId: decision.decisionId, requestId };
