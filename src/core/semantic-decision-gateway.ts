@@ -10,7 +10,7 @@ import type {
 } from '../providers/semantic-adapter.ts';
 import { semanticConfigurationMatches } from '../providers/semantic-adapter.ts';
 import type { SemanticProviderRegistry } from '../providers/semantic-provider-registry.ts';
-import type { TaskKernelRepository } from '../storage/task-kernel-repository.ts';
+import type { DecisionRecord, TaskKernelRepository } from '../storage/task-kernel-repository.ts';
 
 const MAX_PACKET_BYTES = 12 * 1024;
 const MAX_REASON_LENGTH = 120;
@@ -82,6 +82,42 @@ function selectionIsValid(schema: SemanticInput, value: string | undefined): boo
     value.length > 0 && value.length <= schema.maxLength;
   return typeof value === 'string' &&
     schema.options.some(option => option.value === value && option.enabled);
+}
+
+const UNCERTAIN_EFFORT_REASON = 'reasoning-effort-previous-action-uncertain';
+
+/**
+ * A configured Power click is non-idempotent. Core must not expose a second
+ * choose_reasoning_effort decision after the prior one was reserved without
+ * a confirmed receipt, or returned uncertain. This applies across processes,
+ * even when an older runner or another public client does not know the
+ * receipt's requestId. Refresh-only decisions never click and are excluded.
+ */
+function priorUncertainReasoningEffort(decisions: readonly DecisionRecord[]): boolean {
+  for (const row of decisions) {
+    if (row.status !== 'resolved') continue;
+    let stored: StoredDecision;
+    try { stored = storedContext(row.contextJson); }
+    catch { return true; } // Malformed durable decision history fails closed.
+    if (stored.purpose !== 'choose_reasoning_effort') continue;
+    if (row.resolutionJson === null) return true;
+    let receipt: Record<string, unknown>;
+    try { receipt = JSON.parse(row.resolutionJson) as Record<string, unknown>; }
+    catch { return true; }
+    if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) return true;
+    // Read-only refresh has no provider mutation. A failed refresh may publish
+    // a fresh, *still unconsumed* option with a distinct decisionId.
+    if (receipt.kind === 'read_only_refresh' && !row.actionConsumed) continue;
+    if (receipt.kind !== 'semantic_action' || !receipt.outcome ||
+        typeof receipt.outcome !== 'object') return true;
+    const outcome = receipt.outcome as { kind?: unknown; effect?: unknown };
+    if (outcome.kind === 'performed' && row.actionConsumed &&
+        outcome.effect === 'reasoning_effort_selected') continue;
+    const kind = outcome.kind;
+    if (kind === 'refresh_required' && !row.actionConsumed) continue;
+    return true; // uncertain, malformed or action-consumption mismatch
+  }
+  return false;
 }
 
 function oneAction(
@@ -278,7 +314,13 @@ export class SemanticDecisionGateway {
         ? ['open_model_chooser', 'close_model_chooser',
           'choose_model', 'choose_reasoning_effort'] : kind === 'recovery_choice'
           ? ['retry'] : [];
-    const action = observation ? oneAction(observation, purposes) : null;
+    // A prior Power action with an uncertain external effect is an explicit
+    // durable barrier. No new agent decision, however fresh its DOM evidence,
+    // may authorize another Power click on this Task.
+    const uncertainEffort = kind === 'model_choice' &&
+      priorUncertainReasoningEffort(full.decisions);
+    const action = uncertainEffort ? null :
+      observation ? oneAction(observation, purposes) : null;
     const now = new Date().toISOString();
     const decisionId = randomUUID();
     const option: AgentDecisionOption[] = action ? [{
@@ -286,8 +328,9 @@ export class SemanticDecisionGateway {
       risk: action.risk, evidenceHash: action.evidenceHash,
       expiresAt: action.expiresAt, inputSchema: action.input,
     }] : [];
-    const reason = observation ? boundedReason(observation.reason) :
-      provider.kind === 'unsupported' ? provider.reason : 'semantic-observation-unavailable';
+    const reason = uncertainEffort ? UNCERTAIN_EFFORT_REASON :
+      observation ? boundedReason(observation.reason) :
+        provider.kind === 'unsupported' ? provider.reason : 'semantic-observation-unavailable';
     let packet: AgentDecisionPacket = {
       taskId: input.taskId, taskRevision: full.task.revision + 1, decisionId,
       kind, reason, humanOnly: kind === 'human_verification',
@@ -490,6 +533,15 @@ export class SemanticDecisionGateway {
     }
     if (!selectionIsValid(option.inputSchema, input.input)) {
       throw new SessionPlaneDomainError('invalid_request', 'Selected input does not match the enabled decision schema');
+    }
+    // Cover previously published decisions too, including pending packets
+    // created by an older Core before this barrier existed. Checking only the
+    // read-only inspection path is insufficient: another client can call
+    // task.decide directly with an old exact actionRef.
+    if (option.purpose === 'choose_reasoning_effort' &&
+        priorUncertainReasoningEffort(full.decisions)) {
+      throw new SessionPlaneDomainError('stale_decision',
+        'A previous reasoning effort action has an uncertain external effect');
     }
     if (!Number.isFinite(Date.parse(option.expiresAt)) ||
         Date.now() > Date.parse(option.expiresAt)) {

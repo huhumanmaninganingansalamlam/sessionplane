@@ -20,7 +20,7 @@ const MANIFEST: SemanticCapabilityManifest = {
   supports: ['conversation', 'question', 'permission', 'model_choice'],
 };
 
-type Mode = 'question' | 'free_text' | 'model' | 'model-unready' | 'page_race' | 'permission' |
+type Mode = 'question' | 'free_text' | 'model' | 'power' | 'model-unready' | 'page_race' | 'permission' |
   'human' | 'oversized' | 'none';
 
 class FakeSemanticAdapter implements SemanticProviderAdapter {
@@ -43,16 +43,18 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
     const blocker = this.mode === 'page_race' ? 'unsupported'
       : this.mode === 'permission' ? 'provider_permission'
       : this.mode === 'human' ? 'human_verification'
-        : this.mode === 'none' || this.mode === 'model' ||
+        : this.mode === 'none' || this.mode === 'model' || this.mode === 'power' ||
           this.mode === 'model-unready' ? 'none'
           : 'provider_question';
     const action = this.mode === 'question' || this.mode === 'free_text' ||
-      this.mode === 'model' || this.mode === 'oversized' ? [{
-        actionRef, purpose: this.mode === 'model'
+      this.mode === 'model' || this.mode === 'power' || this.mode === 'oversized' ? [{
+        actionRef, purpose: this.mode === 'power'
+          ? 'choose_reasoning_effort' as const : this.mode === 'model'
           ? 'open_model_chooser' as const : 'answer_question' as const,
         effect: 'Apply exact current choice',
-        risk: this.mode === 'model' ? 'configuration_only' as const : 'send_once' as const,
-        input: this.mode === 'model' ? { kind: 'none' as const } :
+        risk: this.mode === 'model' || this.mode === 'power'
+          ? 'configuration_only' as const : 'send_once' as const,
+        input: this.mode === 'model' || this.mode === 'power' ? { kind: 'none' as const } :
           this.mode === 'free_text' ? { kind: 'text' as const, maxLength: 20 } :
           { kind: 'option' as const, options: [
             { value: 'Proceed', enabled: true }, { value: 'Decline', enabled: false },
@@ -106,8 +108,8 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
     this.clicks++;
     if (this.throwAfterConsume) throw new Error('Injected crash after durable action consumption');
     if (this.holdAction) await this.holdAction;
-    return { kind: 'performed', effect: this.mode === 'model'
-      ? 'model_menu_opened' : 'question_answered' };
+    return { kind: 'performed', effect: this.mode === 'power' ? 'reasoning_effort_selected'
+      : this.mode === 'model' ? 'model_menu_opened' : 'question_answered' };
   }
 
   async verify(_query: SemanticExactQuery): Promise<SemanticVerification> {
@@ -518,6 +520,90 @@ test('provider error after durable consumption persists uncertain receipt withou
   const reopened = new FakeSemanticAdapter(env.store);
   assert.deepEqual(await env.getGateway(reopened).decide(request), first);
   assert.equal(reopened.clicks, 0);
+});
+
+test('uncertain Pro Power effect remains blocked after a fresh observation and Core reopen', async t => {
+  const env = fixture(t);
+  const adapter = new FakeSemanticAdapter(env.store);
+  adapter.mode = 'power';
+  adapter.throwAfterConsume = true;
+  const gateway = env.getGateway(adapter);
+  const first = (await gateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    modelChoice: true, modelIntent: 'Pro',
+  }))!;
+  assert.equal(first.kind, 'model_choice');
+  assert.equal(first.options.length, 1);
+  assert.equal(first.options[0]!.purpose, 'choose_reasoning_effort');
+  const request = {
+    taskId: 'task-1', clientId: 'alice', decisionId: first.decisionId,
+    requestId: 'only-power-click', actionRef: first.options[0]!.actionRef,
+  };
+  const failed = await gateway.decideCurrent(request);
+  assert.deepEqual(failed, { kind: 'uncertain', reason: 'semantic-decision-effect-unverified' });
+  assert.equal(adapter.clicks, 1);
+  assert.deepEqual(await gateway.decideCurrent(request), failed,
+    'idempotent recovery reads the prior outcome, never repeats the click');
+  env.reopen();
+  const freshAdapter = new FakeSemanticAdapter(env.store);
+  freshAdapter.mode = 'power';
+  const fresh = env.getGateway(freshAdapter);
+  const blocked = (await fresh.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    modelChoice: true, modelIntent: 'Pro',
+  }))!;
+  assert.equal(blocked.kind, 'model_choice');
+  assert.equal(blocked.requestedModel, 'Pro');
+  assert.equal(blocked.reason, 'reasoning-effort-previous-action-uncertain');
+  assert.deepEqual(blocked.options, [], 'no new one-shot Power action may be published');
+  assert.equal(freshAdapter.clicks, 0);
+  assert.equal(fresh.get('task-1', 'alice')?.decisionId, blocked.decisionId);
+});
+
+test('a legacy pending Power packet cannot bypass the uncertain-effect barrier via direct decide', async t => {
+  const env = fixture(t);
+  const adapter = new FakeSemanticAdapter(env.store);
+  adapter.mode = 'power';
+  adapter.throwAfterConsume = true;
+  const gateway = env.getGateway(adapter);
+  const original = (await gateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    modelChoice: true, modelIntent: 'Pro',
+  }))!;
+  const outcome = await gateway.decideCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: original.decisionId,
+    requestId: 'original-one-shot-power', actionRef: original.options[0]!.actionRef,
+  });
+  assert.equal(outcome.kind, 'uncertain');
+  assert.equal(adapter.clicks, 1);
+  const stored = env.store.getFullTask('task-1', 'alice').decisions
+    .find(row => row.decisionId === original.decisionId)!;
+  const prior = JSON.parse(stored.contextJson);
+  const legacyId = 'legacy-pending-before-guard';
+  prior.packet.decisionId = legacyId;
+  env.store.requireDecision({
+    taskId: 'task-1', clientId: 'alice', decisionId: legacyId,
+    audience: 'agent', contextJson: JSON.stringify(prior),
+  });
+  const pending = gateway.get('task-1', 'alice')!;
+  assert.equal(pending.options[0]!.purpose, 'choose_reasoning_effort');
+  await assert.rejects(gateway.decideCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: legacyId,
+    requestId: 'different-power-attempt', actionRef: pending.options[0]!.actionRef,
+  }), /previous reasoning effort action has an uncertain external effect/i);
+  assert.equal(adapter.clicks, 1, 'direct RPC must not dispatch a second external click');
+  const record = env.store.getFullTask('task-1', 'alice');
+  assert.equal(record.task.pendingDecisionId, legacyId);
+  assert.equal(record.decisions.find(row => row.decisionId === legacyId)?.status, 'pending',
+    'rejected direct action must not consume or rewrite the older packet');
+  const refreshed = await gateway.refresh({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    decisionId: legacyId, modelChoice: true, requestId: 'read-only-reconcile',
+  });
+  assert.equal(refreshed?.kind, 'model_choice');
+  assert.equal(refreshed?.reason, 'reasoning-effort-previous-action-uncertain');
+  assert.deepEqual(refreshed?.options, [], 'read-only refresh cannot grant another Power click');
+  assert.equal(adapter.clicks, 1);
 });
 
 test('a changed unconsumed provider action yields exactly one fresh durable packet', async t => {

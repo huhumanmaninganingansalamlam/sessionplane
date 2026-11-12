@@ -202,6 +202,7 @@ async function acceptOneTask({ plan, state, index, call, receiptDir, limitMs, wa
         const explicitEffortBarrier = [
           'reasoning-effort-control-disabled',
           'reasoning-effort-pro-target-unverified',
+          'reasoning-effort-previous-action-uncertain',
         ].includes(decision?.reason);
         const refreshable = !explicitEffortBarrier &&
           (transientRootRace || expiredOrEmptyModel);

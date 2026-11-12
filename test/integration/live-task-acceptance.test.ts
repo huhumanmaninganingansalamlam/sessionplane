@@ -483,7 +483,8 @@ test('cold root chooser hydrates after one read-only refresh; Core independently
 
 test('disabled or unverified Pro effort stops L3 without radio selection, refresh churn or POST', async () => {
   for (const reason of ['reasoning-effort-control-disabled',
-    'reasoning-effort-pro-target-unverified']) {
+    'reasoning-effort-pro-target-unverified',
+    'reasoning-effort-previous-action-uncertain']) {
     const f = makeFixture();
     try {
       await runLiveTaskAcceptance(options(f.dir, f.call, 'start'));

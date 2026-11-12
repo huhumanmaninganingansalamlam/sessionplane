@@ -550,6 +550,9 @@ export async function selectExactChatGptProReasoningLevel(
     '[role="menu"][id="' + expected.menuId +
     '"] [data-model-picker-power-slider] span[data-selected]').nth(4).elementHandle();
   if (!pinnedTick) throw new Error('Exact Power tick disappeared');
+  // Report only the bounded stage, never provider DOM text, URL or prompt.
+  // The dispatch stage remains uncertain even if the command throws.
+  let phase: 'pre_click' | 'trusted_click' | 'post_click_verify' = 'pre_click';
   try {
     await beforeMutation();
     const current = await inspectSemanticChatGptModelMenu(page);
@@ -624,7 +627,9 @@ export async function selectExactChatGptProReasoningLevel(
         (hit === tick || tick.contains(hit));
     }, { ...point, menuId: expected.menuId });
     if (!pinnedValid) throw new Error('Power target replaced before trusted click');
+    phase = 'trusted_click';
     await page.mouse.click(point.x, point.y, { button: 'left', clickCount: 1 });
+    phase = 'post_click_verify';
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
       const after = await inspectSemanticChatGptModelMenu(page);
@@ -635,6 +640,11 @@ export async function selectExactChatGptProReasoningLevel(
       await new Promise<void>(resolve => setTimeout(resolve, 150));
     }
     throw new Error('Pro effort not verified by exact composer label after one click');
+  } catch (error) {
+    const name = error instanceof Error
+      ? error.name.replace(/[^A-Za-z]/g, '').slice(0, 32) : 'unknown';
+    console.error('[SessionPlane Pro effort action] phase=' + phase + ' class=' + name);
+    throw error;
   } finally {
     await pinnedTick.dispose();
   }
