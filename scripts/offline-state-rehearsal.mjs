@@ -184,6 +184,17 @@ export async function rehearseMigration(input) {
   }
 }
 
+function assertOriginalFacts(db, expected, label) {
+  const facts = tableFacts(db);
+  for (const original of expected) {
+    const retained = facts.find(value => value.name === original.name);
+    if (!retained || retained.count !== original.count ||
+        retained.sha256 !== original.sha256) {
+      throw new Error(label + ' does not match source manifest: ' + original.name);
+    }
+  }
+}
+
 /** A rollback rehearsal NEVER replaces the candidate database. It snapshots
  * post-migration evidence first, then restores the original into another
  * destination. New ACKs, UNKNOWNs and drafts remain in the evidence file.
@@ -205,8 +216,13 @@ export async function rehearseRollback(input) {
     const evidence = path.join(stage, 'post-migration-evidence.sqlite');
     const restored = path.join(stage, 'restored-original.sqlite');
     const readCandidate = openReadonly(candidate);
-    try { quickCheck(readCandidate); await backup(readCandidate, evidence); }
-    finally { readCandidate.close(); }
+    try {
+      quickCheck(readCandidate);
+      // This must not accept a different account/backup merely because its
+      // SQLite schema is compatible. Original legacy facts are immutable.
+      assertOriginalFacts(readCandidate, manifest.originalFacts, 'Rollback candidate');
+      await backup(readCandidate, evidence);
+    } finally { readCandidate.close(); }
     if (input.failAfterEvidence === true) {
       throw new Error('Injected rollback interruption after retaining new evidence');
     }
@@ -221,6 +237,9 @@ export async function rehearseRollback(input) {
       if (JSON.stringify(tableFacts(restoredDb)) !== JSON.stringify(manifest.originalFacts)) {
         throw new Error('Rollback original facts differ');
       }
+      // Detect a candidate that changed while the consistent snapshot was
+      // being taken. Never publish a mixed-account rollback result.
+      assertOriginalFacts(retainedDb, manifest.originalFacts, 'Retained rollback evidence');
     } finally { restoredDb.close(); retainedDb.close(); }
 
     const result = {

@@ -74,6 +74,8 @@ test('Task RPC returns exact result bytes and semantic evidence without scraping
   assert.equal(exact.result.answerSha256,
     createHash('sha256').update(answer).digest('hex'));
   const evidence = await rpc<any>('task.get', { taskId, clientId, view: 'evidence' });
+  assert.equal(evidence.evidence.conversation.providerConversationId, null);
+  assert.equal(evidence.evidence.rootPost, null);
   assert.equal(evidence.evidence.attempts[0].externalTurnId, 'turn-exact');
   assert.equal(evidence.evidence.results[0].answerSha256, exact.result.answerSha256);
   assert.equal(JSON.stringify(evidence).includes(answer), false,
@@ -734,4 +736,91 @@ test('three independent public questions reuse one Main conversation and never s
       clientId, taskId: ids[i], view: 'result',
     })).result.answerText, 'Answer to ' + questions[i]);
   }
+});
+
+
+test('public Task evidence exposes canonical root identity without adopting a later conversation', async t => {
+  const { core, clientId, store, rpc } = await fixture(t);
+  const team = core.teamDirectory.createTeam({
+    clientId, name: 'Exact root evidence fixture', primaryRoleKey: 'main',
+  });
+  const projectId = team.teamId;
+  const taskId = randomUUID();
+  store.openProject({ projectId, clientId, projectKey: 'root-evidence-' + taskId,
+    displayName: 'Root evidence fixture' });
+  store.openSlot({ projectId, clientId, slotId: 'main',
+    roleKey: 'main', providerKey: 'chatgpt' });
+  store.startTask({ taskId, projectId, clientId, slotId: 'main',
+    expectedSlotRevision: 1, requestId: 'initial-' + taskId,
+    prompt: 'Exact public question' });
+  store.planAttempt({ taskId, clientId, attemptId: 'exact-root', kind: 'initial',
+    turnKey: 'root', content: 'Exact public question' });
+  store.beginDispatch(taskId, clientId, 'exact-root');
+  const session = core.teamDirectory.createSession({
+    teamId: projectId, roleKey: 'main', provider: 'chatgpt',
+  });
+  const original = {
+    sessionId: session.sessionId, generation: 1, pageKey: 'fixture-page',
+    targetId: 'fixture-target', bindingEpoch: 1,
+    messageId: 'original-user-message', parentMessageId: 'original-parent',
+    textHash: createHash('sha256').update('Exact public question').digest('hex'),
+    observedAt: new Date().toISOString(), requestConversationId: null,
+  };
+  store.recordRootPost({ taskId, clientId, attemptId: 'exact-root', evidence: original });
+  const before = await rpc<any>('task.get', { taskId, clientId, view: 'evidence' });
+  assert.equal(before.evidence.conversation.providerConversationId, null);
+  assert.equal(before.evidence.rootPost.observationCount, 1);
+  assert.equal(before.evidence.rootPost.ambiguous, false);
+  assert.equal(before.evidence.rootPost.contentSha256, original.textHash);
+  assert.equal(before.evidence.rootPost.canonicalConversationId, null);
+  assert.equal(before.evidence.rootPost.userMessageId, original.messageId);
+  assert.equal(JSON.stringify(before).includes('Exact public question'), false,
+    'Evidence contains only bounded provenance, not the original prompt');
+
+  store.promoteRootPost({ taskId, clientId, attemptId: 'exact-root',
+    conversationId: 'verified-conversation', messageId: original.messageId,
+    externalTurnId: 'verified-turn' });
+  const acknowledged = await rpc<any>('task.get', { taskId, clientId, view: 'evidence' });
+  assert.equal(acknowledged.submission.acknowledged, true);
+  assert.equal(acknowledged.evidence.conversation.providerConversationId, 'verified-conversation');
+  assert.equal(acknowledged.evidence.rootPost.canonicalConversationId, 'verified-conversation');
+  store.recordFinal({ taskId, clientId, attemptId: 'exact-root',
+    externalTurnId: 'verified-turn', resultId: 'root-result',
+    answerText: 'Exact root answer', completeTask: true });
+  store.replaceBinding({
+    projectId: store.getTask(taskId, clientId).projectId,
+    clientId, slotId: 'main', expectedRevision: 1,
+    providerKey: 'chatgpt', providerConversationId: 'later-conversation',
+  });
+  const historical = await rpc<any>('task.get', { taskId, clientId, view: 'evidence' });
+  assert.equal(historical.evidence.conversation.providerConversationId, 'verified-conversation',
+    'Historical Task evidence cannot adopt the new slot binding');
+  assert.equal(historical.evidence.rootPost.canonicalConversationId, 'verified-conversation');
+});
+
+test('an ambiguous initial POST is visible as durable evidence, never a fabricated ACK', async t => {
+  const { taskId, clientId, store, rpc } = await fixture(t);
+  store.planAttempt({ taskId, clientId, attemptId: 'uncertain-root',
+    kind: 'initial', turnKey: 'root', content: 'Exact public question' });
+  store.beginDispatch(taskId, clientId, 'uncertain-root');
+  const original = {
+    sessionId: 'one-session', generation: 1, pageKey: 'root-page', targetId: 'target',
+    bindingEpoch: 1, messageId: 'post-one', parentMessageId: 'parent-one',
+    textHash: createHash('sha256').update('Exact public question').digest('hex'),
+    observedAt: new Date().toISOString(), requestConversationId: null,
+  };
+  store.recordRootPost({ taskId, clientId, attemptId: 'uncertain-root', evidence: original });
+  assert.throws(() => store.recordRootPost({
+    taskId, clientId, attemptId: 'uncertain-root',
+    evidence: { ...original, messageId: 'post-two' },
+  }), /Conflicting root POST evidence/);
+  const evidence = await rpc<any>('task.get', { taskId, clientId, view: 'evidence' });
+  assert.equal(evidence.evidence.rootPost.ambiguous, true);
+  assert.equal(evidence.evidence.rootPost.observationCount, 2);
+  assert.equal(evidence.evidence.rootPost.canonicalConversationId, null);
+  assert.equal(evidence.submission.acknowledged, false);
+  assert.throws(() => store.promoteRootPost({
+    taskId, clientId, attemptId: 'uncertain-root',
+    conversationId: 'untrusted', messageId: 'post-one', externalTurnId: 'bad-turn',
+  }), /one unambiguous observed POST/);
 });

@@ -101,9 +101,31 @@ export function readTaskSummary(
     resultAvailable: result !== null,
   };
   if (selectedView !== 'evidence') return summary;
+  // Historical slot identity is read from the immutable Task revision, not
+  // the current live page/slot (which may already belong to a later question).
+  const binding = store.getBindingAtRevision(
+    full.task.projectId, full.task.slotId, full.task.slotRevision, clientIdValue);
+  const initial = full.attempts.find(attempt => attempt.kind === 'initial');
+  const rootPost = initial ? store.getRootPost({
+    taskId: full.task.taskId, clientId: clientIdValue, attemptId: initial.attemptId,
+  }) : null;
   return {
     ...summary,
     evidence: {
+      conversation: {
+        providerKey: binding.providerKey,
+        providerConversationId: binding.providerConversationId,
+        immutableSlotRevision: binding.revision,
+      },
+      rootPost: rootPost === null ? null : {
+        observed: true,
+        ambiguous: rootPost.ambiguous,
+        observationCount: rootPost.observationCount,
+        contentSha256: rootPost.textHash,
+        userMessageId: rootPost.messageId,
+        parentMessageId: rootPost.parentMessageId,
+        canonicalConversationId: rootPost.canonicalConversationId,
+      },
       attempts: full.attempts.map(attempt => ({
         attemptId: attempt.attemptId, kind: attempt.kind, state: attempt.state,
         externalTurnId: attempt.externalTurnId,
