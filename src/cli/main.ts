@@ -14,6 +14,7 @@ import {
 import { resolveConfig, SESSIONPLANE_VERSION, type SessionPlaneConfig } from '../config.ts';
 import { serveForever } from '../main.ts';
 import { runMcpServer } from '../mcp/server.ts';
+import { projectOpenSchema, taskSchemas } from '../rpc/methods/task.ts';
 import { SkillDistributionService } from '../skills/skill-distribution.ts';
 import { callRpc, RpcClientError } from './client.ts';
 import { runDoctor } from './commands/doctor.ts';
@@ -53,6 +54,7 @@ const FLAG_OPTIONS = new Set([
   'return-on-wait-expiry',
   'preserve-conversation',
   'discard-unresolved',
+  'until-change',
 ]);
 const MULTI_VALUE_OPTIONS = new Set(['file', 'skill']);
 const VALUE_OPTIONS = new Set([
@@ -72,6 +74,11 @@ const VALUE_OPTIONS = new Set([
   'url',
   'client-id',
   'request-id',
+  'expected-conversation-revision',
+  'conversation-slot',
+  'after-revision',
+  'approval-ref',
+  'input',
   'name',
   'objective',
   'primary-role',
@@ -261,6 +268,10 @@ export async function runCli(
         return 0;
       case 'health':
         return await printRpc(io, parsed, config, 'system.health', {});
+      case 'project':
+        return await runPublicProjectCommand(io, parsed, config);
+      case 'task':
+        return await runPublicTaskCommand(io, parsed, config);
       case 'doctor': {
         const report = await runDoctor(config);
         writeCliResult(io, parsed.json, report);
@@ -384,6 +395,129 @@ export async function runCli(
   } catch (error) {
     writeCliError(io, parsed.json, error);
     return error instanceof RpcClientError ? 1 : 2;
+  }
+}
+
+/** The public CLI accepts only the exact project/task inputs sent to Core.
+ * It does not infer provider identity, run a task timer, or retry a mutation.
+ */
+const PUBLIC_GLOBAL_OPTIONS = [
+  'client-id', 'socket', 'state-dir', 'remote', 'remote-executable',
+  'remote-socket', 'remote-control-path',
+] as const;
+
+function publicCommandOptions(
+  parsed: ParsedArgs, name: string, words: number, allowed: readonly string[],
+): void {
+  if (parsed.words.length !== words) {
+    throw new Error('Usage: ' + name + ' (unexpected or missing positional arguments)');
+  }
+  const names = new Set<string>([...PUBLIC_GLOBAL_OPTIONS, ...allowed]);
+  for (const flag of Object.keys(parsed.options)) {
+    if (!names.has(flag)) throw new Error('Unsupported ' + name + ' option: --' + flag);
+  }
+  if (parsed.files.length > 0) throw new Error(name + ' does not accept legacy --file attachments');
+}
+
+async function runPublicProjectCommand(
+  io: CliIo, parsed: ParsedArgs, config: SessionPlaneConfig,
+): Promise<number> {
+  if (parsed.words[1] !== 'open') throw new Error('Usage: sessplane project open --key KEY --name NAME --request-id ID');
+  publicCommandOptions(parsed, 'project open', 2, [
+    'key', 'name', 'request-id', 'provider', 'surface', 'model',
+  ]);
+  const params = projectOpenSchema.parse({
+    clientId: clientId(parsed),
+    requestId: requireOption(parsed, 'request-id'),
+    projectKey: requireOption(parsed, 'key'),
+    displayName: requireOption(parsed, 'name'),
+    ...(parsed.options.provider ? { provider: parsed.options.provider } : {}),
+    ...(parsed.options.surface ? { surfaceIntent: parsed.options.surface } : {}),
+    ...(parsed.options.model ? { modelIntent: parsed.options.model } : {}),
+  });
+  return await printRpc(io, parsed, config, 'project.open', params);
+}
+
+async function runPublicTaskCommand(
+  io: CliIo, parsed: ParsedArgs, config: SessionPlaneConfig,
+): Promise<number> {
+  const action = parsed.words[1];
+  const owner = clientId(parsed);
+  const viewOption = parsed.options.view === undefined ? {} : { view: parsed.options.view };
+  switch (action) {
+    case 'start': {
+      publicCommandOptions(parsed, 'task start', 3, [
+        'request-id', 'expected-conversation-revision', 'conversation-slot',
+        'prompt', 'prompt-file', 'prompt-stdin', 'continuation-approved', 'approval-ref',
+      ]);
+      const sources = [
+        parsed.options.prompt !== undefined,
+        parsed.options['prompt-file'] !== undefined,
+        parsed.options['prompt-stdin'] === 'true',
+      ].filter(Boolean).length;
+      if (sources !== 1) throw new Error('Specify exactly one of --prompt, --prompt-file or --prompt-stdin');
+      const prompt = parsed.options.prompt ??
+        (parsed.options['prompt-file'] !== undefined
+          ? readFileSync(parsed.options['prompt-file'], 'utf8')
+          : await readInput(io.stdin));
+      const approved = parsed.options['continuation-approved'] === 'true';
+      if (!approved && parsed.options['approval-ref'] !== undefined) {
+        throw new Error('--approval-ref requires --continuation-approved');
+      }
+      const params = taskSchemas.start.parse({
+        clientId: owner, requestId: requireOption(parsed, 'request-id'),
+        projectId: requirePositional(parsed.words, 2, 'projectId'),
+        expectedConversationRevision: integerOption(
+          parsed, 'expected-conversation-revision',
+          Number(requireOption(parsed, 'expected-conversation-revision')), 1,
+        ),
+        ...(parsed.options['conversation-slot'] === undefined
+          ? {} : { conversationSlotId: parsed.options['conversation-slot'] }),
+        prompt,
+        ...(approved ? { continuationPolicy: {
+          enabled: true, intervalMs: 1_200_000, message: '계속',
+          approvalRef: requireOption(parsed, 'approval-ref'),
+        } } : {}),
+      });
+      return await printRpc(io, parsed, config, 'task.start', params);
+    }
+    case 'get': {
+      publicCommandOptions(parsed, 'task get', 3, ['view']);
+      return await printRpc(io, parsed, config, 'task.get', taskSchemas.get.parse({
+        clientId: owner, taskId: requirePositional(parsed.words, 2, 'taskId'), ...viewOption,
+      }));
+    }
+    case 'wait': {
+      publicCommandOptions(parsed, 'task wait', 3, [
+        'after-revision', 'wait-ms', 'view', 'until-change',
+      ]);
+      requireOption(parsed, 'after-revision');
+      const waitMs = integerOption(parsed, 'wait-ms', 30_000, 0, 120_000);
+      return await printRpc(io, parsed, config, 'task.wait', taskSchemas.wait.parse({
+        clientId: owner, taskId: requirePositional(parsed.words, 2, 'taskId'),
+        afterRevision: integerOption(parsed, 'after-revision', 0, 0),
+        waitMs, ...viewOption,
+      }), waitMs + 5_000);
+    }
+    case 'decide': {
+      publicCommandOptions(parsed, 'task decide', 5, ['request-id', 'input']);
+      return await printRpc(io, parsed, config, 'task.decide', taskSchemas.decide.parse({
+        clientId: owner, taskId: requirePositional(parsed.words, 2, 'taskId'),
+        decisionId: requirePositional(parsed.words, 3, 'decisionId'),
+        actionRef: requirePositional(parsed.words, 4, 'actionRef'),
+        requestId: requireOption(parsed, 'request-id'),
+        ...(parsed.options.input === undefined ? {} : { input: parsed.options.input }),
+      }));
+    }
+    case 'cancel': {
+      publicCommandOptions(parsed, 'task cancel', 3, ['request-id']);
+      return await printRpc(io, parsed, config, 'task.cancel', taskSchemas.cancel.parse({
+        clientId: owner, taskId: requirePositional(parsed.words, 2, 'taskId'),
+        requestId: requireOption(parsed, 'request-id'),
+      }));
+    }
+    default:
+      throw new Error('Usage: sessplane task start|get|wait|decide|cancel ...');
   }
 }
 
@@ -1370,6 +1504,18 @@ Usage:
   sessplane doctor [--json]
   sessplane browser-list [--browser NAME] [--browser-executable PATH]
   sessplane login [--manual|--resume] [--json] [--url HTTPS_URL]
+
+Public project/task flow (Core owns preparation, ACK, FINAL, and timers):
+  sessplane project open --key KEY --name NAME --request-id ID [--model Pro] --json
+  sessplane task start PROJECT_ID --expected-conversation-revision N --request-id ID
+    (--prompt TEXT | --prompt-file PATH | --prompt-stdin) [--conversation-slot ID] --json
+    [--continuation-approved --approval-ref EXISTING_USER_DELEGATION]
+  sessplane task get TASK_ID [--view summary|result|evidence] --json
+  sessplane task wait TASK_ID --after-revision N [--wait-ms 30000] [--until-change] --json
+  sessplane task decide TASK_ID DECISION_ID ACTION_REF --request-id ID [--input TEXT] --json
+  sessplane task cancel TASK_ID --request-id ID --json
+  One task.wait call performs one bounded Core wait; it never drives execution.
+  Reuse stable --client-id and --request-id values for exact mutation replays.
 
 Remote execution:
   Add --remote SSH_HOST or set SESSIONPLANE_REMOTE_HOST for CLI and MCP.
