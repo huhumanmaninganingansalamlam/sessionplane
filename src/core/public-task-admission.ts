@@ -217,7 +217,10 @@ export class PublicTaskAdmissionService {
         const task = this.#store.getTask(prior.taskId, input.clientId);
         return this.#taskReceipt(task, slot, recorded.acceptedRevision);
       }
-      const revision = this.#store.getConversationRevision(
+      // Older explicitly owned slots may have immutable provider bindings
+      // but no public revision row (schema 12 -> 13). Initialize that row
+      // atomically before the CAS. It must never reset an existing counter.
+      const revision = this.#store.ensureConversationRevision(
         input.projectId, slotId, input.clientId);
       if (revision !== input.expectedConversationRevision) {
         throw new SessionPlaneDomainError('conversation_conflict', 'Conversation revision conflict; re-read the current slot');

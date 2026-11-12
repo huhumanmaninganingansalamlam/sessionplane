@@ -86,3 +86,15 @@ leases, correct answer/result association, cancellation isolation, stale
 revision rejection, and foreign/unregistered slot rejection before any provider
 send. This is an L1/L2 scope foundation, not a public role-creation command or
 an assertion that a real Expert account has been created.
+
+## Historical role-slot public revision repair
+
+An actual RPC regression reproduces a pre-public role slot whose immutable
+provider binding revision has advanced to 2 but whose new public admission
+revision row is missing. Before the fix, task.start returned
+conversation_conflict despite the caller supplying the correct revision.
+Admission now initializes only the missing public row in the same SQLite
+transaction and advances it to 3 without touching provider identity. Foreign
+owner and stale-revision admissions roll back with no row inserted. The
+installed-package smoke repeats this after a real Core restart and verifies
+that one Task/attempt is preserved. No archived old workflow runtime is used.

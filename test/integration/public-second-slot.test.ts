@@ -152,3 +152,89 @@ test('public Main and explicitly opened second logical slot have independent rev
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('a historical explicitly owned slot without public revision metadata is admitted exactly once', {
+  timeout: 30_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sp-historical-slot-recovery-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const clientId = 'historical-slot-owner';
+  let core = await startCore({ config, startBrowser: false, logger });
+  const rpc = (method: string, params: Record<string, unknown>) => callRpc<any>({
+    socketPath: config.socketPath, method, params, timeoutMs: 10_000,
+    maxLineBytes: config.rpcMaxLineBytes,
+  });
+  try {
+    const project = await rpc('project.open', {
+      clientId, requestId: 'open-historical-project', projectKey: 'historical-slot',
+      displayName: 'Historical independent slot',
+      provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'Pro',
+    });
+    core.teamDirectory.createRole({
+      teamId: project.projectId, roleKey: 'expert.backend',
+      roleType: 'expert', reportsToRoleKey: 'main',
+    });
+    core.semanticTaskRepository.openSlot({
+      projectId: project.projectId, clientId, slotId: 'expert.backend',
+      roleKey: 'expert.backend', providerKey: 'chatgpt',
+    });
+    core.semanticTaskRepository.replaceBinding({
+      projectId: project.projectId, clientId, slotId: 'expert.backend',
+      expectedRevision: 1, providerKey: 'chatgpt',
+      providerConversationId: 'historical-verified-conversation',
+    });
+    // Simulates an explicit role/slot that was written under schema 12
+    // and subsequently upgraded to public admission metadata in schema 13.
+    // Historical binding revision is 2; it must not be reset to 1.
+    core.database.raw.prepare(
+      'DELETE FROM kernel_public_slot_revisions WHERE project_id=? AND slot_id=?'
+    ).run(project.projectId, 'expert.backend');
+    assert.equal(core.semanticTaskRepository.getConversationRevision(
+      project.projectId, 'expert.backend', clientId), 2);
+    await core.close();
+    core = await startCore({ config, startBrowser: false, logger });
+    const input = {
+      clientId, projectId: project.projectId,
+      conversationSlotId: 'expert.backend',
+      expectedConversationRevision: 2,
+      requestId: 'old-slot-first-public-question',
+      prompt: 'Once-only question on an upgraded historical slot',
+    };
+    const persistedRow = () => core.database.raw.prepare(
+      'SELECT revision FROM kernel_public_slot_revisions WHERE project_id=? AND slot_id=?'
+    ).get(project.projectId, 'expert.backend') as { revision: number } | undefined;
+    await assert.rejects(rpc('task.start', {
+      ...input, clientId: 'foreign-role-owner', requestId: 'foreign-slot-injection',
+    }), (error: any) => error.data?.errorCode === 'invalid_request');
+    assert.equal(persistedRow(), undefined,
+      'A foreign owner cannot create a missing historical public slot counter');
+    await assert.rejects(rpc('task.start', {
+      ...input, requestId: 'stale-slot-guess',
+      expectedConversationRevision: 1,
+    }), (error: any) => error.data?.errorCode === 'conversation_conflict');
+    assert.equal(persistedRow(), undefined,
+      'A failed compare-and-swap rolls back the lazy metadata repair');
+    const admitted = await rpc('task.start', input);
+    assert.equal(admitted.conversationSlotId, 'expert.backend');
+    assert.equal(admitted.conversationRevision, 3);
+    assert.equal(admitted.submission.attempted, false);
+    assert.equal((await rpc('task.start', input)).taskId, admitted.taskId);
+    assert.equal(core.semanticTaskRepository.getConversationRevision(
+      project.projectId, 'expert.backend', clientId), 3);
+    assert.equal(core.semanticTaskRepository.getConversationRevision(
+      project.projectId, 'main', clientId), 1);
+    const entry = core.database.raw.prepare(
+      'SELECT revision FROM kernel_public_slot_revisions WHERE project_id=? AND slot_id=?'
+    ).get(project.projectId, 'expert.backend') as { revision: number };
+    assert.equal(entry.revision, 3);
+    const task = core.semanticTaskRepository.getFullTask(admitted.taskId, clientId);
+    assert.equal(task.attempts.length, 1);
+    assert.equal(task.attempts[0]!.state, 'planned');
+    assert.equal(task.attempts[0]!.content, input.prompt);
+    assert.equal(task.task.slotRevision, 2,
+      'Public admission revision never rewrites historical provider-binding identity');
+  } finally {
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

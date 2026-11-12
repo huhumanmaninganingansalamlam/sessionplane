@@ -341,6 +341,21 @@ export class TaskKernelRepository {
     return this.#findSlot(projectId, slotId);
   }
 
+  /** A schema-12 role/slot can predate the schema-13 public revision
+   * ledger. Repair exactly that missing metadata under the same admission
+   * transaction; never rewrite an existing public revision or the immutable
+   * provider binding history. A foreign owner cannot synthesize a ledger row.
+   */
+  ensureConversationRevision(projectId: string, slotId: string, clientId: string): number {
+    this.#requireAccess(projectId, clientId);
+    const slot = this.#requireSlot(projectId, slotId);
+    this.#database.raw.prepare(
+      'INSERT INTO kernel_public_slot_revisions(project_id,slot_id,revision)' +
+      ' VALUES(?,?,?) ON CONFLICT(project_id,slot_id) DO NOTHING',
+    ).run(projectId, slotId, slot.revision);
+    return this.getConversationRevision(projectId, slotId, clientId);
+  }
+
   /** Public revision is advanced by admitted tasks, separate from the
    * immutable provider binding revision used for ACK/FINAL correlation.
    */

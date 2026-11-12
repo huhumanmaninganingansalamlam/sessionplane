@@ -179,8 +179,9 @@ try {
       installedCore.installedCoreRestarted !== true ||
       installedCore.requestIdentitySurvivedRestart !== true ||
       installedCore.originalAttemptCountAfterRestart !== 1 ||
-      installedCore.secondSlotRevisionIndependentAfterRestart !== true) {
-    throw new Error('Installed Core public Task/restart/two-slot smoke failed');
+      installedCore.secondSlotRevisionIndependentAfterRestart !== true ||
+      installedCore.historicalSlotRecoveredAfterRestart !== true) {
+    throw new Error('Installed Core public Task/restart/historical-slot smoke failed');
   }
 
   process.stdout.write(

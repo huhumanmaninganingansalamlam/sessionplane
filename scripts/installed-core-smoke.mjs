@@ -99,6 +99,28 @@ try {
   });
   assert.deepEqual(replayCancel, canceled);
 
+  // An explicitly scoped role from an older kernel schema can have a valid
+  // immutable slot binding but no new public revision metadata at all.
+  // Preserve its provider binding revision across a real package restart.
+  core.teamDirectory.createRole({
+    teamId: project.projectId, roleKey: 'expert.legacy',
+    roleType: 'expert', reportsToRoleKey: 'main',
+  });
+  core.semanticTaskRepository.openSlot({
+    projectId: project.projectId, clientId,
+    slotId: 'expert.legacy', roleKey: 'expert.legacy',
+    providerKey: 'chatgpt',
+  });
+  core.semanticTaskRepository.replaceBinding({
+    projectId: project.projectId, clientId,
+    slotId: 'expert.legacy', expectedRevision: 1,
+    providerKey: 'chatgpt',
+    providerConversationId: 'test-historical-provider-conversation',
+  });
+  core.database.raw.prepare(
+    'DELETE FROM kernel_public_slot_revisions WHERE project_id=? AND slot_id=?'
+  ).run(project.projectId, 'expert.legacy');
+
   // Second logical slots are explicitly provisioned, not invented by
   // arbitrary clients. Their public revision is persisted independently
   // from the owner's Main conversation, including in the real tarball.
@@ -165,6 +187,23 @@ try {
   assert.equal(resumedMcp.structuredContent.taskId, first.taskId);
   assert.equal(resumedMcp.structuredContent.state, 'canceled');
 
+  const historicalInput = {
+    clientId, projectId: project.projectId,
+    conversationSlotId: 'expert.legacy',
+    expectedConversationRevision: 2,
+    requestId: 'installed-historical-slot-once',
+    prompt: 'One recovered explicitly owned historical role Task',
+  };
+  const historical = await rpc('task.start', historicalInput);
+  assert.equal(historical.conversationSlotId, 'expert.legacy');
+  assert.equal(historical.conversationRevision, 3);
+  assert.equal(historical.submission.attempted, false);
+  assert.equal((await rpc('task.start', historicalInput)).taskId, historical.taskId);
+  assert.equal(core.semanticTaskRepository.getConversationRevision(
+    project.projectId, 'expert.legacy', clientId), 3);
+  assert.equal(core.semanticTaskRepository.getFullTask(
+    historical.taskId, clientId).attempts.length, 1);
+
   const reviewerResumed = await rpc('task.get', {
     clientId, taskId: reviewer.taskId, view: 'evidence',
   });
@@ -186,6 +225,7 @@ try {
     installedCoreRestarted: true, requestIdentitySurvivedRestart: true,
     originalAttemptCountAfterRestart: resumed.evidence.attempts.length,
     secondSlotRevisionIndependentAfterRestart: true,
+    historicalSlotRecoveredAfterRestart: true,
   }));
 } finally {
   await core?.close().catch(() => undefined);
