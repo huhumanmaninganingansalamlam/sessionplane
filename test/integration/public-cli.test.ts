@@ -317,7 +317,7 @@ test('SQLite cancellation receipt survives Core process restart and blocks forei
   }
 });
 
-test('opt-in public MCP advertises only six task tools, rejects legacy mutations, and preserves existing callers', async () => {
+test('default MCP advertises only six task tools and rejects retired workflow tools', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-public-mcp-catalog-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
   const core = await startCore({
@@ -329,26 +329,25 @@ test('opt-in public MCP advertises only six task tools, rejects legacy mutations
     'io.modelcontextprotocol/clientCapabilities': {},
   };
   let id = 1;
-  const request = async (publicOnly: boolean, method: string,
+  const request = async (method: string,
     params: Record<string, unknown>) => {
     const output = capture();
     const message = { jsonrpc: '2.0', id: id++, method,
       params: { ...params, _meta: metadata } };
     const io = { ...output.io, stdin: Readable.from([JSON.stringify(message) + '\n']) };
-    const code = await runCli(['mcp', ...(publicOnly ? ['--public'] : []),
-      '--socket', config.socketPath], io);
+    const code = await runCli(['mcp', '--socket', config.socketPath], io);
     assert.equal(code, 0, output.output().stderr);
     const lines = output.output().stdout.trim().split('\n');
     assert.equal(lines.length, 1);
     return JSON.parse(lines[0]!);
   };
   try {
-    const discover = await request(true, 'server/discover', {});
+    const discover = await request('server/discover', {});
     assert.equal(discover.error, undefined);
     assert.match(discover.result.instructions, /task\.start/);
     assert.doesNotMatch(discover.result.instructions, /roleRef|requestRef|workflow\.decide/);
 
-    const catalog = await request(true, 'tools/list', {});
+    const catalog = await request('tools/list', {});
     assert.equal(catalog.error, undefined);
     const names: string[] = catalog.result.tools.map((tool: { name: string }) => tool.name);
     assert.deepEqual(names.sort(), [
@@ -356,14 +355,14 @@ test('opt-in public MCP advertises only six task tools, rejects legacy mutations
       'sessionplane_task_get', 'sessionplane_task_wait',
       'sessionplane_task_decide', 'sessionplane_task_cancel',
     ].sort());
-    const forbidden = await request(true, 'tools/call', {
+    const forbidden = await request('tools/call', {
       name: 'sessionplane_team_delete',
       arguments: { teamId: 'foreign', requestId: 'never-dispatch' },
     });
     assert.equal(forbidden.error.code, -32602);
     assert.equal(core.teamDirectory.listTeams('sessionplane-mcp').teams.length, 0);
 
-    const opened = await request(true, 'tools/call', {
+    const opened = await request('tools/call', {
       name: 'sessionplane_project_open',
       arguments: {
         clientId: 'public-only-caller',
@@ -373,7 +372,7 @@ test('opt-in public MCP advertises only six task tools, rejects legacy mutations
     });
     assert.equal(opened.error, undefined);
     assert.equal(opened.result.structuredContent.modelIntent, 'Pro');
-    const replay = await request(true, 'tools/call', {
+    const replay = await request('tools/call', {
       name: 'sessionplane_project_open',
       arguments: {
         clientId: 'public-only-caller',
@@ -384,12 +383,31 @@ test('opt-in public MCP advertises only six task tools, rejects legacy mutations
     assert.equal(replay.result.structuredContent.projectId,
       opened.result.structuredContent.projectId);
 
-    const retained = await request(false, 'tools/list', {});
-    const legacyNames: string[] = retained.result.tools.map((tool: { name: string }) => tool.name);
-    assert.ok(legacyNames.includes('sessionplane_team_get'),
-      'default legacy MCP clients keep their existing catalog');
-    assert.ok(legacyNames.includes('sessionplane_task_get'),
-      'both catalog modes still reach one Core Task state');
+    const afterReplay = await request('tools/list', {});
+    assert.deepEqual(afterReplay.result.tools.map((tool: { name: string }) => tool.name).sort(),
+      names, 'reconnect never advertises retired tools');
+    for (const legacy of [
+      'workflow.team_get', 'workflow.send', 'session.create', 'team.create',
+      'send', 'stop', 'artifact.list', 'browser.runtime.reset',
+    ]) {
+      await assert.rejects(callRpc({
+        socketPath: config.socketPath, method: legacy, params: {},
+      }), (error: any) => {
+        assert.equal(error.code, -32601, legacy + ' must be unregistered from Core');
+        return true;
+      });
+    }
+    for (const command of ['team', 'request', 'role', 'session', 'send',
+      'wait', 'stop', 'status', 'events', 'artifact', 'browser-reset']) {
+      const out = capture();
+      const code = await runCli([command, '--socket', config.socketPath, '--json'], out.io);
+      assert.equal(code, 2, command + ' remains a public CLI command');
+      assert.equal(JSON.parse(out.output().stderr).requestOk, false);
+    }
+    const optIn = capture();
+    assert.equal(await runCli(['mcp', '--public', '--socket', config.socketPath,
+      '--json'], optIn.io), 2);
+    assert.match(optIn.output().stderr, /Unknown option/);
   } finally {
     await core.close();
     rmSync(root, { recursive: true, force: true });

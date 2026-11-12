@@ -1,8 +1,6 @@
 import { CoreMaintenance } from './core/maintenance.ts';
 import { ThinkingFailureRecovery } from './core/thinking-failure-recovery.ts';
 import { ConversationLoadRecovery } from './core/conversation-load-recovery.ts';
-import { TeamWorkflow } from './core/team-workflow.ts';
-import { registerWorkflowMethods } from './rpc/methods/workflow.ts';
 import { SessionRepository } from './storage/session-repository.ts';
 import { EventRepository } from './storage/event-repository.ts';
 import { homedir } from 'node:os';
@@ -22,20 +20,11 @@ import { RecoveryService } from './core/recovery-service.ts';
 import { StopService } from './core/stop-service.ts';
 import { TeamDirectory } from './core/team-directory.ts';
 import { SubmissionService } from './core/submission-service.ts';
-import { ConversationCleanupService } from './core/conversation-cleanup-service.ts';
 import { SessionUiService } from './core/session-ui-service.ts';
 import { createLogger, type Logger } from './logging.ts';
 import { RpcRouter } from './rpc/router.ts';
 import { RpcServer } from './rpc/server.ts';
 import { registerBrowserMethods } from './rpc/methods/browser.ts';
-import { registerBrowserControlMethods } from './rpc/methods/browser-control.ts';
-import { registerArtifactMethods } from './rpc/methods/artifact.ts';
-import { registerSessionMethods } from './rpc/methods/session.ts';
-import { registerSessionUiMethods } from './rpc/methods/session-ui.ts';
-import { registerSendMethods } from './rpc/methods/send.ts';
-import { registerStopMethods } from './rpc/methods/stop.ts';
-import { registerTeamMethods } from './rpc/methods/team.ts';
-import { registerWaitMethods } from './rpc/methods/wait.ts';
 import { registerTaskMethods } from './rpc/methods/task.ts';
 import { PublicTaskAdmissionService } from './core/public-task-admission.ts';
 import { ActorScheduler } from './scheduler/actor-scheduler.ts';
@@ -100,7 +89,6 @@ export interface StartCoreOptions {
   readonly browserHeadless?: boolean;
   readonly providerAdapters?: readonly ProviderAdapter[];
   readonly recoveryNavigatePage?: (page: Page, url: string) => Promise<void>;
-  readonly enableInternalBrowserControlRpc?: boolean;
 }
 
 export async function startCore(options: StartCoreOptions = {}): Promise<CoreService> {
@@ -400,21 +388,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     profileDir: config.profileDir,
     recoverBrowser: () => restartBrowser(),
   });
-  if (options.enableInternalBrowserControlRpc === true) {
-    registerBrowserControlMethods(router, browserControl);
-  }
-  registerArtifactMethods(router, artifactService);
-  const cleanup = new ConversationCleanupService({
-    directory: teamDirectory, onDeleted: sessionId => recovery.forgetSession(sessionId),
-    verifyPreservingReplacement: session => ui.verifyPreservingReplacement(session),
-    isFailedConversationPage: async (pageKey, session) => session.conversationId !== null && browserOwner !== null &&
-      await browserOwner.isFailedConversationPage(pageKey, session.provider, session.conversationId),
-    closeCrashedPages: async (session, canClose) => session.conversationId === null || browserOwner === null
-      ? { closedPages: 0, pageErrors: [] }
-      : await browserOwner.closeCrashedConversationPages(session.provider, session.conversationId, canClose),
-    database, scheduler: actorScheduler, adapters: providerAdapters,
-    pageMutex: pageMutationMutex, registry: pageRegistry,
-  });
   const ui = new SessionUiService({
     browserOwner,
     submissions: submissionService,
@@ -422,21 +395,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     chatgptUrl: config.chatgptUrl,
     quietWindowMs: config.observationQuietWindowMs,
   });
-  registerSessionMethods(router, teamDirectory, receipts, cleanup, ui);
   thinkingFailureRecovery = new ThinkingFailureRecovery({ maintenance, database, submissions: submissionService, ui });
-  registerSessionUiMethods(router, ui);
-  registerTeamMethods(router, teamDirectory, receipts, cleanup, stopService, async () => { await browserOwner?.syncTeamGroups(); });
-  registerWorkflowMethods(router, new TeamWorkflow({
-    database, directory: teamDirectory, receipts, submissions: submissionService, ui,
-    scheduler: actorScheduler, artifacts: artifactService, stops: stopService, cleanup,
-    pageMutex: pageMutationMutex,
-    enabledProviders: config.enabledProviders,
-    retireObservation: sessionId => recovery.forgetSession(sessionId),
-    ensurePage: (sessionId, generation, options) => recovery.ensurePage(sessionId, generation, options),
-  }));
-  registerSendMethods(router, submissionService);
-  registerStopMethods(router, stopService);
-  registerWaitMethods(router, teamDirectory, actorScheduler);
   registerTaskMethods(router, {
     repository: semanticTaskRepository, gateway: semanticDecisionGateway,
     admission: new PublicTaskAdmissionService({

@@ -1,4 +1,3 @@
-import { MAX_WORKFLOW_WAIT_MS, workflowWaitOutcome } from '../domain/workflow-wait.ts';
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import type { Duplex } from 'node:stream';
@@ -7,7 +6,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { JsonRpcResponse } from '../rpc/schemas.ts';
 import type { RemoteConnection } from '../config.ts';
 import { connectRemote } from './remote.ts';
-import { remoteArtifacts } from './remote-artifacts.ts';
 
 export class RpcClientError extends Error {
   readonly code: number;
@@ -29,65 +27,24 @@ export interface RpcCallOptions {
   readonly timeoutMs?: number;
   readonly maxLineBytes?: number;
   readonly signal?: AbortSignal;
-  readonly collectContinuation?: boolean;
-  readonly collectAcknowledgement?: boolean;
 }
 
 export async function callRpc<Result>(options: RpcCallOptions): Promise<Result> {
-  const params = options.params as Record<string, unknown> | undefined;
-  if (options.method === 'workflow.wait' && params?.untilResult === true && Number(params.waitMs) > 0) {
-    // Each core admission remains bounded for a normal handover. Keep routine
-    // rounds in this existing client process, including its maintenance reconnect.
-    for (;;) {
-      const result = await callRpcOnce<{ results: Record<string, unknown>[] }>({ ...options,
-        params: { ...params, untilResult: false }, timeoutMs: Number(params.waitMs) + 5_000 });
-      if (!Array.isArray(result.results) || result.results.some(workflowWaitOutcome) || options.signal?.aborted) return result as Result;
-    }
-  }
-  let result: Result;
-  for (;;) {
-    try { result = await callRpcOnce<Result>(options); break; }
-    catch (error) {
-      const data = error instanceof RpcClientError ? error.data as { errorCode?: string;
-        details?: { kind?: string; requestRef?: string; automaticResubmit?: boolean; nextCheckAt?: string } } | undefined : undefined;
-      const nextCheck = Date.parse(String(data?.details?.nextCheckAt));
-      if (!options.collectAcknowledgement || options.method !== 'workflow.decide' || params?.decision !== 'acknowledge' ||
-          data?.errorCode !== 'provider.observation-deferred' || data.details?.kind !== 'deferred' ||
-          data.details.requestRef !== params.requestRef || data.details.automaticResubmit !== false || !Number.isFinite(nextCheck)) throw error;
-      // Retain only the caller's exact selection in this existing call. Every
-      // retry re-enters the normal owner/generation and fresh DOM/hash guards.
-      const retryAt = Math.max(Date.now() + 1000, nextCheck);
-      while (Date.now() < retryAt) await delay(Math.min(retryAt - Date.now(), MAX_WORKFLOW_WAIT_MS), undefined, { signal: options.signal });
-    }
-  }
-  const continuation = result as Record<string, unknown>;
-  if (options.collectContinuation && continuation && typeof continuation === 'object' && continuation.requestOk !== false && continuation.promptSubmitted === true && continuation.terminal !== true &&
-      typeof continuation.requestRef === 'string') {
-    const collection = await callRpc({ ...options, collectContinuation: false, method: 'workflow.wait',
-      params: { teamId: continuation.teamId, requestRefs: [continuation.requestRef], waitMs: 600_000, untilResult: true,
-        ...(typeof continuation.followupUserMessageId === 'string' ? { followupUserMessageId: typeof continuation.recoveredFromUserMessageId === 'string'
-          ? continuation.recoveredFromUserMessageId : continuation.followupUserMessageId } : {}),
-        ...(params?.continuationApproved === true ? { continuationApproved: true } : {}) } });
-    return { ...continuation, collection } as Result;
-  }
-  return result;
-}
-
-async function callRpcOnce<Result>(options: RpcCallOptions): Promise<Result> {
   if (options.remote) {
-    const connection = { socket: connectRemote(options.remote), ready: false, error: undefined as Error | undefined };
-    // Keep one encrypted stream for collection and all file chunks, then release it.
+    const connection = {
+      socket: connectRemote(options.remote),
+      ready: false,
+      error: undefined as Error | undefined,
+    };
     connection.socket.on('error', error => { connection.error = error; });
-    try {
-      return await remoteArtifacts(options, (method, params) =>
-        callTransport({ ...options, method, params }, connection)) as Result;
-    } finally { connection.socket.destroy(); }
+    try { return await callTransport<Result>(options, connection); }
+    finally { connection.socket.destroy(); }
   }
   return await callTransport<Result>(options);
 }
 
 async function callTransport<Result>(options: RpcCallOptions, connection?: { socket: Duplex; ready: boolean; error: Error | undefined }): Promise<Result> {
-  const readWait = ['workflow.wait', 'session.wait', 'team.wait', 'task.wait'].includes(options.method) &&
+  const readWait = options.method === 'task.wait' &&
     Number((options.params as { waitMs?: number } | undefined)?.waitMs) > 0;
   let deadline: number | undefined;
   let deferred = false;

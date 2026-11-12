@@ -65,7 +65,67 @@ try {
   delete runtimeEnv.SESSIONPLANE_STATE_DIR;
   delete runtimeEnv.XDG_STATE_HOME;
 
-  run(sessplane, ['--help'], { cwd: temporaryRoot, env: runtimeEnv, capture: true });
+  const help = run(sessplane, ['--help'], {
+    cwd: temporaryRoot, env: runtimeEnv, capture: true,
+  });
+  if (/sessplane (?:team|role|request|session|send|stop|wait|artifact)\\b/.test(help)) {
+    throw new Error('installed help still advertises a retired public CLI workflow');
+  }
+  const catalogRequest = {
+    jsonrpc: '2.0', id: 1, method: 'tools/list',
+    params: { _meta: {
+      'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+      'io.modelcontextprotocol/clientCapabilities': {},
+    } },
+  };
+  const catalog = JSON.parse(run(sessplane, ['mcp'], {
+    cwd: temporaryRoot, env: runtimeEnv, capture: true,
+    input: JSON.stringify(catalogRequest) + '\n',
+  }).trim());
+  const names = catalog.result?.tools?.map((tool) => tool.name).sort();
+  const expected = [
+    'sessionplane_project_open', 'sessionplane_task_start',
+    'sessionplane_task_get', 'sessionplane_task_wait',
+    'sessionplane_task_decide', 'sessionplane_task_cancel',
+  ].sort();
+  if (JSON.stringify(names) !== JSON.stringify(expected)) {
+    throw new Error('installed MCP catalogue does not match six-tool contract: ' + JSON.stringify({names, expected, error:catalog.error}));
+  }
+  const forbiddenCall = JSON.parse(run(sessplane, ['mcp'], {
+    cwd: temporaryRoot, env: runtimeEnv, capture: true,
+    input: JSON.stringify({ ...catalogRequest, method: 'tools/call',
+      params: { ...catalogRequest.params, name: 'sessionplane_team_get',
+        arguments: { teamId: 'retired' } } }) + '\n',
+  }).trim());
+  if (forbiddenCall.error?.code !== -32602) {
+    throw new Error('installed MCP still executes a retired workflow tool');
+  }
+  for (const retired of [
+    'dist/core/team-workflow.js',
+    'dist/rpc/methods/workflow.js',
+    'dist/rpc/methods/team.js',
+    'dist/rpc/methods/session.js',
+    'dist/rpc/methods/session-ui.js',
+    'dist/rpc/methods/send.js',
+    'dist/rpc/methods/stop.js',
+    'dist/rpc/methods/wait.js',
+    'dist/rpc/methods/artifact.js',
+    'dist/rpc/methods/browser-control.js',
+    'dist/cli/remote-artifacts.js',
+  ]) {
+    if (existsSync(path.join(installedRoot, retired))) {
+      throw new Error('retired public implementation was packaged: ' + retired);
+    }
+  }
+  for (const [file, forbidden] of [
+    ['dist/main.js', /registerWorkflowMethods|registerTeamMethods|registerSessionMethods|registerSendMethods|registerWaitMethods|registerStopMethods/],
+    ['dist/cli/main.js', /runRequestCommand|runTeamCommand|runSessionCommand|runRoleCommand/],
+    ['dist/mcp/tools.js', /workflowSchemas|sessionplane_team_get|sessionplane_send/],
+  ]) {
+    if (forbidden.test(readFileSync(path.join(installedRoot, file), 'utf8'))) {
+      throw new Error('retired public surface remains in installed ' + file);
+    }
+  }
   const doctor = JSON.parse(run(sessplane, ['doctor', '--json'], {
     cwd: temporaryRoot,
     env: runtimeEnv,
@@ -85,6 +145,7 @@ function run(command, args, options = {}) {
     env: options.env ?? process.env,
     encoding: 'utf8',
     stdio: options.capture ? 'pipe' : 'inherit',
+    ...(options.input === undefined ? {} : { input: options.input }),
   });
   if (result.error !== undefined) throw result.error;
   if (result.status !== 0) {

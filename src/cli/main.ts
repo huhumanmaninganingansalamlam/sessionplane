@@ -1,19 +1,13 @@
-import { DEFAULT_WORKFLOW_WAIT_MS, MAX_WORKFLOW_WAIT_MS, workflowWaitMs } from '../domain/workflow-wait.ts';
-import { runRpcRelay } from './remote.ts';
-import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import {
-  findHostBrowser,
-  listHostBrowsers,
-  type BrowserPreference,
-} from '../browser/browser-health.ts';
+import { findHostBrowser, listHostBrowsers, type BrowserPreference } from '../browser/browser-health.ts';
 import { resolveConfig, SESSIONPLANE_VERSION, type SessionPlaneConfig } from '../config.ts';
 import { serveForever } from '../main.ts';
 import { runMcpServer } from '../mcp/server.ts';
+import { runRpcRelay } from './remote.ts';
 import { projectOpenSchema, taskSchemas } from '../rpc/methods/task.ts';
 import { SkillDistributionService } from '../skills/skill-distribution.ts';
 import { callRpc, RpcClientError } from './client.ts';
@@ -24,381 +18,128 @@ import { writeCliError, writeCliResult, type CliIo } from './format.ts';
 interface ParsedArgs {
   readonly words: readonly string[];
   readonly options: Readonly<Record<string, string>>;
-  readonly multiOptions: Readonly<Record<string, readonly string[]>>;
   readonly files: readonly string[];
   readonly json: boolean;
 }
 
 const FLAG_OPTIONS = new Set([
-  'json',
-  'interactive',
-  'full-page',
-  'append',
-  'clear',
-  'boxes',
-  'include-disabled',
-  'screenshot',
-  'all-nodes',
-  'force',
-  'deep',
-  'prompt-stdin',
-  'overwrite',
-  'full',
-  'link',
-  'manual',
-  'resume',
-  'no-activate',
-  'outputs-retrieved',
-  'continuation-approved',
-  'manage-only',
-  'return-on-wait-expiry',
-  'preserve-conversation',
-  'discard-unresolved',
-  'until-change',
-  'public',
+  'json', 'prompt-stdin', 'continuation-approved', 'until-change',
+  'manual', 'resume', 'full', 'link', 'force',
 ]);
-const MULTI_VALUE_OPTIONS = new Set(['file', 'skill']);
 const VALUE_OPTIONS = new Set([
-  'answer',
-  'view',
-  'user-confirmed-interruption',
-  'unresolved-handoff',
-  'discard-retired-observation',
-  'resume-page-cleanup',
-  'evidence-ref',
-  'followup-message-id', 'remote', 'remote-executable', 'remote-socket', 'remote-control-path',
-  'state-dir',
-  'browser',
-  'browser-executable',
-  'providers',
-  'socket',
-  'url',
-  'client-id',
-  'request-id',
-  'expected-conversation-revision',
-  'conversation-slot',
-  'after-revision',
-  'approval-ref',
-  'input',
-  'name',
-  'objective',
-  'primary-role',
-  'external-ref',
-  'type',
-  'display-name',
-  'reports-to',
-  'provider',
-  'brief',
-  'prompt',
-  'prompt-file',
-  'continuation-prompt',
-  'text',
-  'model',
-  'effort',
-  'surface',
-  'file',
-  'deadline',
-  'session',
-  'generation',
-  'after-event-sequence',
-  'wait-ms',
-  'roles',
-  'until',
-  'after-sequence',
-  'limit',
-  'page',
-  'snapshot-id',
-  'max-nodes',
-  'out',
-  'width',
-  'height',
-  'key',
-  'value',
-  'x',
-  'y',
-  'delta-x',
-  'delta-y',
-  'timeout-ms',
-  'selector',
-  'script',
-  'max-chars',
-  'top-n',
-  'button',
-  'click-count',
-  'max-bytes',
-  'source',
-  'timeout',
-  'artifact-id',
-  'target',
-  'skill',
-  'conversation',
-  'chatgpt-url',
-  'message-id',
-  'evidence-hash',
-  'action',
-  'app-name',
-  'tool-name',
-  'allow-mode',
-]);
-
-const INTERNAL_BROWSER_COMMANDS = new Set([
-  'tabs',
-  'browser-status',
-  'browser-start',
-  'browser-stop',
-  'browser-reset',
-  'active-tab',
-  'select-tab',
-  'tab-switch',
-  'new-tab',
-  'tab-close',
-  'tab-cleanup',
-  'navigate',
-  'reload',
-  'back',
-  'forward',
-  'resize',
-  'snapshot',
-  'screenshot',
-  'text',
-  'get-dom',
-  'click',
-  'type',
-  'press',
-  'hover',
-  'select',
-  'check',
-  'uncheck',
-  'upload',
-  'drag',
-  'mouse-click',
-  'move-mouse',
-  'mouse-down',
-  'mouse-up',
-  'scroll',
-  'wait-for-selector',
-  'wait-for-text',
-  'wait-for',
-  'console',
-  'network',
-  'evaluate',
-  'observe-bundle',
-  'observe-actions',
+  'view', 'remote', 'remote-executable', 'remote-socket', 'remote-control-path',
+  'state-dir', 'browser', 'browser-executable', 'providers', 'socket',
+  'client-id', 'request-id', 'expected-conversation-revision', 'conversation-slot',
+  'after-revision', 'approval-ref', 'input', 'name', 'provider', 'prompt',
+  'prompt-file', 'model', 'surface', 'wait-ms', 'key', 'url', 'skill', 'target',
 ]);
 
 export async function runCli(
   argv: readonly string[],
-  io: CliIo = {
-    stdin: process.stdin,
-    stdout: process.stdout,
-    stderr: process.stderr,
-  },
+  io: CliIo = { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr },
 ): Promise<number> {
-  let parsed: ParsedArgs;
-  try {
-    parsed = parseArgs(argv);
-  } catch (error) {
-    writeCliError(io, argv.includes('--json'), error);
-    return 2;
-  }
-
-  const command = parsed.words[0] ?? 'help';
-  if (command === 'help' || parsed.words.includes('--help') || parsed.words.includes('-h')) {
+  if (argv.includes('--help') || argv.includes('-h') || argv.length === 0 ||
+      argv[0] === 'help') {
     io.stdout.write(helpText());
     return 0;
   }
+  let parsed: ParsedArgs;
+  try { parsed = parseArgs(argv); }
+  catch (error) { writeCliError(io, argv.includes('--json'), error); return 2; }
+
+  const command = parsed.words[0] ?? 'help';
+  const requestedState = parsed.options['state-dir'] ?? process.env.SESSIONPLANE_STATE_DIR;
   let stateDir = parsed.options['state-dir'];
   if (command === 'serve') {
     const canonical = path.join(homedir(), '.local', 'state', 'sessionplane');
-    const requested = stateDir ?? process.env.SESSIONPLANE_STATE_DIR;
-    if (
-      requested !== undefined &&
-      requested !== '' &&
-      path.resolve(requested) !== canonical
-    ) {
-      writeCliError(
-        io,
-        parsed.json,
-        new Error(
-          'Installed SessionPlane uses one canonical runtime state: ' +
-            canonical +
-            '. Isolated --state-dir runtimes are test-only.',
-        ),
-      );
+    if (requestedState && path.resolve(requestedState) !== canonical) {
+      writeCliError(io, parsed.json, new Error(
+        'Installed Core uses the canonical state directory; isolated stateDir is test-only.',
+      ));
       return 2;
     }
     stateDir = canonical;
   }
-
   const remoteHost = parsed.options.remote ?? process.env.SESSIONPLANE_REMOTE_HOST;
   const remoteSocket = parsed.options['remote-socket'] ?? process.env.SESSIONPLANE_REMOTE_SOCKET;
   const controlPath = parsed.options['remote-control-path'] ?? process.env.SESSIONPLANE_REMOTE_CONTROL_PATH;
   const config = resolveConfig({
     ...(remoteHost ? { remote: {
       host: remoteHost,
-      executable: parsed.options['remote-executable'] ?? process.env.SESSIONPLANE_REMOTE_EXECUTABLE ?? 'sessplane',
+      executable: parsed.options['remote-executable'] ??
+        process.env.SESSIONPLANE_REMOTE_EXECUTABLE ?? 'sessplane',
       ...(controlPath ? { controlPath } : {}),
       ...(remoteSocket ? { socketPath: remoteSocket } : {}),
     } } : {}),
     ...(stateDir === undefined ? {} : { stateDir }),
     ...(parsed.options.socket === undefined ? {} : { socketPath: parsed.options.socket }),
     ...(parsed.options.browser === undefined
-      ? {}
-      : { browserPreference: parsed.options.browser as BrowserPreference }),
+      ? {} : { browserPreference: parsed.options.browser as BrowserPreference }),
     ...(parsed.options['browser-executable'] === undefined
-      ? {}
-      : { browserExecutable: parsed.options['browser-executable'] }),
+      ? {} : { browserExecutable: parsed.options['browser-executable'] }),
     ...(parsed.options.providers === undefined
-      ? {}
-      : { enabledProviders: parsed.options.providers.split(',') }),
+      ? {} : { enabledProviders: parsed.options.providers.split(',') }),
   });
 
   try {
-    if (parsed.options.public === 'true' && command !== 'mcp') {
-      throw new Error('--public is supported only by sessplane mcp');
-    }
-    if (INTERNAL_BROWSER_COMMANDS.has(command)) {
-      throw new Error(
-        `Generic browser command is not part of the public SessionPlane runtime: ${command}. ` +
-          'Use Playwright for general browser automation.',
-      );
-    }
     switch (command) {
-      case 'rpc-stdio':
-        return await runRpcRelay(config.socketPath, io);
       case 'serve':
-        if (config.remote) throw new Error('Start serve on the remote computer without SESSIONPLANE_REMOTE_HOST');
+        if (config.remote) throw new Error('Run serve on the remote Core host, not through SSH');
         await serveForever(config);
         return 0;
+      case 'rpc-stdio':
+        return await runRpcRelay(config.socketPath, io);
       case 'health':
         return await printRpc(io, parsed, config, 'system.health', {});
       case 'project':
         return await runPublicProjectCommand(io, parsed, config);
       case 'task':
         return await runPublicTaskCommand(io, parsed, config);
+      case 'mcp':
+        if (parsed.words.length !== 1) throw new Error('Usage: sessplane mcp');
+        await runMcpServer({ input: io.stdin, output: io.stdout, error: io.stderr, config });
+        return 0;
       case 'doctor': {
         const report = await runDoctor(config);
         writeCliResult(io, parsed.json, report);
         return report.requestOk ? 0 : 1;
       }
       case 'browser-list': {
-        if (config.remote) throw new Error('Run browser-list on the remote computer; use doctor here to inspect the remote core');
         const available = listHostBrowsers();
         const selected = findHostBrowser({
           preference: config.browserPreference,
-          ...(config.browserExecutable === null
-            ? {}
-            : { executablePath: config.browserExecutable }),
+          ...(config.browserExecutable === null ? {} : { executablePath: config.browserExecutable }),
         });
         writeCliResult(io, parsed.json, {
-          requestOk: selected !== null,
-          requested: config.browserPreference,
-          executableOverride: config.browserExecutable,
-          selected,
-          available,
+          requestOk: selected !== null, requested: config.browserPreference,
+          selected, available,
         });
-        return selected === null ? 1 : 0;
+        return selected ? 0 : 1;
       }
       case 'login': {
-        if (parsed.options.manual !== undefined && parsed.options.resume !== undefined) {
+        if (parsed.options.manual === 'true' && parsed.options.resume === 'true') {
           throw new Error('--manual and --resume are mutually exclusive');
         }
-        if (parsed.options.resume !== undefined && parsed.options.url !== undefined) {
+        if (parsed.options.resume === 'true' && parsed.options.url !== undefined) {
           throw new Error('--resume does not accept --url');
         }
-        const mode = parsed.options.manual !== undefined
-          ? 'manual'
-          : parsed.options.resume !== undefined
-            ? 'resume'
-            : 'automated';
+        const mode = parsed.options.manual === 'true' ? 'manual' :
+          parsed.options.resume === 'true' ? 'resume' : 'automated';
         const result = await runLogin(config, {
-          mode,
-          ...(parsed.options.url === undefined ? {} : { url: parsed.options.url }),
+          mode, ...(parsed.options.url ? { url: parsed.options.url } : {}),
         });
         writeCliResult(io, parsed.json, result);
         return 0;
       }
-      case 'team':
-        return await runTeamCommand(io, parsed, config);
-      case 'request':
-        return await runRequestCommand(io, parsed, config);
-      case 'role':
-        return await runRoleCommand(io, parsed, config);
-      case 'session':
-        return await runSessionCommand(io, parsed, config);
-      case 'send':
-        return await runSendCommand(io, parsed, config);
-      case 'wait':
-        return await runWaitCommand(io, parsed, config);
-      case 'stop':
-        return await runStopCommand(io, parsed, config);
-      case 'status':
-        return parsed.words.length === 1 && parsed.options.session === undefined
-          ? await printRpc(io, parsed, config, 'system.health', {})
-          : await runStatusCommand(io, parsed, config);
-      case 'events':
-        return await runEventsCommand(io, parsed, config, parsed.words.slice(1));
-      case 'artifact':
-        return await runArtifactCommand(io, parsed, config);
       case 'skills':
-        return await runSkillsCommand(io, parsed);
-      case 'mcp':
-        if (parsed.words.length !== 1) throw new Error('Usage: sessplane mcp [--public]');
-        await runMcpServer({
-          input: io.stdin, output: io.stdout, error: io.stderr, config,
-          publicOnly: parsed.options.public === 'true',
-        });
-        return 0;
-      case 'tabs':
-      case 'browser-status':
-      case 'browser-start':
-      case 'browser-stop':
-      case 'browser-reset':
-      case 'active-tab':
-      case 'select-tab':
-      case 'tab-switch':
-      case 'new-tab':
-      case 'tab-close':
-      case 'tab-cleanup':
-      case 'navigate':
-      case 'reload':
-      case 'back':
-      case 'forward':
-      case 'resize':
-      case 'snapshot':
-      case 'screenshot':
-      case 'text':
-      case 'get-dom':
-      case 'click':
-      case 'type':
-      case 'press':
-      case 'hover':
-      case 'select':
-      case 'check':
-      case 'uncheck':
-      case 'upload':
-      case 'drag':
-      case 'mouse-click':
-      case 'move-mouse':
-      case 'mouse-down':
-      case 'mouse-up':
-      case 'scroll':
-      case 'wait-for-selector':
-      case 'wait-for-text':
-      case 'wait-for':
-      case 'console':
-      case 'network':
-      case 'evaluate':
-      case 'observe-bundle':
-      case 'observe-actions':
-        return await runBrowserCommand(io, parsed, config);
+        return await runOperatorSkills(io, parsed);
       case 'version':
       case '--version':
       case '-v':
-        io.stdout.write(`${SESSIONPLANE_VERSION}\n`);
+        io.stdout.write(SESSIONPLANE_VERSION + '\n');
         return 0;
       default:
-        throw new Error(`Unknown command: ${command}`);
+        throw new Error('Unknown public command: ' + command);
     }
   } catch (error) {
     writeCliError(io, parsed.json, error);
@@ -406,9 +147,7 @@ export async function runCli(
   }
 }
 
-/** The public CLI accepts only the exact project/task inputs sent to Core.
- * It does not infer provider identity, run a task timer, or retry a mutation.
- */
+/** Only the provider-neutral project/task RPC is accepted from the public CLI. */
 const PUBLIC_GLOBAL_OPTIONS = [
   'client-id', 'socket', 'state-dir', 'remote', 'remote-executable',
   'remote-socket', 'remote-control-path',
@@ -529,1110 +268,146 @@ async function runPublicTaskCommand(
   }
 }
 
-async function assertCoreBrowserSelection(config: SessionPlaneConfig): Promise<void> {
-  if (config.browserPreference === 'auto' && config.browserExecutable === null) return;
-
-  const expected = findHostBrowser({
-    preference: config.browserPreference,
-    ...(config.browserExecutable === null
-      ? {}
-      : { executablePath: config.browserExecutable }),
-  });
-  if (expected === null) {
-    throw new Error('The requested host browser is unavailable');
-  }
-
-  const health = await callRpc<{
-    readonly browser?: {
-      readonly chrome?: {
-        readonly executable?: string;
-        readonly product?: string;
-      } | null;
-    };
-  }>({
-    socketPath: config.socketPath,
-    remote: config.remote,
-    method: 'system.health',
-    params: {},
-    timeoutMs: config.rpcRequestTimeoutMs,
-    maxLineBytes: config.rpcMaxLineBytes,
-  });
-  const current = health.browser?.chrome;
-  const matches =
-    current !== null &&
-    current !== undefined &&
-    (config.browserExecutable !== null
-      ? current.executable === expected.executable
-      : current.product === expected.product);
-  if (!matches) {
-    throw new Error(
-      `The running core owns ${current?.product ?? 'an unknown browser'}; ` +
-        `restart the core with --browser ${config.browserPreference}`,
-    );
-  }
-}
-
-async function runBrowserCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const command = parsed.words[0] as string;
-  const rest = parsed.words.slice(1);
-  const pageKey = parsed.options.page;
-  const page = pageKey === undefined ? {} : { pageKey };
-  const snapshotId = parsed.options['snapshot-id'];
-  const snapshot = snapshotId === undefined ? {} : { snapshotId };
-
-  switch (command) {
-    case 'browser-status':
-      return await printRpc(io, parsed, config, 'browser.runtime.status', {});
-    case 'browser-start':
-      await assertCoreBrowserSelection(config);
-      return await printRpc(
-        io,
-        parsed,
-        config,
-        'browser.runtime.start',
-        {},
-        browserRuntimeRpcTimeoutMs(config),
-      );
-    case 'browser-stop':
-      return await printRpc(
-        io,
-        parsed,
-        config,
-        'browser.runtime.stop',
-        {},
-        browserRuntimeRpcTimeoutMs(config),
-      );
-    case 'browser-reset':
-      return await printRpc(
-        io,
-        parsed,
-        config,
-        'browser.runtime.reset',
-        {
-          force: parsed.options.force === 'true',
-        },
-        browserRuntimeRpcTimeoutMs(config),
-      );
-    case 'tabs':
-    case 'active-tab':
-      return await printRpc(io, parsed, config, 'browser.tabs', {});
-    case 'select-tab':
-    case 'tab-switch':
-      return await printRpc(io, parsed, config, 'browser.select', {
-        pageKey: requirePositional(rest, 0, 'pageKey'),
-      });
-    case 'new-tab':
-      return await printRpc(
-        io,
-        parsed,
-        config,
-        'browser.new',
-        {
-          ...optionalParam('url', rest[0] ?? parsed.options.url),
-          activate: parsed.options['no-activate'] !== 'true',
-        },
-        browserNavigationRpcTimeoutMs(config),
-      );
-    case 'tab-close':
-      return await printRpc(io, parsed, config, 'browser.close', {
-        ...optionalParam('pageKey', rest[0] ?? pageKey),
-      });
-    case 'tab-cleanup':
-      return await printRpc(io, parsed, config, 'browser.cleanup', {
-        ...optionalParam('keepPageKey', pageKey),
-      });
-    case 'navigate':
-      return await printRpc(
-        io,
-        parsed,
-        config,
-        'browser.navigate',
-        {
-          ...page,
-          url: requirePositional(rest, 0, 'url'),
-        },
-        browserNavigationRpcTimeoutMs(config),
-      );
-    case 'reload':
-    case 'back':
-    case 'forward':
-      return await printRpc(
-        io,
-        parsed,
-        config,
-        `browser.${command}`,
-        page,
-        browserNavigationRpcTimeoutMs(config),
-      );
-    case 'resize':
-      return await printRpc(io, parsed, config, 'browser.resize', {
-        ...page,
-        width: numberFromOptionOrPosition(parsed, 'width', rest, 0, 200, 10_000),
-        height: numberFromOptionOrPosition(parsed, 'height', rest, 1, 200, 10_000),
-      });
-    case 'snapshot':
-      return await printRpc(io, parsed, config, 'browser.snapshot', {
-        ...page,
-        interactive: !parsed.options['all-nodes'],
-        maxNodes: integerOption(parsed, 'max-nodes', 250, 1, 5_000),
-      });
-    case 'screenshot':
-      return await printRpc(io, parsed, config, 'browser.screenshot', {
-        ...page,
-        outputPath: parsed.options.out ?? rest[0] ?? 'sessionplane-screenshot.png',
-        fullPage: parsed.options['full-page'] === 'true',
-      });
-    case 'text':
-      return await printRpc(io, parsed, config, 'browser.text', {
-        ...page,
-        ...optionalParam('selector', parsed.options.selector),
-        maxChars: integerOption(parsed, 'max-chars', 200_000, 1, 2_000_000),
-      });
-    case 'get-dom':
-      return await printRpc(io, parsed, config, 'browser.dom', {
-        ...page,
-        ...optionalParam('selector', parsed.options.selector),
-        maxChars: integerOption(parsed, 'max-chars', 500_000, 1, 4_000_000),
-      });
-    case 'click':
-      return await printRpc(io, parsed, config, 'browser.click', {
-        ...page,
-        ...snapshot,
-        ref: requirePositional(rest, 0, 'ref'),
-        button: parsed.options.button ?? 'left',
-        clickCount: integerOption(parsed, 'click-count', 1, 1, 3),
-      });
-    case 'type':
-      return await printRpc(io, parsed, config, 'browser.type', {
-        ...page,
-        ...snapshot,
-        ref: requirePositional(rest, 0, 'ref'),
-        text: requireOption(parsed, 'text'),
-        append: parsed.options.append === 'true',
-      });
-    case 'press': {
-      const ref = rest[0]?.startsWith('@e') ? rest[0] : undefined;
-      const key = parsed.options.key ?? (ref === undefined ? rest[0] : rest[1]);
-      if (key === undefined) throw new Error('key is required');
-      return await printRpc(io, parsed, config, 'browser.press', {
-        ...page,
-        ...snapshot,
-        ...optionalParam('ref', ref),
-        key,
-      });
-    }
-    case 'hover':
-      return await printRpc(io, parsed, config, 'browser.hover', {
-        ...page,
-        ...snapshot,
-        ref: requirePositional(rest, 0, 'ref'),
-      });
-    case 'select':
-      return await printRpc(io, parsed, config, 'browser.selectOption', {
-        ...page,
-        ...snapshot,
-        ref: requirePositional(rest, 0, 'ref'),
-        values: requireOption(parsed, 'value').split(',').map((value) => value.trim()),
-      });
-    case 'check':
-    case 'uncheck':
-      return await printRpc(io, parsed, config, `browser.${command}`, {
-        ...page,
-        ...snapshot,
-        ref: requirePositional(rest, 0, 'ref'),
-      });
-    case 'upload':
-      return await printRpc(io, parsed, config, 'browser.upload', {
-        ...page,
-        ...snapshot,
-        ref: requirePositional(rest, 0, 'ref'),
-        files: rest.slice(1),
-      });
-    case 'drag':
-      return await printRpc(io, parsed, config, 'browser.drag', {
-        ...page,
-        ...snapshot,
-        sourceRef: requirePositional(rest, 0, 'sourceRef'),
-        targetRef: requirePositional(rest, 1, 'targetRef'),
-      });
-    case 'mouse-click':
-    case 'move-mouse':
-    case 'mouse-down':
-    case 'mouse-up': {
-      const action = command === 'mouse-click'
-        ? 'click'
-        : command === 'move-mouse'
-          ? 'move'
-          : command === 'mouse-down'
-            ? 'down'
-            : 'up';
-      return await printRpc(io, parsed, config, 'browser.mouse', {
-        ...page,
-        action,
-        ...(action === 'click' || action === 'move'
-          ? {
-              x: numberFromOptionOrPosition(parsed, 'x', rest, 0, -100_000, 100_000),
-              y: numberFromOptionOrPosition(parsed, 'y', rest, 1, -100_000, 100_000),
-            }
-          : {}),
-        button: parsed.options.button ?? 'left',
-      });
-    }
-    case 'scroll':
-      return await printRpc(io, parsed, config, 'browser.scroll', {
-        ...page,
-        deltaX: numberFromOptionOrPosition(parsed, 'delta-x', rest, 0, -1_000_000, 1_000_000, 0),
-        deltaY: numberFromOptionOrPosition(parsed, 'delta-y', rest, 1, -1_000_000, 1_000_000, 700),
-      });
-    case 'wait-for-selector': {
-      const timeoutMs = integerOption(parsed, 'timeout-ms', 30_000, 0, 600_000);
-      return await printRpc(io, parsed, config, 'browser.wait', {
-        ...page,
-        selector: parsed.options.selector ?? requirePositional(rest, 0, 'selector'),
-        timeoutMs,
-      }, timeoutMs + 5_000);
-    }
-    case 'wait-for-text': {
-      const timeoutMs = integerOption(parsed, 'timeout-ms', 30_000, 0, 600_000);
-      return await printRpc(io, parsed, config, 'browser.wait', {
-        ...page,
-        text: parsed.options.text ?? requirePositional(rest, 0, 'text'),
-        timeoutMs,
-      }, timeoutMs + 5_000);
-    }
-    case 'wait-for': {
-      const condition = requirePositional(rest, 0, 'ref-or-text');
-      const timeoutMs = integerOption(parsed, 'timeout-ms', 30_000, 0, 600_000);
-      return await printRpc(io, parsed, config, 'browser.wait', {
-        ...page,
-        ...snapshot,
-        ...(condition.startsWith('@e') ? { ref: condition } : { text: condition }),
-        timeoutMs,
-      }, timeoutMs + 5_000);
-    }
-    case 'console':
-      return await printRpc(io, parsed, config, 'browser.console', {
-        ...page,
-        clear: parsed.options.clear === 'true',
-        ...optionalIntegerParam(parsed, 'limit', 'limit', 1, 10_000),
-      });
-    case 'network':
-      return await printRpc(io, parsed, config, 'browser.network', {
-        ...page,
-        clear: parsed.options.clear === 'true',
-      });
-    case 'evaluate':
-      return await printRpc(io, parsed, config, 'browser.evaluate', {
-        ...page,
-        script: parsed.options.script ?? rest.join(' '),
-      });
-    case 'observe-bundle':
-      return await printRpc(io, parsed, config, 'browser.observeBundle', {
-        ...page,
-        ...(parsed.options.screenshot === 'true'
-          ? { screenshotPath: parsed.options.out ?? 'sessionplane-observation.png' }
-          : {}),
-        includeBoxes: parsed.options.boxes === 'true',
-        maxTextChars: integerOption(parsed, 'max-chars', 2_000, 1, 2_000_000),
-        maxNodes: integerOption(parsed, 'max-nodes', 250, 1, 5_000),
-      });
-    case 'observe-actions':
-      return await printRpc(io, parsed, config, 'browser.observeActions', {
-        ...page,
-        instruction: rest.join(' ') || requireOption(parsed, 'text'),
-        topN: integerOption(parsed, 'top-n', 10, 1, 100),
-        includeDisabled: parsed.options['include-disabled'] === 'true',
-      });
-    default:
-      throw new Error(`Unknown browser command: ${command}`);
-  }
-}
-
-export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
-  process.exitCode = await runCli(argv);
-}
-
-// Human commands are thin adapters over the same guarded workflow used by MCP.
-async function runRequestCommand(io: CliIo, parsed: ParsedArgs, config: SessionPlaneConfig): Promise<number> {
-  const action = parsed.words[1];
-  const teamId = requirePositional(parsed.words, 2, 'teamId');
-  const ref = requirePositional(parsed.words, 3, ['send', 'replace', 'open'].includes(action ?? '') ? 'roleRef' : 'requestRef');
-  const request = { teamId, requestRef: ref };
-  const requestId = parsed.options['request-id'] ?? randomUUID();
-  const mutation = { ...request, requestId };
-  if (action === 'show' && parsed.options['followup-message-id'] !== undefined) return await printRpc(io, parsed, config, 'workflow.wait', {
-    teamId, requestRefs: [ref], waitMs: 0, untilResult: false,
-    followupUserMessageId: parsed.options['followup-message-id'],
-  });
-  if (action === 'show') return await printRpc(io, parsed, config, 'workflow.team_get', {
-    ...request, ...optionalParam('view', parsed.options.view),
-    ...(parsed.options['max-nodes'] === undefined ? {} : { maxNodes: integerOption(parsed, 'max-nodes', 250, 1, 5000) }),
-  });
-  if (action === 'wait') {
-    const waitMs = workflowWaitMs(integerOption(parsed, 'wait-ms', DEFAULT_WORKFLOW_WAIT_MS, 0, MAX_WORKFLOW_WAIT_MS));
-    return await printRpc(io, parsed, config, 'workflow.wait', { teamId, requestRefs: [ref], waitMs,
-      ...(parsed.options['continuation-approved'] === 'true' ? { continuationApproved: true as const } : {}),
-      untilResult: waitMs > 0 && parsed.options['return-on-wait-expiry'] !== 'true',
-      ...optionalParam('followupUserMessageId', parsed.options['followup-message-id']),
-      ...optionalParam('outputDir', parsed.options.out) }, (waitMs > 0 && parsed.options['return-on-wait-expiry'] !== 'true' ? MAX_WORKFLOW_WAIT_MS : waitMs) + 5_000);
-  }
-  if (action === 'send') {
-    const sources = ['prompt', 'prompt-file', 'prompt-stdin'].filter(key => parsed.options[key] !== undefined);
-    if (sources.length !== 1) throw new Error('Choose exactly one of --prompt, --prompt-file, or --prompt-stdin');
-    const prompt = parsed.options['prompt-file'] !== undefined ? readFileSync(parsed.options['prompt-file'], 'utf8')
-      : parsed.options['prompt-stdin'] === 'true' ? await readInput(io.stdin) : requireOption(parsed, 'prompt');
-    return await printRpc(io, parsed, config, 'workflow.send', { teamId, roleRef: ref, requestId, prompt,
-      ...optionalParam('model', parsed.options.model), ...optionalParam('effort', parsed.options.effort),
-      ...(parsed.files.length ? { files: parsed.files } : {}) }, sessionSendRpcTimeoutMs(config));
-  }
-  if (action === 'open') return await printRpc(io, parsed, config, 'workflow.session_open', { teamId, roleRef: ref, requestId }, sessionSendRpcTimeoutMs(config));
-  if (action === 'replace') return await printRpc(io, parsed, config, 'workflow.session_replace', {
-    teamId, roleRef: ref, requestId,
-    ...(parsed.options['preserve-conversation'] === 'true' ? { preserveConversation: true } : {}),
-    ...(parsed.options['unresolved-handoff'] === undefined ? {} : {
-      unresolvedHandoff: JSON.parse(readFileSync(parsed.options['unresolved-handoff'], 'utf8')) }),
-  }, sessionSendRpcTimeoutMs(config));
-  if (action === 'delete') {
-    if (parsed.options['outputs-retrieved'] !== 'true') throw new Error('Retrieve the original answer/files first, then pass --outputs-retrieved to authorize conversation deletion.');
-    return await printRpc(io, parsed, config, 'workflow.session_delete', { ...mutation, outputsRetrieved: true,
-      ...(parsed.options['discard-retired-observation'] === undefined ? {} : {
-        discardRetiredObservation: JSON.parse(readFileSync(parsed.options['discard-retired-observation'], 'utf8')) }),
-    }, sessionSendRpcTimeoutMs(config));
-  }
-  if (action === 'stop') return await printRpc(io, parsed, config, 'workflow.stop', mutation, sessionSendRpcTimeoutMs(config));
-  if (action === 'configure') return await printRpc(io, parsed, config, 'workflow.decide', {
-    ...mutation, decision: 'configure', configurationId: requirePositional(parsed.words, 4, 'configurationId'),
-  }, sessionSendRpcTimeoutMs(config));
-  if (action === 'human_review') return await printRpc(io, parsed, config, 'workflow.decide', {
-    ...mutation, decision: 'human_review', action: requireOption(parsed, 'action'),
-  }, sessionSendRpcTimeoutMs(config));
-  if (action === 'retire_observation') return await printRpc(io, parsed, config, 'workflow.decide', {
-    ...mutation, decision: 'retire_observation', discardUnresolved: parsed.options['discard-unresolved'] === 'true',
-    evidenceRef: requireOption(parsed, 'evidence-ref'),
-  }, sessionSendRpcTimeoutMs(config));
-  if (action === 'answer_question') return await printRpc(io, parsed, config, 'workflow.decide', {
-    ...mutation, decision: 'answer_question', answer: requireOption(parsed, 'answer'),
-    evidenceHash: requireOption(parsed, 'evidence-hash'),
-  }, sessionSendRpcTimeoutMs(config));
-  if (action === 'output_panel') return await printRpc(io, parsed, config, 'workflow.decide', {
-    ...mutation, decision: 'output_panel', action: requireOption(parsed, 'action'),
-    ...optionalParam('evidenceHash', parsed.options['evidence-hash']),
-  }, sessionSendRpcTimeoutMs(config));
-  if (action === 'hostspan_permission') return await printRpc(io, parsed, config, 'workflow.decide', {
-    ...mutation, decision: 'hostspan_permission', action: requireOption(parsed, 'action'),
-    ...optionalParam('followupUserMessageId', parsed.options['followup-message-id']),
-    appName: requireOption(parsed, 'app-name'), ...optionalParam('toolName', parsed.options['tool-name']),
-    ...(parsed.options['allow-mode'] === undefined ? {} : { allowMode: parsed.options['allow-mode'] }),
-    ...(parsed.options['evidence-hash'] === undefined ? {} : { evidenceHash: parsed.options['evidence-hash'] }),
-  }, sessionSendRpcTimeoutMs(config));
-  if (action === 'acknowledge') return await printRpc(io, parsed, config, 'workflow.decide', {
-    ...mutation, decision: 'acknowledge', messageId: requireOption(parsed, 'message-id'),
-    evidenceHash: requireOption(parsed, 'evidence-hash'),
-  }, sessionSendRpcTimeoutMs(config));
-  if (action === 'choose' || action === 'reveal') return await printRpc(io, parsed, config, 'workflow.decide', {
-    ...mutation, decision: action, purpose: requirePositional(parsed.words, 4, 'purpose'),
-    ref: requirePositional(parsed.words, 5, 'control ref'), snapshotId: requireOption(parsed, 'snapshot-id'),
-    ...(parsed.options.value === undefined ? {} : { value: Number(parsed.options.value) }),
-  }, sessionSendRpcTimeoutMs(config));
-  if (action === 'continue') return await printRpc(io, parsed, config, 'workflow.decide', {
-    ...mutation, decision: 'continue', continuationApproved: parsed.options['continuation-approved'] === 'true',
-    ...(parsed.options['manage-only'] === 'true' ? { manageOnly: true } : {}),
-    ...optionalParam('followupUserMessageId', parsed.options['followup-message-id']),
-    ...(parsed.options['user-confirmed-interruption'] === undefined ? {} : {
-      userConfirmedInterruption: JSON.parse(readFileSync(parsed.options['user-confirmed-interruption'], 'utf8')) }),
-  }, sessionSendRpcTimeoutMs(config), parsed.options['wait-ms'] !== '0' && parsed.options['manage-only'] !== 'true');
-  if (action === 'followup') return await printRpc(io, parsed, config, 'workflow.decide', {
-    ...mutation, decision: 'followup', approvalRef: requirePositional(parsed.words, 4, 'exact user instruction reference'),
-  }, sessionSendRpcTimeoutMs(config), true);
-  if (['discover', 'refresh', 'focus', 'latest', 'reopen', 'reconcile_failure'].includes(action ?? '')) {
-    return await printRpc(io, parsed, config, 'workflow.decide', { ...mutation, decision: action,
-      ...(action === 'reconcile_failure' && parsed.options['continuation-prompt'] !== undefined
-        ? { continuationPrompt: parsed.options['continuation-prompt'] } : {}) }, sessionSendRpcTimeoutMs(config));
-  }
-  throw new Error(`Unknown request action: ${action}. See sessplane --help.`);
-}
-
-async function runTeamCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const action = parsed.words[1];
-  const rest = parsed.words.slice(2);
-  switch (action) {
-    case 'delete':
-      return await printRpc(io, parsed, config, 'team.delete', {
-        ...mutationIdentity(parsed), teamId: requirePositional(rest, 0, 'teamId'),
-        ...(parsed.options['resume-page-cleanup'] === undefined ? {} : {
-          resumePageCleanup: JSON.parse(readFileSync(parsed.options['resume-page-cleanup'], 'utf8')) }),
-      }, sessionSendRpcTimeoutMs(config));
-    case 'create':
-      return await printRpc(io, parsed, config, 'team.create', {
-        ...mutationIdentity(parsed),
-        ...optionalParam('name', parsed.options.name),
-        ...optionalParam('objective', parsed.options.objective),
-        ...optionalParam('primaryRoleKey', parsed.options['primary-role']),
-        ...optionalParam('externalRef', parsed.options['external-ref']),
-      });
-    case 'show':
-    case 'get':
-      if (!parsed.json) return await printRpc(io, parsed, config, 'workflow.team_get', {
-        teamId: requirePositional(rest, 0, 'teamId'),
-      });
-      return await printRpc(io, parsed, config, 'team.get', {
-        clientId: clientId(parsed),
-        teamId: requirePositional(rest, 0, 'teamId'),
-      });
-    case 'list':
-      return await printRpc(io, parsed, config, 'team.list', {
-        clientId: clientId(parsed),
-      });
-    case 'wait': {
-      const waitMs = integerOption(parsed, 'wait-ms', 30_000, 0, 120_000);
-      const roleKeys = parsed.options.roles
-        ?.split(',')
-        .map((value) => value.trim())
-        .filter(Boolean);
-      return await printRpc(
-        io,
-        parsed,
-        config,
-        'team.wait',
-        {
-          clientId: clientId(parsed),
-          teamId: requirePositional(rest, 0, 'teamId'),
-          ...(roleKeys === undefined || roleKeys.length === 0 ? {} : { roleKeys }),
-          until: normalizeUntil(parsed.options.until ?? 'all_selected_terminal'),
-          ...optionalIntegerParam(parsed, 'after-event-sequence', 'afterEventSequence', 0),
-          waitMs,
-        },
-        waitMs + 5_000,
-      );
-    }
-    case 'rename':
-      return await printRpc(io, parsed, config, 'team.rename', {
-        ...mutationIdentity(parsed), teamId: requirePositional(rest, 0, 'teamId'), name: requireOption(parsed, 'name'),
-      });
-    case 'brief': {
-      const offset = rest[0] === 'update' ? 1 : 0;
-      return await printRpc(io, parsed, config, 'team.brief.update', {
-        ...mutationIdentity(parsed),
-        teamId: requirePositional(rest, offset, 'teamId'),
-        briefText: requireOption(parsed, 'brief'),
-        ...optionalParam('objective', parsed.options.objective),
-      });
-    }
-    default:
-      throw new Error(`Unknown team command: ${action ?? ''}`);
-  }
-}
-
-async function runRoleCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const action = parsed.words[1];
-  const rest = parsed.words.slice(2);
-  if (action === 'add' || action === 'create') {
-    return await printRpc(io, parsed, config, 'team.role.create', {
-      ...mutationIdentity(parsed),
-      teamId: requirePositional(rest, 0, 'teamId'),
-      roleKey: requirePositional(rest, 1, 'roleKey'),
-      roleType: parsed.options.type ?? 'expert',
-      ...optionalParam('displayName', parsed.options['display-name']),
-      ...optionalParam('reportsToRoleKey', parsed.options['reports-to']),
-      ...optionalParam('provider', parsed.options.provider),
-    });
-  }
-  if (action === 'retire') {
-    return await printRpc(io, parsed, config, 'team.role.retire', {
-      ...mutationIdentity(parsed),
-      teamId: requirePositional(rest, 0, 'teamId'),
-      roleKey: requirePositional(rest, 1, 'roleKey'),
-    });
-  }
-  throw new Error(`Unknown role command: ${action ?? ''}`);
-}
-
-async function runSessionCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const action = parsed.words[1];
-  const rest = parsed.words.slice(2);
-  switch (action) {
-    case 'create':
-      return await printRpc(io, parsed, config, 'session.create', {
-        ...mutationIdentity(parsed),
-        teamId: requirePositional(rest, 0, 'teamId'),
-        roleKey: requirePositional(rest, 1, 'roleKey'),
-        provider: parsed.options.provider ?? 'chatgpt',
-      });
-    case 'show':
-    case 'get':
-      return await runStatusCommand(io, { ...parsed, words: ['status', ...rest] }, config);
-    case 'list':
-      return await printRpc(io, parsed, config, 'session.list', { clientId: clientId(parsed) });
-    case 'events':
-      return await runEventsCommand(io, parsed, config, rest);
-    default:
-      throw new Error(`Unknown session command: ${action ?? ''}`);
-  }
-}
-
-export function sessionSendRpcTimeoutMs(
-  config: Pick<
-    SessionPlaneConfig,
-    'rpcRequestTimeoutMs' | 'browserLaunchTimeoutMs' | 'submissionAckTimeoutMs'
-  >,
-): number {
-  return Math.max(
-    config.rpcRequestTimeoutMs,
-    config.browserLaunchTimeoutMs + config.submissionAckTimeoutMs + 30_000,
-  );
-}
-
-export function browserNavigationRpcTimeoutMs(
-  config: Pick<SessionPlaneConfig, 'rpcRequestTimeoutMs'>,
-): number {
-  return Math.max(config.rpcRequestTimeoutMs, 35_000);
-}
-
-export function browserRuntimeRpcTimeoutMs(
-  config: Pick<SessionPlaneConfig, 'rpcRequestTimeoutMs' | 'browserLaunchTimeoutMs'>,
-): number {
-  return Math.max(
-    config.rpcRequestTimeoutMs,
-    config.browserLaunchTimeoutMs + 5_000,
-    300_000,
-  );
-}
-
-async function runSendCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const sources = ['prompt', 'prompt-file', 'prompt-stdin'].filter((key) => parsed.options[key] !== undefined);
-  if (sources.length !== 1) throw new Error('Choose exactly one of --prompt, --prompt-file, or --prompt-stdin');
-  const prompt = parsed.options['prompt-file'] !== undefined
-    ? readFileSync(parsed.options['prompt-file'], 'utf8')
-    : parsed.options['prompt-stdin'] === 'true'
-      ? await readInput(io.stdin)
-      : requireOption(parsed, 'prompt');
-  const files = [...parsed.files];
-  return await printRpc(io, parsed, config, 'session.send', {
-    ...mutationIdentity(parsed),
-    ...sessionSelector(parsed, parsed.words.slice(1)),
-    prompt,
-    ...optionalParam('model', parsed.options.model),
-    ...optionalParam('effort', parsed.options.effort),
-    ...optionalParam('surface', parsed.options.surface),
-    ...(files.length === 0 ? {} : { files }),
-    ...optionalIntegerParam(parsed, 'deadline', 'sessionDeadlineSec', 1, 86_400),
-  }, sessionSendRpcTimeoutMs(config));
-}
-
-async function runWaitCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const waitMs = integerOption(parsed, 'wait-ms', 30_000, 0, 120_000);
-  return await printRpc(
-    io,
-    parsed,
-    config,
-    'session.wait',
-    {
-      clientId: clientId(parsed),
-      ...sessionSelector(parsed, parsed.words.slice(1)),
-      ...optionalIntegerParam(parsed, 'generation', 'generation', 0),
-      ...optionalIntegerParam(parsed, 'after-event-sequence', 'afterEventSequence', 0),
-      waitMs,
-    },
-    waitMs + 5_000,
-  );
-}
-
-async function runStopCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  return await printRpc(io, parsed, config, 'session.stop', {
-    ...mutationIdentity(parsed),
-    ...sessionSelector(parsed, parsed.words.slice(1)),
-  });
-}
-
-async function runStatusCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  return await printRpc(io, parsed, config, 'session.get', {
-    clientId: clientId(parsed),
-    ...sessionSelector(parsed, parsed.words.slice(1)),
-  });
-}
-
-async function runEventsCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-  rest: readonly string[],
-): Promise<number> {
-  return await printRpc(io, parsed, config, 'session.events', {
-    clientId: clientId(parsed),
-    teamId: requirePositional(rest, 0, 'teamId'),
-    ...optionalIntegerParam(parsed, 'after-sequence', 'afterSequence', 0),
-    ...optionalIntegerParam(parsed, 'limit', 'limit', 1, 1_000),
-  });
-}
-
-async function runArtifactCommand(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-): Promise<number> {
-  const action = parsed.words[1] ?? 'list';
-  const rest = parsed.words.slice(2);
-  switch (action) {
-    case 'discover':
-      return await printRpc(io, parsed, config, 'artifact.discover', {
-        clientId: clientId(parsed),
-        ...sessionSelector(parsed, rest),
-        ...optionalIntegerParam(parsed, 'generation', 'generation', 1),
-      }, 120_000);
-    case 'capture':
-      return await printRpc(io, parsed, config, 'artifact.capture', {
-        clientId: clientId(parsed),
-        ...sessionSelector(parsed, rest),
-        ...optionalIntegerParam(parsed, 'generation', 'generation', 1),
-        ...(parsed.options['artifact-id'] === undefined
-          ? {}
-          : { artifactIds: [parsed.options['artifact-id']] }),
-      }, 120_000);
-    case 'list':
-      return await printRpc(io, parsed, config, 'artifact.list', {
-        clientId: clientId(parsed),
-        ...sessionSelector(parsed, rest),
-        ...optionalIntegerParam(parsed, 'generation', 'generation', 1),
-      });
-    case 'get':
-      return await printRpc(io, parsed, config, 'artifact.get', {
-        clientId: clientId(parsed),
-        artifactId: requirePositional(rest, 0, 'artifactId'),
-      });
-    case 'export':
-      return await printRpc(io, parsed, config, 'artifact.export', {
-        clientId: clientId(parsed),
-        artifactId: requirePositional(rest, 0, 'artifactId'),
-        outputPath: requireOption(parsed, 'out'),
-        overwrite: parsed.options.overwrite === 'true',
-      }, 120_000);
-    default:
-      throw new Error(`Unknown artifact command: ${action}`);
-  }
-}
-
-async function runSkillsCommand(io: CliIo, parsed: ParsedArgs): Promise<number> {
-  const action = parsed.words[1] ?? 'list';
-  const service = new SkillDistributionService();
-  switch (action) {
-    case 'list':
-      writeCliResult(io, parsed.json, { requestOk: true, skills: service.list() });
-      return 0;
-    case 'get':
-      writeCliResult(
-        io,
-        parsed.json,
-        service.get(requirePositional(parsed.words.slice(2), 0, 'skill'), parsed.options.full === 'true'),
-      );
-      return 0;
-    case 'path':
-      writeCliResult(io, parsed.json, service.path(parsed.words[2]));
-      return 0;
-    case 'install':
-      writeCliResult(
-        io,
-        parsed.json,
-        service.install({
-          target: requireOption(parsed, 'target'),
-          ...(optionValues(parsed, 'skill').length === 0
-            ? {}
-            : { names: optionValues(parsed, 'skill') }),
-          link: parsed.options.link === 'true',
-          force: parsed.options.force === 'true',
-        }),
-      );
-      return 0;
-    default:
-      throw new Error(`Unknown skills command: ${action}`);
-  }
-}
 
 async function printRpc(
-  io: CliIo,
-  parsed: ParsedArgs,
-  config: SessionPlaneConfig,
-  method: string,
-  params: Readonly<Record<string, unknown>>,
+  io: CliIo, parsed: ParsedArgs, config: SessionPlaneConfig,
+  method: string, params: Readonly<Record<string, unknown>>,
   minimumTimeoutMs = 0,
-  collectContinuation = false,
 ): Promise<number> {
-  if (!parsed.json && typeof params.requestId === 'string') {
-    io.stderr.write(`Operation reference: ${params.requestId}. If interrupted, inspect the same request; an identical operation retry must reuse --request-id ${params.requestId}.\n`);
-  }
   const result = await callRpc<unknown>({
-    socketPath: config.socketPath,
-    remote: config.remote,
-    method,
-    params,
+    socketPath: config.socketPath, remote: config.remote,
+    method, params,
     timeoutMs: Math.max(config.rpcRequestTimeoutMs, minimumTimeoutMs),
     maxLineBytes: config.rpcMaxLineBytes,
-    collectContinuation,
-    collectAcknowledgement: method === 'workflow.decide' && params.decision === 'acknowledge',
   });
-  const view = !parsed.json && result !== null && typeof result === 'object' && !Array.isArray(result)
-    ? { ...('teamId' in params ? { teamId: params.teamId } : {}), ...result } : result;
-  writeCliResult(io, parsed.json, view);
-  const failed = (value: unknown) => value !== null && typeof value === 'object' && 'requestOk' in value && value.requestOk === false;
-  return failed(result) || (method === 'workflow.wait' && result !== null && typeof result === 'object' &&
-    'results' in result && Array.isArray(result.results) && result.results.some(failed)) ? 1 : 0;
+  writeCliResult(io, parsed.json, result);
+  return result && typeof result === 'object' && 'requestOk' in result &&
+    result.requestOk === false ? 1 : 0;
 }
 
 function parseArgs(argv: readonly string[]): ParsedArgs {
   const words: string[] = [];
   const options: Record<string, string> = {};
-  const multiOptions: Record<string, string[]> = {};
-  const files: string[] = [];
   let json = false;
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    if (arg === undefined) {
-      continue;
-    }
-    if (arg === '-h' || arg === '-v') {
-      words.push(arg);
-      continue;
-    }
-    if (!arg.startsWith('--')) {
-      words.push(arg);
-      continue;
-    }
-
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index]!;
+    if (arg === '-v') { words.push(arg); continue; }
+    if (!arg.startsWith('--')) { words.push(arg); continue; }
     const equals = arg.indexOf('=');
     const name = arg.slice(2, equals < 0 ? undefined : equals);
+    if (name === 'version') { words.push('--version'); continue; }
     if (FLAG_OPTIONS.has(name)) {
-      if (equals >= 0) {
-        throw new Error(`--${name} does not accept a value`);
-      }
-      if (name === 'json') {
-        json = true;
-      } else {
-        options[name] = 'true';
-      }
+      if (equals !== -1) throw new Error('--' + name + ' does not accept a value');
+      if (name === 'json') json = true;
+      else options[name] = 'true';
       continue;
     }
-    if (!VALUE_OPTIONS.has(name)) {
-      if (name === 'help' || name === 'version') {
-        words.push(`--${name}`);
-        continue;
-      }
-      throw new Error(`Unknown option: --${name}`);
+    if (!VALUE_OPTIONS.has(name)) throw new Error('Unknown option: --' + name);
+    if (options[name] !== undefined) throw new Error('Duplicate option: --' + name);
+    const value = equals < 0 ? argv[++index] : arg.slice(equals + 1);
+    if (value === undefined || value.length === 0 || value.startsWith('--')) {
+      throw new Error('--' + name + ' requires a value');
     }
-    const value = equals >= 0 ? arg.slice(equals + 1) : argv[index + 1];
-    if (value === undefined || value.startsWith('--')) {
-      throw new Error(`--${name} requires a value`);
-    }
-    if (equals < 0) {
-      index += 1;
-    }
-    if (MULTI_VALUE_OPTIONS.has(name)) {
-      const values = multiOptions[name] ?? [];
-      values.push(value);
-      multiOptions[name] = values;
-    }
-    if (name === 'file') files.push(value);
-    else options[name] = value;
+    options[name] = value;
   }
-
-  return { words, options, multiOptions, files, json };
-}
-
-function sessionSelector(
-  parsed: ParsedArgs,
-  positionals: readonly string[],
-): Readonly<Record<string, string>> {
-  const exactSession = parsed.options.session;
-  if (exactSession !== undefined) {
-    if (positionals.length > 0) {
-      throw new Error('Use either --session or teamId + roleKey, not both');
-    }
-    return { sessionId: exactSession };
-  }
-  if (positionals.length === 1) {
-    return { sessionId: positionals[0] as string };
-  }
-  return {
-    teamId: requirePositional(positionals, 0, 'teamId'),
-    roleKey: requirePositional(positionals, 1, 'roleKey'),
-  };
-}
-
-function mutationIdentity(parsed: ParsedArgs): Readonly<Record<string, string>> {
-  return {
-    clientId: clientId(parsed),
-    requestId: parsed.options['request-id'] ?? randomUUID(),
-  };
+  return { words, options, files: [], json };
 }
 
 function clientId(parsed: ParsedArgs): string {
   return parsed.options['client-id'] ?? process.env.SESSIONPLANE_CLIENT_ID ?? 'sessplane-cli';
 }
-
 function requireOption(parsed: ParsedArgs, name: string): string {
   const value = parsed.options[name];
-  if (value === undefined || value.length === 0) {
-    throw new Error(`--${name} is required`);
-  }
+  if (!value) throw new Error('--' + name + ' is required');
   return value;
 }
-
-function requirePositional(
-  values: readonly string[],
-  index: number,
-  name: string,
-): string {
-  const value = values[index];
-  if (value === undefined || value.length === 0) {
-    throw new Error(`${name} is required`);
-  }
+function requirePositional(words: readonly string[], index: number, name: string): string {
+  const value = words[index];
+  if (!value) throw new Error(name + ' is required');
   return value;
 }
-
 function integerOption(
-  parsed: ParsedArgs,
-  optionName: string,
-  fallback: number,
-  minimum: number,
-  maximum = Number.MAX_SAFE_INTEGER,
+  parsed: ParsedArgs, name: string, fallback: number,
+  minimum: number, maximum = Number.MAX_SAFE_INTEGER,
 ): number {
-  const value = parsed.options[optionName];
-  if (value === undefined) {
-    return fallback;
-  }
-  const parsedValue = Number(value);
-  if (!Number.isSafeInteger(parsedValue) || parsedValue < minimum || parsedValue > maximum) {
-    throw new Error(`--${optionName} must be an integer from ${minimum} to ${maximum}`);
-  }
-  return parsedValue;
-}
-
-function numberFromOptionOrPosition(
-  parsed: ParsedArgs,
-  optionName: string,
-  positionals: readonly string[],
-  positionalIndex: number,
-  minimum: number,
-  maximum: number,
-  fallback?: number,
-): number {
-  const raw = parsed.options[optionName] ?? positionals[positionalIndex];
-  if (raw === undefined) {
-    if (fallback !== undefined) return fallback;
-    throw new Error(`--${optionName} or positional value is required`);
-  }
-  const value = Number(raw);
-  if (!Number.isFinite(value) || value < minimum || value > maximum) {
-    throw new Error(`--${optionName} must be a number from ${minimum} to ${maximum}`);
+  const text = parsed.options[name];
+  if (text === undefined) return fallback;
+  const value = Number(text);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error('--' + name + ' must be an integer from ' + minimum + ' to ' + maximum);
   }
   return value;
 }
-
-function optionalIntegerParam(
-  parsed: ParsedArgs,
-  optionName: string,
-  paramName: string,
-  minimum: number,
-  maximum = Number.MAX_SAFE_INTEGER,
-): Readonly<Record<string, number>> {
-  if (parsed.options[optionName] === undefined) {
-    return {};
-  }
-  return {
-    [paramName]: integerOption(parsed, optionName, minimum, minimum, maximum),
-  };
-}
-
-function optionalParam(
-  name: string,
-  value: string | undefined,
-): Readonly<Record<string, string>> {
-  return value === undefined ? {} : { [name]: value };
-}
-
-function optionValues(parsed: ParsedArgs, name: string): readonly string[] {
-  return parsed.multiOptions[name] ?? (parsed.options[name] === undefined ? [] : [parsed.options[name]]);
-}
-
 async function readInput(stream: NodeJS.ReadableStream): Promise<string> {
   stream.setEncoding('utf8');
   let value = '';
   for await (const chunk of stream) {
     value += typeof chunk === 'string' ? chunk : Buffer.from(chunk as Uint8Array).toString('utf8');
-    if (value.length > 20 * 1024 * 1024) throw new Error('stdin exceeded 20 MiB');
+    if (value.length > 200_000) throw new Error('Prompt exceeds public 200000-character limit');
   }
   return value;
 }
 
-function normalizeUntil(value: string): string {
-  const normalized = value.replaceAll('-', '_');
-  if (!['any_change', 'primary_terminal', 'all_selected_terminal'].includes(normalized)) {
-    throw new Error(`Unknown team wait condition: ${value}`);
-  }
-  return normalized;
+async function runOperatorSkills(io: CliIo, parsed: ParsedArgs): Promise<number> {
+  const service = new SkillDistributionService();
+  const action = parsed.words[1] ?? 'list';
+  if (action === 'list') writeCliResult(io, parsed.json, service.list());
+  else if (action === 'get') {
+    writeCliResult(io, parsed.json, service.get(requirePositional(parsed.words, 2, 'skill'),
+      parsed.options.full === 'true'));
+  } else if (action === 'path') {
+    writeCliResult(io, parsed.json, service.path(parsed.words[2]));
+  } else if (action === 'install') {
+    writeCliResult(io, parsed.json, service.install({
+      target: requireOption(parsed, 'target'),
+      ...(parsed.options.skill ? { names: [parsed.options.skill] } : {}),
+      link: parsed.options.link === 'true',
+      force: parsed.options.force === 'true',
+    }));
+  } else throw new Error('Unknown skills operation: ' + action);
+  return 0;
 }
 
 function helpText(): string {
-  return `SessionPlane ${SESSIONPLANE_VERSION}
-
-Usage:
-  sessplane serve [--providers chatgpt,gemini,grok]
-  sessplane health [--json] [--socket PATH]
-  sessplane doctor [--json]
-  sessplane browser-list [--browser NAME] [--browser-executable PATH]
-  sessplane login [--manual|--resume] [--json] [--url HTTPS_URL]
-
-Public project/task flow (Core owns preparation, ACK, FINAL, and timers):
-  sessplane project open --key KEY --name NAME --request-id ID [--model Pro] --json
-  sessplane task start PROJECT_ID --expected-conversation-revision N --request-id ID
-    (--prompt TEXT | --prompt-file PATH | --prompt-stdin) [--conversation-slot ID] --json
-    [--continuation-approved --approval-ref EXISTING_USER_DELEGATION]
-  sessplane task get TASK_ID [--view summary|result|evidence] --json
-  sessplane task wait TASK_ID --after-revision N [--wait-ms 30000] [--until-change] --json
-  sessplane task decide TASK_ID DECISION_ID ACTION_REF --request-id ID [--input TEXT] --json
-  sessplane task cancel TASK_ID --request-id ID --json
-  One task.wait call performs one bounded Core wait; it never drives execution.
-  Reuse stable --client-id and --request-id values for exact mutation replays.
-
-Remote execution:
-  Add --remote SSH_HOST or set SESSIONPLANE_REMOTE_HOST for CLI and MCP.
-  --remote-executable PATH selects the installed remote sessplane executable.
-  --remote-socket PATH selects its existing core socket.
-  --remote-control-path PATH reuses an authenticated OpenSSH master connection.
-  SSH uses existing authentication and verified host keys; no local fallback.
-  Start serve/login on the remote computer. --out exports verified files here.
-
-Provider browser runtime:
-  SessionPlane owns browser state only for supported AI provider sessions.
-  General website automation is intentionally not exposed; use Playwright.
-  ChatGPT is enabled by default; other providers require explicit operator enablement.
-  --providers or SESSIONPLANE_ENABLED_PROVIDERS defines the hard provider allowlist.
-
-Team and role sessions:
-  sessplane team create --name NAME [--objective TEXT] [--request-id ID]
-  sessplane team delete TEAM_ID [--request-id ID] [--resume-page-cleanup JSON_FILE]
-  sessplane team rename TEAM_ID --name NAME [--request-id ID]
-  sessplane team show TEAM_ID [--json]
-  sessplane team list [--json]
-  sessplane team wait TEAM_ID [--roles KEY,KEY] [--until CONDITION]
-  sessplane team brief [update] TEAM_ID --brief TEXT
-  sessplane role add TEAM_ID ROLE_KEY --type expert|reviewer|custom
-  sessplane role retire TEAM_ID ROLE_KEY
-  sessplane session create TEAM_ID ROLE_KEY [--provider chatgpt|gemini|grok]
-  sessplane session show SESSION_ID
-  sessplane session events TEAM_ID [--after-sequence N]
-  sessplane send TEAM_ID ROLE_KEY (--prompt TEXT | --prompt-file PATH | --prompt-stdin) [--model MODEL] [--effort LEVEL] [--surface chat] [--file PATH ...]
-  sessplane send --session SESSION_ID (--prompt TEXT | --prompt-file PATH | --prompt-stdin)
-  sessplane status TEAM_ID ROLE_KEY | --session SESSION_ID
-  sessplane wait TEAM_ID ROLE_KEY [--generation N] [--wait-ms N]
-  sessplane stop TEAM_ID ROLE_KEY [--request-id ID]
-
-Exact request flow (same request; no automatic resend):
-  1. Find your team and role: team list, then team show TEAM_ID
-  2. Start: request send TEAM_ID ROLE_REF --prompt-file FILE [--request-id ID]
-     May submit immediately when ready; otherwise pauses for preparation.
-  3. Status: request show TEAM_ID REQUEST_REF
-     Fresh controls: request show TEAM_ID REQUEST_REF --view evidence
-     Exact answer: request show TEAM_ID REQUEST_REF --view result
-  4. Select model: request configure TEAM_ID REQUEST_REF CONFIGURATION_ID
-  5. Choose fresh controls: request choose TEAM_ID REQUEST_REF PURPOSE REF --snapshot-id ID
-     PURPOSE is model, effort, composer or submit. Submit only after checking the input.
-  6. Collect: request wait TEAM_ID REQUEST_REF [--wait-ms N] [--out DIRECTORY]
-  Recovery: request discover|refresh|focus|latest|reopen|reconcile_failure TEAM_ID REQUEST_REF
-  Approved interrupted tool-turn continuation: request continue TEAM_ID REQUEST_REF --continuation-approved
-  Approve existing exact later collector without sending: request continue TEAM_ID REQUEST_REF --followup-message-id SOURCE_ID --continuation-approved --manage-only
-  User-confirmed disconnected turn: add --user-confirmed-interruption FILE (conversationId, submittedUserMessageId, evidenceRef). Never infer user confirmation.
-  Approve existing current ACK collector: request continue TEAM_ID REQUEST_REF --continuation-approved --manage-only
-  Explicit new literal 계속 after UNKNOWN or a backend-proven lost continuation: request followup TEAM_ID REQUEST_REF USER_INSTRUCTION_REF
-    Preserves original uncertainty; never automatically retries or bypasses provider errors/drafts/activity.
-  Confirm an observed matching submission without resending:
-    request acknowledge TEAM_ID REQUEST_REF --message-id ID --evidence-hash HASH
-  Answer an owned provider question: request answer_question TEAM_ID REQUEST_REF --answer EXACT_OPTION --evidence-hash HASH
-  Owned output panel inspect/close: request output_panel TEAM_ID REQUEST_REF --action inspect|close [--evidence-hash HASH]
-  HostSpan permission inspection, authorized grant or decline: request hostspan_permission TEAM_ID REQUEST_REF --action inspect|allow|decline --app-name NAME [--tool-name NAME] [--allow-mode once|always] [--evidence-hash HASH] [--followup-message-id SOURCE_ID]
-  User-controlled review: request human_review TEAM_ID CURRENT_REQUEST_REF --action pause|resume
-  Cancel: request stop TEAM_ID REQUEST_REF
-  Open an empty current Chat session without a prompt: request open TEAM_ID ROLE_REF
-  Dispose obsolete local observation without declaring child completion:
-    request retire_observation TEAM_ID REQUEST_REF --discard-unresolved --evidence-ref EXISTING_AGENT_HANDOFF
-    Requires displaced role routing, exact review hold and no remaining collectors; UNKNOWN records stay unchanged.
-  Delete a collected conversation: request delete TEAM_ID REQUEST_REF --outputs-retrieved [--discard-retired-observation FILE]
-    For explicitly disposed unresolved history, FILE contains exact conversationId and existing evidenceRef.
-  Replace: request replace TEAM_ID ROLE_REF [--preserve-conversation] [--unresolved-handoff FILE]
-    Unresolved handoff JSON: exact requestRef and explicit user approvalRef; requires hold and no collectors.
-    Default replacement attempts old-chat deletion. Preserve mode retains the old conversation.
-    Replacement is not a resend. Check chat and tab cleanup separately.
-  For unconfirmed delivery, inspect the same request; never run send again as a retry.
-  All mutations accept --request-id ID; retain it for an identical retry.
-
-Provider artifacts:
-  sessplane artifact discover --session SESSION_ID
-  sessplane artifact capture --session SESSION_ID [--artifact-id ID]
-  sessplane artifact list --session SESSION_ID [--generation N]
-  sessplane artifact get ARTIFACT_ID
-  sessplane artifact export ARTIFACT_ID --out PATH [--overwrite]
-
-Skill distribution:
-  sessplane skills list [--json]
-  sessplane skills get core --full
-  sessplane skills path [SKILL]
-  sessplane skills install --target DIR [--skill NAME ...] [--link] [--force]
-
-  sessplane mcp --public    Six project/task MCP tools only (recommended for new clients)
-  sessplane mcp             Legacy workflow catalog retained for existing clients
-
-Global options:
-  --client-id ID       Stable caller identity
-  --request-id ID      Stable mutation identity for exact retries
-  --json               Emit compact JSON: results on stdout, command errors on stderr
-  --socket PATH        Override core Unix socket
-  --browser NAME       auto|chrome|chromium|edge|brave|custom
-  --browser-executable PATH  Explicit host Chromium-family executable
-  --providers LIST     Provider allowlist; default chatgpt, use all to enable every provider
-`;
+  return [
+    'SessionPlane ' + SESSIONPLANE_VERSION,
+    '',
+    'Usage:',
+    '  sessplane serve [--providers chatgpt,gemini,grok]',
+    '  sessplane health [--json]',
+    '  sessplane project open --key KEY --name NAME --request-id ID [--model Pro] --json',
+    '  sessplane task start PROJECT_ID --expected-conversation-revision N --request-id ID',
+    '    (--prompt TEXT | --prompt-file PATH | --prompt-stdin) [--conversation-slot ID]',
+    '    [--continuation-approved --approval-ref EXISTING_USER_DELEGATION] --json',
+    '  sessplane task get TASK_ID [--view summary|result|evidence] --json',
+    '  sessplane task wait TASK_ID --after-revision N [--wait-ms 30000] --json',
+    '  sessplane task decide TASK_ID DECISION_ID ACTION_REF --request-id ID [--input TEXT] --json',
+    '  sessplane task cancel TASK_ID --request-id ID --json',
+    '  sessplane mcp',
+    '',
+    'Operator utilities:',
+    '  sessplane login [--manual|--resume] [--url HTTPS_URL]',
+    '  sessplane doctor --json',
+    '  sessplane browser-list',
+    '  sessplane skills list|get|path|install',
+    '  sessplane version',
+    '',
+    'Transport:',
+    '  --client-id ID    Stable owner identity',
+    '  --request-id ID   Exact idempotency identity (required for mutations)',
+    '  --socket PATH     Core Unix socket',
+    '  --remote SSH_HOST  Existing remote Core transport (same RPC)',
+    '  --json           Return structured results without truncating answers',
+    '',
+  ].join('\n');
 }
 
-function isDirectExecution(): boolean {
-  const entry = process.argv[1];
-  return entry !== undefined && import.meta.url === pathToFileURL(entry).href;
+export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
+  process.exitCode = await runCli(argv);
 }
-
-if (isDirectExecution()) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error: unknown) => {
-    process.stderr.write(
-      `${error instanceof Error ? error.stack ?? error.message : String(error)}\n`,
-    );
+    process.stderr.write((error instanceof Error ? error.stack ?? error.message : String(error)) + '\n');
     process.exitCode = 1;
   });
 }

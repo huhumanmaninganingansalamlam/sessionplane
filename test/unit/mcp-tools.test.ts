@@ -1,153 +1,131 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import test from 'node:test';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
-import { invokeMcpTool, MCP_TOOLS } from '../../src/mcp/tools.ts';
-import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import {
+  getMcpTool, invokeMcpTool, MCP_TOOLS, McpToolNotFoundError,
+} from '../../src/mcp/tools.ts';
 
-test('MCP permission action explains nonexecuting inspection without marking the mixed decide tool read-only', () => {
-  const decide = MCP_TOOLS.find(tool => tool.name === 'sessionplane_decide')!;
-  const variants = decide.inputSchema.anyOf as Array<{ properties: Record<string, any> }>;
-  const permission = variants.find(variant => variant.properties.decision.const === 'hostspan_permission')!;
-  assert.deepEqual(permission.properties.action.enum, ['inspect', 'allow', 'decline']);
-  assert.match(permission.properties.action.description, /inspect reads.*tool arguments.*opening\/closing details/);
-  assert.match(permission.properties.action.description, /never grants permission or executes/);
-  assert.match(permission.properties.action.description, /allow grants the separately authorized tool.*fresh matching.*may resume execution/);
-  assert.match(permission.properties.action.description, /decline rejects only the exact pending tool.*fresh card inspection hash.*never grants or executes/);
-  assert.match(decide.description, /inspect reads pending arguments before approval/);
-  assert.equal(decide.annotations.readOnlyHint, false, 'Other decide actions grant, submit or reload; no blanket read-only claim');
+const expected = [
+  'sessionplane_project_open',
+  'sessionplane_task_start',
+  'sessionplane_task_get',
+  'sessionplane_task_wait',
+  'sessionplane_task_decide',
+  'sessionplane_task_cancel',
+];
+
+test('published MCP catalog contains six source-schema tools, no legacy selectors or request refs', () => {
+  assert.deepEqual(MCP_TOOLS.map(tool => tool.name).sort(), expected.sort());
+  for (const tool of MCP_TOOLS) {
+    assert.equal(tool.rpcMethod, tool.name.replace('sessionplane_', '').replace('_', '.'));
+    assert.ok(tool.description.length < 450, tool.name);
+    assert.ok(JSON.stringify(tool.inputSchema).length < 5500, tool.name);
+    assert.doesNotMatch(JSON.stringify(tool.inputSchema),
+      /"selector"|"script"|"roleRef"|"requestRef"|"generation"|"collector"/);
+    assert.equal(tool.annotations.openWorldHint, false);
+    assert.equal(getMcpTool(tool.name), tool);
+  }
+  assert.equal(getMcpTool('sessionplane_team_get'), null);
+  assert.equal(getMcpTool('sessionplane_send'), null);
+  assert.equal(getMcpTool('sessionplane_decide'), null);
+  assert.equal(MCP_TOOLS.find(t => t.name === 'sessionplane_task_get')!.annotations.readOnlyHint, true);
+  assert.equal(MCP_TOOLS.find(t => t.name === 'sessionplane_task_wait')!.annotations.readOnlyHint, true);
+  assert.equal(MCP_TOOLS.find(t => t.name === 'sessionplane_task_cancel')!.annotations.destructiveHint, true);
 });
 
-test('MCP distinguishes an unreachable core from lost responses without claiming submit failure', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-mcp-transport-'));
+test('MCP refuses unregistered legacy mutation before opening a socket', async () => {
+  await assert.rejects(invokeMcpTool({
+    name: 'sessionplane_send',
+    arguments: { prompt: 'unauthorized' },
+    socketPath: '/missing-public-core.sock', timeoutMs: 200, maxLineBytes: 4096,
+  }), McpToolNotFoundError);
+});
+
+test('MCP cannot classify disconnected or unacknowledged provider mutation as success', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-public-mcp-transport-'));
   try {
     for (const mode of ['missing', 'closed', 'timeout'] as const) {
       const socketPath = path.join(root, mode + '.sock');
       const sockets = new Set<net.Socket>();
-      const server = net.createServer((socket) => {
+      const server = net.createServer(socket => {
         sockets.add(socket);
         socket.on('data', () => { if (mode === 'closed') socket.end(); });
       });
       try {
-        if (mode !== 'missing') await new Promise<void>((resolve) => server.listen(socketPath, resolve));
-        const result = await invokeMcpTool({ name: 'sessionplane_team_create', arguments: { requestId: mode },
-          socketPath, timeoutMs: mode === 'timeout' ? 200 : 5000, maxLineBytes: 4096 });
+        if (mode !== 'missing') {
+          await new Promise<void>(resolve => server.listen(socketPath, resolve));
+        }
+        const result = await invokeMcpTool({
+          name: 'sessionplane_task_start',
+          arguments: { clientId: 'agent', projectId: 'f'.repeat(36),
+            requestId: 'one-request', expectedConversationRevision: 1,
+            prompt: 'Do not resend when unacknowledged' },
+          socketPath, timeoutMs: mode === 'timeout' ? 200 : 5000, maxLineBytes: 4096,
+        });
         assert.equal(result.isError, true);
-        assert.equal(result.structuredContent.errorCode,
-          { missing: 'core.unavailable', closed: 'core.connection-lost', timeout: 'core.timeout' }[mode]);
-        assert.equal((result.structuredContent.details as { requestDispatched: boolean }).requestDispatched, mode !== 'missing');
-        assert.equal(result.structuredContent.promptSubmitted, undefined);
+        assert.equal(result.structuredContent.errorCode, {
+          missing: 'core.unavailable', closed: 'core.connection-lost',
+          timeout: 'core.timeout',
+        }[mode]);
+        assert.equal((result.structuredContent.details as { requestDispatched: boolean })
+          .requestDispatched, mode !== 'missing');
+        assert.equal(result.structuredContent.state, undefined,
+          'transport failure cannot be fabricated into a durable Task state');
       } finally {
         for (const socket of sockets) socket.destroy();
-        if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+        if (server.listening) await new Promise<void>(resolve => server.close(resolve));
       }
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('team MCP deduplicates sends, rejects stale/cross-team refs and keeps concurrent role results exact', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-team-mcp-'));
+test('MCP direct project/task calls share the same Core and never schedule a client loop', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-mcp-task-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
-  const fake = new FakeProviderAdapter();
-  const service = await startCore({ config, startBrowser: false, providerAdapters: [fake],
-    logger: { debug() {}, info() {}, warn() {}, error() {} } });
-  const invoke = async (name: string, args: Record<string, unknown>) => await invokeMcpTool({
-    name: 'sessionplane_' + name, arguments: args, socketPath: config.socketPath,
-    timeoutMs: 5000, maxLineBytes: config.rpcMaxLineBytes,
+  const core = await startCore({
+    config, startBrowser: false,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
   });
+  const call = async (name: string, args: Record<string, unknown>) =>
+    await invokeMcpTool({
+      name, arguments: args, socketPath: config.socketPath,
+      timeoutMs: 5000, maxLineBytes: config.rpcMaxLineBytes,
+    });
+  const clientId = 'mcp-only-agent';
   try {
-    const disabled = await invoke('team_create', { requestId: 'disabled', provider: 'gemini' });
-    assert.equal(disabled.structuredContent.errorCode, 'provider.disabled');
-    assert.equal(service.teamDirectory.listTeams('sessionplane-mcp').teams.length, 0);
-    const created = await invoke('team_create', { requestId: 'team' });
-    assert.equal(created.isError, false);
-    assert.deepEqual(created.structuredContent.capabilities, { uploadsEnabled: false, downloadsEnabled: true });
-    const rejectedUpload = await invoke('send', { teamId: created.structuredContent.teamId,
-      roleRef: (created.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef,
-      requestId: 'disabled-upload', prompt: 'Review', files: ['/does-not-exist'] });
-    assert.equal(rejectedUpload.structuredContent.errorCode, 'capability.unsupported');
-    assert.equal(fake.submitCount, 0);
-    assert.deepEqual((await invoke('team_get', { teamId: created.structuredContent.teamId, history: true })).structuredContent.requests, []);
-    const teamId = created.structuredContent.teamId;
-    assert.equal((await invoke('team_create', { requestId: 'team' })).structuredContent.teamId, teamId);
-    const withExpert = await invoke('role_create', { teamId, requestId: 'expert', roleKey: 'expert.database' });
-    const roles = withExpert.structuredContent.roles as Array<{ roleRef: string }>;
-    const inputs = roles.map((role, i) => ({ teamId, roleRef: role.roleRef, requestId: 'send-' + i, prompt: 'Review ' + i }));
-    const sent = await Promise.all(inputs.map((input) => invoke('send', input)));
-    for (const result of sent) assert.equal(result.isError, false, JSON.stringify(result));
-    const first = sent[0]!.structuredContent;
-    assert.equal((await invoke('send', inputs[0]!)).structuredContent.requestRef, first.requestRef);
-    const stale = await invoke('send', { ...inputs[0], requestId: 'stale' });
-    assert.equal(stale.structuredContent.errorCode, 'session.generation-superseded');
-    const other = await invoke('team_create', { requestId: 'other' });
-    const otherSend = await invoke('send', { teamId: other.structuredContent.teamId,
-      roleRef: (other.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef,
-      requestId: inputs[0]!.requestId, prompt: inputs[0]!.prompt });
-    assert.equal(otherSend.isError, false);
-    assert.notEqual(otherSend.structuredContent.requestRef, first.requestRef);
-    const wrong = await invoke('team_get', { teamId: other.structuredContent.teamId, requestRef: first.requestRef });
-    assert.equal(wrong.structuredContent.errorCode, 'input.invalid');
-    const waiting = await invoke('wait', { teamId, requestRefs: [first.requestRef], waitMs: 0 });
-    assert.equal((waiting.structuredContent.results as Array<{ waitExpired: boolean }>)[0]!.waitExpired, true);
-    for (const [i, result] of sent.entries()) {
-      fake.emitObservation(result.structuredContent.sessionId as string, {
-        candidate: { responseMessageId: 'answer-' + i, answerText: 'Result ' + i, terminalMarker: true, streamingMarker: false }, activity: 'none',
-      });
-    }
-    let results: Array<{ terminal: boolean; answerText: string; requestRef: string }> = [];
-    for (let i = 0; i < 20; i++) {
-      const waited = await invoke('wait', { teamId, requestRefs: sent.map((s) => s.structuredContent.requestRef), waitMs: 100, outputDir: path.join(root, 'outputs') });
-      results = waited.structuredContent.results as typeof results;
-      if (results.every((r) => r.terminal)) break;
-    }
-    assert.deepEqual(results.map((r) => r.answerText), ['Result 0', 'Result 1']);
-    const count = fake.acknowledgementRecoveryCount;
-    const summary = (await invoke('team_get', { teamId, requestRef: first.requestRef })).structuredContent.request as any;
-    assert.equal(summary.view, 'summary');
-    assert.equal(summary.answerText, undefined);
-    assert.equal(summary.evidence, undefined);
-    assert.equal(summary.answer.characters, 'Result 0'.length);
-    assert.equal(summary.submittedUserMessageId, first.submittedUserMessageId);
-    assert.equal(fake.acknowledgementRecoveryCount, count, 'Status reads do not dispatch provider recovery');
-    const exact = (await invoke('team_get', { teamId, requestRef: first.requestRef, view: 'result' })).structuredContent.request as any;
-    assert.equal(exact.answerText, 'Result 0');
-    assert.equal(exact.evidence, undefined);
-    assert.equal((MCP_TOOLS.find(tool => tool.name === 'sessionplane_wait')!.inputSchema.properties as any).continuationApproved.const, true);
-    const refreshed = await invoke('team_get', { teamId });
-    const nextRole = (refreshed.structuredContent.roles as Array<{ roleRef: string }>)[0]!.roleRef;
-    const next = await invoke('send', { teamId, roleRef: nextRole, requestId: 'next', prompt: 'Next review' });
-    assert.equal(next.isError, false);
-    const oldStop = await invoke('stop', { teamId, requestRef: first.requestRef, requestId: 'old-stop' });
-    assert.equal(oldStop.structuredContent.errorCode, 'session.generation-superseded');
-    fake.addArtifact(first.sessionId as string, { providerArtifactId: 'native-file', name: 'review.txt',
-      sourceUrl: 'https://fixture.invalid/review.txt', mediaType: 'text/plain' }, 'review bytes');
-    const history = await invoke('wait', { teamId, requestRefs: [first.requestRef, otherSend.structuredContent.requestRef], waitMs: 0, outputDir: path.join(root, 'historical-files') });
-    assert.equal(history.isError, false);
-    const historicalResults = history.structuredContent.results as Array<{ answerText: string; errorCode?: string; files: { exports: Array<{ outputPath: string }> } }>;
-    assert.equal(historicalResults[1]!.errorCode, 'input.invalid');
-    assert.equal(readFileSync(historicalResults[0]!.files.exports[0]!.outputPath, 'utf8'), 'review bytes');
-    const all = await invoke('team_get', { teamId, history: true });
-    const entries = all.structuredContent.requests as Array<{ requestRef: string }>;
-    assert.ok(entries.some((r) => r.requestRef === first.requestRef));
-    assert.ok(entries.some((r) => r.requestRef === next.structuredContent.requestRef));
-    const older = await invoke('team_get', { teamId, beforeRequestRef: entries[0]!.requestRef });
-    assert.deepEqual((older.structuredContent.requests as typeof entries).map((r) => r.requestRef), entries.slice(1).map((r) => r.requestRef));
-    const wrongCursor = await invoke('team_get', { teamId, beforeRequestRef: otherSend.structuredContent.requestRef });
-    assert.equal(wrongCursor.structuredContent.errorCode, 'input.invalid');
-    assert.equal(((history.structuredContent.results as Array<{ answerText: string }>)[0]!).answerText, 'Result 0');
-    const empty = service.teamDirectory.createTeam({ clientId: 'empty-team' });
-    const initialize = { teamId: empty.teamId, requestId: 'initialize', roleKey: empty.primaryRoleKey };
-    assert.equal((await invoke('session_replace', { ...initialize, provider: 'gemini' })).structuredContent.errorCode, 'provider.disabled');
-    const initialized = await invoke('session_replace', initialize);
-    assert.equal(initialized.isError, false);
-    const initialRoles = initialized.structuredContent.roles as Array<{ roleRef: string; currentSessionId: string }>;
-    assert.ok(initialRoles[0]!.roleRef);
-    assert.deepEqual((await invoke('session_replace', initialize)).structuredContent.roles, initialRoles);
-    assert.equal((await invoke('session_replace', { ...initialize, requestId: 'occupied' })).structuredContent.errorCode, 'input.invalid');
-    assert.equal(service.teamDirectory.getCurrentSession(empty.teamId, empty.primaryRoleKey).sessionId, initialRoles[0]!.currentSessionId);
-  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+    const project = (await call('sessionplane_project_open', {
+      clientId, requestId: 'open', projectKey: 'mcp-exact',
+      displayName: 'Exact MCP state', modelIntent: 'Pro',
+    })).structuredContent;
+    const args = { clientId, requestId: 'start', projectId: project.projectId,
+      expectedConversationRevision: project.conversationRevision,
+      prompt: 'Exactly one task from MCP' };
+    const first = await call('sessionplane_task_start', args);
+    const replay = await call('sessionplane_task_start', args);
+    assert.equal(first.isError, false);
+    assert.equal(first.structuredContent.taskId, replay.structuredContent.taskId);
+    const taskId = String(first.structuredContent.taskId);
+    assert.equal(core.semanticTaskRepository.getFullTask(taskId, clientId).attempts.length, 1);
+    const read = await call('sessionplane_task_get', { clientId, taskId });
+    assert.equal(read.structuredContent.state, 'working');
+    assert.equal((read.structuredContent.submission as { attempted: boolean }).attempted, false);
+    const wait = await call('sessionplane_task_wait', {
+      clientId, taskId, afterRevision: read.structuredContent.revision, waitMs: 0,
+    });
+    assert.equal(wait.structuredContent.revision, read.structuredContent.revision);
+    assert.equal(core.semanticTaskRepository.getFullTask(taskId, clientId).attempts.length, 1);
+    const cancel = await call('sessionplane_task_cancel', {
+      clientId, taskId, requestId: 'cancel-once',
+    });
+    assert.equal(cancel.structuredContent.state, 'canceled');
+    assert.equal(core.semanticTaskRepository.getFullTask(taskId, clientId).attempts.length, 1);
+  } finally {
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
