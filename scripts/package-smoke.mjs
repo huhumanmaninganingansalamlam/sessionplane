@@ -178,8 +178,9 @@ try {
       installedCore.isolatedBrowserStarted !== false ||
       installedCore.installedCoreRestarted !== true ||
       installedCore.requestIdentitySurvivedRestart !== true ||
-      installedCore.originalAttemptCountAfterRestart !== 1) {
-    throw new Error('Installed Core public Task/restart functional smoke failed');
+      installedCore.originalAttemptCountAfterRestart !== 1 ||
+      installedCore.secondSlotRevisionIndependentAfterRestart !== true) {
+    throw new Error('Installed Core public Task/restart/two-slot smoke failed');
   }
 
   process.stdout.write(

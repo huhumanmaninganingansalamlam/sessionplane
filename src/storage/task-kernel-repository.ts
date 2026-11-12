@@ -297,6 +297,12 @@ export class TaskKernelRepository {
         if (found.roleKey !== input.roleKey || found.providerKey !== input.providerKey) {
           throw new Error('Slot role/provider conflict; explicit binding replacement required');
         }
+        // Existing non-Main slots predate public admission. Preserve their
+        // current binding revision rather than defaulting it back to Main.
+        this.#database.raw.prepare(
+          'INSERT INTO kernel_public_slot_revisions(project_id,slot_id,revision)' +
+          ' VALUES(?,?,?) ON CONFLICT(project_id,slot_id) DO NOTHING',
+        ).run(input.projectId, input.slotId, found.revision);
         return found;
       }
       const at = this.#now();
@@ -309,6 +315,13 @@ export class TaskKernelRepository {
         `INSERT INTO kernel_slot_bindings(project_id,slot_id,revision,provider_key,
           provider_conversation_id,observed_at) VALUES(?,?,1,?,NULL,?)`,
       ).run(input.projectId, input.slotId, input.providerKey, at);
+      // Every explicitly bound logical slot, not only Main, must have an
+      // independently addressable public Task revision. The FK guarantees
+      // that it cannot be initialized before its own stable slot exists.
+      this.#database.raw.prepare(
+        'INSERT INTO kernel_public_slot_revisions(project_id,slot_id,revision)' +
+        ' VALUES(?,?,1) ON CONFLICT(project_id,slot_id) DO NOTHING',
+      ).run(input.projectId, input.slotId);
       return this.#requireSlot(input.projectId, input.slotId);
     });
   }
@@ -316,6 +329,16 @@ export class TaskKernelRepository {
   getSlot(projectId: string, slotId: string, clientId: string): SlotRecord {
     this.#requireAccess(projectId, clientId);
     return this.#requireSlot(projectId, slotId);
+  }
+
+  /** The public admission layer needs a typed missing-slot result rather
+   * than exposing an internal invariant error for an invented role/slot.
+   * Ownership is checked before the existence probe to avoid cross-owner
+   * slot enumeration.
+   */
+  findAuthorizedSlot(projectId: string, slotId: string, clientId: string): SlotRecord | null {
+    this.#requireAccess(projectId, clientId);
+    return this.#findSlot(projectId, slotId);
   }
 
   /** Public revision is advanced by admitted tasks, separate from the

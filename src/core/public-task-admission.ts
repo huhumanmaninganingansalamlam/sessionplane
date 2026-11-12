@@ -152,10 +152,6 @@ export class PublicTaskAdmissionService {
           ' VALUES(?,?,?,?,?,?,?,?)',
         ).run(projectId, input.clientId, key, input.provider,
           input.surfaceIntent, model, MAIN_SLOT, new Date().toISOString());
-        this.#db.raw.prepare(
-          'INSERT INTO kernel_public_slot_revisions(project_id,slot_id,revision)' +
-          ' VALUES(?,?,1)',
-        ).run(projectId, MAIN_SLOT);
       }
       if (!previous) {
         this.#db.raw.prepare(
@@ -194,7 +190,10 @@ export class PublicTaskAdmissionService {
       ).get(input.projectId) as { mainSlotId: string; providerKey: string } | undefined;
       if (!publicProject) throw new SessionPlaneDomainError('invalid_request', 'Unknown public project identity');
       const slotId = input.conversationSlotId ?? publicProject.mainSlotId;
-      const slot = this.#store.getSlot(input.projectId, slotId, input.clientId);
+      const slot = this.#store.findAuthorizedSlot(input.projectId, slotId, input.clientId);
+      if (slot === null) {
+        throw new SessionPlaneDomainError('invalid_request', 'Unknown authorized conversation slot');
+      }
       if (slot.providerKey === 'chatgpt' && policy.enabled && policy.message !== '계속') {
         throw new SessionPlaneDomainError('invalid_request', 'ChatGPT managed continuation requires the exact literal 계속');
       }

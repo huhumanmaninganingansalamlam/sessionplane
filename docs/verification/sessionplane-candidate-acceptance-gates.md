@@ -75,3 +75,14 @@ fixtures, each with exact canonical ACK and unique FINAL. A scoped GET 429 for o
 project defers the read and never authorizes an original POST replay. All four
 answer/project bindings and zero native focus actions are asserted. This is L2,
 not four actual authenticated ChatGPT projects (L3 remains pending).
+
+## X02 second explicitly provisioned logical slot
+
+A separate public Core integration regression explicitly provisions one reviewer
+role/slot through the internal owner fixture, then admits independent Main and
+reviewer Tasks using the normal task.start conversationSlotId. It verifies
+slot-specific public revisions and unchanged idempotency, independent pending
+leases, correct answer/result association, cancellation isolation, stale
+revision rejection, and foreign/unregistered slot rejection before any provider
+send. This is an L1/L2 scope foundation, not a public role-creation command or
+an assertion that a real Expert account has been created.

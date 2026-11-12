@@ -99,6 +99,33 @@ try {
   });
   assert.deepEqual(replayCancel, canceled);
 
+  // Second logical slots are explicitly provisioned, not invented by
+  // arbitrary clients. Their public revision is persisted independently
+  // from the owner's Main conversation, including in the real tarball.
+  core.teamDirectory.createRole({
+    teamId: project.projectId, roleKey: 'reviewer', roleType: 'reviewer',
+    displayName: 'Isolated installed reviewer', reportsToRoleKey: 'main',
+  });
+  core.semanticTaskRepository.openSlot({
+    projectId: project.projectId, clientId,
+    slotId: 'reviewer', roleKey: 'reviewer', providerKey: 'chatgpt',
+  });
+  const reviewerStart = {
+    clientId, projectId: project.projectId, conversationSlotId: 'reviewer',
+    expectedConversationRevision: 1, requestId: 'installed-second-slot-once',
+    prompt: 'Independent reviewer Task, no real browser/provider effect',
+  };
+  const reviewer = await rpc('task.start', reviewerStart);
+  assert.equal(reviewer.conversationSlotId, 'reviewer');
+  assert.equal(reviewer.conversationRevision, 2);
+  assert.equal(core.semanticTaskRepository.getConversationRevision(
+    project.projectId, 'main', clientId), 2,
+    'Reviewer Task cannot alter the Main public revision');
+  await assert.rejects(rpc('task.start', {
+    ...reviewerStart, requestId: 'invented-slot-id',
+    conversationSlotId: 'not-opened',
+  }), error => error?.data?.errorCode === 'invalid_request');
+
   // An installed package must really reopen its own durable SQLite
   // state and recover the exact same identities, rather than merely passing
   // while all caches and MCP processes are still resident.
@@ -138,6 +165,19 @@ try {
   assert.equal(resumedMcp.structuredContent.taskId, first.taskId);
   assert.equal(resumedMcp.structuredContent.state, 'canceled');
 
+  const reviewerResumed = await rpc('task.get', {
+    clientId, taskId: reviewer.taskId, view: 'evidence',
+  });
+  assert.equal(reviewerResumed.conversationSlotId, 'reviewer');
+  assert.equal(reviewerResumed.state, 'working');
+  assert.equal(reviewerResumed.submission.attempted, false);
+  assert.equal(reviewerResumed.evidence.attempts.length, 1);
+  assert.equal((await rpc('task.start', reviewerStart)).taskId, reviewer.taskId);
+  assert.equal(core.semanticTaskRepository.getConversationRevision(
+    project.projectId, 'main', clientId), 2);
+  assert.equal(core.semanticTaskRepository.getConversationRevision(
+    project.projectId, 'reviewer', clientId), 2);
+
   console.log(JSON.stringify({
     requestOk: true, gate: 'installed-core-public-task-smoke',
     schemaVersion: resumedHealth.schemaVersion, toolCount: MCP_TOOLS.length,
@@ -145,6 +185,7 @@ try {
     cancelReceiptReplayed: true, isolatedBrowserStarted: false,
     installedCoreRestarted: true, requestIdentitySurvivedRestart: true,
     originalAttemptCountAfterRestart: resumed.evidence.attempts.length,
+    secondSlotRevisionIndependentAfterRestart: true,
   }));
 } finally {
   await core?.close().catch(() => undefined);
