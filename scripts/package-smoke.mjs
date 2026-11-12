@@ -181,8 +181,9 @@ try {
       installedCore.originalAttemptCountAfterRestart !== 1 ||
       installedCore.secondSlotRevisionIndependentAfterRestart !== true ||
       installedCore.historicalSlotRecoveredAfterRestart !== true ||
-      installedCore.crossProjectRequestCollisionRejected !== true) {
-    throw new Error('Installed Core idempotency/restart/historical-slot smoke failed');
+      installedCore.crossProjectRequestCollisionRejected !== true ||
+      installedCore.staleBindingReplacementRejectedAfterRestart !== true) {
+    throw new Error('Installed Core idempotency/restart/rebinding smoke failed');
   }
 
   process.stdout.write(
