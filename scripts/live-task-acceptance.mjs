@@ -171,6 +171,15 @@ async function acceptOneTask({ plan, state, index, call, receiptDir, limitMs, wa
   let modelRefreshes = 0;
   while (Date.now() < expiresAt) {
     if (summary.state === 'agent_input_required') {
+      // A prior configuration effect may have reached the provider even if
+      // its response was lost. Persisted uncertain/unknown (or no receipt
+      // after journaling) is a hard stop across separate runner processes.
+      // Never issue a *new* decisionId merely because read-only observation
+      // now exposes a fresh Power action. Human review may resolve the state.
+      if (row.modelDecision &&
+          !['performed', 'refresh_required'].includes(row.modelDecisionResult)) {
+        break;
+      }
       const action = exactProModelAction(summary.decision);
       if (!action) {
         const decision = summary.decision;

@@ -357,6 +357,62 @@ test('L3 runner consumes exact model-view close, reopen, one Pro effort selectio
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
+test('an uncertain or lost Pro configuration result never causes a second action after runner reconnect', async () => {
+  for (const variant of ['uncertain', 'lost'] as const) {
+    const f = makeFixture();
+    let decisions = 0;
+    const call = async (method: string, params: any) => {
+      if (method === 'task.decide') {
+        decisions++;
+        if (decisions > 1) {
+          throw new Error('Unsafe configuration retry after an ambiguous external effect');
+        }
+        if (variant === 'lost') throw new Error('Lost configuration RPC reply');
+        return { kind: 'uncertain', reason: 'pro-effort-click-outcome-unverified' };
+      }
+      const base = await f.call(method, params);
+      if (method === 'task.get' && !params.view && f.records.size === 1) {
+        const suffix = decisions === 0 ? '91' : '92';
+        return {
+          ...base, state: 'agent_input_required', revision: 30 + decisions,
+          submission: { attempted: false, acknowledged: false },
+          decision: {
+            decisionId: '00000000-0000-4000-8000-0000000000' + suffix,
+            kind: 'model_choice', humanOnly: false, requestedModel: 'Pro',
+            options: [{
+              actionRef: 'pro-pointer-' + suffix,
+              purpose: 'choose_reasoning_effort', risk: 'configuration_only',
+              expiresAt: new Date(Date.now() + 120_000).toISOString(),
+              inputSchema: { kind: 'none' },
+            }],
+          },
+        };
+      }
+      return base;
+    };
+    try {
+      await runLiveTaskAcceptance(options(f.dir, call, 'start'));
+      const resume = { ...options(f.dir, call, 'resume'), maxWaitMs: 200 };
+      if (variant === 'lost') {
+        await assert.rejects(runLiveTaskAcceptance(resume), /Lost configuration RPC reply/);
+      } else {
+        const first = await runLiveTaskAcceptance(resume);
+        assert.equal(first.status, 'read_only_reconnect_pending');
+      }
+      const saved = JSON.parse(readFileSync(join(f.dir, 'receipt', 'state.json'), 'utf8'));
+      assert.equal(saved.tasks[0].modelDecision.actionRef, 'pro-pointer-91');
+      assert.equal(saved.tasks[0].modelDecisionResult,
+        variant === 'lost' ? undefined : 'uncertain');
+      const after = await runLiveTaskAcceptance(resume);
+      assert.equal(after.status, 'read_only_reconnect_pending');
+      assert.equal(after.taskState, 'agent_input_required');
+      assert.equal(decisions, 1, 'a new decision identity is never a replay authorization');
+      assert.equal(f.calls.filter(x => x.method === 'task.start').length, 1);
+      assert.equal(saved.conversationId, null);
+    } finally { rmSync(f.dir, { recursive: true, force: true }); }
+  }
+});
+
 test('cold root chooser hydrates after one read-only refresh; Core independently verifies Pro', async () => {
   const f = makeFixture();
   const decisions: any[] = [];
