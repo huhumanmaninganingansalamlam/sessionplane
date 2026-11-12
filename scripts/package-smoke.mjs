@@ -180,8 +180,9 @@ try {
       installedCore.requestIdentitySurvivedRestart !== true ||
       installedCore.originalAttemptCountAfterRestart !== 1 ||
       installedCore.secondSlotRevisionIndependentAfterRestart !== true ||
-      installedCore.historicalSlotRecoveredAfterRestart !== true) {
-    throw new Error('Installed Core public Task/restart/historical-slot smoke failed');
+      installedCore.historicalSlotRecoveredAfterRestart !== true ||
+      installedCore.crossProjectRequestCollisionRejected !== true) {
+    throw new Error('Installed Core idempotency/restart/historical-slot smoke failed');
   }
 
   process.stdout.write(

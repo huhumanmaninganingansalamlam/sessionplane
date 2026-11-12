@@ -66,6 +66,20 @@ try {
   const first = await rpc('task.start', start);
   const replayedTask = await rpc('task.start', start);
   assert.equal(first.taskId, replayedTask.taskId);
+  const unrelatedProjectInput = {
+    clientId, requestId: 'package-unrelated-open',
+    projectKey: 'package-unrelated-project',
+    displayName: 'Unrelated package project',
+    provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'Pro',
+  };
+  const unrelated = await rpc('project.open', unrelatedProjectInput);
+  await assert.rejects(rpc('task.start', {
+    ...start, projectId: unrelated.projectId,
+    prompt: 'A different project must never share an original requestId',
+  }), error => error?.data?.errorCode === 'idempotency_conflict',
+  'A reused caller requestId cannot create a second Task or provider POST');
+  assert.equal((await rpc('project.open', unrelatedProjectInput)).conversationRevision,
+    1, 'Collision must not advance an unrelated Main conversation');
   const read = await rpc('task.get', { clientId, taskId: first.taskId, view: 'evidence' });
   assert.equal(read.taskId, first.taskId);
   assert.equal(read.submission.attempted, false);
@@ -226,6 +240,7 @@ try {
     originalAttemptCountAfterRestart: resumed.evidence.attempts.length,
     secondSlotRevisionIndependentAfterRestart: true,
     historicalSlotRecoveredAfterRestart: true,
+    crossProjectRequestCollisionRejected: true,
   }));
 } finally {
   await core?.close().catch(() => undefined);

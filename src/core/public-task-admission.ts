@@ -217,6 +217,20 @@ export class PublicTaskAdmissionService {
         const task = this.#store.getTask(prior.taskId, input.clientId);
         return this.#taskReceipt(task, slot, recorded.acceptedRevision);
       }
+      // Public mutation identity is caller + requestId, not the project
+      // chosen by a transient MCP/CLI connection. The exact same request
+      // cannot accidentally admit another provider POST in a different
+      // project. Existing receipts are checked first above, so historical
+      // requests remain replayable even if older code admitted duplicates.
+      const otherProject = this.#db.raw.prepare(
+        'SELECT project_id AS projectId FROM kernel_tasks' +
+        ' WHERE client_id=? AND request_id=? LIMIT 1',
+      ).get(input.clientId, input.requestId) as
+        { projectId: string } | undefined;
+      if (otherProject && otherProject.projectId !== input.projectId) {
+        throw new SessionPlaneDomainError('idempotency_conflict',
+          'Task start requestId is already bound to another project');
+      }
       // Older explicitly owned slots may have immutable provider bindings
       // but no public revision row (schema 12 -> 13). Initialize that row
       // atomically before the CAS. It must never reset an existing counter.

@@ -98,3 +98,15 @@ transaction and advances it to 3 without touching provider identity. Foreign
 owner and stale-revision admissions roll back with no row inserted. The
 installed-package smoke repeats this after a real Core restart and verifies
 that one Task/attempt is preserved. No archived old workflow runtime is used.
+
+## Caller-wide request ID cannot create a second Task in another project
+
+A controlled RPC reproduction showed the old admission path accepted two
+different tasks in two projects when the same clientId/requestId was reused.
+The public admission service now checks the caller's durable Task request
+identity across all project IDs before admitting a new Task. It preserves
+prior exact per-project receipts first (including historical replays), rejects
+new cross-project collisions as idempotency_conflict, and does not advance the
+other project's Main revision or create another provider attempt.
+This is independently asserted in RPC integration and installed package
+smoke, without changing existing live callers or their account profile.

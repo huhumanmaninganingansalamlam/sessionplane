@@ -824,3 +824,53 @@ test('an ambiguous initial POST is visible as durable evidence, never a fabricat
     conversationId: 'untrusted', messageId: 'post-one', externalTurnId: 'bad-turn',
   }), /one unambiguous observed POST/);
 });
+
+test('caller-scoped task.start requestId cannot create a second Task in another project', async t => {
+  const { rpc, core } = await fixture(t);
+  const clientId = 'alice';
+  const projects = [];
+  for (const i of [1, 2]) {
+    projects.push(await rpc<any>('project.open', {
+      clientId, requestId: 'cross-project-open-' + i,
+      projectKey: 'cross-project-idempotency-' + i,
+      displayName: 'Independent project ' + i,
+      provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'Pro',
+    }));
+  }
+  const a = projects[0]!;
+  const b = projects[1]!;
+  const original = {
+    clientId, projectId: a.projectId,
+    requestId: 'one-client-idempotency-key',
+    expectedConversationRevision: a.conversationRevision,
+    prompt: 'A single original prompt in project A',
+  };
+  const admitted = await rpc<any>('task.start', original);
+  assert.equal((await rpc<any>('task.start', original)).taskId, admitted.taskId);
+  await assert.rejects(rpc('task.start', {
+    ...original, projectId: b.projectId, prompt: 'A foreign second project prompt',
+  }), (error: any) => {
+    assert.equal(error.data?.errorCode, 'idempotency_conflict');
+    return true;
+  });
+  const projectB = await rpc<any>('project.open', {
+    clientId, requestId: 'cross-project-open-2',
+    projectKey: 'cross-project-idempotency-2',
+    displayName: 'Independent project 2',
+    provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'Pro',
+  });
+  assert.equal(projectB.conversationRevision, 1,
+    'An identity collision must not advance a different project revision');
+  assert.equal(projectB.currentTaskId, null,
+    'An identity collision must not admit a foreign Task');
+  assert.equal(core.database.raw.prepare(
+    'SELECT COUNT(*) AS n FROM kernel_tasks WHERE client_id=? AND request_id=?'
+  ).get(clientId, original.requestId)!.n, 1);
+  const independent = await rpc<any>('task.start', {
+    ...original, projectId: b.projectId, requestId: 'distinct-project-b-task',
+    prompt: 'Allowed independent question for the second project',
+  });
+  assert.notEqual(independent.taskId, admitted.taskId);
+  assert.equal(independent.conversationRevision, 2,
+    'Distinct idempotency identity must still allow an independent Task');
+});
