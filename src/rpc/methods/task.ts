@@ -158,26 +158,27 @@ export function registerTaskMethods(
     });
   });
 
-  router.register('task.cancel', taskSchemas.cancel, params => {
-    const before = repository.getFullTask(params.taskId, params.clientId);
-    if (!['completed', 'failed', 'canceled'].includes(before.task.state) &&
-        !before.task.cancelRequested) {
-      repository.requestCancel(params.taskId, params.clientId);
-    }
-    const current = repository.getFullTask(params.taskId, params.clientId);
-    const externalAttempted = current.attempts.some(attempt =>
-      ['dispatched', 'uncertain', 'acknowledged'].includes(attempt.state));
-    if (!externalAttempted && current.task.cancelRequested && current.task.state !== 'canceled') {
-      repository.confirmCancel(params.taskId, params.clientId);
-    }
-    const snapshot = readTaskSummary(repository, gateway, params.taskId, params.clientId);
-    return {
-      ...snapshot,
-      cancelOutcome: snapshot.state === 'canceled'
-        ? 'not_submitted'
-        : snapshot.cancelRequested
-          ? 'external_stop_unverified'
-          : 'already_terminal',
-    };
-  });
+  router.register('task.cancel', taskSchemas.cancel, params =>
+    repository.withCancelReceipt(params, () => {
+      const before = repository.getFullTask(params.taskId, params.clientId);
+      if (!['completed', 'failed', 'canceled'].includes(before.task.state) &&
+          !before.task.cancelRequested) {
+        repository.requestCancel(params.taskId, params.clientId);
+      }
+      const current = repository.getFullTask(params.taskId, params.clientId);
+      const externalAttempted = current.attempts.some(attempt =>
+        ['dispatched', 'uncertain', 'acknowledged'].includes(attempt.state));
+      if (!externalAttempted && current.task.cancelRequested && current.task.state !== 'canceled') {
+        repository.confirmCancel(params.taskId, params.clientId);
+      }
+      const snapshot = readTaskSummary(repository, gateway, params.taskId, params.clientId);
+      return {
+        ...snapshot,
+        cancelOutcome: snapshot.state === 'canceled'
+          ? 'not_submitted'
+          : snapshot.cancelRequested
+            ? 'external_stop_unverified'
+            : 'already_terminal',
+      };
+    }));
 }

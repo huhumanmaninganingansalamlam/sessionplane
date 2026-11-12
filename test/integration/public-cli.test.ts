@@ -7,6 +7,7 @@ import { Readable, Writable } from 'node:stream';
 import test from 'node:test';
 
 import { runCli } from '../../src/cli/main.ts';
+import { callRpc } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
 import { startCore } from '../../src/main.ts';
 import { runMcpServer } from '../../src/mcp/server.ts';
@@ -255,6 +256,60 @@ test('modern MCP client exit and reconnect cannot cancel or replay a durable pub
     assert.equal(terminal.structuredContent.state, 'canceled');
     assert.equal(core.semanticTaskRepository.getFullTask(taskId, owner)
       .attempts.length, 1);
+  } finally {
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('SQLite cancellation receipt survives Core process restart and blocks foreign task reuse', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-cancel-receipt-restart-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const logger = { debug() {}, info() {}, warn() {}, error() {} };
+  let core = await startCore({ config, startBrowser: false, logger });
+  const owner = 'cancel-receipt-restart';
+  const rpc = async (method: string, params: Record<string, unknown>) =>
+    await callRpc<any>({ socketPath: config.socketPath, method, params });
+  try {
+    const project = await rpc('project.open', {
+      clientId: owner, requestId: 'open-for-cancel',
+      projectKey: 'cancel-receipt-restart', displayName: 'Cancellation persistence',
+    });
+    const started = await rpc('task.start', {
+      clientId: owner, requestId: 'one-task-for-cancel',
+      projectId: project.projectId,
+      expectedConversationRevision: project.conversationRevision,
+      prompt: 'Cancel this work before provider submission',
+    });
+    const identity = { clientId: owner, taskId: started.taskId, requestId: 'cancel-original' };
+    const first = await rpc('task.cancel', identity);
+    assert.equal(first.state, 'canceled');
+    assert.equal(first.cancelOutcome, 'not_submitted');
+
+    await core.close();
+    core = await startCore({ config, startBrowser: false, logger });
+    assert.deepEqual(await rpc('task.cancel', identity), first);
+    assert.equal(core.semanticTaskRepository.getFullTask(started.taskId, owner)
+      .events.filter((event: { event: { type: string } }) =>
+        event.event.type === 'cancel.requested').length, 1);
+
+    const other = await rpc('project.open', {
+      clientId: owner, requestId: 'other-project-open',
+      projectKey: 'cancel-other-project', displayName: 'Separate project',
+    });
+    const otherTask = await rpc('task.start', {
+      clientId: owner, requestId: 'other-start',
+      projectId: other.projectId,
+      expectedConversationRevision: other.conversationRevision,
+      prompt: 'This must remain independent',
+    });
+    await assert.rejects(rpc('task.cancel', {
+      clientId: owner, taskId: otherTask.taskId, requestId: 'cancel-original',
+    }), (error: any) => {
+      assert.equal(error.data?.errorCode, 'idempotency_conflict');
+      return true;
+    });
+    assert.equal(core.semanticTaskRepository.getTask(otherTask.taskId, owner).state, 'working');
   } finally {
     await core.close();
     rmSync(root, { recursive: true, force: true });

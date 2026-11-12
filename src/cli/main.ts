@@ -464,12 +464,12 @@ async function runPublicTaskCommand(
       if (!approved && parsed.options['approval-ref'] !== undefined) {
         throw new Error('--approval-ref requires --continuation-approved');
       }
+      requireOption(parsed, 'expected-conversation-revision');
       const params = taskSchemas.start.parse({
         clientId: owner, requestId: requireOption(parsed, 'request-id'),
         projectId: requirePositional(parsed.words, 2, 'projectId'),
         expectedConversationRevision: integerOption(
-          parsed, 'expected-conversation-revision',
-          Number(requireOption(parsed, 'expected-conversation-revision')), 1,
+          parsed, 'expected-conversation-revision', 0, 1,
         ),
         ...(parsed.options['conversation-slot'] === undefined
           ? {} : { conversationSlotId: parsed.options['conversation-slot'] }),

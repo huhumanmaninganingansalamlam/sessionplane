@@ -119,9 +119,9 @@ test('Task cancel revokes a never-submitted task; an attempted external mutation
   assert.equal(result.state, 'canceled');
   assert.equal(result.cancelOutcome, 'not_submitted');
   assert.equal(result.cancelRequested, true);
-  assert.equal((await rpc<any>('task.cancel', {
+  assert.deepEqual(await rpc<any>('task.cancel', {
     taskId, clientId, requestId: 'cancel-no-post',
-  })).state, 'canceled');
+  }), result, 'same cancellation request replays its exact durable receipt');
   assert.equal(store.getFullTask(taskId, clientId).attempts[0].state, 'planned');
   const projectId = randomUUID();
   const other = randomUUID();
@@ -133,6 +133,11 @@ test('Task cancel revokes a never-submitted task; an attempted external mutation
     taskId: other, projectId, slotId: 'main', expectedSlotRevision: 1,
     clientId, requestId: 'other-start', prompt: 'Other question',
   });
+  await assert.rejects(rpc('task.cancel', {
+    taskId: other, clientId, requestId: 'cancel-no-post',
+  }), /Cancellation requestId is already bound/);
+  assert.equal(store.getTask(other, clientId).state, 'working',
+    'a requestId collision cannot cancel an unrelated Task');
   store.planAttempt({
     taskId: other, clientId, attemptId: 'maybe-sent',
     kind: 'initial', turnKey: 'root', content: 'Other question',
@@ -145,6 +150,18 @@ test('Task cancel revokes a never-submitted task; an attempted external mutation
   assert.equal(uncertain.cancelOutcome, 'external_stop_unverified');
   assert.equal(uncertain.cancelRequested, true);
   assert.equal(store.getFullTask(other, clientId).attempts[0].state, 'dispatched');
+  store.acknowledgeAttempt({
+    taskId: other, clientId, attemptId: 'maybe-sent', externalTurnId: 'late-ack-after-cancel',
+  });
+  assert.deepEqual(await rpc<any>('task.cancel', {
+    taskId: other, clientId, requestId: 'stop-intent',
+  }), uncertain, 'late canonical ACK does not rewrite the original cancel receipt');
+  const observed = await rpc<any>('task.cancel', {
+    taskId: other, clientId, requestId: 'different-cancel-request',
+  });
+  assert.equal(observed.state, 'uncertain');
+  assert.equal(observed.submission.acknowledged, true,
+    'a new read receipt may reflect the late ACK without reviving cancellation');
 });
 
 test('Task decide rejects arbitrary selector, stale decision and invalid typed input at schema boundary', async t => {

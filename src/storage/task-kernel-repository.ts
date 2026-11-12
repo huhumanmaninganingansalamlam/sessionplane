@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { SessionPlaneDomainError } from '../domain/errors.ts';
 
 import {
   isTaskTerminal,
@@ -1217,6 +1218,41 @@ export class TaskKernelRepository {
       if (changed.changes !== 1) return false;
       this.#appendEvent(task, { type: 'decision.action_consumed', decisionId });
       return true;
+    });
+  }
+
+  /** Idempotent public cancellation envelope: both its state transition and
+   * the exact response snapshot live in one SQLite transaction. Replays never
+   * call the provider, revisit a decision, or reinterpret a late ACK.
+   */
+  withCancelReceipt<T>(input: {
+    taskId: string; clientId: string; requestId: string;
+  }, apply: () => T): T {
+    return this.#database.transaction(() => {
+      const task = this.#requireTask(input.taskId, input.clientId);
+      requireNonempty(input.requestId, 'requestId');
+      const earlier = this.#database.raw.prepare(
+        'SELECT task_id AS taskId,result_json AS resultJson' +
+        ' FROM kernel_task_cancel_receipts WHERE client_id=? AND request_id=?',
+      ).get(input.clientId, input.requestId) as
+        { taskId: string; resultJson: string } | undefined;
+      if (earlier !== undefined) {
+        if (earlier.taskId !== task.taskId) {
+          throw new SessionPlaneDomainError('idempotency_conflict',
+            'Cancellation requestId is already bound to another task');
+        }
+        return JSON.parse(earlier.resultJson) as T;
+      }
+      // The callback must be synchronous and only mutate this same SQLite
+      // journal. Nested repository operations use transaction savepoints.
+      const result = apply();
+      const serialized = JSON.stringify(result);
+      if (typeof serialized !== 'string') throw new Error('Cancel receipt cannot be encoded');
+      this.#database.raw.prepare(
+        'INSERT INTO kernel_task_cancel_receipts' +
+        '(client_id,request_id,task_id,result_json,committed_at) VALUES(?,?,?,?,?)',
+      ).run(input.clientId, input.requestId, input.taskId, serialized, this.#now());
+      return result;
     });
   }
 
