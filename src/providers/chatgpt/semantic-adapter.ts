@@ -330,6 +330,9 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       if (blocker === 'none') {
         const model = await inspectSemanticChatGptModelMenu(page);
         if (model?.status === 'closed' || model?.status === 'nested') {
+          // The exact current Pro badge is on the verified closed composer
+          // trigger even after a model selection closes its Radix menu.
+          verifiedModel = model.closedVerifiedModel;
           issue('open_model_chooser', 'Inspect currently offered model choices',
             'configuration_only', { kind: 'none' }, ui.fingerprint,
             null, model.evidenceHash);
@@ -675,8 +678,12 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         const currentModel = await inspectSemanticChatGptModelMenu(page);
         const selected = currentModel?.options.filter(
           option => option.selected && option.enabled) ?? [];
-        if (currentModel?.status !== 'open' || selected.length !== 1 ||
-            selected[0]!.value !== request.context.requiredModel) {
+        const exactOpenChoice = currentModel?.status === 'open' &&
+          selected.length === 1 && selected[0]!.value === request.context.requiredModel;
+        const exactClosedPro = currentModel?.status === 'closed' &&
+          currentModel.closedVerifiedModel === 'Pro' &&
+          request.context.requiredModel === 'Pro';
+        if (!exactOpenChoice && !exactClosedPro) {
           return 'stale' as const;
         }
       }

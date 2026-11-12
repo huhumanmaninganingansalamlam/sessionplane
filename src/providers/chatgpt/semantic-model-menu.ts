@@ -23,6 +23,8 @@ export interface SemanticModelMenu {
   readonly submenuTriggerIndex: number;
   readonly evidenceHash: string;
   readonly options: readonly SemanticModelChoice[];
+  /** Exact visible Pro badge on the *closed* canonical composer picker. */
+  readonly closedVerifiedModel: 'Pro' | null;
 }
 
 /**
@@ -50,6 +52,7 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
       label: '', expanded: '',
       options: [] as Array<{ value: string; controlLabel: string;
         enabled: boolean; selected: boolean }>,
+      closedVerifiedModel: null as 'Pro' | null,
     };
     if (selected.length === 0) return null;
     if (selected.length !== 1) return { ...base,
@@ -83,7 +86,21 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
         reason: 'model-menu-link-unverified' };
     }
     if (expanded === 'false') {
-      return { ...initial, status: 'closed' as const, reason: null };
+      // Current ChatGPT composer picker displays the selected Pro level
+      // *inside the one verified closed trigger*. Its exact visible label is
+      // stronger than a cached menu choice, and unlike an open-menu radio it
+      // persists through the subsequent Compose -> Submit observations.
+      // Never infer Pro from unrelated text, other triggers or an effort
+      // slider. All other labels remain unverified until opening the menu.
+      const displayed = element.innerText.replace(/\s+/g, ' ').trim();
+      const exactPro = strategy === 'composer-radix' &&
+        element.getAttribute('aria-label') === 'ChatGPT 모델 선택' &&
+        element.getAttribute('aria-haspopup') === 'menu' &&
+        !element.disabled && element.getAttribute('aria-disabled') !== 'true' &&
+        menuId === '' &&
+        /^(?:Pro|추론 수준 Pro|Thinking level Pro|Thinking effort Pro)$/.test(displayed);
+      return { ...initial, status: 'closed' as const, reason: null,
+        closedVerifiedModel: exactPro ? 'Pro' as const : null };
     }
     const root = menus[0]!;
     const radios = (menu: HTMLElement, prefix = '') =>
@@ -188,7 +205,7 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
     status: data.status, reason: data.reason, openerIndex: data.openerIndex,
     menuId: data.menuId, optionMenuId: data.optionMenuId,
     submenuId: data.submenuId, submenuTriggerIndex: data.submenuTriggerIndex,
-    options: data.options, evidenceHash,
+    options: data.options, closedVerifiedModel: data.closedVerifiedModel, evidenceHash,
   };
 }
 

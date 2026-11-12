@@ -222,3 +222,175 @@ test('resume without a saved plan refuses to invent a first live prompt', async 
     assert.equal(existsSync(join(f.dir, 'receipt')), false);
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
+
+test('resumed L3 runner performs only exact current Pro semantic decisions before three-Turn FINAL', async () => {
+  const f = makeFixture();
+  const decisions: any[] = [];
+  const expiresAt = new Date(Date.now() + 120_000).toISOString();
+  let stage = 0;
+  const call = async (method: string, params: any) => {
+    if (method === 'task.decide') {
+      decisions.push(params);
+      assert.equal(params.clientId, clientId);
+      if (stage === 0) {
+        assert.equal(params.actionRef, 'open-pro-model-menu');
+        assert.equal(params.input, undefined);
+      } else if (stage === 1) {
+        assert.equal(params.actionRef, 'select-pro-model-only');
+        assert.equal(params.input, 'Pro');
+      } else {
+        throw new Error('Unexpected extra model decision');
+      }
+      stage++;
+      return { kind: 'performed', effect: stage === 1
+        ? 'model_menu_opened' : 'model_selected' };
+    }
+    const result = await f.call(method, params);
+    if (method === 'task.get' && !params.view &&
+        f.records.size === 1 && stage < 2) {
+      const open = stage === 0;
+      return {
+        ...result, state: 'agent_input_required', revision: 10 + stage,
+        decision: {
+          decisionId: '00000000-0000-4000-8000-0000000000' + (open ? '91' : '92'),
+          kind: 'model_choice', humanOnly: false,
+          requestedModel: 'Pro', options: [{
+            actionRef: open ? 'open-pro-model-menu' : 'select-pro-model-only',
+            purpose: open ? 'open_model_chooser' : 'choose_model',
+            risk: 'configuration_only',
+            expiresAt,
+            inputSchema: open ? { kind: 'none' } : { kind: 'option', options: [
+              { value: 'Instant', enabled: true }, { value: 'Pro', enabled: true },
+            ] },
+          }],
+        },
+      };
+    }
+    return result;
+  };
+  try {
+    const initial = await runLiveTaskAcceptance(options(f.dir, call, 'start'));
+    assert.equal(initial.status, 'owner_client_exited_after_initial');
+    assert.equal(stage, 0, 'The first client must exit before acting on model decisions');
+    const completed = await runLiveTaskAcceptance({
+      ...options(f.dir, call, 'resume'), maxWaitMs: 5000,
+    });
+    assert.equal(completed.status, 'three_turns_canonical_final_verified');
+    assert.equal(decisions.length, 2);
+    assert.equal(stage, 2);
+    assert.deepEqual(decisions.map(({ requestId }) => requestId), [
+      'l3-pro-00000000-0000-4000-8000-000000000091',
+      'l3-pro-00000000-0000-4000-8000-000000000092',
+    ]);
+    assert.equal(f.records.size, 3);
+    assert.deepEqual(f.calls.filter(x => x.method === 'task.start')
+      .map(x => x.params.expectedConversationRevision), [1, 2, 3]);
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('a human-only permission or unrelated decision is never auto-executed by the L3 runner', async () => {
+  const f = makeFixture();
+  let attempted = 0;
+  const call = async (method: string, params: any) => {
+    if (method === 'task.decide') {
+      attempted++;
+      throw new Error('Human-only approval must never be sent');
+    }
+    const result = await f.call(method, params);
+    if (method === 'task.get' && !params.view) return {
+      ...result,
+      state: 'agent_input_required',
+      decision: {
+        decisionId: '00000000-0000-4000-8000-000000000099',
+        kind: 'tool_permission', humanOnly: true, requestedModel: null,
+        options: [{ actionRef: 'never-auto-grant', purpose: 'grant_permission',
+          expiresAt: new Date(Date.now() + 120_000).toISOString(),
+          inputSchema: { kind: 'none' },
+        }],
+      },
+    };
+    return result;
+  };
+  try {
+    await runLiveTaskAcceptance(options(f.dir, call, 'start'));
+    const pending = await runLiveTaskAcceptance({
+      ...options(f.dir, call, 'resume'), maxWaitMs: 2000,
+    });
+    assert.equal(pending.status, 'read_only_reconnect_pending');
+    assert.equal(pending.taskState, 'agent_input_required');
+    assert.equal(attempted, 0);
+    assert.equal(f.records.size, 1);
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('a paced/429 provider wait retains one initial attempt without any client resend', async () => {
+  const f = makeFixture();
+  let waits = 0;
+  const paced = async (method: string, params: any) => {
+    if (method === 'task.get' && params.view === undefined) {
+      const base = await f.call(method, params);
+      return { ...base, revision: 7, state: 'working',
+        submission: { attempted: true, acknowledged: false },
+        lastExactProgressAt: null,
+        nextAutomaticActionAt: new Date(Date.now() + 60000).toISOString(),
+        decision: null };
+    }
+    if (method === 'task.wait') {
+      waits++;
+      await new Promise(resolve => setTimeout(resolve, 6));
+      return { taskId: params.taskId, state: 'working', revision: 7,
+        submission: { attempted: true, acknowledged: false }, decision: null };
+    }
+    return await f.call(method, params);
+  };
+  try {
+    await runLiveTaskAcceptance(options(f.dir, paced, 'start'));
+    const once = await runLiveTaskAcceptance({
+      ...options(f.dir, paced, 'resume'), maxWaitMs: 28, waitMs: 8,
+    });
+    assert.equal(once.status, 'read_only_reconnect_pending');
+    assert.equal(once.taskState, 'working');
+    const twice = await runLiveTaskAcceptance({
+      ...options(f.dir, paced, 'resume'), maxWaitMs: 28, waitMs: 8,
+    });
+    assert.equal(twice.status, 'read_only_reconnect_pending');
+    assert.equal(f.records.size, 1);
+    assert.equal(f.calls.filter(item => item.method === 'task.start').length, 1);
+    assert.ok(waits > 1, 'The client is allowed bounded read-only waits');
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('expired model action is not retried or substituted by an unverified model choice', async () => {
+  const f = makeFixture();
+  let acted = 0;
+  const call = async (method: string, params: any) => {
+    if (method === 'task.decide') {
+      acted++;
+      throw new Error('Expired model action must never be executed');
+    }
+    const base = await f.call(method, params);
+    if (method === 'task.get' && !params.view) return {
+      ...base, state: 'agent_input_required', revision: 4,
+      decision: {
+        decisionId: '00000000-0000-4000-8000-000000000123',
+        kind: 'model_choice', humanOnly: false, requestedModel: 'Pro',
+        options: [{
+          actionRef: 'expired-model-popup', purpose: 'open_model_chooser',
+          expiresAt: '2020-01-01T00:00:00.000Z',
+          inputSchema: { kind: 'none' },
+        }],
+      },
+    };
+    return base;
+  };
+  try {
+    await runLiveTaskAcceptance(options(f.dir, call, 'start'));
+    const result = await runLiveTaskAcceptance({
+      ...options(f.dir, call, 'resume'), maxWaitMs: 200,
+    });
+    assert.equal(result.status, 'read_only_reconnect_pending');
+    assert.equal(result.taskState, 'agent_input_required');
+    assert.equal(acted, 0);
+    assert.equal(f.records.size, 1);
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});

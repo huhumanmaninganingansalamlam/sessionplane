@@ -1619,17 +1619,15 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
         return route.fulfill({ status: 202, contentType: 'application/json', body: '{}' });
       }
       return route.fulfill({ contentType: 'text/html', body: `
+        <meta charset="utf-8">
         <main>
           <section data-chatgpt-composer>
             <div id="prompt-textarea" role="textbox" contenteditable="true"></div>
             <button data-testid="send-button" type="button">Send</button>
           </section>
-          <button id="model-trigger" aria-label="Model" aria-haspopup="menu"
-            aria-controls="model-menu" aria-expanded="true" type="button">Pro</button>
-          <div id="model-menu" role="menu">
-            <button role="menuitemradio" aria-checked="false">Default</button>
-            <button role="menuitemradio" aria-checked="true">Pro</button>
-          </div>
+          <button id="model-trigger" aria-label="ChatGPT 모델 선택"
+            aria-haspopup="menu" aria-expanded="false" data-state="closed"
+            type="button"><span>추론 수준<br>Pro</span></button>
         </main>
         <script>
           window.sends = 0;

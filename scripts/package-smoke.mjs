@@ -132,6 +132,19 @@ try {
     capture: true,
   }));
   if (doctor.requestOk !== true) throw new Error('installed sessplane doctor failed');
+  const installedCore = JSON.parse(run(process.execPath, [
+    path.join(sourceRoot, 'scripts', 'installed-core-smoke.mjs'),
+    installedRoot, temporaryRoot,
+  ], {
+    cwd: sourceRoot, env: runtimeEnv, capture: true,
+  }).trim());
+  if (installedCore.requestOk !== true ||
+      installedCore.gate !== 'installed-core-public-task-smoke' ||
+      installedCore.toolCount !== 6 || installedCore.originalProviderPosts !== 0 ||
+      installedCore.isolatedBrowserStarted !== false) {
+    throw new Error('Installed Core public Task functional smoke failed');
+  }
+
   process.stdout.write(
     `${JSON.stringify({ requestOk: true, gate: 'package-smoke', filename })}\n`,
   );

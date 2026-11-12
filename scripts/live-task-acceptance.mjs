@@ -99,6 +99,39 @@ function saveState(dir, state) {
   renameSync(tmp, file);
 }
 
+/**
+ * Only the exact, current Pro model decision can be automated by the explicit
+ * acceptance runner. Permissions, provider questions, retries and every
+ * human-only decision remain external barriers. No DOM selectors are used.
+ */
+function exactProModelAction(decision) {
+  if (!decision || decision.kind !== 'model_choice' || decision.humanOnly ||
+      decision.requestedModel !== 'Pro' || !Array.isArray(decision.options) ||
+      decision.options.length !== 1 || !decision.decisionId) return null;
+  const action = decision.options[0];
+  if (!action || !action.actionRef || action.risk !== 'configuration_only' ||
+      !['open_model_chooser', 'choose_model'].includes(action.purpose)) {
+    return null;
+  }
+  if (!Number.isFinite(Date.parse(action.expiresAt)) || Date.now() > Date.parse(action.expiresAt)) {
+    return null;
+  }
+  let selected;
+  if (action.purpose === 'open_model_chooser') {
+    if (action.inputSchema?.kind !== 'none') return null;
+  } else {
+    if (action.inputSchema?.kind !== 'option' ||
+        action.inputSchema.options?.filter(option =>
+          option.value === 'Pro' && option.enabled).length !== 1) return null;
+    selected = 'Pro';
+  }
+  return {
+    decisionId: decision.decisionId, actionRef: action.actionRef,
+    requestId: 'l3-pro-' + decision.decisionId,
+    ...(selected ? { input: selected } : {}),
+  };
+}
+
 async function acceptOneTask({ plan, state, index, call, receiptDir, limitMs, waitMs }) {
   const row = state.tasks[index];
   const input = plan.tasks[index];
@@ -139,7 +172,36 @@ async function acceptOneTask({ plan, state, index, call, receiptDir, limitMs, wa
     clientId: plan.clientId, taskId: row.taskId,
   });
   const expiresAt = Date.now() + limitMs;
-  while (summary.state === 'working' && Date.now() < expiresAt) {
+  let modelDecisions = 0;
+  while (Date.now() < expiresAt) {
+    if (summary.state === 'agent_input_required') {
+      const action = exactProModelAction(summary.decision);
+      if (!action || modelDecisions >= 4) break;
+      // Store the exact request identity before the external UI effect.
+      if (row.modelDecision?.decisionId === action.decisionId &&
+          (row.modelDecision.actionRef !== action.actionRef ||
+            row.modelDecision.requestId !== action.requestId ||
+            row.modelDecision.input !== (action.input ?? null))) {
+        throw new Error('A previously issued model choice changed without a new decisionId');
+      }
+      row.modelDecision = { ...action, input: action.input ?? null };
+      saveState(receiptDir, state);
+      modelDecisions++;
+      const decisionResult = await call('task.decide', {
+        clientId: plan.clientId, taskId: row.taskId, ...action,
+      });
+      row.modelDecisionResult = decisionResult?.kind ?? 'unknown';
+      saveState(receiptDir, state);
+      if (!['performed', 'refresh_required'].includes(decisionResult?.kind)) break;
+      const previous = summary;
+      summary = await call('task.get', {
+        clientId: plan.clientId, taskId: row.taskId,
+      });
+      if (summary.revision === previous.revision &&
+          summary.decision?.decisionId === previous.decision?.decisionId) break;
+      continue;
+    }
+    if (summary.state !== 'working') break;
     summary = await call('task.wait', {
       clientId: plan.clientId, taskId: row.taskId,
       afterRevision: summary.revision,

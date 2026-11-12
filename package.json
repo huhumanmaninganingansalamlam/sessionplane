@@ -34,9 +34,11 @@
     "verify": "npm run typecheck && npm test && npm run build && npm run doctor",
     "verify:clean": "node scripts/clean-checkout-gate.mjs",
     "test:legacy": "node --test --test-concurrency=1 --experimental-strip-types $(find test -name '*.test.ts' ! -path 'test/browser/*' ! -path 'test/integration/browser-cli-mcp.test.ts' | sort)",
-    "test:browser": "node --test --test-concurrency=1 --experimental-strip-types test/browser/semantic-core-composition.test.ts",
+    "test:browser": "node --test --test-concurrency=1 --experimental-strip-types test/browser/semantic-core-composition.test.ts test/browser/closed-pro-model.test.ts test/browser/four-project-background.test.ts",
     "test:live-preflight": "node scripts/live-candidate-preflight.mjs",
-    "test:live-task": "node scripts/live-task-acceptance.mjs"
+    "test:live-task": "node scripts/live-task-acceptance.mjs",
+    "test:background-l2": "SESSIONPLANE_RUN_HEADLESS_BROWSER_L2=1 node --test --experimental-strip-types test/browser/owned-page-liveness.benchmark.test.ts",
+    "test:browser-transport-l2": "SESSIONPLANE_COMPARE_BROWSER_TRANSPORT_L2=1 node --test --experimental-strip-types test/browser/owned-page-transport.comparison.test.ts"
   },
   "dependencies": {
     "playwright-core": "1.64.0",
