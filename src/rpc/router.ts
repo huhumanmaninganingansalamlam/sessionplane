@@ -11,6 +11,27 @@ import {
 } from './schemas.ts';
 
 interface RpcContext { readonly signal?: AbortSignal | undefined }
+const PUBLIC_ERROR_CODES = new Set([
+  'invalid_request', 'idempotency_conflict', 'project_conflict',
+  'conversation_busy', 'conversation_conflict', 'stale_decision',
+  'browser_unavailable', 'adapter_unsupported', 'human_input_required',
+  'uncertain_mutation', 'rate_limited', 'internal_failure',
+]);
+
+function publicMethod(name: string): boolean {
+  return name === 'project.open' || name.startsWith('task.');
+}
+
+function publicErrorCode(source: string): string {
+  if (PUBLIC_ERROR_CODES.has(source)) return source;
+  if (source === 'provider.disabled' || source === 'capability.unsupported') {
+    return 'adapter_unsupported';
+  }
+  if (source === 'browser.unavailable') return 'browser_unavailable';
+  if (source === 'input.invalid') return 'invalid_request';
+  return 'internal_failure';
+}
+
 
 type RpcHandler<Params> = (params: Params, context: RpcContext) => unknown | Promise<unknown>;
 
@@ -56,7 +77,7 @@ export class RpcRouter {
     const requestResult = JsonRpcRequestSchema.safeParse(input);
     if (!requestResult.success) {
       return rpcError(null, -32600, 'Invalid Request', {
-        errorCode: 'input.invalid',
+        errorCode: 'invalid_request',
         issues: requestResult.error.issues,
       });
     }
@@ -67,7 +88,7 @@ export class RpcRouter {
       return request.id === undefined
         ? null
         : rpcError(request.id, -32601, 'Method not found', {
-            errorCode: 'input.invalid',
+            errorCode: 'invalid_request',
             method: request.method,
           });
     }
@@ -77,7 +98,7 @@ export class RpcRouter {
       return request.id === undefined
         ? null
         : rpcError(request.id, -32602, 'Invalid params', {
-            errorCode: 'input.invalid',
+            errorCode: publicMethod(request.method) ? 'invalid_request' : 'input.invalid',
             issues: paramsResult.error.issues,
           });
     }
@@ -97,15 +118,18 @@ export class RpcRouter {
         return null;
       }
       if (error instanceof RpcMethodError || error instanceof SessionPlaneDomainError) {
+        const code = publicMethod(request.method)
+          ? publicErrorCode(error.errorCode) : error.errorCode;
         return rpcError(
           request.id,
           error instanceof RpcMethodError ? error.rpcCode : -32000,
-          error.message,
-          { errorCode: error.errorCode, details: error.details },
+          code === 'internal_failure' ? 'Internal error' : error.message,
+          { errorCode: code, ...(code === 'internal_failure' ? {} : { details: error.details }) },
         );
       }
       return rpcError(request.id, -32603, 'Internal error', {
-        errorCode: 'internal.invariant-violation',
+        errorCode: publicMethod(request.method) ? 'internal_failure'
+          : 'internal.invariant-violation',
       });
     }
   }

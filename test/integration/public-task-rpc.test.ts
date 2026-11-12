@@ -201,10 +201,23 @@ test('Task decide rejects arbitrary selector, stale decision and invalid typed i
   assert.equal(before.decision.decisionId, decisionId);
   await assert.rejects(rpc('task.decide', { taskId, clientId,
     decisionId, requestId: 'forged', actionRef, input: 'Proceed',
-    selector: '#danger' }), /Invalid params/);
+    selector: '#danger' }), (error: any) => {
+      assert.equal(error.code, -32602);
+      assert.equal(error.data?.errorCode, 'invalid_request');
+      return true;
+    });
+  await assert.rejects(rpc('task.decide', { taskId, clientId,
+    decisionId: randomUUID(), requestId: 'missing-choice', actionRef,
+  }), (error: any) => {
+    assert.equal(error.data?.errorCode, 'stale_decision');
+    return true;
+  });
   await assert.rejects(rpc('task.decide', { taskId, clientId,
     decisionId, requestId: 'disabled', actionRef, input: 'Decline' }),
-    /Internal error|selected input/i);
+    (error: any) => {
+      assert.equal(error.data?.errorCode, 'invalid_request');
+      return true;
+    });
   assert.equal(store.getTask(taskId, clientId).pendingDecisionId, decisionId);
 });
 
@@ -246,17 +259,26 @@ test('project.open is owner-scoped and persists one canonical Main identity and 
     clientId: 'bob', requestId: 'unauthorized-task',
     projectId: first.projectId, expectedConversationRevision: 1,
     prompt: 'Not your project',
-  }), /access denied|Internal error/i);
+  }), (error: any) => {
+    assert.equal(error.data?.errorCode, 'invalid_request');
+    return true;
+  });
   await assert.rejects(rpc('project.open', {
     clientId: 'alice', requestId: 'open-project-1',
     projectKey: 'Another key', displayName: 'Alpha',
     provider: 'chatgpt', surfaceIntent: 'chat',
-  }), /conflict|Internal error/i);
+  }), (error: any) => {
+    assert.equal(error.data?.errorCode, 'idempotency_conflict');
+    return true;
+  });
   await assert.rejects(rpc('project.open', {
     clientId: 'alice', requestId: 'open-project-3',
     projectKey: 'project alpha', displayName: 'Alpha',
     provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'different-model',
-  }), /conflict|Internal error/i);
+  }), (error: any) => {
+    assert.equal(error.data?.errorCode, 'project_conflict');
+    return true;
+  });
   const mcp = await invokeMcpTool({
     name: 'sessionplane_project_open',
     arguments: { clientId: 'alice', requestId: 'open-project-1',
@@ -305,16 +327,31 @@ test('task.start atomically plans one original attempt and returns current slot 
     'a replay must not submit the initial prompt or plan a duplicate attempt');
   await assert.rejects(rpc('task.start', {
     ...input, requestId: 'competing-start',
-  }), /busy|Internal error/i);
+  }), /Conversation revision conflict/i);
+  await assert.rejects(rpc('task.start', {
+    ...input, requestId: 'busy-current-revision', expectedConversationRevision: 2,
+  }), (error: any) => {
+    assert.equal(error.data?.errorCode, 'conversation_busy');
+    return true;
+  });
   await assert.rejects(rpc('task.start', {
     ...input, requestId: 'different-prompt', expectedConversationRevision: 1,
-  }), /conflict|Internal error/i);
+  }), (error: any) => {
+    assert.equal(error.data?.errorCode, 'conversation_conflict');
+    return true;
+  });
   await assert.rejects(rpc('task.start', {
     ...input, prompt: 'Change the original question under one requestId',
-  }), /conflict|Internal error/i);
+  }), (error: any) => {
+    assert.equal(error.data?.errorCode, 'idempotency_conflict');
+    return true;
+  });
   await assert.rejects(rpc('task.start', {
     ...input, continuationPolicy: { ...input.continuationPolicy, message: 'not exact 계속' },
-  }), /conflict|Internal error/i);
+  }), (error: any) => {
+    assert.equal(error.data?.errorCode, 'invalid_request');
+    return true;
+  });
   const mcp = await invokeMcpTool({
     name: 'sessionplane_task_start', arguments: input,
     socketPath: config.socketPath, timeoutMs: 5_000, maxLineBytes: 2 * 1024 * 1024,

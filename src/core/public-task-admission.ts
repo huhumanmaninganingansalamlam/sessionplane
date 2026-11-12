@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { SessionPlaneDomainError } from '../domain/errors.ts';
 
 import type { TeamDirectory } from './team-directory.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
@@ -68,7 +69,7 @@ function hash(value: unknown): string {
 }
 function normalizedKey(value: string): string {
   const key = value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
-  if (key.length === 0) throw new Error('Public project key must be nonempty');
+  if (key.length === 0) throw new SessionPlaneDomainError('invalid_request', 'Public project key must be nonempty');
   return key;
 }
 
@@ -108,7 +109,7 @@ export class PublicTaskAdmissionService {
         ' FROM kernel_public_project_open_requests WHERE owner_client_id=? AND request_id=?',
       ).get(input.clientId, input.requestId) as RequestRow | undefined;
       if (previous && previous.inputSha256 !== payloadHash) {
-        throw new Error('Project open request identity conflict');
+        throw new SessionPlaneDomainError('idempotency_conflict', 'Project open request identity conflict');
       }
       const prior = this.#db.raw.prepare(
         'SELECT i.project_id AS projectId,i.owner_client_id AS ownerClientId,' +
@@ -125,7 +126,7 @@ export class PublicTaskAdmissionService {
         if (prior.providerKey !== input.provider ||
             prior.surfaceIntent !== input.surfaceIntent ||
             prior.modelIntent !== model) {
-          throw new Error('Project intent conflict; explicit revision is required');
+          throw new SessionPlaneDomainError('project_conflict', 'Project intent conflict; explicit revision is required');
         }
         projectId = prior.projectId;
       } else {
@@ -164,7 +165,7 @@ export class PublicTaskAdmissionService {
         ).run(input.clientId, input.requestId, projectId,
           payloadHash, new Date().toISOString());
       } else if (previous.projectId !== projectId) {
-        throw new Error('Project open request belongs to another project');
+        throw new SessionPlaneDomainError('idempotency_conflict', 'Project open request belongs to another project');
       }
       const row = this.#db.raw.prepare(
         'SELECT i.project_id AS projectId,i.owner_client_id AS ownerClientId,' +
@@ -184,18 +185,18 @@ export class PublicTaskAdmissionService {
     if (policy.enabled && (policy.intervalMs !== INTERVAL_MS ||
         policy.approvalRef.trim().length === 0 ||
         policy.message.trim().length === 0)) {
-      throw new Error('Continuation approval requires exact interval, text and delegation');
+      throw new SessionPlaneDomainError('invalid_request', 'Continuation approval requires exact interval, text and delegation');
     }
     return this.#db.transaction(() => {
       const publicProject = this.#db.raw.prepare(
         'SELECT main_slot_id AS mainSlotId,provider_key AS providerKey' +
         ' FROM kernel_public_project_intents WHERE project_id=?',
       ).get(input.projectId) as { mainSlotId: string; providerKey: string } | undefined;
-      if (!publicProject) throw new Error('Unknown public project identity');
+      if (!publicProject) throw new SessionPlaneDomainError('invalid_request', 'Unknown public project identity');
       const slotId = input.conversationSlotId ?? publicProject.mainSlotId;
       const slot = this.#store.getSlot(input.projectId, slotId, input.clientId);
       if (slot.providerKey === 'chatgpt' && policy.enabled && policy.message !== '계속') {
-        throw new Error('ChatGPT managed continuation requires the exact literal 계속');
+        throw new SessionPlaneDomainError('invalid_request', 'ChatGPT managed continuation requires the exact literal 계속');
       }
       const exactInputHash = hash([
         input.projectId, slotId, input.expectedConversationRevision,
@@ -212,7 +213,7 @@ export class PublicTaskAdmissionService {
           ' policy_json AS policyJson FROM kernel_public_task_policies WHERE task_id=?',
         ).get(prior.taskId) as AdmissionRow | undefined;
         if (!recorded || recorded.inputSha256 !== exactInputHash) {
-          throw new Error('Task start request identity conflict');
+          throw new SessionPlaneDomainError('idempotency_conflict', 'Task start request identity conflict');
         }
         const task = this.#store.getTask(prior.taskId, input.clientId);
         return this.#taskReceipt(task, slot, recorded.acceptedRevision);
@@ -220,10 +221,10 @@ export class PublicTaskAdmissionService {
       const revision = this.#store.getConversationRevision(
         input.projectId, slotId, input.clientId);
       if (revision !== input.expectedConversationRevision) {
-        throw new Error('Conversation revision conflict; re-read the current slot');
+        throw new SessionPlaneDomainError('conversation_conflict', 'Conversation revision conflict; re-read the current slot');
       }
       if (slot.activeTaskId !== null) {
-        throw new Error('Conversation busy; prior Task still owns the slot');
+        throw new SessionPlaneDomainError('conversation_busy', 'Conversation busy; prior Task still owns the slot');
       }
       const taskId = cryptoRandomUuid();
       const task = this.#store.startTask({
@@ -246,7 +247,7 @@ export class PublicTaskAdmissionService {
         ' WHERE project_id=? AND slot_id=? AND revision=?',
       ).run(input.projectId, slotId, revision);
       if (advanced.changes !== 1) {
-        throw new Error('Concurrent conversation revision conflict');
+        throw new SessionPlaneDomainError('conversation_conflict', 'Concurrent conversation revision conflict');
       }
       // This is a storage-only session shell; provider-specific preparation
       // and exact page/conversation binding remain Core work, never inferred

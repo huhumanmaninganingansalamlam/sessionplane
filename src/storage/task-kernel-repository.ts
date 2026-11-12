@@ -1591,7 +1591,9 @@ export class TaskKernelRepository {
     const row = this.#database.raw.prepare(
       'SELECT access_role AS accessRole FROM kernel_project_access WHERE project_id=? AND client_id=?',
     ).get(projectId, clientId) as { accessRole: string } | undefined;
-    if (!row || (role && row.accessRole !== role)) throw new Error('Project access denied');
+    if (!row || (role && row.accessRole !== role)) {
+      throw new SessionPlaneDomainError('invalid_request', 'Project access denied');
+    }
   }
 
   #findSlot(projectId: string, slotId: string): SlotRecord | null {

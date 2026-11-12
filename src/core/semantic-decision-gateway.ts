@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { SessionPlaneDomainError } from '../domain/errors.ts';
 
 import type { ExactSendIntent } from './durable-task-kernel.ts';
 import type { SemanticContextResolver } from './semantic-exact-task-port.ts';
@@ -121,12 +122,12 @@ function replayDecisionOutcome(
 ): AgentDecisionOutcome {
   const value: unknown = resolutionJson === null ? null : JSON.parse(resolutionJson);
   if (!value || typeof value !== 'object') {
-    throw new Error('Decision already resolved by a different request');
+    throw new SessionPlaneDomainError('idempotency_conflict', 'Decision already resolved by a different request');
   }
   const receipt = value as Record<string, unknown>;
   if (receipt.kind !== 'semantic_action' || receipt.requestId !== input.requestId ||
       receipt.actionRef !== input.actionRef || receipt.input !== input.inputValue) {
-    throw new Error('Decision already resolved by a different request');
+    throw new SessionPlaneDomainError('idempotency_conflict', 'Decision already resolved by a different request');
   }
   // The decision grant is irreversibly reserved before the adapter acts.
   // Neither a consumed bit nor the resolution alone proves its effect.
@@ -361,7 +362,7 @@ export class SemanticDecisionGateway {
   }): Promise<AgentDecisionOutcome> {
     const full = this.#repository.getFullTask(input.taskId, input.clientId);
     const row = full.decisions.find(decision => decision.decisionId === input.decisionId);
-    if (!row) throw new Error('Unknown decision identity');
+    if (!row) throw new SessionPlaneDomainError('stale_decision', 'Unknown decision identity');
     const bound = storedContext(row.contextJson);
     if (typeof bound.attemptId !== 'string' || bound.attemptId.length === 0) {
       throw new Error('Decision has no exact durable attempt binding');
@@ -374,14 +375,14 @@ export class SemanticDecisionGateway {
     taskId: string; clientId: string; attemptId: string; decisionId: string;
     requestId: string; actionRef: string; input?: string;
   }): Promise<AgentDecisionOutcome> {
-    if (!input.requestId || !input.actionRef) throw new Error('Exact decision input required');
+    if (!input.requestId || !input.actionRef) throw new SessionPlaneDomainError('invalid_request', 'Exact decision input required');
     const full = this.#repository.getFullTask(input.taskId, input.clientId);
     const decision = full.decisions.find(row => row.decisionId === input.decisionId);
-    if (!decision) throw new Error('Unknown decision identity');
+    if (!decision) throw new SessionPlaneDomainError('stale_decision', 'Unknown decision identity');
     const stored = storedContext(decision.contextJson);
     if (stored.attemptId !== input.attemptId ||
         !full.attempts.some(attempt => attempt.attemptId === input.attemptId)) {
-      throw new Error('Decision belongs to another exact attempt');
+      throw new SessionPlaneDomainError('stale_decision', 'Decision belongs to another exact attempt');
     }
     const normalized = input.input ?? null;
     if (decision.status === 'resolved') {
@@ -390,31 +391,31 @@ export class SemanticDecisionGateway {
       });
     }
     if (decision.status !== 'pending' || full.task.pendingDecisionId !== input.decisionId ||
-        full.task.cancelRequested) throw new Error('Decision is not pending on this Task');
+        full.task.cancelRequested) throw new SessionPlaneDomainError('stale_decision', 'Decision is not pending on this Task');
     const [option] = stored.packet.options;
     if (stored.packet.options.length !== 1 || !option ||
         option.actionRef !== input.actionRef || stored.actionRef !== input.actionRef ||
         stored.purpose !== option.purpose || stored.evidenceHash !== option.evidenceHash ||
         option.risk === 'permission_grant' || option.purpose === 'grant_permission') {
-      throw new Error('Decision does not authorize the selected action');
+      throw new SessionPlaneDomainError('stale_decision', 'Decision does not authorize the selected action');
     }
     if (!selectionIsValid(option.inputSchema, input.input)) {
-      throw new Error('Selected input does not match the enabled decision schema');
+      throw new SessionPlaneDomainError('invalid_request', 'Selected input does not match the enabled decision schema');
     }
     if (!Number.isFinite(Date.parse(option.expiresAt)) ||
         Date.now() > Date.parse(option.expiresAt)) {
-      throw new Error('Decision action expired; refresh before selecting');
+      throw new SessionPlaneDomainError('stale_decision', 'Decision action expired; refresh before selecting');
     }
     const slot = this.#repository.getSlot(full.task.projectId, full.task.slotId, input.clientId);
     if (slot.activeTaskId !== input.taskId || slot.revision !== full.task.slotRevision) {
-      throw new Error('Decision lost its exact active slot');
+      throw new SessionPlaneDomainError('stale_decision', 'Decision lost its exact active slot');
     }
     const binding = this.#repository.getBindingAtRevision(
       full.task.projectId, full.task.slotId, full.task.slotRevision, input.clientId);
     const provider = this.#providers.resolve(binding.providerKey, 'conversation');
     if (provider.kind !== 'available' ||
         (provider.adapter.capabilities.browserRequired && stored.context.pageLease === null)) {
-      throw new Error('Executable decision provider/page is unavailable');
+      throw new SessionPlaneDomainError('adapter_unsupported', 'Executable decision provider/page is unavailable');
     }
     try {
       this.#repository.resolveDecision({
