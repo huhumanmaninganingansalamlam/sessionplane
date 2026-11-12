@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
-import { rehearseMigration, rehearseRollback } from '../../scripts/offline-state-rehearsal.mjs';
+import { inspectArchivedState, rehearseMigration, rehearseRollback } from '../../scripts/offline-state-rehearsal.mjs';
 import { SessionPlaneDatabase } from '../../src/storage/database.ts';
 import { TaskKernelRepository } from '../../src/storage/task-kernel-repository.ts';
 import { migrations } from '../../src/storage/migrations/index.ts';
@@ -54,6 +54,13 @@ test('WAL-consistent offline backup upgrades schema and keeps every synthetic le
     assert.deepEqual(rows(join(destinationDir, 'candidate.sqlite')), facts);
     assert.equal(result.snapshotSha256,
       hash(join(destinationDir, 'source-snapshot.sqlite')));
+    const archived = inspectArchivedState({ migrationDir: destinationDir });
+    assert.equal(archived.sourceSchemaVersion, 0);
+    assert.equal(archived.completeOriginalFactsVerified, true);
+    assert.equal(archived.sourceOpenedReadOnly, true);
+    assert.equal(archived.legacyRuntimeRequired, false);
+    assert.equal(archived.conversationBodiesReturned, false);
+    assert.equal(archived.tables.find(table => table.name === 'legacy_facts')?.count, facts.length);
     const replay = await rehearseMigration({ sourcePath: source.path, destinationDir });
     assert.equal(replay.replayed, true);
     assert.equal(replay.snapshotSha256, result.snapshotSha256);
@@ -164,6 +171,12 @@ test('offline rehearsal CLI requires explicit paths and emits a verifiable manif
     const manifest = JSON.parse(operation.stdout);
     assert.equal(manifest.schemaVersion, migrations.at(-1)!.version);
     assert.equal(manifest.snapshotSha256, hash(join(destinationDir, 'source-snapshot.sqlite')));
+    const inspected = spawnSync(process.execPath, [
+      'scripts/offline-state-rehearsal.mjs', 'inspect',
+      '--migration', destinationDir,
+    ], { cwd: process.cwd(), encoding: 'utf8' });
+    assert.equal(inspected.status, 0, inspected.stderr);
+    assert.equal(JSON.parse(inspected.stdout).snapshotSha256, manifest.snapshotSha256);
     assert.deepEqual(rows(source.path), facts);
     assert.deepEqual(rows(join(destinationDir, 'candidate.sqlite')), facts);
     const invalid = spawnSync(process.execPath, [
@@ -234,6 +247,15 @@ test('actual v8 legacy schema with WAL ACK/FINAL/UNKNOWN/draft is retained while
     const target = join(dir, 'migrated');
     const report = await rehearseMigration({ sourcePath: source, destinationDir: target });
     assert.equal(report.schemaVersion, 15);
+    const archive = inspectArchivedState({ migrationDir: target });
+    assert.equal(archive.sourceSchemaVersion, 8);
+    assert.equal(archive.candidateSchemaVersion, 15);
+    assert.deepEqual(archive.retainedSubmissionStates.generations, [
+      { state: 'composer_filled', count: 1 },
+      { state: 'submission_unknown', count: 1 },
+      { state: 'submitted', count: 1 },
+    ]);
+    assert.equal(archive.legacyRuntimeRequired, false);
     for (const [table, count] of [
       ['teams', 1], ['team_roles', 1], ['sessions', 1], ['generations', 3],
       ['outbox', 3], ['request_receipts', 1], ['events', 4],
@@ -291,6 +313,30 @@ test('rollback refuses a different source/account candidate even when both use t
     assert.equal(existsSync(destinationDir), false);
   } finally {
     left.db.close(); right.db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('archived source tampering is rejected before inspecting any legacy data', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sp-offline-archive-tamper-'));
+  const source = fixture(root);
+  try {
+    const destinationDir = join(root, 'migration');
+    await rehearseMigration({ sourcePath: source.path, destinationDir });
+    const archivePath = join(destinationDir, 'source-snapshot.sqlite');
+    assert.equal(inspectArchivedState({ migrationDir: destinationDir })
+      .completeOriginalFactsVerified, true);
+    const tampered = new DatabaseSync(archivePath);
+    try {
+      tampered.prepare('UPDATE legacy_facts SET body=? WHERE id=?')
+        .run('forged ACK outcome', 'ack');
+    } finally { tampered.close(); }
+    assert.throws(() => inspectArchivedState({ migrationDir: destinationDir }),
+      /Archived original SHA-256 mismatch|Archived source table facts differ/);
+    assert.deepEqual(rows(source.path), facts,
+      'An archive cannot modify its original, externally supplied source');
+  } finally {
+    source.db.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

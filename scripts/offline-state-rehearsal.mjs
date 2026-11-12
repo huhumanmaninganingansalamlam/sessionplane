@@ -184,6 +184,53 @@ export async function rehearseMigration(input) {
   }
 }
 
+/** An archived v8 (or older) state remains independently inspectable even
+ * after the old RPC/workflow implementation is removed from the package.
+ * This performs read-only SQLite/manifest verification; it does not run
+ * migrations, deserialize workflow objects, or export conversation bodies.
+ */
+export function inspectArchivedState(input) {
+  const rehearsal = realpathSync(assertPath(input.migrationDir, 'migration'));
+  const manifest = readVerifiedManifest(rehearsal);
+  const source = path.join(rehearsal, 'source-snapshot.sqlite');
+  verifyFileHash(source, manifest.snapshotSha256, 'Archived original');
+  const db = openReadonly(source);
+  try {
+    quickCheck(db);
+    const current = tableFacts(db);
+    if (JSON.stringify(current) !== JSON.stringify(manifest.originalFacts)) {
+      throw new Error('Archived source table facts differ from sealed manifest');
+    }
+    const hasTable = (name) => current.some(fact => fact.name === name) ||
+      Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name));
+    const byState = (table) => hasTable(table)
+      ? db.prepare('SELECT submission_state AS state,COUNT(*) AS count FROM ' +
+          quote(table) + ' GROUP BY submission_state ORDER BY submission_state').all()
+        .map(row => ({ state: String(row.state), count: Number(row.count) }))
+      : [];
+    const archivedSchemaVersion = hasTable('schema_migrations')
+      ? Number(db.prepare('SELECT COALESCE(MAX(version),0) AS version FROM schema_migrations').get().version)
+      : 0;
+    return {
+      kind: 'sessionplane-archived-state-inspection-v1',
+      sourceSchemaVersion: archivedSchemaVersion,
+      candidateSchemaVersion: manifest.schemaVersion,
+      snapshotSha256: manifest.snapshotSha256,
+      tables: current,
+      retainedSubmissionStates: {
+        generations: byState('generations'),
+        outbox: byState('outbox'),
+      },
+      completeOriginalFactsVerified: true,
+      legacyRuntimeRequired: false,
+      sourceOpenedReadOnly: true,
+      conversationBodiesReturned: false,
+    };
+  } finally {
+    db.close();
+  }
+}
+
 function assertOriginalFacts(db, expected, label) {
   const facts = tableFacts(db);
   for (const original of expected) {
@@ -286,7 +333,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
           migrationDir: args.migration, candidatePath: args.candidate,
           destinationDir: args.destination,
         })
-      : Promise.reject(new Error('Usage: offline-state-rehearsal.mjs migrate|rollback --...'));
+      : mode === 'inspect'
+        ? Promise.resolve(inspectArchivedState({ migrationDir: args.migration }))
+        : Promise.reject(new Error('Usage: offline-state-rehearsal.mjs migrate|rollback|inspect --...'));
   operation.then(result => process.stdout.write(JSON.stringify(result) + '\n'),
     error => { process.stderr.write(error.message + '\n'); process.exitCode = 1; });
 }
