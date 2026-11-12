@@ -91,6 +91,30 @@ VERSION=0.4.93
     npm install -g ./sessionplane-$VERSION.tgz
     sessplane doctor --json
 
+## Offline state rehearsal (synthetic or explicitly approved copy only)
+
+The dev-only scripts/offline-state-rehearsal.mjs tool performs a consistent
+SQLite backup (including WAL commits), keeps the original snapshot, and
+migrates another candidate. It never edits the source database, Core,
+browser profile or installed package.
+
+    node scripts/offline-state-rehearsal.mjs migrate --source SOURCE_COPY.sqlite --destination REHEARSAL_DIR
+
+The manifest records original table counts/content hashes, the snapshot
+SHA-256, candidate SHA-256 and schema version. Identical replays are
+read-only; changed sources or output hashes fail closed.
+
+    node scripts/offline-state-rehearsal.mjs rollback --migration REHEARSAL_DIR --candidate REHEARSAL_DIR/candidate.sqlite --destination ROLLBACK_DIR
+
+Rollback preserves every post-migration candidate fact in a separate
+evidence snapshot before restoring the original to another destination.
+It never replaces the candidate in place. Run synthetic tests:
+
+    node --test --experimental-strip-types test/integration/offline-state-rehearsal.test.ts
+
+This verifies isolated L2 candidates, not live data approval or production
+cutover. Shared/Core data and unknown-owner projects are out of scope.
+
 ## Development
 
 Requires Node.js 24.15–24.x and a Chromium-family browser for browser tests.

@@ -28,19 +28,8 @@
     "sourceMap": true
   },
   "include": [
-    "src/**/*.ts"
-  ],
-  "exclude": [
-    "src/core/team-workflow.ts",
-    "src/rpc/methods/artifact.ts",
-    "src/rpc/methods/browser-control.ts",
-    "src/rpc/methods/send.ts",
-    "src/rpc/methods/session.ts",
-    "src/rpc/methods/session-ui.ts",
-    "src/rpc/methods/stop.ts",
-    "src/rpc/methods/team.ts",
-    "src/rpc/methods/wait.ts",
-    "src/rpc/methods/workflow.ts",
-    "src/cli/remote-artifacts.ts"
+    "src/main.ts",
+    "src/cli/main.ts",
+    "src/mcp/server.ts"
   ]
 }
