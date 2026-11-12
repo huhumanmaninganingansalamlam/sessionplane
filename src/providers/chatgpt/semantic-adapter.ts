@@ -292,11 +292,12 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       // A retained human/provider draft is not disposable. Only an empty
       // editor may be filled; an existing draft can be submitted solely when
       // the journaled exact content hash matches at dispatch time.
-      if (ui.editors[0]!.value.length === 0) {
+      if (context.providerConversationId !== null && ui.editors[0]!.value.length === 0) {
         issue('compose', 'Set the empty exact chat draft', 'draft_only',
           { kind: 'text', maxLength: MAX_DRAFT }, ui.fingerprint);
       }
-      if (ui.buttons.length === 1 && ui.buttons[0]!.enabled &&
+      if (context.providerConversationId !== null &&
+        ui.buttons.length === 1 && ui.buttons[0]!.enabled &&
         ui.editors[0]!.value.trim().length > 0) {
         // Draft text is not Task intent. An initial user prompt can itself be
         // exactly "계속"; only the durable attempt kind authorizes the click.
@@ -879,14 +880,22 @@ async function inspectExactChatGptRetry(page: Page, context: SemanticTaskContext
 function sha(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
-/** Mutation requires a previously bound canonical conversation. New-chat
- * creation needs its own exact dispatch/ACK identity protocol; a leased tab
- * at the wrong URL or an unknown ID cannot receive an optimistic send.
+/** A reserved, precisely-owned new-chat root may inspect/configure the model,
+ * but cannot expose compose/submit until the first POST has its own
+ * root-dispatch/ACK identity protocol. Bound conversations retain the exact
+ * canonical conversation URL requirement.
  */
 function conversationBindingProblem(page: Page, context: SemanticTaskContext): string | null {
   const id = context.providerConversationId;
-  if (!id || !/^[A-Za-z0-9_-]{1,160}$/.test(id)) return 'conversation-binding-required';
   const current = new URL(page.url());
+  if (id === null) {
+    if (context.submittedUserMessageId !== null || context.submittedUserTurnId !== null) {
+      return 'unbound-root-cannot-have-a-submitted-turn';
+    }
+    return current.pathname === '/' && current.search === '' && current.hash === ''
+      ? null : 'conversation-binding-required';
+  }
+  if (!/^[A-Za-z0-9_-]{1,160}$/.test(id)) return 'conversation-binding-required';
   const expected = `/c/${encodeURIComponent(id)}`;
   return current.pathname === expected ? null : 'conversation-url-mismatch';
 }

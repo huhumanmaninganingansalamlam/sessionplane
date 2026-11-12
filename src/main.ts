@@ -217,7 +217,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     decisionGateway: semanticDecisionGateway,
     managedContinuation: semanticManagedContinuation,
     bindAttemptSession: semanticTaskBindAttemptSession } = createSemanticCoreRuntime({
-    database, browserOwner, pageRegistry, teamDirectory, pageMutationMutex,
+    database, browserOwner, pageRegistry, teamDirectory, actorScheduler, pageMutationMutex,
     enabledProviders: config.enabledProviders, chatgptUrl: config.chatgptUrl,
     canRunContinuation: () => !maintenance.paused,
   });

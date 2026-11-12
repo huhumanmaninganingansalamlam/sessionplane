@@ -5,6 +5,7 @@ import type { OwnedPageIdentity } from '../browser/owned-page-lifecycle.ts';
 import type { PageMutationMutex } from '../browser/page-mutex.ts';
 import { ChatGptBackendRecovery, type BackendJsonClient } from '../providers/chatgpt/backend-recovery.ts';
 import type { PageRegistry } from '../browser/page-registry.ts';
+import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import { ChatGptSemanticAdapter, chatGptBackendJsonClient } from '../providers/chatgpt/semantic-adapter.ts';
 import { SemanticProviderRegistry } from '../providers/semantic-provider-registry.ts';
 import type { SemanticTaskContext } from '../providers/semantic-adapter.ts';
@@ -13,6 +14,7 @@ import { TaskKernelRepository, type AttemptSessionBindingRecord } from '../stora
 import { DurableTaskKernel, type ExactSendIntent } from './durable-task-kernel.ts';
 import { SemanticDecisionGateway } from './semantic-decision-gateway.ts';
 import { ManagedContinuationService } from './managed-continuation.ts';
+import { PublicTaskPreparationService } from './public-task-preparation.ts';
 import { SemanticExactTaskPort } from './semantic-exact-task-port.ts';
 import type { TeamDirectory } from './team-directory.ts';
 
@@ -58,6 +60,8 @@ export function createSemanticCoreRuntime(input: {
   readonly database: SessionPlaneDatabase;
   readonly browserOwner: BrowserOwner | null;
   readonly pageRegistry: PageRegistry;
+  /** Existing Core actor scheduler; never create a second session executor. */
+  readonly actorScheduler?: ActorScheduler;
   readonly teamDirectory: TeamDirectory;
   readonly pageMutationMutex: PageMutationMutex;
   readonly enabledProviders: readonly string[];
@@ -119,6 +123,36 @@ export function createSemanticCoreRuntime(input: {
     } catch { return null; }
   };
   const isExactLease = (identity: OwnedPageIdentity): boolean => {
+    // A new conversation has no provider ID until its FIRST POST. The
+    // reserved root page still has exact Task/session/generation ownership,
+    // but is usable solely for pre-send model/login decisions.
+    const owner = repository.dispatchClientId(identity.taskId);
+    if (owner) {
+      try {
+        const current = repository.getTask(identity.taskId, owner);
+        const slot = repository.getSlot(identity.projectId, identity.slotId, owner);
+        if (current.projectId === identity.projectId &&
+            current.slotId === identity.slotId &&
+            current.slotRevision === identity.slotRevision &&
+            !current.cancelRequested &&
+            ['working', 'agent_input_required'].includes(current.state) &&
+            slot.activeTaskId === identity.taskId &&
+            slot.revision === identity.slotRevision &&
+            slot.providerKey === 'chatgpt' && slot.providerConversationId === null) {
+          const session = input.teamDirectory.getCurrentSession(identity.projectId, identity.slotId);
+          const page = input.pageRegistry.getBinding(identity.pageKey);
+          const url = new URL(page.url);
+          return session.provider === 'chatgpt' && session.generation > 0 &&
+            session.pageKey === page.pageKey && session.conversationId === null &&
+            page.state === 'reserved' && page.targetId === identity.targetId &&
+            page.bindingEpoch === identity.bindingEpoch &&
+            page.sessionId === session.sessionId && page.generation === session.generation &&
+            page.conversationId === null && page.expectedConversationId === null &&
+            url.origin === new URL(input.chatgptUrl).origin &&
+            url.pathname === '/' && url.search === '' && url.hash === '';
+        }
+      } catch { return false; }
+    }
     const task = activeTask(identity);
     if (!task) return false;
     try {
@@ -160,7 +194,7 @@ export function createSemanticCoreRuntime(input: {
           found.sessionId === attemptBinding.sessionId &&
           found.generation === attemptBinding.generation &&
           found.conversationId === attemptBinding.conversationId);
-    const candidate: OwnedPageIdentity | null = matches.length === 1 ? {
+    let candidate: OwnedPageIdentity | null = matches.length === 1 ? {
       projectId: intent.projectId, slotId: intent.slotId, slotRevision: intent.slotRevision,
       taskId: intent.taskId, pageKey: matches[0]!.pageKey,
       targetId: matches[0]!.targetId!, bindingEpoch: matches[0]!.bindingEpoch,
@@ -170,6 +204,27 @@ export function createSemanticCoreRuntime(input: {
     });
     const full = repository.getFullTask(intent.taskId, intent.clientId);
     const attempt = full.attempts.find(row => row.attemptId === intent.attemptId);
+    if (candidate === null && activeSlot && intent.providerConversationId === null &&
+        attempt?.kind === 'initial' && attempt.state === 'planned') {
+      try {
+        const session = input.teamDirectory.getCurrentSession(intent.projectId, intent.slotId);
+        const root = session.pageKey === null ? null :
+          input.pageRegistry.getBinding(session.pageKey);
+        if (root?.state === 'reserved' && typeof root.targetId === 'string' &&
+            root.sessionId === session.sessionId && session.generation > 0 &&
+            root.generation === session.generation &&
+            root.conversationId === null && root.expectedConversationId === null &&
+            session.conversationId === null && session.pageKey !== null &&
+            root.pageKey === session.pageKey) {
+          candidate = {
+            projectId: intent.projectId, slotId: intent.slotId,
+            slotRevision: intent.slotRevision, taskId: intent.taskId,
+            pageKey: session.pageKey, targetId: root.targetId,
+            bindingEpoch: root.bindingEpoch,
+          };
+        }
+      } catch { /* A missing root is preparation, never a send. */ }
+    }
     let submittedUserMessageId = evidence?.messageId ?? null;
     let submittedUserTurnId = attempt?.externalTurnId ?? null;
     if (attempt?.kind === 'continuation' && evidence === null &&
@@ -308,10 +363,32 @@ export function createSemanticCoreRuntime(input: {
     },
   })] : [];
   const kernel = new DurableTaskKernel(repository, ports);
+  const publicPreparation = input.actorScheduler
+    ? new PublicTaskPreparationService({
+        repository, teams: input.teamDirectory, scheduler: input.actorScheduler,
+        browserOwner: input.browserOwner, pages: input.pageRegistry,
+        chatgptUrl: input.chatgptUrl,
+      })
+    : null;
   const managedContinuation = new ManagedContinuationService({
     repository, kernel,
     ...(input.continuationNow ? { now: input.continuationNow } : {}),
     ...(input.canRunContinuation ? { canRun: input.canRunContinuation } : {}),
+    ...(publicPreparation ? { preparePublicTask: async () => {
+      const prepared = await publicPreparation.prepareNext();
+      if (prepared.kind !== 'prepared' || prepared.taskId === null) return;
+      const clientId = repository.dispatchClientId(prepared.taskId);
+      if (!clientId) return;
+      const full = repository.getFullTask(prepared.taskId, clientId);
+      const initial = full.attempts.find(a => a.kind === 'initial' && a.state === 'planned');
+      const requested = repository.publicModelIntent(full.task.projectId, clientId);
+      if (initial && requested) {
+        await decisionGateway.verifyModelIntent({
+          taskId: full.task.taskId, clientId, attemptId: initial.attemptId,
+          modelIntent: requested,
+        });
+      }
+    } } : {}),
     inspectModelIntent: async ({ taskId, clientId, attemptId, modelIntent }) =>
       await decisionGateway.verifyModelIntent({ taskId, clientId, attemptId, modelIntent }),
     bindInitialAttempt: ({ taskId, clientId, attemptId }) => {

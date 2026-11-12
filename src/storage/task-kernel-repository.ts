@@ -1151,12 +1151,6 @@ export class TaskKernelRepository {
     return rows.length;
   }
 
-  /**
-   * Admitted public Task initials ready for Core-owned dispatch. Conversation
-   * identity must already be verified and bound to the current active slot;
-   * a new/unprepared ChatGPT page is not an invented conversation ID.
-   * Only PLANNED work is eligible: dispatched/uncertain is never replayed.
-   */
   /** Exact model intent is stored at project admission, not inferred from UI. */
   publicModelIntent(projectId: string, clientId: string): string | null {
     this.#requireAccess(projectId, clientId);
@@ -1167,6 +1161,36 @@ export class TaskKernelRepository {
     return row?.modelIntent ?? null;
   }
 
+  /**
+   * Preparation can own one reserved root page before ChatGPT creates its
+   * conversation ID. It never enters the irreversible dispatch journal.
+   */
+  listPendingPublicPreparations(limit = 4, afterTaskId: string | null = null): readonly {
+    taskId: string; clientId: string; attemptId: string;
+    providerKey: string;
+  }[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error('Invalid public preparation scan limit');
+    }
+    return this.#database.raw.prepare(
+      `SELECT t.task_id AS taskId,t.client_id AS clientId,
+          a.attempt_id AS attemptId,s.provider_key AS providerKey
+        FROM kernel_tasks t
+        JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+        JOIN kernel_attempts a ON a.task_id=t.task_id
+        JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
+          AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
+        WHERE t.cancel_requested=0 AND t.state='working'
+          AND t.pending_decision_id IS NULL AND s.provider_conversation_id IS NULL
+          AND a.kind='initial' AND a.state='planned'
+          AND (? IS NULL OR t.task_id>?)
+        ORDER BY t.task_id LIMIT ?`,
+    ).all(afterTaskId, afterTaskId, limit) as Array<{
+      taskId: string; clientId: string; attemptId: string; providerKey: string;
+    }>;
+  }
+
+  /** Only PLANNED public initials with a canonical conversation may dispatch. */
   listPendingPublicInitials(limit = 16): readonly {
     taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
   }[] {

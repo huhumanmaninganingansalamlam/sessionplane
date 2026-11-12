@@ -194,8 +194,7 @@ export class SemanticDecisionGateway {
     const attempt = full.attempts.find(a => a.attemptId === input.attemptId);
     const slot = this.#repository.getSlot(full.task.projectId, full.task.slotId, input.clientId);
     if (!attempt || attempt.kind !== 'initial' || attempt.state !== 'planned' ||
-        slot.activeTaskId !== input.taskId || slot.revision !== full.task.slotRevision ||
-        !slot.providerConversationId) return false;
+        slot.activeTaskId !== input.taskId || slot.revision !== full.task.slotRevision) return false;
     const provider = this.#providers.resolve(slot.providerKey, 'conversation');
     if (provider.kind !== 'available') return false;
     const context = await this.#resolveContext({

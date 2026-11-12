@@ -40,6 +40,7 @@ export class ManagedContinuationService {
   readonly #inspectModelIntent: ((input: {
     taskId: string; clientId: string; attemptId: string; modelIntent: string;
   }) => boolean | Promise<boolean>) | undefined;
+  readonly #preparePublicTask: (() => Promise<void>) | undefined;
   #interval: ReturnType<typeof setInterval> | null = null;
   #active: Promise<ContinuationReviewReport> | null = null;
   #closed = false;
@@ -58,6 +59,7 @@ export class ManagedContinuationService {
     inspectModelIntent?: (input: {
       taskId: string; clientId: string; attemptId: string; modelIntent: string;
     }) => boolean | Promise<boolean>;
+    preparePublicTask?: () => Promise<void>;
   }) {
     this.#repository = input.repository;
     this.#kernel = input.kernel;
@@ -66,6 +68,7 @@ export class ManagedContinuationService {
     this.#bindAttempt = input.bindAttempt ?? (() => undefined);
     this.#bindInitialAttempt = input.bindInitialAttempt;
     this.#inspectModelIntent = input.inspectModelIntent;
+    this.#preparePublicTask = input.preparePublicTask;
   }
 
   /** Called only by a trusted Core caller with explicit user delegation.
@@ -244,6 +247,13 @@ export class ManagedContinuationService {
             'public-exact-final-observation-unavailable');
         } catch { /* Do not convert read failure into task completion. */ }
       }
+    }
+    // New-root page preparation is bounded to one Task and runs AFTER due
+    // sends and canonical FINAL observations: navigation cannot starve a due
+    // continuation or consume an initial attempt.
+    if (this.#preparePublicTask) {
+      try { await this.#preparePublicTask(); }
+      catch { deferred++; }
     }
     return { timersClaimed: claimed.length, dispatchesAttempted, deferred };
   }
