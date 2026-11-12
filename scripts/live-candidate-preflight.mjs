@@ -130,7 +130,9 @@ async function readStructure(target, timeoutMs = 6000) {
 export function evaluateInstalledCandidate({ health, pages, targets, observations, candidate }) {
   const schema = migrations.at(-1)?.version ?? null;
   const blockers = [];
-  if (health?.browser?.state !== 'ready' || health?.browser?.ownership !== 'spawned') {
+  const browserOwnership = health?.browser?.ownership;
+  if (health?.browser?.state !== 'ready' ||
+      !['spawned', 'adopted'].includes(browserOwnership)) {
     blockers.push('core_browser_not_owned_and_ready');
   }
   if (health?.database?.schemaVersion !== schema) {

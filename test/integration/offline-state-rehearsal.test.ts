@@ -49,6 +49,10 @@ test('WAL-consistent offline backup upgrades schema and keeps every synthetic le
     assert.equal(result.schemaVersion, migrations.at(-1)!.version);
     assert.equal(result.replayed, false);
     assert.equal(result.sourceReadOnly, true);
+    assert.equal(result.sourceSchemaVersion, 0);
+    assert.equal(result.integrityCheck, 'ok');
+    assert.equal(result.foreignKeyViolations, 0);
+    assert.equal(result.createdKernelTables.every(table => table.count === 0), true);
     assert.deepEqual(rows(source.path), facts);
     assert.deepEqual(rows(join(destinationDir, 'source-snapshot.sqlite')), facts);
     assert.deepEqual(rows(join(destinationDir, 'candidate.sqlite')), facts);
@@ -72,6 +76,24 @@ test('WAL-consistent offline backup upgrades schema and keeps every synthetic le
     source.db.close();
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('offline migration refuses a source snapshot with foreign-key violations', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sp-offline-foreign-key-'));
+  const source = join(dir, 'source.sqlite');
+  const db = new DatabaseSync(source);
+  try {
+    db.exec('PRAGMA foreign_keys=OFF');
+    db.exec('CREATE TABLE parent(id TEXT PRIMARY KEY) STRICT');
+    db.exec('CREATE TABLE child(id TEXT PRIMARY KEY,parent_id TEXT NOT NULL REFERENCES parent(id)) STRICT');
+    db.exec("INSERT INTO child VALUES('orphan','missing')");
+  } finally { db.close(); }
+  try {
+    await assert.rejects(rehearseMigration({
+      sourcePath: source, destinationDir: join(dir, 'migration'),
+    }), /foreign-key verification failed/);
+    assert.equal(existsSync(join(dir, 'migration')), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('interrupted migration publishes no partial candidate; rollback preserves post-migration Task evidence', async () => {

@@ -27,9 +27,24 @@ function openReadonly(file) {
   return new DatabaseSync(file, { readOnly: true });
 }
 
-function quickCheck(db) {
-  const result = db.prepare('PRAGMA quick_check').get();
-  if (Object.values(result ?? {})[0] !== 'ok') throw new Error('SQLite integrity verification failed');
+function verifyDatabase(db) {
+  const integrity = db.prepare('PRAGMA integrity_check').all();
+  if (integrity.length !== 1 || Object.values(integrity[0] ?? {})[0] !== 'ok') {
+    throw new Error('SQLite full integrity verification failed');
+  }
+  const foreignKeys = db.prepare('PRAGMA foreign_key_check').all();
+  if (foreignKeys.length !== 0) {
+    throw new Error('SQLite foreign-key verification failed');
+  }
+}
+
+function schemaVersion(db) {
+  const table = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
+  ).get();
+  return table ? Number(db.prepare(
+    'SELECT COALESCE(MAX(version),0) AS version FROM schema_migrations',
+  ).get().version) : 0;
 }
 
 function quote(identifier) {
@@ -113,10 +128,6 @@ function verifyFileHash(file, expected, label) {
 export async function rehearseMigration(input) {
   const source = realpathSync(assertPath(input.sourcePath, 'source'));
   const destination = assertPath(input.destinationDir, 'destination');
-  const original = openReadonly(source);
-  let sourceFacts;
-  try { quickCheck(original); sourceFacts = tableFacts(original); }
-  finally { original.close(); }
 
   if (existsSync(destination)) {
     const old = readVerifiedManifest(destination);
@@ -124,9 +135,14 @@ export async function rehearseMigration(input) {
     const migrated = path.join(destination, 'candidate.sqlite');
     verifyFileHash(snapshot, old.snapshotSha256, 'Archived original');
     verifyFileHash(migrated, old.candidateSha256, 'Committed candidate');
-    if (JSON.stringify(old.originalFacts) !== JSON.stringify(sourceFacts)) {
-      throw new Error('Source changed since committed offline rehearsal');
-    }
+    const original = openReadonly(source);
+    try {
+      verifyDatabase(original);
+      if (schemaVersion(original) !== old.sourceSchemaVersion ||
+          JSON.stringify(tableFacts(original)) !== JSON.stringify(old.originalFacts)) {
+        throw new Error('Source changed since committed offline rehearsal');
+      }
+    } finally { original.close(); }
     return { ...old, replayed: true };
   }
 
@@ -134,16 +150,19 @@ export async function rehearseMigration(input) {
   try {
     const snapshot = path.join(stage, 'source-snapshot.sqlite');
     const candidate = path.join(stage, 'candidate.sqlite');
+    // The SQLite backup is the first durable operation. Facts are derived from
+    // that one WAL-consistent image, never from a racing pre-backup read.
     const readSource = openReadonly(source);
     try { await backup(readSource, snapshot); }
     finally { readSource.close(); }
 
     const snapshotDb = openReadonly(snapshot);
+    let sourceFacts;
+    let sourceSchemaVersion;
     try {
-      quickCheck(snapshotDb);
-      if (JSON.stringify(tableFacts(snapshotDb)) !== JSON.stringify(sourceFacts)) {
-        throw new Error('Online backup differs from source fact snapshot; retry offline');
-      }
+      verifyDatabase(snapshotDb);
+      sourceFacts = tableFacts(snapshotDb);
+      sourceSchemaVersion = schemaVersion(snapshotDb);
     } finally { snapshotDb.close(); }
     if (input.failAfterSnapshot === true) throw new Error('Injected offline interruption');
 
@@ -154,10 +173,11 @@ export async function rehearseMigration(input) {
     chmodSync(candidate, 0o600);
 
     const upgraded = SessionPlaneDatabase.open(candidate);
-    let schemaVersion;
+    let candidateSchemaVersion;
+    let createdKernelTables;
     try {
-      quickCheck(upgraded.raw);
-      schemaVersion = upgraded.schemaVersion;
+      verifyDatabase(upgraded.raw);
+      candidateSchemaVersion = upgraded.schemaVersion;
       const retainedFacts = tableFacts(upgraded.raw);
       for (const fact of sourceFacts) {
         const after = retainedFacts.find(value => value.name === fact.name);
@@ -165,16 +185,26 @@ export async function rehearseMigration(input) {
           throw new Error('Migration changed an archived original fact: ' + fact.name);
         }
       }
+      const originalNames = new Set(sourceFacts.map(fact => fact.name));
+      createdKernelTables = retainedFacts.filter(fact =>
+        fact.name.startsWith('kernel_') && !originalNames.has(fact.name));
+      if (createdKernelTables.some(fact => fact.count !== 0)) {
+        throw new Error('Migration introduced conflicting Task/slot rows');
+      }
     } finally { upgraded.close(); }
 
     const manifest = {
       kind: KIND, version: 1,
       createdAt: new Date().toISOString(),
       sourceBasename: path.basename(source),
+      sourceSchemaVersion,
       originalFacts: sourceFacts,
       snapshotSha256: sha256File(snapshot),
       candidateSha256: sha256File(candidate),
-      schemaVersion,
+      schemaVersion: candidateSchemaVersion,
+      createdKernelTables,
+      integrityCheck: 'ok',
+      foreignKeyViolations: 0,
       sourceReadOnly: true,
       publishedAtomically: true,
       rollback: 'new-evidence-first; no in-place restoration or deletion',
@@ -200,7 +230,7 @@ export function inspectArchivedState(input) {
   verifyFileHash(source, manifest.snapshotSha256, 'Archived original');
   const db = openReadonly(source);
   try {
-    quickCheck(db);
+    verifyDatabase(db);
     const current = tableFacts(db);
     if (JSON.stringify(current) !== JSON.stringify(manifest.originalFacts)) {
       throw new Error('Archived source table facts differ from sealed manifest');
@@ -212,9 +242,7 @@ export function inspectArchivedState(input) {
           quote(table) + ' GROUP BY submission_state ORDER BY submission_state').all()
         .map(row => ({ state: String(row.state), count: Number(row.count) }))
       : [];
-    const archivedSchemaVersion = hasTable('schema_migrations')
-      ? Number(db.prepare('SELECT COALESCE(MAX(version),0) AS version FROM schema_migrations').get().version)
-      : 0;
+    const archivedSchemaVersion = schemaVersion(db);
     return {
       kind: 'sessionplane-archived-state-inspection-v1',
       sourceSchemaVersion: archivedSchemaVersion,
@@ -268,7 +296,7 @@ export async function rehearseRollback(input) {
     const restored = path.join(stage, 'restored-original.sqlite');
     const readCandidate = openReadonly(candidate);
     try {
-      quickCheck(readCandidate);
+      verifyDatabase(readCandidate);
       // This must not accept a different account/backup merely because its
       // SQLite schema is compatible. Original legacy facts are immutable.
       assertOriginalFacts(readCandidate, manifest.originalFacts, 'Rollback candidate');
@@ -283,8 +311,8 @@ export async function rehearseRollback(input) {
     const restoredDb = openReadonly(restored);
     const retainedDb = openReadonly(evidence);
     try {
-      quickCheck(restoredDb);
-      quickCheck(retainedDb);
+      verifyDatabase(restoredDb);
+      verifyDatabase(retainedDb);
       if (JSON.stringify(tableFacts(restoredDb)) !== JSON.stringify(manifest.originalFacts)) {
         throw new Error('Rollback original facts differ');
       }

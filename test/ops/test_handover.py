@@ -739,5 +739,63 @@ class HandoverTests(unittest.TestCase):
                         if mode not in ['persistent','slow-health']: self.assertEqual(clock[0],0)
 
 
+    def test_candidate_acceptance_v1_binds_commit_tree_package_and_all_required_gates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt = pathlib.Path(directory)/'acceptance.json'
+            names = ['typecheck', 'public-core-ci', 'chromium-composition',
+                     'four-background-tabs', 'browser-transport-comparison',
+                     'semantic-adapter', 'clean-build', 'installed-tarball-core']
+            manifest = {'sourceCommit': 'a'*40, 'sourceTree': 'b'*40,
+                        'packageSha256': 'c'*64, 'requiredGates': names,
+                        'schemaTransition': {'from': 8, 'to': 15}}
+            report = {'contract': 'sessionplane-candidate-acceptance-v1',
+                'source': {'head': 'a'*40, 'tree': 'b'*40,
+                    'currentHead': 'a'*40, 'currentTree': 'b'*40,
+                    'currentWorktreeClean': True, 'buildMatchesCleanHead': True,
+                    'sourceIssues': []},
+                'externalPackageSha256': 'c'*64, 'candidateL1L2L4Passed': True,
+                'gates': [{'name': name, 'passed': True, 'exitCode': 0,
+                           'assertionsFailed': 0, 'skipped': 0} for name in names]}
+            receipt.write_text(json.dumps(report))
+            handover.validate_candidate(manifest, receipt)
+            for mutate in ['package', 'tree', 'gate']:
+                changed = copy.deepcopy(report)
+                if mutate == 'package': changed['externalPackageSha256'] = 'd'*64
+                elif mutate == 'tree': changed['source']['currentTree'] = 'd'*40
+                else: changed['gates'][2]['passed'] = False
+                receipt.write_text(json.dumps(changed))
+                with self.subTest(mutate=mutate), self.assertRaises(AssertionError):
+                    handover.validate_candidate(manifest, receipt)
+
+    def test_schema_transition_is_explicit_and_database_promotion_archives_original_sidecars(self):
+        self.assertEqual(handover.schema_transition(
+            {'schemaTransition': {'from': 8, 'to': 15}}, 8), (8, 15))
+        with self.assertRaises(AssertionError):
+            handover.schema_transition({'schemaTransition': {'from': 8, 'to': 15}}, 9)
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            live = root/'sessionplane.sqlite'
+            migration = root/'migration'; migration.mkdir()
+            receipt = root/'receipt'; receipt.mkdir()
+            def make(path, version, marker):
+                db = sqlite3.connect(path)
+                db.execute('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,name TEXT,applied_at TEXT)')
+                db.execute('INSERT INTO schema_migrations VALUES(?,?,?)', (version, marker, 'now'))
+                db.execute('CREATE TABLE evidence(id TEXT PRIMARY KEY,value TEXT)')
+                db.execute('INSERT INTO evidence VALUES(?,?)', ('row', marker))
+                db.commit(); db.close()
+            make(live, 8, 'old')
+            make(migration/'source-snapshot.sqlite', 8, 'old')
+            make(migration/'candidate.sqlite', 15, 'new')
+            pathlib.Path(str(live)+'-wal').write_bytes(b'archived-wal-evidence')
+            report = handover.promote_database(live, migration, receipt, (8, 15))
+            self.assertEqual(handover.sqlite_schema(live), 15)
+            self.assertEqual(report['targetSchemaVersion'], 15)
+            self.assertEqual(handover.sqlite_schema(receipt/'database-archive/sessionplane.sqlite'), 8)
+            self.assertEqual((receipt/'database-archive/sessionplane.sqlite-wal').read_bytes(),
+                             b'archived-wal-evidence')
+
+
+
 if __name__ == '__main__':
     unittest.main()

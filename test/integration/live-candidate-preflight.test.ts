@@ -47,6 +47,19 @@ test('live preflight rejects a running older schema even when Chrome and Pro are
     'The machine-readable report must not reveal existing account conversation IDs');
 });
 
+test('an exact successor that adopted the preserved browser is a valid live candidate', () => {
+  const report = evaluateInstalledCandidate({
+    health: { ...health, browser: { ...health.browser, ownership: 'adopted' } },
+    pages: [{ state: 'owned' }], targets,
+    observations: [{ kind: 'conversation', readyState: 'complete',
+      composerPresent: true, composerEditable: true, modelProVisible: true }],
+    candidate,
+  });
+  assert.equal(report.outcome.candidateMatchesLiveCore, true);
+  assert.deepEqual(report.outcome.blockers, []);
+  assert.equal(report.installed.browserOwner, 'adopted');
+});
+
 test('matching Core and Pro composer are compatible but a preflight never submits', () => {
   const report = evaluateInstalledCandidate({
     health, pages: [{ state: 'owned' }], targets,
