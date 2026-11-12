@@ -197,8 +197,13 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
       optionMenuId: submenuId, options };
   }, { openerSelector: OPENER, labelPattern: MODEL_LABEL.source });
   if (!data) return null;
+  // Composer Radix controls have a verified unique DOM id. Unrelated chat
+  // actions can mount/unmount before them in document order; the volatile
+  // querySelectorAll index is not part of this control's identity.
   const evidenceHash = createHash('sha256').update(JSON.stringify({
     url: page.url(), ...data,
+    openerIndex: data.strategy === 'composer-radix' && ID.test(data.openerId)
+      ? null : data.openerIndex,
   })).digest('hex');
   return {
     strategy: data.strategy, openerId: data.openerId,
@@ -274,8 +279,13 @@ export async function openExactChatGptModelMenu(
     throw new Error('Model opener changed before action');
   }
   if (current.status === 'closed') {
-    await clickExactModelControl(page, current, page.locator(OPENER).nth(current.openerIndex),
-      beforeMutation, current.openerId);
+    // Never re-address a verified Radix composer by an index that unrelated
+    // sidebar menus can shift between observation and the exact UI action.
+    const opener = current.strategy === 'composer-radix'
+      ? page.locator(OPENER + '[id="' + current.openerId + '"]')
+      : page.locator(OPENER).nth(current.openerIndex);
+    if (await opener.count() !== 1) throw new Error('Exact model opener no longer unique');
+    await clickExactModelControl(page, current, opener, beforeMutation, current.openerId);
     if (current.strategy === 'composer-radix') {
       await waitForComposerMenuView(page, current.openerId, current.menuId, 'root');
     }

@@ -842,6 +842,20 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     `);
     const radixClosed = await adapter.observe(task);
     assert.equal(radixClosed.actions.some(a => a.purpose === 'choose_model'), false);
+    const stableBefore = await inspectSemanticChatGptModelMenu(page);
+    await page.evaluate(() => {
+      for (let i = 0; i < 7; i++) {
+        const unrelated = document.createElement('button');
+        unrelated.setAttribute('aria-haspopup', 'menu');
+        unrelated.textContent = 'Unrelated chat actions';
+        document.body.insertBefore(unrelated, document.body.firstChild);
+      }
+    });
+    const stableAfter = await inspectSemanticChatGptModelMenu(page);
+    assert.equal(stableAfter?.openerId, stableBefore?.openerId);
+    assert.notEqual(stableAfter?.openerIndex, stableBefore?.openerIndex);
+    assert.equal(stableAfter?.evidenceHash, stableBefore?.evidenceHash,
+      'Dynamic sidebar buttons cannot invalidate the ID-anchored canonical composer');
     const openRadix = radixClosed.actions.find(a => a.purpose === 'open_model_chooser')!;
     assert.ok(openRadix, 'unmounted composer picker is a read-only disclosed candidate');
     assert.equal((await adapter.act({ context: task, snapshotId: radixClosed.snapshotId,
