@@ -1136,17 +1136,15 @@ test('public task.start uses Core-owned verified existing conversation for one i
         });
       }
       return route.fulfill({ contentType: 'text/html', body:
-        '<main><article data-message-author-role="user" ' +
+        '<meta charset="utf-8"><main><article data-message-author-role="user" ' +
         'data-message-id="previous-user">Previous content</article>' +
         '<section data-chatgpt-composer>' +
         '<div id="prompt-textarea" role="textbox" contenteditable="true"></div>' +
         '<button data-testid="send-button" type="button">Send</button>' +
         '</section>' +
-        '<button id="model-trigger" aria-label="Model" aria-haspopup="menu" ' +
-        'aria-controls="model-menu" aria-expanded="true" type="button">Pro</button>' +
-        '<div id="model-menu" role="menu">' +
-        '<button role="menuitemradio" aria-checked="false">Default</button>' +
-        '<button role="menuitemradio" aria-checked="true">Pro</button></div>' +
+        '<button id="radix-model-picker" aria-label="ChatGPT 모델 선택" ' +
+        'aria-haspopup="menu" aria-expanded="false" data-state="closed" ' +
+        'type="button">추론 수준 Pro</button>' +
         '</main><script>' +
         'window.sends=0;document.querySelector("button").onclick=()=>{' +
         'const editor=document.querySelector("#prompt-textarea");' +
@@ -1196,7 +1194,7 @@ test('public task.start uses Core-owned verified existing conversation for one i
 });
 
 
-test('public task.start with explicit Pro intent emits agent model decision before any POST', {
+test('public Pro effort intent rejects model radio Pro and never posts without effort evidence', {
   timeout: 45_000,
 }, async () => {
   const root = mkdtempSync(join(tmpdir(), 'sessionplane-public-pro-intent-'));
@@ -1338,39 +1336,20 @@ test('public task.start with explicit Pro intent emits agent model decision befo
     const selection = runtime.decisionGateway.get(task.taskId, clientId);
     assert.equal(selection?.kind, 'model_choice');
     assert.equal(selection?.requestedModel, 'Pro');
-    assert.equal(selection?.options[0]?.purpose, 'choose_model');
+    assert.equal(selection?.reason, 'reasoning-effort-pro-target-unverified');
+    assert.equal(selection?.options.length, 0,
+      'a literal Pro model radio is not an actionable Pro reasoning control');
     assert.equal(await page.evaluate(() => (window as any).sends), 0);
-    assert.deepEqual(await runtime.decisionGateway.decideCurrent({
-      taskId: task.taskId, clientId, decisionId: selection!.decisionId,
-      requestId: 'choose-exact-pro', actionRef: selection!.options[0]!.actionRef,
-      input: 'Pro',
-    }), { kind: 'performed', effect: 'model_selected' });
-    // A person can change the model between the successful decision and
-    // the next Core tick. Previous decision success is not current evidence.
-    await page.locator('[role="menuitemradio"]').first().click();
+
+    // Even a manual change of the model radio to the literal word Pro cannot
+    // bypass Core preflight, consume the original POST, or produce an ACK.
+    await page.getByRole('menuitemradio', { name: 'Pro', exact: true }).click();
     await runtime.managedContinuation.tick();
-    assert.equal(await page.evaluate(() => (window as any).sends), 0,
-      'model drift must never silently consume the original public POST');
-    const corrected = runtime.decisionGateway.get(task.taskId, clientId);
-    assert.equal(corrected?.kind, 'model_choice');
-    assert.equal(corrected?.requestedModel, 'Pro');
-    assert.equal(corrected?.options[0]?.purpose, 'choose_model');
-    assert.deepEqual(await runtime.decisionGateway.decideCurrent({
-      taskId: task.taskId, clientId, decisionId: corrected!.decisionId,
-      requestId: 'restore-exact-pro', actionRef: corrected!.options[0]!.actionRef,
-      input: 'Pro',
-    }), { kind: 'performed', effect: 'model_selected' });
-    await runtime.managedContinuation.tick();
-    const sent = core.semanticTaskRepository.getFullTask(task.taskId, clientId).attempts[0]!;
-    assert.equal(sent.state, 'acknowledged');
-    assert.equal(sent.externalTurnId, 'pro-turn');
-    assert.equal(await page.evaluate(() => (window as any).sends), 1);
-    virtualNow += 5_001;
-    await runtime.managedContinuation.tick();
-    assert.equal(core.semanticTaskRepository.getTask(task.taskId, clientId).state, 'completed');
-    assert.equal(core.semanticTaskRepository.getFullTask(task.taskId, clientId)
-      .results[0]?.answerText, 'Exact Pro answer');
-    assert.equal(await page.evaluate(() => (window as any).sends), 1);
+    const blocked = core.semanticTaskRepository.getFullTask(task.taskId, clientId);
+    assert.equal(blocked.task.state, 'agent_input_required');
+    assert.equal(blocked.attempts[0]!.state, 'planned');
+    assert.equal(blocked.attempts[0]!.dispatchedAt, null);
+    assert.equal(await page.evaluate(() => (window as any).sends), 0);
     await runtime.managedContinuation.close();
   } finally {
     await core.close();
@@ -1534,28 +1513,11 @@ test('new public Task prepares exact Core-owned roots and blocks foreign navigat
     const choose = core.semanticDecisionGateway.get(started.taskId, clientId);
     assert.equal(choose?.kind, 'model_choice');
     assert.equal(choose?.requestedModel, 'Pro');
-    assert.equal(choose?.options[0]?.purpose, 'choose_model');
-    let selected = await core.semanticDecisionGateway.decideCurrent({
-      taskId: started.taskId, clientId,
-      decisionId: choose!.decisionId, requestId: 'root-choose-pro',
-      actionRef: choose!.options[0]!.actionRef, input: 'Pro',
-    });
-    if (selected.kind === 'refresh_required') {
-      const refreshed = selected.packet;
-      assert.equal(refreshed?.kind, 'model_choice');
-      assert.equal(refreshed?.options[0]?.purpose, 'choose_model');
-      selected = await core.semanticDecisionGateway.decideCurrent({
-        taskId: started.taskId, clientId,
-        decisionId: refreshed!.decisionId, requestId: 'root-choose-pro-refreshed',
-        actionRef: refreshed!.options[0]!.actionRef, input: 'Pro',
-      });
-    }
-    assert.deepEqual(selected, { kind: 'performed', effect: 'model_selected' });
-    // The next Core tick is now allowed to consume the first attempt. Move the
-    // retained target first to prove foreign navigation cannot become an ACK
-    // or cause a POST on the wrong conversation.
-    assert.equal(core.semanticTaskRepository.getTask(started.taskId, clientId).state, 'working');
-    assert.equal(core.semanticDecisionGateway.get(started.taskId, clientId), null);
+    assert.equal(choose?.options.length, 0);
+    assert.equal(choose?.reason, 'reasoning-effort-pro-target-unverified');
+    // A chooser disclosure did not select Pro or authorize the first POST.
+    assert.equal(core.semanticTaskRepository.getTask(started.taskId, clientId).state,
+      'agent_input_required');
     assert.equal(core.semanticTaskRepository.getFullTask(
       started.taskId, clientId).attempts[0]!.state, 'planned');
     assert.equal(core.semanticTaskRepository.getSlot(

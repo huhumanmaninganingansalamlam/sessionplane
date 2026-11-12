@@ -234,7 +234,7 @@ test('resume without a saved plan refuses to invent a first live prompt', async 
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
-test('resumed L3 runner performs only exact current Pro semantic decisions before three-Turn FINAL', async () => {
+test('resumed L3 runner opens a safe chooser before Core-verified Pro and three-Turn FINAL', async () => {
   const f = makeFixture();
   const decisions: any[] = [];
   const expiresAt = new Date(Date.now() + 120_000).toISOString();
@@ -246,19 +246,15 @@ test('resumed L3 runner performs only exact current Pro semantic decisions befor
       if (stage === 0) {
         assert.equal(params.actionRef, 'open-pro-model-menu');
         assert.equal(params.input, undefined);
-      } else if (stage === 1) {
-        assert.equal(params.actionRef, 'select-pro-model-only');
-        assert.equal(params.input, 'Pro');
       } else {
         throw new Error('Unexpected extra model decision');
       }
       stage++;
-      return { kind: 'performed', effect: stage === 1
-        ? 'model_menu_opened' : 'model_selected' };
+      return { kind: 'performed', effect: 'model_menu_opened' };
     }
     const result = await f.call(method, params);
     if (method === 'task.get' && !params.view &&
-        f.records.size === 1 && stage < 2) {
+        f.records.size === 1 && stage < 1) {
       const open = stage === 0;
       return {
         ...result, state: 'agent_input_required', revision: 10 + stage,
@@ -266,13 +262,11 @@ test('resumed L3 runner performs only exact current Pro semantic decisions befor
           decisionId: '00000000-0000-4000-8000-0000000000' + (open ? '91' : '92'),
           kind: 'model_choice', humanOnly: false,
           requestedModel: 'Pro', options: [{
-            actionRef: open ? 'open-pro-model-menu' : 'select-pro-model-only',
-            purpose: open ? 'open_model_chooser' : 'choose_model',
+            actionRef: 'open-pro-model-menu',
+            purpose: 'open_model_chooser',
             risk: 'configuration_only',
             expiresAt,
-            inputSchema: open ? { kind: 'none' } : { kind: 'option', options: [
-              { value: 'Instant', enabled: true }, { value: 'Pro', enabled: true },
-            ] },
+            inputSchema: { kind: 'none' },
           }],
         },
       };
@@ -287,11 +281,10 @@ test('resumed L3 runner performs only exact current Pro semantic decisions befor
       ...options(f.dir, call, 'resume'), maxWaitMs: 5000,
     });
     assert.equal(completed.status, 'three_turns_canonical_final_verified');
-    assert.equal(decisions.length, 2);
-    assert.equal(stage, 2);
+    assert.equal(decisions.length, 1);
+    assert.equal(stage, 1);
     assert.deepEqual(decisions.map(({ requestId }) => requestId), [
       'l3-pro-00000000-0000-4000-8000-000000000091',
-      'l3-pro-00000000-0000-4000-8000-000000000092',
     ]);
     assert.equal(f.records.size, 3);
     assert.deepEqual(f.calls.filter(x => x.method === 'task.start')
@@ -299,7 +292,7 @@ test('resumed L3 runner performs only exact current Pro semantic decisions befor
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
-test('cold root chooser hydrates after one read-only refresh, then exact Pro actions unblock L3', async () => {
+test('cold root chooser hydrates after one read-only refresh; Core independently verifies Pro', async () => {
   const f = makeFixture();
   const decisions: any[] = [];
   const expiresAt = new Date(Date.now() + 120_000).toISOString();
@@ -317,9 +310,6 @@ test('cold root chooser hydrates after one read-only refresh, then exact Pro act
       if (stage === 1) {
         assert.equal(params.actionRef, 'live-hydrated-opener');
         assert.equal(params.input, undefined);
-      } else if (stage === 2) {
-        assert.equal(params.actionRef, 'live-hydrated-pro-choice');
-        assert.equal(params.input, 'Pro');
       } else {
         throw new Error('Unbounded model action attempted');
       }
@@ -328,21 +318,17 @@ test('cold root chooser hydrates after one read-only refresh, then exact Pro act
     }
     const base = await f.call(method, params);
     if (method === 'task.get' && !params.view &&
-        f.records.size === 1 && stage < 3) {
+        f.records.size === 1 && stage < 2) {
       return {
         ...base, state: 'agent_input_required', revision: 10 + stage,
         decision: {
           decisionId: '00000000-0000-4000-8000-0000000000' + (91 + stage),
           kind: 'model_choice', humanOnly: false, requestedModel: 'Pro',
           options: stage === 0 ? [] : [{
-            actionRef: stage === 1 ? 'live-hydrated-opener' : 'live-hydrated-pro-choice',
-            purpose: stage === 1 ? 'open_model_chooser' : 'choose_model',
+            actionRef: 'live-hydrated-opener',
+            purpose: 'open_model_chooser',
             risk: 'configuration_only', expiresAt,
-            inputSchema: stage === 1 ? { kind: 'none' } : {
-              kind: 'option', options: [
-                { value: 'Instant', enabled: true }, { value: 'Pro', enabled: true },
-              ],
-            },
+            inputSchema: { kind: 'none' },
           }],
         },
       };
@@ -355,15 +341,59 @@ test('cold root chooser hydrates after one read-only refresh, then exact Pro act
       ...options(f.dir, call, 'resume'), maxWaitMs: 5000,
     });
     assert.equal(completed.status, 'three_turns_canonical_final_verified');
-    assert.equal(stage, 3);
-    assert.equal(decisions.length, 3);
+    assert.equal(stage, 2);
+    assert.equal(decisions.length, 2);
     assert.deepEqual(decisions.map(d => d.requestId), [
       'l3-refresh-00000000-0000-4000-8000-000000000091',
       'l3-pro-00000000-0000-4000-8000-000000000092',
-      'l3-pro-00000000-0000-4000-8000-000000000093',
     ]);
     assert.equal(f.calls.filter(c => c.method === 'task.start').length, 3);
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('disabled or unverified Pro effort stops L3 without radio selection, refresh churn or POST', async () => {
+  for (const reason of ['reasoning-effort-control-disabled',
+    'reasoning-effort-pro-target-unverified']) {
+    const f = makeFixture();
+    try {
+      await runLiveTaskAcceptance(options(f.dir, f.call, 'start'));
+      const call = async (method: string, params: any) => {
+        if (method === 'task.decide') {
+          throw new Error('Pro effort must not select a model radio or refresh a stable barrier');
+        }
+        const base = await f.call(method, params);
+        if (method === 'task.get' && !params.view) {
+          return { ...base, state: 'agent_input_required', revision: 7,
+            submission: { attempted: false, acknowledged: false },
+            decision: {
+              decisionId: '00000000-0000-4000-8000-0000000000ab',
+              kind: 'model_choice', humanOnly: false, requestedModel: 'Pro',
+              reason, options: [{
+                actionRef: 'bad-pro-model-radio', purpose: 'choose_model',
+                risk: 'configuration_only',
+                expiresAt: new Date(Date.now() + 120_000).toISOString(),
+                inputSchema: { kind: 'option', options: [
+                  { value: 'GPT-6', enabled: true }, { value: 'Pro', enabled: true },
+                ] },
+              }],
+            },
+          };
+        }
+        return base;
+      };
+      const result = await runLiveTaskAcceptance({
+        ...options(f.dir, call, 'resume'), maxWaitMs: 200,
+      });
+      assert.equal(result.status, 'read_only_reconnect_pending');
+      assert.equal(result.taskState, 'agent_input_required');
+      assert.equal(f.calls.filter(x => x.method === 'task.start').length, 1);
+      assert.equal(f.calls.filter(x => x.method === 'task.wait').length, 0);
+      const receipt = JSON.parse(readFileSync(join(f.dir, 'receipt', 'state.json'), 'utf8'));
+      assert.equal(receipt.conversationId, null);
+      assert.equal(receipt.tasks[0].modelDecision, undefined,
+        'no guess-based radio mutation is journaled');
+    } finally { rmSync(f.dir, { recursive: true, force: true }); }
+  }
 });
 
 test('L3 read-only refresh of a superseded root observation never repeats Task or POST', async () => {

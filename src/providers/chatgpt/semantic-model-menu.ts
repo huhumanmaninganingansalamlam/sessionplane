@@ -23,8 +23,10 @@ export interface SemanticModelMenu {
   readonly submenuTriggerIndex: number;
   readonly evidenceHash: string;
   readonly options: readonly SemanticModelChoice[];
-  /** Exact visible Pro badge on the *closed* canonical composer picker. */
-  readonly closedVerifiedModel: 'Pro' | null;
+  /** Explicit composer reasoning level; separate from model radios. */
+  readonly verifiedReasoningLevel: 'Medium' | 'Pro' | null;
+  /** The visible Power control can be disabled even when the model menu works. */
+  readonly reasoningControlState: 'disabled' | 'unverified';
 }
 
 /**
@@ -52,7 +54,8 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
       label: '', expanded: '',
       options: [] as Array<{ value: string; controlLabel: string;
         enabled: boolean; selected: boolean }>,
-      closedVerifiedModel: null as 'Pro' | null,
+      verifiedReasoningLevel: null as 'Medium' | 'Pro' | null,
+      reasoningControlState: 'unverified' as 'disabled' | 'unverified',
     };
     if (selected.length === 0) return null;
     if (selected.length !== 1) return { ...base,
@@ -67,6 +70,22 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
       ? [...document.querySelectorAll<HTMLElement>('[role="menu"][id]')]
         .filter(menu => menu.id === id) : [];
     const menus = linked(menuId);
+    const display = element.innerText.replace(/\s+/g, ' ').trim();
+    // The unique composer trigger reports the selected reasoning *level*.
+    // It is not the model radio. Nothing here maps a numeric Power tick.
+    const verifiedReasoningLevel =
+      strategy === 'composer-radix' &&
+      element.getAttribute('aria-label') === 'ChatGPT 모델 선택' &&
+      element.getAttribute('aria-haspopup') === 'menu' &&
+      !element.disabled && element.getAttribute('aria-disabled') !== 'true' &&
+      (expanded !== 'false' || menuId === '')
+        ? /^(?:Pro|추론 수준 Pro|Thinking level Pro|Thinking effort Pro)$/.test(display)
+          ? 'Pro' as const
+          : /^(?:Medium|추론 수준 Medium|Thinking level Medium|Thinking effort Medium)$/.test(display)
+            ? 'Medium' as const : null
+        : null;
+    // Invalid linkage cannot carry positive effort evidence, even if the
+    // untrusted trigger happens to display 'Pro'.
     const initial = { ...base, strategy, openerId, openerIndex: index, menuId, label, expanded };
     // The composer Radix trigger receives aria-controls only after opening.
     // In that one verified pattern, bind the newly mounted portal back to
@@ -85,22 +104,9 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
       return { ...initial, status: 'unsupported' as const,
         reason: 'model-menu-link-unverified' };
     }
+    const trusted = { ...initial, verifiedReasoningLevel };
     if (expanded === 'false') {
-      // Current ChatGPT composer picker displays the selected Pro level
-      // *inside the one verified closed trigger*. Its exact visible label is
-      // stronger than a cached menu choice, and unlike an open-menu radio it
-      // persists through the subsequent Compose -> Submit observations.
-      // Never infer Pro from unrelated text, other triggers or an effort
-      // slider. All other labels remain unverified until opening the menu.
-      const displayed = element.innerText.replace(/\s+/g, ' ').trim();
-      const exactPro = strategy === 'composer-radix' &&
-        element.getAttribute('aria-label') === 'ChatGPT 모델 선택' &&
-        element.getAttribute('aria-haspopup') === 'menu' &&
-        !element.disabled && element.getAttribute('aria-disabled') !== 'true' &&
-        menuId === '' &&
-        /^(?:Pro|추론 수준 Pro|Thinking level Pro|Thinking effort Pro)$/.test(displayed);
-      return { ...initial, status: 'closed' as const, reason: null,
-        closedVerifiedModel: exactPro ? 'Pro' as const : null };
+      return { ...trusted, status: 'closed' as const, reason: null };
     }
     const root = menus[0]!;
     const radios = (menu: HTMLElement, prefix = '') =>
@@ -136,6 +142,12 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
       // being structurally present inside the visible Power item. Recognize
       // it only as non-actionable layout evidence, never as a model option.
       const powerItems = items.filter(item => item.getAttribute('aria-label') === '파워');
+      const allPowerItems = [...root.querySelectorAll<HTMLElement>(
+        '[role="menuitem"][aria-label="파워"]')]
+        .filter(item => item.closest('[role="menu"]') === root);
+      const composerEvidence = { ...trusted, reasoningControlState:
+        allPowerItems.length === 1 && allPowerItems[0]!.getAttribute('aria-disabled') === 'true'
+          ? 'disabled' as const : 'unverified' as const };
       const structuralSliders = [...root.querySelectorAll<HTMLElement>('[role="slider"]')]
         .filter(slider => slider.closest('[role="menu"]') === root);
       const powerSliderVerified = powerItems.length === 1 && structuralSliders.length === 1 &&
@@ -161,13 +173,13 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
       }
       if (modelRadios.length === 0 && items.length === 2 && powerSliderVerified &&
         items.filter(item => item.getAttribute('aria-label') === '모델 선택').length === 1) {
-        return { ...initial, status: 'nested' as const, reason: null };
+        return { ...composerEvidence, status: 'nested' as const, reason: null };
       }
       if (items.length === 0 && sliders.length === 0 && optionsValid(options) &&
         modelRadios.every(radio => ['true', 'false'].includes(
           radio.getAttribute('aria-checked') ?? '')) &&
         modelRadios.filter(radio => radio.getAttribute('aria-checked') === 'true').length === 1) {
-        return { ...initial, status: 'open' as const, reason: null,
+        return { ...composerEvidence, status: 'open' as const, reason: null,
           optionMenuId: menuId, options };
       }
       return { ...initial, status: 'unsupported' as const,
@@ -226,7 +238,8 @@ export async function inspectSemanticChatGptModelMenu(page: Page): Promise<Seman
     status: data.status, reason: data.reason, openerIndex: data.openerIndex,
     menuId: data.menuId, optionMenuId: data.optionMenuId,
     submenuId: data.submenuId, submenuTriggerIndex: data.submenuTriggerIndex,
-    options: data.options, closedVerifiedModel: data.closedVerifiedModel, evidenceHash,
+    options: data.options, verifiedReasoningLevel: data.verifiedReasoningLevel,
+    reasoningControlState: data.reasoningControlState, evidenceHash,
   };
 }
 

@@ -10,6 +10,7 @@ import type {
   SemanticRootPostEvidence, SemanticExactQuery, SemanticObservation, SemanticProviderAdapter,
   SemanticTaskContext, SemanticVerification,
 } from '../semantic-adapter.ts';
+import { semanticConfigurationIntent, semanticConfigurationMatches } from '../semantic-adapter.ts';
 import { ChatGptBackendRecovery, type BackendJsonClient } from './backend-recovery.ts';
 import { observeChatGptDialog } from './dialog-observer.ts';
 import { observeChatGptDom, observeChatGptAlerts } from './dom-observer.ts';
@@ -150,6 +151,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     let reason: string | null = null;
     let progress: SemanticObservation['progress'] = 'unknown';
     let verifiedModel: string | null = null;
+    let verifiedReasoningLevel: string | null = null;
     const unverifiedTurn: SemanticObservation['turn'] = {
       submittedUserFound: false, laterUserFound: false,
       submittedUserMessageId: context.submittedUserMessageId,
@@ -329,20 +331,43 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       // observe never opens either the root menu or a linked Pro submenu.
       if (blocker === 'none') {
         const model = await inspectSemanticChatGptModelMenu(page);
+        const requiredEffort = context.requiredModel != null &&
+          semanticConfigurationIntent(this.providerKey, context.requiredModel).kind === 'reasoning_effort';
         if (model?.status === 'closed' || model?.status === 'nested') {
-          // The exact current Pro badge is on the verified closed composer
-          // trigger even after a model selection closes its Radix menu.
-          verifiedModel = model.closedVerifiedModel;
-          issue('open_model_chooser', 'Inspect currently offered model choices',
-            'configuration_only', { kind: 'none' }, ui.fingerprint,
-            null, model.evidenceHash);
+          // A trusted closed composer label is an effort level, not a model
+          // radio. Opening a menu is configuration-only, never send permission.
+          verifiedReasoningLevel = model.status === 'closed'
+            ? model.verifiedReasoningLevel : null;
+          if (requiredEffort && model.status === 'nested') {
+            // Live ChatGPT's Power menu may be disabled or have only an
+            // unlabeled numeric slider. Neither is an exact Pro target.
+            const why = model.reasoningControlState === 'disabled'
+              ? 'reasoning-effort-control-disabled'
+              : 'reasoning-effort-pro-target-unverified';
+            capabilityIssues.push({ capability: 'model_choice', reason: why });
+            reason = why;
+          } else if (!requiredEffort || verifiedReasoningLevel !== 'Pro') {
+            issue('open_model_chooser', 'Inspect currently offered model controls',
+              'configuration_only', { kind: 'none' }, ui.fingerprint,
+              null, model.evidenceHash);
+          }
         } else if (model?.status === 'open') {
           const checked = model.options.filter(option => option.selected && option.enabled);
           verifiedModel = checked.length === 1 ? checked[0]!.value : null;
-          issue('choose_model', 'Select one verified model menu option',
-            'configuration_only', { kind: 'option', options: model.options.map(o => ({
-              value: o.value, enabled: o.enabled,
-            })) }, ui.fingerprint, null, model.evidenceHash);
+          if (requiredEffort) {
+            // GPT-6 and GPT-5.6 Sol are model radios, not Pro effort.
+            // Do not offer a wrong-target choice or touch a Power slider.
+            const why = model.reasoningControlState === 'disabled'
+              ? 'reasoning-effort-control-disabled'
+              : 'reasoning-effort-pro-target-unverified';
+            capabilityIssues.push({ capability: 'model_choice', reason: why });
+            reason = why;
+          } else {
+            issue('choose_model', 'Select one verified model menu option',
+              'configuration_only', { kind: 'option', options: model.options.map(o => ({
+                value: o.value, enabled: o.enabled,
+              })) }, ui.fingerprint, null, model.evidenceHash);
+          }
         } else if (model?.status === 'unsupported') {
           capabilityIssues.push({
             capability: 'model_choice', reason: model.reason ?? 'model-menu-unverified',
@@ -353,7 +378,9 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       // the exact project model is visibly selected. No unrelated Task may
       // borrow this root lease or mutate its draft.
       if (blocker === 'none' && context.providerConversationId === null &&
-          context.requiredModel && verifiedModel === context.requiredModel) {
+          context.requiredModel && semanticConfigurationMatches(
+            this.providerKey, context.requiredModel,
+            { verifiedModel, verifiedReasoningLevel })) {
         if (ui.editors[0]!.value.length === 0) {
           issue('compose', 'Prepare exact first public prompt on new chat root',
             'draft_only', { kind: 'text', maxLength: MAX_DRAFT }, ui.fingerprint);
@@ -417,7 +444,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       providerKey: this.providerKey, surface: surface.mode, snapshotId, observedAt,
       capabilityManifest: this.capabilities, progress, blocker, reason, turn,
       questionText: blocker === 'provider_question' ? question?.text ?? null : null,
-      permission, actions, verifiedModel, evidenceBytes: 0,
+      permission, actions, verifiedModel, verifiedReasoningLevel, evidenceBytes: 0,
       ...(capabilityIssues.length > 0 ? { capabilityIssues } : {}),
     };
     let bytes = observationBytes(observation);
@@ -458,6 +485,11 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     // Validate input before consuming a durable one-shot decision.
     if (action.purpose === 'compose' && (!request.input || request.input.length > MAX_DRAFT)) {
       return { kind: 'unsupported', reason: 'invalid-draft-input' };
+    }
+    if (action.purpose === 'choose_model' && request.context.requiredModel &&
+        semanticConfigurationIntent(this.providerKey, request.context.requiredModel).kind ===
+          'reasoning_effort') {
+      return { kind: 'unsupported', reason: 'reasoning-effort-is-not-model-radio' };
     }
     if (action.purpose === 'choose_model' && (!request.input || request.input.length > 160)) {
       return { kind: 'unsupported', reason: 'exact-model-option-required' };
@@ -676,14 +708,15 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         // Re-read exact current configuration immediately inside the same
         // owned-page mutation, rather than treating an earlier decision as proof.
         const currentModel = await inspectSemanticChatGptModelMenu(page);
-        const selected = currentModel?.options.filter(
-          option => option.selected && option.enabled) ?? [];
-        const exactOpenChoice = currentModel?.status === 'open' &&
-          selected.length === 1 && selected[0]!.value === request.context.requiredModel;
-        const exactClosedPro = currentModel?.status === 'closed' &&
-          currentModel.closedVerifiedModel === 'Pro' &&
-          request.context.requiredModel === 'Pro';
-        if (!exactOpenChoice && !exactClosedPro) {
+        const selected = currentModel?.status === 'open'
+          ? currentModel.options.filter(option => option.selected && option.enabled) : [];
+        if (!semanticConfigurationMatches(this.providerKey, request.context.requiredModel, {
+          verifiedModel: selected.length === 1 ? selected[0]!.value : null,
+          // A closed, uniquely linked trigger is the only durable proof
+          // of an applied Pro effort level immediately before Submit.
+          verifiedReasoningLevel: currentModel?.status === 'closed'
+            ? currentModel.verifiedReasoningLevel : null,
+        })) {
           return 'stale' as const;
         }
       }

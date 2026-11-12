@@ -62,11 +62,12 @@ test('exact Pro badge on a closed authenticated composer picker survives compose
     const firstMenu = await inspectSemanticChatGptModelMenu(page);
     assert.equal(firstMenu?.status, 'closed');
     assert.equal(firstMenu?.strategy, 'composer-radix');
-    assert.equal(firstMenu?.closedVerifiedModel, 'Pro');
+    assert.equal(firstMenu?.verifiedReasoningLevel, 'Pro');
 
     const first = await adapter.observe(context);
     assert.equal(first.surface, 'chat');
-    assert.equal(first.verifiedModel, 'Pro');
+    assert.equal(first.verifiedModel, null, 'Pro effort is not a model radio');
+    assert.equal(first.verifiedReasoningLevel, 'Pro');
     assert.ok(first.actions.some(action => action.purpose === 'compose'),
       'A closed but exact Pro badge must not block the root composer');
     assert.equal(first.actions.some(action => action.purpose === 'submit'), false,
@@ -74,8 +75,9 @@ test('exact Pro badge on a closed authenticated composer picker survives compose
 
     await page.locator('#prompt-textarea').fill('Exact one-time root question');
     const second = await adapter.observe(context);
-    assert.equal(second.verifiedModel, 'Pro',
-      'The immutable chosen model must remain verified when the menu is closed');
+    assert.equal(second.verifiedModel, null);
+    assert.equal(second.verifiedReasoningLevel, 'Pro',
+      'The exact chosen reasoning level remains verified when the menu is closed');
     assert.ok(second.actions.some(action => action.purpose === 'submit'),
       'Exactly one prepared initial root may expose a submit choice');
     assert.equal(second.actions.filter(action => action.purpose === 'submit').length, 1);
@@ -122,6 +124,7 @@ test('Pro in unrelated elements, ambiguous picker state and other visible models
     const cases = [
       fixtureDocument('추론 수준<br>Instant',
         { extra: '<article>Pro</article>' }),
+      fixtureDocument('추론 수준<br>Medium'),
       fixtureDocument('추론 수준<br>Pro Extra'),
       fixtureDocument('추론 수준<br>Pro',
         { openerLabel: 'Model selector elsewhere' }),
@@ -134,9 +137,10 @@ test('Pro in unrelated elements, ambiguous picker state and other visible models
       await page.setContent(document);
       await page.locator('#prompt-textarea').fill('Cannot submit if Pro is not exact');
       const menu = await inspectSemanticChatGptModelMenu(page);
-      assert.equal(menu?.closedVerifiedModel ?? null, null);
+      assert.notEqual(menu?.verifiedReasoningLevel ?? null, 'Pro');
       const result = await adapter.observe(context);
-      assert.notEqual(result.verifiedModel, 'Pro');
+      assert.equal(result.verifiedModel, null);
+      assert.notEqual(result.verifiedReasoningLevel, 'Pro');
       assert.equal(result.actions.some(action => action.purpose === 'submit'), false,
         'Unrelated or ambiguous Pro text cannot authorize the initial POST');
     }

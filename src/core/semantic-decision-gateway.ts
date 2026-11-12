@@ -8,6 +8,7 @@ import type {
   SemanticInput, SemanticObservation, SemanticPermissionEvidence,
   SemanticTaskContext,
 } from '../providers/semantic-adapter.ts';
+import { semanticConfigurationMatches } from '../providers/semantic-adapter.ts';
 import type { SemanticProviderRegistry } from '../providers/semantic-provider-registry.ts';
 import type { TaskKernelRepository } from '../storage/task-kernel-repository.ts';
 
@@ -213,7 +214,8 @@ export class SemanticDecisionGateway {
       if (observed.providerKey === provider.adapter.providerKey &&
           observed.surface === 'chat' && observed.blocker === 'none' &&
           observed.progress !== 'streaming' &&
-          observed.verifiedModel === input.modelIntent) return true;
+          semanticConfigurationMatches(
+            provider.adapter.providerKey, input.modelIntent, observed)) return true;
     } catch { /* Re-examine the latest observed blocker as an agent decision. */ }
     await this.inspect({ ...input, modelChoice: true });
     return false;

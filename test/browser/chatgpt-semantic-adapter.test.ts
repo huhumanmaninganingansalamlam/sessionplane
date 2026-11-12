@@ -813,7 +813,7 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
           menu.innerHTML = '<div role="group">' +
             '<div id="radix-effort-view">' +
               '<div role="menuitem" aria-label="모델 선택" id="radix-choose">Medium</div>' +
-              '<div role="menuitem" aria-label="파워">' +
+              '<div role="menuitem" aria-label="파워" aria-disabled="true">' +
                 '<span role="slider" aria-hidden="true" aria-valuenow="1" aria-valuemin="0" aria-valuemax="4" ' +
                 'style="display:inline-block;width:28px;height:28px"></span>' +
               '</div></div>' +
@@ -919,6 +919,19 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     { kind: 'performed', effect: 'model_selected' });
     assert.equal(await page.evaluate(() => (window as any).radixModelChanges), 1);
     assert.equal(await page.evaluate(() => (window as any).radixSliderChanges), 0);
+    const proOnly = await adapter.observe({ ...task, requiredModel: 'Pro' });
+    const proMenu = await inspectSemanticChatGptModelMenu(page);
+    assert.equal(proMenu?.verifiedReasoningLevel, 'Medium');
+    assert.equal(proMenu?.reasoningControlState, 'disabled');
+    assert.equal(proOnly.verifiedModel, 'GPT-5.6 Sol');
+    assert.equal(proOnly.verifiedReasoningLevel, null,
+      'an open radio view cannot establish a closed Pro effort selection');
+    assert.equal(proOnly.reason, 'reasoning-effort-control-disabled');
+    assert.equal(proOnly.actions.some(a => a.purpose === 'choose_model'), false,
+      'literal GPT radios must never become a Pro reasoning decision');
+    assert.deepEqual(proOnly.capabilityIssues, [
+      { capability: 'model_choice', reason: 'reasoning-effort-control-disabled' },
+    ]);
     await page.evaluate(() => document.querySelector('#radix-menu')!
       .removeAttribute('aria-labelledby'));
     const unlinkedRadix = await adapter.observe(task);

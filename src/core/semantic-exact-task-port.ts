@@ -4,6 +4,7 @@ import type {
   ExactSendIntent, ExactTaskProviderPort, ExactTurnQuery,
   FinalObservation, RecoveryOutcome, SendOutcome,
 } from './durable-task-kernel.ts';
+import { semanticConfigurationMatches } from '../providers/semantic-adapter.ts';
 import type {
   SemanticActionCandidate, SemanticActResult, SemanticDispatchEvidence, SemanticObservation,
   SemanticProviderAdapter, SemanticRootPostEvidence, SemanticTaskContext,
@@ -161,7 +162,8 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
           }
           return { kind: 'unavailable', reason: 'semantic-preflight-blocked-or-generating' };
         }
-        if (context.requiredModel && observation.verifiedModel !== context.requiredModel) {
+        if (context.requiredModel &&
+          !semanticConfigurationMatches(this.providerKey, context.requiredModel, observation)) {
           return { kind: 'unavailable', reason: 'requested-model-not-currently-verified' };
         }
         // A non-empty existing draft has no Core-owned content proof. It is a
@@ -207,7 +209,8 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
         observation.blocker !== 'none' || observation.progress === 'streaming') {
         return { kind: 'uncertain', reason: 'semantic-observation-blocked-or-generating' };
       }
-      if (context.requiredModel && observation.verifiedModel !== context.requiredModel) {
+      if (context.requiredModel &&
+          !semanticConfigurationMatches(this.providerKey, context.requiredModel, observation)) {
         return { kind: 'uncertain', reason: 'requested-model-changed-after-preflight' };
       }
       const compose = one(observation.actions, 'compose');
@@ -227,7 +230,8 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
           observation.blocker !== 'none' || observation.progress === 'streaming') {
           return { kind: 'uncertain', reason: 'semantic-observation-changed-after-draft' };
         }
-        if (context.requiredModel && observation.verifiedModel !== context.requiredModel) {
+        if (context.requiredModel &&
+          !semanticConfigurationMatches(this.providerKey, context.requiredModel, observation)) {
           return { kind: 'uncertain', reason: 'requested-model-changed-after-draft' };
         }
       }

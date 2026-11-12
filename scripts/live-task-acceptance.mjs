@@ -100,8 +100,8 @@ function saveState(dir, state) {
 }
 
 /**
- * Only the exact, current Pro model decision can be automated by the explicit
- * acceptance runner. Permissions, provider questions, retries and every
+ * Only a uniquely verified chooser disclosure can be automated for the legacy
+ * ChatGPT Pro reasoning-effort requirement. Permissions, provider questions, retries and every
  * human-only decision remain external barriers. No DOM selectors are used.
  */
 function exactProModelAction(decision) {
@@ -110,25 +110,19 @@ function exactProModelAction(decision) {
       decision.options.length !== 1 || !decision.decisionId) return null;
   const action = decision.options[0];
   if (!action || !action.actionRef || action.risk !== 'configuration_only' ||
-      !['open_model_chooser', 'choose_model'].includes(action.purpose)) {
+      action.purpose !== 'open_model_chooser') {
     return null;
   }
   if (!Number.isFinite(Date.parse(action.expiresAt)) || Date.now() > Date.parse(action.expiresAt)) {
     return null;
   }
-  let selected;
-  if (action.purpose === 'open_model_chooser') {
-    if (action.inputSchema?.kind !== 'none') return null;
-  } else {
-    if (action.inputSchema?.kind !== 'option' ||
-        action.inputSchema.options?.filter(option =>
-          option.value === 'Pro' && option.enabled).length !== 1) return null;
-    selected = 'Pro';
-  }
+  // The legacy 'Pro' intent means reasoning effort on ChatGPT.
+  // GPT model radios (even one literally called Pro) cannot satisfy it.
+  if (action.purpose !== 'open_model_chooser' ||
+      action.inputSchema?.kind !== 'none') return null;
   return {
     decisionId: decision.decisionId, actionRef: action.actionRef,
     requestId: 'l3-pro-' + decision.decisionId,
-    ...(selected ? { input: selected } : {}),
   };
 }
 
@@ -195,7 +189,12 @@ async function acceptOneTask({ plan, state, index, call, receiptDir, limitMs, wa
           (decision.options.length === 0 ||
             (Number.isFinite(Date.parse(option?.expiresAt)) &&
              Date.now() > Date.parse(option.expiresAt)));
-        const refreshable = transientRootRace || expiredOrEmptyModel;
+        const explicitEffortBarrier = [
+          'reasoning-effort-control-disabled',
+          'reasoning-effort-pro-target-unverified',
+        ].includes(decision?.reason);
+        const refreshable = !explicitEffortBarrier &&
+          (transientRootRace || expiredOrEmptyModel);
         if (!refreshable || modelRefreshes >= 6) break;
         const requestId = 'l3-refresh-' + decision.decisionId;
         row.modelRefresh = { decisionId: decision.decisionId, requestId };

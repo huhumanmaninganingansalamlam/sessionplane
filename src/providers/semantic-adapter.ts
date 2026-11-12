@@ -10,6 +10,33 @@ export type SemanticCapability =
   | 'continuation' | 'artifact_read' | 'artifact_write';
 export type SemanticSurface = 'chat' | 'work' | 'unknown';
 export type SemanticProgress = 'unknown' | 'idle' | 'streaming' | 'final';
+
+/** Explicit semantic requirement, distinct from a provider's model-radio label.
+ * Legacy public modelIntent stays compatible; only ChatGPT's exact 'Pro'
+ * means a reasoning-effort level. Never infer a level from slider numbers.
+ */
+export type SemanticConfigurationIntent =
+  | { readonly kind: 'model'; readonly name: string }
+  | { readonly kind: 'reasoning_effort'; readonly level: 'Pro' };
+
+export function semanticConfigurationIntent(providerKey: string, modelIntent: string):
+  SemanticConfigurationIntent {
+  return providerKey === 'chatgpt' && modelIntent === 'Pro'
+    ? { kind: 'reasoning_effort', level: 'Pro' }
+    : { kind: 'model', name: modelIntent };
+}
+
+export function semanticConfigurationMatches(
+  providerKey: string, modelIntent: string,
+  evidence: { readonly verifiedModel?: string | null;
+    readonly verifiedReasoningLevel?: string | null },
+): boolean {
+  const intent = semanticConfigurationIntent(providerKey, modelIntent);
+  return intent.kind === 'reasoning_effort'
+    ? evidence.verifiedReasoningLevel === intent.level
+    : evidence.verifiedModel === intent.name;
+}
+
 export type SemanticActionPurpose =
   | 'compose' | 'submit' | 'open_model_chooser' | 'choose_model' | 'answer_question'
   | 'grant_permission' | 'retry' | 'continue';
@@ -25,7 +52,7 @@ export interface SemanticTaskContext {
   readonly submittedUserMessageId: string | null;
   readonly submittedUserTurnId: string | null;
   readonly pageLease: OwnedPageIdentity | null;
-  /** Project's retained exact model intent, when explicitly configured. */
+  /** Legacy public modelIntent: ChatGPT 'Pro' means reasoning effort, not a model radio. */
   readonly requiredModel?: string | null;
 }
 export interface SemanticCapabilityManifest {
@@ -89,8 +116,10 @@ export interface SemanticObservation {
   readonly questionText: string | null;
   readonly permission?: SemanticPermissionEvidence | null;
   readonly actions: readonly SemanticActionCandidate[];
-  /** Selected exactly one current radio option in an authenticated open model menu. */
+  /** Selected exactly one current model radio; never a reasoning badge. */
   readonly verifiedModel?: string | null;
+  /** Read from an authenticated closed composer trigger; never from slider numbers. */
+  readonly verifiedReasoningLevel?: string | null;
   readonly capabilityIssues?: readonly SemanticCapabilityIssue[];
   readonly evidenceBytes: number;
 }
