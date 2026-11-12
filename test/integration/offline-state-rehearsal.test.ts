@@ -180,6 +180,77 @@ test('interrupted migration publishes no partial candidate; rollback preserves p
   }
 });
 
+test('equal-schema rollback retains additive Task evidence and rejects mutation of an original Task row', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sp-offline-equal-schema-'));
+  const source = join(dir, 'source-v15.sqlite');
+  const sourceDb = SessionPlaneDatabase.open(source);
+  try {
+    const store = new TaskKernelRepository(sourceDb);
+    store.openProject({ projectId: 'original-project', clientId: 'original-owner',
+      projectKey: 'original-project', displayName: 'original' });
+    store.openSlot({ projectId: 'original-project', clientId: 'original-owner',
+      slotId: 'main', roleKey: 'main', providerKey: 'chatgpt' });
+    store.startTask({ taskId: 'original-task', projectId: 'original-project',
+      slotId: 'main', clientId: 'original-owner', requestId: 'original-request',
+      expectedSlotRevision: 1, prompt: 'original prompt must remain byte exact' });
+  } finally { sourceDb.close(); }
+
+  const migrationDir = join(dir, 'migration');
+  const rollbackDir = join(dir, 'rollback');
+  try {
+    const migrated = await rehearseMigration({ sourcePath: source, destinationDir: migrationDir });
+    assert.equal(migrated.sourceSchemaVersion, 15);
+    assert.equal(migrated.schemaVersion, 15);
+    const candidatePath = join(migrationDir, 'candidate.sqlite');
+    const candidate = SessionPlaneDatabase.open(candidatePath);
+    try {
+      const store = new TaskKernelRepository(candidate);
+      store.openProject({ projectId: 'new-project', clientId: 'new-owner',
+        projectKey: 'new-project', displayName: 'new evidence' });
+      store.openSlot({ projectId: 'new-project', clientId: 'new-owner',
+        slotId: 'main', roleKey: 'main', providerKey: 'chatgpt' });
+      store.startTask({ taskId: 'new-task', projectId: 'new-project', slotId: 'main',
+        clientId: 'new-owner', requestId: 'new-request', expectedSlotRevision: 1,
+        prompt: 'new evidence retained before rollback' });
+      store.planAttempt({ taskId: 'new-task', clientId: 'new-owner',
+        attemptId: 'new-attempt', kind: 'initial', turnKey: 'root',
+        content: 'new evidence retained before rollback' });
+      store.beginDispatch('new-task', 'new-owner', 'new-attempt');
+      store.markUncertain('new-task', 'new-owner', 'new-attempt', 'lost-ack');
+    } finally { candidate.close(); }
+
+    const result = await rehearseRollback({
+      migrationDir, candidatePath, destinationDir: rollbackDir,
+    });
+    assert.equal(result.postMigrationEvidencePreserved, true);
+    const restored = new DatabaseSync(join(rollbackDir, 'restored-original.sqlite'),
+      { readOnly: true });
+    const evidence = new DatabaseSync(join(rollbackDir, 'post-migration-evidence.sqlite'),
+      { readOnly: true });
+    try {
+      assert.deepEqual(restored.prepare(
+        'SELECT task_id AS id,original_prompt AS prompt FROM kernel_tasks ORDER BY task_id',
+      ).all().map(row => ({ id: row.id, prompt: row.prompt })),
+      [{ id: 'original-task', prompt: 'original prompt must remain byte exact' }]);
+      assert.deepEqual(evidence.prepare(
+        'SELECT task_id AS id,state FROM kernel_tasks ORDER BY task_id',
+      ).all().map(row => ({ id: row.id, state: row.state })),
+      [{ id: 'new-task', state: 'uncertain' }, { id: 'original-task', state: 'working' }]);
+      assert.equal(evidence.prepare(
+        "SELECT state FROM kernel_attempts WHERE task_id='new-task'",
+      ).get()!.state, 'uncertain');
+    } finally { restored.close(); evidence.close(); }
+
+    const tampered = new DatabaseSync(candidatePath);
+    try {
+      tampered.prepare("UPDATE kernel_tasks SET original_prompt='forged' WHERE task_id='original-task'").run();
+    } finally { tampered.close(); }
+    await assert.rejects(rehearseRollback({
+      migrationDir, candidatePath, destinationDir: join(dir, 'must-not-exist'),
+    }), /changed or removed a source row: kernel_tasks/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('offline rehearsal CLI requires explicit paths and emits a verifiable manifest', async () => {
   const root = mkdtempSync(join(tmpdir(), 'sp-offline-cli-'));
   const source = fixture(root);

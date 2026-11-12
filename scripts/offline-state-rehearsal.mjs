@@ -51,6 +51,16 @@ function quote(identifier) {
   return '"' + identifier.replaceAll('"', '""') + '"';
 }
 
+function canonicalRow(row) {
+  return JSON.stringify(row, (_key, value) => {
+    if (typeof value === 'bigint') return { sqliteInteger: value.toString() };
+    if (value instanceof Uint8Array) {
+      return { sqliteBlob: Buffer.from(value).toString('base64') };
+    }
+    return value;
+  });
+}
+
 function tableFacts(db) {
   const tables = db.prepare(
     "SELECT name,sql FROM sqlite_master WHERE type='table'" +
@@ -70,11 +80,7 @@ function tableFacts(db) {
     const sha = createHash('sha256');
     let count = 0;
     for (const row of statement.iterate()) {
-      sha.update(JSON.stringify(row, (_key, value) => {
-        if (typeof value === 'bigint') return { sqliteInteger: value.toString() };
-        if (value instanceof Uint8Array) return { sqliteBlob: Buffer.from(value).toString('base64') };
-        return value;
-      }));
+      sha.update(canonicalRow(row));
       sha.update('\n');
       count++;
     }
@@ -274,6 +280,62 @@ function assertOriginalFacts(db, expected, label) {
   }
 }
 
+function assertOriginalRowsRetained(sourceDb, candidateDb, tableName, label) {
+  const sourceColumns = sourceDb.prepare('PRAGMA table_info(' + quote(tableName) + ')').all();
+  const candidateColumns = new Set(candidateDb.prepare(
+    'PRAGMA table_info(' + quote(tableName) + ')').all().map(column => String(column.name)));
+  const primaryKey = sourceColumns.filter(column => Number(column.pk) > 0)
+    .sort((a, b) => Number(a.pk) - Number(b.pk));
+  if (sourceColumns.length === 0 ||
+      sourceColumns.some(column => !candidateColumns.has(String(column.name)))) {
+    throw new Error(label + ' cannot prove retained source rows: ' + tableName);
+  }
+  const sourceCount = Number(sourceDb.prepare(
+    'SELECT COUNT(*) AS count FROM ' + quote(tableName)).get().count);
+  if (sourceCount === 0) return;
+  if (primaryKey.length === 0) {
+    throw new Error(label + ' cannot prove retained source rows: ' + tableName);
+  }
+  const columns = sourceColumns.map(column => String(column.name));
+  const projection = columns.map(quote).join(',');
+  const order = primaryKey.map(column => quote(String(column.name))).join(',');
+  const where = primaryKey.map(column => quote(String(column.name)) + ' IS ?').join(' AND ');
+  const sourceRows = sourceDb.prepare(
+    'SELECT ' + projection + ' FROM ' + quote(tableName) + ' ORDER BY ' + order);
+  const lookup = candidateDb.prepare(
+    'SELECT ' + projection + ' FROM ' + quote(tableName) + ' WHERE ' + where);
+  for (const sourceRow of sourceRows.iterate()) {
+    const key = primaryKey.map(column => sourceRow[String(column.name)]);
+    const candidateRow = lookup.get(...key);
+    if (!candidateRow || canonicalRow(candidateRow) !== canonicalRow(sourceRow)) {
+      throw new Error(label + ' changed or removed a source row: ' + tableName);
+    }
+  }
+}
+
+function assertRollbackCandidate(candidateDb, sourceDb, manifest, label) {
+  if (schemaVersion(candidateDb) !== manifest.schemaVersion) {
+    throw new Error(label + ' schema differs from migration manifest');
+  }
+  const facts = tableFacts(candidateDb);
+  for (const original of manifest.originalFacts) {
+    const retained = facts.find(value => value.name === original.name);
+    if (retained && retained.count === original.count && retained.sha256 === original.sha256) {
+      continue;
+    }
+    // During an exact-package refresh (for example schema 15 -> 15), the
+    // isolated successor is expected to add Task/attempt/result evidence to
+    // pre-existing kernel tables. Prove every source row is still byte-exact,
+    // but permit only additive changes in those durable evidence tables.
+    if (manifest.sourceSchemaVersion === manifest.schemaVersion &&
+        original.name.startsWith('kernel_')) {
+      assertOriginalRowsRetained(sourceDb, candidateDb, original.name, label);
+      continue;
+    }
+    throw new Error(label + ' does not match source manifest: ' + original.name);
+  }
+}
+
 /** A rollback rehearsal NEVER replaces the candidate database. It snapshots
  * post-migration evidence first, then restores the original into another
  * destination. New ACKs, UNKNOWNs and drafts remain in the evidence file.
@@ -291,15 +353,18 @@ export async function rehearseRollback(input) {
   if (existsSync(destination)) throw new Error('Rollback output already exists; preserve its evidence');
 
   const stage = stageInParent(destination);
+  const sourceDb = openReadonly(original);
   try {
+    verifyDatabase(sourceDb);
     const evidence = path.join(stage, 'post-migration-evidence.sqlite');
     const restored = path.join(stage, 'restored-original.sqlite');
     const readCandidate = openReadonly(candidate);
     try {
       verifyDatabase(readCandidate);
       // This must not accept a different account/backup merely because its
-      // SQLite schema is compatible. Original legacy facts are immutable.
-      assertOriginalFacts(readCandidate, manifest.originalFacts, 'Rollback candidate');
+      // SQLite schema is compatible. Equal-schema refreshes may append only
+      // durable kernel evidence while retaining every original row byte-exact.
+      assertRollbackCandidate(readCandidate, sourceDb, manifest, 'Rollback candidate');
       await backup(readCandidate, evidence);
     } finally { readCandidate.close(); }
     if (input.failAfterEvidence === true) {
@@ -318,7 +383,8 @@ export async function rehearseRollback(input) {
       }
       // Detect a candidate that changed while the consistent snapshot was
       // being taken. Never publish a mixed-account rollback result.
-      assertOriginalFacts(retainedDb, manifest.originalFacts, 'Retained rollback evidence');
+      assertRollbackCandidate(retainedDb, sourceDb, manifest,
+        'Retained rollback evidence');
     } finally { restoredDb.close(); retainedDb.close(); }
 
     const result = {
@@ -335,6 +401,8 @@ export async function rehearseRollback(input) {
   } catch (error) {
     rmSync(stage, { recursive: true, force: true });
     throw error;
+  } finally {
+    sourceDb.close();
   }
 }
 
