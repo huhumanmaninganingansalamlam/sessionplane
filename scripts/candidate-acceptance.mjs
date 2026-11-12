@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { compareCandidateSource } from './candidate-source-identity.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -26,6 +27,23 @@ if (status || branch !== 'dev' || !/^[a-f0-9]{40}$/.test(head)) {
   throw new Error('Acceptance requires committed clean dev candidate, never a WIP tree');
 }
 const sourceTree = exec('git', ['rev-parse', 'HEAD^{tree}'], 10_000).stdout.trim();
+const initial = { head, tree: sourceTree, branch, status };
+function captureSource() {
+  const read = args => {
+    const result = exec('git', args, 10_000);
+    if (result.status !== 0 || result.error !== null) {
+      throw new Error('Cannot verify git source during candidate acceptance');
+    }
+    return result.stdout.trim();
+  };
+  return {
+    head: read(['rev-parse', 'HEAD']),
+    tree: read(['rev-parse', 'HEAD^{tree}']),
+    branch: read(['branch', '--show-current']),
+    status: read(['status', '--porcelain']),
+  };
+}
+let sourceChangedDuringRun = null;
 const gates = [];
 const plan = [
   { name: 'typecheck', argv: ['run', 'typecheck'], timeoutMs: 90_000 },
@@ -76,9 +94,22 @@ for (const step of plan) {
       } catch { successful = false; gate.passed = false; gate.error = 'Package smoke receipt unparseable'; }
     } else { successful = false; gate.passed = false; gate.error = 'Missing package smoke receipt'; }
   }
+  const observed = captureSource();
+  const checkpoint = compareCandidateSource(initial, observed, {
+    sourceCommit: head, sourceTree, sourceState: 'clean',
+  });
+  if (!checkpoint.passed) {
+    successful = false;
+    sourceChangedDuringRun = { afterGate: gate.name, issues: checkpoint.issues,
+      currentHead: observed.head, currentTree: observed.tree,
+      dirty: observed.status !== '' };
+    gate.passed = false;
+    gate.error = 'Source changed during acceptance: ' + checkpoint.issues.join(', ');
+  }
   gates.push(gate);
   console.error(JSON.stringify({ gate: gate.name, passed: gate.passed,
-    assertions: gate.assertionsPassed, seconds: Number((gate.durationMs / 1000).toFixed(1)) }));
+    assertions: gate.assertionsPassed, seconds: Number((gate.durationMs / 1000).toFixed(1)),
+    ...(sourceChangedDuringRun ? { sourceChangedDuringRun } : {}) }));
   if (!gate.passed) break;
 }
 const identityFile = path.join(root, 'dist', 'build-identity.json');
@@ -87,11 +118,9 @@ if (existsSync(identityFile)) {
   try { buildIdentity = JSON.parse(readFileSync(identityFile, 'utf8')); }
   catch { successful = false; }
 }
-if (buildIdentity?.sourceCommit !== head ||
-    buildIdentity?.sourceTree !== sourceTree ||
-    buildIdentity?.sourceState !== 'clean') {
-  successful = false;
-}
+const finalSource = captureSource();
+const provenance = compareCandidateSource(initial, finalSource, buildIdentity);
+if (!provenance.passed) successful = false;
 let installedLive = null;
 if (liveReadonly) {
   const result = exec(process.execPath,
@@ -116,10 +145,12 @@ const report = {
   contract: 'sessionplane-candidate-acceptance-v1',
   evaluatedAt: new Date().toISOString(),
   source: { branch, head, tree: sourceTree,
-    buildMatchesCleanHead: buildIdentity?.sourceCommit === head &&
-      buildIdentity?.sourceTree === sourceTree &&
-      buildIdentity?.sourceState === 'clean' },
-  candidateL1L2L4Passed: successful,
+    currentHead: finalSource.head, currentTree: finalSource.tree,
+    currentWorktreeClean: finalSource.status === '',
+    buildMatchesCleanHead: provenance.passed,
+    sourceIssues: provenance.issues,
+    ...(sourceChangedDuringRun ? { sourceChangedDuringRun } : {}) },
+  candidateL1L2L4Passed: successful && provenance.passed,
   l3LiveCandidateTested: false,
   actualTwentyMinuteDueObserved: false,
   actualFourLiveProviderBackgroundProjectsProven: false,

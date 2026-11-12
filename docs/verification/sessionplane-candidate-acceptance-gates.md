@@ -51,3 +51,18 @@ A live Core with historical user work owns Chrome and SQLite at schema 8,
 while the dev candidate uses schema 15. Running a second Core on that
 profile/database is not a substitute for an authorized one-owner handover.
 The read-only preflight reports this mismatch, never a fake L3 pass.
+
+## Public SSH relay and concurrent-source-fence evidence
+
+The public project/task methods and MCP share exactly one Core when accessed
+through an SSH stdio relay. An isolated fake-SSH fixture checks that strict
+host-key and batch-mode arguments remain enabled, verifies idempotent
+project/start/cancel receipts across local, remote and MCP clients and after
+Core restart, and treats loss of an already-dispatched remote response as
+uncertain instead of creating another Task. No real SSH account was used.
+
+Acceptance now captures the initial committed HEAD/tree and compares them
+after **each** gate and again with the emitted build identity. Any concurrent
+commit, uncommitted tree mutation or build-source mismatch invalidates that
+run with explicit reason codes. All green tests cannot be attached to a
+source tree that changed during their execution.
