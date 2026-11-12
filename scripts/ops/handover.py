@@ -561,7 +561,7 @@ def schema_transition(manifest, current_schema):
         return None
     assert set(transition) == {'from', 'to'}, 'Schema transition contract is ambiguous'
     source, target = transition['from'], transition['to']
-    assert isinstance(source, int) and isinstance(target, int) and target > source >= 0
+    assert isinstance(source, int) and isinstance(target, int) and target >= source >= 0
     assert current_schema == source, 'Live schema differs from transition source'
     return source, target
 

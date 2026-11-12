@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { runLiveTaskAcceptance } from '../../scripts/live-task-acceptance.mjs';
+import { resolveLiveTaskAcceptanceTiming, runLiveTaskAcceptance } from '../../scripts/live-task-acceptance.mjs';
 
 const clientId = 'sessionplane-l3-test-owner';
 const projectKey = 'sessionplane-l3-test-project';
@@ -102,6 +102,17 @@ function options(dir: string, call: (method: string, params: any) => Promise<any
     phase, call, preflight, maxWaitMs: 1_000, waitMs: 0,
   };
 }
+
+test('CLI defaults resolve to a finite RPC timeout before the first live mutation', () => {
+  assert.deepEqual(resolveLiveTaskAcceptanceTiming({}), {
+    maxWaitMs: 120_000, waitMs: 15_000, rpcTimeoutMs: 20_000,
+  });
+  assert.deepEqual(resolveLiveTaskAcceptanceTiming({ waitMs: 0, maxWaitMs: 900_000 }), {
+    maxWaitMs: 900_000, waitMs: 0, rpcTimeoutMs: 10_000,
+  });
+  assert.throws(() => resolveLiveTaskAcceptanceTiming({ waitMs: Number.NaN }),
+    /Invalid bounded wait interval/);
+});
 
 test('incompatible installed Core prevents even project.open, not just provider submission', async () => {
   const f = makeFixture();

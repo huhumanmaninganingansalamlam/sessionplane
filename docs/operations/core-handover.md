@@ -21,6 +21,11 @@ unit is started after package and database promotion, so the successor is not an
 unmanaged background process. The successor must adopt the same Chrome PID,
 profile and CDP port.
 
+A later exact-package refresh may declare an equal source and target schema
+(for example 15 to 15). It still runs the same WAL-consistent copy, evidence-first
+rollback rehearsal, raw DB archive, systemd ownership and browser-adoption checks;
+it is not a shortcut around the handover contract.
+
 For a schema transition, a same-schema rollback is not assumed. Before the old
 Core is stopped, the staged candidate performs an actual WAL-consistent backup
 and migration of the live production database into a separate directory. It

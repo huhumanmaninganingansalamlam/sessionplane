@@ -770,6 +770,9 @@ class HandoverTests(unittest.TestCase):
     def test_schema_transition_is_explicit_and_database_promotion_archives_original_sidecars(self):
         self.assertEqual(handover.schema_transition(
             {'schemaTransition': {'from': 8, 'to': 15}}, 8), (8, 15))
+        self.assertEqual(handover.schema_transition(
+            {'schemaTransition': {'from': 15, 'to': 15}}, 15), (15, 15),
+            'An exact package refresh may reuse the evidence-first systemd path without a schema downgrade')
         with self.assertRaises(AssertionError):
             handover.schema_transition({'schemaTransition': {'from': 8, 'to': 15}}, 9)
         with tempfile.TemporaryDirectory() as directory:

@@ -265,6 +265,18 @@ async function acceptOneTask({ plan, state, index, call, receiptDir, limitMs, wa
   return { kind: 'completed', taskIndex: index + 1 };
 }
 
+export function resolveLiveTaskAcceptanceTiming(input = {}) {
+  const maxWaitMs = input.maxWaitMs ?? 120_000;
+  const waitMs = input.waitMs ?? 15_000;
+  if (!Number.isSafeInteger(maxWaitMs) || maxWaitMs < 0 || maxWaitMs > 900_000) {
+    throw new Error('Invalid bounded max wait');
+  }
+  if (!Number.isSafeInteger(waitMs) || waitMs < 0 || waitMs > 900_000) {
+    throw new Error('Invalid bounded wait interval');
+  }
+  return { maxWaitMs, waitMs, rpcTimeoutMs: Math.max(10_000, waitMs + 5_000) };
+}
+
 export async function runLiveTaskAcceptance(input) {
   assertAcceptanceIdentity(input);
   const compatibility = await (input.preflight ?? inspectLiveCandidate)({
@@ -286,9 +298,10 @@ export async function runLiveTaskAcceptance(input) {
   if (input.phase === 'resume' && state.projectId === null) {
     throw new Error('Resume requires the previously admitted acceptance project');
   }
+  const { maxWaitMs, waitMs, rpcTimeoutMs } = resolveLiveTaskAcceptanceTiming(input);
   const call = input.call ?? (async (method, params) => await callRpc({
     socketPath: input.socketPath, method, params,
-    timeoutMs: Math.max(10_000, input.waitMs + 5_000),
+    timeoutMs: rpcTimeoutMs,
     maxLineBytes: 8 * 1024 * 1024,
   }));
   if (state.projectId === null) {
@@ -307,8 +320,6 @@ export async function runLiveTaskAcceptance(input) {
     state.firstRevision = project.conversationRevision;
     saveState(input.receiptDir, state);
   }
-  const maxWaitMs = input.maxWaitMs ?? 120_000;
-  const waitMs = input.waitMs ?? 15_000;
   if (input.phase === 'start') {
     const result = await acceptOneTask({
       plan, state, index: 0, call, receiptDir: input.receiptDir,
