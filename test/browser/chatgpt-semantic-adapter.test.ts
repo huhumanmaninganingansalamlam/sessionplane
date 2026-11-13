@@ -92,6 +92,12 @@ test('a literal initial prompt 계속 is a submit, not an inferred continuation'
       '<button data-testid="send-button" onclick="window.sends++">Send</button></main>' +
       '<script>window.sends=0;</script>');
     const continuing = context(lease, 'original');
+    // Hidden owned tabs can lose renderer animation frames. Exercise the
+    // one-shot CDP hit-tested send without stealing foreground focus.
+    await page.evaluate(() => Object.defineProperty(document, 'visibilityState', {
+      configurable: true, get: () => 'hidden',
+    }));
+    assert.equal(await page.evaluate(() => document.visibilityState), 'hidden');
     const next = await adapter.observe(continuing);
     const continuation = next.actions.find(action => action.purpose === 'continue');
     assert.ok(continuation, 'the exact previously submitted turn can offer continue');

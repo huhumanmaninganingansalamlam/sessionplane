@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -54,9 +55,14 @@ test('exact Pro badge on a closed authenticated composer picker survives compose
       submittedUserMessageId: null, submittedUserTurnId: null,
       pageLease: identity, requiredModel: 'Pro',
     };
+    const rootPrompt = 'Exact one-time root question';
+    const rootSha256 = createHash('sha256').update(rootPrompt).digest('hex');
     const adapter = new ChatGptSemanticAdapter({
       isExactLease: actual => actual === identity,
       resolvePage: () => page,
+      isAuthorizedAttempt: input => input.purpose === 'submit' &&
+        input.attemptId === 'journaled-root-only' &&
+        input.contentSha256 === rootSha256,
     });
 
     const firstMenu = await inspectSemanticChatGptModelMenu(page);
@@ -73,7 +79,7 @@ test('exact Pro badge on a closed authenticated composer picker survives compose
     assert.equal(first.actions.some(action => action.purpose === 'submit'), false,
       'A blank editor must never be submitted');
 
-    await page.locator('#prompt-textarea').fill('Exact one-time root question');
+    await page.locator('#prompt-textarea').fill(rootPrompt);
     const second = await adapter.observe(context);
     assert.equal(second.verifiedModel, null);
     assert.equal(second.verifiedReasoningLevel, 'Pro',
@@ -81,8 +87,38 @@ test('exact Pro badge on a closed authenticated composer picker survives compose
     assert.ok(second.actions.some(action => action.purpose === 'submit'),
       'Exactly one prepared initial root may expose a submit choice');
     assert.equal(second.actions.filter(action => action.purpose === 'submit').length, 1);
-    assert.equal(await page.locator('#prompt-textarea').innerText(),
-      'Exact one-time root question');
+    assert.equal(await page.locator('#prompt-textarea').innerText(), rootPrompt);
+    await page.evaluate(() => {
+      (window as any).rootClicks = 0;
+      document.querySelector('[data-testid="send-button"]')!
+        .addEventListener('click', () => { (window as any).rootClicks++; });
+    });
+    // Headless Chromium does not reliably report hidden for background
+    // tabs. Force only the visibility predicate to exercise the production
+    // hidden-target branch; normal runtime never brings a tab forward.
+    await page.evaluate(() => Object.defineProperty(document, 'visibilityState', {
+      configurable: true, get: () => 'hidden',
+    }));
+    assert.equal(await page.evaluate(() => document.visibilityState), 'hidden');
+    const exactSubmit = second.actions.find(action => action.purpose === 'submit')!;
+    const dispatched = await adapter.act({
+      context, snapshotId: second.snapshotId,
+      actionRef: exactSubmit.actionRef, evidenceHash: exactSubmit.evidenceHash,
+      authorizedAttemptId: 'journaled-root-only',
+      expectedContentSha256: rootSha256,
+    });
+    assert.deepEqual(dispatched, {
+      kind: 'root_dispatched_unverified', effect: 'send', rootPosts: [],
+    }, 'a DOM click is not a provider ACK or canonical root POST');
+    assert.equal(await page.evaluate(() => (window as any).rootClicks), 1,
+      'one hidden-target pointer click, with no foreground activation');
+    assert.equal((await adapter.act({
+      context, snapshotId: second.snapshotId,
+      actionRef: exactSubmit.actionRef, evidenceHash: exactSubmit.evidenceHash,
+      authorizedAttemptId: 'journaled-root-only',
+      expectedContentSha256: rootSha256,
+    })).kind, 'stale', 'the exact root action cannot be replayed');
+    assert.equal(await page.evaluate(() => (window as any).rootClicks), 1);
   } finally {
     await owner.close();
     rmSync(dir, { recursive: true, force: true });

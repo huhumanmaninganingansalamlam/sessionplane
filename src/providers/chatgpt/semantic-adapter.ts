@@ -820,14 +820,18 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
             (await captureUi(page)).fingerprint !== fresh.fingerprint) {
             return 'stale' as const;
           }
-          requireExactMutationIdentity();
-          await button.click({ timeout: 5_000 });
+          const hiddenClick = await clickExactChatGptSend(
+            page, button, fresh.buttons[0]!, requireExactMutationIdentity);
+          // Hidden root composition may schedule its network POST after the
+          // CDP input is acknowledged. The watcher, not click success, is the
+          // only source of durable root dispatch evidence.
+          const settleMs = hiddenClick ? 1_800 : 350;
+          capturedAttempts = watch ? await watch.collect(settleMs) : [];
+          capturedRootPosts = rootWatch ? await rootWatch.collect(settleMs) : [];
         } finally {
           await editor.dispose();
           await button?.dispose();
         }
-        capturedAttempts = watch ? await watch.collect(350) : [];
-        capturedRootPosts = rootWatch ? await rootWatch.collect(350) : [];
       } finally {
         capturedAttempts = watch?.snapshot() ?? [];
         capturedRootPosts = rootWatch?.snapshot() ?? [];
@@ -1201,6 +1205,66 @@ async function exactControlReady(handle: ElementHandle<HTMLElement>,
       element.getAttribute('placeholder'), element.getAttribute('type'),
     ].join('|') === signature,
   expected.signature).catch(() => false);
+}
+
+/**
+ * Playwright's actionability click can stall in Chrome tabs that have never
+ * become foreground (the renderer may not paint another animation frame).
+ * Keep the normal visible-tab path unchanged. In a hidden owned target, use
+ * one CDP mouse click only after rechecking the originally pinned send button,
+ * its exact signature, live hit target, ownership and geometric position.
+ * A failed/ambiguous click is never retried here or by the Task kernel.
+ */
+async function clickExactChatGptSend(
+  page: Page, handle: ElementHandle<HTMLElement>, expected: Control,
+  beforeMutation: () => void,
+): Promise<boolean> {
+  const hidden = await page.evaluate(() => document.visibilityState === 'hidden');
+  if (!hidden) {
+    beforeMutation();
+    await handle.click({ timeout: 5_000 });
+    return false;
+  }
+  const point = await handle.evaluate((element, signature) => {
+    const actual = [
+      element.tagName.toLowerCase(), element.id, element.getAttribute('data-testid'),
+      element.getAttribute('role'), element.getAttribute('aria-label'),
+      element.getAttribute('placeholder'), element.getAttribute('type'),
+    ].join('|');
+    const rect = element.getBoundingClientRect();
+    const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+    const hit = document.elementFromPoint(x, y);
+    return element.isConnected && actual === signature &&
+      element.closest('main') !== null &&
+      element.closest('[aria-hidden="true"], [inert]') === null &&
+      !element.matches(':disabled, [aria-disabled="true"], [readonly]') &&
+      element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
+      rect.width > 0 && rect.height > 0 &&
+      Number.isFinite(x) && Number.isFinite(y) &&
+      x >= 0 && y >= 0 && x < innerWidth && y < innerHeight &&
+      (hit === element || element.contains(hit)) ? { x, y } : null;
+  }, expected.signature);
+  if (!point) throw new Error('Exact hidden send target failed hit test');
+  beforeMutation();
+  const stillPinned = await handle.evaluate((element, previous) => {
+    const actual = [
+      element.tagName.toLowerCase(), element.id, element.getAttribute('data-testid'),
+      element.getAttribute('role'), element.getAttribute('aria-label'),
+      element.getAttribute('placeholder'), element.getAttribute('type'),
+    ].join('|');
+    const rect = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(previous.x, previous.y);
+    return element.isConnected && actual === previous.signature &&
+      !element.matches(':disabled, [aria-disabled="true"], [readonly]') &&
+      element.closest('[aria-hidden="true"], [inert]') === null &&
+      Math.abs(rect.x + rect.width / 2 - previous.x) < 1 &&
+      Math.abs(rect.y + rect.height / 2 - previous.y) < 1 &&
+      (hit === element || element.contains(hit));
+  }, { ...point, signature: expected.signature });
+  if (!stillPinned) throw new Error('Hidden send target changed before input');
+  beforeMutation();
+  await page.mouse.click(point.x, point.y, { button: 'left', clickCount: 1 });
+  return true;
 }
 
 /** One exact root request before provider conversation binding. The POST
