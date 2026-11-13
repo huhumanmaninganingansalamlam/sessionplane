@@ -872,9 +872,13 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
       Object.defineProperty(document, 'visibilityState', {
         configurable: true, get: () => 'hidden',
       });
-      (window as any).radixTrustedOpens = 0;
+      (window as any).radixPointerDowns = 0;
+      (window as any).radixDomClicks = 0;
+      document.getElementById('radix-opener')!.addEventListener('pointerdown', event => {
+        if (event.button === 0 && event.pointerType === 'mouse') (window as any).radixPointerDowns++;
+      });
       document.getElementById('radix-opener')!.addEventListener('click', event => {
-        if (event.isTrusted) (window as any).radixTrustedOpens++;
+        if (!event.isTrusted) (window as any).radixDomClicks++;
       });
     });
     assert.equal((await adapter.act({ context: task, snapshotId: radixClosed.snapshotId,
@@ -887,8 +891,10 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     { kind: 'performed', effect: 'model_menu_opened' });
     assert.equal(await page.evaluate(() => (window as any).radixRootOpens), 1,
       'opening animation cannot cause a second root click');
-    assert.equal(await page.evaluate(() => (window as any).radixTrustedOpens), 1,
-      'Hidden composer action must deliver one trusted browser click');
+    assert.equal(await page.evaluate(() => (window as any).radixPointerDowns), 1,
+      'Hidden composer Radix opener needs one exact pointerdown');
+    assert.equal(await page.evaluate(() => (window as any).radixDomClicks), 1,
+      'The same exact opener must receive one DOM click');
     await page.evaluate(() => { Reflect.deleteProperty(document, 'visibilityState'); });
     const radixEffort = await adapter.observe(task);
     assert.equal(radixEffort.actions.some(a => a.purpose === 'choose_model'), false,

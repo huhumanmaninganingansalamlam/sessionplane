@@ -345,9 +345,9 @@ async function clickExactModelControl(
     if (!connected) throw new Error('Exact model control was replaced before click');
     // Playwright's actionability click waits for renderer animation frames.
     // A long-hidden provider tab may stop those frames entirely. For the
-    // uniquely identified composer opener or linked menu option only, use one
-    // trusted CDP mouse click after exact hit-test, evidence and lease checks.
-    // Never fall back after a timed-out click: its effect could be unknown.
+    // uniquely identified composer opener or linked menu option, dispatch the
+    // exact DOM event after hit-test, evidence and lease checks. CDP mouse
+    // input can be silently suppressed in inactive Chrome renderers.
     const hiddenComposer = expected.strategy === 'composer-radix' &&
       await page.evaluate(() => document.visibilityState === 'hidden');
     if (hiddenComposer) {
@@ -378,7 +378,25 @@ async function clickExactModelControl(
         return { x, y };
       }, { openerId: expectedOpenerId, menuId: expected.menuId });
       if (!point) throw new Error('Hidden model picker failed exact hit test');
-      await page.mouse.click(point.x, point.y, { button: 'left', clickCount: 1 });
+      await beforeMutation();
+      const final = await inspectSemanticChatGptModelMenu(page);
+      if (!final || final.evidenceHash !== expected.evidenceHash) {
+        throw new Error('Hidden model control changed before DOM event');
+      }
+      await handle.evaluate((element, openerId) => {
+        if (!element.isConnected || (openerId !== null &&
+            (element.id !== openerId || document.getElementById(openerId) !== element))) {
+          throw new Error('Exact model control changed before DOM event');
+        }
+        if (openerId !== null) {
+          // Radix dropdown triggers open on pointerdown, not click.
+          element.dispatchEvent(new PointerEvent('pointerdown', {
+            bubbles: true, cancelable: true, composed: true,
+            pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1,
+          }));
+        }
+        (element as HTMLElement).click();
+      }, expectedOpenerId);
     } else {
       await handle.click({ timeout: 5_000 });
     }
