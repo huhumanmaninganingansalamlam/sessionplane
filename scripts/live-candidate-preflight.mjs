@@ -130,6 +130,17 @@ async function readStructure(target, timeoutMs = 6000) {
 export function evaluateInstalledCandidate({ health, pages, targets, observations, candidate }) {
   const schema = migrations.at(-1)?.version ?? null;
   const blockers = [];
+  // An installed Core's commit label alone is not sufficient provenance:
+  // a stale/malformed build identity could carry that label with different
+  // compiled content. The exact 40-hex source tree is a separate required
+  // match, especially before authorizing a reviewed release candidate.
+  const sourceCommitKnown = /^[0-9a-f]{40}$/.test(candidate?.sourceCommit ?? '');
+  const sourceTreeKnown = /^[0-9a-f]{40}$/.test(candidate?.sourceTree ?? '');
+  const sourceTreeMatchesCandidate = sourceTreeKnown &&
+    candidate.sourceTree === health?.sourceTree;
+  const sourceMatchesCandidate = sourceCommitKnown && sourceTreeMatchesCandidate &&
+    health?.sourceCommit === candidate.sourceCommit &&
+    health?.sourceState === 'clean' && candidate.sourceState === 'clean';
   const browserOwnership = health?.browser?.ownership;
   if (health?.browser?.state !== 'ready' ||
       !['spawned', 'adopted'].includes(browserOwnership)) {
@@ -141,9 +152,7 @@ export function evaluateInstalledCandidate({ health, pages, targets, observation
   if (health?.version !== candidate?.version) {
     blockers.push('installed_core_version_differs_from_candidate');
   }
-  if (!candidate?.sourceCommit || candidate.sourceState !== 'clean' ||
-      !health?.sourceCommit || health.sourceCommit !== candidate.sourceCommit ||
-      health.sourceState !== 'clean') {
+  if (!sourceMatchesCandidate) {
     blockers.push('installed_core_source_not_verified_as_candidate');
   }
   const ready = observations.filter(item =>
@@ -157,8 +166,8 @@ export function evaluateInstalledCandidate({ health, pages, targets, observation
     installed: {
       version: health?.version ?? null,
       schemaVersion: health?.database?.schemaVersion ?? null,
-      sourceMatchesCandidate: health?.sourceCommit != null &&
-        health.sourceCommit === candidate?.sourceCommit,
+      sourceMatchesCandidate,
+      sourceTreeMatchesCandidate,
       browserReady: health?.browser?.state === 'ready',
       browserOwner: health?.browser?.ownership ?? null,
       trackedPageCount: Array.isArray(pages) ? pages.length : 0,
@@ -166,7 +175,8 @@ export function evaluateInstalledCandidate({ health, pages, targets, observation
     candidate: {
       version: candidate?.version ?? null,
       schemaVersion: schema,
-      sourceCommitKnown: typeof candidate?.sourceCommit === 'string',
+      sourceCommitKnown,
+      sourceTreeKnown,
       clean: candidate?.sourceState === 'clean',
     },
     chrome: {

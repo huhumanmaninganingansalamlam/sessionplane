@@ -6,9 +6,10 @@ import {
 } from '../../scripts/live-candidate-preflight.mjs';
 
 const sha = 'a'.repeat(40);
-const candidate = { version: '0.4.93', sourceCommit: sha, sourceState: 'clean' };
+const tree = 'b'.repeat(40);
+const candidate = { version: '0.4.93', sourceCommit: sha, sourceTree: tree, sourceState: 'clean' };
 const health = {
-  version: '0.4.93', sourceCommit: sha, sourceState: 'clean',
+  version: '0.4.93', sourceCommit: sha, sourceTree: tree, sourceState: 'clean',
   browser: { state: 'ready', ownership: 'spawned', debuggingPort: 43865 },
   database: { schemaVersion: 15 },
 };
@@ -58,6 +59,22 @@ test('an exact successor that adopted the preserved browser is a valid live cand
   assert.equal(report.outcome.candidateMatchesLiveCore, true);
   assert.deepEqual(report.outcome.blockers, []);
   assert.equal(report.installed.browserOwner, 'adopted');
+});
+
+test('live preflight fails closed on mismatched or missing source tree despite matching version and commit', () => {
+  for (const badTree of ['c'.repeat(40), undefined, null]) {
+    const report = evaluateInstalledCandidate({
+      health: { ...health, sourceTree: badTree },
+      pages: [{ state: 'owned' }], targets,
+      observations: [{ kind: 'conversation', readyState: 'complete',
+        composerPresent: true, composerEditable: true, modelProVisible: true }],
+      candidate,
+    });
+    assert.equal(report.outcome.candidateMatchesLiveCore, false,
+      'A matching git commit label cannot substitute for exact source tree identity');
+    assert.ok(report.outcome.blockers.includes('installed_core_source_not_verified_as_candidate'));
+    assert.equal(report.installed.sourceMatchesCandidate, false);
+  }
 });
 
 test('matching Core and Pro composer are compatible but a preflight never submits', () => {
