@@ -87,7 +87,7 @@ rather than automatically resubmitted.
 
 Tagged release instructions use the matching package version:
 
-VERSION=0.4.93
+VERSION=0.4.94
     npm install -g ./sessionplane-$VERSION.tgz
     sessplane doctor --json
 
