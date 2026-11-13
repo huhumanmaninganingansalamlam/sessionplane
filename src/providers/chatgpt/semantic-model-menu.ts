@@ -570,7 +570,7 @@ export async function selectExactChatGptProReasoningLevel(
   if (!pinnedTick) throw new Error('Exact Power tick disappeared');
   // Report only the bounded stage, never provider DOM text, URL or prompt.
   // The dispatch stage remains uncertain even if the command throws.
-  let phase: 'pre_click' | 'trusted_click' | 'post_click_verify' = 'pre_click';
+  let phase: 'pre_click' | 'exact_click' | 'post_click_verify' = 'pre_click';
   try {
     await beforeMutation();
     const current = await inspectSemanticChatGptModelMenu(page);
@@ -585,7 +585,9 @@ export async function selectExactChatGptProReasoningLevel(
           menu.getAttribute('role') !== 'menu' ||
           menu.getAttribute('data-state') !== 'open' ||
           menu.getAttribute('aria-labelledby') !== openerId ||
-          menu.querySelector('[data-model-picker-view="advanced"]') === null) return null;
+          menu.querySelectorAll(
+            '[data-model-picker-view="simple"], [data-model-picker-view="advanced"]',
+          ).length !== 1) return null;
       const controls = [...menu.querySelectorAll<HTMLElement>(
         '[role="menuitem"][aria-label="파워"][data-reasoning-slider="true"]')]
         .filter(item => item.closest('[role="menu"]') === menu &&
@@ -629,7 +631,7 @@ export async function selectExactChatGptProReasoningLevel(
     await beforeMutation();
     const last = await inspectSemanticChatGptModelMenu(page);
     if (!last || last.evidenceHash !== expectedHash) {
-      throw new Error('Power choice changed before one trusted click');
+      throw new Error('Power choice changed before one exact click');
     }
     // Reconfirm the original exact DOM tick, geometry and hit-test after
     // authorization I/O. A same-looking replacement cannot inherit this click.
@@ -644,9 +646,29 @@ export async function selectExactChatGptProReasoningLevel(
         Math.abs(bounds.y + bounds.height / 2 - pos.y) < 1 &&
         (hit === tick || tick.contains(hit));
     }, { ...point, menuId: expected.menuId });
-    if (!pinnedValid) throw new Error('Power target replaced before trusted click');
-    phase = 'trusted_click';
-    await page.mouse.click(point.x, point.y, { button: 'left', clickCount: 1 });
+    if (!pinnedValid) throw new Error('Power target replaced before exact click');
+    phase = 'exact_click';
+    if (await page.evaluate(() => document.visibilityState === 'hidden')) {
+      // A hidden renderer can suppress trusted CDP mouse input. Deliver one
+      // exact-position DOM click to the already pinned, hit-tested Pro tick.
+      // Never try the CDP path afterwards: its outcome would be ambiguous.
+      await pinnedTick.evaluate((tick, pos) => {
+        const bounds = tick.getBoundingClientRect();
+        const hit = document.elementFromPoint(pos.x, pos.y);
+        if (!tick.isConnected || tick.getAttribute('data-selected') !== 'false' ||
+            Math.abs(bounds.x + bounds.width / 2 - pos.x) >= 1 ||
+            Math.abs(bounds.y + bounds.height / 2 - pos.y) >= 1 ||
+            !(hit === tick || tick.contains(hit))) {
+          throw new Error('Exact hidden Power tick changed before DOM event');
+        }
+        tick.dispatchEvent(new MouseEvent('click', {
+          bubbles: true, cancelable: true, composed: true,
+          button: 0, clientX: pos.x, clientY: pos.y,
+        }));
+      }, point);
+    } else {
+      await page.mouse.click(point.x, point.y, { button: 'left', clickCount: 1 });
+    }
     phase = 'post_click_verify';
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
