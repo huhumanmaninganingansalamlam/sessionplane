@@ -661,6 +661,19 @@ export async function selectExactChatGptProReasoningLevel(
             !(hit === tick || tick.contains(hit))) {
           throw new Error('Exact hidden Power tick changed before DOM event');
         }
+        // The Power slider selects a value on pointer input. Its click
+        // handler alone does not update the requested reasoning level.
+        // Dispatch exactly one pointer gesture to the pinned, verified tick.
+        tick.dispatchEvent(new PointerEvent('pointerdown', {
+          bubbles: true, cancelable: true, composed: true,
+          pointerType: 'mouse', isPrimary: true, pointerId: 1,
+          button: 0, buttons: 1, clientX: pos.x, clientY: pos.y,
+        }));
+        tick.dispatchEvent(new PointerEvent('pointerup', {
+          bubbles: true, cancelable: true, composed: true,
+          pointerType: 'mouse', isPrimary: true, pointerId: 1,
+          button: 0, buttons: 0, clientX: pos.x, clientY: pos.y,
+        }));
         tick.dispatchEvent(new MouseEvent('click', {
           bubbles: true, cancelable: true, composed: true,
           button: 0, clientX: pos.x, clientY: pos.y,
