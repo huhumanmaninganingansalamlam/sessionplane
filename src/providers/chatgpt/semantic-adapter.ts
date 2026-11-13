@@ -1208,12 +1208,12 @@ async function exactControlReady(handle: ElementHandle<HTMLElement>,
 }
 
 /**
- * Playwright's actionability click can stall in Chrome tabs that have never
- * become foreground (the renderer may not paint another animation frame).
- * Keep the normal visible-tab path unchanged. In a hidden owned target, use
- * one CDP mouse click only after rechecking the originally pinned send button,
- * its exact signature, live hit target, ownership and geometric position.
- * A failed/ambiguous click is never retried here or by the Task kernel.
+ * Headed Chrome can suppress CDP Input mouse and key events on a background
+ * tab even when its DOM send button remains visible, enabled and hit-testable.
+ * Keep normal visible-tab Playwright clicks unchanged. In the exact hidden
+ * owned target, dispatch one native DOM button click (which reaches React's
+ * composer/form handler) after rechecking the pinned control, hit target and
+ * lease. Never retry an ambiguous action or equate a click with provider POST.
  */
 async function clickExactChatGptSend(
   page: Page, handle: ElementHandle<HTMLElement>, expected: Control,
@@ -1263,7 +1263,17 @@ async function clickExactChatGptSend(
   }, { ...point, signature: expected.signature });
   if (!stillPinned) throw new Error('Hidden send target changed before input');
   beforeMutation();
-  await page.mouse.click(point.x, point.y, { button: 'left', clickCount: 1 });
+  // A CDP Input.dispatchMouseEvent can be silently ignored by the inactive
+  // renderer. HTMLElement.click() dispatches the *same exact button's* click
+  // inside its DOM, including the browser's native submit event for a form.
+  // This may be untrusted to the provider. The caller still requires one
+  // independently witnessed canonical POST; it never retries this invocation.
+  await handle.evaluate(element => {
+    if (!element.isConnected || element.matches(':disabled, [aria-disabled="true"]')) {
+      throw new Error('Exact hidden submit control changed');
+    }
+    element.click();
+  });
   return true;
 }
 

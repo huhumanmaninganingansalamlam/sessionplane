@@ -44,6 +44,23 @@ test('exact Pro badge on a closed authenticated composer picker survives compose
       body: fixtureDocument('추론 수준<br>Pro'),
     }));
     await page.goto('https://chatgpt.com/');
+    // Keep the existing composer but give Send its native form-submit path,
+    // as on the real provider root. Event bodies remain inside this fixture.
+    await page.evaluate(() => {
+      (window as any).rootClicks = 0;
+      (window as any).rootFormSubmits = 0;
+      const section = document.querySelector('[data-chatgpt-composer]')!;
+      const form = document.createElement('form');
+      while (section.firstChild) form.append(section.firstChild);
+      section.append(form);
+      const send = form.querySelector<HTMLButtonElement>('[data-testid="send-button"]')!;
+      send.type = 'submit';
+      send.addEventListener('click', () => { (window as any).rootClicks++; });
+      form.addEventListener('submit', event => {
+        event.preventDefault();
+        (window as any).rootFormSubmits++;
+      });
+    });
     const identity = {
       projectId: 'own-project', slotId: 'main', slotRevision: 1,
       taskId: 'own-initial', pageKey: binding.pageKey,
@@ -88,11 +105,7 @@ test('exact Pro badge on a closed authenticated composer picker survives compose
       'Exactly one prepared initial root may expose a submit choice');
     assert.equal(second.actions.filter(action => action.purpose === 'submit').length, 1);
     assert.equal(await page.locator('#prompt-textarea').innerText(), rootPrompt);
-    await page.evaluate(() => {
-      (window as any).rootClicks = 0;
-      document.querySelector('[data-testid="send-button"]')!
-        .addEventListener('click', () => { (window as any).rootClicks++; });
-    });
+
     // Headless Chromium does not reliably report hidden for background
     // tabs. Force only the visibility predicate to exercise the production
     // hidden-target branch; normal runtime never brings a tab forward.
@@ -111,7 +124,9 @@ test('exact Pro badge on a closed authenticated composer picker survives compose
       kind: 'root_dispatched_unverified', effect: 'send', rootPosts: [],
     }, 'a DOM click is not a provider ACK or canonical root POST');
     assert.equal(await page.evaluate(() => (window as any).rootClicks), 1,
-      'one hidden-target pointer click, with no foreground activation');
+      'one exact hidden-target DOM click, without foreground activation');
+    assert.equal(await page.evaluate(() => (window as any).rootFormSubmits), 1,
+      'the native form submission path must be reached exactly once');
     assert.equal((await adapter.act({
       context, snapshotId: second.snapshotId,
       actionRef: exactSubmit.actionRef, evidenceHash: exactSubmit.evidenceHash,
