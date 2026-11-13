@@ -20,7 +20,7 @@ const MANIFEST: SemanticCapabilityManifest = {
   supports: ['conversation', 'question', 'permission', 'model_choice'],
 };
 
-type Mode = 'question' | 'free_text' | 'model' | 'power' | 'model-unready' | 'page_race' | 'permission' |
+type Mode = 'question' | 'free_text' | 'model' | 'model-verified' | 'power' | 'model-unready' | 'page_race' | 'permission' |
   'human' | 'oversized' | 'none';
 
 class FakeSemanticAdapter implements SemanticProviderAdapter {
@@ -32,6 +32,7 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
   clicks = 0;
   currentActionRef: string | null = null;
   throwAfterConsume = false;
+  expiresOffsetMs = 120_000;
   holdAction: Promise<void> | null = null;
 
   constructor(store: TaskKernelRepository) { this.store = store; }
@@ -43,7 +44,8 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
     const blocker = this.mode === 'page_race' ? 'unsupported'
       : this.mode === 'permission' ? 'provider_permission'
       : this.mode === 'human' ? 'human_verification'
-        : this.mode === 'none' || this.mode === 'model' || this.mode === 'power' ||
+        : this.mode === 'none' || this.mode === 'model' ||
+          this.mode === 'model-verified' || this.mode === 'power' ||
           this.mode === 'model-unready' ? 'none'
           : 'provider_question';
     const action = this.mode === 'question' || this.mode === 'free_text' ||
@@ -60,7 +62,7 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
             { value: 'Proceed', enabled: true }, { value: 'Decline', enabled: false },
           ] },
         evidenceHash: 'evidence-' + this.observed,
-        expiresAt: new Date(Date.now() + 120_000).toISOString(),
+        expiresAt: new Date(Date.now() + this.expiresOffsetMs).toISOString(),
       }] : [];
     return {
       providerKey: this.providerKey, surface: 'chat',
@@ -83,7 +85,9 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
         argumentsSummary: null, detailState: 'redacted', evidenceHash: 'permission-hash',
         canGrant: false,
       } : null,
-      actions: action, evidenceBytes: 500,
+      actions: action,
+      verifiedModel: this.mode === 'model-verified' ? 'Pro' : null,
+      evidenceBytes: 500,
     };
   }
 
@@ -120,7 +124,7 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
   }
 }
 
-function fixture(t: TestContext) {
+function fixture(t: TestContext, options: { plannedInitial?: boolean; requiredModel?: string } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'sessionplane-agent-gateway-'));
   const file = join(dir, 'state.sqlite');
   let db = SessionPlaneDatabase.open(file);
@@ -138,13 +142,21 @@ function fixture(t: TestContext) {
     providerConversationId: 'conv-1' });
   store.planAttempt({ taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
     kind: 'initial', turnKey: 'root', content: 'Provider question prompt' });
-  store.beginDispatch('task-1', 'alice', 'initial-1');
-  store.acknowledgeAttempt({ taskId: 'task-1', clientId: 'alice',
-    attemptId: 'initial-1', externalTurnId: 'turn-1' });
+  if (options.plannedInitial !== true) {
+    store.beginDispatch('task-1', 'alice', 'initial-1');
+    store.acknowledgeAttempt({ taskId: 'task-1', clientId: 'alice',
+      attemptId: 'initial-1', externalTurnId: 'turn-1' });
+  }
   const context: SemanticTaskContext = {
     projectId: 'project', slotId: 'main', slotRevision: 1, taskId: 'task-1',
-    providerConversationId: 'conv-1', submittedUserMessageId: 'user-1',
-    submittedUserTurnId: 'turn-1', pageLease: null,
+    providerConversationId: 'conv-1',
+    submittedUserMessageId: options.plannedInitial ? null : 'user-1',
+    submittedUserTurnId: options.plannedInitial ? null : 'turn-1',
+    pageLease: options.plannedInitial ? {
+      projectId: 'project', slotId: 'main', slotRevision: 1, taskId: 'task-1',
+      pageKey: 'fixture-owned-page', targetId: 'fixture-owned-target', bindingEpoch: 1,
+    } : null,
+    ...(options.requiredModel ? { requiredModel: options.requiredModel } : {}),
   };
   const getGateway = (adapter: FakeSemanticAdapter) => new SemanticDecisionGateway({
     repository: store, providers: new SemanticProviderRegistry([adapter]),
@@ -604,6 +616,92 @@ test('a legacy pending Power packet cannot bypass the uncertain-effect barrier v
   assert.equal(refreshed?.reason, 'reasoning-effort-previous-action-uncertain');
   assert.deepEqual(refreshed?.options, [], 'read-only refresh cannot grant another Power click');
   assert.equal(adapter.clicks, 1);
+});
+
+test('read-only refresh clears a stale model chooser after exact external selection without a new click', async t => {
+  const env = fixture(t, { plannedInitial: true, requiredModel: 'Pro' });
+  const adapter = new FakeSemanticAdapter(env.store);
+  adapter.mode = 'model';
+  adapter.expiresOffsetMs = -1_000;
+  const gateway = env.getGateway(adapter);
+  const original = (await gateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    modelChoice: true, modelIntent: 'Pro',
+  }))!;
+  assert.equal(original.kind, 'model_choice');
+  assert.equal(original.options[0]?.purpose, 'open_model_chooser');
+  adapter.mode = 'model-verified'; // External user changed the UI; no Core click.
+  const input = {
+    taskId: 'task-1', clientId: 'alice',
+    decisionId: original.decisionId, requestId: 'read-only-external-model',
+  };
+  assert.deepEqual(await gateway.refreshCurrent(input),
+    { kind: 'refresh_required', packet: null });
+  const after = env.store.getFullTask('task-1', 'alice');
+  assert.equal(after.task.pendingDecisionId, null);
+  assert.equal(after.task.state, 'working');
+  assert.equal(after.attempts[0]?.state, 'planned');
+  assert.equal(adapter.clicks, 0);
+  assert.deepEqual(await gateway.refreshCurrent(input),
+    { kind: 'refresh_required', packet: null },
+    'idempotent replay must not create another model packet when Pro is verified');
+  assert.equal(env.store.getFullTask('task-1', 'alice').decisions.length, 1);
+});
+
+test('historically uncertain Power choice can be reconciled only by current exact external Pro evidence', async t => {
+  const env = fixture(t, { plannedInitial: true, requiredModel: 'Pro' });
+  const adapter = new FakeSemanticAdapter(env.store);
+  adapter.mode = 'power';
+  adapter.throwAfterConsume = true;
+  const gateway = env.getGateway(adapter);
+  const original = (await gateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    modelChoice: true, modelIntent: 'Pro',
+  }))!;
+  assert.equal(original.options[0]?.purpose, 'choose_reasoning_effort');
+  const first = await gateway.decideCurrent({
+    taskId: 'task-1', clientId: 'alice',
+    decisionId: original.decisionId, requestId: 'one-uncertain-power',
+    actionRef: original.options[0]!.actionRef,
+  });
+  assert.equal(first.kind, 'uncertain');
+  assert.equal(adapter.clicks, 1);
+  // A new Core process must reconstruct the barrier from SQLite, not from
+  // the adapter's volatile action-ref cache or a surviving agent session.
+  env.reopen();
+  const restartedAdapter = new FakeSemanticAdapter(env.store);
+  restartedAdapter.mode = 'power';
+  const restartedGateway = env.getGateway(restartedAdapter);
+  const blocked = (await restartedGateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    modelChoice: true, modelIntent: 'Pro',
+  }))!;
+  assert.equal(blocked.reason, 'reasoning-effort-previous-action-uncertain');
+  assert.deepEqual(blocked.options, []);
+  const request = { taskId: 'task-1', clientId: 'alice',
+    decisionId: blocked.decisionId, requestId: 'read-only-review-pro' };
+  // First refresh without verified Pro retains the durable barrier.
+  const noPro = await restartedGateway.refreshCurrent(request);
+  assert.equal(noPro.kind, 'refresh_required');
+  assert.equal(noPro.packet?.reason, 'reasoning-effort-previous-action-uncertain');
+  assert.deepEqual(noPro.packet?.options, []);
+  assert.equal(adapter.clicks, 1);
+  // A separate later read-only refresh observes the user's external Pro
+  // selection; it never replays the historically uncertain Power click.
+  restartedAdapter.mode = 'model-verified';
+  const reconcile = { taskId: 'task-1', clientId: 'alice',
+    decisionId: noPro.packet!.decisionId, requestId: 'read-only-now-exact-pro' };
+  assert.deepEqual(await restartedGateway.refreshCurrent(reconcile),
+    { kind: 'refresh_required', packet: null });
+  assert.deepEqual(await restartedGateway.refreshCurrent(reconcile),
+    { kind: 'refresh_required', packet: null });
+  const after = env.store.getFullTask('task-1', 'alice');
+  assert.equal(after.task.pendingDecisionId, null);
+  assert.equal(after.task.state, 'working');
+  assert.equal(after.attempts[0]?.state, 'planned');
+  assert.equal(adapter.clicks, 1, "historical Core's one uncertain click remains the only click");
+  assert.equal(restartedAdapter.clicks, 0,
+    'read-only restart/reconciliation may not execute any new provider click');
 });
 
 test('a changed unconsumed provider action yields exactly one fresh durable packet', async t => {

@@ -395,6 +395,20 @@ export class SemanticDecisionGateway {
       resolutionJson: JSON.stringify({ kind: 'read_only_refresh',
         ...(input.requestId ? { requestId: input.requestId } : {}) }),
     });
+    if (requestedModel && original.packet.kind === 'model_choice') {
+      // An externally selected, exact model/effort can clear a stale pending
+      // chooser without replaying a prior uncertain pointer click. This does
+      // not approve a send: the Core dispatch port will independently observe
+      // the model again before spending the originally planned attempt.
+      try {
+        if (await this.verifyModelIntent({
+          taskId: input.taskId, clientId: input.clientId,
+          attemptId: input.attemptId, modelIntent: requestedModel,
+        })) return null;
+      } catch { /* Fall back to a fresh blocked read-only packet. */ }
+      const existing = this.get(input.taskId, input.clientId);
+      if (existing !== null) return existing;
+    }
     return await this.inspect({ taskId: input.taskId, clientId: input.clientId,
       attemptId: input.attemptId,
       modelChoice: original.packet.kind === 'model_choice' || input.modelChoice === true,
@@ -438,15 +452,26 @@ export class SemanticDecisionGateway {
       }
       // A crash after the durable receipt but before reinspection cannot strand
       // this Task. A replay can only observe, never perform a provider action.
-      const next = this.get(input.taskId, input.clientId) ??
-        (full.task.state === 'working' && !full.task.cancelRequested &&
-         originalAttempt.state === 'planned' ? await this.inspect({
+      let next = this.get(input.taskId, input.clientId);
+      if (next === null && full.task.state === 'working' &&
+          !full.task.cancelRequested && originalAttempt.state === 'planned') {
+        if (original.packet.kind === 'model_choice' && original.packet.requestedModel) {
+          try {
+            if (await this.verifyModelIntent({
+              taskId: input.taskId, clientId: input.clientId,
+              attemptId: original.attemptId, modelIntent: original.packet.requestedModel,
+            })) return { kind: 'refresh_required', packet: null };
+          } catch { /* Fall through to read-only inspection. */ }
+          next = this.get(input.taskId, input.clientId);
+        }
+        if (next === null) next = await this.inspect({
           taskId: input.taskId, clientId: input.clientId, attemptId: original.attemptId,
           modelChoice: original.packet.kind === 'model_choice' || transientModelRace,
           ...(original.packet.requestedModel || (transientModelRace ? original.context.requiredModel : null)
             ? { modelIntent: (original.packet.requestedModel ??
               original.context.requiredModel)! } : {}),
-        }) : null);
+        });
+      }
       return { kind: 'refresh_required', packet: next };
     }
     const packet = original.packet;
