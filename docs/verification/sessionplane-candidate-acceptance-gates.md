@@ -10,6 +10,28 @@ reproducible tarball SHA-256 and the actual test counts and output hashes.
 Timeout, dirty source, incorrect package hash or failing gate is a failure.
 L1/L2/L4 candidate pass does not grant L3 or release approval.
 
+## Current status — 2026-11-14 (separate source identities)
+
+- The installed Core source `889db8f1` (schema 15) has real-account
+  canonical evidence: one Main conversation with three exact FINALs, four
+  independent background project conversations with each original POST once,
+  exact ACK and raw byte/SHA-verified FINAL, and one permitted literal
+  `계속` after a measured 20-minute due with its own ACK and FINAL.
+  The next due was observed before one-shot local cancellation; provider
+  Stop was unverified, so P1's public state remains uncertain.
+- The newer **dev** candidate is version `0.4.94`. It is *not* the source
+  deployed for that L3 run; candidate HEAD/tree/package evidence is separate.
+- A single candidate test run timed out at the previous Chromium 180-second
+  limit under extreme host load; a separate bounded run passed all 16 cases.
+  The failed run remains in its receipt. The candidate runner now uses finite
+  gate-specific limits and captures bounded failure output tails and hashes.
+- Reviewed dev-to-main PR, unique main artifact, approved maintenance cutover,
+  post-install checks and final release decision are still separate gates.
+  L3 alone does not authorize publishing or replacing the shared Core.
+
+Historical snapshots below record earlier source/runtime states. Their
+2026-11-12 pending entries are not a current verdict for E05/E07/E19.
+
 ## Proven in supported isolation
 
 - Six public Core/MCP tools, stable idempotency, cancellation receipt and
@@ -36,7 +58,7 @@ HTTP 429 deferral read-only; the dev Core did not send those prompts.
 
 Full details: sessionplane-l3-real-2026-11-12.md.
 
-## Still pending before any new-runtime release assertion
+## Historical pending list (2026-11-12 snapshot; updated above)
 
 | Gate | Exact missing proof |
 | --- | --- |
@@ -47,10 +69,9 @@ Full details: sessionplane-l3-real-2026-11-12.md.
 | X03/X04, retained scope | Retained SSH, role, extra provider and artifact verification against approved requirements |
 | Release L4 | Reviewed main version, checked external package receipt, single writer cutover and rollback |
 
-A live Core with historical user work owns Chrome and SQLite at schema 8,
-while the dev candidate uses schema 15. Running a second Core on that
-profile/database is not a substitute for an authorized one-owner handover.
-The read-only preflight reports this mismatch, never a fake L3 pass.
+On 2026-11-12, the live Core used schema 8 while the dev candidate used
+schema 15. It has since undergone a controlled schema-15 handover. A second
+Core/profile remains prohibited; source mismatch is not L3 evidence.
 
 ## Public SSH relay and concurrent-source-fence evidence
 

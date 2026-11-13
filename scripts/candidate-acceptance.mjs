@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareCandidateSource } from './candidate-source-identity.mjs';
+import { candidateGatePlan, candidateGateFailureSummary } from './candidate-acceptance-policy.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -45,18 +46,7 @@ function captureSource() {
 }
 let sourceChangedDuringRun = null;
 const gates = [];
-const plan = [
-  { name: 'typecheck', argv: ['run', 'typecheck'], timeoutMs: 90_000 },
-  { name: 'public-core-ci', argv: ['run', 'test:ci'], timeoutMs: 150_000 },
-  { name: 'chromium-composition', argv: ['run', 'test:browser'], timeoutMs: 180_000 },
-  { name: 'four-background-tabs', argv: ['run', 'test:background-l2'], timeoutMs: 90_000 },
-  { name: 'browser-transport-comparison', argv: ['run', 'test:browser-transport-l2'], timeoutMs: 90_000 },
-  { name: 'semantic-adapter', command: process.execPath,
-    argv: ['--test', '--test-concurrency=1', '--experimental-strip-types',
-      'test/browser/chatgpt-semantic-adapter.test.ts'], timeoutMs: 180_000 },
-  { name: 'clean-build', argv: ['run', 'build'], timeoutMs: 90_000 },
-  { name: 'installed-tarball-core', argv: ['run', 'test:package'], timeoutMs: 120_000 },
-];
+const plan = candidateGatePlan(process.execPath);
 let successful = true;
 let packageSha256 = null;
 for (const step of plan) {
@@ -75,10 +65,14 @@ for (const step of plan) {
     assertionsPassed: passed ? Number(passed[1]) : null,
     assertionsFailed: failed ? Number(failed[1]) : null,
     skipped: skipped ? Number(skipped[1]) : null,
+    timeoutMs: step.timeoutMs,
     stdoutSha256: createHash('sha256').update(result.stdout).digest('hex'),
+    stderrSha256: createHash('sha256').update(result.stderr).digest('hex'),
   };
   if (!gate.passed) {
-    gate.error = (result.error ?? result.stderr ?? result.stdout).slice(-1000);
+    gate.error = candidateGateFailureSummary(result);
+    if (result.errorCode) gate.errorCode = result.errorCode;
+    if (result.signal) gate.signal = result.signal;
     successful = false;
   }
   if (step.name === 'installed-tarball-core' && gate.passed) {
@@ -169,5 +163,6 @@ function exec(command, argv, timeoutMs) {
     timeout: timeoutMs, maxBuffer: 12 * 1024 * 1024,
   });
   return { stdout: run.stdout ?? '', stderr: run.stderr ?? '',
-    status: run.status, error: run.error?.message ?? null };
+    status: run.status, signal: run.signal ?? null,
+    error: run.error?.message ?? null, errorCode: run.error?.code ?? null };
 }
