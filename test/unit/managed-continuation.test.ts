@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -317,6 +318,61 @@ test('Core drives one planned public initial send after exact bound conversation
     'Core also observes exact FINAL for the public standalone task');
   await service.tick();
   assert.equal(env.fake.sends.length, 1, 'completed public initial never resubmits');
+});
+
+test('Core recovers journaled public ACK after restart without another send', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  env.seedPublicPolicy('task-a');
+  env.startTask('no-evidence', 'review');
+  env.seedPublicPolicy('no-evidence');
+  env.fake.sendOnce = async intent => {
+    env.fake.sends.push(intent);
+    if (intent.taskId === 'task-a') {
+      env.store.recordDispatchEvidence({
+        taskId: intent.taskId, clientId: 'alice', attemptId: intent.attemptId,
+        evidence: {
+          conversationId: intent.providerConversationId!,
+          messageId: 'exact-user', parentMessageId: 'previous-final',
+          textHash: createHash('sha256').update(intent.content).digest('hex'),
+          observedAt: new Date(env.now).toISOString(),
+        },
+      });
+    }
+    return { kind: 'uncertain', reason: 'canonical-ack-still-unverified' };
+  };
+  await env.kernel.dispatch('task-a', 'alice', 'initial:task-a');
+  await env.kernel.dispatch('no-evidence', 'alice', 'initial:no-evidence');
+  env.reopen();
+
+  const recovered: string[] = [];
+  let ackReady = false;
+  env.fake.recoverAck = async query => {
+    recovered.push(query.attemptId);
+    return ackReady
+      ? { kind: 'verified_ack', externalTurnId: 'exact-delayed-turn' }
+      : { kind: 'pending', reason: 'backend-read-paced' };
+  };
+  const service = env.createService();
+  await service.tick();
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'uncertain');
+  assert.deepEqual(recovered, ['initial:task-a'],
+    'missing POST evidence is never inferred from an uncertain state');
+  ackReady = true;
+  await service.tick();
+  const exact = env.store.getFullTask('task-a', 'alice');
+  assert.equal(exact.task.state, 'completed');
+  assert.equal(exact.attempts[0]!.externalTurnId, 'exact-delayed-turn');
+  assert.equal(exact.results[0]!.answerText, 'Exact final for initial:task-a');
+  assert.equal(exact.attempts.length, 1);
+  assert.equal(env.store.getTask('no-evidence', 'alice').state, 'uncertain');
+  assert.equal(env.fake.sends.filter(send => send.taskId === 'task-a').length, 1,
+    'read-only ACK recovery cannot resend the existing prompt');
+  assert.equal(env.fake.sends.length, 2);
+  await service.tick();
+  assert.deepEqual(recovered, ['initial:task-a', 'initial:task-a'],
+    'completed work and evidence-free attempts are excluded');
+  await service.close();
 });
 
 test('Core public initial scanner never dispatches canceled public work', async t => {

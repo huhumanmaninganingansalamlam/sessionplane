@@ -1553,6 +1553,40 @@ export class TaskKernelRepository {
     }>;
   }
 
+  /** Non-root POSTs with exact durable provenance await read-only ACK recovery.
+   * The active immutable binding and latest attempt must still own the turn.
+   */
+  listPendingPublicAcknowledgements(limit = 16): readonly {
+    taskId: string; clientId: string; attemptId: string;
+  }[] {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error('Invalid public acknowledgement scan limit');
+    }
+    return this.#database.raw.prepare(
+      `SELECT t.task_id AS taskId,t.client_id AS clientId,a.attempt_id AS attemptId
+        FROM kernel_tasks t
+        JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+        JOIN kernel_attempts a ON a.task_id=t.task_id
+        JOIN kernel_dispatch_evidence e ON e.attempt_id=a.attempt_id AND e.task_id=t.task_id
+        JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
+          AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
+        WHERE t.cancel_requested=0 AND t.state IN ('working','uncertain')
+          AND t.pending_decision_id IS NULL
+          AND a.kind!='stop' AND a.state IN ('dispatched','uncertain')
+          AND s.provider_conversation_id IS NOT NULL
+          AND e.provider_key=s.provider_key
+          AND e.provider_conversation_id=s.provider_conversation_id
+          AND NOT EXISTS (SELECT 1 FROM kernel_root_dispatch_evidence r
+            WHERE r.attempt_id=a.attempt_id)
+          AND NOT EXISTS (SELECT 1 FROM kernel_attempts newer
+            WHERE newer.task_id=t.task_id AND newer.kind!='stop'
+              AND newer.sequence>a.sequence)
+        ORDER BY t.updated_at,t.task_id,a.sequence LIMIT ?`,
+    ).all(limit) as Array<{
+      taskId: string; clientId: string; attemptId: string;
+    }>;
+  }
+
   /** Only PLANNED public initials with a canonical conversation may dispatch. */
   listPendingPublicInitials(limit = 16): readonly {
     taskId: string; clientId: string; attemptId: string; modelIntent: string | null;

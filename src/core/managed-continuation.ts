@@ -235,6 +235,19 @@ export class ManagedContinuationService {
         } catch { /* Read-only recovery remains pending for the next Core tick. */ }
       }
     }
+    // A followup POST can outlive its first canonical ACK read. Reconcile only
+    // its persisted exact evidence; this path cannot draft, click or resend.
+    for (const pending of this.#repository.listPendingPublicAcknowledgements(8)) {
+      try {
+        await this.#kernel.recoverAck(
+          pending.taskId, pending.clientId, pending.attemptId);
+      } catch {
+        try {
+          this.#repository.recordObservationDeferred(pending.taskId, pending.clientId,
+            'public-exact-ack-reconciliation-unavailable');
+        } catch { /* Read-only recovery remains pending for the next Core tick. */ }
+      }
+    }
     // An approved public Task is admitted before any provider send. Once its
     // exact ACK lands, Core (not task.wait or a connected client) turns that
     // persisted approval into the first durable 20-minute timer.

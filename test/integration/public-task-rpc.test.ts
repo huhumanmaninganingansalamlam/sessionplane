@@ -415,7 +415,7 @@ test('approved task.start policy automatically arms on exact ACK without any cli
 });
 
 
-test('Core independently retrieves exact public FINAL after ACK with no client wait or browser', async t => {
+test('Core independently recovers delayed public ACK and exact FINAL without a client or browser', async t => {
   const { core, rpc, store } = await fixture(t);
   const project = await rpc<any>('project.open', {
     clientId: 'alice', requestId: 'open-autonomous-final',
@@ -444,10 +444,8 @@ test('Core independently retrieves exact public FINAL after ACK with no client w
       observedAt: new Date().toISOString(),
     },
   });
-  store.acknowledgeAttempt({
-    taskId: started.taskId, clientId: 'alice', attemptId: attempt.attemptId,
-    externalTurnId: 'public-turn-one',
-  });
+  store.markUncertain(started.taskId, 'alice', attempt.attemptId,
+    'canonical-ack-still-unverified');
   const payload = {
     id: 'public-fixture-conversation', current_node: 'assistant-one',
     mapping: {
@@ -466,6 +464,7 @@ test('Core independently retrieves exact public FINAL after ACK with no client w
     },
   };
   let reads = 0;
+  let backendNow = Date.now();
   const backend: BackendJsonClient = {
     authScope: {},
     async get(url) {
@@ -483,14 +482,22 @@ test('Core independently retrieves exact public FINAL after ACK with no client w
     backendClientProvider: () => backend,
     backendRecovery: new ChatGptBackendRecovery({
       requestTimeoutMs: 500, tokenCacheTtlMs: 10_000,
+      now: () => new Date(backendNow),
     }),
   });
-  assert.equal(store.getTask(started.taskId, 'alice').state, 'working');
+  assert.equal(store.getTask(started.taskId, 'alice').state, 'uncertain');
   assert.equal((await runtime.managedContinuation.tick()).dispatchesAttempted, 0);
+  assert.equal(store.getTask(started.taskId, 'alice').state, 'working',
+    'canonical ACK restores working while the next GET respects pacing');
+  assert.equal(store.getFullTask(started.taskId, 'alice').attempts[0]!.state, 'acknowledged');
+  backendNow += 60_000;
+  await runtime.managedContinuation.tick();
   const exact = await rpc<any>('task.get', {
     clientId: 'alice', taskId: started.taskId, view: 'result',
   });
   assert.equal(exact.state, 'completed');
+  assert.equal(exact.submission.acknowledged, true);
+  assert.equal(exact.result.externalTurnId, 'public-turn-one');
   assert.equal(exact.result.answerText, 'Autonomous exact FINAL 🌟');
   assert.equal(exact.result.completesTask, true);
   assert.equal(store.getFullTask(started.taskId, 'alice').attempts.length, 1,
