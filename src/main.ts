@@ -207,6 +207,14 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     bindAttemptSession: semanticTaskBindAttemptSession } = createSemanticCoreRuntime({
     database, browserOwner, pageRegistry, teamDirectory, actorScheduler, pageMutationMutex,
     enabledProviders: config.enabledProviders, chatgptUrl: config.chatgptUrl,
+    backendRequestTimeoutMs: config.backendRequestTimeoutMs,
+    tokenCacheTtlMs: config.tokenCacheTtlMs,
+    onBackendRateLimit: evidence => logger.warn('semantic.backend.rate-limit-observed', {
+      status: evidence.status, method: evidence.method,
+      endpointCategory: evidence.endpointCategory, receivedAt: evidence.receivedAt,
+      retryAfterSource: evidence.retryAfterSource,
+      retryAfterDurationMs: evidence.retryAfterDurationMs,
+    }),
     canRunContinuation: () => !maintenance.paused,
   });
   // Reconcile only attempts which irreversibly entered dispatch before the

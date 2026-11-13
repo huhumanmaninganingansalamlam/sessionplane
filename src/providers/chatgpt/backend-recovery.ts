@@ -47,6 +47,8 @@ export interface ChatGptBackendRecoveryOptions {
   readonly onConversationRetryAtMs?: (nextAllowedAtMs: number) => void;
   readonly now?: () => Date;
   readonly onRateLimit?: (request: ProviderRecoveryRequest, evidence: BackendRateLimitEvidence) => void;
+  /** Safe endpoint/Retry-After metadata for semantic and legacy reads alike. */
+  readonly onRateLimitEvidence?: (evidence: BackendRateLimitEvidence) => void;
 }
 
 interface CachedToken {
@@ -61,6 +63,7 @@ export class ChatGptBackendRecovery {
   readonly #tokenCacheTtlMs: number;
   readonly #now: () => Date;
   readonly #onRateLimit: ChatGptBackendRecoveryOptions['onRateLimit'];
+  readonly #onRateLimitEvidence: ChatGptBackendRecoveryOptions['onRateLimitEvidence'];
   readonly #onConversationRetryAtMs: ChatGptBackendRecoveryOptions['onConversationRetryAtMs'];
   #token: CachedToken | null = null;
   #conversationRetryAt = 0;
@@ -72,6 +75,7 @@ export class ChatGptBackendRecovery {
     this.#tokenCacheTtlMs = options.tokenCacheTtlMs;
     this.#now = options.now ?? (() => new Date());
     this.#onRateLimit = options.onRateLimit;
+    this.#onRateLimitEvidence = options.onRateLimitEvidence;
     this.#onConversationRetryAtMs = options.onConversationRetryAtMs;
     this.#conversationRetryAt = options.acknowledgementRetryAtMs ?? 0;
   }
@@ -288,7 +292,9 @@ export class ChatGptBackendRecovery {
     }
 
     if (response.status === 429) {
-      return { recovery: rateLimited(response.headers, this.#now(), 'conversation-detail', observe), httpStatus: response.status, endpointCategory: 'conversation-detail' };
+      return { recovery: rateLimited(response.headers, this.#now(), 'conversation-detail',
+        evidence => { observe?.(evidence); this.#onRateLimitEvidence?.(evidence); }),
+        httpStatus: response.status, endpointCategory: 'conversation-detail' };
     }
     if (response.status === 401 || response.status === 403) {
       this.#token = null;
@@ -326,7 +332,9 @@ export class ChatGptBackendRecovery {
       return { recovery: unavailable('backend-auth-session-failed') };
     }
     if (response.status === 429) {
-      return { recovery: rateLimited(response.headers, this.#now(), 'auth-session', observe), httpStatus: response.status, endpointCategory: 'auth-session' };
+      return { recovery: rateLimited(response.headers, this.#now(), 'auth-session',
+        evidence => { observe?.(evidence); this.#onRateLimitEvidence?.(evidence); }),
+        httpStatus: response.status, endpointCategory: 'auth-session' };
     }
     if (response.status < 200 || response.status >= 300) {
       return { recovery: unavailable(`backend-auth-http-${response.status}`), httpStatus: response.status, endpointCategory: 'auth-session' };

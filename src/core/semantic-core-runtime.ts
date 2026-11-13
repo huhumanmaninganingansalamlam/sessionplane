@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 import type { BrowserOwner } from '../browser/browser-owner.ts';
 import type { OwnedPageIdentity } from '../browser/owned-page-lifecycle.ts';
 import type { PageMutationMutex } from '../browser/page-mutex.ts';
-import { ChatGptBackendRecovery, type BackendJsonClient } from '../providers/chatgpt/backend-recovery.ts';
+import { ChatGptBackendRecovery, type BackendJsonClient,
+  type BackendRateLimitEvidence } from '../providers/chatgpt/backend-recovery.ts';
 import type { PageRegistry } from '../browser/page-registry.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import { ChatGptSemanticAdapter, chatGptBackendJsonClient } from '../providers/chatgpt/semantic-adapter.ts';
@@ -68,6 +69,9 @@ export function createSemanticCoreRuntime(input: {
   readonly chatgptUrl: string;
   readonly backendClientProvider?: () => BackendJsonClient | Promise<BackendJsonClient>;
   readonly backendRecovery?: ChatGptBackendRecovery;
+  readonly backendRequestTimeoutMs?: number;
+  readonly tokenCacheTtlMs?: number;
+  readonly onBackendRateLimit?: (evidence: BackendRateLimitEvidence) => void;
   /** Deterministic backend pacing clock for isolated recovery tests. */
   readonly backendRecoveryNow?: () => Date;
   /** Dedicated deterministic due clock for isolated Core timer tests. */
@@ -486,10 +490,12 @@ export function createSemanticCoreRuntime(input: {
   // Profile-local SQLite retains backend GET cooldowns after an owner restart.
   // Auth tokens and conversation payloads always remain ephemeral.
   const backendRecovery = input.backendRecovery ?? new ChatGptBackendRecovery({
-    requestTimeoutMs: 15_000, tokenCacheTtlMs: 60_000,
+    requestTimeoutMs: input.backendRequestTimeoutMs ?? 15_000,
+    tokenCacheTtlMs: input.tokenCacheTtlMs ?? 60_000,
     acknowledgementRetryAtMs: repository.backendReadNotBeforeMs('chatgpt', backendOrigin),
     onConversationRetryAtMs: atMs =>
       repository.extendBackendReadNotBeforeMs('chatgpt', backendOrigin, atMs),
+    ...(input.onBackendRateLimit ? { onRateLimitEvidence: input.onBackendRateLimit } : {}),
     ...(input.backendRecoveryNow ? { now: input.backendRecoveryNow } : {}),
   });
   const providers = new SemanticProviderRegistry(input.enabledProviders.includes('chatgpt') ? [

@@ -373,6 +373,42 @@ test('backend client caches access token in memory and classifies Retry-After 42
   );
 });
 
+test('configured token cache spans paced reads and refreshes after auth rejection', async () => {
+  let clock = Date.parse('2026-11-13T00:00:00.000Z');
+  let authReads = 0;
+  let conversationReads = 0;
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('exact-user', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('assistant', 'exact-user', finalAssistant('answer-1', 'Cached answer')),
+  ], 'assistant');
+  const client: BackendJsonClient = { async get(url) {
+    if (url.endsWith('/api/auth/session')) {
+      authReads++;
+      return { status: 200, headers: {}, body: { accessToken: `memory-token-${authReads}` } };
+    }
+    conversationReads++;
+    return conversationReads === 2
+      ? { status: 403, headers: {}, body: null }
+      : { status: 200, headers: {}, body: payload };
+  } };
+  const recovery = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 5 * 60_000,
+    now: () => new Date(clock),
+  });
+
+  assert.equal((await recovery.recoverExactTurn(
+    identity(), client, 'https://chatgpt.com')).kind, 'complete');
+  clock += 65_000;
+  const rejected = await recovery.recoverExactTurn(identity(), client, 'https://chatgpt.com');
+  assert.equal(rejected.reason, 'backend-auth-rejected');
+  assert.equal(authReads, 1, 'paced read must reuse the configured live token');
+  clock += 65_000;
+  assert.equal((await recovery.recoverExactTurn(
+    identity(), client, 'https://chatgpt.com')).kind, 'complete');
+  assert.equal(authReads, 2, '401/403 clears the cached token before the next read');
+});
+
 test('oversized Retry-After remains a bounded deferral without a second GET', async () => {
   const now = new Date('2026-11-10T00:00:00.000Z');
   let conversationReads = 0;
@@ -501,6 +537,42 @@ test('auth GET429 keeps its own safe provenance and cannot leak or create a conv
     receivedAt: new Date(0).toISOString(), source: 'sessionplane-backend-recovery',
     headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-scope': 'endpoint' },
     retryAfterSource: 'header-invalid-fallback', retryAfterDurationMs: null }]);
+});
+
+test('semantic exact-turn rate limits expose safe endpoint provenance', async () => {
+  const evidence: BackendRateLimitEvidence[] = [];
+  const authRecovery = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 60000, now: () => new Date(0),
+    onRateLimitEvidence: value => evidence.push(value),
+  });
+  const authClient: BackendJsonClient = { async get(url) {
+    assert.equal(url, 'https://chatgpt.com/api/auth/session');
+    return { status: 429, headers: { 'retry-after': '60', authorization: 'private' }, body: null };
+  } };
+  assert.equal((await authRecovery.recoverExactTurn(
+    identity(), authClient, 'https://chatgpt.com')).reason, 'backend-http-429');
+  assert.deepEqual(evidence.map(value => ({ endpointCategory: value.endpointCategory,
+    retryAfterDurationMs: value.retryAfterDurationMs, headers: value.headers })), [{
+      endpointCategory: 'auth-session', retryAfterDurationMs: 60_000,
+      headers: { 'retry-after': '60' },
+    }]);
+
+  evidence.length = 0;
+  const detailRecovery = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 60000, now: () => new Date(0),
+    onRateLimitEvidence: value => evidence.push(value),
+  });
+  const detailClient: BackendJsonClient = { async get(url) {
+    return url.endsWith('/api/auth/session')
+      ? { status: 200, headers: {}, body: { accessToken: 'memory-only-token' } }
+      : { status: 429, headers: { 'retry-after': '120' }, body: null };
+  } };
+  assert.equal((await detailRecovery.recoverExactTurn(
+    identity(), detailClient, 'https://chatgpt.com')).reason, 'backend-http-429');
+  assert.deepEqual(evidence.map(value => ({ endpointCategory: value.endpointCategory,
+    retryAfterDurationMs: value.retryAfterDurationMs })), [{
+      endpointCategory: 'conversation-detail', retryAfterDurationMs: 120_000,
+    }]);
 });
 
 test('backend acknowledgement requires one exact user prompt on the verified current branch', () => {
