@@ -943,9 +943,11 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         observedAt: root.observedAt,
       }];
       let latestReason: string | null = null;
+      // Durable root POST evidence already carries the exact UUID and text hash.
+      // Interactive selected-read priority is reserved for an explicit DOM choice;
+      // otherwise root ACK recovery can starve an acknowledged turn's FINAL.
       const ack = await this.#backend.recoverAcknowledgement(conversationId, query.prompt!,
-        client, origin, attempts, evidence => { latestReason = evidence.reason; },
-        root?.messageId);
+        client, origin, attempts, evidence => { latestReason = evidence.reason; });
       if (ack !== null && id.submittedUserTurnId !== null &&
         ack.submittedUserTurnId !== id.submittedUserTurnId) {
         return { kind: 'unavailable', reason: 'canonical-ack-bound-turn-mismatch' };

@@ -663,6 +663,67 @@ test('explicit selected ACK gets the next permitted read ahead of background UNK
   assert.equal(reads.length, 4, 'Background reads cannot renew an abandoned explicit selection indefinitely');
 });
 
+test('semantic root ACK durable identity does not claim interactive selected-read priority', async () => {
+  let selectedMessageId: string | undefined = 'not-called';
+  class RootAckBackend extends ChatGptBackendRecovery {
+    override async recoverAcknowledgement(
+      ...args: Parameters<ChatGptBackendRecovery['recoverAcknowledgement']>
+    ) {
+      selectedMessageId = args[6];
+      const attempt = args[4]?.[0];
+      assert.ok(attempt);
+      return {
+        conversationId: args[0],
+        submittedUserMessageId: attempt.messageId,
+        submittedUserTurnId: 'root-turn',
+        dispatchParent: {
+          capturedParentMessageId: attempt.parentMessageId,
+          canonicalParentNodeId: 'canonical-parent',
+          canonicalParentMessageId: attempt.parentMessageId,
+          matches: true,
+        },
+      };
+    }
+  }
+  const backend = new RootAckBackend({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000 });
+  const client: BackendJsonClient = { async get() {
+    throw new Error('The spy backend must intercept the read');
+  } };
+  const adapter = new ChatGptSemanticAdapter({
+    isExactLease: () => false,
+    resolvePage: () => { throw new Error('Root ACK recovery must remain page-less'); },
+    backendClient: client,
+    backendOrigin: 'https://chatgpt.com',
+    backendRecovery: backend,
+  });
+  const prompt = 'Root question';
+  const rootPost = {
+    requestConversationId: null,
+    messageId: 'root-message',
+    parentMessageId: 'client-created-root',
+    textHash: createHash('sha256').update(prompt).digest('hex'),
+    observedAt: new Date(0).toISOString(),
+  } as const;
+
+  assert.deepEqual(await adapter.recover({
+    kind: 'ack', prompt, rootPost,
+    candidateConversationId: 'canonical-root-conversation',
+    context: {
+      projectId: 'project', slotId: 'main', slotRevision: 1, taskId: 'root-task',
+      providerConversationId: null,
+      submittedUserMessageId: null, submittedUserTurnId: null,
+      pageLease: null,
+    },
+  }), {
+    kind: 'verified_root_ack',
+    conversationId: 'canonical-root-conversation',
+    externalTurnId: 'root-turn',
+    messageId: 'root-message',
+  });
+  assert.equal(selectedMessageId, undefined,
+    'durable root POST UUID/hash must not reserve the interactive selected queue');
+});
+
 test('canonical ACK evidence separates no match and access rejection from a recovered original answer', async () => {
   let now = 0;
   let status = 200;
