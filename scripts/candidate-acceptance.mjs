@@ -13,6 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareCandidateSource } from './candidate-source-identity.mjs';
 import { candidateGatePlan, candidateGateFailureSummary } from './candidate-acceptance-policy.mjs';
+import { runIsolatedCandidateCommand } from './candidate-gate-process.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
@@ -52,7 +53,9 @@ let packageSha256 = null;
 for (const step of plan) {
   const command = step.command ?? 'npm';
   const startedAt = Date.now();
-  const result = exec(command, step.argv, step.timeoutMs);
+  const result = await runIsolatedCandidateCommand(command, step.argv, {
+    cwd: root, env: process.env, timeoutMs: step.timeoutMs,
+  });
   const merged = result.stdout + '\n' + result.stderr;
   const tests = /\btests (\d+)(?![\s\S]*\btests \d+)/.exec(merged);
   const passed = /\bpass (\d+)(?![\s\S]*\bpass \d+)/.exec(merged);
