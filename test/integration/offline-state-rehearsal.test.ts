@@ -193,6 +193,17 @@ test('equal-schema rollback retains additive Task evidence and rejects mutation 
     store.startTask({ taskId: 'original-task', projectId: 'original-project',
       slotId: 'main', clientId: 'original-owner', requestId: 'original-request',
       expectedSlotRevision: 1, prompt: 'original prompt must remain byte exact' });
+    store.planAttempt({ taskId: 'original-task', clientId: 'original-owner',
+      attemptId: 'original-attempt', kind: 'initial', turnKey: 'root',
+      content: 'original prompt must remain byte exact' });
+    sourceDb.raw.prepare(
+      'INSERT INTO kernel_public_task_policies' +
+      '(task_id,policy_json,input_sha256,accepted_revision,created_at)' +
+      ' VALUES(?,?,?,?,?)',
+    ).run('original-task', JSON.stringify({ enabled: false }),
+      'original-policy-hash', 1, '2026-11-12T00:00:00.000Z');
+    assert.equal(store.listPendingPublicPreparations(1)[0]?.taskId, 'original-task');
+    assert.equal(store.claimPublicPreparationPrefersBound(), false);
   } finally { sourceDb.close(); }
 
   const migrationDir = join(dir, 'migration');
@@ -215,6 +226,14 @@ test('equal-schema rollback retains additive Task evidence and rejects mutation 
       store.planAttempt({ taskId: 'new-task', clientId: 'new-owner',
         attemptId: 'new-attempt', kind: 'initial', turnKey: 'root',
         content: 'new evidence retained before rollback' });
+      candidate.raw.prepare(
+        'INSERT INTO kernel_public_task_policies' +
+        '(task_id,policy_json,input_sha256,accepted_revision,created_at)' +
+        ' VALUES(?,?,?,?,?)',
+      ).run('new-task', JSON.stringify({ enabled: false }),
+        'new-policy-hash', 1, '2026-11-12T00:00:00.000Z');
+      assert.equal(store.listPendingPublicPreparations(1)[0]?.taskId, 'new-task');
+      assert.equal(store.claimPublicPreparationPrefersBound(), true);
       store.beginDispatch('new-task', 'new-owner', 'new-attempt');
       store.markUncertain('new-task', 'new-owner', 'new-attempt', 'lost-ack');
     } finally { candidate.close(); }
@@ -240,6 +259,36 @@ test('equal-schema rollback retains additive Task evidence and rejects mutation 
         "SELECT state FROM kernel_attempts WHERE task_id='new-task'",
       ).get()!.state, 'uncertain');
     } finally { restored.close(); evidence.close(); }
+
+    // Scheduler values may move, but removing an original cursor/phase key
+    // cannot become a valid same-schema rollback receipt.
+    const missingCursor = new DatabaseSync(candidatePath);
+    try {
+      missingCursor.prepare(
+        "DELETE FROM kernel_public_scan_cursors WHERE scan_kind='root_prepare'",
+      ).run();
+    } finally { missingCursor.close(); }
+    await assert.rejects(rehearseRollback({
+      migrationDir, candidatePath, destinationDir: join(dir, 'missing-cursor-rollback'),
+    }), /changed or removed a source row: kernel_public_scan_cursors/);
+    const restoredCursor = new DatabaseSync(candidatePath);
+    try {
+      restoredCursor.prepare(
+        'INSERT INTO kernel_public_scan_cursors' +
+        '(scan_kind,last_task_id,last_attempt_sequence) VALUES(?,?,?)',
+      ).run('root_prepare', 'new-task', 0);
+      restoredCursor.prepare('DELETE FROM kernel_public_preparation_phase WHERE singleton=1')
+        .run();
+    } finally { restoredCursor.close(); }
+    await assert.rejects(rehearseRollback({
+      migrationDir, candidatePath, destinationDir: join(dir, 'missing-phase-rollback'),
+    }), /changed or removed a source row: kernel_public_preparation_phase/);
+    const restoredPhase = new DatabaseSync(candidatePath);
+    try {
+      restoredPhase.prepare(
+        'INSERT INTO kernel_public_preparation_phase(singleton,next_kind) VALUES(1,?)',
+      ).run('root');
+    } finally { restoredPhase.close(); }
 
     const tampered = new DatabaseSync(candidatePath);
     try {
@@ -359,7 +408,68 @@ test('v15-to-v16 isolated upgrade retains original exact ACK/FINAL and event cha
         'SELECT COUNT(*) AS count FROM kernel_public_scan_cursors').get()!.count, 0);
       assert.equal(new TaskKernelRepository(candidate)
         .getTask('retained-task', 'owner').state, 'completed');
+      // Simulate new exact POST provenance after promotion. An interrupted
+      // successor must retain this v16-only evidence during rollback, while
+      // the archived source remains an untouched, executable v15 snapshot.
+      const store = new TaskKernelRepository(candidate);
+      store.openProject({ projectId: 'post-upgrade', clientId: 'owner',
+        projectKey: 'upgrade.post', displayName: 'Post-upgrade evidence' });
+      store.openSlot({ projectId: 'post-upgrade', clientId: 'owner', slotId: 'main',
+        roleKey: 'Main', providerKey: 'fixture' });
+      store.startTask({ taskId: 'post-upgrade-task', projectId: 'post-upgrade',
+        slotId: 'main', clientId: 'owner', expectedSlotRevision: 1,
+        requestId: 'post-upgrade-once', prompt: 'Never replay this POST' });
+      store.planAttempt({ taskId: 'post-upgrade-task', clientId: 'owner',
+        attemptId: 'post-upgrade-attempt', kind: 'initial', turnKey: 'root',
+        content: 'Never replay this POST' });
+      store.beginDispatch('post-upgrade-task', 'owner', 'post-upgrade-attempt');
+      store.markUncertain('post-upgrade-task', 'owner', 'post-upgrade-attempt',
+        'exact-ACK-not-observed');
+      assert.equal(store.getTask('post-upgrade-task', 'owner').state, 'uncertain');
     } finally { candidate.close(); }
+
+    const afterWrites = snapshot(join(target, 'candidate.sqlite'));
+    assert.notDeepEqual(afterWrites, before, 'post-upgrade Task evidence is additive');
+    const rollbackDir = join(dir, 'rollback');
+    const rollback = await rehearseRollback({
+      migrationDir: target, candidatePath: join(target, 'candidate.sqlite'),
+      destinationDir: rollbackDir,
+    });
+    assert.equal(rollback.postMigrationEvidencePreserved, true);
+    assert.equal(rollback.candidateWasNeverOverwritten, true);
+    const restored = join(rollbackDir, 'restored-original.sqlite');
+    const archivedPostWrites = join(rollbackDir, 'post-migration-evidence.sqlite');
+    const old = new DatabaseSync(restored, { readOnly: true });
+    try {
+      assert.equal(old.prepare('SELECT MAX(version) AS v FROM schema_migrations')
+        .get()!.v, 15, 'rollback restores exactly the original schema');
+    } finally { old.close(); }
+    assert.deepEqual(snapshot(restored), before,
+      'rollback cannot rewrite the original Task, ACK, FINAL or event chain');
+    assert.deepEqual(snapshot(archivedPostWrites), afterWrites,
+      'new possibly-dispatched attempts must be retained as post-upgrade evidence');
+    assert.deepEqual(snapshot(join(target, 'candidate.sqlite')), afterWrites,
+      'rollback cannot mutate the installed candidate');
+    assert.deepEqual(snapshot(source), before, 'the source stays untouched');
+
+    // A post-upgrade agent or external writer cannot silently change the
+    // original ACK identity and get an approved rollback receipt. Only
+    // additive evidence is allowed even while the schema number increases.
+    const modifiedCandidate = new DatabaseSync(join(target, 'candidate.sqlite'));
+    try {
+      modifiedCandidate.prepare(
+        'UPDATE kernel_attempts SET external_turn_id=? WHERE attempt_id=?',
+      ).run('forged-ACK', 'original-attempt');
+    } finally { modifiedCandidate.close(); }
+    const rejected = join(dir, 'rejected-tampered-rollback');
+    await assert.rejects(rehearseRollback({
+      migrationDir: target, candidatePath: join(target, 'candidate.sqlite'),
+      destinationDir: rejected,
+    }), /changed or removed a source row: kernel_attempts/);
+    assert.equal(existsSync(rejected), false,
+      'rejected rollback cannot publish an apparently valid archive');
+    assert.deepEqual(snapshot(source), before,
+      'tampering with candidate can never change the original v15 snapshot');
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
