@@ -8,6 +8,8 @@ import test from 'node:test';
 import { resolveConfig } from '../../src/config.ts';
 import { callRpc } from '../../src/cli/client.ts';
 import { createSemanticCoreRuntime } from '../../src/core/semantic-core-runtime.ts';
+import { PublicTaskPreparationService } from '../../src/core/public-task-preparation.ts';
+import { PageBindingRepository } from '../../src/storage/page-binding-repository.ts';
 import { startCore } from '../../src/main.ts';
 import { ChatGptBackendRecovery, type BackendJsonClient } from '../../src/providers/chatgpt/backend-recovery.ts';
 
@@ -1062,6 +1064,114 @@ test('Core restart marks interrupted semantic dispatch uncertain without a new P
     ), /Mutation already attempted/, 'Core restart cannot send the original prompt');
     assert.equal(core.semanticTaskRepository.getFullTask(
       'crashed-task', 'alice').attempts.length, 1);
+  } finally {
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+
+test('planned Main after a closed tab reopens the exact owned conversation without POST or duplicate target', {
+  timeout: 45_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sessionplane-bound-main-reopen-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({
+    config, browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  try {
+    // Isolate preparation from the automatic Core timer in this focused test.
+    await core.semanticManagedContinuation.close();
+    const clientId = 'bound-main-owner';
+    const project = await callRpc<any>({
+      socketPath: config.socketPath, method: 'project.open',
+      params: {
+        clientId, requestId: 'existing-project',
+        projectKey: 'bound-main-reopen', displayName: 'Existing Main',
+        provider: 'chatgpt', surfaceIntent: 'chat',
+      }, timeoutMs: 10_000,
+    });
+    const prompt = 'Resume exact owned Main without a new project';
+    const task = await callRpc<any>({
+      socketPath: config.socketPath, method: 'task.start',
+      params: {
+        clientId, requestId: 'one-original-attempt',
+        projectId: project.projectId,
+        expectedConversationRevision: project.conversationRevision, prompt,
+      }, timeoutMs: 10_000,
+    });
+    const session = core.teamDirectory.getCurrentSession(project.projectId, 'main');
+    await core.actorScheduler.startGeneration({
+      sessionId: session.sessionId, teamBriefVersion: 0, promptHash: sha(prompt),
+    });
+    const canonical = '6af7dab0-2674-83ee-bb7e-5ed04b9a4d0e';
+    const owner = core.browserOwner!;
+    const stale = await owner.createPage();
+    await stale.page.route('https://chatgpt.com/**', route =>
+      route.fulfill({ contentType: 'text/html', body: '<main>Old Main tab</main>' }));
+    await stale.page.goto('https://chatgpt.com/c/' + canonical);
+    core.pageRegistry.bindPage(stale.binding.pageKey, {
+      sessionId: session.sessionId, generation: 1, conversationId: canonical,
+    });
+    await core.actorScheduler.updateGeneration(session.sessionId, 1, {
+      conversationId: canonical, pageKey: stale.binding.pageKey,
+      sessionState: 'ready', providerState: 'idle',
+    });
+    await stale.page.close();
+    assert.equal(new PageBindingRepository(core.database.raw)
+      .get(stale.binding.pageKey)?.targetId, stale.binding.targetId);
+    const store = core.semanticTaskRepository;
+    store.observeConversation({
+      projectId: project.projectId, slotId: 'main', expectedRevision: 1,
+      clientId, taskId: task.taskId, providerConversationId: canonical,
+    });
+    const originalCreate = owner.createPage.bind(owner);
+    let newTargets = 0;
+    let providerPosts = 0;
+    owner.createPage = async () => {
+      const fromPreparation = (new Error().stack ?? '').includes('#prepareBoundConversation');
+      const created = await originalCreate();
+      if (!fromPreparation) return created;
+      newTargets++;
+      await created.page.route('https://chatgpt.com/**', route => {
+        if (route.request().method() === 'POST') providerPosts++;
+        return route.fulfill({ contentType: 'text/html',
+          body: '<main><div id="prompt-textarea" contenteditable="true"></div></main>' });
+      });
+      return created;
+    };
+    const preparation = new PublicTaskPreparationService({
+      repository: store, teams: core.teamDirectory,
+      scheduler: core.actorScheduler, browserOwner: owner,
+      pages: core.pageRegistry,
+      pageBindings: new PageBindingRepository(core.database.raw),
+      chatgptUrl: 'https://chatgpt.com',
+    });
+    const foreign = await originalCreate();
+    await foreign.page.route('https://chatgpt.com/**', route =>
+      route.fulfill({ contentType: 'text/html', body: '<main>Foreign tab</main>' }));
+    await foreign.page.goto('https://chatgpt.com/c/' + canonical);
+    assert.deepEqual(await preparation.prepareNext(),
+      { kind: 'waiting', taskId: task.taskId },
+      'same URL without the persisted target is not ownership');
+    assert.equal(newTargets, 0, 'a foreign tab must not trigger duplicate allocation');
+    await foreign.page.close();
+    assert.deepEqual(await preparation.prepareNext(),
+      { kind: 'prepared', taskId: task.taskId });
+    const owned = core.pageRegistry.findByConversation(canonical);
+    assert.equal(owned.length, 1);
+    assert.equal(owned[0]!.state, 'owned');
+    assert.equal(owned[0]!.sessionId, session.sessionId);
+    assert.equal(owned[0]!.generation, 1);
+    assert.equal(core.teamDirectory.getCurrentSession(project.projectId, 'main').pageKey,
+      owned[0]!.pageKey);
+    assert.deepEqual(await preparation.prepareNext(),
+      { kind: 'prepared', taskId: task.taskId });
+    assert.equal(newTargets, 1, 'reinspection cannot create another target');
+    assert.equal(providerPosts, 0, 'page restoration never sends the original prompt');
+    assert.equal(store.getFullTask(task.taskId, clientId).attempts.length, 1);
+    assert.equal(store.getFullTask(task.taskId, clientId).attempts[0]!.state, 'planned');
   } finally {
     await core.close();
     rmSync(root, { recursive: true, force: true });
