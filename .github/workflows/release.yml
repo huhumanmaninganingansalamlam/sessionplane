@@ -58,10 +58,19 @@ jobs:
       - run: npm run test:package
       - id: pack
         name: Build release package
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/release-pack" "$RUNNER_TEMP/repro-pack"
-          package="$(npm pack --silent --pack-destination "$RUNNER_TEMP/release-pack")"
-          repro_package="$(npm pack --silent --pack-destination "$RUNNER_TEMP/repro-pack")"
+          # npm pack invokes prepack -> build, which also prints JSON identity to
+          # stdout. Only the final npm pack filename is a usable artifact path.
+          package="$(npm pack --silent --pack-destination "$RUNNER_TEMP/release-pack" | tail -n 1)"
+          repro_package="$(npm pack --silent --pack-destination "$RUNNER_TEMP/repro-pack" | tail -n 1)"
+          version="$(node -p "require('./package.json').version")"
+          test "$package" = "sessionplane-$version.tgz"
+          test "$repro_package" = "$package"
+          test -f "$RUNNER_TEMP/release-pack/$package"
+          test -f "$RUNNER_TEMP/repro-pack/$repro_package"
           cmp "$RUNNER_TEMP/release-pack/$package" "$RUNNER_TEMP/repro-pack/$repro_package"
           ( cd "$RUNNER_TEMP/release-pack" && sha256sum "$package" > "$package.sha256" )
           echo "package=$RUNNER_TEMP/release-pack/$package" >> "$GITHUB_OUTPUT"
