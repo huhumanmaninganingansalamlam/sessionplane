@@ -47,6 +47,9 @@ class FakeNonBrowserAdapter implements SemanticProviderAdapter {
     return { kind: 'exact_final', externalTurnId: query.context.submittedUserTurnId!,
       answerText: 'Other provider exact answer' };
   }
+  async readArtifact(): Promise<{ kind: 'unavailable'; reason: string }> {
+    return { kind: 'unavailable', reason: 'fixture-no-file' };
+  }
 }
 
 test('ChatGPT B-first and future browserless providers share a capability-negotiated port', async () => {
@@ -95,6 +98,8 @@ test('Core composes the semantic ChatGPT provider without launching a separate b
     });
     assert.equal(core.browserOwner, null);
     assert.ok(core.semanticTaskKernel, 'normal Core must assemble the durable semantic task execution port');
+    assert.ok(core.semanticTaskArtifactReader,
+      'Core must assemble the optional artifact boundary without legacy artifact runtime');
     assert.ok(core.semanticTaskRepository, 'the kernel must use the Core-owned durable journal');
     assert.equal(core.pageRegistry.listBindings().length, 0);
     const store = core.semanticTaskRepository;

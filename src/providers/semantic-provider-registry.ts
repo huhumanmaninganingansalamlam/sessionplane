@@ -21,6 +21,10 @@ export class SemanticProviderRegistry {
         new Set(adapter.capabilities.supports).size !== adapter.capabilities.supports.length) {
         throw new Error('Invalid semantic provider manifest');
       }
+      if (adapter.capabilities.supports.includes('artifact_read') &&
+          typeof adapter.readArtifact !== 'function') {
+        throw new Error('artifact_read requires a readArtifact handler');
+      }
       if (map.has(adapter.providerKey)) throw new Error('Duplicate semantic provider key');
       map.set(adapter.providerKey, adapter);
     }

@@ -178,6 +178,24 @@ export type SemanticVerification =
       readonly externalTurnId: string; readonly messageId: string }
   | { readonly kind: 'exact_final'; readonly externalTurnId: string; readonly answerText: string }
   | { readonly kind: 'pending' | 'unavailable'; readonly reason: string };
+/** Optional result-file channel. A provider name/URL is not a trusted output
+ * path, and an advertised artifact capability is never itself a verified
+ * download. The Core supplies its already durable FINAL identity.
+ */
+export interface SemanticArtifactReadRequest {
+  readonly context: SemanticTaskContext;
+  readonly resultId: string;
+  readonly artifactRef: string;
+}
+export type SemanticArtifactReadResult =
+  | { readonly kind: 'unavailable'; readonly reason: string }
+  | { readonly kind: 'denied'; readonly reason: string }
+  | { readonly kind: 'verified'; readonly artifactRef: string;
+      readonly taskId: string; readonly resultId: string;
+      readonly conversationId: string; readonly submittedUserTurnId: string;
+      readonly sizeBytes: number; readonly sha256: string;
+      readonly mediaType: string; readonly bytes: Uint8Array };
+
 export interface SemanticProviderAdapter {
   readonly providerKey: string;
   readonly capabilities: SemanticCapabilityManifest;
@@ -187,4 +205,8 @@ export interface SemanticProviderAdapter {
   verify(query: SemanticExactQuery): Promise<SemanticVerification>;
   /** Always read-only, even when the page is missing or the Core restarted. */
   recover(query: SemanticExactQuery): Promise<SemanticVerification>;
+  /** Optional, read-only file retrieval. No POST, file-path selection or
+   * permission grant; Core independently verifies exact provenance/hash.
+   */
+  readArtifact?(request: SemanticArtifactReadRequest): Promise<SemanticArtifactReadResult>;
 }

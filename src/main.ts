@@ -25,6 +25,7 @@ import { ConversationLoadRecoveryRepository } from './storage/conversation-load-
 import { RuntimeMetrics } from './telemetry/metrics.ts';
 import { createSemanticCoreRuntime, restoreSemanticPageBindings, type SemanticCoreRuntime } from './core/semantic-core-runtime.ts';
 import type { DurableTaskKernel } from './core/durable-task-kernel.ts';
+import type { SemanticTaskArtifactReader } from './core/semantic-task-artifact-reader.ts';
 import type { SemanticProviderRegistry } from './providers/semantic-provider-registry.ts';
 import type { TaskKernelRepository } from './storage/task-kernel-repository.ts';
 import { z } from 'zod';
@@ -46,6 +47,7 @@ export interface CoreService {
   readonly semanticProviders: SemanticProviderRegistry;
   readonly semanticTaskRepository: TaskKernelRepository;
   readonly semanticTaskKernel: DurableTaskKernel;
+  readonly semanticTaskArtifactReader: SemanticTaskArtifactReader;
   readonly semanticDecisionGateway: SemanticCoreRuntime['decisionGateway'];
   readonly semanticManagedContinuation: SemanticCoreRuntime['managedContinuation'];
   readonly semanticTaskBindAttemptSession: SemanticCoreRuntime['bindAttemptSession'];
@@ -121,6 +123,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
 
   const { providers: semanticProviders, repository: semanticTaskRepository,
     kernel: semanticTaskKernel,
+    artifactReader: semanticTaskArtifactReader,
     decisionGateway: semanticDecisionGateway,
     managedContinuation: semanticManagedContinuation,
     bindAttemptSession: semanticTaskBindAttemptSession } = createSemanticCoreRuntime({
@@ -296,6 +299,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     semanticProviders,
     semanticTaskRepository,
     semanticTaskKernel,
+    semanticTaskArtifactReader,
     semanticDecisionGateway,
     semanticManagedContinuation,
     semanticTaskBindAttemptSession,
