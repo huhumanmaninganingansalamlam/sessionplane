@@ -137,6 +137,42 @@ test('an explicitly authorized acceptance identity is mandatory before any mutat
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 
+test('uncertain ACK is awaited read-only until recovery instead of stopping the live run', async () => {
+  const f = makeFixture();
+  let uncertainWaits = 0;
+  const call = async (method: string, params: any) => {
+    const result = await f.call(method, params);
+    if (method === 'task.get' && !params.view &&
+        f.records.size === 1 && uncertainWaits < 3) {
+      return { ...result, state: 'uncertain', revision: 2 + uncertainWaits,
+        submission: { attempted: true, acknowledged: false },
+        cancelRequested: false, decision: null };
+    }
+    if (method === 'task.wait' && f.records.size === 1) {
+      uncertainWaits++;
+      if (uncertainWaits < 3) {
+        return { ...result, state: 'uncertain', revision: 2 + uncertainWaits,
+          submission: { attempted: true, acknowledged: false },
+          cancelRequested: false, decision: null };
+      }
+    }
+    return result;
+  };
+  try {
+    const first = await runLiveTaskAcceptance(options(f.dir, call, 'start'));
+    assert.equal(first.status, 'owner_client_exited_after_initial');
+    assert.equal(f.records.size, 1);
+    const result = await runLiveTaskAcceptance(options(f.dir, call, 'resume'));
+    assert.equal(result.status, 'three_turns_canonical_final_verified');
+    assert.equal(uncertainWaits, 3,
+      'three paced/uncertain ACK observations must attach revision waits without resend');
+    assert.equal(f.calls.filter(row => row.method === 'task.start').length, 3,
+      'a recovered uncertain Task cannot re-send the original');
+    assert.equal(f.calls.filter(row => row.method === 'task.decide').length, 0,
+      'read-only ACK waiting can never invent a model or permission action');
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
 test('start exits after one Task, resume verifies exact root ACK and three Main answers without resending', async () => {
   const f = makeFixture();
   try {

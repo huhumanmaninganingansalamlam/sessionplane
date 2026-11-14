@@ -10,6 +10,27 @@ reproducible tarball SHA-256 and the actual test counts and output hashes.
 Timeout, dirty source, incorrect package hash or failing gate is a failure.
 L1/L2/L4 candidate pass does not grant L3 or release approval.
 
+## Current status — 2026-11-15 (installed and dev are different)
+
+The installed v0.4.98 (source b804ef35, schema 15) reused its existing
+authenticated Chrome for a three-turn **actual** Main L3 baseline: three
+independent initial attempts, three canonical ACKs, three byte/hash-exact
+FINALs within one conversation, with naturally occurring HTTP 429/ACK
+pacing recovered read-only without replay. Full evidence and limits:
+[2026-11-15 existing Chrome L3](sessionplane-l3-existing-chrome-2026-11-15.md).
+
+The schema-16 v0.4.99 dev candidate b7e36eb passed 8/8 isolated gates
+(Core 270/270, Chromium 17/17, semantic adapter 9/9), external package
+SHA-256 58fec1ae63bbeef67af455fbe0861a2a3c6ec67bcdb56a3641b150847d13eddf,
+and safe 15-to-16 isolated rollback rehearsal. Draft [PR #194](https://github.com/huhumanmaninganingansalamlam/sessionplane/pull/194)
+is not merged. An additional dev acceptance-runner fix discovered during the
+new installed L3 baseline requires its own source-bound validation.
+
+**Do not substitute old installed L3 for the newer dev source.** A real
+eligible 20-minute no-FINAL E07 and the separate reviewed main release,
+maintenance cutover and installed acceptance remain unproven. An additional
+browser or account is **not** needed: the retained Chrome is already logged in.
+
 ## Current status — 2026-11-14 (separate source identities)
 
 - The installed Core source `889db8f1` (schema 15) has real-account
