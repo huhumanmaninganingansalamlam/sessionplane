@@ -232,6 +232,24 @@ test('owned canonical Main load failure offers a bounded read-only refresh witho
   assert.equal(submitted.store.getFullTask('task-1', 'alice').attempts[0]!.state, 'acknowledged');
 });
 
+test('persistent canonical 429 creates a reasoned, agent-first decision on the original ACK', async t => {
+  const env = fixture(t);
+  const gateway = env.getGateway(new FakeSemanticAdapter(env.store));
+  const packet = await gateway.requireNoProgressReview({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    cause: 'persistent_backend_read_throttle',
+  });
+  assert.equal(packet?.kind, 'recovery_choice');
+  assert.equal(packet?.reason, 'canonical-final-rate-limit-persistent');
+  assert.equal(packet?.humanOnly, false, 'agent decides whether human assistance is necessary');
+  assert.deepEqual(packet?.options, [], 'transport throttle cannot license a replay POST');
+  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.equal((await gateway.requireNoProgressReview({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    cause: 'persistent_backend_read_throttle',
+  }))?.decisionId, packet?.decisionId, 'repeat scans preserve the pending decision');
+});
+
 test('unanswered continuation creates durable agent review; refresh is read-only and late FINAL completes', async t => {
   const env = fixture(t);
   env.store.planAttempt({

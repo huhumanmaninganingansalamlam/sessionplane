@@ -224,6 +224,7 @@ export class SemanticDecisionGateway {
    */
   async requireNoProgressReview(input: {
     taskId: string; clientId: string; attemptId: string;
+    cause?: 'persistent_backend_read_throttle';
   }): Promise<AgentDecisionPacket | null> {
     const full = this.#repository.getFullTask(input.taskId, input.clientId);
     if (full.task.pendingDecisionId !== null) return this.get(input.taskId, input.clientId);
@@ -284,7 +285,9 @@ export class SemanticDecisionGateway {
     const packet = countBytes({
       taskId: input.taskId, taskRevision: full.task.revision + 1, decisionId,
       kind: 'recovery_choice',
-      reason: attempt.kind === 'initial' ? 'managed-continuation-later-user-boundary'
+      reason: input.cause === 'persistent_backend_read_throttle'
+        ? 'canonical-final-rate-limit-persistent'
+        : attempt.kind === 'initial' ? 'managed-continuation-later-user-boundary'
         : unableToSend ? 'managed-continuation-safe-send-unavailable'
           : 'managed-continuation-no-final-after-approved-continue',
       humanOnly: false, observedAt: now,
