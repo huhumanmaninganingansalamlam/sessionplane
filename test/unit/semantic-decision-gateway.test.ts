@@ -217,6 +217,12 @@ test('unanswered continuation creates durable agent review; refresh is read-only
     taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
   });
   assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.throws(() => env.store.recordFinal({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
+    resultId: 'nonterminal-wrong', externalTurnId: 'turn-2',
+    answerText: 'Pending review must persist', completeTask: false,
+  }), /Invalid task transition/);
+  assert.equal(env.store.getTask('task-1', 'alice').pendingDecisionId, second!.decisionId);
   env.store.recordFinal({
     taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
     resultId: 'result-final-1', externalTurnId: 'turn-2',
