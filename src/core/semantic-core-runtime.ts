@@ -603,6 +603,9 @@ export function createSemanticCoreRuntime(input: {
     } } : {}),
     inspectModelIntent: async ({ taskId, clientId, attemptId, modelIntent }) =>
       await decisionGateway.verifyModelIntent({ taskId, clientId, attemptId, modelIntent }),
+    requestAgentReview: async ({ taskId, clientId, attemptId }) => {
+      await decisionGateway.requireNoProgressReview({ taskId, clientId, attemptId });
+    },
     ...(input.actorScheduler ? { bindRootAttempt } : {}),
     bindInitialAttempt: ({ taskId, clientId, attemptId }) => {
       const task = repository.getTask(taskId, clientId);

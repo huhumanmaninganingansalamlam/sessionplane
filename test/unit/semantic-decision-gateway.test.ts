@@ -174,6 +174,91 @@ function fixture(t: TestContext, options: { plannedInitial?: boolean; requiredMo
   };
 }
 
+test('unanswered continuation creates durable agent review; refresh is read-only and late FINAL completes', async t => {
+  const env = fixture(t);
+  env.store.planAttempt({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
+    kind: 'continuation', turnKey: 'managed-continue-1', content: '계속',
+  });
+  env.store.beginDispatch('task-1', 'alice', 'continue-1');
+  env.store.acknowledgeAttempt({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
+    externalTurnId: 'turn-2',
+  });
+  const adapter = new FakeSemanticAdapter(env.store);
+  adapter.mode = 'none';
+  const gateway = env.getGateway(adapter);
+  const packet = await gateway.requireNoProgressReview({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
+  });
+  assert.equal(packet?.kind, 'recovery_choice');
+  assert.equal(packet?.reason, 'managed-continuation-no-final-after-approved-continue');
+  assert.equal(packet?.humanOnly, false);
+  assert.deepEqual(packet?.options, []);
+  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.equal(gateway.get('task-1', 'alice')?.decisionId, packet?.decisionId);
+  await assert.rejects(() => gateway.decideCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: packet!.decisionId,
+    requestId: 'cannot-retry-post', actionRef: 'invented-send',
+  }), /does not authorize/);
+  const refreshed = await gateway.refreshCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: packet!.decisionId,
+    requestId: 'agent-refresh-1',
+  });
+  assert.deepEqual(refreshed, { kind: 'refresh_required', packet: null });
+  assert.equal(env.store.getTask('task-1', 'alice').state, 'working');
+  assert.equal(adapter.clicks, 0);
+  assert.deepEqual(await gateway.refreshCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: packet!.decisionId,
+    requestId: 'agent-refresh-1',
+  }), refreshed, 'same request replays the read-only result');
+
+  const second = await gateway.requireNoProgressReview({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
+  });
+  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  env.store.recordFinal({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
+    resultId: 'result-final-1', externalTurnId: 'turn-2',
+    answerText: 'Exact FINAL finally arrived', completeTask: true,
+  });
+  const completed = env.store.getFullTask('task-1', 'alice');
+  assert.equal(completed.task.state, 'completed');
+  assert.equal(completed.task.pendingDecisionId, null);
+  assert.equal(completed.decisions.find(row => row.decisionId === second!.decisionId)?.status,
+    'superseded');
+  assert.equal(gateway.get('task-1', 'alice'), null);
+  assert.equal(adapter.clicks, 0);
+});
+
+test('agent-first stall packet persists without a live browser context', async t => {
+  const env = fixture(t);
+  env.store.planAttempt({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'continue-lost-page',
+    kind: 'continuation', turnKey: 'managed-lost-page', content: '계속',
+  });
+  env.store.beginDispatch('task-1', 'alice', 'continue-lost-page');
+  env.store.acknowledgeAttempt({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'continue-lost-page',
+    externalTurnId: 'turn-lost-page',
+  });
+  const adapter = new FakeSemanticAdapter(env.store);
+  const gateway = new SemanticDecisionGateway({
+    repository: env.store, providers: new SemanticProviderRegistry([adapter]),
+    resolveContext: () => { throw new Error('Owned page disappeared'); },
+  });
+  const packet = await gateway.requireNoProgressReview({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'continue-lost-page',
+  });
+  assert.equal(packet?.kind, 'recovery_choice');
+  assert.equal(packet?.humanOnly, false);
+  assert.deepEqual(packet?.options, []);
+  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.equal(gateway.get('task-1', 'alice')?.decisionId, packet?.decisionId);
+  assert.equal(adapter.observed, 0);
+  assert.equal(adapter.clicks, 0);
+});
+
 test('agent question persists, rejects disabled options and consumes one exact typed decision', async t => {
   const env = fixture(t);
   const adapter = new FakeSemanticAdapter(env.store);

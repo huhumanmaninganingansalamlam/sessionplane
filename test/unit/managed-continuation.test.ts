@@ -20,6 +20,9 @@ class FakeProvider implements ExactTaskProviderPort {
   readonly providerKey = 'provider-fixture';
   readonly sends: ExactSendIntent[] = [];
   readonly blocked = new Set<string>();
+  readonly pendingInitialFinals = new Set<string>();
+  readonly readyContinuationFinals = new Set<string>();
+  readonly unavailableFinals = new Set<string>();
   async preflight(intent: ExactSendIntent): Promise<
     { kind: 'ready' } | { kind: 'unavailable'; reason: string }
   > {
@@ -35,6 +38,14 @@ class FakeProvider implements ExactTaskProviderPort {
     return { kind: 'unavailable', reason: 'fake-no-backend' };
   }
   async observeFinal(query: ExactTurnQuery): Promise<FinalObservation> {
+    if (this.unavailableFinals.has(query.attemptId)) {
+      return { kind: 'unavailable', reason: 'fixture-backend-http-429' };
+    }
+    if (this.pendingInitialFinals.has(query.attemptId) ||
+        (query.attemptId.startsWith('managed-continuation:') &&
+          !this.readyContinuationFinals.has(query.attemptId))) {
+      return { kind: 'pending', reason: 'fixture-no-final' };
+    }
     return { kind: 'exact_final',
       externalTurnId: query.externalTurnId!, answerText: 'Exact final for ' + query.attemptId };
   }
@@ -64,8 +75,9 @@ function fixture(t: TestContext) {
     store.planAttempt({ taskId, clientId: 'alice', attemptId: 'initial:' + taskId,
       kind: 'initial', turnKey: 'original', content: 'Question ' + taskId });
   };
-  const ack = async (taskId: string, withFinal = true) => {
+  const ack = async (taskId: string, withFinal = false) => {
     await kernel.dispatch(taskId, 'alice', 'initial:' + taskId);
+    if (!withFinal) fake.pendingInitialFinals.add('initial:' + taskId);
     if (withFinal) await kernel.observeFinal({ taskId, clientId: 'alice',
       attemptId: 'initial:' + taskId, resultId: 'result:' + taskId,
       completeTask: false });
@@ -140,6 +152,41 @@ test('approved exact ACK schedules one due at 20m, no client wait, no repeated P
   assert.equal(env.fake.sends.length, 2, 'due timer and original attempt cannot replay');
 });
 
+test('unanswered approved Continue stops automatic sends and raises agent-first review', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  await env.ack('task-a');
+  const reviews: string[] = [];
+  const service = new ManagedContinuationService({
+    repository: env.store, kernel: env.kernel, now: () => new Date(env.now),
+    requestAgentReview: async ({ taskId, clientId, attemptId }) => {
+      reviews.push(attemptId);
+      env.store.requireDecision({
+        taskId, clientId, decisionId: 'decision:' + attemptId,
+        audience: 'agent', contextJson: JSON.stringify({ evidence: 'no-final' }),
+      });
+    },
+  });
+  service.activate({
+    taskId: 'task-a', clientId: 'alice', sourceAttemptId: 'initial:task-a',
+    approvalRef: 'explicit-user-delegation', message: '계속',
+  });
+  env.now = START + CONTINUATION_INTERVAL_MS;
+  assert.equal((await service.tick()).dispatchesAttempted, 1);
+  assert.equal(env.fake.sends.length, 2);
+  env.now = START + 2 * CONTINUATION_INTERVAL_MS;
+  assert.equal((await service.tick()).dispatchesAttempted, 0);
+  assert.deepEqual(reviews, ['managed-continuation:initial:task-a']);
+  const stalled = env.store.getFullTask('task-a', 'alice');
+  assert.equal(stalled.task.state, 'agent_input_required');
+  assert.equal(stalled.task.pendingDecisionId, 'decision:managed-continuation:initial:task-a');
+  assert.equal(stalled.timers.filter(timer => timer.status === 'pending').length, 0);
+  env.now = START + 3 * CONTINUATION_INTERVAL_MS;
+  await service.tick();
+  assert.equal(env.fake.sends.length, 2, 'review pending never triggers another POST');
+  assert.deepEqual(reviews, ['managed-continuation:initial:task-a']);
+});
+
 test('Core restart retains due timer and recovers a claimed but unplanned slot', async t => {
   const env = fixture(t);
   env.startTask('task-a', 'main');
@@ -164,20 +211,66 @@ test('Core restart retains due timer and recovers a claimed but unplanned slot',
   assert.equal(env.fake.sends.length, 2);
 });
 
-test('no exact final defers without consuming a send, then resumes next fixed slot', async t => {
+test('no exact FINAL at 20m sends one approved Continue; later exact FINAL ends the Task', async t => {
   const env = fixture(t);
   env.startTask('task-a', 'main');
-  await env.ack('task-a', false);
+  env.seedPublicPolicy('task-a', true);
+  await env.ack('task-a');
+  const service = env.createService();
+  service.activate({ taskId: 'task-a', clientId: 'alice',
+    sourceAttemptId: 'initial:task-a', approvalRef: 'approved-public', message: '계속' });
+  env.now += CONTINUATION_INTERVAL_MS;
+  assert.deepEqual(await service.tick(),
+    { timersClaimed: 1, dispatchesAttempted: 1, deferred: 0 });
+  assert.equal(env.fake.sends.length, 2, 'no answer at 20 minutes must dispatch exactly once');
+  assert.equal(env.fake.sends[1]!.kind, 'continuation');
+  assert.equal(env.fake.sends[1]!.content, '계속');
+  assert.equal(env.store.getFullTask('task-a', 'alice').results.length, 0);
+  env.fake.readyContinuationFinals.add('managed-continuation:initial:task-a');
+  env.now += 1_000;
+  await service.tick();
+  const completed = env.store.getFullTask('task-a', 'alice');
+  assert.equal(completed.task.state, 'completed');
+  assert.equal(completed.results.length, 1);
+  assert.equal(completed.results[0]!.completesTask, true);
+  assert.equal(completed.timers.filter(timer => timer.status === 'pending').length, 0);
+  env.now += 3 * CONTINUATION_INTERVAL_MS;
+  await service.tick();
+  assert.equal(env.fake.sends.length, 2, 'FINAL ends all automatic continuation');
+});
+
+test('exact FINAL at the 20m due ends the Task before any Continue POST', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  await env.ack('task-a');
   const service = env.createService();
   service.activate({ taskId: 'task-a', clientId: 'alice',
     sourceAttemptId: 'initial:task-a', approvalRef: 'approved', message: '계속' });
+  env.fake.pendingInitialFinals.delete('initial:task-a');
+  env.now += CONTINUATION_INTERVAL_MS;
+  assert.deepEqual(await service.tick(),
+    { timersClaimed: 1, dispatchesAttempted: 0, deferred: 0 });
+  const completed = env.store.getFullTask('task-a', 'alice');
+  assert.equal(completed.task.state, 'completed');
+  assert.equal(completed.results[0]!.completesTask, true);
+  assert.equal(completed.timers.filter(timer => timer.status === 'pending').length, 0);
+  assert.equal(env.fake.sends.length, 1);
+});
+
+test('unavailable canonical FINAL read at due defers without speculative Continue', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  await env.ack('task-a');
+  const service = env.createService();
+  service.activate({ taskId: 'task-a', clientId: 'alice',
+    sourceAttemptId: 'initial:task-a', approvalRef: 'approved', message: '계속' });
+  env.fake.unavailableFinals.add('initial:task-a');
   env.now += CONTINUATION_INTERVAL_MS;
   assert.deepEqual(await service.tick(),
     { timersClaimed: 1, dispatchesAttempted: 0, deferred: 1 });
   assert.equal(env.fake.sends.length, 1);
   assert.equal(env.store.getFullTask('task-a', 'alice').attempts.length, 1);
-  await env.kernel.observeFinal({ taskId: 'task-a', clientId: 'alice',
-    attemptId: 'initial:task-a', resultId: 'delayed-result', completeTask: false });
+  env.fake.unavailableFinals.delete('initial:task-a');
   env.now += CONTINUATION_INTERVAL_MS;
   assert.equal((await service.tick()).dispatchesAttempted, 1);
   assert.equal(env.fake.sends.length, 2);

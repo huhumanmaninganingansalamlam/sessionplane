@@ -678,19 +678,32 @@ export class TaskKernelRepository {
         ).get(task.taskId);
         if (first) throw new Error('Original attempt already exists; no prompt replay');
       } else if (input.kind === 'continuation') {
-        const finished = this.#database.raw.prepare(
-          'SELECT result_id FROM kernel_results WHERE task_id=? LIMIT 1',
-        ).get(task.taskId);
-        if (!finished) throw new Error('Continuation requires a prior exact FINAL');
+        // The approved timer may fire while the exact acknowledged answer is
+        // still pending. A FINAL is a reason to finish, not to grant Continue.
+        const latest = this.#database.raw.prepare(
+          `SELECT attempt_id AS attemptId,state,external_turn_id AS externalTurnId
+            FROM kernel_attempts WHERE task_id=? AND kind!='stop'
+            ORDER BY sequence DESC LIMIT 1`,
+        ).get(task.taskId) as {
+          attemptId: string; state: AttemptState; externalTurnId: string | null;
+        } | undefined;
+        if (!latest || latest.state !== 'acknowledged' || latest.externalTurnId === null) {
+          throw new Error('Continuation requires a prior exact ACK');
+        }
       }
       if (input.kind !== 'stop') {
+        const latest = input.kind === 'continuation' ? this.#database.raw.prepare(
+          `SELECT attempt_id AS attemptId FROM kernel_attempts
+            WHERE task_id=? AND kind!='stop' ORDER BY sequence DESC LIMIT 1`,
+        ).get(task.taskId) as { attemptId: string } : null;
         const unresolved = this.#database.raw.prepare(
           `SELECT a.attempt_id FROM kernel_attempts a
              LEFT JOIN kernel_results r ON r.attempt_id=a.attempt_id
              WHERE a.task_id=? AND a.kind!='stop'
-               AND a.state!='failed_before_dispatch' AND r.result_id IS NULL LIMIT 1`,
-        ).get(task.taskId);
-        if (unresolved) throw new Error('Previous exact attempt has no correlated FINAL');
+               AND a.state!='failed_before_dispatch' AND r.result_id IS NULL
+               ${latest ? 'AND a.attempt_id!=?' : ''} LIMIT 1`,
+        ).get(task.taskId, ...(latest ? [latest.attemptId] : []));
+        if (unresolved) throw new Error('Another exact attempt is unresolved');
         const slot = this.#requireSlot(task.projectId, task.slotId);
         if (slot.activeTaskId !== task.taskId || slot.revision !== task.slotRevision) {
           throw new Error('Task lost its exact conversation lease');
@@ -1627,7 +1640,8 @@ export class TaskKernelRepository {
         FROM kernel_tasks t JOIN kernel_public_task_policies p ON p.task_id=t.task_id
         JOIN kernel_attempts a ON a.task_id=t.task_id
         LEFT JOIN kernel_results r ON r.attempt_id=a.attempt_id
-        WHERE t.cancel_requested=0 AND t.state='working'
+        WHERE t.cancel_requested=0
+          AND t.state IN ('working','agent_input_required')
           AND a.kind!='stop' AND a.state='acknowledged' AND r.result_id IS NULL
         ORDER BY t.updated_at,a.sequence LIMIT ?`,
     ).all(limit) as Array<{

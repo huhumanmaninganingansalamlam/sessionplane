@@ -218,6 +218,86 @@ export class SemanticDecisionGateway {
       taskRevision: full.task.revision };
   }
 
+  /** The first unanswered approved Continue exhausts that automatic approval.
+   * An agent, not a human popup or a second speculative POST, gets durable
+   * exact-turn evidence. This packet has no permission-granting actionRef.
+   */
+  async requireNoProgressReview(input: {
+    taskId: string; clientId: string; attemptId: string;
+  }): Promise<AgentDecisionPacket | null> {
+    const full = this.#repository.getFullTask(input.taskId, input.clientId);
+    if (full.task.pendingDecisionId !== null) return this.get(input.taskId, input.clientId);
+    if (full.task.cancelRequested || full.task.state !== 'working') return null;
+    const attempt = full.attempts.find(row => row.attemptId === input.attemptId);
+    const latest = full.attempts.filter(row => row.kind !== 'stop').at(-1);
+    if (!attempt || attempt.kind !== 'continuation' ||
+        attempt.state !== 'acknowledged' || attempt.externalTurnId === null ||
+        latest?.attemptId !== attempt.attemptId ||
+        full.results.some(row => row.attemptId === attempt.attemptId)) {
+      throw new Error('Agent review requires latest unanswered exact Continue ACK');
+    }
+    const slot = this.#repository.getSlot(full.task.projectId, full.task.slotId, input.clientId);
+    if (slot.activeTaskId !== input.taskId || slot.revision !== full.task.slotRevision) {
+      throw new Error('Agent review lost the exact Task slot');
+    }
+    const binding = this.#repository.getBindingAtRevision(
+      full.task.projectId, full.task.slotId, full.task.slotRevision, input.clientId);
+    const intent: ExactSendIntent = {
+      taskId: input.taskId, clientId: input.clientId,
+      projectId: full.task.projectId, slotId: full.task.slotId,
+      slotRevision: full.task.slotRevision,
+      providerConversationId: binding.providerConversationId,
+      attemptId: attempt.attemptId, kind: attempt.kind, content: attempt.content,
+    };
+    let context: SemanticTaskContext;
+    try { context = await this.#resolveContext(intent); }
+    catch {
+      // A lost tab must not prevent a durable agent handoff. Only immutable
+      // Task/ACK facts are retained; the packet has no executable action.
+      context = {
+        projectId: full.task.projectId, slotId: full.task.slotId,
+        slotRevision: full.task.slotRevision, taskId: input.taskId,
+        providerConversationId: binding.providerConversationId,
+        submittedUserMessageId: null,
+        submittedUserTurnId: attempt.externalTurnId,
+        pageLease: null,
+      };
+    }
+    if (context.taskId !== input.taskId || context.projectId !== full.task.projectId ||
+        context.slotId !== full.task.slotId ||
+        context.slotRevision !== full.task.slotRevision ||
+        context.providerConversationId !== binding.providerConversationId) {
+      throw new Error('No-progress review context changed its canonical identity');
+    }
+    const now = new Date().toISOString();
+    const decisionId = randomUUID();
+    const packet = countBytes({
+      taskId: input.taskId, taskRevision: full.task.revision + 1, decisionId,
+      kind: 'recovery_choice',
+      reason: 'managed-continuation-no-final-after-approved-continue',
+      humanOnly: false, observedAt: now,
+      expiresAt: new Date(Date.now() + 30_000).toISOString(),
+      snapshotId: null, questionText: null, permission: null,
+      requestedModel: null, options: [], evidenceBytes: 0,
+    });
+    const envelope: StoredDecision = {
+      kind: 'semantic_action', context, attemptId: attempt.attemptId,
+      purpose: null, snapshotId: null, actionRef: null,
+      evidenceHash: null, packet,
+    };
+    try {
+      this.#repository.requireDecision({
+        taskId: input.taskId, clientId: input.clientId, decisionId,
+        audience: 'agent', contextJson: JSON.stringify(envelope),
+      });
+    } catch (error) {
+      const current = this.get(input.taskId, input.clientId);
+      if (current !== null) return current;
+      throw error;
+    }
+    return this.get(input.taskId, input.clientId);
+  }
+
   /**
    * One read-only fresh model-state check before an initial send. Failure is
    * converted into an agent packet; a previous successful chooser click does
@@ -434,6 +514,12 @@ export class SemanticDecisionGateway {
     }
     // The only unsupported packet allowed a public read-only refresh is the
     // exact unsubmitted Pro-root observation raced by a page operation.
+    const stalledContinuation =
+      original.packet.kind === 'recovery_choice' &&
+      original.packet.reason === 'managed-continuation-no-final-after-approved-continue' &&
+      original.packet.options.length === 0 && !original.packet.humanOnly &&
+      originalAttempt.kind === 'continuation' &&
+      originalAttempt.state === 'acknowledged';
     const transientModelRace =
       original.packet.kind === 'adapter_unsupported' &&
       original.packet.reason === 'semantic-observation-superseded-by-page-operation' &&
@@ -454,7 +540,8 @@ export class SemanticDecisionGateway {
       // this Task. A replay can only observe, never perform a provider action.
       let next = this.get(input.taskId, input.clientId);
       if (next === null && full.task.state === 'working' &&
-          !full.task.cancelRequested && originalAttempt.state === 'planned') {
+          !full.task.cancelRequested &&
+          (originalAttempt.state === 'planned' || stalledContinuation)) {
         if (original.packet.kind === 'model_choice' && original.packet.requestedModel) {
           try {
             if (await this.verifyModelIntent({
@@ -478,7 +565,8 @@ export class SemanticDecisionGateway {
     const option = packet.options[0];
     if (row.status !== 'pending' || full.task.pendingDecisionId !== input.decisionId ||
         full.task.cancelRequested ||
-        (packet.kind !== 'model_choice' && !transientModelRace) ||
+        (packet.kind !== 'model_choice' && !transientModelRace &&
+         !stalledContinuation) ||
         packet.humanOnly ||
         (packet.kind === 'model_choice' && !packet.requestedModel) ||
         packet.options.length > 1 ||

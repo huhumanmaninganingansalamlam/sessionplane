@@ -1,7 +1,7 @@
 # SessionPlane Engineering Rules
 
-This repository implements the contracts in the workspace-level `docs/PRD.md`
-and `docs/prd/` documents. Product requirements and fixed decisions take
+This repository implements the contracts in the workspace-level `../docs/PRD.md`
+and `../docs/specs/` documents. Product requirements and fixed decisions take
 precedence over implementation convenience.
 
 ## Invariants
@@ -20,8 +20,8 @@ precedence over implementation convenience.
 
 ## Development
 
-- Start routine development on `dev` (or a task branch based on `dev`), not on
-  `main`. Check the current branch before editing and never discard existing work
+- Start routine development only on the canonical `dev` branch, not on a new task
+  branch, worktree, or `main`. Check the current branch before editing and never discard existing work
   to switch branches.
 - Publish development changes through `origin/dev` and promote release candidates
   through a reviewed `dev` to `main` pull request with successful CI. Publication

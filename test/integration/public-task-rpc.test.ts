@@ -509,7 +509,7 @@ test('Core independently recovers delayed public ACK and exact FINAL without a c
 });
 
 
-test('approved public Task collects exact FINAL but preserves the next due and does not auto-continue early', async t => {
+test('approved public Task completes on exact FINAL and cancels its pending 20m Continue', async t => {
   const { core, rpc, store } = await fixture(t);
   const project = await rpc<any>('project.open', {
     clientId: 'alice', requestId: 'open-managed-public-final',
@@ -590,13 +590,13 @@ test('approved public Task collects exact FINAL but preserves the next due and d
   const exact = await rpc<any>('task.get', {
     clientId: 'alice', taskId: started.taskId, view: 'result',
   });
-  assert.equal(exact.state, 'working');
+  assert.equal(exact.state, 'completed');
   assert.equal(exact.result.answerText, 'Current stage done, policy still approved');
-  assert.equal(exact.result.completesTask, false,
-    'an approved long-running Task must retain the continuation policy');
-  const acknowledged = store.getFullTask(started.taskId, 'alice').attempts[0]!;
-  const dueAt = Date.parse(acknowledged.acknowledgedAt!) + 1_200_000;
-  assert.equal(Date.parse(exact.nextAutomaticActionAt), dueAt);
+  assert.equal(exact.result.completesTask, true,
+    'a verified FINAL ends this Task even when the continuation policy was approved');
+  assert.equal(exact.nextAutomaticActionAt, null);
+  assert.equal(store.getFullTask(started.taskId, 'alice').timers
+    .filter(timer => timer.status === 'pending').length, 0);
   assert.equal(store.getFullTask(started.taskId, 'alice').attempts.length, 1,
     'no client and no active page mean no early continuation POST');
   await runtime.managedContinuation.tick();
