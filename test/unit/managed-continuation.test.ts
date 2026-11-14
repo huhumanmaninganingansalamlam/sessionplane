@@ -64,6 +64,7 @@ class FakeProvider implements ExactTaskProviderPort {
 }
 
 const START = Date.parse('2026-11-12T00:00:00.000Z');
+const PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT = 5;
 
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), 'sessionplane-managed-continuation-'));
@@ -312,7 +313,7 @@ test('a paced 429 FINAL probe never licenses a speculative 20-minute Continue PO
   assert.equal(env.fake.sends.length, 2);
 });
 
-test('public FINAL sustained 429/pacing creates a durable agent decision without continuation approval', async t => {
+test('public FINAL sustained 429/pacing waits until the fifth blocked slot before agent review', async t => {
   const env = fixture(t);
   env.startTask('task-a', 'main');
   env.seedPublicPolicy('task-a');
@@ -337,12 +338,14 @@ test('public FINAL sustained 429/pacing creates a durable agent decision without
   // The real backend can remain paced for a long Retry-After with no new GET.
   env.fake.pending429Finals.delete('initial:task-a');
   env.fake.pacedFinals.add('initial:task-a');
-  env.now = START + CONTINUATION_INTERVAL_MS - 1;
+  const fifthBlockedSlot = START +
+    (PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT - 1) * CONTINUATION_INTERVAL_MS;
+  env.now = fifthBlockedSlot - 1;
   await service.tick();
-  assert.deepEqual(reviews, [], 'one 429 is not immediately escalated');
+  assert.deepEqual(reviews, [], 'four blocked slots must not escalate');
   env.reopen();
   const resumed = env.createService(review);
-  env.now++;
+  env.now = fifthBlockedSlot;
   await resumed.tick();
   assert.deepEqual(reviews, [{
     attemptId: 'initial:task-a', cause: 'persistent_backend_read_throttle',
@@ -371,9 +374,14 @@ test('a successful canonical observation resets 429 escalation and exact FINAL c
   env.fake.pending429Finals.add('initial:task-a');
   env.now = START + 2 * CONTINUATION_INTERVAL_MS;
   await service.tick();
+  env.fake.pending429Finals.delete('initial:task-a');
+  env.fake.pacedFinals.add('initial:task-a');
+  env.now = START +
+    (PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT - 1) * CONTINUATION_INTERVAL_MS;
+  await service.tick();
   assert.deepEqual(reviews, [], 'old 429 cannot leak across a successful read');
   assert.equal(env.store.getTask('task-a', 'alice').state, 'working');
-  env.fake.pending429Finals.delete('initial:task-a');
+  env.fake.pacedFinals.delete('initial:task-a');
   env.fake.pendingInitialFinals.delete('initial:task-a');
   env.now += 1_000;
   await service.tick();
@@ -382,7 +390,7 @@ test('a successful canonical observation resets 429 escalation and exact FINAL c
   assert.equal(env.fake.sends.length, 1);
 });
 
-test('standalone approved due 429 raises agent review at the second blocked slot', async t => {
+test('standalone approved due 429 raises agent review at the fifth blocked slot', async t => {
   const env = fixture(t);
   env.startTask('task-a', 'main');
   await env.ack('task-a');
@@ -400,17 +408,79 @@ test('standalone approved due 429 raises agent review at the second blocked slot
     taskId: 'task-a', clientId: 'alice', sourceAttemptId: 'initial:task-a',
     approvalRef: 'approved', message: '계속',
   });
-  env.now = START + CONTINUATION_INTERVAL_MS;
-  assert.equal((await service.tick()).dispatchesAttempted, 0);
-  assert.deepEqual(reviews, []);
-  assert.equal(env.fake.sends.length, 1);
-  env.now = START + 2 * CONTINUATION_INTERVAL_MS;
+  for (let slot = 1; slot < PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT; slot++) {
+    env.now = START + slot * CONTINUATION_INTERVAL_MS;
+    assert.equal((await service.tick()).dispatchesAttempted, 0);
+    assert.deepEqual(reviews, [], 'blocked slot ' + slot + ' must not escalate');
+    assert.equal(env.store.getTask('task-a', 'alice').state, 'working');
+    assert.equal(env.fake.sends.length, 1);
+  }
+  env.now = START +
+    PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT * CONTINUATION_INTERVAL_MS;
   assert.equal((await service.tick()).dispatchesAttempted, 0);
   assert.deepEqual(reviews, ['persistent_backend_read_throttle']);
   assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
   assert.equal(env.store.getFullTask('task-a', 'alice').timers
     .filter(timer => timer.status === 'pending').length, 0);
   assert.equal(env.fake.sends.length, 1);
+});
+
+test('explicit agent release of a fifth-slot 429 review resets only the old blocked streak', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  env.seedPublicPolicy('task-a');
+  await env.ack('task-a');
+  env.fake.pending429Finals.add('initial:task-a');
+  const reviews: string[] = [];
+  const review = async (owner: {
+    taskId: string; clientId: string; attemptId: string;
+    cause?: 'persistent_backend_read_throttle';
+  }) => {
+    const decisionId = 'rate-review-' + (reviews.length + 1);
+    reviews.push(decisionId);
+    env.store.requireDecision({
+      taskId: owner.taskId, clientId: owner.clientId, decisionId,
+      audience: 'agent', contextJson: JSON.stringify({
+        kind: 'semantic_action', attemptId: owner.attemptId,
+        packet: { reason: 'canonical-final-rate-limit-persistent' },
+      }),
+    });
+  };
+  let service = env.createService(review);
+  await service.tick(); // actual 429 is blocked review slot one
+  env.fake.pending429Finals.delete('initial:task-a');
+  env.fake.pacedFinals.add('initial:task-a');
+  env.now += 4 * CONTINUATION_INTERVAL_MS;
+  await service.tick();
+  assert.deepEqual(reviews, ['rate-review-1']);
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
+  env.store.resolveDecision({
+    taskId: 'task-a', clientId: 'alice', decisionId: reviews[0]!,
+    resolutionJson: JSON.stringify({ kind: 'read_only_refresh', requestId: 'agent-resume-1' }),
+  });
+  env.reopen();
+  service = env.createService(review);
+  await service.tick();
+  assert.deepEqual(reviews, ['rate-review-1'], 'an old throttle must not re-escalate on resume');
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'working');
+  assert.equal(env.fake.sends.length, 1);
+  env.now += CONTINUATION_INTERVAL_MS;
+  await service.tick();
+  assert.deepEqual(reviews, ['rate-review-1'], 'paced GET alone is not a new real 429');
+  env.fake.pacedFinals.delete('initial:task-a');
+  env.fake.pending429Finals.add('initial:task-a');
+  env.now += CONTINUATION_INTERVAL_MS;
+  await service.tick(); // a new actual 429 opens the next streak
+  env.fake.pending429Finals.delete('initial:task-a');
+  env.fake.pacedFinals.add('initial:task-a');
+  env.now += 4 * CONTINUATION_INTERVAL_MS - 1;
+  await service.tick();
+  assert.deepEqual(reviews, ['rate-review-1']);
+  env.now++;
+  await service.tick();
+  assert.deepEqual(reviews, ['rate-review-1', 'rate-review-2']);
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
+  assert.equal(env.fake.sends.length, 1, 'explicit review never permits a speculative POST');
 });
 
 test('a later foreign user turn becomes an agent decision, never another automatic POST', async t => {

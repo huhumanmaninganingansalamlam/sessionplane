@@ -286,7 +286,7 @@ try {
 
 
 /** Exercise the compiled, installed modules, never a TS unit-test import.
- * Both scenarios are clock-accelerated in disposable SQLite; no real provider
+ * All continuation scenarios are clock-accelerated in disposable SQLite; no real provider
  * POST, Chrome, profile, or operational Core participates.
  */
 async function verifyInstalledContinuation(moduleAt, work) {
@@ -304,8 +304,10 @@ async function verifyInstalledContinuation(moduleAt, work) {
   const store = new TaskKernelRepository(db, () => new Date(nowMs).toISOString());
   const pending = new Set(['initial:no-final', 'initial:rate-limited']);
   const rateLimited = new Set(['initial:rate-limited']);
+  const paced = new Set();
   const ready = new Set();
   const sends = [];
+  const reviews = [];
   const provider = {
     providerKey: 'compiled-fixture',
     async preflight() { return { kind: 'ready' }; },
@@ -317,6 +319,9 @@ async function verifyInstalledContinuation(moduleAt, work) {
     async observeFinal(query) {
       if (rateLimited.has(query.attemptId)) {
         return { kind: 'pending', reason: 'backend-http-429' };
+      }
+      if (paced.has(query.attemptId)) {
+        return { kind: 'pending', reason: 'backend-conversation-probe-paced' };
       }
       if (pending.has(query.attemptId) ||
           (query.attemptId.startsWith('managed-continuation:') && !ready.has(query.attemptId))) {
@@ -331,6 +336,18 @@ async function verifyInstalledContinuation(moduleAt, work) {
   const kernel = new DurableTaskKernel(store, [provider]);
   const service = new ManagedContinuationService({
     repository: store, kernel, now: () => new Date(nowMs),
+    requestAgentReview: async input => {
+      reviews.push(input);
+      store.requireDecision({
+        taskId: input.taskId, clientId: input.clientId,
+        decisionId: 'installed-review:' + input.attemptId, audience: 'agent',
+        contextJson: JSON.stringify({
+          kind: 'semantic_action', attemptId: input.attemptId,
+          packet: { reason: input.cause === 'persistent_backend_read_throttle'
+            ? 'canonical-final-rate-limit-persistent' : 'other-agent-review' },
+        }),
+      });
+    },
   });
   const projectId = 'installed-continuation-project';
   try {
@@ -400,10 +417,56 @@ async function verifyInstalledContinuation(moduleAt, work) {
     assert.equal((await service.tick()).dispatchesAttempted, 1);
     assert.deepEqual(sends.filter(send => send.taskId === rateTask)
       .map(send => send.kind), ['initial', 'continuation']);
+    ready.add('managed-continuation:initial:rate-limited');
+    nowMs += 1_000;
+    await service.tick();
+    assert.equal(store.getTask(rateTask, clientId).state, 'completed');
+
+    const sustainedRate = await prepare('sustained-rate-limited', 'sustained-rate');
+    rateLimited.add('initial:sustained-rate-limited');
+    const reviewsBefore = reviews.length;
+    for (let slot = 1; slot < 5; slot++) {
+      nowMs += CONTINUATION_INTERVAL_MS;
+      assert.equal((await service.tick()).dispatchesAttempted, 0);
+      assert.equal(reviews.length, reviewsBefore,
+        'installed JS must hold the first four blocked slots without agent review');
+      assert.equal(store.getTask(sustainedRate, clientId).state, 'working');
+      assert.equal(sends.filter(send => send.taskId === sustainedRate).length, 1);
+    }
+    nowMs += CONTINUATION_INTERVAL_MS;
+    assert.equal((await service.tick()).dispatchesAttempted, 0);
+    assert.deepEqual(reviews.slice(reviewsBefore).map(review => review.cause),
+      ['persistent_backend_read_throttle']);
+    assert.equal(store.getTask(sustainedRate, clientId).state, 'agent_input_required');
+    assert.equal(store.getFullTask(sustainedRate, clientId).attempts.length, 1);
+    assert.equal(sends.filter(send => send.taskId === sustainedRate).length, 1);
+    // An explicit agent read-only release must not immediately regenerate
+    // the same rate-limit decision from events before that durable receipt.
+    store.resolveDecision({
+      taskId: sustainedRate, clientId,
+      decisionId: 'installed-review:initial:sustained-rate-limited',
+      resolutionJson: JSON.stringify({ kind: 'read_only_refresh',
+        requestId: 'installed-rate-review-refresh' }),
+    });
+    rateLimited.delete('initial:sustained-rate-limited');
+    paced.add('initial:sustained-rate-limited');
+    nowMs += 1_000;
+    await service.tick();
+    assert.equal(store.getTask(sustainedRate, clientId).state, 'working');
+    nowMs += CONTINUATION_INTERVAL_MS;
+    await service.tick();
+    assert.equal(store.getTask(sustainedRate, clientId).state, 'working');
+    assert.deepEqual(reviews.filter(r => r.taskId === sustainedRate).map(r => r.cause),
+      ['persistent_backend_read_throttle'], 'resolved 429 cannot escalate itself');
+    const persistent429ExtraPosts = sends.filter(send => send.taskId === sustainedRate).length - 1;
+    assert.equal(persistent429ExtraPosts, 0);
     return {
       installedNoFinal20MinuteContinue: true,
       installedExactFinalStopsContinuation: true,
       installed429NeverLicensesContinue: true,
+      installedPersistent429FifthSlotAgentReview: true,
+      installedPersistent429ReviewResumesOnce: true,
+      installedPersistent429ExtraPosts: persistent429ExtraPosts,
     };
   } finally {
     await service.close();

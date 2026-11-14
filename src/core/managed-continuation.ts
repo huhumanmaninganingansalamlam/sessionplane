@@ -4,6 +4,9 @@ import type {
 } from '../storage/task-kernel-repository.ts';
 
 export const CONTINUATION_INTERVAL_MS = 20 * 60_000;
+const PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT = 5;
+const PERSISTENT_READ_LIMIT_AGENT_REVIEW_DELAY_MS =
+  (PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT - 1) * CONTINUATION_INTERVAL_MS;
 const TIMER_KIND = 'continuation_due';
 
 interface ContinuationContext {
@@ -412,20 +415,41 @@ export class ManagedContinuationService {
     });
   }
 
-  /** An extended 429 is not evidence of an absent answer. A full twenty
-   * minutes of continuous rate-limit/pacing observations trigger a durable
-   * agent review, even on a Task without automatic continuation approval.
-   * Identical 429 journal events are deduplicated; use elapsed time instead
-   * of treating event count as the number of backend requests.
+  /** An extended 429 is not evidence of an absent answer. The actual 429
+   * opens blocked review slot one; four further twenty-minute boundaries
+   * must pass before the fifth blocked slot creates durable agent review.
+   * Identical pacing events are deduplicated and are not backend requests,
+   * so elapsed review slots—not event or probe count—define the threshold.
    */
   #hasPersistentReadLimit(
     taskId: string, clientId: string, attemptId: string, now: string,
   ): boolean {
-    const events = this.#repository.getFullTask(taskId, clientId).events;
+    const full = this.#repository.getFullTask(taskId, clientId);
+    const events = full.events;
+    // A resolved, read-only agent review starts a new throttle observation
+    // epoch. The decision.resolved event is atomically journaled with the
+    // decision receipt, so a Core crash cannot resurrect an old streak.
+    const releasedReviewIds = new Set<string>();
+    for (const decision of full.decisions) {
+      if (decision.status !== 'resolved' || decision.resolutionJson === null) continue;
+      try {
+        const envelope = JSON.parse(decision.contextJson) as {
+          attemptId?: unknown; packet?: { reason?: unknown };
+        };
+        const resolution = JSON.parse(decision.resolutionJson) as { kind?: unknown };
+        if (envelope.attemptId === attemptId &&
+            envelope.packet?.reason === 'canonical-final-rate-limit-persistent' &&
+            resolution.kind === 'read_only_refresh') {
+          releasedReviewIds.add(decision.decisionId);
+        }
+      } catch { /* An invalid historical receipt cannot clear rate-limit evidence. */ }
+    }
     const prefix = 'final:' + attemptId + ':';
     let first429At: number | null = null;
     for (let index = events.length - 1; index >= 0; index--) {
       const entry = events[index]!;
+      if (entry.event.type === 'decision.resolved' &&
+          releasedReviewIds.has(entry.event.decisionId)) break;
       if (entry.event.type !== 'observation.deferred' ||
           !entry.event.reason.startsWith(prefix)) continue;
       const reason = entry.event.reason.slice(prefix.length);
@@ -438,7 +462,7 @@ export class ManagedContinuationService {
       }
     }
     return first429At !== null && Number.isFinite(first429At) &&
-      Date.parse(now) - first429At >= CONTINUATION_INTERVAL_MS;
+      Date.parse(now) - first429At >= PERSISTENT_READ_LIMIT_AGENT_REVIEW_DELAY_MS;
   }
 
   async #handle(timer: TimerRecord, now: string): Promise<'attempted' | 'deferred' | 'ignored'> {
