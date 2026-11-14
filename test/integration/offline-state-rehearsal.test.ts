@@ -182,7 +182,7 @@ test('interrupted migration publishes no partial candidate; rollback preserves p
 
 test('equal-schema rollback retains additive Task evidence and rejects mutation of an original Task row', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sp-offline-equal-schema-'));
-  const source = join(dir, 'source-v15.sqlite');
+  const source = join(dir, 'source-current.sqlite');
   const sourceDb = SessionPlaneDatabase.open(source);
   try {
     const store = new TaskKernelRepository(sourceDb);
@@ -199,8 +199,8 @@ test('equal-schema rollback retains additive Task evidence and rejects mutation 
   const rollbackDir = join(dir, 'rollback');
   try {
     const migrated = await rehearseMigration({ sourcePath: source, destinationDir: migrationDir });
-    assert.equal(migrated.sourceSchemaVersion, 15);
-    assert.equal(migrated.schemaVersion, 15);
+    assert.equal(migrated.sourceSchemaVersion, 16);
+    assert.equal(migrated.schemaVersion, 16);
     const candidatePath = join(migrationDir, 'candidate.sqlite');
     const candidate = SessionPlaneDatabase.open(candidatePath);
     try {
@@ -283,7 +283,87 @@ test('offline rehearsal CLI requires explicit paths and emits a verifiable manif
   }
 });
 
-test('actual v8 legacy schema with WAL ACK/FINAL/UNKNOWN/draft is retained while upgrading only an isolated candidate to v15', async () => {
+test('v15-to-v16 isolated upgrade retains original exact ACK/FINAL and event chain', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sp-scan-cursors-schema15-'));
+  const source = join(dir, 'original-v15.sqlite');
+  const target = join(dir, 'migration');
+  try {
+    // Create a genuine Task/evidence chain through public repository methods,
+    // then reconstruct the exact pre-0016 schema in this disposable fixture.
+    // The new table is empty before downgrading; no operational DB is touched.
+    const current = SessionPlaneDatabase.open(source);
+    try {
+      const store = new TaskKernelRepository(current);
+      store.openProject({ projectId: 'upgraded', clientId: 'owner',
+        projectKey: 'upgrade.fixture', displayName: 'Preserve exact final' });
+      store.openSlot({ projectId: 'upgraded', clientId: 'owner', slotId: 'main',
+        roleKey: 'Main', providerKey: 'fixture' });
+      store.startTask({ taskId: 'retained-task', projectId: 'upgraded',
+        slotId: 'main', expectedSlotRevision: 1, clientId: 'owner',
+        requestId: 'start-once', prompt: 'exact original prompt' });
+      store.observeConversation({ projectId: 'upgraded', clientId: 'owner',
+        slotId: 'main', expectedRevision: 1, taskId: 'retained-task',
+        providerConversationId: 'exact-conversation' });
+      store.planAttempt({ taskId: 'retained-task', clientId: 'owner',
+        attemptId: 'original-attempt', kind: 'initial', turnKey: 'root',
+        content: 'exact original prompt' });
+      store.beginDispatch('retained-task', 'owner', 'original-attempt');
+      store.acknowledgeAttempt({ taskId: 'retained-task', clientId: 'owner',
+        attemptId: 'original-attempt', externalTurnId: 'exact-turn' });
+      store.recordFinal({ taskId: 'retained-task', clientId: 'owner',
+        attemptId: 'original-attempt', externalTurnId: 'exact-turn',
+        resultId: 'original-final', answerText: 'Original FINAL\n  exact spacing',
+        completeTask: true });
+      assert.equal(store.getTask('retained-task', 'owner').state, 'completed');
+    } finally { current.close(); }
+
+    const original = new DatabaseSync(source);
+    try {
+      original.exec('BEGIN IMMEDIATE');
+      try {
+        original.exec('DROP TABLE kernel_public_preparation_phase');
+        original.exec('DROP TABLE kernel_public_scan_cursors');
+        original.prepare('DELETE FROM schema_migrations WHERE version=16').run();
+        original.exec('COMMIT');
+      } catch (error) { original.exec('ROLLBACK'); throw error; }
+      assert.equal(original.prepare('SELECT MAX(version) AS version FROM schema_migrations')
+        .get()!.version, 15);
+    } finally { original.close(); }
+    const snapshot = (file: string) => {
+      const db = new DatabaseSync(file, { readOnly: true });
+      try {
+        return {
+          task: db.prepare('SELECT task_id,state,original_prompt,revision FROM kernel_tasks')
+            .all(),
+          attempts: db.prepare('SELECT attempt_id,state,external_turn_id FROM kernel_attempts')
+            .all(),
+          final: db.prepare('SELECT answer_text,external_turn_id FROM kernel_results')
+            .all(),
+          events: db.prepare('SELECT task_revision,event_type,payload_json FROM kernel_events' +
+            ' ORDER BY task_revision').all(),
+        };
+      } finally { db.close(); }
+    };
+    const before = snapshot(source);
+    const result = await rehearseMigration({ sourcePath: source, destinationDir: target });
+    assert.equal(result.sourceSchemaVersion, 15);
+    assert.equal(result.schemaVersion, 16);
+    assert.equal(result.sourceReadOnly, true);
+    assert.deepEqual(snapshot(source), before, 'source archive is read-only');
+    assert.deepEqual(snapshot(join(target, 'candidate.sqlite')), before,
+      'exact Task, ACK, FINAL and event chain must survive the additive upgrade');
+    const candidate = SessionPlaneDatabase.open(join(target, 'candidate.sqlite'));
+    try {
+      assert.equal(candidate.schemaVersion, 16);
+      assert.equal(candidate.raw.prepare(
+        'SELECT COUNT(*) AS count FROM kernel_public_scan_cursors').get()!.count, 0);
+      assert.equal(new TaskKernelRepository(candidate)
+        .getTask('retained-task', 'owner').state, 'completed');
+    } finally { candidate.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('actual v8 legacy schema with WAL ACK/FINAL/UNKNOWN/draft is retained while upgrading only an isolated candidate to v16', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sp-real-schema8-upgrade-'));
   const source = join(dir, 'original-v8.sqlite');
   const db = new DatabaseSync(source);
@@ -339,10 +419,10 @@ test('actual v8 legacy schema with WAL ACK/FINAL/UNKNOWN/draft is retained while
 
     const target = join(dir, 'migrated');
     const report = await rehearseMigration({ sourcePath: source, destinationDir: target });
-    assert.equal(report.schemaVersion, 15);
+    assert.equal(report.schemaVersion, 16);
     const archive = inspectArchivedState({ migrationDir: target });
     assert.equal(archive.sourceSchemaVersion, 8);
-    assert.equal(archive.candidateSchemaVersion, 15);
+    assert.equal(archive.candidateSchemaVersion, 16);
     assert.deepEqual(archive.retainedSubmissionStates.generations, [
       { state: 'composer_filled', count: 1 },
       { state: 'submission_unknown', count: 1 },
@@ -358,7 +438,7 @@ test('actual v8 legacy schema with WAL ACK/FINAL/UNKNOWN/draft is retained while
     }
     const candidate = SessionPlaneDatabase.open(join(target, 'candidate.sqlite'));
     try {
-      assert.equal(candidate.schemaVersion, 15);
+      assert.equal(candidate.schemaVersion, 16);
       assert.equal(candidate.raw.prepare('SELECT answer_text AS text FROM generations WHERE generation=1')
         .get()!.text, 'Exact FINAL \n  with whitespace');
       assert.equal(candidate.raw.prepare('SELECT submission_state AS state FROM generations WHERE generation=2')

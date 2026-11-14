@@ -501,7 +501,12 @@ async function verifyInstalledContinuation(moduleAt, work) {
     assert.equal(sends.length - sendsBeforeFairTasks, 12, 'one initial send per fixture Task');
     for (let scan = 0; scan < 4; scan++) {
       nowMs += 1_000;
-      await service.tick();
+      // Each tick uses a newly constructed installed Core scheduler. The
+      // cursor must be recovered from SQLite, not from an instance field.
+      const restartedScanner = new ManagedContinuationService({
+        repository: store, kernel, now: () => new Date(nowMs),
+      });
+      try { await restartedScanner.tick(); } finally { await restartedScanner.close(); }
     }
     const fairReadCounts = fairAttemptIds.map(attemptId =>
       finalReads.filter(id => id === attemptId).length);
@@ -510,6 +515,40 @@ async function verifyInstalledContinuation(moduleAt, work) {
       JSON.stringify(fairReadCounts));
     assert.equal(sends.length - sendsBeforeFairTasks, 12,
       'repeated read-only scans cannot submit continuations');
+
+    // The installed cursor also covers browser *preparation*, which must not
+    // silently choose the first Task again after every new Core instance.
+    const prepIds = [];
+    const sendsBeforePreparation = sends.length;
+    for (let index = 0; index < 12; index++) {
+      const name = 'prepare-' + String(index).padStart(2, '0');
+      const taskId = 'task:' + name;
+      const slotId = 'slot:' + name;
+      store.openSlot({ projectId, slotId, roleKey: slotId, clientId,
+        providerKey: provider.providerKey });
+      store.startTask({ taskId, projectId, slotId, clientId,
+        requestId: 'request:' + name, expectedSlotRevision: 1,
+        prompt: 'Fixture question ' + name });
+      store.planAttempt({ taskId, clientId, attemptId: 'initial:' + name,
+        kind: 'initial', turnKey: 'original', content: 'Fixture question ' + name });
+      db.raw.prepare(
+        'INSERT INTO kernel_public_task_policies' +
+        '(task_id,policy_json,input_sha256,accepted_revision,created_at)' +
+        ' VALUES(?,?,?,?,?)',
+      ).run(taskId, JSON.stringify({ enabled: false }),
+        'compiled-fixture-hash', 1, new Date(nowMs).toISOString());
+      prepIds.push(taskId);
+    }
+    const chosen = [];
+    for (let index = 0; index < prepIds.length; index++) {
+      const restartedRepo = new TaskKernelRepository(db, () => new Date(nowMs).toISOString());
+      assert.equal(restartedRepo.claimPublicPreparationPrefersBound(), index % 2 === 1);
+      chosen.push(restartedRepo.listPendingPublicPreparations(1)[0]?.taskId);
+    }
+    assert.deepEqual(chosen, prepIds,
+      'installed JS must persist fair browser preparation across Core instances');
+    assert.equal(sends.length, sendsBeforePreparation,
+      'prepared-only synthetic Tasks cannot send any provider action');
     return {
       installedNoFinal20MinuteContinue: true,
       installedExactFinalStopsContinuation: true,
@@ -518,6 +557,7 @@ async function verifyInstalledContinuation(moduleAt, work) {
       installedPersistent429ReviewResumesOnce: true,
       installedPersistent429ExtraPosts: persistent429ExtraPosts,
       installedPublicFinalFairRotation: true,
+      installedPublicPreparationFairRotation: true,
     };
   } finally {
     await service.close();

@@ -130,6 +130,7 @@ function fixture(t: TestContext) {
   return {
     fake, startTask, ack, createService, seedPublicPolicy, seedModelIntent,
     get store() { return store; },
+    get database() { return database; },
     get kernel() { return kernel; },
     get now() { return current; },
     set now(value: number) { current = value; },
@@ -351,9 +352,11 @@ test('pending unbound root POSTs recover ACK fairly across a sixteen-slot limit'
       },
     });
   }
-  const service = env.createService();
-  await service.tick();
-  await service.tick();
+  const first = env.createService();
+  await first.tick();
+  await first.close();
+  env.reopen();
+  await env.createService().tick();
   const recovered = new Set(env.fake.recoveredAckAttemptIds);
   assert.ok(ids.every(taskId => recovered.has('initial:' + taskId)),
     'every retained root POST must have a read-only canonical ACK recovery chance');
@@ -383,9 +386,11 @@ test('unbound root initial scans visit all waiting Tasks despite an eight-slot l
     // Known not-ready preflight: no POST, only a durable defer.
     env.fake.blocked.add(taskId);
   }
-  const service = env.createService();
-  await service.tick();
-  await service.tick();
+  const first = env.createService();
+  await first.tick();
+  await first.close();
+  env.reopen();
+  await env.createService().tick();
   const observed = new Set(env.fake.preflightAttemptIds);
   assert.ok(ids.every(taskId => observed.has('initial:' + taskId)),
     'bounded root scan must rotate past the first eight blocked Tasks');
@@ -413,9 +418,11 @@ test('read-only ACK reconciliation rotates past eight uncertain exact attempts',
     });
     env.store.markUncertain(taskId, 'alice', attemptId, 'fixture-lost-ack');
   }
-  const service = env.createService();
-  await service.tick();
-  await service.tick();
+  const first = env.createService();
+  await first.tick();
+  await first.close();
+  env.reopen();
+  await env.createService().tick();
   const observed = new Set(env.fake.recoveredAckAttemptIds);
   assert.ok(ids.every(taskId => observed.has('initial:' + taskId)),
     'all uncertain attempts must get read-only ACK recovery opportunities');
@@ -432,14 +439,87 @@ test('unready early public initials never starve later safe Tasks past the scan 
     env.seedPublicPolicy(taskId);
     if (index < 8) env.fake.blocked.add(taskId);
   }
-  const service = env.createService();
-  await service.tick();
-  await service.tick();
+  const first = env.createService();
+  await first.tick();
+  await first.close();
+  env.reopen();
+  await env.createService().tick();
   const sentIds = env.fake.sends.map(sent => sent.taskId);
   assert.deepEqual(sentIds.slice().sort(), ids.slice(8),
     'a blocked leading batch cannot monopolize every future initial scan');
   assert.ok(ids.slice(0, 8).every(taskId =>
     env.store.getFullTask(taskId, 'alice').attempts[0]!.state === 'planned'));
+});
+
+test('stable single-Task scan does not rewrite the same durable cursor every tick', async t => {
+  const env = fixture(t);
+  env.startTask('only-task', 'main');
+  env.seedPublicPolicy('only-task');
+  await env.ack('only-task');
+  assert.deepEqual(env.store.listPendingPublicFinals(8)
+    .map(item => item.taskId), ['only-task']);
+  const cursor = env.database.raw.prepare(
+    "SELECT scan_kind AS kind,last_task_id AS taskId FROM kernel_public_scan_cursors").all();
+  assert.deepEqual(cursor.map(row => ({
+    kind: String(row.kind), taskId: String(row.taskId),
+  })), [{ kind: 'final', taskId: 'only-task' }]);
+  const writesAfterFirst = Number((env.database.raw.prepare(
+    'SELECT total_changes() AS changes').get() as { changes: number }).changes);
+  for (let i = 0; i < 4; i++) {
+    assert.deepEqual(env.store.listPendingPublicFinals(8)
+      .map(item => item.taskId), ['only-task']);
+  }
+  const writesAfterRepeat = Number((env.database.raw.prepare(
+    'SELECT total_changes() AS changes').get() as { changes: number }).changes);
+  assert.equal(writesAfterRepeat, writesAfterFirst,
+    'an unchanged cursor cannot inflate SQLite writes or Task revisions');
+});
+
+test('durable FINAL scan selection advances atomically without changing Task evidence', async t => {
+  const env = fixture(t);
+  const ids = Array.from({ length: 12 }, (_, index) =>
+    'cursor-final-' + String(index).padStart(2, '0'));
+  for (const taskId of ids) {
+    env.startTask(taskId, 'slot-' + taskId);
+    env.seedPublicPolicy(taskId);
+    await env.ack(taskId);
+  }
+  const before = ids.map(taskId => env.store.getTask(taskId, 'alice').revision);
+  const first = env.store.listPendingPublicFinals(8);
+  assert.deepEqual(first.map(row => row.taskId), ids.slice(0, 8));
+  assert.deepEqual(ids.map(taskId => env.store.getTask(taskId, 'alice').revision), before,
+    'fairness selection is not a durable Task event');
+  env.reopen();
+  const second = env.store.listPendingPublicFinals(8);
+  assert.deepEqual(second.map(row => row.taskId), [...ids.slice(8), ...ids.slice(0, 4)]);
+  const third = env.store.listPendingPublicFinals(8);
+  assert.deepEqual(third.map(row => row.taskId), ids.slice(4));
+  assert.deepEqual(ids.map(taskId => env.store.getTask(taskId, 'alice').revision), before);
+  assert.equal(env.fake.sends.length, 12);
+});
+
+test('FINAL scan fairness survives SQLite/Core reopen after every bounded tick', async t => {
+  const env = fixture(t);
+  const ids = Array.from({ length: 12 }, (_, index) =>
+    'restart-final-' + String(index).padStart(2, '0'));
+  for (const taskId of ids) {
+    env.startTask(taskId, 'slot-' + taskId);
+    env.seedPublicPolicy(taskId);
+    await env.ack(taskId);
+  }
+  for (let scan = 0; scan < 4; scan++) {
+    const service = env.createService();
+    await service.tick();
+    await service.close();
+    env.reopen(); // new repository and Core service each time
+  }
+  const readCounts = ids.map(taskId => env.fake.observedFinalAttemptIds
+    .filter(id => id === 'initial:' + taskId).length);
+  assert.ok(readCounts.every(count => count >= 2),
+    'each restart must resume the bounded cursor, not reset to first eight: ' +
+    JSON.stringify(readCounts));
+  assert.equal(env.fake.sends.length, 12, 'recovery never replays POST');
+  assert.ok(ids.every(taskId => env.store.getTask(taskId, 'alice').state === 'working'));
 });
 
 test('bounded public FINAL observer revisits every Task beyond its eight-slot limit', async t => {

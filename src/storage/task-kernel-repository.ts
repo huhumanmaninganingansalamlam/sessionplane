@@ -1506,190 +1506,253 @@ export class TaskKernelRepository {
    * Preparation can own one reserved root page before ChatGPT creates its
    * conversation ID. It never enters the irreversible dispatch journal.
    */
-  listPendingPublicPreparations(limit = 4, afterTaskId: string | null = null): readonly {
+  /** Select and durably rotate one bounded new-root preparation batch. */
+  listPendingPublicPreparations(limit = 4): readonly {
     taskId: string; clientId: string; attemptId: string;
     providerKey: string;
   }[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
       throw new Error('Invalid public preparation scan limit');
     }
-    return this.#database.raw.prepare(
-      `SELECT t.task_id AS taskId,t.client_id AS clientId,
-          a.attempt_id AS attemptId,s.provider_key AS providerKey
-        FROM kernel_tasks t
-        JOIN kernel_public_task_policies p ON p.task_id=t.task_id
-        JOIN kernel_attempts a ON a.task_id=t.task_id
-        JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
-          AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
-        WHERE t.cancel_requested=0 AND t.state='working'
-          AND t.pending_decision_id IS NULL AND s.provider_conversation_id IS NULL
-          AND a.kind='initial' AND a.state='planned'
-          AND (? IS NULL OR t.task_id>?)
-        ORDER BY t.task_id LIMIT ?`,
-    ).all(afterTaskId, afterTaskId, limit) as Array<{
-      taskId: string; clientId: string; attemptId: string; providerKey: string;
-    }>;
+    return this.#nextPublicScanBatch('root_prepare', cursor =>
+      this.#database.raw.prepare(
+        `SELECT t.task_id AS taskId,t.client_id AS clientId,
+            a.attempt_id AS attemptId,s.provider_key AS providerKey
+          FROM kernel_tasks t
+          JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+          JOIN kernel_attempts a ON a.task_id=t.task_id
+          JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
+            AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
+          WHERE t.cancel_requested=0 AND t.state='working'
+            AND t.pending_decision_id IS NULL AND s.provider_conversation_id IS NULL
+            AND a.kind='initial' AND a.state='planned'
+          ORDER BY CASE WHEN t.task_id > ? THEN 0 ELSE 1 END, t.task_id LIMIT ?`,
+      ).all(cursor.taskId, limit) as Array<{
+        taskId: string; clientId: string; attemptId: string; providerKey: string;
+      }>);
   }
 
   /** Prepared root initials remain unbound until their one exact POST is observed. */
-  listPendingPublicRootInitials(limit = 16, afterTaskId?: string): readonly {
+  listPendingPublicRootInitials(limit = 16): readonly {
     taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
   }[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error('Invalid public root initial scan limit');
     }
-    if (afterTaskId !== undefined) requireNonempty(afterTaskId, 'afterTaskId');
-    return this.#database.raw.prepare(
-      `SELECT t.task_id AS taskId,t.client_id AS clientId,
-          a.attempt_id AS attemptId,i.model_intent AS modelIntent
-        FROM kernel_tasks t
-        JOIN kernel_public_task_policies p ON p.task_id=t.task_id
-        JOIN kernel_attempts a ON a.task_id=t.task_id
-        JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
-          AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
-        LEFT JOIN kernel_public_project_intents i ON i.project_id=t.project_id
-        LEFT JOIN kernel_root_dispatch_evidence r ON r.attempt_id=a.attempt_id
-        WHERE t.cancel_requested=0 AND t.state='working'
-          AND t.pending_decision_id IS NULL AND s.provider_conversation_id IS NULL
-          AND a.kind='initial' AND a.state='planned' AND r.attempt_id IS NULL
-        ORDER BY CASE WHEN t.task_id > ? THEN 0 ELSE 1 END, t.task_id LIMIT ?`,
-    ).all(afterTaskId ?? '', limit) as Array<{
-      taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
-    }>;
+    return this.#nextPublicScanBatch('root_initial', cursor =>
+      this.#database.raw.prepare(
+        `SELECT t.task_id AS taskId,t.client_id AS clientId,
+            a.attempt_id AS attemptId,i.model_intent AS modelIntent
+          FROM kernel_tasks t
+          JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+          JOIN kernel_attempts a ON a.task_id=t.task_id
+          JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
+            AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
+          LEFT JOIN kernel_public_project_intents i ON i.project_id=t.project_id
+          LEFT JOIN kernel_root_dispatch_evidence r ON r.attempt_id=a.attempt_id
+          WHERE t.cancel_requested=0 AND t.state='working'
+            AND t.pending_decision_id IS NULL AND s.provider_conversation_id IS NULL
+            AND a.kind='initial' AND a.state='planned' AND r.attempt_id IS NULL
+          ORDER BY CASE WHEN t.task_id > ? THEN 0 ELSE 1 END, t.task_id LIMIT ?`,
+      ).all(cursor.taskId, limit) as Array<{
+        taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
+      }>);
   }
 
   /** Root POSTs are reconciled read-only until canonical ACK, then rebound
    * idempotently to the retained page/session generation after a Core restart.
    */
-  listPendingPublicRootReconciliations(limit = 32, afterTaskId?: string): readonly {
+  listPendingPublicRootReconciliations(limit = 32): readonly {
     taskId: string; clientId: string; attemptId: string;
     canonicalConversationId: string | null;
   }[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error('Invalid public root reconciliation scan limit');
     }
-    if (afterTaskId !== undefined) requireNonempty(afterTaskId, 'afterTaskId');
-    return this.#database.raw.prepare(
-      `SELECT t.task_id AS taskId,t.client_id AS clientId,
-          a.attempt_id AS attemptId,
-          r.canonical_conversation_id AS canonicalConversationId
-        FROM kernel_tasks t
-        JOIN kernel_public_task_policies p ON p.task_id=t.task_id
-        JOIN kernel_attempts a ON a.task_id=t.task_id
-        JOIN kernel_root_dispatch_evidence r ON r.attempt_id=a.attempt_id
-        JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
-          AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
-        WHERE t.state IN ('working','uncertain','canceled') AND a.kind='initial'
-          AND ((r.canonical_conversation_id IS NULL
-                AND a.state IN ('dispatched','uncertain'))
-            OR (r.canonical_conversation_id IS NOT NULL
-                AND a.state='acknowledged'))
-        ORDER BY CASE WHEN t.task_id > ? THEN 0 ELSE 1 END, t.task_id LIMIT ?`,
-    ).all(afterTaskId ?? '', limit) as Array<{
-      taskId: string; clientId: string; attemptId: string;
-      canonicalConversationId: string | null;
-    }>;
+    return this.#nextPublicScanBatch('root_reconcile', cursor =>
+      this.#database.raw.prepare(
+        `SELECT t.task_id AS taskId,t.client_id AS clientId,
+            a.attempt_id AS attemptId,
+            r.canonical_conversation_id AS canonicalConversationId
+          FROM kernel_tasks t
+          JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+          JOIN kernel_attempts a ON a.task_id=t.task_id
+          JOIN kernel_root_dispatch_evidence r ON r.attempt_id=a.attempt_id
+          JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
+            AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
+          WHERE t.state IN ('working','uncertain','canceled') AND a.kind='initial'
+            AND ((r.canonical_conversation_id IS NULL
+                  AND a.state IN ('dispatched','uncertain'))
+              OR (r.canonical_conversation_id IS NOT NULL
+                  AND a.state='acknowledged'))
+          ORDER BY CASE WHEN t.task_id > ? THEN 0 ELSE 1 END, t.task_id LIMIT ?`,
+      ).all(cursor.taskId, limit) as Array<{
+        taskId: string; clientId: string; attemptId: string;
+        canonicalConversationId: string | null;
+      }>);
   }
 
   /** Non-root POSTs with exact durable provenance await read-only ACK recovery.
    * The active immutable binding and latest attempt must still own the turn.
    */
-  listPendingPublicAcknowledgements(limit = 16, afterTaskId?: string): readonly {
+  listPendingPublicAcknowledgements(limit = 16): readonly {
     taskId: string; clientId: string; attemptId: string;
   }[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error('Invalid public acknowledgement scan limit');
     }
-    if (afterTaskId !== undefined) requireNonempty(afterTaskId, 'afterTaskId');
-    return this.#database.raw.prepare(
-      `SELECT t.task_id AS taskId,t.client_id AS clientId,a.attempt_id AS attemptId
-        FROM kernel_tasks t
-        JOIN kernel_public_task_policies p ON p.task_id=t.task_id
-        JOIN kernel_attempts a ON a.task_id=t.task_id
-        JOIN kernel_dispatch_evidence e ON e.attempt_id=a.attempt_id AND e.task_id=t.task_id
-        JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
-          AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
-        WHERE t.cancel_requested=0 AND t.state IN ('working','uncertain')
-          AND t.pending_decision_id IS NULL
-          AND a.kind!='stop' AND a.state IN ('dispatched','uncertain')
-          AND s.provider_conversation_id IS NOT NULL
-          AND e.provider_key=s.provider_key
-          AND e.provider_conversation_id=s.provider_conversation_id
-          AND NOT EXISTS (SELECT 1 FROM kernel_root_dispatch_evidence r
-            WHERE r.attempt_id=a.attempt_id)
-          AND NOT EXISTS (SELECT 1 FROM kernel_attempts newer
-            WHERE newer.task_id=t.task_id AND newer.kind!='stop'
-              AND newer.sequence>a.sequence)
-        ORDER BY CASE WHEN t.task_id > ? THEN 0 ELSE 1 END, t.task_id,a.sequence LIMIT ?`,
-    ).all(afterTaskId ?? '', limit) as Array<{
-      taskId: string; clientId: string; attemptId: string;
-    }>;
+    return this.#nextPublicScanBatch('ack_reconcile', cursor =>
+      this.#database.raw.prepare(
+        `SELECT t.task_id AS taskId,t.client_id AS clientId,a.attempt_id AS attemptId
+          FROM kernel_tasks t
+          JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+          JOIN kernel_attempts a ON a.task_id=t.task_id
+          JOIN kernel_dispatch_evidence e ON e.attempt_id=a.attempt_id AND e.task_id=t.task_id
+          JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
+            AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
+          WHERE t.cancel_requested=0 AND t.state IN ('working','uncertain')
+            AND t.pending_decision_id IS NULL
+            AND a.kind!='stop' AND a.state IN ('dispatched','uncertain')
+            AND s.provider_conversation_id IS NOT NULL
+            AND e.provider_key=s.provider_key
+            AND e.provider_conversation_id=s.provider_conversation_id
+            AND NOT EXISTS (SELECT 1 FROM kernel_root_dispatch_evidence r
+              WHERE r.attempt_id=a.attempt_id)
+            AND NOT EXISTS (SELECT 1 FROM kernel_attempts newer
+              WHERE newer.task_id=t.task_id AND newer.kind!='stop'
+                AND newer.sequence>a.sequence)
+          ORDER BY CASE WHEN t.task_id > ? THEN 0 ELSE 1 END, t.task_id,a.sequence LIMIT ?`,
+      ).all(cursor.taskId, limit) as Array<{
+        taskId: string; clientId: string; attemptId: string;
+      }>);
   }
 
   /** Only PLANNED public initials with a canonical conversation may dispatch. */
-  listPendingPublicInitials(limit = 16, afterTaskId?: string): readonly {
+  /** These two Core scanners share a safety predicate, never a cursor. */
+  listPendingPublicInitials(limit = 16): readonly {
+    taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
+  }[] {
+    return this.#scanPendingPublicInitials(limit, 'initial');
+  }
+
+  listPendingPublicBoundPreparations(limit = 8): readonly {
+    taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
+  }[] {
+    return this.#scanPendingPublicInitials(limit, 'bound_prepare');
+  }
+
+  #scanPendingPublicInitials(limit: number, scanKind: 'initial' | 'bound_prepare'): readonly {
     taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
   }[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error('Invalid public initial scan limit');
     }
-    if (afterTaskId !== undefined) requireNonempty(afterTaskId, 'afterTaskId');
-    return this.#database.raw.prepare(
-      `SELECT t.task_id AS taskId,t.client_id AS clientId,
-          a.attempt_id AS attemptId,i.model_intent AS modelIntent
-        FROM kernel_tasks t
-        JOIN kernel_public_task_policies p ON p.task_id=t.task_id
-        JOIN kernel_attempts a ON a.task_id=t.task_id
-        JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
-          AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
-        LEFT JOIN kernel_public_project_intents i ON i.project_id=t.project_id
-        WHERE t.cancel_requested=0 AND t.state='working'
-          AND t.pending_decision_id IS NULL AND s.provider_conversation_id IS NOT NULL
-          AND a.kind='initial' AND a.state='planned'
-        ORDER BY CASE WHEN t.task_id > ? THEN 0 ELSE 1 END, t.task_id LIMIT ?`,
-    ).all(afterTaskId ?? '', limit) as Array<{
-      taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
-    }>;
+    return this.#nextPublicScanBatch(scanKind, cursor =>
+      this.#database.raw.prepare(
+        `SELECT t.task_id AS taskId,t.client_id AS clientId,
+            a.attempt_id AS attemptId,i.model_intent AS modelIntent
+          FROM kernel_tasks t
+          JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+          JOIN kernel_attempts a ON a.task_id=t.task_id
+          JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
+            AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
+          LEFT JOIN kernel_public_project_intents i ON i.project_id=t.project_id
+          WHERE t.cancel_requested=0 AND t.state='working'
+            AND t.pending_decision_id IS NULL AND s.provider_conversation_id IS NOT NULL
+            AND a.kind='initial' AND a.state='planned'
+          ORDER BY CASE WHEN t.task_id > ? THEN 0 ELSE 1 END, t.task_id LIMIT ?`,
+      ).all(cursor.taskId, limit) as Array<{
+        taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
+      }>);
   }
 
   /** Exact public ACKs awaiting a canonical FINAL. The Core may observe
    * these without a connected RPC/MCP client or a subscriber lifecycle.
    */
-  listPendingPublicFinals(
-    limit = 32, after?: { readonly taskId: string; readonly attemptSequence: number },
-  ): readonly {
+  listPendingPublicFinals(limit = 32): readonly {
     taskId: string; clientId: string; attemptId: string;
     attemptSequence: number; policyJson: string;
   }[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error('Invalid public final scan limit');
     }
-    if (after !== undefined && (!after.taskId ||
-        !Number.isSafeInteger(after.attemptSequence) || after.attemptSequence < 1)) {
-      throw new Error('Invalid public final scan cursor');
-    }
     // A bounded observer must not order only by task.updated_at: identical
     // pacing/FINAL deferrals are intentionally event-deduplicated and leave
     // that timestamp unchanged, starving every Task past LIMIT indefinitely.
     // Rotate by immutable task + attempt sequence, wrapping in one query.
-    const cursorTaskId = after?.taskId ?? '';
-    const cursorSequence = after?.attemptSequence ?? 0;
-    return this.#database.raw.prepare(
-      `SELECT t.task_id AS taskId,t.client_id AS clientId,
-          a.attempt_id AS attemptId,a.sequence AS attemptSequence,
-          p.policy_json AS policyJson
-        FROM kernel_tasks t JOIN kernel_public_task_policies p ON p.task_id=t.task_id
-        JOIN kernel_attempts a ON a.task_id=t.task_id
-        LEFT JOIN kernel_results r ON r.attempt_id=a.attempt_id
-        WHERE t.cancel_requested=0
-          AND t.state IN ('working','agent_input_required')
-          AND a.kind!='stop' AND a.state='acknowledged' AND r.result_id IS NULL
-        ORDER BY CASE WHEN t.task_id > ? OR (t.task_id=? AND a.sequence>?)
-          THEN 0 ELSE 1 END, t.task_id,a.sequence LIMIT ?`,
-    ).all(cursorTaskId, cursorTaskId, cursorSequence, limit) as Array<{
-      taskId: string; clientId: string; attemptId: string;
-      attemptSequence: number; policyJson: string;
-    }>;
+    return this.#nextPublicScanBatch('final', cursor =>
+      this.#database.raw.prepare(
+        `SELECT t.task_id AS taskId,t.client_id AS clientId,
+            a.attempt_id AS attemptId,a.sequence AS attemptSequence,
+            p.policy_json AS policyJson
+          FROM kernel_tasks t JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+          JOIN kernel_attempts a ON a.task_id=t.task_id
+          LEFT JOIN kernel_results r ON r.attempt_id=a.attempt_id
+          WHERE t.cancel_requested=0
+            AND t.state IN ('working','agent_input_required')
+            AND a.kind!='stop' AND a.state='acknowledged' AND r.result_id IS NULL
+          ORDER BY CASE WHEN t.task_id > ? OR (t.task_id=? AND a.sequence>?)
+            THEN 0 ELSE 1 END, t.task_id,a.sequence LIMIT ?`,
+      ).all(cursor.taskId, cursor.taskId, cursor.attemptSequence, limit) as Array<{
+        taskId: string; clientId: string; attemptId: string;
+        attemptSequence: number; policyJson: string;
+      }>, row => row.attemptSequence);
+  }
+
+  /** Rotate root/bound browser preparation priority across Core restarts.
+   * This is ordering metadata only; neither branch gains POST authority.
+   */
+  claimPublicPreparationPrefersBound(): boolean {
+    return this.#database.transaction(() => {
+      const row = this.#database.raw.prepare(
+        'SELECT next_kind AS nextKind FROM kernel_public_preparation_phase' +
+        ' WHERE singleton=1',
+      ).get() as { nextKind: 'root' | 'bound' } | undefined;
+      const preferred = row?.nextKind ?? 'root';
+      // A new schema must remain empty until first use; migration never
+      // creates operational scheduler activity in an offline candidate.
+      this.#database.raw.prepare(
+        'INSERT INTO kernel_public_preparation_phase(singleton,next_kind)' +
+        ' VALUES(1,?) ON CONFLICT(singleton) DO UPDATE' +
+        ' SET next_kind=excluded.next_kind',
+      ).run(preferred === 'root' ? 'bound' : 'root');
+      return preferred === 'bound';
+    });
+  }
+
+  /** One bounded scan and its next fairness position are committed together.
+   * This position is not permission to mutate a Task or provider: if Core
+   * crashes after selecting rows but before observing them, the next pass
+   * eventually wraps and can inspect them again without replaying a POST.
+   */
+  #nextPublicScanBatch<RowType extends { readonly taskId: string }>(
+    scanKind: 'root_prepare' | 'root_initial' | 'initial' | 'bound_prepare' |
+      'root_reconcile' | 'ack_reconcile' | 'final',
+    load: (cursor: { taskId: string; attemptSequence: number }) => readonly RowType[],
+    sequenceOf: (row: RowType) => number = () => 0,
+  ): readonly RowType[] {
+    return this.#database.transaction(() => {
+      const previous = this.#database.raw.prepare(
+        'SELECT last_task_id AS taskId,last_attempt_sequence AS attemptSequence' +
+        ' FROM kernel_public_scan_cursors WHERE scan_kind=?',
+      ).get(scanKind) as { taskId: string; attemptSequence: number } | undefined;
+      const selected = load(previous ?? { taskId: '', attemptSequence: 0 });
+      const last = selected.at(-1);
+      const sequence = last === undefined ? 0 : sequenceOf(last);
+      // A single permanently paced Task must not generate a WAL write on
+      // every poll merely to persist the identical ordering marker.
+      if (last !== undefined && (last.taskId !== previous?.taskId ||
+          sequence !== previous.attemptSequence)) {
+        this.#database.raw.prepare(
+          `INSERT INTO kernel_public_scan_cursors(
+             scan_kind,last_task_id,last_attempt_sequence) VALUES(?,?,?)
+           ON CONFLICT(scan_kind) DO UPDATE SET
+             last_task_id=excluded.last_task_id,
+             last_attempt_sequence=excluded.last_attempt_sequence`,
+        ).run(scanKind, last.taskId, sequence);
+      }
+      return selected;
+    });
   }
 
   /** Standing policy is durable Task admission data, never a client wait.

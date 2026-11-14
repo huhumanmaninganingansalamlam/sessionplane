@@ -202,7 +202,8 @@ try {
       installedCore.installedPersistent429FifthSlotAgentReview !== true ||
       installedCore.installedPersistent429ReviewResumesOnce !== true ||
       installedCore.installedPersistent429ExtraPosts !== 0 ||
-      installedCore.installedPublicFinalFairRotation !== true) {
+      installedCore.installedPublicFinalFairRotation !== true ||
+      installedCore.installedPublicPreparationFairRotation !== true) {
     throw new Error('Installed Core idempotency/restart/rebinding smoke failed');
   }
 
