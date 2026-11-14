@@ -30,3 +30,23 @@ test('uncommitted file changes or dirty emitted build cannot be reported as acce
     ],
   });
 });
+
+test('explicit main source retains the exact clean HEAD/tree identity across all gates', () => {
+  const main = { ...start, branch: 'main', head: 'c'.repeat(40), tree: 'd'.repeat(40) };
+  const mainBuild = { sourceCommit: main.head, sourceTree: main.tree, sourceState: 'clean' };
+  assert.deepEqual(compareCandidateSource(main, { ...main }, mainBuild,
+    { expectedBranch: 'main' }), { passed: true, issues: [] });
+  assert.deepEqual(compareCandidateSource(main, { ...main }, mainBuild), {
+    passed: false, issues: ['invalid_initial_dev_candidate'],
+  });
+  assert.deepEqual(compareCandidateSource(start, { ...start }, identity,
+    { expectedBranch: 'main' }), {
+    passed: false, issues: ['invalid_initial_main_candidate'],
+  });
+  assert.deepEqual(compareCandidateSource(main, { ...main, head: 'e'.repeat(40) },
+    mainBuild, { expectedBranch: 'main' }), {
+    passed: false, issues: ['candidate_head_changed_during_tests'],
+  });
+  assert.throws(() => compareCandidateSource(main, main, mainBuild,
+    { expectedBranch: 'release' }), /fenced to dev or main/);
+});
