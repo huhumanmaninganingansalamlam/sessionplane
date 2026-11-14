@@ -524,8 +524,8 @@ export class SemanticDecisionGateway {
     if (!original.attemptId || !originalAttempt) {
       throw new SessionPlaneDomainError('stale_decision', 'Decision lost its exact attempt');
     }
-    // The only unsupported packet allowed a public read-only refresh is the
-    // exact unsubmitted Pro-root observation raced by a page operation.
+    // Explicitly refresh only bounded, unsubmitted, exact page observations.
+    // A page-load error is not permission to send or navigate again.
     const stalledContinuation =
       original.packet.kind === 'recovery_choice' &&
       original.packet.options.length === 0 && !original.packet.humanOnly &&
@@ -544,6 +544,15 @@ export class SemanticDecisionGateway {
       original.context.submittedUserMessageId === null &&
       original.context.submittedUserTurnId === null &&
       original.context.pageLease !== null &&
+      originalAttempt.kind === 'initial' && originalAttempt.state === 'planned';
+    const transientBoundSurface =
+      original.packet.kind === 'adapter_unsupported' &&
+      original.packet.reason === 'chat-surface-unverified' &&
+      original.packet.options.length === 0 && !original.packet.humanOnly &&
+      original.context.providerConversationId !== null &&
+      original.context.pageLease !== null &&
+      original.context.submittedUserMessageId === null &&
+      original.context.submittedUserTurnId === null &&
       originalAttempt.kind === 'initial' && originalAttempt.state === 'planned';
     const receipt = row.resolutionJson === null ? null
       : JSON.parse(row.resolutionJson) as Record<string, unknown>;
@@ -584,7 +593,7 @@ export class SemanticDecisionGateway {
     if (row.status !== 'pending' || full.task.pendingDecisionId !== input.decisionId ||
         full.task.cancelRequested ||
         (packet.kind !== 'model_choice' && !transientModelRace &&
-         !stalledContinuation) ||
+         !transientBoundSurface && !stalledContinuation) ||
         packet.humanOnly ||
         (packet.kind === 'model_choice' && !packet.requestedModel) ||
         packet.options.length > 1 ||

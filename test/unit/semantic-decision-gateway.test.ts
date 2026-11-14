@@ -20,7 +20,7 @@ const MANIFEST: SemanticCapabilityManifest = {
   supports: ['conversation', 'question', 'permission', 'model_choice'],
 };
 
-type Mode = 'question' | 'free_text' | 'model' | 'model-verified' | 'power' | 'model-unready' | 'page_race' | 'permission' |
+type Mode = 'question' | 'free_text' | 'model' | 'model-verified' | 'power' | 'model-unready' | 'page_race' | 'surface_unverified' | 'permission' |
   'human' | 'oversized' | 'none';
 
 class FakeSemanticAdapter implements SemanticProviderAdapter {
@@ -41,7 +41,7 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
     this.observed++;
     const actionRef = 'action-' + this.observed;
     this.currentActionRef = actionRef;
-    const blocker = this.mode === 'page_race' ? 'unsupported'
+    const blocker = this.mode === 'page_race' || this.mode === 'surface_unverified' ? 'unsupported'
       : this.mode === 'permission' ? 'provider_permission'
       : this.mode === 'human' ? 'human_verification'
         : this.mode === 'none' || this.mode === 'model' ||
@@ -70,7 +70,8 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
       snapshotId: 'snapshot-' + this.observed,
       observedAt: new Date().toISOString(),
       blocker, progress: 'idle',
-      reason: this.mode === 'page_race'
+      reason: this.mode === 'surface_unverified' ? 'chat-surface-unverified'
+        : this.mode === 'page_race'
         ? 'semantic-observation-superseded-by-page-operation'
         : blocker === 'none' ? null : this.mode === 'human'
         ? 'human-verification-required' : this.mode === 'permission'
@@ -173,6 +174,63 @@ function fixture(t: TestContext, options: { plannedInitial?: boolean; requiredMo
     },
   };
 }
+
+test('owned canonical Main load failure offers a bounded read-only refresh without a second POST', async t => {
+  const env = fixture(t, { plannedInitial: true });
+  const adapter = new FakeSemanticAdapter(env.store);
+  adapter.mode = 'surface_unverified';
+  const gateway = env.getGateway(adapter);
+  const first = await gateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+  });
+  assert.equal(first?.kind, 'adapter_unsupported');
+  assert.equal(first?.reason, 'chat-surface-unverified');
+  assert.deepEqual(first?.options, []);
+  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  await assert.rejects(() => gateway.decideCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: first!.decisionId,
+    requestId: 'invented-post', actionRef: 'invented-send',
+  }), /does not authorize/);
+
+  const stillBlocked = await gateway.refreshCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: first!.decisionId,
+    requestId: 'bound-load-refresh-1',
+  });
+  assert.equal(stillBlocked.kind, 'refresh_required');
+  assert.equal(stillBlocked.packet?.reason, 'chat-surface-unverified');
+  assert.notEqual(stillBlocked.packet?.decisionId, first?.decisionId);
+  assert.deepEqual(await gateway.refreshCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: first!.decisionId,
+    requestId: 'bound-load-refresh-1',
+  }), stillBlocked, 'a replay can only read the next pending packet');
+  assert.equal(adapter.clicks, 0);
+  assert.equal(env.store.getFullTask('task-1', 'alice').attempts.length, 1);
+  assert.equal(env.store.getFullTask('task-1', 'alice').attempts[0]!.state, 'planned');
+
+  adapter.mode = 'none';
+  assert.deepEqual(await gateway.refreshCurrent({
+    taskId: 'task-1', clientId: 'alice',
+    decisionId: stillBlocked.packet!.decisionId,
+    requestId: 'bound-load-refresh-2',
+  }), { kind: 'refresh_required', packet: null });
+  assert.equal(env.store.getTask('task-1', 'alice').state, 'working');
+  assert.equal(env.store.getFullTask('task-1', 'alice').attempts.length, 1);
+  assert.equal(env.store.getFullTask('task-1', 'alice').attempts[0]!.state, 'planned');
+  assert.equal(adapter.clicks, 0, 'refresh must never click a provider control');
+
+  const submitted = fixture(t);
+  const submittedAdapter = new FakeSemanticAdapter(submitted.store);
+  submittedAdapter.mode = 'surface_unverified';
+  const submittedGateway = submitted.getGateway(submittedAdapter);
+  const submittedPacket = await submittedGateway.inspect({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+  });
+  await assert.rejects(() => submittedGateway.refreshCurrent({
+    taskId: 'task-1', clientId: 'alice',
+    decisionId: submittedPacket!.decisionId, requestId: 'wrong-boundary',
+  }), /Current decision is not refreshable/);
+  assert.equal(submitted.store.getFullTask('task-1', 'alice').attempts[0]!.state, 'acknowledged');
+});
 
 test('unanswered continuation creates durable agent review; refresh is read-only and late FINAL completes', async t => {
   const env = fixture(t);
