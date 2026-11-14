@@ -24,6 +24,7 @@ class FakeProvider implements ExactTaskProviderPort {
   readonly readyContinuationFinals = new Set<string>();
   readonly unavailableFinals = new Set<string>();
   readonly pending429Finals = new Set<string>();
+  readonly pacedFinals = new Set<string>();
   readonly laterUserFinals = new Set<string>();
   async preflight(intent: ExactSendIntent): Promise<
     { kind: 'ready' } | { kind: 'unavailable'; reason: string }
@@ -45,6 +46,9 @@ class FakeProvider implements ExactTaskProviderPort {
     }
     if (this.pending429Finals.has(query.attemptId)) {
       return { kind: 'pending', reason: 'backend-http-429' };
+    }
+    if (this.pacedFinals.has(query.attemptId)) {
+      return { kind: 'pending', reason: 'backend-conversation-probe-paced' };
     }
     if (this.laterUserFinals.has(query.attemptId)) {
       return { kind: 'pending', reason: 'backend-next-user-turn-before-final' };
@@ -92,6 +96,7 @@ function fixture(t: TestContext) {
   };
   const createService = (requestAgentReview?: (input: {
     taskId: string; clientId: string; attemptId: string;
+    cause?: 'persistent_backend_read_throttle';
   }) => Promise<void>) => new ManagedContinuationService({
     repository: store, kernel, now: () => new Date(current),
     ...(requestAgentReview ? { requestAgentReview } : {}),
@@ -305,6 +310,107 @@ test('a paced 429 FINAL probe never licenses a speculative 20-minute Continue PO
   env.now += CONTINUATION_INTERVAL_MS;
   assert.equal((await service.tick()).dispatchesAttempted, 1);
   assert.equal(env.fake.sends.length, 2);
+});
+
+test('public FINAL sustained 429/pacing creates a durable agent decision without continuation approval', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  env.seedPublicPolicy('task-a');
+  await env.ack('task-a');
+  env.fake.pending429Finals.add('initial:task-a');
+  const reviews: Array<{ attemptId: string; cause: string | undefined }> = [];
+  const review = async (owner: {
+    taskId: string; clientId: string; attemptId: string;
+    cause?: 'persistent_backend_read_throttle';
+  }) => {
+    reviews.push({ attemptId: owner.attemptId, cause: owner.cause });
+    env.store.requireDecision({
+      taskId: owner.taskId, clientId: owner.clientId,
+      decisionId: 'sustained-429-review', audience: 'agent',
+      contextJson: JSON.stringify({ reason: owner.cause, attemptId: owner.attemptId }),
+    });
+  };
+  const service = env.createService(review);
+  await service.tick();
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'working');
+  assert.equal(env.fake.sends.length, 1);
+  // The real backend can remain paced for a long Retry-After with no new GET.
+  env.fake.pending429Finals.delete('initial:task-a');
+  env.fake.pacedFinals.add('initial:task-a');
+  env.now = START + CONTINUATION_INTERVAL_MS - 1;
+  await service.tick();
+  assert.deepEqual(reviews, [], 'one 429 is not immediately escalated');
+  env.reopen();
+  const resumed = env.createService(review);
+  env.now++;
+  await resumed.tick();
+  assert.deepEqual(reviews, [{
+    attemptId: 'initial:task-a', cause: 'persistent_backend_read_throttle',
+  }]);
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.getTask('task-a', 'alice').pendingDecisionId, 'sustained-429-review');
+  assert.equal(env.fake.sends.length, 1, '429/pacing is never submission permission');
+  env.now += 3 * CONTINUATION_INTERVAL_MS;
+  await resumed.tick();
+  assert.equal(reviews.length, 1, 'pending review remains durable, not repeated');
+  assert.equal(env.fake.sends.length, 1);
+});
+
+test('a successful canonical observation resets 429 escalation and exact FINAL closes normally', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  env.seedPublicPolicy('task-a');
+  await env.ack('task-a');
+  env.fake.pending429Finals.add('initial:task-a');
+  const reviews: string[] = [];
+  const service = env.createService(async owner => { reviews.push(owner.attemptId); });
+  await service.tick();
+  env.fake.pending429Finals.delete('initial:task-a');
+  env.now = START + CONTINUATION_INTERVAL_MS / 2;
+  await service.tick(); // verified missing answer breaks the continuous throttle
+  env.fake.pending429Finals.add('initial:task-a');
+  env.now = START + 2 * CONTINUATION_INTERVAL_MS;
+  await service.tick();
+  assert.deepEqual(reviews, [], 'old 429 cannot leak across a successful read');
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'working');
+  env.fake.pending429Finals.delete('initial:task-a');
+  env.fake.pendingInitialFinals.delete('initial:task-a');
+  env.now += 1_000;
+  await service.tick();
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'completed');
+  assert.equal(env.store.getFullTask('task-a', 'alice').results[0]!.completesTask, true);
+  assert.equal(env.fake.sends.length, 1);
+});
+
+test('standalone approved due 429 raises agent review at the second blocked slot', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  await env.ack('task-a');
+  env.fake.pending429Finals.add('initial:task-a');
+  const reviews: string[] = [];
+  const service = env.createService(async owner => {
+    reviews.push(owner.cause ?? 'missing-cause');
+    env.store.requireDecision({
+      taskId: owner.taskId, clientId: owner.clientId,
+      decisionId: 'due-429-review', audience: 'agent',
+      contextJson: JSON.stringify({ reason: owner.cause }),
+    });
+  });
+  service.activate({
+    taskId: 'task-a', clientId: 'alice', sourceAttemptId: 'initial:task-a',
+    approvalRef: 'approved', message: '계속',
+  });
+  env.now = START + CONTINUATION_INTERVAL_MS;
+  assert.equal((await service.tick()).dispatchesAttempted, 0);
+  assert.deepEqual(reviews, []);
+  assert.equal(env.fake.sends.length, 1);
+  env.now = START + 2 * CONTINUATION_INTERVAL_MS;
+  assert.equal((await service.tick()).dispatchesAttempted, 0);
+  assert.deepEqual(reviews, ['persistent_backend_read_throttle']);
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.getFullTask('task-a', 'alice').timers
+    .filter(timer => timer.status === 'pending').length, 0);
+  assert.equal(env.fake.sends.length, 1);
 });
 
 test('a later foreign user turn becomes an agent decision, never another automatic POST', async t => {

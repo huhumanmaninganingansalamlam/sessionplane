@@ -20,6 +20,13 @@ export interface ContinuationReviewReport {
   readonly deferred: number;
 }
 
+interface ContinuationAgentReviewInput {
+  readonly taskId: string;
+  readonly clientId: string;
+  readonly attemptId: string;
+  readonly cause?: 'persistent_backend_read_throttle';
+}
+
 /**
  * No separate browser, agent, collector, or timer database. SQLite owns
  * durable approvals (in each exact timer), due slots and dispatch attempts.
@@ -44,9 +51,9 @@ export class ManagedContinuationService {
     taskId: string; clientId: string; attemptId: string; modelIntent: string;
   }) => boolean | Promise<boolean>) | undefined;
   readonly #preparePublicTask: (() => Promise<void>) | undefined;
-  readonly #requestAgentReview: ((input: {
-    taskId: string; clientId: string; attemptId: string;
-  }) => Promise<void>) | undefined;
+  readonly #requestAgentReview: ((
+    input: ContinuationAgentReviewInput,
+  ) => Promise<void>) | undefined;
   #interval: ReturnType<typeof setInterval> | null = null;
   #active: Promise<ContinuationReviewReport> | null = null;
   #closed = false;
@@ -69,9 +76,7 @@ export class ManagedContinuationService {
       taskId: string; clientId: string; attemptId: string; modelIntent: string;
     }) => boolean | Promise<boolean>;
     preparePublicTask?: () => Promise<void>;
-    requestAgentReview?: (input: {
-      taskId: string; clientId: string; attemptId: string;
-    }) => Promise<void>;
+    requestAgentReview?: (input: ContinuationAgentReviewInput) => Promise<void>;
   }) {
     this.#repository = input.repository;
     this.#kernel = input.kernel;
@@ -311,11 +316,23 @@ export class ManagedContinuationService {
     // Process due sends first; a slow FINAL GET cannot starve another Task's due.
     for (const pending of this.#repository.listPendingPublicFinals(8)) {
       try {
-        await this.#kernel.observeFinal({
+        const observed = await this.#kernel.probeFinal({
           taskId: pending.taskId, clientId: pending.clientId,
           attemptId: pending.attemptId, resultId: 'public-final:' + pending.attemptId,
           completeTask: true,
         });
+        if (observed.kind !== 'exact_final' &&
+            (observed.reason === 'backend-http-429' ||
+              observed.reason === 'backend-conversation-probe-paced') &&
+            this.#requestAgentReview &&
+            this.#repository.getTask(pending.taskId, pending.clientId).state === 'working' &&
+            this.#hasPersistentReadLimit(pending.taskId, pending.clientId,
+              pending.attemptId, now)) {
+          await this.#requestAgentReview({
+            taskId: pending.taskId, clientId: pending.clientId,
+            attemptId: pending.attemptId, cause: 'persistent_backend_read_throttle',
+          });
+        }
       } catch {
         try {
           this.#repository.recordObservationDeferred(pending.taskId, pending.clientId,
@@ -395,6 +412,35 @@ export class ManagedContinuationService {
     });
   }
 
+  /** An extended 429 is not evidence of an absent answer. A full twenty
+   * minutes of continuous rate-limit/pacing observations trigger a durable
+   * agent review, even on a Task without automatic continuation approval.
+   * Identical 429 journal events are deduplicated; use elapsed time instead
+   * of treating event count as the number of backend requests.
+   */
+  #hasPersistentReadLimit(
+    taskId: string, clientId: string, attemptId: string, now: string,
+  ): boolean {
+    const events = this.#repository.getFullTask(taskId, clientId).events;
+    const prefix = 'final:' + attemptId + ':';
+    let first429At: number | null = null;
+    for (let index = events.length - 1; index >= 0; index--) {
+      const entry = events[index]!;
+      if (entry.event.type !== 'observation.deferred' ||
+          !entry.event.reason.startsWith(prefix)) continue;
+      const reason = entry.event.reason.slice(prefix.length);
+      if (reason === 'pending:backend-http-429' ||
+          reason === 'unavailable:backend-http-429') {
+        first429At = Date.parse(entry.createdAt);
+      } else if (reason !== 'pending:backend-conversation-probe-paced' &&
+          reason !== 'unavailable:backend-conversation-probe-paced') {
+        break;
+      }
+    }
+    return first429At !== null && Number.isFinite(first429At) &&
+      Date.parse(now) - first429At >= CONTINUATION_INTERVAL_MS;
+  }
+
   async #handle(timer: TimerRecord, now: string): Promise<'attempted' | 'deferred' | 'ignored'> {
     const clientId = this.#repository.dispatchClientId(timer.taskId);
     const context = parseContext(timer.contextJson);
@@ -447,6 +493,18 @@ export class ManagedContinuationService {
       }
       this.#rearmReview(timer, clientId, context, now);
       return 'deferred';
+    }
+    if ((observed.reason === 'backend-http-429' ||
+          observed.reason === 'backend-conversation-probe-paced') &&
+        this.#requestAgentReview &&
+        this.#hasPersistentReadLimit(timer.taskId, clientId, source.attemptId, now)) {
+      try {
+        await this.#requestAgentReview({
+          taskId: timer.taskId, clientId, attemptId: source.attemptId,
+          cause: 'persistent_backend_read_throttle',
+        });
+        return 'deferred';
+      } catch { /* Unavailable handoff never licenses a speculative POST. */ }
     }
     if (observed.kind !== 'pending' ||
         (observed.reason !== 'backend-assistant-missing' &&
