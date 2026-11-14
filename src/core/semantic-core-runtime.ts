@@ -12,6 +12,7 @@ import { SemanticProviderRegistry } from '../providers/semantic-provider-registr
 import type { SemanticTaskContext } from '../providers/semantic-adapter.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { TaskKernelRepository, type AttemptSessionBindingRecord } from '../storage/task-kernel-repository.ts';
+import type { PageBindingRepository } from '../storage/page-binding-repository.ts';
 import { DurableTaskKernel, type ExactSendIntent } from './durable-task-kernel.ts';
 import { SemanticDecisionGateway } from './semantic-decision-gateway.ts';
 import { ManagedContinuationService } from './managed-continuation.ts';
@@ -31,6 +32,111 @@ export interface SemanticCoreRuntime {
   }) => AttemptSessionBindingRecord;
 }
 
+
+/**
+ * Re-associate only retained native Chrome targets belonging to active public
+ * Tasks after Core adoption. Never create/navigate a page, repeat a POST, or
+ * restore legacy observation/submission workers. A missing, ambiguous or
+ * foreign target remains unbound and awaits an agent decision.
+ */
+export async function restoreSemanticPageBindings(input: {
+  readonly repository: TaskKernelRepository;
+  readonly teamDirectory: TeamDirectory;
+  readonly pageRegistry: PageRegistry;
+  readonly pageBindings: PageBindingRepository;
+  readonly actorScheduler: ActorScheduler;
+  readonly chatgptUrl: string;
+}): Promise<{ scanned: number; rebound: number; held: number }> {
+  const owners = input.repository.listCurrentPublicPageOwners();
+  const providerOrigin = new URL(input.chatgptUrl).origin;
+  let rebound = 0;
+  let held = 0;
+  for (const owner of owners) {
+    try {
+      const session = input.teamDirectory.getCurrentSession(owner.projectId, owner.slotId);
+      if (session.teamId !== owner.projectId || session.roleKey !== owner.slotId ||
+          session.provider !== 'chatgpt' || session.generation < 1 ||
+          session.pageKey === null ||
+          session.conversationId !== owner.providerConversationId) {
+        held++;
+        continue;
+      }
+      const persisted = input.pageBindings.get(session.pageKey);
+      if (!persisted || persisted.targetId === null ||
+          persisted.sessionId !== session.sessionId ||
+          persisted.generation !== session.generation ||
+          (session.conversationId !== null &&
+            persisted.conversationId !== session.conversationId)) {
+        held++;
+        continue;
+      }
+      const candidates = input.pageRegistry.listBindings({ includeClosed: false })
+        .filter(binding => binding.targetId === persisted.targetId);
+      if (candidates.length !== 1) {
+        held++;
+        continue;
+      }
+      const page = input.pageRegistry.refreshPage(candidates[0]!.pageKey);
+      if (page.state !== 'unbound' || page.sessionId !== null ||
+          page.generation !== null || page.targetId !== persisted.targetId) {
+        // Idempotent when this Core already restored the same exact generation.
+        if (page.sessionId === session.sessionId &&
+            page.generation === session.generation &&
+            page.pageKey === session.pageKey &&
+            page.conversationId === session.conversationId &&
+            (page.state === 'owned' || page.state === 'reserved')) {
+          rebound++;
+          continue;
+        }
+        held++;
+        continue;
+      }
+      const url = new URL(page.url);
+      if (session.conversationId !== null) {
+        if (page.conversationId !== session.conversationId ||
+            input.pageRegistry.findByConversation(session.conversationId).length !== 1 ||
+            url.origin !== providerOrigin ||
+            url.pathname !== `/c/${encodeURIComponent(session.conversationId)}` ||
+            url.search !== '' || url.hash !== '') {
+          held++;
+          continue;
+        }
+        input.pageRegistry.bindPage(page.pageKey, {
+          sessionId: session.sessionId, generation: session.generation,
+          conversationId: session.conversationId,
+        });
+      } else if (page.conversationId === null &&
+          (page.url === 'about:blank' ||
+            (url.origin === providerOrigin && url.pathname === '/' &&
+              url.search === '' && url.hash === ''))) {
+        input.pageRegistry.reservePage(page.pageKey, {
+          sessionId: session.sessionId, generation: session.generation,
+          conversationId: null,
+        });
+      } else if (page.conversationId !== null &&
+          url.origin === providerOrigin &&
+          url.pathname === `/c/${encodeURIComponent(page.conversationId)}` &&
+          url.search === '' && url.hash === '') {
+        // A root POST may have navigated to a conversation before exact ACK.
+        // Retain target identity for read-only canonical reconciliation only.
+        input.pageRegistry.reserveUnknownConversationCandidate(page.pageKey, {
+          sessionId: session.sessionId, generation: session.generation,
+          targetId: persisted.targetId,
+        });
+      } else {
+        held++;
+        continue;
+      }
+      await input.actorScheduler.updateGeneration(session.sessionId, session.generation,
+        { pageKey: page.pageKey }, 'semantic.restart-exact-target-rebound');
+      rebound++;
+    } catch {
+      // Missing or stale identity must fail closed, never become a new POST.
+      held++;
+    }
+  }
+  return { scanned: owners.length, rebound, held };
+}
 /** Decision packets carry exact Task and UI snapshot identity, not a selector. */
 function sameDecisionContext(expected: SemanticTaskContext, actual: unknown): boolean {
   if (actual === null || typeof actual !== 'object') return false;
@@ -111,16 +217,36 @@ export function createSemanticCoreRuntime(input: {
       const task = repository.getTask(identity.taskId, clientId);
       const slot = repository.getSlot(identity.projectId, identity.slotId, clientId);
       if (task.projectId !== identity.projectId || task.slotId !== identity.slotId ||
-        task.slotRevision !== identity.slotRevision ||
+        task.slotRevision !== identity.slotRevision || task.cancelRequested ||
+        !['working', 'agent_input_required', 'uncertain'].includes(task.state) ||
         slot.activeTaskId !== identity.taskId || slot.revision !== identity.slotRevision ||
         slot.providerKey !== 'chatgpt' || slot.providerConversationId === null) return null;
       const full = repository.getFullTask(identity.taskId, clientId);
       const unresolved = full.attempts.filter(attempt =>
         attempt.kind !== 'stop' && attempt.state !== 'failed_before_dispatch' &&
         !full.results.some(result => result.attemptId === attempt.attemptId));
-      if (unresolved.length !== 1) return null;
+      const latest = unresolved.at(-1);
+      if (!latest || unresolved.length > 2) return null;
+      if (unresolved.length === 2) {
+        // A timed Continue is valid precisely because the first ACK still has
+        // NO FINAL. Both outstanding turns must own the same exact generation;
+        // never adopt another Task, session, page or unverified POST.
+        const source = unresolved[0]!;
+        if (source.state !== 'acknowledged' || source.externalTurnId === null ||
+            latest.kind !== 'continuation' || latest.sequence !== source.sequence + 1) return null;
+        const earlier = repository.getAttemptSessionBinding({
+          taskId: identity.taskId, clientId, attemptId: source.attemptId,
+        });
+        const following = repository.getAttemptSessionBinding({
+          taskId: identity.taskId, clientId, attemptId: latest.attemptId,
+        });
+        if (!earlier || !following ||
+            earlier.sessionId !== following.sessionId ||
+            earlier.generation !== following.generation ||
+            earlier.conversationId !== following.conversationId) return null;
+      }
       const sessionBinding = repository.getAttemptSessionBinding({
-        taskId: identity.taskId, clientId, attemptId: unresolved[0]!.attemptId,
+        taskId: identity.taskId, clientId, attemptId: latest.attemptId,
       });
       if (sessionBinding?.conversationId !== slot.providerConversationId) return null;
       return { clientId, slot, sessionBinding };
@@ -299,19 +425,24 @@ export function createSemanticCoreRuntime(input: {
     let submittedUserTurnId = attempt?.externalTurnId ?? null;
     if (attempt?.kind === 'continuation' && evidence === null &&
         submittedUserTurnId === null) {
-      // Before this continuation has its own POST, bind observation to the
-      // nearest earlier ACK with a recorded exact FINAL, never an arbitrary
-      // mounted user turn. After POST, current attempt evidence takes over.
-      const previous = [...full.attempts].reverse().find(row =>
-        row.sequence < attempt.sequence && row.kind !== 'stop' &&
-        row.state === 'acknowledged' && row.externalTurnId !== null &&
-        full.results.some(result => result.attemptId === row.attemptId &&
-          result.externalTurnId === row.externalTurnId));
+      // The approved Continue answers an unanswered exact ACK. Before the
+      // new POST, inspect only its immediately preceding bound user turn;
+      // requiring a FINAL here would invert the no-response product contract.
+      const previous = full.attempts.find(row =>
+        row.sequence === attempt.sequence - 1 && row.kind !== 'stop' &&
+        row.state === 'acknowledged' && row.externalTurnId !== null);
       if (previous) {
         const precedingEvidence = repository.getDispatchEvidence({
           taskId: intent.taskId, clientId: intent.clientId, attemptId: previous.attemptId,
         });
-        if (precedingEvidence?.conversationId === intent.providerConversationId) {
+        const precedingBinding = repository.getAttemptSessionBinding({
+          taskId: intent.taskId, clientId: intent.clientId, attemptId: previous.attemptId,
+        });
+        if (precedingEvidence?.conversationId === intent.providerConversationId &&
+            precedingBinding && attemptBinding &&
+            precedingBinding.sessionId === attemptBinding.sessionId &&
+            precedingBinding.generation === attemptBinding.generation &&
+            precedingBinding.conversationId === attemptBinding.conversationId) {
           submittedUserMessageId = precedingEvidence.messageId;
           submittedUserTurnId = previous.externalTurnId;
         }
@@ -603,6 +734,9 @@ export function createSemanticCoreRuntime(input: {
     } } : {}),
     inspectModelIntent: async ({ taskId, clientId, attemptId, modelIntent }) =>
       await decisionGateway.verifyModelIntent({ taskId, clientId, attemptId, modelIntent }),
+    requestAgentReview: async ({ taskId, clientId, attemptId }) => {
+      await decisionGateway.requireNoProgressReview({ taskId, clientId, attemptId });
+    },
     ...(input.actorScheduler ? { bindRootAttempt } : {}),
     bindInitialAttempt: ({ taskId, clientId, attemptId }) => {
       const task = repository.getTask(taskId, clientId);

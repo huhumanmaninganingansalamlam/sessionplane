@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import { DurableTaskKernel } from '../../src/core/durable-task-kernel.ts';
 import { SemanticExactTaskPort } from '../../src/core/semantic-exact-task-port.ts';
+import { restoreSemanticPageBindings } from '../../src/core/semantic-core-runtime.ts';
 import type { ExactSendIntent, ExactTurnQuery } from '../../src/core/durable-task-kernel.ts';
 import type {
   SemanticActRequest, SemanticActResult, SemanticDispatchEvidence,
@@ -382,4 +383,135 @@ test('semantic ACK recovery rejects a turn conflicting with the exact task conte
   resolvedTurn = null;
   assert.deepEqual(await port.recoverAck(query), { kind: 'verified_ack', externalTurnId: 'turn-1' });
   assert.equal(fake.sends, 0, 'ACK recovery remains read-only');
+});
+
+interface FixtureOptions {
+  conversationId?: string | null;
+  liveConversationId?: string | null;
+  liveUrl?: string;
+  liveTargetId?: string;
+  duplicateTarget?: boolean;
+  terminalSession?: boolean;
+}
+
+function fixture(options: FixtureOptions = {}) {
+  const conversationId = options.conversationId === undefined ? 'exact-conversation' : options.conversationId;
+  const liveConversationId = options.liveConversationId === undefined ? conversationId : options.liveConversationId;
+  const targetId = options.liveTargetId ?? 'native-target-123';
+  const url = options.liveUrl ??
+    (liveConversationId === null ? 'https://chatgpt.com/' : `https://chatgpt.com/c/${liveConversationId}`);
+  const page = {
+    pageKey: 'new-controller-page', targetId, url,
+    conversationId: liveConversationId,
+    sessionId: null as string | null, generation: null as number | null,
+    state: 'unbound', expectedConversationId: null as string | null,
+  };
+  const actions: string[] = [];
+  const duplicates = options.duplicateTarget ?
+    [{ ...page, pageKey: 'conflicting-page' }] : [];
+  const pageRegistry = {
+    listBindings() { return [page, ...duplicates]; },
+    refreshPage() { return { ...page }; },
+    findByConversation(id: string) {
+      return [page, ...duplicates].filter(binding => binding.conversationId === id);
+    },
+    bindPage(key: string, owner: { sessionId: string; generation: number; conversationId: string }) {
+      assert.equal(key, page.pageKey);
+      assert.deepEqual(owner, { sessionId: 'session-exact', generation: 4, conversationId });
+      actions.push('bind-exact-conversation');
+      page.sessionId = owner.sessionId; page.generation = owner.generation;
+      page.expectedConversationId = owner.conversationId; page.state = 'owned';
+      return page;
+    },
+    reservePage(key: string, owner: { sessionId: string; generation: number; conversationId: null }) {
+      assert.equal(key, page.pageKey);
+      assert.equal(owner.conversationId, null);
+      actions.push('reserve-original-root');
+      page.sessionId = owner.sessionId; page.generation = owner.generation;
+      page.state = 'reserved';
+      return page;
+    },
+    reserveUnknownConversationCandidate(key: string, owner: {
+      sessionId: string; generation: number; targetId: string;
+    }) {
+      assert.equal(key, page.pageKey);
+      assert.equal(owner.targetId, 'native-target-123');
+      actions.push('reserve-read-only-candidate');
+      page.sessionId = owner.sessionId; page.generation = owner.generation;
+      page.state = 'identity_lost';
+      return page;
+    },
+  };
+  const input = {
+    repository: {
+      listCurrentPublicPageOwners() {
+        return [{ taskId: 'task-exact', projectId: 'project', slotId: 'main',
+          slotRevision: 1, providerConversationId: conversationId }];
+      },
+    },
+    teamDirectory: {
+      getCurrentSession() {
+        return { sessionId: 'session-exact', teamId: 'project', roleKey: 'main',
+          provider: 'chatgpt', generation: 4, terminal: !!options.terminalSession,
+          pageKey: 'previous-controller-page', conversationId };
+      },
+    },
+    pageBindings: {
+      get(key: string) {
+        assert.equal(key, 'previous-controller-page');
+        return { pageKey: key, targetId: 'native-target-123', sessionId: 'session-exact',
+          generation: 4, conversationId };
+      },
+    },
+    pageRegistry,
+    actorScheduler: {
+      async updateGeneration(sessionId: string, generation: number,
+        update: { pageKey: string }) {
+        assert.equal(sessionId, 'session-exact');
+        assert.equal(generation, 4);
+        assert.deepEqual(update, { pageKey: 'new-controller-page' });
+        actions.push('record-new-page-key');
+      },
+    },
+    chatgptUrl: 'https://chatgpt.com',
+  };
+  return { input: input as unknown as Parameters<typeof restoreSemanticPageBindings>[0], actions };
+}
+
+test('Core adoption restores only the original native target and exact canonical conversation', async () => {
+  const { input, actions } = fixture({ terminalSession: true });
+  const report = await restoreSemanticPageBindings(input);
+  assert.deepEqual(report, { scanned: 1, rebound: 1, held: 0 });
+  assert.deepEqual(actions, ['bind-exact-conversation', 'record-new-page-key']);
+});
+
+test('a root POST without canonical ACK remains a read-only candidate on the retained target', async () => {
+  const { input, actions } = fixture({
+    conversationId: null, liveConversationId: 'unverified-page-conversation',
+  });
+  assert.deepEqual(await restoreSemanticPageBindings(input),
+    { scanned: 1, rebound: 1, held: 0 });
+  assert.deepEqual(actions, ['reserve-read-only-candidate', 'record-new-page-key']);
+  assert.ok(!actions.includes('bind-exact-conversation'));
+});
+
+test('a retained unsubmitted root is reserved without opening or navigating a page', async () => {
+  const { input, actions } = fixture({ conversationId: null, liveConversationId: null });
+  assert.deepEqual(await restoreSemanticPageBindings(input),
+    { scanned: 1, rebound: 1, held: 0 });
+  assert.deepEqual(actions, ['reserve-original-root', 'record-new-page-key']);
+});
+
+test('a changed native target, foreign conversation or duplicate target is held without mutation', async () => {
+  for (const options of [
+    { liveTargetId: 'different-target' },
+    { liveConversationId: 'foreign-conversation' },
+    { duplicateTarget: true },
+    { liveUrl: 'https://evil.example/c/exact-conversation' },
+  ]) {
+    const { input, actions } = fixture(options);
+    assert.deepEqual(await restoreSemanticPageBindings(input),
+      { scanned: 1, rebound: 0, held: 1 }, JSON.stringify(options));
+    assert.deepEqual(actions, [], JSON.stringify(options));
+  }
 });

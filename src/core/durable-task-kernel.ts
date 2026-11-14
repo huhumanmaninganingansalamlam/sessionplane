@@ -38,6 +38,10 @@ export type FinalObservation =
   | { readonly kind: 'exact_final'; readonly externalTurnId: string; readonly answerText: string }
   | { readonly kind: 'pending'; readonly reason?: string }
   | { readonly kind: 'unavailable'; readonly reason: string };
+export type FinalProbeOutcome =
+  | { readonly kind: 'exact_final'; readonly result: ResultRecord }
+  | { readonly kind: 'pending'; readonly reason?: string }
+  | { readonly kind: 'unavailable'; readonly reason: string };
 
 export interface ExactTaskProviderPort {
   readonly providerKey: string;
@@ -156,6 +160,20 @@ export class DurableTaskKernel {
     resultId: string;
     completeTask: boolean;
   }): Promise<ResultRecord | null> {
+    const probe = await this.probeFinal(input);
+    return probe.kind === 'exact_final' ? probe.result : null;
+  }
+
+  /** Preserve the difference between a verified absent FINAL and a read
+   * failure. Only a known pending answer may permit a safe-idle Continue.
+   */
+  async probeFinal(input: {
+    taskId: string;
+    clientId: string;
+    attemptId: string;
+    resultId: string;
+    completeTask: boolean;
+  }): Promise<FinalProbeOutcome> {
     const { attempt, provider, intent } = this.#resolve(
       input.taskId, input.clientId, input.attemptId,
     );
@@ -165,22 +183,20 @@ export class DurableTaskKernel {
       ...intent, externalTurnId: attempt.externalTurnId,
     });
     if (observation.kind !== 'exact_final') {
-      // Preserve the exact attempt's nonterminal read reason. A missing FINAL
-      // is never task completion or permission to replay the original POST.
       const code = observation.reason && /^[a-z0-9_.:-]{1,100}$/i.test(observation.reason)
         ? observation.reason : 'provider-final-unverified';
       this.#storage.recordObservationDeferred(input.taskId, input.clientId,
         `final:${input.attemptId}:${observation.kind}:${code}`);
-      return null;
+      return observation;
     }
     if (observation.externalTurnId !== attempt.externalTurnId) {
       throw new Error('Provider returned FINAL for wrong turn; reject evidence');
     }
-    return this.#storage.recordFinal({
+    return { kind: 'exact_final', result: this.#storage.recordFinal({
       ...input,
       externalTurnId: observation.externalTurnId,
       answerText: observation.answerText,
-    });
+    }) };
   }
 
   #resolve(taskId: string, clientId: string, attemptId: string): {

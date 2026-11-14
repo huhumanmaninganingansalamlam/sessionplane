@@ -832,8 +832,10 @@ test('Core-owned approved 20-minute continuation sends one exact POST without a 
     });
     const owned = await core.browserOwner!.createPage();
     const page = owned.page;
+    let postedContinuation = false;
     await page.route('https://chatgpt.com/**', route => {
       if (route.request().method() === 'POST') {
+        postedContinuation = true;
         return route.fulfill({ status: 202, contentType: 'application/json', body: '{}' });
       }
       return route.fulfill({
@@ -901,11 +903,6 @@ test('Core-owned approved 20-minute continuation sends one exact POST without a 
       taskId: 'managed-task', clientId, attemptId: 'managed-original',
       externalTurnId: 'turn-root',
     });
-    repository.recordFinal({
-      taskId: 'managed-task', clientId, attemptId: 'managed-original',
-      externalTurnId: 'turn-root', resultId: 'managed-original-result',
-      answerText: 'More work remains', completeTask: false,
-    });
     const payload = {
       id: 'managed-conversation', current_node: 'assistant-managed',
       mapping: {
@@ -934,11 +931,16 @@ test('Core-owned approved 20-minute continuation sends one exact POST without a 
         },
       },
     };
+    const pendingPayload = {
+      ...payload, current_node: 'user-root-node',
+      mapping: { root: payload.mapping.root,
+        'user-root-node': payload.mapping['user-root-node'] },
+    };
     const backend: BackendJsonClient = {
       async get(url) {
         return url.endsWith('/api/auth/session')
           ? { status: 200, headers: {}, body: { accessToken: 'fixture-only' } }
-          : { status: 200, headers: {}, body: payload };
+          : { status: 200, headers: {}, body: postedContinuation ? payload : pendingPayload };
       },
     };
     const prior = repository.getFullTask('managed-task', clientId).attempts[0]!;
@@ -963,32 +965,51 @@ test('Core-owned approved 20-minute continuation sends one exact POST without a 
       approvalRef: 'explicit-approved-continuation', message: '계속',
     });
     assert.equal(Date.parse(due.dueAt), clock + 1_200_000);
+    assert.equal(repository.getFullTask('managed-task', clientId).results.length, 0,
+      'the approved Continue must be due while the original has no FINAL');
     clock += 1_200_000 - 1;
     assert.equal((await runtime.managedContinuation.tick()).timersClaimed, 0);
     assert.equal(await page.evaluate(() => (window as any).sends), 0);
     clock++;
-    assert.deepEqual(await runtime.managedContinuation.tick(), {
+    const dueReport = await runtime.managedContinuation.tick();
+    assert.deepEqual(dueReport, {
       timersClaimed: 1, dispatchesAttempted: 1, deferred: 0,
-    });
+    }, JSON.stringify(repository.getFullTask('managed-task', clientId).events.slice(-8), null, 2));
     assert.equal(await page.evaluate(() => (window as any).sends), 1);
     const exact = repository.getFullTask('managed-task', clientId).attempts[1]!;
     assert.equal(exact.kind, 'continuation');
     assert.equal(exact.content, '계속');
-    assert.equal(exact.state, 'acknowledged');
-    assert.equal(exact.externalTurnId, 'turn-managed');
+    assert.ok(['uncertain', 'acknowledged'].includes(exact.state),
+      'the single POST may await a paced canonical ACK read');
     assert.equal(repository.getAttemptSessionBinding({
       taskId: 'managed-task', clientId, attemptId: exact.attemptId,
     })?.sessionId, session.sessionId);
     assert.equal(repository.getDispatchEvidence({
       taskId: 'managed-task', clientId, attemptId: exact.attemptId,
     })?.messageId, 'user-managed');
+    clock += 5_001; // canonical ACK may be paced after the no-FINAL GET
+    // This manually admitted fixture has no public policy row; reconcile its
+    // persisted POST by the same read-only kernel path used by the Core scanner.
+    await runtime.kernel.recoverAck('managed-task', clientId, exact.attemptId);
+    const afterAck = repository.getFullTask('managed-task', clientId);
+    assert.equal(afterAck.attempts[1]!.state, 'acknowledged',
+      JSON.stringify(afterAck.events.slice(-8), null, 2));
+    assert.equal(afterAck.attempts[1]!.externalTurnId, 'turn-managed');
+    // Even a pre-armed next slot must be canceled by the exact FINAL.
+    const nextDue = runtime.managedContinuation.activate({
+      taskId: 'managed-task', clientId, sourceAttemptId: exact.attemptId,
+      approvalRef: 'explicit-approved-continuation', message: '계속',
+    });
+    assert.ok(nextDue.dueAt);
     clock += 5_001; // independent canonical FINAL GET after the ACK read interval
-    const final = await runtime.kernel.observeFinal({
+    const existingFinal = afterAck.results.find(row => row.attemptId === exact.attemptId);
+    const final = existingFinal ?? await runtime.kernel.observeFinal({
       taskId: 'managed-task', clientId, attemptId: exact.attemptId,
       resultId: 'managed-final', completeTask: true,
     });
     assert.equal(final?.answerText, 'Managed final response');
     assert.equal(repository.getTask('managed-task', clientId).state, 'completed');
+    clock += 1_200_000;
     assert.equal((await runtime.managedContinuation.tick()).timersClaimed, 0);
     assert.equal(await page.evaluate(() => (window as any).sends), 1);
     await runtime.managedContinuation.close();

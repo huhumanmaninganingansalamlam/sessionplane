@@ -44,6 +44,9 @@ export class ManagedContinuationService {
     taskId: string; clientId: string; attemptId: string; modelIntent: string;
   }) => boolean | Promise<boolean>) | undefined;
   readonly #preparePublicTask: (() => Promise<void>) | undefined;
+  readonly #requestAgentReview: ((input: {
+    taskId: string; clientId: string; attemptId: string;
+  }) => Promise<void>) | undefined;
   #interval: ReturnType<typeof setInterval> | null = null;
   #active: Promise<ContinuationReviewReport> | null = null;
   #closed = false;
@@ -66,6 +69,9 @@ export class ManagedContinuationService {
       taskId: string; clientId: string; attemptId: string; modelIntent: string;
     }) => boolean | Promise<boolean>;
     preparePublicTask?: () => Promise<void>;
+    requestAgentReview?: (input: {
+      taskId: string; clientId: string; attemptId: string;
+    }) => Promise<void>;
   }) {
     this.#repository = input.repository;
     this.#kernel = input.kernel;
@@ -76,6 +82,7 @@ export class ManagedContinuationService {
     this.#bindRootAttempt = input.bindRootAttempt;
     this.#inspectModelIntent = input.inspectModelIntent;
     this.#preparePublicTask = input.preparePublicTask;
+    this.#requestAgentReview = input.requestAgentReview;
   }
 
   /** Called only by a trusted Core caller with explicit user delegation.
@@ -304,13 +311,10 @@ export class ManagedContinuationService {
     // Process due sends first; a slow FINAL GET cannot starve another Task's due.
     for (const pending of this.#repository.listPendingPublicFinals(8)) {
       try {
-        const policy: unknown = JSON.parse(pending.policyJson);
-        const managed = policy !== null && typeof policy === 'object' &&
-          (policy as { enabled?: unknown }).enabled === true;
         await this.#kernel.observeFinal({
           taskId: pending.taskId, clientId: pending.clientId,
           attemptId: pending.attemptId, resultId: 'public-final:' + pending.attemptId,
-          completeTask: !managed,
+          completeTask: true,
         });
       } catch {
         try {
@@ -347,14 +351,15 @@ export class ManagedContinuationService {
 
   #reconcileOwner(taskId: string, clientId: string, now: string): void {
     const full = this.#repository.getFullTask(taskId, clientId);
-    if (full.task.cancelRequested ||
-        ['completed', 'failed', 'canceled'].includes(full.task.state)) return;
+    if (full.task.cancelRequested || full.task.state !== 'working' ||
+        full.task.pendingDecisionId !== null) return;
     const approved = full.timers.map(timer => parseContext(timer.contextJson))
       .find(context => context !== null);
     if (!approved) return;
     const latest = full.attempts.filter(attempt => attempt.kind !== 'stop').at(-1);
     if (!latest) return;
-    if (latest.state === 'acknowledged' && latest.acknowledgedAt !== null) {
+    if (latest.state === 'acknowledged' && latest.acknowledgedAt !== null &&
+        !full.results.some(result => result.attemptId === latest.attemptId)) {
       this.#armFromAck(full, clientId, latest, approved);
     }
     // Recover a claimed due timer after a crash before planning or rearming.
@@ -398,11 +403,9 @@ export class ManagedContinuationService {
     if (full.task.cancelRequested ||
         ['completed', 'failed', 'canceled'].includes(full.task.state)) return 'ignored';
     const source = full.attempts.find(attempt => attempt.attemptId === context.sourceAttemptId);
-    if (!source || source.state !== 'acknowledged' ||
-        !full.results.some(result => result.attemptId === source.attemptId &&
-          result.externalTurnId === source.externalTurnId && !result.completesTask)) {
+    if (!source || source.state !== 'acknowledged' || source.externalTurnId === null) {
       this.#repository.recordObservationDeferred(timer.taskId, clientId,
-        'managed-continuation-exact-final-not-ready');
+        'managed-continuation-source-ack-unverified');
       this.#rearmReview(timer, clientId, context, now);
       return 'deferred';
     }
@@ -411,6 +414,61 @@ export class ManagedContinuationService {
     if (latest?.attemptId !== source.attemptId &&
         latest?.attemptId !== continuationId) return 'ignored';
     if (full.task.state !== 'working' || full.task.pendingDecisionId !== null) {
+      // An agent decision holds the continuation; it must not keep a timer
+      // alive or create new work while the Task is awaiting judgment.
+      return 'ignored';
+    }
+    // An already correlated FINAL ends the automatic policy. Do not create
+    // another turn merely because a timer was scheduled by older code.
+    if (full.results.some(result => result.attemptId === source.attemptId)) {
+      this.#repository.recordObservationDeferred(timer.taskId, clientId,
+        'managed-continuation-source-final-already-recorded');
+      return 'ignored';
+    }
+    // At the due, check the exact source answer BEFORE trying a new send.
+    // A transport/read failure is not evidence of no answer.
+    const observed = await this.#kernel.probeFinal({
+      taskId: timer.taskId, clientId, attemptId: source.attemptId,
+      resultId: 'public-final:' + source.attemptId, completeTask: true,
+    });
+    if (observed.kind === 'exact_final') return 'ignored';
+    // Retry-After, paced GETs and unknown transport are NOT verified absence
+    // of an answer. Only a fresh canonical conversation view can justify a
+    // Continue. A later foreign user turn requires agent judgment instead.
+    if (observed.kind === 'pending' &&
+        observed.reason === 'backend-next-user-turn-before-final') {
+      if (this.#requestAgentReview) {
+        try {
+          await this.#requestAgentReview({
+            taskId: timer.taskId, clientId, attemptId: source.attemptId,
+          });
+          return 'deferred';
+        } catch { /* Durable review unavailable: hold without a new send. */ }
+      }
+      this.#rearmReview(timer, clientId, context, now);
+      return 'deferred';
+    }
+    if (observed.kind !== 'pending' ||
+        (observed.reason !== 'backend-assistant-missing' &&
+          observed.reason !== 'backend-assistant-not-final')) {
+      this.#rearmReview(timer, clientId, context, now);
+      return 'deferred';
+    }
+    // An unanswered, already approved Continue is repeated lack of progress.
+    // No second automatic send may be inferred from the same approval. Core
+    // raises a durable agent-first packet; if that cannot be persisted, hold
+    // the exact Task and retry the review without submitting anything.
+    if (source.kind === 'continuation') {
+      this.#repository.recordObservationDeferred(timer.taskId, clientId,
+        'managed-continuation-agent-review-required');
+      if (this.#requestAgentReview) {
+        try {
+          await this.#requestAgentReview({
+            taskId: timer.taskId, clientId, attemptId: source.attemptId,
+          });
+          return 'deferred';
+        } catch { /* Failed durable handoff is not permission to resend. */ }
+      }
       this.#rearmReview(timer, clientId, context, now);
       return 'deferred';
     }
@@ -431,6 +489,14 @@ export class ManagedContinuationService {
     } catch {
       this.#repository.recordObservationDeferred(timer.taskId, clientId,
         'managed-continuation-owned-binding-unavailable');
+      if (this.#requestAgentReview) {
+        try {
+          await this.#requestAgentReview({
+            taskId: timer.taskId, clientId, attemptId: continuationId,
+          });
+          return 'deferred';
+        } catch { /* A lost binding must not trigger an unowned send. */ }
+      }
       this.#rearmReview(timer, clientId, context, now);
       return 'deferred';
     }
@@ -443,6 +509,19 @@ export class ManagedContinuationService {
     }
     if (attempt?.state === 'planned' &&
         !state.cancelRequested && state.state !== 'completed') {
+      // The canonical answer is absent, but the current UI/lease was not
+      // safely sendable. Do not silently defer the user's stuck work for
+      // another 20 minutes; hand immutable evidence to the agent.
+      this.#repository.recordObservationDeferred(timer.taskId, clientId,
+        'managed-continuation-safe-send-agent-review-required');
+      if (this.#requestAgentReview) {
+        try {
+          await this.#requestAgentReview({
+            taskId: timer.taskId, clientId, attemptId: continuationId,
+          });
+          return 'deferred';
+        } catch { /* A failed handoff is never permission to send. */ }
+      }
       this.#rearmReview(timer, clientId, context, now);
       return 'deferred';
     }

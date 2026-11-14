@@ -105,6 +105,18 @@ try {
     throw new Error('installed MCP still executes a retired workflow tool');
   }
   for (const retired of [
+    'dist/core/observation-service.js',
+    'dist/core/submission-service.js',
+    'dist/core/recovery-service.js',
+    'dist/core/thinking-failure-recovery.js',
+    'dist/core/conversation-load-recovery.js',
+    'dist/core/session-ui-service.js',
+    'dist/core/stop-service.js',
+    'dist/core/artifact-service.js',
+    'dist/core/browser-control-service.js',
+    'dist/providers/chatgpt/adapter.js',
+    'dist/providers/gemini/adapter.js',
+    'dist/providers/grok/adapter.js',
     'dist/core/team-workflow.js',
     'dist/rpc/methods/workflow.js',
     'dist/rpc/methods/team.js',
@@ -182,7 +194,11 @@ try {
       installedCore.secondSlotRevisionIndependentAfterRestart !== true ||
       installedCore.historicalSlotRecoveredAfterRestart !== true ||
       installedCore.crossProjectRequestCollisionRejected !== true ||
-      installedCore.staleBindingReplacementRejectedAfterRestart !== true) {
+      installedCore.staleBindingReplacementRejectedAfterRestart !== true ||
+      installedCore.noIdleLegacyActorsOnRestart !== true ||
+      installedCore.installedNoFinal20MinuteContinue !== true ||
+      installedCore.installedExactFinalStopsContinuation !== true ||
+      installedCore.installed429NeverLicensesContinue !== true) {
     throw new Error('Installed Core idempotency/restart/rebinding smoke failed');
   }
 

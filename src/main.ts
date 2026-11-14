@@ -1,26 +1,15 @@
 import { CoreMaintenance } from './core/maintenance.ts';
-import { ThinkingFailureRecovery } from './core/thinking-failure-recovery.ts';
-import { ConversationLoadRecovery } from './core/conversation-load-recovery.ts';
 import { SessionRepository } from './storage/session-repository.ts';
-import { EventRepository } from './storage/event-repository.ts';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { Page } from 'playwright-core';
 
 import { BrowserOwner } from './browser/browser-owner.ts';
 import { PageMutationMutex } from './browser/page-mutex.ts';
 import { PageRegistry } from './browser/page-registry.ts';
 import { prepareRuntimeDirectories, resolveConfig, type SessionPlaneConfig } from './config.ts';
 import { getSystemHealth } from './core/health.ts';
-import { BrowserControlService } from './core/browser-control-service.ts';
-import { ArtifactService } from './core/artifact-service.ts';
-import { ObservationService } from './core/observation-service.ts';
-import { RecoveryService } from './core/recovery-service.ts';
-import { StopService } from './core/stop-service.ts';
 import { TeamDirectory } from './core/team-directory.ts';
-import { SubmissionService } from './core/submission-service.ts';
-import { SessionUiService } from './core/session-ui-service.ts';
 import { createLogger, type Logger } from './logging.ts';
 import { RpcRouter } from './rpc/router.ts';
 import { RpcServer } from './rpc/server.ts';
@@ -32,19 +21,12 @@ import { ProbeCoordinator } from './scheduler/probe-coordinator.ts';
 import { SessionPlaneDatabase } from './storage/database.ts';
 import { PageBindingRepository } from './storage/page-binding-repository.ts';
 import { ReceiptRepository } from './storage/receipt-repository.ts';
+import { ConversationLoadRecoveryRepository } from './storage/conversation-load-recovery-repository.ts';
 import { RuntimeMetrics } from './telemetry/metrics.ts';
-import { ChatGptAdapter } from './providers/chatgpt/adapter.ts';
-import { createSemanticCoreRuntime, type SemanticCoreRuntime } from './core/semantic-core-runtime.ts';
+import { createSemanticCoreRuntime, restoreSemanticPageBindings, type SemanticCoreRuntime } from './core/semantic-core-runtime.ts';
 import type { DurableTaskKernel } from './core/durable-task-kernel.ts';
 import type { SemanticProviderRegistry } from './providers/semantic-provider-registry.ts';
 import type { TaskKernelRepository } from './storage/task-kernel-repository.ts';
-import { GeminiAdapter } from './providers/gemini/adapter.ts';
-import { GrokAdapter } from './providers/grok/adapter.ts';
-import {
-  ProviderAdapterRegistry,
-  type ProviderAdapter,
-  type ProviderName,
-} from './providers/provider-adapter.ts';
 import { z } from 'zod';
 
 export interface CoreService {
@@ -54,8 +36,6 @@ export interface CoreService {
   readonly rpcServer: RpcServer;
   readonly browserOwner: BrowserOwner | null;
   readonly pageRegistry: PageRegistry;
-  readonly browserControl: BrowserControlService;
-  readonly artifactService: ArtifactService;
   readonly pageMutationMutex: PageMutationMutex;
   readonly teamDirectory: TeamDirectory;
   readonly receipts: ReceiptRepository;
@@ -63,19 +43,12 @@ export interface CoreService {
   readonly probeCoordinator: ProbeCoordinator;
   readonly metrics: RuntimeMetrics;
   readonly pageBindings: PageBindingRepository;
-  readonly providerAdapters: ProviderAdapterRegistry;
   readonly semanticProviders: SemanticProviderRegistry;
   readonly semanticTaskRepository: TaskKernelRepository;
   readonly semanticTaskKernel: DurableTaskKernel;
   readonly semanticDecisionGateway: SemanticCoreRuntime['decisionGateway'];
   readonly semanticManagedContinuation: SemanticCoreRuntime['managedContinuation'];
   readonly semanticTaskBindAttemptSession: SemanticCoreRuntime['bindAttemptSession'];
-  readonly observationService: ObservationService;
-  readonly thinkingFailureRecovery: ThinkingFailureRecovery;
-  readonly conversationLoadRecovery: ConversationLoadRecovery;
-  readonly recoveryService: RecoveryService;
-  readonly submissionService: SubmissionService;
-  readonly stopService: StopService;
   readonly startedAt: Date;
   restartBrowser(): Promise<Readonly<Record<string, unknown>>>;
   close(): Promise<void>;
@@ -87,8 +60,6 @@ export interface StartCoreOptions {
   readonly logger?: Logger;
   readonly startBrowser?: boolean;
   readonly browserHeadless?: boolean;
-  readonly providerAdapters?: readonly ProviderAdapter[];
-  readonly recoveryNavigatePage?: (page: Page, url: string) => Promise<void>;
 }
 
 export async function startCore(options: StartCoreOptions = {}): Promise<CoreService> {
@@ -112,6 +83,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     onSessionChanged: (sessionId) => actorScheduler.refreshSession(sessionId),
   });
   const receipts = new ReceiptRepository(database);
+  const accountPacing = new ConversationLoadRecoveryRepository(database);
   const browserOwner =
     options.startBrowser === false
       ? null
@@ -137,9 +109,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
 
   try {
     await browserOwner?.start();
-    const restoredRetiredSessions = new SessionRepository(database.raw).restorePendingRetiredSessions(config.enabledProviders);
-    if (restoredRetiredSessions > 0) logger.info('recovery.pending-retired-sessions', { count: restoredRetiredSessions });
-    actorScheduler.restore();
+    // Create session actors only when a public Task needs them. Legacy
+    // nonterminal histories remain durable in SQLite, not live idle actors.
   } catch (error) {
     actorScheduler.close();
     unsubscribePageBindings();
@@ -148,58 +119,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     throw error;
   }
 
-  const configuredAdapters =
-    options.providerAdapters ??
-    (browserOwner === null
-      ? []
-      : [
-          new ChatGptAdapter({
-            acknowledgementRetryAtMs: new EventRepository(database.raw).acknowledgementRetryAtMs(),
-            onBackendRateLimit: ({ session, generation }, evidence) => {
-              maintenance.callback(() => new EventRepository(database.raw).append({ teamId: session.teamId, roleId: session.roleId,
-                sessionId: session.sessionId, generation, eventType: 'provider.backend-rate-limit-observed',
-                createdAt: evidence.receivedAt, payload: { ...evidence,
-                  policyScope: `chatgpt:conversation-detail:${session.conversationId}`,
-                  serverScope: evidence.headers['ratelimit-scope'] ?? evidence.headers['x-ratelimit-scope'] ?? 'unverified' } }));
-            },
-            pageMutex: pageMutationMutex,
-            canRestoreLatestPosition: ({ session, generation }) => {
-              if (maintenance.paused) return false;
-              const current = teamDirectory.getSession(session.sessionId);
-              const completedAnswer = session.terminal && current.sessionState === 'complete' &&
-                current.errorCode === null && session.responseMessageId !== null &&
-                current.responseMessageId === session.responseMessageId;
-              return current.generation === generation && (!current.terminal || completedAnswer) && current.promptSubmitted &&
-                current.pageKey === session.pageKey && current.conversationId === session.conversationId &&
-                current.submittedUserMessageId === session.submittedUserMessageId &&
-                current.submittedUserTurnId === session.submittedUserTurnId &&
-                !receipts.hasFocusedGeneration(session.sessionId, generation);
-            },
-            browserOwner,
-            pageRegistry,
-            loginUrl: config.chatgptUrl,
-            acknowledgementTimeoutMs: config.submissionAckTimeoutMs,
-            backendRequestTimeoutMs: config.backendRequestTimeoutMs,
-            tokenCacheTtlMs: config.tokenCacheTtlMs,
-          }),
-          new GeminiAdapter({
-            browserOwner,
-            pageRegistry,
-            loginUrl: config.geminiUrl,
-            acknowledgementTimeoutMs: config.submissionAckTimeoutMs,
-          }),
-          new GrokAdapter({
-            browserOwner,
-            pageRegistry,
-            loginUrl: config.grokUrl,
-            acknowledgementTimeoutMs: config.submissionAckTimeoutMs,
-          }),
-        ]);
-  const providerAdapters = new ProviderAdapterRegistry(
-    configuredAdapters.filter((adapter) =>
-      config.enabledProviders.includes(adapter.provider as ProviderName),
-    ),
-  );
   const { providers: semanticProviders, repository: semanticTaskRepository,
     kernel: semanticTaskKernel,
     decisionGateway: semanticDecisionGateway,
@@ -230,106 +149,16 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     max429BackoffMs: config.probeMax429BackoffMs,
     metrics,
   });
-  let thinkingFailureRecovery: ThinkingFailureRecovery | null = null;
-  const observationService = new ObservationService({
-    maintenance,
-    onActionableAlert: async (snapshot, signal) => { await thinkingFailureRecovery?.observe(snapshot, signal); },
-    database,
-    scheduler: actorScheduler,
-    adapters: providerAdapters,
-    activeSweepMs: config.observationActiveSweepMs,
-    quietSweepMs: config.observationQuietSweepMs,
-    quietWindowMs: config.observationQuietWindowMs,
-    backendRecoveryAfterMs: config.backendRecoveryAfterMs,
-    observationTimeoutMs: config.backendRequestTimeoutMs,
-    probeCoordinator,
-    logger,
-    metrics,
+  const rebindSemanticPages = async () => restoreSemanticPageBindings({
+    repository: semanticTaskRepository, teamDirectory, pageRegistry, pageBindings,
+    actorScheduler, chatgptUrl: config.chatgptUrl,
   });
-  let recoveryService: RecoveryService | null = null;
-  const submissionService = new SubmissionService({
-    database,
-    directory: teamDirectory,
-    scheduler: actorScheduler,
-    pageMutex: pageMutationMutex,
-    adapters: providerAdapters,
-    maxUploadFileBytes: config.maxUploadFileBytes,
-    uploadsEnabled: config.uploadsEnabled,
-    beforeFailureContinuation: async (snapshot, continuation) => {
-      if (!thinkingFailureRecovery) throw new Error('Thinking-failure validation is unavailable');
-      await thinkingFailureRecovery.validateContinuation(snapshot, continuation);
-    },
-    beforeContinuation: async (current, original, confirmation) => { await ui.verifyContinuation(current, original, confirmation); },
-    beforeAuthorizedResend: async (current, original, prompt, beforeDispatch, followup, userTranscriptHash) => {
-      return await ui.verifyAuthorizedResend(current, original, prompt, beforeDispatch, followup, userTranscriptHash);
-      // Explicit duplicate-risk approval preserves the unresolved original.
-      // Recovery GET pacing remains with its observer; it does not gate this UI dispatch.
-    },
-    reserveResendPage: (original, successor) => ui.reserveResendPage(original, successor),
-    onSubmitted: (snapshot) => observationService.start(snapshot),
-    onSubmissionUnknown: (snapshot) =>
-      recoveryService?.watchAcknowledgementRecovery(snapshot),
-  });
-  const stopService = new StopService({
-    database,
-    directory: teamDirectory,
-    scheduler: actorScheduler,
-    pageMutex: pageMutationMutex,
-    adapters: providerAdapters,
-  });
-  const recovery = new RecoveryService({
-    maintenance,
-    pageMutex: pageMutationMutex,
-    database,
-    browserOwner,
-    pageRegistry,
-    scheduler: actorScheduler,
-    observations: observationService,
-    adapters: providerAdapters,
-    submissions: submissionService,
-    chatgptUrl: config.chatgptUrl,
-    geminiUrl: config.geminiUrl,
-    grokUrl: config.grokUrl,
-    metrics,
-    logger,
-    acknowledgementRetryMs: config.observationActiveSweepMs,
-    ...(options.recoveryNavigatePage === undefined
-      ? {}
-      : { navigatePage: options.recoveryNavigatePage }),
-  });
-  recoveryService = recovery;
-  const browserControl = new BrowserControlService({
-    browserOwner,
-    pageRegistry,
-    uploadsEnabled: config.uploadsEnabled,
-    onStarted: async () => await recovery.restore({ forceObservers: true }),
-  });
-  const artifactService = new ArtifactService({
-    database,
-    directory: teamDirectory,
-    adapters: providerAdapters,
-    artifactDir: config.artifactDir,
-    maxArtifactFileBytes: config.maxArtifactFileBytes,
-    ...(browserOwner === null ? {} : { ensurePage: (sessionId: string, generation: number) => recovery.ensurePage(sessionId, generation) }),
-  });
-
   try {
-    const preSubmitRecovered = await submissionService.recoverInterruptedPreSubmissions();
-    if (preSubmitRecovered > 0) {
-      logger.warn('submission.recovered-pre-submit', { count: preSubmitRecovered });
+    if (browserOwner !== null) {
+      const report = await rebindSemanticPages();
+      if (report.scanned > 0) logger.info('semantic.page-rebind', report);
     }
-    const reconciled = await submissionService.reconcileOutboxDiagnostics();
-    if (reconciled > 0) {
-      logger.warn('submission.reconciled-diagnostics', { count: reconciled });
-    }
-    const recovered = await submissionService.recoverInterruptedSubmissions();
-    if (recovered > 0) {
-      logger.warn('submission.recovered-ambiguous', { count: recovered });
-    }
-    await recovery.restore();
   } catch (error) {
-    await recovery.close();
-    await observationService.close();
     await browserOwner?.close();
     actorScheduler.close();
     unsubscribePageBindings();
@@ -337,10 +166,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     database.close();
     throw error;
   }
-
-  const conversationLoadRecovery = new ConversationLoadRecovery({ maintenance, database, registry: pageRegistry,
-    pageMutex: pageMutationMutex, scheduler: actorScheduler, probes: probeCoordinator,
-    chatgptUrl: config.chatgptUrl });
   router.register('system.defer_account_cooldown', z.object({
     requestId: z.string().min(1).max(200), observedAt: z.iso.datetime(), until: z.iso.datetime(),
     evidenceRef: z.string().min(1).max(500),
@@ -351,7 +176,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       method: 'system.defer_account_cooldown', payload: input,
       operation: () => {
         probeCoordinator.defer(input.scope ?? 'chatgpt:conversation-list', input.until);
-        return { deferred: true, scope: input.scope ?? 'chatgpt:conversation-list', ...conversationLoadRecovery.repository.pacing() };
+        return { deferred: true, scope: input.scope ?? 'chatgpt:conversation-list', ...accountPacing.pacing() };
       },
     }));
   router.register('system.health', z.object({}).strict(), () =>
@@ -362,9 +187,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       browserOwner,
       pageRegistry,
       actorScheduler,
-      observationService,
       metrics,
-    }), conversationLoadRecovery: conversationLoadRecovery.status(), maintenance: {
+    }), maintenance: {
       ...maintenance.status(), durableRecoveryHandover: true,
     } }),
   );
@@ -396,14 +220,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     profileDir: config.profileDir,
     recoverBrowser: () => restartBrowser(),
   });
-  const ui = new SessionUiService({
-    browserOwner,
-    submissions: submissionService,
-    registry: pageRegistry,
-    chatgptUrl: config.chatgptUrl,
-    quietWindowMs: config.observationQuietWindowMs,
-  });
-  thinkingFailureRecovery = new ThinkingFailureRecovery({ maintenance, database, submissions: submissionService, ui });
   registerTaskMethods(router, {
     repository: semanticTaskRepository, gateway: semanticDecisionGateway,
     admission: new PublicTaskAdmissionService({
@@ -421,9 +237,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   try {
     await rpcServer.listen();
   } catch (error) {
-    await recovery.close();
-    await thinkingFailureRecovery.close();
-    await observationService.close();
     await browserOwner?.close();
     actorScheduler.close();
     unsubscribePageBindings();
@@ -432,8 +245,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     throw error;
   }
 
-  thinkingFailureRecovery.restore();
-  if (browserOwner && config.enabledProviders.includes('chatgpt')) conversationLoadRecovery.start();
   let closed = false;
   let browserRecovery: Promise<Readonly<Record<string, unknown>>> | null = null;
   const restartBrowser = (): Promise<Readonly<Record<string, unknown>>> => {
@@ -441,7 +252,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     browserRecovery = (async () => {
       if (browserOwner === null) throw new Error('Browser owner is disabled');
       const browser = await browserOwner.restart();
-      const report = await recovery.restore({ forceObservers: true });
+      const report = await rebindSemanticPages();
       return { browser, recovery: report };
     })().finally(() => {
       browserRecovery = null;
@@ -475,8 +286,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     rpcServer,
     browserOwner,
     pageRegistry,
-    browserControl,
-    artifactService,
     pageMutationMutex,
     teamDirectory,
     receipts,
@@ -484,19 +293,12 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     probeCoordinator,
     metrics,
     pageBindings,
-    providerAdapters,
     semanticProviders,
     semanticTaskRepository,
     semanticTaskKernel,
     semanticDecisionGateway,
     semanticManagedContinuation,
     semanticTaskBindAttemptSession,
-    observationService,
-    thinkingFailureRecovery,
-    conversationLoadRecovery,
-    recoveryService: recovery,
-    submissionService,
-    stopService,
     startedAt,
     async restartBrowser(): Promise<Readonly<Record<string, unknown>>> {
       return await restartBrowser();
@@ -511,10 +313,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       if (browserRecoveryTimer !== null) clearInterval(browserRecoveryTimer);
       await browserRecovery?.catch(() => undefined);
       await rpcServer.close();
-      await conversationLoadRecovery.close();
-      await recovery.close();
-      await thinkingFailureRecovery?.close();
-      await observationService.close();
       await browserOwner?.close();
       actorScheduler.close();
       unsubscribePageBindings();
