@@ -1532,12 +1532,13 @@ export class TaskKernelRepository {
   }
 
   /** Prepared root initials remain unbound until their one exact POST is observed. */
-  listPendingPublicRootInitials(limit = 16): readonly {
+  listPendingPublicRootInitials(limit = 16, afterTaskId?: string): readonly {
     taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
   }[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error('Invalid public root initial scan limit');
     }
+    if (afterTaskId !== undefined) requireNonempty(afterTaskId, 'afterTaskId');
     return this.#database.raw.prepare(
       `SELECT t.task_id AS taskId,t.client_id AS clientId,
           a.attempt_id AS attemptId,i.model_intent AS modelIntent
@@ -1551,8 +1552,8 @@ export class TaskKernelRepository {
         WHERE t.cancel_requested=0 AND t.state='working'
           AND t.pending_decision_id IS NULL AND s.provider_conversation_id IS NULL
           AND a.kind='initial' AND a.state='planned' AND r.attempt_id IS NULL
-        ORDER BY t.created_at,t.task_id LIMIT ?`,
-    ).all(limit) as Array<{
+        ORDER BY CASE WHEN t.task_id > ? THEN 0 ELSE 1 END, t.task_id LIMIT ?`,
+    ).all(afterTaskId ?? '', limit) as Array<{
       taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
     }>;
   }
@@ -1560,13 +1561,14 @@ export class TaskKernelRepository {
   /** Root POSTs are reconciled read-only until canonical ACK, then rebound
    * idempotently to the retained page/session generation after a Core restart.
    */
-  listPendingPublicRootReconciliations(limit = 32): readonly {
+  listPendingPublicRootReconciliations(limit = 32, afterTaskId?: string): readonly {
     taskId: string; clientId: string; attemptId: string;
     canonicalConversationId: string | null;
   }[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error('Invalid public root reconciliation scan limit');
     }
+    if (afterTaskId !== undefined) requireNonempty(afterTaskId, 'afterTaskId');
     return this.#database.raw.prepare(
       `SELECT t.task_id AS taskId,t.client_id AS clientId,
           a.attempt_id AS attemptId,
@@ -1582,8 +1584,8 @@ export class TaskKernelRepository {
                 AND a.state IN ('dispatched','uncertain'))
             OR (r.canonical_conversation_id IS NOT NULL
                 AND a.state='acknowledged'))
-        ORDER BY t.updated_at,t.task_id LIMIT ?`,
-    ).all(limit) as Array<{
+        ORDER BY CASE WHEN t.task_id > ? THEN 0 ELSE 1 END, t.task_id LIMIT ?`,
+    ).all(afterTaskId ?? '', limit) as Array<{
       taskId: string; clientId: string; attemptId: string;
       canonicalConversationId: string | null;
     }>;
@@ -1592,12 +1594,13 @@ export class TaskKernelRepository {
   /** Non-root POSTs with exact durable provenance await read-only ACK recovery.
    * The active immutable binding and latest attempt must still own the turn.
    */
-  listPendingPublicAcknowledgements(limit = 16): readonly {
+  listPendingPublicAcknowledgements(limit = 16, afterTaskId?: string): readonly {
     taskId: string; clientId: string; attemptId: string;
   }[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error('Invalid public acknowledgement scan limit');
     }
+    if (afterTaskId !== undefined) requireNonempty(afterTaskId, 'afterTaskId');
     return this.#database.raw.prepare(
       `SELECT t.task_id AS taskId,t.client_id AS clientId,a.attempt_id AS attemptId
         FROM kernel_tasks t
@@ -1617,19 +1620,20 @@ export class TaskKernelRepository {
           AND NOT EXISTS (SELECT 1 FROM kernel_attempts newer
             WHERE newer.task_id=t.task_id AND newer.kind!='stop'
               AND newer.sequence>a.sequence)
-        ORDER BY t.updated_at,t.task_id,a.sequence LIMIT ?`,
-    ).all(limit) as Array<{
+        ORDER BY CASE WHEN t.task_id > ? THEN 0 ELSE 1 END, t.task_id,a.sequence LIMIT ?`,
+    ).all(afterTaskId ?? '', limit) as Array<{
       taskId: string; clientId: string; attemptId: string;
     }>;
   }
 
   /** Only PLANNED public initials with a canonical conversation may dispatch. */
-  listPendingPublicInitials(limit = 16): readonly {
+  listPendingPublicInitials(limit = 16, afterTaskId?: string): readonly {
     taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
   }[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error('Invalid public initial scan limit');
     }
+    if (afterTaskId !== undefined) requireNonempty(afterTaskId, 'afterTaskId');
     return this.#database.raw.prepare(
       `SELECT t.task_id AS taskId,t.client_id AS clientId,
           a.attempt_id AS attemptId,i.model_intent AS modelIntent
@@ -1642,8 +1646,8 @@ export class TaskKernelRepository {
         WHERE t.cancel_requested=0 AND t.state='working'
           AND t.pending_decision_id IS NULL AND s.provider_conversation_id IS NOT NULL
           AND a.kind='initial' AND a.state='planned'
-        ORDER BY t.created_at,t.task_id LIMIT ?`,
-    ).all(limit) as Array<{
+        ORDER BY CASE WHEN t.task_id > ? THEN 0 ELSE 1 END, t.task_id LIMIT ?`,
+    ).all(afterTaskId ?? '', limit) as Array<{
       taskId: string; clientId: string; attemptId: string; modelIntent: string | null;
     }>;
   }
@@ -1651,24 +1655,40 @@ export class TaskKernelRepository {
   /** Exact public ACKs awaiting a canonical FINAL. The Core may observe
    * these without a connected RPC/MCP client or a subscriber lifecycle.
    */
-  listPendingPublicFinals(limit = 32): readonly {
-    taskId: string; clientId: string; attemptId: string; policyJson: string;
+  listPendingPublicFinals(
+    limit = 32, after?: { readonly taskId: string; readonly attemptSequence: number },
+  ): readonly {
+    taskId: string; clientId: string; attemptId: string;
+    attemptSequence: number; policyJson: string;
   }[] {
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       throw new Error('Invalid public final scan limit');
     }
+    if (after !== undefined && (!after.taskId ||
+        !Number.isSafeInteger(after.attemptSequence) || after.attemptSequence < 1)) {
+      throw new Error('Invalid public final scan cursor');
+    }
+    // A bounded observer must not order only by task.updated_at: identical
+    // pacing/FINAL deferrals are intentionally event-deduplicated and leave
+    // that timestamp unchanged, starving every Task past LIMIT indefinitely.
+    // Rotate by immutable task + attempt sequence, wrapping in one query.
+    const cursorTaskId = after?.taskId ?? '';
+    const cursorSequence = after?.attemptSequence ?? 0;
     return this.#database.raw.prepare(
       `SELECT t.task_id AS taskId,t.client_id AS clientId,
-          a.attempt_id AS attemptId,p.policy_json AS policyJson
+          a.attempt_id AS attemptId,a.sequence AS attemptSequence,
+          p.policy_json AS policyJson
         FROM kernel_tasks t JOIN kernel_public_task_policies p ON p.task_id=t.task_id
         JOIN kernel_attempts a ON a.task_id=t.task_id
         LEFT JOIN kernel_results r ON r.attempt_id=a.attempt_id
         WHERE t.cancel_requested=0
           AND t.state IN ('working','agent_input_required')
           AND a.kind!='stop' AND a.state='acknowledged' AND r.result_id IS NULL
-        ORDER BY t.updated_at,a.sequence LIMIT ?`,
-    ).all(limit) as Array<{
-      taskId: string; clientId: string; attemptId: string; policyJson: string;
+        ORDER BY CASE WHEN t.task_id > ? OR (t.task_id=? AND a.sequence>?)
+          THEN 0 ELSE 1 END, t.task_id,a.sequence LIMIT ?`,
+    ).all(cursorTaskId, cursorTaskId, cursorSequence, limit) as Array<{
+      taskId: string; clientId: string; attemptId: string;
+      attemptSequence: number; policyJson: string;
     }>;
   }
 

@@ -59,6 +59,13 @@ export class ManagedContinuationService {
   ) => Promise<void>) | undefined;
   #interval: ReturnType<typeof setInterval> | null = null;
   #active: Promise<ContinuationReviewReport> | null = null;
+  // Fairness cursor only, never a durable Task or mutation authority.
+  // A Core restart starts a new bounded round-robin pass.
+  #publicRootInitialCursor: string | null = null;
+  #publicInitialCursor: string | null = null;
+  #publicRootReconciliationCursor: string | null = null;
+  #publicAckCursor: string | null = null;
+  #publicFinalCursor: { taskId: string; attemptSequence: number } | null = null;
   #closed = false;
 
   constructor(input: {
@@ -173,7 +180,10 @@ export class ManagedContinuationService {
     const now = this.#now().toISOString();
     // A precisely-owned new-chat root may consume only its one journaled
     // initial attempt. The POST remains uncertain until canonical recovery.
-    for (const planned of this.#repository.listPendingPublicRootInitials(8)) {
+    const rootInitials = this.#repository.listPendingPublicRootInitials(
+      8, this.#publicRootInitialCursor ?? undefined);
+    this.#publicRootInitialCursor = rootInitials.at(-1)?.taskId ?? this.#publicRootInitialCursor;
+    for (const planned of rootInitials) {
       try {
         if (planned.modelIntent !== null) {
           const verified = await this.#inspectModelIntent?.({
@@ -197,7 +207,10 @@ export class ManagedContinuationService {
     // Fresh public initial work requires a verified, retained conversation.
     // Preparation still owns missing conversations; never fabricate one or
     // spend the initial attempt merely because a client asked to start.
-    for (const planned of this.#repository.listPendingPublicInitials(8)) {
+    const publicInitials = this.#repository.listPendingPublicInitials(
+      8, this.#publicInitialCursor ?? undefined);
+    this.#publicInitialCursor = publicInitials.at(-1)?.taskId ?? this.#publicInitialCursor;
+    for (const planned of publicInitials) {
       try {
         await this.#bindInitialAttempt?.(planned);
         if (planned.modelIntent !== null) {
@@ -225,7 +238,10 @@ export class ManagedContinuationService {
     // A root POST is never replayed. The retained target contributes only a
     // candidate conversation ID; authenticated canonical GET proves the ACK.
     // After promotion, restore exact page/session ownership idempotently.
-    for (const pending of this.#repository.listPendingPublicRootReconciliations(16)) {
+    const rootReconciliations = this.#repository.listPendingPublicRootReconciliations(
+      16, this.#publicRootReconciliationCursor ?? undefined);
+    this.#publicRootReconciliationCursor = rootReconciliations.at(-1)?.taskId ?? this.#publicRootReconciliationCursor;
+    for (const pending of rootReconciliations) {
       try {
         let full = this.#repository.getFullTask(pending.taskId, pending.clientId);
         let attempt = full.attempts.find(row => row.attemptId === pending.attemptId);
@@ -252,7 +268,10 @@ export class ManagedContinuationService {
     }
     // A followup POST can outlive its first canonical ACK read. Reconcile only
     // its persisted exact evidence; this path cannot draft, click or resend.
-    for (const pending of this.#repository.listPendingPublicAcknowledgements(8)) {
+    const pendingAcknowledgements = this.#repository.listPendingPublicAcknowledgements(
+      8, this.#publicAckCursor ?? undefined);
+    this.#publicAckCursor = pendingAcknowledgements.at(-1)?.taskId ?? this.#publicAckCursor;
+    for (const pending of pendingAcknowledgements) {
       try {
         await this.#kernel.recoverAck(
           pending.taskId, pending.clientId, pending.attemptId);
@@ -317,7 +336,15 @@ export class ManagedContinuationService {
     // A standalone public Task must finish even when every client has exited.
     // This read-only observer never takes over the provider or retries a POST.
     // Process due sends first; a slow FINAL GET cannot starve another Task's due.
-    for (const pending of this.#repository.listPendingPublicFinals(8)) {
+    const publicFinals = this.#repository.listPendingPublicFinals(
+      8, this.#publicFinalCursor ?? undefined);
+    const lastPublicFinal = publicFinals.at(-1);
+    if (lastPublicFinal !== undefined) {
+      this.#publicFinalCursor = {
+        taskId: lastPublicFinal.taskId, attemptSequence: lastPublicFinal.attemptSequence,
+      };
+    }
+    for (const pending of publicFinals) {
       try {
         const observed = await this.#kernel.probeFinal({
           taskId: pending.taskId, clientId: pending.clientId,

@@ -307,6 +307,7 @@ async function verifyInstalledContinuation(moduleAt, work) {
   const paced = new Set();
   const ready = new Set();
   const sends = [];
+  const finalReads = [];
   const reviews = [];
   const provider = {
     providerKey: 'compiled-fixture',
@@ -317,6 +318,7 @@ async function verifyInstalledContinuation(moduleAt, work) {
     },
     async recoverAck() { return { kind: 'unavailable', reason: 'fixture-no-recovery' }; },
     async observeFinal(query) {
+      finalReads.push(query.attemptId);
       if (rateLimited.has(query.attemptId)) {
         return { kind: 'pending', reason: 'backend-http-429' };
       }
@@ -460,6 +462,54 @@ async function verifyInstalledContinuation(moduleAt, work) {
       ['persistent_backend_read_throttle'], 'resolved 429 cannot escalate itself');
     const persistent429ExtraPosts = sends.filter(send => send.taskId === sustainedRate).length - 1;
     assert.equal(persistent429ExtraPosts, 0);
+
+    // Exercise fair scanning of the actual compiled modules in a disposable
+    // database. All twelve distinct public Tasks have confirmed initial ACKs
+    // but no exact FINAL, and their identical observations are deduplicated.
+    const fairAttemptIds = [];
+    const sendsBeforeFairTasks = sends.length;
+    for (let index = 0; index < 12; index++) {
+      const name = 'fair-' + String(index).padStart(2, '0');
+      const taskId = 'task:' + name;
+      const attemptId = 'initial:' + name;
+      const slotId = 'slot:' + name;
+      store.openSlot({
+        projectId, slotId, roleKey: slotId, providerKey: provider.providerKey, clientId,
+      });
+      store.startTask({
+        taskId, projectId, slotId, clientId, requestId: 'request:' + name,
+        expectedSlotRevision: 1, prompt: 'Fixture question ' + name,
+      });
+      store.observeConversation({
+        projectId, slotId, clientId, taskId,
+        expectedRevision: 1, providerConversationId: 'conversation:' + name,
+      });
+      store.planAttempt({
+        taskId, clientId, attemptId, kind: 'initial',
+        turnKey: 'original', content: 'Fixture question ' + name,
+      });
+      db.raw.prepare(
+        'INSERT INTO kernel_public_task_policies' +
+        '(task_id,policy_json,input_sha256,accepted_revision,created_at)' +
+        ' VALUES(?,?,?,?,?)',
+      ).run(taskId, JSON.stringify({ enabled: false }),
+        'compiled-fixture-hash', 1, new Date(nowMs).toISOString());
+      pending.add(attemptId);
+      await kernel.dispatch(taskId, clientId, attemptId);
+      fairAttemptIds.push(attemptId);
+    }
+    assert.equal(sends.length - sendsBeforeFairTasks, 12, 'one initial send per fixture Task');
+    for (let scan = 0; scan < 4; scan++) {
+      nowMs += 1_000;
+      await service.tick();
+    }
+    const fairReadCounts = fairAttemptIds.map(attemptId =>
+      finalReads.filter(id => id === attemptId).length);
+    assert.ok(fairReadCounts.every(count => count >= 2),
+      'compiled FINAL scanner must revisit all twelve pending Tasks: ' +
+      JSON.stringify(fairReadCounts));
+    assert.equal(sends.length - sendsBeforeFairTasks, 12,
+      'repeated read-only scans cannot submit continuations');
     return {
       installedNoFinal20MinuteContinue: true,
       installedExactFinalStopsContinuation: true,
@@ -467,6 +517,7 @@ async function verifyInstalledContinuation(moduleAt, work) {
       installedPersistent429FifthSlotAgentReview: true,
       installedPersistent429ReviewResumesOnce: true,
       installedPersistent429ExtraPosts: persistent429ExtraPosts,
+      installedPublicFinalFairRotation: true,
     };
   } finally {
     await service.close();
