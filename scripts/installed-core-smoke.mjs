@@ -186,6 +186,8 @@ try {
     logger: { debug() {}, info() {}, warn() {}, error() {} },
   });
   assert.equal(core.browserOwner, null);
+  assert.equal(core.actorScheduler.actorCount, 0,
+    'a restart must not hydrate dormant legacy session actors');
   const resumedHealth = await rpc('system.health', {});
   assert.equal(resumedHealth.schemaVersion, health.schemaVersion);
   assert.equal(resumedHealth.sourceCommit, health.sourceCommit);
@@ -262,6 +264,7 @@ try {
   assert.equal(core.semanticTaskRepository.getFullTask(
     rebound.taskId, clientId).attempts.length, 1);
 
+  const managed = await verifyInstalledContinuation(moduleAt, work);
   console.log(JSON.stringify({
     requestOk: true, gate: 'installed-core-public-task-smoke',
     schemaVersion: resumedHealth.schemaVersion, toolCount: MCP_TOOLS.length,
@@ -273,8 +276,137 @@ try {
     historicalSlotRecoveredAfterRestart: true,
     crossProjectRequestCollisionRejected: true,
     staleBindingReplacementRejectedAfterRestart: true,
+    noIdleLegacyActorsOnRestart: true,
+    ...managed,
   }));
 } finally {
   await core?.close().catch(() => undefined);
   rmSync(work, { recursive: true, force: true });
+}
+
+
+/** Exercise the compiled, installed modules, never a TS unit-test import.
+ * Both scenarios are clock-accelerated in disposable SQLite; no real provider
+ * POST, Chrome, profile, or operational Core participates.
+ */
+async function verifyInstalledContinuation(moduleAt, work) {
+  const [{ SessionPlaneDatabase }, { TaskKernelRepository },
+    { DurableTaskKernel }, { ManagedContinuationService, CONTINUATION_INTERVAL_MS }] =
+    await Promise.all([
+      moduleAt('storage/database.js'),
+      moduleAt('storage/task-kernel-repository.js'),
+      moduleAt('core/durable-task-kernel.js'),
+      moduleAt('core/managed-continuation.js'),
+    ]);
+  const db = SessionPlaneDatabase.open(path.join(work, 'compiled-continuation.sqlite'));
+  let nowMs = Date.parse('2026-11-14T00:00:00.000Z');
+  const clientId = 'compiled-fixture-agent';
+  const store = new TaskKernelRepository(db, () => new Date(nowMs).toISOString());
+  const pending = new Set(['initial:no-final', 'initial:rate-limited']);
+  const rateLimited = new Set(['initial:rate-limited']);
+  const ready = new Set();
+  const sends = [];
+  const provider = {
+    providerKey: 'compiled-fixture',
+    async preflight() { return { kind: 'ready' }; },
+    async sendOnce(intent) {
+      sends.push(intent);
+      return { kind: 'verified_ack', externalTurnId: 'ack:' + intent.attemptId };
+    },
+    async recoverAck() { return { kind: 'unavailable', reason: 'fixture-no-recovery' }; },
+    async observeFinal(query) {
+      if (rateLimited.has(query.attemptId)) {
+        return { kind: 'pending', reason: 'backend-http-429' };
+      }
+      if (pending.has(query.attemptId) ||
+          (query.attemptId.startsWith('managed-continuation:') && !ready.has(query.attemptId))) {
+        return { kind: 'pending', reason: 'backend-assistant-missing' };
+      }
+      return {
+        kind: 'exact_final', externalTurnId: query.externalTurnId,
+        answerText: 'Exact installed final for ' + query.attemptId,
+      };
+    },
+  };
+  const kernel = new DurableTaskKernel(store, [provider]);
+  const service = new ManagedContinuationService({
+    repository: store, kernel, now: () => new Date(nowMs),
+  });
+  const projectId = 'installed-continuation-project';
+  try {
+    store.openProject({
+      projectId, projectKey: 'installed.continuation',
+      displayName: 'No real browser package contract', clientId,
+    });
+    const prepare = async (name, slotId) => {
+      const taskId = 'task:' + name;
+      const attemptId = 'initial:' + name;
+      store.openSlot({ projectId, slotId, roleKey: slotId,
+        providerKey: provider.providerKey, clientId });
+      store.startTask({ taskId, projectId, slotId, clientId,
+        requestId: 'request:' + name, expectedSlotRevision: 1,
+        prompt: 'Fixture question ' + name });
+      store.observeConversation({ projectId, slotId, clientId, taskId,
+        expectedRevision: 1, providerConversationId: 'conversation:' + name });
+      store.planAttempt({ taskId, clientId, attemptId, kind: 'initial',
+        turnKey: 'original', content: 'Fixture question ' + name });
+      db.raw.prepare(
+        'INSERT INTO kernel_public_task_policies' +
+        '(task_id,policy_json,input_sha256,accepted_revision,created_at)' +
+        ' VALUES(?,?,?,?,?)',
+      ).run(taskId, JSON.stringify({
+        enabled: true, approvalRef: 'explicit-compiled-fixture-approval',
+        message: '계속', intervalMs: CONTINUATION_INTERVAL_MS,
+      }), 'compiled-fixture-hash', 1, new Date(nowMs).toISOString());
+      await kernel.dispatch(taskId, clientId, attemptId);
+      service.activate({ taskId, clientId, sourceAttemptId: attemptId,
+        approvalRef: 'explicit-compiled-fixture-approval', message: '계속' });
+      return taskId;
+    };
+    const noFinal = await prepare('no-final', 'main');
+    nowMs += CONTINUATION_INTERVAL_MS;
+    assert.equal((await service.tick()).dispatchesAttempted, 1);
+    assert.deepEqual(sends.filter(send => send.taskId === noFinal)
+      .map(send => send.kind), ['initial', 'continuation'],
+      'installed JS must submit exactly one Continue with no source FINAL');
+    const continuationId = 'managed-continuation:initial:no-final';
+    ready.add(continuationId);
+    nowMs += 1_000;
+    await service.tick();
+    const completed = store.getFullTask(noFinal, clientId);
+    assert.equal(completed.task.state, 'completed');
+    assert.equal(completed.results[0].completesTask, true);
+    assert.equal(completed.timers.filter(timer => timer.status === 'pending').length, 0);
+    nowMs += 2 * CONTINUATION_INTERVAL_MS;
+    await service.tick();
+    assert.equal(sends.filter(send => send.taskId === noFinal).length, 2,
+      'exact installed FINAL must revoke future Continue');
+
+    const withFinal = await prepare('with-final', 'final');
+    nowMs += CONTINUATION_INTERVAL_MS;
+    assert.equal((await service.tick()).dispatchesAttempted, 0);
+    assert.equal(store.getTask(withFinal, clientId).state, 'completed');
+    assert.deepEqual(sends.filter(send => send.taskId === withFinal)
+      .map(send => send.kind), ['initial'],
+      'installed JS must never Continue after source FINAL');
+
+    const rateTask = await prepare('rate-limited', 'rate');
+    nowMs += CONTINUATION_INTERVAL_MS;
+    assert.equal((await service.tick()).dispatchesAttempted, 0);
+    assert.equal(store.getFullTask(rateTask, clientId).attempts.length, 1,
+      'canonical 429 cannot authorize an installed Continue');
+    rateLimited.delete('initial:rate-limited');
+    nowMs += CONTINUATION_INTERVAL_MS;
+    assert.equal((await service.tick()).dispatchesAttempted, 1);
+    assert.deepEqual(sends.filter(send => send.taskId === rateTask)
+      .map(send => send.kind), ['initial', 'continuation']);
+    return {
+      installedNoFinal20MinuteContinue: true,
+      installedExactFinalStopsContinuation: true,
+      installed429NeverLicensesContinue: true,
+    };
+  } finally {
+    await service.close();
+    db.close();
+  }
 }

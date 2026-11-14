@@ -194,7 +194,11 @@ try {
       installedCore.secondSlotRevisionIndependentAfterRestart !== true ||
       installedCore.historicalSlotRecoveredAfterRestart !== true ||
       installedCore.crossProjectRequestCollisionRejected !== true ||
-      installedCore.staleBindingReplacementRejectedAfterRestart !== true) {
+      installedCore.staleBindingReplacementRejectedAfterRestart !== true ||
+      installedCore.noIdleLegacyActorsOnRestart !== true ||
+      installedCore.installedNoFinal20MinuteContinue !== true ||
+      installedCore.installedExactFinalStopsContinuation !== true ||
+      installedCore.installed429NeverLicensesContinue !== true) {
     throw new Error('Installed Core idempotency/restart/rebinding smoke failed');
   }
 
