@@ -32,6 +32,17 @@ L1/L2/L4 candidate pass does not grant L3 or release approval.
 Historical snapshots below record earlier source/runtime states. Their
 2026-11-12 pending entries are not a current verdict for E05/E07/E19.
 
+## Merged main acceptance (same gates, distinct provenance)
+
+For an exact reviewed merge commit, run
+`node scripts/candidate-acceptance.mjs --release-main --live-readonly`
+on the **clean main** checkout whose HEAD matches both `origin/main` and
+the remote main ref. The default remains clean dev-only. This explicit mode
+runs the same eight isolated gates and creates a fresh, main-commit-bound
+receipt and package checksum. It does not copy the dev receipt or authorize a
+production Core/Chrome change. Any tree, branch, upstream, or package mismatch
+fails closed.
+
 ## Proven in supported isolation
 
 - Six public Core/MCP tools, stable idempotency, cancellation receipt and

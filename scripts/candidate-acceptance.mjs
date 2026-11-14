@@ -12,21 +12,30 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { compareCandidateSource } from './candidate-source-identity.mjs';
-import { candidateGatePlan, candidateGateFailureSummary } from './candidate-acceptance-policy.mjs';
+import { candidateGatePlan, candidateGateFailureSummary, parseCandidateAcceptanceArgs } from './candidate-acceptance-policy.mjs';
 import { runIsolatedCandidateCommand } from './candidate-gate-process.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const args = process.argv.slice(2);
-if (args.some(arg => arg !== '--live-readonly') || args.length > 1) {
-  throw new Error('Usage: node scripts/candidate-acceptance.mjs [--live-readonly]');
-}
-const liveReadonly = args[0] === '--live-readonly';
+const mode = parseCandidateAcceptanceArgs(process.argv.slice(2));
+const liveReadonly = mode.liveReadonly;
 const receiptDir = mkdtempSync(path.join(tmpdir(), 'sessionplane-candidate-acceptance-'));
 const head = exec('git', ['rev-parse', 'HEAD'], 10_000).stdout.trim();
 const branch = exec('git', ['branch', '--show-current'], 10_000).stdout.trim();
 const status = exec('git', ['status', '--porcelain'], 10_000).stdout.trim();
-if (status || branch !== 'dev' || !/^[a-f0-9]{40}$/.test(head)) {
-  throw new Error('Acceptance requires committed clean dev candidate, never a WIP tree');
+if (status || branch !== mode.expectedBranch || !/^[a-f0-9]{40}$/.test(head)) {
+  throw new Error('Acceptance requires committed clean ' + mode.expectedBranch +
+    ' source, never another branch or WIP tree');
+}
+if (mode.releaseMain) {
+  // Read both the local fetched main ref and the remote authoritative ref.
+  // Passing on an unmerged main tip would produce a misleading handover receipt.
+  const localMain = exec('git', ['rev-parse', 'origin/main'], 10_000);
+  const remoteMain = exec('git', ['ls-remote', 'origin', 'refs/heads/main'], 20_000);
+  if (localMain.error || localMain.status !== 0 || localMain.stdout.trim() !== head ||
+      remoteMain.error || remoteMain.status !== 0 ||
+      remoteMain.stdout.trim() !== head + '\trefs/heads/main') {
+    throw new Error('Main acceptance requires exact origin/main and remote main commit');
+  }
 }
 const sourceTree = exec('git', ['rev-parse', 'HEAD^{tree}'], 10_000).stdout.trim();
 const initial = { head, tree: sourceTree, branch, status };
