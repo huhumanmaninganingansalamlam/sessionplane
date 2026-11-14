@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { candidateGatePlan, candidateGateFailureSummary } from '../../scripts/candidate-acceptance-policy.mjs';
+import { candidateGatePlan, candidateGateFailureSummary, parseCandidateAcceptanceArgs } from '../../scripts/candidate-acceptance-policy.mjs';
 
 test('candidate gate plan uses eight bounded stage-specific budgets', () => {
   const plan = candidateGatePlan('/exact/node');
@@ -28,4 +28,23 @@ test('timeout summary retains process error and bounded stdout/stderr tails', ()
   assert.ok(summary.length <= 1250);
   assert.equal(candidateGateFailureSummary({ error: null, stderr: '', stdout: '' }),
     'candidate gate exited unsuccessfully without captured output');
+});
+
+test('acceptance mode binds dev by default and main only through explicit exact mode', () => {
+  assert.deepEqual(parseCandidateAcceptanceArgs([]), {
+    liveReadonly: false, expectedBranch: 'dev', releaseMain: false,
+  });
+  assert.deepEqual(parseCandidateAcceptanceArgs(['--live-readonly']), {
+    liveReadonly: true, expectedBranch: 'dev', releaseMain: false,
+  });
+  assert.deepEqual(parseCandidateAcceptanceArgs(['--release-main']), {
+    liveReadonly: false, expectedBranch: 'main', releaseMain: true,
+  });
+  assert.deepEqual(parseCandidateAcceptanceArgs(['--live-readonly', '--release-main']), {
+    liveReadonly: true, expectedBranch: 'main', releaseMain: true,
+  });
+  for (const args of [['--main'], ['--release-main', '--release-main'],
+    ['--live-readonly', '--live-readonly'], ['--release-main', '--ignore-source']]) {
+    assert.throws(() => parseCandidateAcceptanceArgs(args), /Usage/);
+  }
 });
