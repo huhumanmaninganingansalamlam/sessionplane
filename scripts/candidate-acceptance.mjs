@@ -103,7 +103,7 @@ for (const step of plan) {
   const observed = captureSource();
   const checkpoint = compareCandidateSource(initial, observed, {
     sourceCommit: head, sourceTree, sourceState: 'clean',
-  });
+  }, { expectedBranch: mode.expectedBranch });
   if (!checkpoint.passed) {
     successful = false;
     sourceChangedDuringRun = { afterGate: gate.name, issues: checkpoint.issues,
@@ -125,8 +125,18 @@ if (existsSync(identityFile)) {
   catch { successful = false; }
 }
 const finalSource = captureSource();
-const provenance = compareCandidateSource(initial, finalSource, buildIdentity);
+const provenance = compareCandidateSource(initial, finalSource, buildIdentity,
+  { expectedBranch: mode.expectedBranch });
 if (!provenance.passed) successful = false;
+if (mode.releaseMain) {
+  const remote = exec('git', ['ls-remote', 'origin', 'refs/heads/main'], 20_000);
+  if (remote.status !== 0 || remote.error !== null ||
+      remote.stdout.trim() !== head + '\trefs/heads/main') {
+    provenance.passed = false;
+    provenance.issues.push('remote_main_changed_during_acceptance');
+    successful = false;
+  }
+}
 let installedLive = null;
 if (liveReadonly) {
   const result = exec(process.execPath,

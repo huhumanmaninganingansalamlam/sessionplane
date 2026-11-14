@@ -2,12 +2,16 @@
  * Every source mutation, including an otherwise valid concurrent commit,
  * invalidates this run rather than attaching test results to another tree.
  */
-export function compareCandidateSource(initial, current, identity) {
+export function compareCandidateSource(initial, current, identity, options = {}) {
+  const expectedBranch = options.expectedBranch ?? 'dev';
+  if (!['dev', 'main'].includes(expectedBranch)) {
+    throw new TypeError('Candidate source must be fenced to dev or main');
+  }
   const issues = [];
-  if (initial.branch !== 'dev' || initial.status !== '' ||
+  if (initial.branch !== expectedBranch || initial.status !== '' ||
       !/^[a-f0-9]{40}$/.test(initial.head) ||
       !/^[a-f0-9]{40}$/.test(initial.tree)) {
-    issues.push('invalid_initial_dev_candidate');
+    issues.push('invalid_initial_' + expectedBranch + '_candidate');
   }
   if (current.head !== initial.head) issues.push('candidate_head_changed_during_tests');
   if (current.tree !== initial.tree) issues.push('candidate_tree_changed_during_tests');
