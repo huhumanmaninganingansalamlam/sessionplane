@@ -277,12 +277,41 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def verify_candidate_schema(installed, policy):
+    # Read only the isolated installed package's pure migration registry.
+    # Never open the operational DB, connect to the Core or touch a browser.
+    transition = policy.get('schemaTransition')
+    assert isinstance(transition, dict) and set(transition) == {'from', 'to'}, (
+        'Candidate schema transition policy unavailable')
+    assert type(transition['from']) is int and type(transition['to']) is int
+    assert transition['to'] >= transition['from'] >= 0
+    script = (
+        "import {pathToFileURL} from 'node:url';"
+        "const {migrations}=await import(pathToFileURL(process.argv[1]).href);"
+        "console.log(JSON.stringify(migrations.map(m=>m.version)))"
+    )
+    registry = pathlib.Path(installed)/'dist/storage/migrations/index.js'
+    assert registry.is_file(), 'Candidate compiled migration registry missing'
+    versions = json.loads(subprocess.check_output(
+        ['node', '--input-type=module', '-e', script, str(registry)], text=True))
+    assert isinstance(versions, list) and versions and all(type(v) is int for v in versions), (
+        'Candidate migration registry invalid')
+    assert versions == list(range(1, versions[-1] + 1)), (
+        'Candidate migration chain is not contiguous')
+    assert versions[-1] == transition['to'], (
+        'Candidate migration schema differs from handover policy')
+    return versions[-1]
+
+
 def verify_package(installed, pkg, manifest):
     with tarfile.open(pkg) as archive:
         for member in archive.getmembers():
             if member.isfile():
                 target = installed/member.name.removeprefix('package/')
                 assert target.is_file() and target.read_bytes() == archive.extractfile(member).read(), 'Package bytes differ'
+    compiled_schema = verify_candidate_schema(installed, manifest)
+    assert manifest.get('candidateSchemaVersion', compiled_schema) == compiled_schema, (
+        'Candidate bundle compiled schema receipt differs')
     identity = json.loads((installed/'dist/build-identity.json').read_text())
     assert identity['sourceCommit'] == manifest['sourceCommit'], 'Candidate build commit differs'
     assert identity.get('sourceTree') == manifest.get('sourceTree'), 'Candidate build tree differs'
@@ -948,6 +977,7 @@ def materialize_bundle(policy_path, package_path, acceptance_path, destination, 
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         installed = stage/'lib/node_modules/sessionplane'
         identity = json.loads((installed/'dist/build-identity.json').read_text())
+        compiled_schema = verify_candidate_schema(installed, policy)
         script = "import {pathToFileURL} from 'node:url'; import {createHash} from 'node:crypto'; const {MCP_TOOLS}=await import(pathToFileURL(process.argv[1]).href); console.log(createHash('sha256').update(JSON.stringify(MCP_TOOLS)).digest('hex'));"
         catalog = subprocess.check_output(['node', '--input-type=module', '-e', script,
             str(installed/'dist/mcp/tools.js')], text=True).strip()
@@ -965,6 +995,7 @@ def materialize_bundle(policy_path, package_path, acceptance_path, destination, 
             'candidateBrowserOwnerSha256': sha256_file(installed/'dist/browser/browser-owner.js'),
             'rollbackRuntimeBrowserOwnerSha256': sha256_file(rollback_install/'dist/browser/browser-owner.js'),
             'schemaTransition': policy['schemaTransition'],
+            'candidateSchemaVersion': compiled_schema,
             'requiredGates': policy['requiredGates'],
             'ciConclusion': None,
         }
