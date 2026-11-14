@@ -4,11 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import {
-  browserNavigationRpcTimeoutMs,
-  browserRuntimeRpcTimeoutMs,
-  sessionSendRpcTimeoutMs,
-} from '../../src/cli/main.ts';
+import { resolveMcpToolTimeoutMs } from '../../src/mcp/tools.ts';
+import { taskSchemas } from '../../src/rpc/methods/task.ts';
 import {
   prepareRuntimeDirectories,
   resolveConfig,
@@ -22,47 +19,51 @@ test('runtime version is sourced from package.json', () => {
   assert.equal(SESSIONPLANE_VERSION, packageJson.version);
 });
 
-test('session.send RPC timeout covers browser setup and provider acknowledgement', () => {
+test('public MCP timeout always covers bounded Core ACK without a client-owned send', () => {
   const config = resolveConfig({
     env: {},
     rpcRequestTimeoutMs: 10_000,
     browserLaunchTimeoutMs: 30_000,
     submissionAckTimeoutMs: 12_000,
   });
-  assert.equal(sessionSendRpcTimeoutMs(config), 72_000);
+  assert.equal(resolveMcpToolTimeoutMs(config), 125_000);
 
   const slowerClient = resolveConfig({
-    env: {},
-    rpcRequestTimeoutMs: 90_000,
-    browserLaunchTimeoutMs: 30_000,
-    submissionAckTimeoutMs: 12_000,
-  });
-  assert.equal(sessionSendRpcTimeoutMs(slowerClient), 90_000);
-});
-
-test('browser RPC timeouts cover navigation and runtime launch budgets', () => {
-  const config = resolveConfig({
-    env: {},
-    rpcRequestTimeoutMs: 10_000,
-    browserLaunchTimeoutMs: 30_000,
-  });
-  assert.equal(browserNavigationRpcTimeoutMs(config), 35_000);
-  assert.equal(browserRuntimeRpcTimeoutMs(config), 300_000);
-
-  const slowerClient = resolveConfig({
-    env: {},
-    rpcRequestTimeoutMs: 60_000,
-    browserLaunchTimeoutMs: 30_000,
-  });
-  assert.equal(browserNavigationRpcTimeoutMs(slowerClient), 60_000);
-  assert.equal(browserRuntimeRpcTimeoutMs(slowerClient), 300_000);
-
-  const verySlowClient = resolveConfig({
     env: {},
     rpcRequestTimeoutMs: 600_000,
     browserLaunchTimeoutMs: 30_000,
+    submissionAckTimeoutMs: 12_000,
   });
-  assert.equal(browserRuntimeRpcTimeoutMs(verySlowClient), 600_000);
+  assert.equal(resolveMcpToolTimeoutMs(slowerClient), 600_000);
+});
+
+test('public task.wait and task.start carry bounded revision/prompt contracts instead of browser RPC selectors', () => {
+  const base = {
+    clientId: 'config-client',
+    taskId: '00000000-0000-4000-8000-000000000001',
+    afterRevision: 1,
+  };
+  const defaultWait = taskSchemas.wait.parse(base);
+  assert.equal(defaultWait.waitMs, 30_000);
+  assert.equal(defaultWait.afterRevision, 1);
+  const longWait = taskSchemas.wait.parse({ ...base, waitMs: 120_000 });
+  assert.equal(longWait.waitMs, 120_000);
+  assert.equal(taskSchemas.wait.safeParse({ ...base, waitMs: 120_001 }).success, false);
+  assert.equal(taskSchemas.wait.safeParse({ ...base, selector: '#send' }).success, false);
+  const start = {
+    clientId: 'config-client',
+    requestId: 'one-send-once',
+    projectId: '00000000-0000-4000-8000-000000000002',
+    expectedConversationRevision: 1,
+    prompt: 'One exact public Task',
+  };
+  assert.equal(taskSchemas.start.safeParse(start).success, true);
+  assert.equal(taskSchemas.start.safeParse({
+    ...start, expectedConversationRevision: 0,
+  }).success, false);
+  assert.equal(taskSchemas.start.safeParse({
+    ...start, browserSelector: '#prompt-textarea',
+  }).success, false);
 });
 
 test('resolveConfig anchors runtime paths under an explicit state directory', () => {

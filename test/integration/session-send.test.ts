@@ -33,6 +33,62 @@ interface SessionSnapshot {
   readonly errorCode: string | null;
 }
 
+test('Chat is the effective default and legacy Work requests fail before opening a provider page', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chat-default-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  const service = await startCore({ config, startBrowser: false, providerAdapters: [fake], logger: silentLogger() });
+  try {
+    const team = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'client-send', requestId: 'chat-only-team', name: 'Chat only', primaryRoleKey: 'main' });
+    const session = await createSession(config.socketPath, team.teamId, 'main', 'chat-only-session');
+    const input = { clientId: 'client-send', sessionId: session.sessionId, prompt: 'Keep this original', sessionDeadlineSec: 600 };
+    const sent = await rpc<SessionSnapshot>(config.socketPath, 'session.send', { ...input, requestId: 'chat-default' });
+    assert.equal(fake.submissionRequests[0]!.surface, 'chat');
+    assert.equal((await rpc<SessionSnapshot>(config.socketPath, 'session.send', { ...input, requestId: 'chat-default' })).generation, sent.generation);
+    const count = fake.submissionRequests.length;
+    await assert.rejects(rpc(config.socketPath, 'session.send', { ...input, requestId: 'work-schema', surface: 'work' }),
+      (error: unknown) => error instanceof RpcClientError);
+    await assert.rejects(service.submissionService.send({ ...input, requestId: 'legacy-work', surface: 'Work' }), /Chat surface only/);
+    assert.equal(fake.submissionRequests.length, count);
+    assert.equal(service.teamDirectory.getSession(session.sessionId).generation, sent.generation);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('current UNKNOWN with no conversation binds only canonical ACK evidence without resending its request', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-unknown-canonical-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const fake = new FakeProviderAdapter();
+  fake.acknowledgementMode = 'missing';
+  const service = await startCore({ config, startBrowser: false, providerAdapters: [fake], logger: silentLogger() });
+  try {
+    const team = await rpc<TeamSnapshot>(config.socketPath, 'team.create', {
+      clientId: 'client-send', requestId: 'canonical-team', name: 'Canonical recovery', primaryRoleKey: 'main' });
+    const session = await createSession(config.socketPath, team.teamId, 'main', 'canonical-session');
+    await assert.rejects(rpc(config.socketPath, 'session.send', { clientId: 'client-send', requestId: 'original-unknown',
+      sessionId: session.sessionId, prompt: 'Exact saved contextual prompt', sessionDeadlineSec: 600 }), hasRpcError('session.submission-unknown', true));
+    const before = service.database.raw.prepare('SELECT outbox_id,request_hash,payload_json FROM outbox WHERE session_id=?').all(session.sessionId);
+    const current = () => service.teamDirectory.getSession(session.sessionId);
+    assert.equal(current().conversationId, null);
+    const ack = { conversationId: 'canonical-current', submittedUserMessageId: 'canonical-user', submittedUserTurnId: 'canonical-turn' };
+    fake.recoverAcknowledgement = async () => ack;
+    assert.equal((await service.submissionService.recoverAcknowledgement(current())).submissionState, 'submission_unknown',
+      'An unqualified adapter ACK cannot adopt an unknown conversation');
+    fake.recoverAcknowledgement = async input => {
+      assert.equal(input.prompt, 'Exact saved contextual prompt');
+      assert.equal(input.selection, undefined);
+      return { ...ack, evidence: 'backend-exact-user' };
+    };
+    const recovered = await service.submissionService.recoverAcknowledgement(current());
+    assert.equal(recovered.submissionState, 'submitted');
+    assert.equal(recovered.submittedUserMessageId, ack.submittedUserMessageId);
+    assert.equal(recovered.conversationId, ack.conversationId);
+    assert.equal(recovered.generation, 1);
+    assert.equal(fake.submitCount, 1);
+    assert.deepEqual(service.database.raw.prepare('SELECT outbox_id,request_hash,payload_json FROM outbox WHERE session_id=?').all(session.sessionId), before);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('restart retains request-bound dispatch proof and recovers late duplicate ACK without another submit', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-durable-dispatch-'));
   const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
@@ -661,6 +717,25 @@ test('session.send submits once, persists exact acknowledgement, and never resen
       hasRpcError('provider.observation-deferred'));
     assert.equal(service.teamDirectory.getSession(unknown.sessionId).submissionState, 'submission_unknown');
     assert.equal(afterRestart.submitCount, 0, 'A deferred acknowledgement cannot dispatch another prompt');
+    const retainedSelection = service.receipts.get('client-send', decision.requestId);
+    assert.equal(retainedSelection?.status, 'attempted');
+    assert.equal(JSON.parse(retainedSelection!.resultJson).messageId, decision.messageId);
+    await assert.rejects(rpc(config.socketPath, 'workflow.decide', { ...decision, evidenceHash: 'b'.repeat(64) }),
+      hasRpcError('input.idempotency-conflict'));
+    const budgets = new ProbeBudgetRepository(service.database.raw);
+    const cooldown = new Date(Date.now() + 50000).toISOString();
+    budgets.save({ scope: 'chatgpt:default', nextAllowedAt: cooldown, blockedUntil: cooldown,
+      backoffLevel: 1, consecutiveFailures: 1, updatedAt: new Date().toISOString() });
+    await assert.rejects(rpc(config.socketPath, 'workflow.decide', decision), (error: unknown) => {
+      assert.ok(error instanceof RpcClientError);
+      const data = error.data as any;
+      assert.equal(data.errorCode, 'provider.observation-deferred');
+      assert.equal(data.details.reason, 'account-cooldown');
+      assert.equal(data.details.nextCheckAt, cooldown);
+      return true;
+    });
+    budgets.save({ scope: 'chatgpt:default', nextAllowedAt: null, blockedUntil: null,
+      backoffLevel: 0, consecutiveFailures: 0, updatedAt: new Date().toISOString() });
     afterRestart.recoverAcknowledgement = async request => {
       request.onRecoveryObservation?.({ kind: 'unverified', source: 'backend', reason: 'backend-exact-prompt-absent',
         observedAt: new Date().toISOString(), nextCheckAt: null, httpStatus: 200,

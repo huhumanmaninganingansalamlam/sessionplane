@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -22,7 +23,26 @@ import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 
 const failure = '<div class="group/activity-header"><button aria-labelledby="failed"></button><span id="failed">Thinking failed</span></div>';
-const configuration = '<div role="menu" id="model-menu"><div role="menuitem" id="configuration" aria-label="5.5 Pro">5.5 Pro Extra High</div></div>';
+// The real selected-state reader needs the checked version and current mode,
+// not only a fabricated combined summary. Keep recovery assertions unchanged.
+const configuration = `<button type="button" id="model-chooser" aria-label="ChatGPT model selection"
+  aria-haspopup="menu" aria-expanded="true" aria-controls="model-menu">5.5 Pro Extra High</button>
+  <button type="button" role="radio" aria-checked="true">Chat</button>
+  <div role="menu" id="model-menu"><div role="menuitem" id="configuration" aria-label="Model selection">5.5 Pro Extra High</div></div>
+  <div role="menu" id="model-versions" hidden><div role="menuitemradio" aria-checked="true">5.5 Pro</div></div>
+  <script>(() => {
+    const chooser = document.getElementById('model-chooser'), menu = document.getElementById('model-menu');
+    const versions = document.getElementById('model-versions');
+    chooser.onclick = () => {
+      const open = chooser.getAttribute('aria-expanded') !== 'true';
+      chooser.setAttribute('aria-expanded', String(open));
+      chooser.setAttribute('aria-controls', 'model-menu');
+      menu.hidden = !open; versions.hidden = true;
+    };
+    document.getElementById('configuration').onclick = () => {
+      menu.hidden = true; versions.hidden = false; chooser.setAttribute('aria-controls', 'model-versions');
+    };
+  })();</script>`;
 
 class FailedChat extends FakeProviderAdapter {
   page!: Page;
@@ -56,7 +76,7 @@ class FailedChat extends FakeProviderAdapter {
           `<div data-message-author-role="user" data-message-id="user-message-${i + 1}">${i === 0 ? 'Original' : '계속'}</div>`).join('');
         const surface = this.surface?.(users) ?? users + (request.generation <= this.failureCount ? failure :
           '<div data-message-author-role="assistant" data-message-id="final" data-end-turn="true">Normal final</div>');
-        await this.page.setContent(`<main>${configuration}${surface}<textarea></textarea><button data-testid="send-button">Send</button></main>`);
+        await this.page.setContent(`<main>${configuration}${surface}<textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button></main>`);
       } };
   }
   override async openObservation(request: ProviderObservationRequest) {
@@ -86,7 +106,7 @@ async function fixture() {
   const { page, binding } = await core.browserOwner!.createPage(); fake.page = page; fake.pageKey = binding.pageKey;
   await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main></main>' }));
   await page.goto('https://chatgpt.com/');
-  await page.setContent(`<main>${configuration}<textarea></textarea><button data-testid="send-button">Send</button></main>`);
+  await page.setContent(`<main>${configuration}<textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button></main>`);
   const rpc = <T>(method: string, arguments_: object) => callRpc<T>({ socketPath: config.socketPath,
     method: 'workflow.' + method, params: arguments_, timeoutMs: 15_000 });
   async function submit(optIn = true) {
@@ -128,7 +148,7 @@ test('opt-in continues once per proven failure, backs off, preserves 5.5 Pro/dea
     const rootRef = await f.submit();
     const deadline = f.core.database.raw.prepare('SELECT deadline_at FROM sessions WHERE session_id=?').get(f.session.sessionId)!.deadline_at;
     await until(() => f.core.teamDirectory.getSession(f.session.sessionId).generation === 3 &&
-      f.core.teamDirectory.getSession(f.session.sessionId).sessionState === 'complete');
+      f.core.teamDirectory.getSession(f.session.sessionId).sessionState === 'complete', 45_000);
     assert.equal(f.fake.submitCount, 3);
     assert.deepEqual(f.fake.submissionRequests.filter((r, i, all) => all.findIndex(x => x.generation === r.generation) === i).map(r => r.prompt),
       ['Original operation snapshot', '계속', '계속']);
@@ -290,10 +310,10 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
         role: 'assistant', endTurn: false, textLength: 0 }] });
     await record();
     const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
-    for (const unsafe of ['<textarea>Separate draft</textarea>',
-      '<textarea></textarea><button data-testid="stop-button">Stop</button>',
-      '<div data-message-author-role="user" data-message-id="already-continued">계속</div><textarea></textarea>',
-      '<div data-message-author-role="assistant" data-message-id="final">Final</div><textarea></textarea>']) {
+    for (const unsafe of ['<textarea id="prompt-textarea">Separate draft</textarea>',
+      '<textarea id="prompt-textarea"></textarea><button data-testid="stop-button">Stop</button>',
+      '<div data-message-author-role="user" data-message-id="already-continued">계속</div><textarea id="prompt-textarea"></textarea>',
+      '<div data-message-author-role="assistant" data-message-id="final">Final</div><textarea id="prompt-textarea"></textarea>']) {
       await f.fake.page.setContent(body + unsafe + '</main>');
       await assert.rejects(f.rpc('decide', input), /draft|active|idle|cleanup/);
       assert.equal(f.core.teamDirectory.getSession(original.sessionId).terminal, false);
@@ -303,9 +323,9 @@ for (const trailingEmpty of [false, true]) test(`approved interrupted tool conti
       const result = readServer.apply(this, args);
       return result ? { ...result, observedAt: new Date(Date.now() - 20 * 60_000).toISOString() } : result;
     });
-    await f.fake.page.setContent(body + '<textarea></textarea></main>');
+    await f.fake.page.setContent(body + '<textarea id="prompt-textarea"></textarea></main>');
     await assert.rejects(f.rpc('decide', input), /Fresh exact server evidence/);
-    await f.fake.page.setContent(body + '<div data-message-author-role="assistant" data-message-id="partial">Preserved partial</div><div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div><textarea>계속</textarea><button data-testid="send-button">Send</button></main>');
+    await f.fake.page.setContent(body + '<div data-message-author-role="assistant" data-message-id="partial">Preserved partial</div><div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div><textarea id="prompt-textarea">계속</textarea><button data-testid="send-button">Send</button></main>');
     f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="continued-answer">Continued answer</div>';
     let prepared;
     if (trailingEmpty) {
@@ -341,7 +361,7 @@ for (const sendAvailable of [true, false]) test(`automatic disconnected continua
     await f.fake.page.setContent('<main>' + configuration +
       '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>' +
       '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>' +
-      '<textarea></textarea><button data-testid="stop-button">Stop</button>' +
+      '<textarea id="prompt-textarea"></textarea><button data-testid="stop-button">Stop</button>' +
       (sendAvailable ? '<button data-testid="send-button">Send</button>' : '') + '</main>');
     const verify = SessionUiService.prototype.verifyContinuation;
     let checked = false;
@@ -385,6 +405,91 @@ for (const sendAvailable of [true, false]) test(`automatic disconnected continua
   } finally { await f.close(); }
 });
 
+test('question-resumed original card permits exact ALWAYS while a contextual successor stays unsubmitted', async () => {
+  const f = await fixture();
+  try {
+    f.fake.idleToolTurn = true;
+    f.fake.surface = users => users;
+    const requestRef = await f.submit(false);
+    f.core.observationService.stop(f.session.sessionId, 1);
+    await f.core.actorScheduler.updateGeneration(f.session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
+      completedAt: new Date().toISOString(), responseMessageId: 'original-final', answerText: 'Retained original result',
+      reason: 'dom-quiet-stable-final' });
+    await assert.rejects(f.core.submissionService.send({ clientId: `team:${f.team.teamId}`, requestId: 'contextual-next',
+      sessionId: f.session.sessionId, expectedGeneration: 1, prompt: 'Preserved contextual next work, not literal Continue',
+      sessionDeadlineSec: 600 }), { errorCode: 'provider.preparation-required' });
+    const pending = f.core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=? AND generation=2').get(f.session.sessionId)!;
+    await f.fake.page.setContent(`<main>
+      <div data-message-author-role="user" data-message-id="user-message-1" data-turn-id="user-turn-1">Original work</div>
+      <div data-message-author-role="assistant" data-message-id="original-final">Retained original result</div>
+      <section id="question" data-codex-composer-request-navigation="true" data-user-input-auto-resolution="true">
+        <p>Choose the already-authorized disposition</p><div role="radiogroup">
+        <button type="button" role="radio" aria-label="Wait for handoff (Recommended)"
+          onclick="document.querySelector('#question').remove();document.querySelector('#permission').hidden=false">Wait for handoff</button>
+        <button type="button" role="radio" aria-label="Other disposition">Other disposition</button></div></section>
+      <section id="permission" hidden><div role="alert">hostspan-desktop File Patch
+        <button onclick="document.querySelector('#details').hidden=false">View details</button></div>
+        <button onclick="throw Error('Never use once')">Allow once</button>
+        <button onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove()">Always allow</button></section>
+      <section role="dialog" id="details" hidden>hostspan-desktop File Patch
+        <pre id="args">{&quot;path&quot;:&quot;owned-file&quot;,&quot;patch&quot;:&quot;authorized change&quot;}</pre>
+        <button aria-label="Close dialog" onclick="document.querySelector('#details').hidden=true">Close dialog</button></section>
+      <textarea id="prompt-textarea">Preserved contextual next work, not literal Continue</textarea>
+      <button data-testid="send-button" onclick="throw Error('No product Submit during consent')">Send</button></main>`);
+    const identity = { teamId: f.team.teamId, requestRef: pending.outbox_id };
+    const fresh = await f.rpc<any>('team_get', { ...identity, view: 'evidence' });
+    const answered = await f.rpc<any>('decide', { ...identity, requestId: 'answer-owned-question', decision: 'answer_question',
+      answer: 'Wait for handoff (Recommended)', evidenceHash: fresh.request.evidence.providerQuestion.evidenceHash });
+    assert.equal(answered.questionAnswer.outcome, 'answered');
+    assert.equal(answered.promptSubmitted, false);
+    const rows = () => ({ session: f.core.teamDirectory.getSession(f.session.sessionId),
+      outbox: f.core.database.raw.prepare('SELECT * FROM outbox WHERE session_id=? ORDER BY generation').all(f.session.sessionId),
+      generations: f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(f.session.sessionId) });
+    const before = rows();
+    const permission = (requestId: string, extra: object = {}) => f.rpc<any>('decide', {
+      teamId: f.team.teamId, requestRef, requestId, decision: 'hostspan_permission', action: 'inspect',
+      appName: 'hostspan-desktop', toolName: 'File Patch', allowMode: 'always', ...extra });
+    const inspected = await permission('original-inspect');
+    assert.equal(inspected.permission.outcome, 'inspected');
+    assert.equal(inspected.permission.requestAcknowledgementVerified, true);
+    assert.equal(inspected.permissionRequestRef, requestRef);
+    assert.equal(inspected.permissionGeneration, 1);
+    assert.equal(inspected.generation, 2);
+    assert.match(inspected.permission.permissionText, /owned-file/);
+    const grant = { action: 'allow', evidenceHash: inspected.permission.evidenceHash };
+    await assert.rejects(permission('foreign-team', { teamId: f.core.teamDirectory.createTeam({ clientId: 'foreign' }).teamId }), /this team/);
+    await assert.rejects(permission('missing-hash', { action: 'allow' }), /evidenceHash/);
+    await f.fake.page.locator('#args').evaluate(node => node.textContent += ' changed');
+    await assert.rejects(permission('changed-arguments', grant), /permission|evidence/i);
+    await f.fake.page.locator('#args').evaluate(node => node.textContent = node.textContent!.replace(' changed', ''));
+    await f.fake.page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="later-user">Later actual work</div>'));
+    await assert.rejects(permission('later-user', grant), /original user anchor/);
+    await f.fake.page.locator('[data-message-id="later-user"]').evaluate(node => node.remove());
+    await f.fake.page.locator('[data-message-id="user-message-1"]').evaluate(node => node.setAttribute('data-message-id', 'wrong-ack'));
+    await assert.rejects(permission('missing-ack', grant), /original user anchor/);
+    await f.fake.page.locator('[data-message-id="wrong-ack"]').evaluate(node => node.setAttribute('data-message-id', 'user-message-1'));
+    await f.rpc('decide', { ...identity, requestId: 'hold-current', decision: 'human_review', action: 'pause' });
+    await assert.rejects(permission('held', grant), /permission|review/i);
+    await f.rpc('decide', { ...identity, requestId: 'resume-own-review', decision: 'human_review', action: 'resume' });
+    const allowed = await permission('authorized-always', grant);
+    assert.equal(allowed.permission.outcome, 'clicked');
+    assert.equal(allowed.permission.permissionStillVisible, false);
+    assert.equal(allowed.permission.requestAcknowledgementVerified, true);
+    assert.deepEqual(await permission('authorized-always', grant), allowed);
+    await assert.rejects(permission('authorized-always', { ...grant, allowMode: 'once' }), /different arguments/);
+    assert.equal(await f.fake.page.evaluate(() => (window as any).grants), 1);
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), 'Preserved contextual next work, not literal Continue');
+    assert.deepEqual(rows().outbox, before.outbox);
+    assert.deepEqual(rows().generations, before.generations);
+    assert.equal(rows().session.submissionState, 'prepared');
+    assert.equal(rows().session.promptSubmitted, false);
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(f.fake.stopCount, 0);
+    assert.equal(f.core.actorScheduler.collectors(f.session.sessionId).length, 0);
+  } finally { await f.close(); }
+});
+
 test('completed original permission inspection verifies its ACK and never inherits a held successor control', async () => {
   const f = await fixture();
   try {
@@ -397,7 +502,7 @@ test('completed original permission inspection verifies its ACK and never inheri
       <div data-message-author-role="assistant" data-message-id="original-final">Retained final</div>
       <section><div role="alert">hostspan-desktop Process Start Command: original review</div>
       <button onclick="window.grants=(window.grants||0)+1">Always allow</button></section>
-      <textarea>Preserved original draft</textarea></main>`);
+      <textarea id="prompt-textarea">Preserved original draft</textarea></main>`);
     await f.core.actorScheduler.updateGeneration(f.session.sessionId, 1, { sessionState: 'complete', providerState: 'complete',
       completedAt: new Date().toISOString(), responseMessageId: 'original-final', answerText: 'Retained final', reason: 'dom-quiet-stable-final' });
     const permission = (requestId: string, extra: object = {}) => f.rpc<any>('decide', { teamId: f.team.teamId, requestRef,
@@ -453,7 +558,7 @@ test('original HostSpan grant remains controllable after an approved continuatio
     const original = f.core.teamDirectory.getSession(f.session.sessionId);
     const question = '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
     await f.fake.page.setContent(`<main>${configuration}${question}
-      <div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div><textarea></textarea></main>`);
+      <div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div><textarea id="prompt-textarea"></textarea></main>`);
     t.mock.method(SessionUiService.prototype, 'prepareFailureContinuation', async () => {
       // The original tool asks permission after continuation preparation has
       // moved page ownership, but before the new user message is dispatched.
@@ -461,7 +566,7 @@ test('original HostSpan grant remains controllable after an approved continuatio
         <section id="permission"><div role="alert">hostspan-desktop Process Start Command: original review</div>
         <button onclick="throw Error('Do not choose once')">Allow once</button>
         <button onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove()">Always allow</button></section>
-        <textarea>Preserved user draft</textarea><button data-testid="stop-button">Stop</button></main>`);
+        <textarea id="prompt-textarea">Preserved user draft</textarea><button data-testid="stop-button">Stop</button></main>`);
       throw new SessionPlaneDomainError('provider.preparation-required', 'Original tool permission requires resolution');
     });
     await assert.rejects(f.rpc('decide', { teamId: f.team.teamId, requestRef,
@@ -516,7 +621,7 @@ test('original HostSpan grant remains controllable after an approved continuatio
     assert.equal(returned, false, 'Historical tracking cancellation must not complete the original work wait');
     await f.fake.page.setContent(`<main>${configuration}${question}
       <div data-message-author-role="assistant" data-message-id="original-review-final" data-end-turn="true">Original review complete; git status exit0</div>
-      <textarea>Preserved user draft</textarea></main>`);
+      <textarea id="prompt-textarea">Preserved user draft</textarea></main>`);
     new EventRepository(f.core.database.raw).append({ teamId: f.team.teamId,
       sessionId: f.session.sessionId, generation: 2, eventType: 'fixture.final-rendered', payload: {}, createdAt: new Date().toISOString() });
     f.core.actorScheduler.refreshSession(f.session.sessionId);
@@ -560,7 +665,7 @@ test('missing recovery ACK controls only the exact retained work permission acro
       <div class="group/activity-header"><button aria-expanded="false" aria-controls="work" onclick="window.reveals=(window.reveals||0)+1;this.setAttribute('aria-expanded','true');document.querySelector('#work').hidden=false">이전 활동</button></div>
       <div id="work" hidden><section id="permission"><div role="alert">hostspan-desktop File Patch target: original workspace/source.ts</div>
         <button onclick="window.grants=(window.grants||0)+1;document.querySelector('#permission').remove();document.querySelector('main').insertAdjacentHTML('beforeend','<div data-message-author-role=assistant data-message-id=work-final data-end-turn=true>Original work patch applied</div>')">Always allow</button></section></div>
-      <textarea>Preserved user draft</textarea></main>`);
+      <textarea id="prompt-textarea">Preserved user draft</textarea></main>`);
     const permission = (requestId: string, extra: object = {}) => f.rpc<any>('decide', {
       teamId: f.team.teamId, requestRef, requestId, decision: 'hostspan_permission',
       action: 'inspect', appName: 'hostspan-desktop', toolName: 'File Patch', allowMode: 'always', ...extra });
@@ -626,7 +731,7 @@ test('continuation reobserves the configured version after chooser identity chan
       if (model !== '5.5 Pro') throw new SessionPlaneDomainError('provider.configuration-stale',
         'Current version/effort does not match the original continuation');
       assert.equal(effort, 'Extra High');
-      return currentModel;
+      return { ...currentModel, configurationVerification: saved.model.configurationVerification };
     });
     f.fake.failureCount = 1;
     const result = await f.rpc<any>('decide', { teamId: f.team.teamId, requestRef, requestId: 'configured-version-continue',
@@ -687,14 +792,14 @@ test('explicitly confirmed idle acknowledged turn with no response continues onc
         conversationId: original.conversationId!, submittedUserMessageId: original.submittedUserMessageId!,
         evidenceRef: 'User explicitly requests continue for the exact idle original with no assistant/tool response' } };
     const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
-    await f.fake.page.setContent(body + '<textarea></textarea></main>');
+    await f.fake.page.setContent(body + '<textarea id="prompt-textarea"></textarea></main>');
     await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: undefined }), /server evidence/);
-    for (const controls of ['<textarea>Other draft</textarea>', '<textarea></textarea><button data-testid="stop-button">Stop</button>']) {
+    for (const controls of ['<textarea id="prompt-textarea">Other draft</textarea>', '<textarea id="prompt-textarea"></textarea><button data-testid="stop-button">Stop</button>']) {
       await f.fake.page.setContent(body + controls + '</main>');
       await assert.rejects(f.rpc('decide', input), /idle|draft/);
       assert.equal(f.fake.submitCount, 1);
     }
-    await f.fake.page.setContent(body + '<textarea></textarea></main>');
+    await f.fake.page.setContent(body + '<textarea id="prompt-textarea"></textarea></main>');
     f.fake.failureCount = 1;
     f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="idle-recovered" data-end-turn="true">Recovered work</div>';
     const result = await f.rpc<any>('decide', input);
@@ -705,6 +810,99 @@ test('explicitly confirmed idle acknowledged turn with no response continues onc
     assert.equal(f.fake.submitCount, 2);
     const payload = f.core.database.raw.prepare('SELECT payload_json FROM outbox WHERE outbox_id=?').get(result.requestRef)!;
     assert.equal(JSON.parse(String(payload.payload_json)).prompt, '계속');
+  } finally { await f.close(); }
+});
+
+test('completed app recovery continues once past only its exact retained expiration alert, preserving all other guards', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    f.fake.idleToolTurn = true;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const alert = 'hostspan-desktop\nhostspan-desktop 다시 연결\nhostspan-desktop 연결이 만료되었습니다. ChatGPT가 이 요청을 처리하는 데 사용할 수 있도록 먼저 다시 연결하세요.';
+    const confirmation = { conversationId: original.conversationId!, submittedUserMessageId: original.submittedUserMessageId!,
+      evidenceRef: 'Completed user account action and exact original server receipt: operation not started',
+      resolvedToolAlert: { appName: 'hostspan-desktop', alertSha256: createHash('sha256').update(alert).digest('hex'),
+        originalOperationOutcome: 'not-started' } };
+    const input = { teamId: f.team.teamId, requestRef, requestId: `recovered-app:${requestRef}`,
+      decision: 'continue', continuationApproved: true, userConfirmedInterruption: confirmation };
+    const warning = `<section><div role="alert">${alert.split('\n').map(line => `<div>${line}</div>`).join('')}</div><button>나중에Esc</button><button>다시 연결⏎</button></section>`;
+    const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
+    const idle = '<textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button></main>';
+    await f.fake.page.setContent(body + warning + idle);
+    const before = { ...original };
+    await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: { ...confirmation, resolvedToolAlert: undefined } }), /no answer|alert/);
+    await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: { ...confirmation,
+      resolvedToolAlert: { ...confirmation.resolvedToolAlert, originalOperationOutcome: 'unknown' } } }), /invalid|Invalid|expected/i);
+    await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: { ...confirmation,
+      resolvedToolAlert: { ...confirmation.resolvedToolAlert, alertSha256: '0'.repeat(64) } } }), /exact recovered/);
+    for (const unsafe of [
+      body + warning.replace('</section>', '<button>항상 허용</button></section>') + idle,
+      body + warning + '<div role="alert">A different current failure</div>' + idle,
+      body + warning + '<div role="dialog">New authentication challenge</div>' + idle,
+      body + warning + '<div data-message-author-role="assistant" data-message-id="new-answer">Partial answer</div>' + idle,
+      body + warning + '<div data-message-author-role="user" data-message-id="new-user">Later user</div>' + idle,
+      body + warning + idle.replace('<textarea id="prompt-textarea"></textarea>', '<textarea id="prompt-textarea">Separate draft</textarea>'),
+      body + warning + idle.replace('</main>', '<button data-testid="stop-button">Stop</button></main>'),
+    ]) {
+      await f.fake.page.setContent(unsafe);
+      await assert.rejects(f.rpc('decide', input), /recovered|idle|draft|interruption|no answer/i);
+      assert.equal(f.fake.submitCount, 1);
+    }
+    assert.equal(f.core.teamDirectory.getSession(original.sessionId).generation, before.generation);
+    assert.equal(f.core.teamDirectory.getSession(original.sessionId).submittedUserMessageId, before.submittedUserMessageId);
+    await f.fake.page.setContent(body + warning + idle);
+    f.fake.failureCount = 1;
+    const recoveredInput = { ...input, userConfirmedInterruption: { ...confirmation,
+      evidenceRef: 'Original read-only git status output remains UNKNOWN; exact command preserved and current process ledger proves inactive',
+      resolvedToolAlert: { ...confirmation.resolvedToolAlert, originalOperationOutcome: 'unknown', readOnlyOperationInactive: true } } };
+    const result = await f.rpc<any>('decide', recoveredInput);
+    assert.equal(result.generation, 2);
+    assert.equal(result.reconciliation.evidence.recoveredToolAlert.alertRetained, true);
+    assert.equal(result.reconciliation.evidence.recoveredToolAlert.callerAttestedRecovery, true);
+    assert.equal(result.reconciliation.evidence.recoveredToolAlert.originalOperationOutcome, 'unknown');
+    await f.rpc('decide', recoveredInput);
+    assert.equal(f.fake.submitCount, 2);
+    assert.equal(f.fake.stopCount, 0);
+    const payloads = f.core.database.raw.prepare('SELECT payload_json FROM outbox WHERE session_id=? ORDER BY generation')
+      .all(original.sessionId);
+    assert.deepEqual(payloads.map(s => JSON.parse(String(s.payload_json)).prompt), ['Original operation snapshot', '계속']);
+  } finally { await f.close(); }
+});
+
+test('recovered tool alert authorization is rechecked before submission when a real permission appears during preparation', async () => {
+  const f = await fixture();
+  try {
+    f.fake.surface = users => users;
+    f.fake.idleToolTurn = true;
+    const requestRef = await f.submit(false);
+    const original = f.core.teamDirectory.getSession(f.session.sessionId);
+    const alert = 'hostspan-desktop\nhostspan-desktop 다시 연결\nhostspan-desktop 연결이 만료되었습니다. ChatGPT가 이 요청을 처리하는 데 사용할 수 있도록 먼저 다시 연결하세요.';
+    await f.fake.page.setContent(`<main>${configuration}<div data-message-author-role="user" data-message-id="user-message-1">Original</div>
+      <div role="alert">${alert.split('\n').map(line => `<div>${line}</div>`).join('')}</div>
+      <textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button></main>`);
+    f.fake.afterPrepare = async request => {
+      if (request.generation === 2) await f.fake.page.evaluate(() => {
+        const card = document.createElement('div'); card.setAttribute('role', 'alertdialog');
+        card.innerHTML = 'hostspan-desktop Process Start <button>항상 허용</button>';
+        document.querySelector('main')!.append(card);
+      });
+    };
+    await assert.rejects(f.rpc('decide', { teamId: f.team.teamId, requestRef, requestId: `recovered-race:${requestRef}`,
+      decision: 'continue', continuationApproved: true, userConfirmedInterruption: {
+        conversationId: original.conversationId!, submittedUserMessageId: original.submittedUserMessageId!,
+        evidenceRef: 'Completed actual account recovery; original command receipt proves not started',
+        resolvedToolAlert: { appName: 'hostspan-desktop', alertSha256: createHash('sha256').update(alert).digest('hex'), originalOperationOutcome: 'not-started' }
+      } }), error => error instanceof RpcClientError &&
+        (error.data as { errorCode?: string }).errorCode === 'provider.preparation-required');
+    assert.equal(f.fake.submitCount, 1);
+    assert.equal(f.fake.stopCount, 0);
+    assert.equal(await f.fake.page.locator('textarea').inputValue(), '계속');
+    assert.equal(await f.fake.page.getByRole('button', { name: '항상 허용' }).count(), 1);
+    const prepared = f.core.database.raw.prepare('SELECT submission_state, prompt_submitted FROM outbox WHERE session_id=? AND generation=2').get(original.sessionId)!;
+    assert.equal(prepared.submission_state, 'prepared');
+    assert.equal(prepared.prompt_submitted, 0);
   } finally { await f.close(); }
 });
 
@@ -722,7 +920,7 @@ test('user-confirmed exact disconnected turn continues once despite deferred bac
     const partial = '<div data-message-author-role="assistant" data-message-id="original-partial">Retain original partial</div>';
     const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
     const disconnected = '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>';
-    const controls = '<textarea></textarea><button data-testid="stop-button">Stop</button></main>';
+    const controls = '<textarea id="prompt-textarea"></textarea><button data-testid="stop-button">Stop</button></main>';
     await f.fake.page.setContent(body + partial + disconnected + controls);
     await f.fake.page.setContent(body + partial + controls);
     await assert.rejects(f.rpc('decide', { ...input, userConfirmedInterruption: undefined }), /idle|server evidence|active generation/);
@@ -740,7 +938,7 @@ test('user-confirmed exact disconnected turn continues once despite deferred bac
     for (const unsafe of [body + partial + controls,
       body + partial.replace('data-message-id="original-partial"', 'data-message-id="original-partial" data-message-status="in_progress"') + disconnected + controls,
       body + partial + disconnected + '<div data-testid="thinking">Thinking</div>' + controls,
-      body + partial + disconnected + controls.replace('<textarea></textarea>', '<textarea>Separate draft</textarea>'),
+      body + partial + disconnected + controls.replace('<textarea id="prompt-textarea"></textarea>', '<textarea id="prompt-textarea">Separate draft</textarea>'),
       body + partial + disconnected + '<div role="alertdialog">HostSpan permission</div>' + controls,
       body + partial + disconnected + '<div data-message-author-role="user" data-message-id="later-user">Already continued</div>' + controls]) {
       await f.fake.page.setContent(unsafe);
@@ -787,7 +985,7 @@ test('a lost continuation ACK uses proven server absence and the exact retained 
     const original = f.core.teamDirectory.getSession(f.session.sessionId);
     const disconnected = '<div role="status">연결이 해제되었습니다. 전체 답변을 기다리는 중입니다.</div>';
     const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
-    const controls = '<textarea></textarea><button data-testid="stop-button">Stop</button></main>';
+    const controls = '<textarea id="prompt-textarea"></textarea><button data-testid="stop-button">Stop</button></main>';
     await f.fake.page.setContent(body + disconnected + controls);
     const next = await f.rpc<any>('decide', { teamId: f.team.teamId, requestRef: first,
       requestId: 'first-continue', decision: 'continue', continuationApproved: true,
@@ -806,7 +1004,7 @@ test('a lost continuation ACK uses proven server absence and the exact retained 
     // Automatic recovery needs an executable Send; only the first, exact
     // user-confirmed interruption above authorizes a Stop-only Enter gesture.
     await f.fake.page.setContent(body + disconnected +
-      '<textarea></textarea><button data-testid="send-button">Send</button></main>');
+      '<textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button></main>');
     f.fake.failureCount = 2;
     f.fake.surface = users => users + '<div data-message-author-role="assistant" data-message-id="recovered" data-end-turn="true">New work recovered</div>';
     const recovered = await f.rpc<any>('decide', input);
@@ -892,10 +1090,16 @@ test('user review pauses the existing managed collector and observation without 
     assert.equal(get.request.observationHeld, true);
     assert.equal(held.observationHeld, true);
     assert.equal(held.recovery.automaticContinuation, false);
-    const focused = t.mock.method(f.fake.page, 'bringToFront', async () => {});
+    assert.match(held.recovery.nextAction, /original owner reviews current evidence/);
+    assert.match(held.recovery.nextAction, /diagnostic hold alone does not establish a human-only action/);
+    assert.match(held.recovery.nextAction, /Preserve explicit user stops/);
+    assert.match(held.recovery.nextAction, /human-only actions require actual user completion/);
+    const focused = t.mock.method(f.core.browserOwner!, 'focusPage');
     const focusInput = { teamId: f.team.teamId, requestRef, requestId: 'held-focus', decision: 'focus' };
     const focus = await f.rpc<any>('decide', focusInput);
     assert.equal(focus.activated, true);
+    assert.equal(focus.tabActive, true);
+    assert.equal(focus.windowFocused, true);
     assert.equal(focus.requestRef, requestRef);
     assert.equal(focus.pageKey, original.pageKey);
     assert.equal(focus.url, f.fake.page.url());
@@ -975,6 +1179,9 @@ for (const newTool of [false, true]) test(`managed recovery reviews a persistent
       assert.equal(result.recovery?.decisionRequired, true);
       assert.equal(result.recovery?.userActionRequired, true);
       assert.equal(result.recovery?.url, `https://chatgpt.com/c/${current.conversationId}`);
+      assert.match(result.recovery.message, /original owner reviews.*original tool\/result evidence/);
+      assert.match(result.recovery.message, /not evidence of authentication or a human-only action/);
+      assert.match(result.recovery.message, /do not repeat an ineffective continuation/);
       assert.equal(f.fake.submitCount, 2, 'An ACK alone must not restart another ineffective recovery');
       assert.equal(f.core.teamDirectory.getSession(current.sessionId).terminal, false);
     }
@@ -995,7 +1202,7 @@ test('managed wait resumes its already prepared continuation without another gen
         messages: [{ messageId: 'tool-done', role: 'tool', channel: 'commentary',
           status: 'finished_successfully', endTurn: true, hidden: false, textLength: 0 }] });
     await f.fake.page.setContent('<main>' + configuration +
-      '<div data-message-author-role="user" data-message-id="user-message-1">Original</div><textarea></textarea><button data-testid="send-button">Send</button></main>');
+      '<div data-message-author-role="user" data-message-id="user-message-1">Original</div><textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button></main>');
     const blocked = t.mock.method(SessionUiService.prototype, 'prepareFailureContinuation', async () => {
       throw new SessionPlaneDomainError('provider.failure-unverified', 'Fresh configuration evidence is missing');
     });
@@ -1026,7 +1233,7 @@ test('managed collection links an existing followup under unsubmitted continuati
         messages: [{ messageId: 'tool-done', role: 'tool', channel: 'commentary',
           status: 'finished_successfully', endTurn: true, hidden: false, textLength: 0 }] });
     await f.fake.page.setContent('<main>' + configuration +
-      '<div data-message-author-role="user" data-message-id="user-message-1">Original</div><textarea></textarea><button data-testid="send-button">Send</button></main>');
+      '<div data-message-author-role="user" data-message-id="user-message-1">Original</div><textarea id="prompt-textarea"></textarea><button data-testid="send-button">Send</button></main>');
     const blocked = t.mock.method(SessionUiService.prototype, 'prepareFailureContinuation', async () => {
       throw new SessionPlaneDomainError('provider.failure-unverified', 'Fresh configuration evidence is missing');
     });
@@ -1045,7 +1252,7 @@ test('managed collection links an existing followup under unsubmitted continuati
       <div data-chatgpt-search-unit-key="fallback-turn-2:2:assistant" data-chatgpt-search-message-ids="checkpoint checkpoint final">
         <div data-dil-message-id="checkpoint"><div data-d-component="text">Checking</div></div>
         <div data-dil-message-id="final"><div data-d-component="text">RESULT: BLOCKED — VM SSH exit255</div></div>
-      </div><textarea>Preserved user draft</textarea></main>`);
+      </div><textarea id="prompt-textarea">Preserved user draft</textarea></main>`);
     const bounded = await f.rpc<any>('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 0 });
     assert.equal(bounded.results[0].followup.terminal, false,
       'A bounded/drained read must retain followup state so the client cannot mistake the historical terminal for collection completion');
@@ -1081,7 +1288,7 @@ test('confirmed manual follow-up releases only original tracking and permits new
     const input = { teamId: f.team.teamId, requestRef, requestId: 'manual-release', decision: 'reconcile_followup',
       followupUserMessageId: 'manual-user', responseMessageId: 'manual-answer',
       responseSha256: createHash('sha256').update(answer).digest('hex'), followupCompleted: true };
-    const body = (middle: string) => `<main>${configuration}<div data-message-author-role="user" data-message-id="user-message-1">Original</div>${middle}<textarea>Preserved draft</textarea></main>`;
+    const body = (middle: string) => `<main>${configuration}<div data-message-author-role="user" data-message-id="user-message-1">Original</div>${middle}<textarea id="prompt-textarea">Preserved draft</textarea></main>`;
     for (const unsafe of [followup + final + '<button data-testid="stop-button">Stop</button>',
       followup + final.replace(answer, 'Different answer'), followup + final + '<div data-message-author-role="user" data-message-id="newer">Newer question</div>',
       '<div data-message-author-role="assistant" data-message-id="original-answer" data-end-turn="true">Original recovered</div>' + followup + final,
@@ -1161,7 +1368,7 @@ test('already-submitted continuation collects checkpoints and reconciles without
       <div data-message-author-role="assistant" data-message-id="original-partial">Original unfinished</div>
       <div data-message-author-role="user" data-message-id="manual-user">계속</div>
       <div data-message-author-role="assistant" data-message-id="checkpoint">Implementing</div>
-      <div data-message-author-role="assistant" data-message-id="manual-final" data-end-turn="true">Actual final</div><textarea></textarea></main>`);
+      <div data-message-author-role="assistant" data-message-id="manual-final" data-end-turn="true">Actual final</div><textarea id="prompt-textarea"></textarea></main>`);
     const [result] = (await waiting).results;
     assert.equal(result.followup.responseMessageId, 'manual-final');
     assert.equal(result.followup.answerText, 'Actual final');
@@ -1327,8 +1534,8 @@ test('approved managed wait preserves actively generating or separately drafted 
     const original = f.core.teamDirectory.getSession(f.session.sessionId);
     const body = '<main>' + configuration + '<div data-message-author-role="user" data-message-id="user-message-1">Original</div>';
     for (const surface of [
-      '<div role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</div><textarea></textarea><button data-testid="stop-button">Stop</button>',
-      '<div role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</div><textarea>Distinct draft</textarea>'
+      '<div role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</div><textarea id="prompt-textarea"></textarea><button data-testid="stop-button">Stop</button>',
+      '<div role="alert">메시지 전송 시간이 초과되었습니다. 다시 시도하세요.</div><textarea id="prompt-textarea">Distinct draft</textarea>'
     ]) {
       await f.fake.page.setContent(body + surface + '</main>');
       await f.rpc('wait', { teamId: f.team.teamId, requestRefs: [requestRef], waitMs: 60000, continuationApproved: true });

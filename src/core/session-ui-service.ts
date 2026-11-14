@@ -1,12 +1,14 @@
+import type { StoredPageBinding } from '../storage/page-binding-repository.ts';
 import type { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
 import { streamRetrySurface } from '../providers/chatgpt/stream-retry.ts';
 import type { ReceiptRepository } from '../storage/receipt-repository.ts';
-import { observeChatGptSurface, type ChatGptSurface } from '../providers/chatgpt/surface.ts';
-import { controlHostSpanPermission, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
+import { observeChatGptSurface, isChatGptModeControl, requireChatGptSurface, type ChatGptSurface } from '../providers/chatgpt/surface.ts';
+import { controlHostSpanPermission, inspectHostSpanActivity, revealHostSpanActivity, type HostSpanPermissionInput } from '../providers/chatgpt/hostspan-permission.ts';
 import { createHash } from 'node:crypto';
 import { requireIdleConversationPage } from './conversation-cleanup-service.ts';
 import { conversationLoadSurface } from '../providers/chatgpt/conversation-load-recovery.ts';
-import { ChatGptConfigurationMenu, type ConfigurationCatalog } from '../providers/chatgpt/configuration-catalog.ts';
+import { inspectChatGptQuestion, answerChatGptQuestion } from '../providers/chatgpt/question.ts';
+import { isChatGptModelChooser, ChatGptConfigurationMenu, type ConfigurationCatalog } from '../providers/chatgpt/configuration-catalog.ts';
 import { errors, type ElementHandle, type Page } from 'playwright-core';
 
 import type { BrowserOwner } from '../browser/browser-owner.ts';
@@ -40,8 +42,50 @@ export class SessionUiService {
 
   get configurationCatalog() { return this.#catalog; }
 
+  async openEmptySession(session: SessionSnapshot, retainPage: (pageKey: string) => void, stored: StoredPageBinding | null): Promise<string> {
+    if (!this.#browserOwner) throw new SessionPlaneDomainError('browser.unavailable', 'Dedicated browser is unavailable');
+    let pageKey = session.pageKey;
+    if (pageKey === null) {
+      const created = await this.#browserOwner.createPage();
+      pageKey = created.binding.pageKey;
+      this.#registry.reservePage(pageKey, { sessionId: session.sessionId, generation: 0, conversationId: null });
+      retainPage(pageKey);
+      // Only the new empty owned tab is navigated. Never revisit an old conversation.
+      await created.page.goto(this.#chatgptOrigin + '/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      this.#registry.refreshPage(pageKey);
+    }
+    // Core adoption gives retained tabs new registry keys, including generation zero.
+    let retained: Page;
+    try {
+      retained = this.#registry.requireSessionPage(pageKey, { sessionId: session.sessionId, generation: 0, conversationId: null });
+    } catch (error) {
+      if (!(error instanceof PageRegistryError) || error.errorCode !== 'browser.unavailable') throw typedUiError(error);
+      const matches = stored?.targetId == null ? [] : this.#registry.listBindings({ includeClosed: false })
+        .filter(binding => binding.targetId === stored.targetId);
+      const match = matches.length === 1 ? matches[0] : undefined;
+      if (stored?.sessionId !== session.sessionId || stored.generation !== 0 || stored.conversationId !== null ||
+          !match || !['unbound', 'reserved'].includes(match.state) || match.conversationId !== null ||
+          (match.sessionId !== null && (match.sessionId !== session.sessionId || match.generation !== 0)) ||
+          ![this.#chatgptOrigin + '/', 'about:blank'].includes(match.url)) throw typedUiError(error);
+      try {
+        this.#registry.reservePage(match.pageKey, { sessionId: session.sessionId, generation: 0, conversationId: null });
+        retainPage(match.pageKey);
+        pageKey = match.pageKey;
+        retained = this.#registry.requireSessionPage(pageKey, { sessionId: session.sessionId, generation: 0, conversationId: null });
+      } catch (failure) { throw typedUiError(failure); }
+    }
+    // A failed first navigation can leave this exact reserved empty tab blank.
+    if (retained.url() === 'about:blank') {
+      await retained.goto(this.#chatgptOrigin + '/', { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      this.#registry.refreshPage(pageKey);
+    }
+    const page = this.#requirePage({ ...session, pageKey });
+    await prepareChatGptObservation(page, pageKey);
+    return pageKey;
+  }
+
   async discover(input: PreparationOwner & { decisionId: string }) {
-    const result = await this.#submissions.decidePreparation({ ...input, decision: 'discover', purpose: 'model' }, async session => {
+    let result = await this.#submissions.decidePreparation({ ...input, decision: 'discover', purpose: 'model' }, async session => {
       try {
         return { choice: null, result: await new ChatGptConfigurationMenu(await this.#interactionPage(session), session.pageKey!).discover() };
       } catch (error) {
@@ -52,6 +96,10 @@ export class SessionUiService {
     });
     // A receipt replay restores the observation without repeating UI mutations.
     if ('options' in result) {
+      result = { ...result, options: result.options.filter(option => !isChatGptModeControl({
+        role: 'menuitemradio', name: option.version, text: option.label,
+      })), unavailableVersions: result.unavailableVersions.filter(version =>
+        !isChatGptModeControl({ role: 'menuitemradio', name: version, text: version })) };
       const key = `${input.sessionId}:${input.generation}`;
       if (result.status === 'available') {
         this.#catalog = result;
@@ -133,13 +181,26 @@ export class SessionUiService {
           }
           this.#requirePage(session);
         }
-        const catalog = this.#discoveryFailures.get(`${session.sessionId}:${session.generation}`) ?? this.#catalog;
+        const chatVerified = snapshot.observedSurface.mode === 'chat';
+        const question = await inspectChatGptQuestion(this.#requirePage(session));
+        const questionAllowed = snapshot.observedSurface.mode !== 'work' &&
+          snapshot.observedSurface.source !== 'conflicting-evidence' &&
+          !snapshot.observedSurface.modeControls?.some(control => !control.navigation && snapshot.observedSurface.mode !== 'chat');
+        const inspectModeChooser = modeInspectionChooser(snapshot.nodes, snapshot.observedSurface);
+        const cachedCatalog = chatVerified ? this.#discoveryFailures.get(`${session.sessionId}:${session.generation}`) ?? this.#catalog : null;
+        const catalog = cachedCatalog === null ? null : { ...cachedCatalog, options: cachedCatalog.options.filter(option =>
+          !isChatGptModeControl({ role: 'menuitemradio', name: option.version, text: option.label })) };
         const menuIds = new Set(snapshot.nodes.filter((node) => node.role === 'menu' && node.id !== '').map((node) => node.id));
         this.#configurationRefs.set(snapshot.pageKey, { snapshotId: snapshot.snapshotId,
           ids: composerAvailable ? catalog?.options.map(option => option.id) ?? [] : [] });
-        return { ...snapshot, nodes: snapshot.nodes.map((node) => ({ ...node, actions: preparationActions(node, menuIds) })),
-          preparationAvailability: { available: composerAvailable,
-            ...(composerAvailable ? {} : { reason: 'composer-unavailable' as const }) },
+        return { ...snapshot, providerQuestion: question === null ? null : { ...question,
+          available: question.available && questionAllowed,
+          instruction: 'The owning Coordinator chooses an authorized exact option with decide answer_question, answer and evidenceHash. Answering never submits this prepared prompt.' },
+          nodes: snapshot.nodes.map((node) => ({ ...node,
+          actions: chatVerified ? preparationActions(node, menuIds) : { choose: [], reveal: node === inspectModeChooser ? ['model' as const] : [] } })),
+          preparationAvailability: { available: composerAvailable && chatVerified,
+            ...(!composerAvailable ? { reason: 'composer-unavailable' as const }
+              : !chatVerified ? { reason: 'chat-selection-unverified' as const } : {}) },
           configurationCatalog: catalog === null ? null : { ...catalog,
             selectionAvailable: composerAvailable,
             instruction: composerAvailable
@@ -211,6 +272,11 @@ export class SessionUiService {
               ...controls,
               submissionControls: { composerCount,
                 enabledSubmitCount: controls.nodes.filter(node => node.submitControl && !node.disabled).length,
+                draft: composerCount !== 1 ? null : await composers.first().evaluate(element => {
+                  const text = element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement
+                    ? element.value : (element as HTMLElement).innerText;
+                  return { text: text.slice(0, 200_000), textLength: text.length, truncated: text.length > 200_000 };
+                }),
                 continuationDraftPresent: composerCount === 1 && await composerHasExactValue(composers.first(), '계속') },
               providerAlerts: await observeChatGptAlerts(this.#requirePage(session, input.readOnly), session),
               ...(session.submissionState !== 'submitted' ? {} : {
@@ -226,9 +292,37 @@ export class SessionUiService {
                     laterUserFound: dom.laterUserFound,
                     activity: activity.strength, activityReason: activity.reason,
                     messageTimeout: dom.providerAlerts.some(isMessageTimeoutAlert),
+                    streamRetry: dom.submittedUserFound && !dom.laterUserFound && dom.actionableAlert && session.submittedUserMessageId
+                      ? await this.#requirePage(session, input.readOnly).evaluate(streamRetrySurface, {
+                        origin: this.#chatgptOrigin, conversationId: session.conversationId!, anchor: session.submittedUserMessageId, click: false,
+                      }) : null,
+                    hostspanActivity: session.submittedUserMessageId === null ? null :
+                      await inspectHostSpanActivity(this.#requirePage(session, input.readOnly), session.submittedUserMessageId, submittedMessageIds),
                     // Passive evidence is not a completed answer or permission to submit.
                     responseCandidate: dom.candidate,
                     turnBoundary: dom.turnBoundary,
+                    // Preserve later human work without adopting it as this request's answer.
+                    conversationContext: await (async () => {
+                      const messages = await readChatGptMessages(this.#requirePage(session, input.readOnly));
+                      const anchors = messages.filter(message => message.role === 'user' &&
+                        ((session.submittedUserMessageId !== null && message.messageId === session.submittedUserMessageId) ||
+                          (session.submittedUserTurnId !== null && message.turnId === session.submittedUserTurnId)));
+                      const anchor = anchors.length === 1 ? anchors[0] : undefined;
+                      // An owned conversation can virtualize its old ACK. Reading its
+                      // mounted text does not verify that ACK or authorize replacement.
+                      const following = anchors.length > 1 ? [] : anchor === undefined ? messages
+                        : messages.slice(messages.indexOf(anchor)).filter(message => message.rootIndex === anchor.rootIndex);
+                      let remaining = 200_000;
+                      return { scope: anchor === undefined ? 'mounted-owned-conversation' as const : 'mounted-dom-from-original-ack' as const,
+                        originalAnchorPresent: anchor !== undefined, originalAnchorAmbiguous: anchors.length > 1,
+                        observedMessageCount: following.length,
+                        truncated: following.length > 100 || following.reduce((size, message) => size + message.text.length, 0) > remaining,
+                        messages: following.slice(0, 100).map(message => {
+                          const text = message.text.slice(0, remaining);
+                          remaining -= text.length;
+                          return { ...message, text };
+                        }) };
+                    })(),
                     messageDiagnostics: dom.messageDiagnostics,
                     scope: 'mounted-dom' as const,
                   };
@@ -319,11 +413,13 @@ export class SessionUiService {
           owner.submissionState !== 'prepared' || owner.promptSubmitted || owner.submittedUserMessageId || owner.responseMessageId)
         throw new SessionPlaneDomainError('session.generation-superseded', 'Preserving follow-up recovery requires its never-submitted preparation');
       const page = this.#requirePage(owner);
+      await requireChatGptSurface(page);
       await inspectChatGptPageReady(page, owner.pageKey!);
       const composer = page.locator(CHATGPT_COMPOSER_SELECTOR).filter({ visible: true });
       if (await composer.count() !== 1 || !await composer.isEditable()) throw new SessionPlaneDomainError(
         'provider.preparation-required', 'No unique editable original composer');
       const verify = async () => {
+        await requireChatGptSurface(page);
         const transcript = await readChatGptMessages(page);
         const anchors = transcript.filter(m => m.role === 'user' && m.messageId === original.submittedUserMessageId);
         const followups = transcript.filter(m => m.role === 'user' && m.messageId === input.followupUserMessageId);
@@ -413,6 +509,62 @@ export class SessionUiService {
     return read.evidence;
   }
 
+  async outputPanel(input: PreparationOwner & { decisionId: string; action: 'inspect' | 'close'; evidenceHash?: string | undefined }, receipts: ReceiptRepository) {
+    const method = 'workflow.output_panel';
+    const receipt = { clientId: input.clientId, requestId: input.decisionId, method,
+      requestHash: createHash('sha256').update(JSON.stringify(input)).digest('hex') };
+    const replay = () => {
+      const prior = receipts.get(receipt.clientId, receipt.requestId);
+      if (prior === null) return null;
+      if (prior.method !== method || prior.requestHash !== receipt.requestHash) throw new SessionPlaneDomainError(
+        'input.idempotency-conflict', 'Output panel operation identity was reused with different arguments');
+      if (prior.status !== 'complete') throw new SessionPlaneDomainError('provider.action-unknown',
+        'Output panel action was attempted; inspect without repeating the toggle');
+      return JSON.parse(prior.resultJson) as Record<string, unknown>;
+    };
+    const prior = replay();
+    if (prior !== null) return prior;
+    const read = await this.#submissions.inspectSubmission({ ...input, readOnly: true }, async session => {
+      const repeated = replay();
+      if (repeated !== null) return repeated;
+      if (session.submissionState !== 'submitted' || !session.promptSubmitted || !session.submittedUserMessageId || !session.conversationId)
+        throw new SessionPlaneDomainError('provider.preparation-required', 'Output panel control requires the exact current submitted request and ACK');
+      const page = this.#requirePage(session, input.action === 'inspect');
+      const binding = this.#registry.refreshPage(session.pageKey!);
+      const target = { origin: this.#chatgptOrigin, conversationId: session.conversationId,
+        anchor: session.submittedUserMessageId, click: false, outputPanel: 'inspect' as const };
+      const surface = await page.evaluate(streamRetrySurface, target);
+      const evidenceHash = createHash('sha256').update(JSON.stringify([session.sessionId, session.generation,
+        session.pageKey, binding.bindingEpoch, target, surface.reason, surface.outputPopover?.identity ?? null])).digest('hex');
+      let dispatch = null;
+      if (input.action === 'close') {
+        if (input.evidenceHash !== evidenceHash) throw new SessionPlaneDomainError('provider.preparation-required',
+          'Inspect the current exact output panel and pass its matching evidenceHash before closing');
+        if (!['output-popover-open', 'output-panel-inactive', 'output-panel-absent', 'output-popover-closing'].includes(surface.reason))
+          throw new SessionPlaneDomainError('provider.preparation-required', `Output panel cannot be closed: ${surface.reason}`);
+        if (surface.reason === 'output-popover-open') {
+          await requireChatGptSurface(page);
+          await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
+          this.#requirePage(session);
+          receipts.record({ ...receipt, status: 'attempted', result: { submittedUserMessageId: target.anchor, evidenceHash } });
+          dispatch = await page.evaluate(streamRetrySurface, { ...target, outputPanel: 'close' as const,
+            expectedOutputIdentity: surface.outputPopover!.identity, expiresAt: Date.now() + 5_000 });
+        }
+      }
+      this.#requirePage(session, input.action === 'inspect');
+      const after = dispatch?.clicked ? await page.evaluate(streamRetrySurface, target) : surface;
+      const result = { action: input.action, outcome: dispatch?.clicked ? 'toggle-dispatched' : dispatch ? 'not-dispatched' : input.action === 'inspect' ? 'inspected' : 'no-op',
+        observedAt: new Date().toISOString(), pageKey: session.pageKey, submittedUserMessageId: target.anchor,
+        requestAcknowledgementVerified: !['binding-url-changed', 'original-anchor-not-latest'].includes(surface.reason),
+        evidenceHash, surface: after, ...(dispatch ? { dispatch } : {}),
+        panelClosed: ['output-panel-inactive', 'output-panel-absent'].includes(after.reason),
+        providerMutation: dispatch?.clicked === true, retryClicked: false, promptSubmitted: session.promptSubmitted };
+      receipts.record({ ...receipt, status: 'complete', result });
+      return result;
+    });
+    return read.evidence;
+  }
+
   async retryStream(input: PreparationOwner & { decisionId: string }, receipts: ReceiptRepository, budgets: ConversationLoadRecoveryRepository) {
     const read = await this.#submissions.inspectSubmission(input, async session => {
       const unknown = session.submissionState === 'submission_unknown';
@@ -428,36 +580,90 @@ export class SessionUiService {
       if (!anchor) return null;
       const target = { origin: this.#chatgptOrigin, conversationId: session.conversationId,
         anchor, click: false, preserveContinuationDraft: unknown };
-      const surface = await page.evaluate(streamRetrySurface, target);
+      let surface = await page.evaluate(streamRetrySurface, target);
       if (!surface.present) return null;
-      const dom = await observeChatGptDom(page, { submittedUserMessageId: anchor, submittedUserTurnId: null });
-      const activity = await observeChatGptActivity(page, dom);
-      // Exact enabled Retry chrome already rejects live Stop/thinking controls.
-      // A weak generic label (including the Thinking model menu) is not a live stream.
-      if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate?.terminalMarker || dom.candidate?.streamingMarker ||
-          activity.strength === 'strong' || activity.strength === 'unknown' ||
-          surface.reason !== 'exact-stream-retry') throw new SessionPlaneDomainError('provider.preparation-required',
-        `Preserve the original turn before stream Retry: ${surface.reason}`, {
-          anchorPresent: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
-          responseCandidatePresent: dom.candidate !== null, observedUserMessageId: anchor, responseCandidate: dom.candidate,
-          activity: activity.strength, activityReason: activity.reason,
-        });
-      await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
+      await requireChatGptSurface(page);
+      let outputPopoverToggleDispatched = false;
+      const verify = async (allowPreparation = false) => {
+        this.#requirePage(session);
+        await requireChatGptSurface(page);
+        const dom = await observeChatGptDom(page, { submittedUserMessageId: anchor, submittedUserTurnId: null });
+        const activity = await observeChatGptActivity(page, dom);
+        // Exact enabled Retry chrome already rejects live Stop/thinking controls.
+        // A weak generic label (including the Thinking model menu) is not a live stream.
+        if (!dom.submittedUserFound || dom.laterUserFound || dom.candidate?.terminalMarker || dom.candidate?.streamingMarker ||
+            activity.strength === 'strong' || activity.strength === 'unknown' ||
+            (surface.reason !== 'exact-stream-retry' && !(allowPreparation && ['retry-offscreen', 'output-popover-open', 'output-popover-closing'].includes(surface.reason)))) throw new SessionPlaneDomainError('provider.preparation-required',
+          `Preserve the original turn before stream Retry: ${surface.reason}`, {
+            anchorPresent: dom.submittedUserFound, laterUserFound: dom.laterUserFound,
+            responseCandidatePresent: dom.candidate !== null, observedUserMessageId: anchor, responseCandidate: dom.candidate,
+            activity: activity.strength, activityReason: activity.reason,
+            retrySurface: surface, outputPopoverToggleDispatched,
+          });
+        await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
+        this.#requirePage(session);
+      };
+      await verify(true);
       const requestId = `stream-retry:${session.sessionId}:${session.generation}`;
       const previous = receipts.get(input.clientId, requestId);
       if (previous !== null) throw new SessionPlaneDomainError('provider.action-unknown',
         'Stream Retry was already attempted for this request; inspect its result without repeating the click');
       const receipt = { clientId: input.clientId, requestId, method: 'session.stream-retry',
         requestHash: createHash('sha256').update(JSON.stringify(target)).digest('hex') };
+      const outputPopoverDismissed = surface.reason === 'output-popover-open';
+      const outputPopoverSettled = outputPopoverDismissed || surface.reason === 'output-popover-closing' || surface.outputPopover?.inactive === true;
+      const preparationReceipt = { ...receipt, requestId: `stream-retry-popover:${session.sessionId}:${session.generation}`, method: 'session.stream-retry-popover' };
+      if (outputPopoverDismissed && receipts.get(input.clientId, preparationReceipt.requestId) !== null)
+        throw new SessionPlaneDomainError('provider.action-unknown',
+          'Output popover dismissal was already attempted; inspect its result without repeating the toggle');
       if (!budgets.reserveRefresh(new Date().toISOString(), 60_000, session.conversationId))
         throw new SessionPlaneDomainError('provider.preparation-required', 'Stream Retry is paced by the existing provider/UI cooldown; preserve this request');
+      if (outputPopoverDismissed) {
+        receipts.record({ ...preparationReceipt, status: 'attempted', result: { decisionId: input.decisionId, anchor: target.anchor } });
+        this.#requirePage(session);
+        const preparation = await page.evaluate(streamRetrySurface, { ...target, dismissOutputPopover: true, expiresAt: Date.now() + 5_000 });
+        outputPopoverToggleDispatched = preparation.reason === 'output-popover-toggle-dispatched';
+        receipts.record({ ...preparationReceipt, status: 'complete', result: { ...preparation, outputPopoverToggleDispatched } });
+        if (!outputPopoverToggleDispatched) throw new SessionPlaneDomainError('provider.preparation-required',
+          `Output popover was not dismissed: ${preparation.reason}`, { retrySurface: preparation });
+      }
+      if (outputPopoverSettled) {
+        // Radix can retain a painted but closed inert panel indefinitely. Wait
+        // without another gesture, then revalidate the entire document-only
+        // surface and all work/permission/hit-test guards before any Retry.
+        try {
+          const hidden = await page.waitForFunction(id => {
+            const dialog = document.getElementById(id);
+            return !dialog || !dialog.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) ||
+              (dialog.getAttribute('data-state') === 'closed' && dialog.hasAttribute('inert') && dialog.getAttribute('aria-hidden') === 'true');
+          }, surface.outputPopover!.dialogId, { timeout: 5_000, polling: 50 });
+          await hidden.dispose();
+        } catch (error) {
+          if (!(error instanceof errors.TimeoutError)) throw error;
+          throw new SessionPlaneDomainError('provider.preparation-required',
+            'Output popover is still visible after dismissal; preserve the original request',
+            { outputPopoverToggleDispatched, retryClicked: false, dialogId: surface.outputPopover!.dialogId });
+        }
+        surface = await page.evaluate(streamRetrySurface, target);
+        await verify(true);
+        if (['output-popover-open', 'output-popover-closing'].includes(surface.reason)) throw new SessionPlaneDomainError('provider.preparation-required',
+          'Output popover remains open after its one toggle; preserve the original request', { retrySurface: surface });
+      }
+      const viewportPrepared = surface.reason === 'retry-offscreen';
+      if (viewportPrepared) {
+        const preparation = await page.evaluate(streamRetrySurface, { ...target, prepareViewport: true, expiresAt: Date.now() + 5_000 });
+        if (preparation.reason !== 'viewport-prepared' && preparation.reason !== 'exact-stream-retry')
+          throw new SessionPlaneDomainError('provider.preparation-required', `Stream Retry viewport was not prepared: ${preparation.reason}`, { retrySurface: preparation });
+        surface = await page.evaluate(streamRetrySurface, target);
+        await verify();
+      }
       receipts.record({ ...receipt, status: 'attempted', result: { decisionId: input.decisionId, anchor: target.anchor } });
       this.#requirePage(session);
-      const retried = await page.evaluate(streamRetrySurface, { ...target, click: true });
-      receipts.record({ ...receipt, status: 'complete', result: { ...retried, anchor: target.anchor } });
+      const retried = await page.evaluate(streamRetrySurface, { ...target, click: true, expiresAt: Date.now() + 5_000 });
+      receipts.record({ ...receipt, status: 'complete', result: { ...retried, viewportPrepared, outputPopoverDismissed, outputPopoverSettled, anchor: target.anchor } });
       if (!retried.clicked) throw new SessionPlaneDomainError('provider.preparation-required',
         `Stream Retry was not dispatched: ${retried.reason}`);
-      return { ...retried, observedUserMessageId: target.anchor,
+      return { ...retried, viewportPrepared, outputPopoverDismissed, outputPopoverSettled, observedUserMessageId: target.anchor,
         ...(unknown ? {} : { submittedUserMessageId: target.anchor }),
         requestAcknowledgementVerified: !unknown, generation: session.generation };
     });
@@ -494,19 +700,54 @@ export class SessionUiService {
           'Preserve the current draft, attachment or active generation before continuation');
       }
       const controls = await this.#capture(session);
+      const resolvedAlert = confirmation?.resolvedToolAlert;
+      let recoveredToolAlert = false;
+      if (resolvedAlert && (resolvedAlert.originalOperationOutcome !== 'unknown' || resolvedAlert.readOnlyOperationInactive === true) &&
+          confirmedInterruption && activity.strength === 'none' && anchor.candidate === null &&
+          anchor.providerAlerts.length === 1 && retained === null) {
+        const alert = anchor.providerAlerts[0]!;
+        // An exact retained tool error may survive successful account recovery.
+        // Explicit caller evidence is not a new grant or proof of tool success.
+        const expected = `${resolvedAlert.appName} ${resolvedAlert.appName} 다시 연결 ${resolvedAlert.appName} 연결이 만료되었습니다. ChatGPT가 이 요청을 처리하는 데 사용할 수 있도록 먼저 다시 연결하세요.`;
+        if (alert.replace(/\s+/g, ' ').trim() === expected &&
+            createHash('sha256').update(alert).digest('hex') === resolvedAlert.alertSha256) {
+          const work = await inspectHostSpanActivity(page, original.submittedUserMessageId!);
+          const compact = (text: string) => text.replace(/\s+/g, '');
+          const warning = compact(expected);
+          recoveredToolAlert = work.available && !work.truncated && work.cards.length > 0 && work.cards.every(card =>
+            card.association === 'current-work' && card.owningUserMessageId === original.submittedUserMessageId &&
+            !card.textTruncated && (card.role === null || card.role === 'alert') &&
+            [warning, warning + '나중에Esc다시연결⏎'].includes(compact(card.text)) &&
+            card.controls.every(control => control.href === null &&
+              /^(?:나중에(?:\s*Esc)?|다시 연결(?:\s*⏎)?)$/.test(control.name.trim())));
+        }
+      }
+      if (resolvedAlert && !recoveredToolAlert) throw new SessionPlaneDomainError('provider.preparation-required',
+        'The exact recovered tool expiration alert is no longer verified; preserve current alerts and work');
+      const output = original.submittedUserMessageId && controls.nodes.some(node => node.role === 'dialog')
+        ? await page.evaluate(streamRetrySurface, { origin: this.#chatgptOrigin, conversationId: original.conversationId!,
+          anchor: original.submittedUserMessageId, click: false, outputPanel: 'inspect' as const }) : null;
+      const inactiveOutputId = output?.outputPopover?.inactive ? output.outputPopover.dialogId : null;
       const after = this.#registry.refreshPage(session.pageKey!);
       if (binding.bindingEpoch !== after.bindingEpoch || !anchor.conversationSurfaceAvailable ||
           !anchor.submittedUserFound || anchor.laterUserFound ||
-          (!confirmedInterruption && anchor.candidate !== null && !(disconnected && !anchor.candidate.terminalMarker)) || anchor.actionableAlert ||
+          (!confirmedInterruption && anchor.candidate !== null && !(disconnected && !anchor.candidate.terminalMarker)) || (anchor.actionableAlert && !recoveredToolAlert) ||
           (!confirmedInterruption && !disconnected && activity.strength !== 'none') || controls.nodesTruncated ||
-          controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role)) ||
+          controls.nodes.some(node => ['dialog', 'alertdialog'].includes(node.role) &&
+            !(node.role === 'dialog' && node.id === inactiveOutputId)) ||
           !controls.nodes.some(node => node.role === 'textbox' && node.editable && !node.disabled)) {
         throw new SessionPlaneDomainError('provider.preparation-required',
-          'Continuation requires the exact idle original turn with no answer, later user, alert or separate draft');
+          'Continuation requires the exact idle original turn with no answer, later user, alert or separate draft',
+          !(binding.bindingEpoch === after.bindingEpoch && retained === null &&
+            anchor.submittedUserFound && !anchor.laterUserFound && anchor.actionableAlert) ? undefined : { kind: 'provider-alert', source: 'dom',
+            observedAt: anchor.messageDiagnostics.observedAt, pageKey: session.pageKey,
+            conversationId: original.conversationId, submittedUserMessageId: original.submittedUserMessageId,
+            providerAlerts: anchor.providerAlerts, actionVerified: false, requiredUserAction: null });
       }
       return { pageKey: session.pageKey!, conversationId: session.conversationId!, bindingEpoch: after.bindingEpoch,
         observedAt: controls.capturedAt, continuationPrompt: '계속',
         disconnectedRecovery: disconnected && !anchor.candidate?.terminalMarker,
+        ...(recoveredToolAlert ? { recoveredToolAlert: { ...resolvedAlert, alertRetained: true, callerAttestedRecovery: true } } : {}),
         ...(retained ? { missingContinuationAcknowledgement: original.submittedUserMessageId,
           retainedPredecessorAcknowledgement: missing!.submittedUserMessageId } : {}),
         ...(confirmedInterruption ? { userConfirmedInterruption: confirmation,
@@ -734,10 +975,23 @@ export class SessionUiService {
 
   async verifyFailureContinuation(session: SessionSnapshot, failed: SessionSnapshot, model: PreparationTarget) {
     await this.#failureEvidence(session, failed);
+    if (model.configurationVerification) {
+      const proof = model.configurationVerification;
+      const verified = await new ChatGptConfigurationMenu(this.#requirePage(session), session.pageKey!)
+        .reobserveSelection(proof.version, proof.effort, true);
+      if (verified.configurationVerification?.version !== proof.version ||
+          verified.configurationVerification.effort !== proof.effort ||
+          verified.configurationVerification.surface !== proof.surface) throw new SessionPlaneDomainError(
+        'provider.failure-unverified', 'Current verified model, effort or Chat mode changed');
+      this.#requirePage(session);
+      model = { ...toPreparationTarget('model', verified), configurationVersion: proof.version,
+        configurationVerification: verified.configurationVerification };
+    }
     const snapshot = await this.#capture(session, 5_000);
     const composers = snapshot.nodes.filter(node => node.role === 'textbox' && node.editable && !node.disabled);
-    const combinedSummary = model.role === 'menuitem' && model.name.trim() !== '' &&
-      model.text.trim() !== '' && model.text.trim() !== model.name.trim();
+    const combinedSummary = model.configurationVerification !== undefined ||
+      (model.role === 'menuitem' && model.name.trim() !== '' &&
+        model.text.trim() !== '' && model.text.trim() !== model.name.trim());
     if (!combinedSummary || snapshot.nodesTruncated || composers.length !== 1 || !hasPreparationSelectionEvidence(snapshot.nodes, model)) {
       throw new SessionPlaneDomainError('provider.failure-unverified', 'Exact configured model/effort or sole composer is unavailable');
     }
@@ -760,12 +1014,16 @@ export class SessionUiService {
         decision: 'configure', purpose }, async session => {
         let snapshot = await this.#capture(session, 5_000);
         const version = model.configurationVersion ?? intended?.model;
+        const effort = intended?.effort ?? model.configurationVerification?.effort;
         if (purpose === 'model' && !snapshot.nodesTruncated &&
             (model.configurationVersion !== undefined || !hasPreparationSelectionEvidence(snapshot.nodes, model)) &&
-            version && intended?.effort) {
+            version && effort) {
           const summary = await new ChatGptConfigurationMenu(this.#requirePage(session), session.pageKey!)
-            .reobserveSelection(version, intended.effort);
+            .reobserveSelection(version, effort, model.configurationVerification !== undefined);
+          if (model.configurationVerification && !summary.configurationVerification) throw new SessionPlaneDomainError(
+            'provider.failure-unverified', 'Current full selection verification is unavailable');
           model = { ...toPreparationTarget('model', summary),
+            ...(summary.configurationVerification ? { configurationVerification: summary.configurationVerification } : {}),
             ...(model.configurationVersion === undefined ? {} : { configurationVersion: model.configurationVersion }) };
           snapshot = await this.#capture(session, 5_000);
         }
@@ -844,7 +1102,9 @@ export class SessionUiService {
     readonly ref?: string;
     readonly value?: number | undefined;
   }) {
-      return await this.#submissions.decidePreparation<BrowserSnapshot | { configurationId: string; label: string }>(input, async (session) => {
+      return await this.#submissions.decidePreparation<(BrowserSnapshot & {
+        configurationVerification?: PreparationTarget['configurationVerification'];
+      }) | { configurationId: string; label: string }>(input, async (session, requested) => {
       const purpose = input.purpose;
       const snapshotId = input.snapshotId;
       const ref = input.ref;
@@ -862,11 +1122,13 @@ export class SessionUiService {
         }
         return await this.#selectConfiguration(session, configurationId);
       }
-      const page = await this.#interactionPage(session);
-      const binding = this.#registry.refreshPage(session.pageKey);
+      const page = this.#requirePage(session);
       let element: ElementHandle<Element> | null = null;
       try {
+        const binding = this.#registry.refreshPage(session.pageKey);
         const node = this.#refs.node({ pageKey: session.pageKey, snapshotId, ref });
+        if (isChatGptModeControl(node)) throw new SessionPlaneDomainError(
+          'capability.unsupported', 'Mode controls are not selectable through preparation. Chat is the only supported mode.');
         element = await this.#refs.resolve({ pageKey: session.pageKey, bindingEpoch: binding.bindingEpoch, page, ref, snapshotId });
         const reveal = input.decision === 'reveal';
         const currentObservation = await this.#refs.capture({
@@ -886,6 +1148,28 @@ export class SessionUiService {
         }
         if (input.value !== undefined && currentNode.role !== 'slider') {
           throw new SessionPlaneDomainError('input.invalid', 'A numeric value is only valid for a model or effort slider');
+        }
+        const modeInspection = reveal && purpose === 'model' && input.value === undefined &&
+          currentNode.ref === modeInspectionChooser(currentObservation.nodes, await observeChatGptSurface(page))?.ref;
+        await this.#interactionPage(session, modeInspection);
+        const existingSelection = !reveal && ['model', 'effort'].includes(purpose) &&
+          ((currentNode.role === 'button' && currentNode.hasPopup !== null) ||
+            isPreparationSummary(currentNode, currentNode.ancestorIds.some(id => menuIds.has(id))) ||
+            currentNode.checked === true || currentNode.selected === true);
+        if (existingSelection && requested.model && requested.effort) {
+          if (requested.surface && !['chat', 'normal'].includes(requested.surface.trim().toLowerCase())) {
+            throw new SessionPlaneDomainError('capability.unsupported', 'Existing-selection verification supports Chat only');
+          }
+          const verified = await new ChatGptConfigurationMenu(page, session.pageKey)
+            .reobserveSelection(requested.model, requested.effort, true);
+          this.#requirePage(session);
+          const after = await this.#capture(session, 5_000);
+          const choice = { ...toPreparationTarget(purpose, verified),
+            configurationVersion: verified.configurationVerification!.version,
+            configurationVerification: verified.configurationVerification! };
+          if (after.nodesTruncated || !hasPreparationSelectionEvidence(after.nodes, choice)) throw new SessionPlaneDomainError(
+            'provider.configuration-stale', 'Verified selection no longer matches the current chooser');
+          return { choice, result: { ...after, configurationVerification: choice.configurationVerification } };
         }
         let actionTimeout: Error | undefined;
         try {
@@ -970,14 +1254,14 @@ export class SessionUiService {
   /** Caller holds the exact current request actor and page mutation lock. */
   async hostspanPermission(session: SessionSnapshot, input: HostSpanPermissionInput, original = session,
     passiveInspection = false, workOriginal?: SessionSnapshot,
-    exactFollowup?: { sourceUserMessageId: string; userMessageId: string }) {
+    exactFollowup?: { sourceUserMessageId: string; userMessageId: string }, retainedAcknowledgements: ReadonlySet<string> = new Set()) {
     if (session.provider !== 'chatgpt' ||
         (original.submissionState !== 'submitted' && original.submissionState !== 'submission_unknown') ||
         original.sessionId !== session.sessionId || original.conversationId !== session.conversationId ||
         !session.conversationId) throw new SessionPlaneDomainError(
       'provider.permission-unverified', 'Recover the original ACK before controlling its tool permission');
-    if (input.action === 'allow' && session.terminal) throw new SessionPlaneDomainError(
-      'provider.permission-unverified', 'A completed turn permits inspection only, not another permission grant');
+    if (input.action !== 'inspect' && session.terminal) throw new SessionPlaneDomainError(
+      'provider.permission-unverified', 'A completed turn permits inspection only, not permission control');
     if (passiveInspection && input.action === 'inspect' && original.generation < session.generation && original.terminal) {
       const page = this.#requirePage(session, true);
       const users = (await readChatGptMessages(page)).filter(message => message.role === 'user');
@@ -992,7 +1276,9 @@ export class SessionUiService {
         reason: 'completed-original-has-successor', providerMutation: false };
     }
     try {
-      const page = await this.#interactionPage(session);
+      // Permission consent belongs to the current owned card/ACK, independently
+      // of composer chrome. Chat-only validation guards preparation/submission.
+      const page = await this.#interactionPage(session, true, input.action === 'inspect');
       await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
       const messages = (await readChatGptMessages(page)).filter(message => message.role === 'user');
       // A visible exact grant belongs to this owned conversation independently of
@@ -1032,8 +1318,14 @@ export class SessionUiService {
         association = { association: 'exact-original-question-and-literal-continuations',
           workUserMessageId: root.messageId, currentUserMessageId: anchor, workAcknowledgementVerified: true };
       }
+      if (input.action === 'inspect' && input.toolName === undefined && input.evidenceHash !== undefined) {
+        if (!acknowledgementVerified) throw new SessionPlaneDomainError('provider.permission-unverified', 'Recover the current ACK before revealing its retained activity');
+        const result = await revealHostSpanActivity(page, anchor, retainedAcknowledgements, input.appName, input.evidenceHash);
+        this.#requirePage(session, true);
+        return { ...result, requestAcknowledgementVerified: true };
+      }
       const result = await controlHostSpanPermission(page, input, anchor);
-      this.#requirePage(session);
+      this.#requirePage(session, input.action === 'inspect');
       return { ...result, ...association, requestAcknowledgementVerified: acknowledgementVerified };
     } catch (error) { throw typedUiError(error); }
   }
@@ -1048,8 +1340,9 @@ export class SessionUiService {
         : this.#registry.requireSessionPage(session.pageKey, session);
       if (new URL(page.url()).origin !== this.#chatgptOrigin) throw new SessionPlaneDomainError(
         'session.page-identity-unverified', 'The request page left the provider origin');
-      await page.bringToFront();
-      return { pageKey: session.pageKey, url: page.url(), ...(unknown ? { conversationVerified: false } : {}) };
+      if (!this.#browserOwner) throw new SessionPlaneDomainError('browser.unavailable', 'Native tab activation is unavailable');
+      const activation = await this.#browserOwner.focusPage(session.pageKey, page);
+      return { pageKey: session.pageKey, url: page.url(), ...activation, ...(unknown ? { conversationVerified: false } : {}) };
     } catch (error) {
       throw typedUiError(error);
     }
@@ -1229,8 +1522,49 @@ export class SessionUiService {
     return await this.#submissions.resumePreparation(input);
   }
 
-  async #interactionPage(session: SessionSnapshot): Promise<Page> {
-    const page = this.#requirePage(session);
+  async answerQuestion(input: PreparationOwner & { decisionId: string; answer: string; evidenceHash: string }, receipts: ReceiptRepository) {
+    const method = 'workflow.answer_question';
+    const requestHash = createHash('sha256').update(JSON.stringify(input)).digest('hex');
+    const receipt = { clientId: input.clientId, requestId: input.decisionId, method, requestHash };
+    const replay = () => {
+      const prior = receipts.get(receipt.clientId, receipt.requestId);
+      if (prior === null) return null;
+      if (prior.method !== method || prior.requestHash !== requestHash) throw new SessionPlaneDomainError(
+        'input.idempotency-conflict', 'Question answer identity was reused with different arguments');
+      if (prior.status !== 'complete') throw new SessionPlaneDomainError('provider.action-unknown',
+        'Question answer was attempted; inspect without repeating it');
+      return JSON.parse(prior.resultJson) as Awaited<ReturnType<typeof answerChatGptQuestion>>;
+    };
+    const prior = replay();
+    if (prior !== null) return prior;
+    return await this.#submissions.withPendingPreparation(input, async session => {
+      const repeated = replay();
+      if (repeated !== null) return repeated;
+      const page = this.#requirePage(session);
+      await inspectChatGptPageReady(page, session.pageKey!);
+      const surface = await observeChatGptSurface(page);
+      if (surface.mode === 'work' || surface.source === 'conflicting-evidence' ||
+          surface.modeControls?.some(control => !control.navigation && surface.mode !== 'chat')) throw new SessionPlaneDomainError(
+        'provider.preparation-required', 'Work or conflicting mode controls cannot be operated; preserve this prepared request');
+      const blocked = await page.locator('[role="alert"], [role="alertdialog"], [role="dialog"], [data-testid="stop-button"]')
+        .evaluateAll(elements => elements.some(e => e.closest('[aria-hidden="true"], [inert]') === null &&
+          e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) && e.getBoundingClientRect().width > 0));
+      if (blocked) throw new SessionPlaneDomainError('provider.question-unverified', 'Preserve active generation, permission and other dialogs before answering a question');
+      await this.#browserOwner?.preparePageInteraction(session.pageKey!, session);
+      const result = await answerChatGptQuestion(page, input, () => {
+        this.#requirePage(session);
+        receipts.record({ ...receipt, status: 'attempted', result: { promptSubmitted: false } });
+      });
+      this.#requirePage(session);
+      receipts.record({ ...receipt, status: 'complete', result });
+      return result;
+    });
+  }
+
+  async #interactionPage(session: SessionSnapshot, modeInspection = false, readOnly = false): Promise<Page> {
+    const page = this.#requirePage(session, readOnly);
+    if (modeInspection) await assertNoHumanVerification({ page, provider: 'chatgpt', pageKey: session.pageKey! });
+    else await requireChatGptSurface(page);
     return this.#browserOwner === null ? page : await this.#browserOwner.preparePageInteraction(session.pageKey!, session);
   }
 
@@ -1263,10 +1597,18 @@ export interface PreparationOwner {
   readonly generation: number;
 }
 
+// Opening this exact chooser is observation, never a mode/model selection or
+// saved Submit resume. It is the only action advertised before Chat is proven.
+function modeInspectionChooser(nodes: readonly BrowserSnapshotNode[], surface: ChatGptSurface) {
+  if (surface.mode !== 'unknown' || surface.source === 'conflicting-evidence') return undefined;
+  const candidates = nodes.filter(isChatGptModelChooser);
+  return candidates.length === 1 && candidates[0]!.expanded === false && !candidates[0]!.disabled ? candidates[0] : undefined;
+}
+
 function preparationActions(node: BrowserSnapshotNode, menuIds: ReadonlySet<string>) {
   const choose: PreparationPurpose[] = [];
   const reveal: PreparationPurpose[] = [];
-  if (node.disabled) return { choose, reveal };
+  if (node.disabled || isChatGptModeControl(node)) return { choose, reveal };
   if (node.editable && node.role === 'textbox') choose.push('composer');
   if (node.role === 'button' && node.submitControl === true) choose.push('submit');
   const insideMenu = node.ancestorIds.some((id) => menuIds.has(id));

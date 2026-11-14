@@ -132,14 +132,14 @@ test('explicit completed display and deferred preparation preserve exact ownersh
     writeFileSync(lockPath, JSON.stringify({ ...lock, pid: 99_999_999 }));
     service = await start();
     assert.equal(service.browserOwner!.status.browserPid, browserPid);
-    await page.setContent('<main><article data-message-author-role="assistant" data-message-id="old">Selected old answer</article><textarea></textarea><button aria-label="맨 아래로 스크롤">↓</button></main>');
+    await page.setContent('<main><article data-message-author-role="user" data-message-id="user-message-1" data-turn-id="user-turn-1">First</article><article data-message-author-role="assistant" data-message-id="old">Selected old answer</article><textarea></textarea><button aria-label="맨 아래로 스크롤">↓</button></main>');
     await page.evaluate(() => {
       document.querySelector('button')!.onclick = () => {
         const button = document.querySelector('button')!;
         button.dataset.clicks = String(Number(button.dataset.clicks ?? 0) + 1);
-        document.querySelector('article')!.outerHTML = '<article data-message-author-role="assistant" data-message-id="chatgpt-auto-final-1"><div class="markdown">Original completed answer</div><a download="original.md" href="data:text/plain,EXACT-ORIGINAL">Original file</a></article>';
+        document.querySelector('[data-message-author-role="assistant"]')!.outerHTML = '<article data-message-author-role="assistant" data-message-id="chatgpt-auto-final-1"><div class="markdown">Original completed answer</div><a download="original.md" href="data:text/plain,EXACT-ORIGINAL">Original file</a></article>';
       };
-      const range = document.createRange(); range.selectNodeContents(document.querySelector('article')!);
+      const range = document.createRange(); range.selectNodeContents(document.querySelector('[data-message-author-role="assistant"]')!);
       const selection = document.getSelection()!; selection.removeAllRanges(); selection.addRange(range);
     });
     assert.equal((await latest('selected')).structuredContent.displayOutcome, 'not-dispatched');
@@ -163,6 +163,7 @@ test('explicit completed display and deferred preparation preserve exact ownersh
     t.mock.method(fake, 'downloadArtifact', (request, candidate) => real.downloadArtifact(request, candidate));
     const files = await service.artifactService.capture({ sessionId: session.sessionId, generation: 1 });
     const artifact = (files.artifacts as Array<{ artifactId: string; sizeBytes: number; sha256: string }>)[0]!;
+    assert.ok(artifact, JSON.stringify(files));
     assert.equal(artifact.sizeBytes, Buffer.byteLength('EXACT-ORIGINAL'));
     assert.ok(artifact.sha256);
     assert.equal(fake.submitCount, 1);

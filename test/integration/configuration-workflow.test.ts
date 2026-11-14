@@ -1,3 +1,7 @@
+import { PageRegistry } from '../../src/browser/page-registry.ts';
+import { SessionUiService } from '../../src/core/session-ui-service.ts';
+import { TeamWorkflow } from '../../src/core/team-workflow.ts';
+import { hashCanonical } from '../../src/storage/receipt-repository.ts';
 import { callRpc } from '../../src/cli/client.ts';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -10,6 +14,224 @@ import { startCore } from '../../src/main.ts';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import type { ConfigurationCatalog } from '../../src/providers/chatgpt/configuration-catalog.ts';
 import { ChatGptConfigurationMenu } from '../../src/providers/chatgpt/configuration-catalog.ts';
+
+test('empty same-role Chat opening materializes once without a prompt, generation or submission', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-empty-chat-'));
+  const core = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const create = core.browserOwner!.createPage.bind(core.browserOwner);
+  t.mock.method(core.browserOwner!, 'createPage', async (...args) => {
+    const result = await create(...args);
+    await result.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body:
+      '<main><div role="group"><button aria-pressed="true">Chat</button><button aria-pressed="false" onclick="throw Error(\'No Work\')">Work</button></div><textarea></textarea></main>' }));
+    return result;
+  });
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_' + name,
+    arguments: args, socketPath: core.config.socketPath, timeoutMs: 10000, maxLineBytes: core.config.rpcMaxLineBytes });
+  try {
+    const team = (await invoke('team_create', { requestId: 'empty-chat-team' })).structuredContent as any;
+    const input = { teamId: team.teamId, roleRef: team.roles[0].roleRef, requestId: 'open-empty' };
+    const opened = await invoke('session_open', input);
+    assert.equal(opened.isError, false, JSON.stringify(opened));
+    assert.equal((opened.structuredContent.observedSurface as any).mode, 'chat', JSON.stringify({ opened, snapshot: core.teamDirectory.getSession(String(opened.structuredContent.sessionId)), binding: core.pageRegistry.getBinding(String(opened.structuredContent.pageKey)) }));
+    assert.equal((opened.structuredContent.observedSurface as any).source, 'selected-control');
+    assert.equal(opened.structuredContent.generation, 0);
+    assert.equal(opened.structuredContent.promptSubmitted, false);
+    assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS count FROM outbox').get()!.count, 0);
+    assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS count FROM generations').get()!.count, 0);
+    const replay = (await invoke('session_open', input)).structuredContent;
+    assert.equal(replay.pageKey, opened.structuredContent.pageKey);
+    assert.equal(replay.observedSurface.mode, 'chat');
+    assert.ok(Date.parse(replay.observedSurface.observedAt) >= Date.parse(opened.structuredContent.observedSurface.observedAt));
+    const retained = await invoke('session_open', { ...input, requestId: 'read-retained-empty' });
+    assert.equal(retained.isError, false, JSON.stringify(retained));
+    assert.equal(retained.structuredContent.pageKey, opened.structuredContent.pageKey);
+    assert.equal(core.pageRegistry.listBindings({ includeClosed: false }).filter(binding =>
+      binding.sessionId === opened.structuredContent.sessionId).length, 1, 'Only one Chat page belongs to this session; native tab-group helper pages are unrelated');
+    const page = core.pageRegistry.pageForObservation(String(opened.structuredContent.pageKey));
+    assert.equal(await page.locator('textarea').inputValue(), '');
+    const foreign = (await invoke('team_create', { requestId: 'foreign-empty-team' })).structuredContent as any;
+    assert.equal((await invoke('session_open', { ...input, teamId: foreign.teamId })).isError, true);
+    assert.equal(core.pageRegistry.listBindings({ includeClosed: false }).filter(binding =>
+      binding.sessionId === opened.structuredContent.sessionId).length, 1);
+    // Explicit unused-page cleanup preserves the role/session and refuses drafts, alerts and messages.
+    const closeInput = { clientId: 'empty-chat-cleanup', sessionId: String(opened.structuredContent.sessionId),
+      generation: 0, conversationId: null, emptyTargetId: core.pageRegistry.getBinding(String(opened.structuredContent.pageKey)).targetId,
+      evidenceRef: 'User requested disposal of this exact unused empty target' };
+    const closeEmpty = (input = closeInput) => callRpc<any>({ socketPath: core.config.socketPath,
+      method: 'session.close_pages', params: input, timeoutMs: 10000 });
+    await page.locator('textarea').fill('Preserved draft');
+    await assert.rejects(closeEmpty(), /Preserve the page draft/);
+    await page.locator('textarea').fill('');
+    for (const markup of ['<div role="alert">Pending permission</div>', '<article>Existing conversation</article>', '<button aria-label="Stop generating">Stop</button>']) {
+      await page.locator('main').evaluate((main, html) => main.insertAdjacentHTML('beforeend', html), markup);
+      await assert.rejects(closeEmpty(), /Preserve/);
+      await page.locator('main > :last-child').evaluate(node => node.remove());
+    }
+    await assert.rejects(closeEmpty({ ...closeInput, emptyTargetId: 'foreign-target' }), /unidentified/);
+    const beforeClose = core.teamDirectory.getSession(closeInput.sessionId);
+    const closed = await closeEmpty();
+    assert.deepEqual(closed.pageCleanup, { closedPages: 1, pageErrors: [] });
+    assert.equal(closed.providerDeletionAttempted, false);
+    assert.equal(page.isClosed(), true);
+    const afterClose = core.teamDirectory.getSession(closeInput.sessionId);
+    assert.equal(afterClose.generation, 0);
+    assert.equal(afterClose.pageKey, null);
+    assert.equal(afterClose.roleId, beforeClose.roleId);
+    assert.equal(core.teamDirectory.getCurrentSession(team.teamId, 'main').sessionId, closeInput.sessionId);
+    assert.equal((await invoke('session_open', input)).isError, true, 'closed completed open cannot silently create a replacement');
+    const fresh = await invoke('session_open', { ...input, requestId: 'explicit-new-empty-open' });
+    assert.equal(fresh.isError, false, JSON.stringify(fresh));
+    assert.equal(fresh.structuredContent.sessionId, closeInput.sessionId);
+    assert.equal((await invoke('session_open', input)).isError, true, 'old open cannot claim a later explicitly opened target');
+    const newPage = core.pageRegistry.pageForObservation(String(fresh.structuredContent.pageKey));
+    assert.equal(core.pageRegistry.listBindings({ includeClosed: false }).filter(binding => binding.sessionId === closeInput.sessionId).length, 1);
+    // A previously open operation cannot be used to open a submitted generation.
+    await assert.rejects(core.submissionService.send({ clientId: 'fixture', requestId: 'not-an-empty-request',
+      sessionId: String(opened.structuredContent.sessionId), prompt: 'Authorized fixture preparation', sessionDeadlineSec: 600 }),
+      (error: any) => error.errorCode === 'provider.preparation-required' && error.details.promptSubmitted === false);
+    assert.equal((await invoke('session_open', { ...input, roleRef: String(opened.structuredContent.sessionId) + ':1' })).isError, true);
+    await assert.rejects(closeEmpty(), /exact durable conversation and generation/);
+    assert.equal(await newPage.locator('textarea').inputValue(), '');
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('empty session open revalidates completed and attempted receipts after Core adoption', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-empty-adoption-'));
+  const core = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const create = core.browserOwner!.createPage.bind(core.browserOwner);
+  let navigations = 0;
+  t.mock.method(core.browserOwner!, 'createPage', async (...args) => {
+    const created = await create(...args);
+    await created.page.route('https://chatgpt.com/**', route => {
+      if (route.request().isNavigationRequest()) navigations++;
+      return route.fulfill({ contentType: 'text/html', body: '<main><textarea></textarea></main>' });
+    });
+    return created;
+  });
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_' + name,
+    arguments: args, socketPath: core.config.socketPath, timeoutMs: 10000, maxLineBytes: core.config.rpcMaxLineBytes });
+  try {
+    const team = (await invoke('team_create', { requestId: 'adopt-team' })).structuredContent as any;
+    const input = { teamId: team.teamId, roleRef: team.roles[0].roleRef, requestId: 'adopt-open' };
+    const first = await invoke('session_open', input);
+    assert.equal(first.isError, false, JSON.stringify(first));
+    const session = core.teamDirectory.getSession(String(first.structuredContent.sessionId));
+    const page = core.pageRegistry.pageForObservation(session.pageKey!);
+    await page.locator('textarea').fill('Retained human draft');
+    const stored = core.pageBindings.get(session.pageKey!)!;
+    const adopted = new PageRegistry();
+    adopted.subscribe(binding => core.pageBindings.upsert(binding));
+    const binding = adopted.identifyPage(page, stored.targetId!);
+    const ui = new SessionUiService({ submissions: core.submissionService, registry: adopted,
+      chatgptUrl: core.config.chatgptUrl, browserOwner: core.browserOwner });
+    const workflow = new TeamWorkflow({ database: core.database, directory: core.teamDirectory, receipts: core.receipts,
+      submissions: core.submissionService, ui, scheduler: core.actorScheduler, pageMutex: core.pageMutationMutex,
+      retireObservation() {}, artifacts: core.artifactService, stops: core.stopService, cleanup: {} as never,
+      enabledProviders: ['chatgpt'], async ensurePage() {} });
+    const retry = { ...input, requestId: 'interrupted-open' };
+    const method = 'workflow.session_open';
+    core.receipts.record({ clientId: `team:${team.teamId}`, requestId: retry.requestId, method,
+      requestHash: hashCanonical({ method, payload: retry }), status: 'attempted', result: { sessionId: session.sessionId } });
+    const completed = await workflow.openSession(input);
+    assert.equal(completed.pageKey, binding.pageKey, 'completed receipt must validate the actual adopted page');
+    assert.ok(Date.parse(completed.observedSurface.observedAt) >= Date.parse(first.structuredContent.observedSurface.observedAt));
+    const reopened = await workflow.openSession(retry);
+    assert.equal(reopened.pageKey, binding.pageKey);
+    assert.notEqual(reopened.pageKey, stored.pageKey);
+    assert.equal(core.teamDirectory.getSession(session.sessionId).pageKey, binding.pageKey);
+    assert.equal(navigations, 1, 'adoption never reloads or creates a replacement');
+    assert.equal(await page.locator('textarea').inputValue(), 'Retained human draft');
+    assert.equal((await workflow.openSession(retry)).pageKey, reopened.pageKey);
+    assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS n FROM outbox').get()!.n, 0);
+    assert.equal(core.database.raw.prepare('SELECT COUNT(*) AS n FROM generations').get()!.n, 0);
+    assert.equal(adopted.getBinding(binding.pageKey).sessionId, session.sessionId);
+    // An unrelated root tab must never substitute for a missing or differently owned target.
+    const missing = { ...stored, targetId: 'missing-exact-target' };
+    await assert.rejects(ui.openEmptySession(session, () => assert.fail('no rebind'), missing),
+      (error: any) => error.errorCode === 'browser.unavailable');
+    adopted.unbindPage(binding.pageKey);
+    adopted.reservePage(binding.pageKey, { sessionId: 'foreign-session', generation: 0 });
+    await assert.rejects(ui.openEmptySession(session, () => assert.fail('no foreign rebind'), stored),
+      (error: any) => error.errorCode === 'browser.unavailable');
+    assert.equal(await page.locator('textarea').inputValue(), 'Retained human draft');
+    assert.equal(navigations, 1);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Chat-only preparation never advertises or activates Work through catalog or raw choices', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chat-only-choices-'));
+  const service = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const owner = service.browserOwner!;
+  const createPage = owner.createPage.bind(owner);
+  owner.createPage = async (...args) => {
+    const created = await createPage(...args);
+    await created.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: fixture
+      .replace('<button type="button" role="radio" aria-checked="true">Chat</button>', '<div role="radiogroup"><button type="button" id="chat-mode" role="radio" aria-checked="true">Chat</button><button type="button" id="work-mode" role="radio" aria-checked="false" onclick="window.workActivations++">Work</button></div>')
+      .replace('<div role="menuitemradio" tabindex="0" aria-checked="false" aria-disabled="true">Unavailable-7</div>', '$&<div role="menuitemradio" tabindex="0" aria-checked="false">Work</div>')
+      .replace('<script>', '<script>window.workActivations=0;document.addEventListener("click",e=>{if(e.target.closest("[role=menuitemradio]")?.textContent==="Work")window.workActivations++},true);') }));
+    return created;
+  };
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: `sessionplane_${name}`,
+    arguments: args, socketPath: service.config.socketPath, timeoutMs: 30_000, maxLineBytes: service.config.rpcMaxLineBytes });
+  try {
+    const team = (await invoke('team_create', { requestId: 'chat-team' })).structuredContent;
+    const pending = (await invoke('send', { teamId: team.teamId, roleRef: (team.roles as any[])[0].roleRef,
+      requestId: 'chat-prepared', prompt: 'Preserve this request', model: 'Aurora-9', effort: 'Balanced' })).structuredContent;
+    const identity = { teamId: team.teamId, requestRef: pending.requestRef };
+    const current = (await invoke('team_get', { ...identity, view: 'evidence' })).structuredContent.request as any;
+    assert.equal(current.evidence.observedSurface.mode, 'chat');
+    assert.ok(current.configurationCatalog.options.length > 0);
+    assert.ok(current.configurationCatalog.options.every((o: any) => !/^work$/i.test(o.version) && !/^work$/i.test(o.label)));
+    const work = current.evidence.nodes.find((n: any) => n.name === 'Work');
+    assert.ok(work);
+    assert.deepEqual(work.actions, { choose: [], reveal: [] });
+    for (const decision of ['choose', 'reveal']) {
+      const rejected = await invoke('decide', { ...identity, requestId: `raw-work-${decision}`, decision,
+        purpose: 'model', snapshotId: current.evidence.snapshotId, ref: work.ref });
+      assert.equal(rejected.isError, true);
+      assert.equal(rejected.structuredContent.errorCode, 'capability.unsupported');
+    }
+    const page = service.pageRegistry.pageForObservation(current.pageKey);
+    const menu = new ChatGptConfigurationMenu(page, current.pageKey);
+    await assert.rejects(menu.select({ id: 'legacy-work', label: 'Work', version: 'Work', power: null }), /Only model and effort/);
+    // Match the current real provider's role=group + ordinary pressed buttons.
+    await page.locator('[role="radiogroup"]').evaluate(group => {
+      group.setAttribute('role', 'group');
+      for (const button of group.querySelectorAll('button')) {
+        button.setAttribute('aria-pressed', button.getAttribute('aria-checked')!);
+        button.removeAttribute('aria-checked'); button.removeAttribute('role');
+        button.setAttribute('data-state', 'closed');
+      }
+    });
+    const pressed = (await invoke('team_get', { ...identity, view: 'evidence' })).structuredContent.request as any;
+    assert.equal(pressed.evidence.observedSurface.mode, 'chat');
+    assert.equal(pressed.evidence.preparationAvailability.available, true);
+    const configured = await invoke('decide', { ...identity, requestId: 'configure-observed-chat', decision: 'configure',
+      configurationId: pressed.configurationCatalog.options.find((o: any) => o.label === 'Aurora-9 / Balanced').id });
+    assert.equal(configured.isError, false, JSON.stringify(configured));
+    assert.equal(configured.structuredContent.promptSubmitted, false);
+    assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');
+    assert.equal(await page.locator('#chat-mode').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.evaluate(() => (window as any).workActivations), 0);
+    await page.evaluate(() => {
+      document.querySelector('#chat-mode')!.setAttribute('aria-pressed', 'false');
+      document.querySelector('#work-mode')!.setAttribute('aria-pressed', 'true');
+    });
+    const blocked = (await invoke('team_get', { ...identity, view: 'evidence' })).structuredContent.request as any;
+    assert.equal(blocked.evidence.observedSurface.mode, 'work');
+    assert.equal(blocked.configurationCatalog, null);
+    assert.ok(blocked.evidence.nodes.every((n: any) => n.actions.choose.length === 0 && n.actions.reveal.length === 0));
+    assert.equal(blocked.promptSubmitted, false);
+    const draft = await page.locator('textarea').inputValue();
+    await assert.rejects(menu.discover(), /observation-only/);
+    assert.equal(await page.locator('textarea').inputValue(), draft);
+    assert.equal(await page.evaluate(() => (window as any).workActivations), 0);
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 const fixture = `<!doctype html><html><body><main><button type="button" role="radio" aria-checked="true">Chat</button><form>
   <button type="button" id="chooser" aria-label="ChatGPT model selection" aria-haspopup="menu" aria-expanded="false" aria-controls="configuration" hidden>Aurora-9 / Balanced</button>
@@ -53,6 +275,49 @@ const fixture = `<!doctype html><html><body><main><button type="button" role="ra
   document.querySelector('textarea').onfocus = () => setTimeout(() => { chooser.hidden = false; }, 120);
   render();
 </script></body></html>`;
+
+for (const selectedMode of ['Chat', 'Work']) test(`unverified preparation exposes only read-only picker inspection before ${selectedMode} proof`, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-mode-inspection-'));
+  const service = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const owner = service.browserOwner!, createPage = owner.createPage.bind(owner);
+  owner.createPage = async (...args) => {
+    const created = await createPage(...args);
+    await created.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: fixture
+      .replace('<button type="button" role="radio" aria-checked="true">Chat</button>', '')
+      .replace(' hidden>Aurora-9 / Balanced', '>Aurora-9 / Balanced')
+      .replace('<div id="configuration" role="menu" hidden>', `<div id="configuration" role="menu" hidden><div role="radiogroup"><button type="button" role="radio" aria-checked="${selectedMode === 'Chat'}">Chat</button><button type="button" role="radio" aria-checked="${selectedMode === 'Work'}" onclick="throw Error('Never select Work')">Work</button></div>`) }));
+    return created;
+  };
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: `sessionplane_${name}`,
+    arguments: args, socketPath: service.config.socketPath, timeoutMs: 30_000, maxLineBytes: service.config.rpcMaxLineBytes });
+  try {
+    const team = (await invoke('team_create', { requestId: 'inspect-mode-team' })).structuredContent;
+    const pending = (await invoke('send', { teamId: team.teamId, roleRef: (team.roles as any[])[0].roleRef,
+      requestId: 'inspect-mode-prepare', prompt: 'Preserve exact unsubmitted work', model: 'Aurora-9', effort: 'Balanced' })).structuredContent;
+    const identity = { teamId: team.teamId, requestRef: pending.requestRef };
+    assert.ok(identity.requestRef);
+    const before = (await invoke('team_get', { ...identity, view: 'evidence' })).structuredContent.request as any;
+    assert.equal(before.evidence.observedSurface.mode, 'unknown');
+    assert.equal(before.evidence.preparationAvailability.available, false);
+    assert.ok(before.evidence.nodes.every((n: any) => n.actions.choose.length === 0));
+    const choices = before.evidence.nodes.filter((n: any) => n.actions.reveal.includes('model'));
+    assert.equal(choices.length, 1);
+    assert.equal(choices[0].id, 'chooser');
+    const revealed = await invoke('decide', { ...identity, requestId: 'inspect-only-mode', decision: 'reveal', purpose: 'model',
+      snapshotId: before.evidence.snapshotId, ref: choices[0].ref });
+    assert.equal(revealed.isError, false, JSON.stringify(revealed));
+    const after = revealed.structuredContent as any;
+    assert.equal(after.promptSubmitted, false);
+    assert.equal(after.evidence.observedSurface.mode, selectedMode.toLowerCase());
+    assert.ok(after.evidence.nodes.filter((n: any) => n.name === 'Work').every((n: any) => n.actions.choose.length === 0 && n.actions.reveal.length === 0));
+    if (selectedMode === 'Work') assert.ok(after.evidence.nodes.every((n: any) => n.actions.choose.length === 0));
+    const page = service.pageRegistry.pageForObservation(before.pageKey);
+    assert.equal(await page.locator('textarea').inputValue(), 'Untouched draft');
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+    assert.equal(service.database.raw.prepare("SELECT COUNT(*) AS n FROM events WHERE event_type='generation.submit-attempted'").get()!.n, 0);
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('unavailable preparation never offers Retry as submit and preserves the same request across restart and page restoration', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-preparation-unavailable-'));
@@ -761,5 +1026,167 @@ test('continuation reobserves exact current model and effort without switching c
     assert.deepEqual(await page.evaluate(() => ({ version: (window as any).version,
       power: (window as any).powerValue, submits: (window as any).submits })),
       { version: 'Aurora-9', power: 1, submits: 0 });
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('existing selected-state recording verifies version and effort with optional mode chrome absent, without selecting or submitting', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-selected-state-proof-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const service = await startCore({ config, browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  const create = service.browserOwner!.createPage.bind(service.browserOwner!);
+  service.browserOwner!.createPage = async (...args) => {
+    const created = await create(...args);
+    await created.page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html',
+      body: fixture.replace('<textarea', '<textarea id="prompt-textarea"') }));
+    return created;
+  };
+  const invoke = (name: string, args: Record<string, unknown>) => invokeMcpTool({ name: 'sessionplane_' + name,
+    arguments: args, socketPath: config.socketPath, timeoutMs: 30_000, maxLineBytes: config.rpcMaxLineBytes });
+  const ok = async (name: string, args: Record<string, unknown>) => {
+    const result = await invoke(name, args);
+    assert.equal(result.isError, false, JSON.stringify(result));
+    return result.structuredContent as any;
+  };
+  try {
+    const team = await ok('team_create', { requestId: 'selected-team' });
+    const sent = await ok('send', { teamId: team.teamId, roleRef: team.roles[0].roleRef,
+      requestId: 'selected-send', prompt: 'Preserve this prepared request', model: 'Aurora-9 Thinking', effort: 'Balanced' });
+    const identity = { teamId: team.teamId, requestRef: sent.requestRef };
+    const page = service.pageRegistry.pageForObservation(sent.pageKey);
+    // Existing Chat conversations omit this optional new-chat selector.
+    await page.locator('[role="radio"]').evaluate(node => node.remove());
+    const inspect = async () => (await ok('team_get', { ...identity, view: 'evidence' })).request;
+    let seq = 0;
+    const choose = async (purpose: string, node?: any, snapshot?: any) => {
+      const q = snapshot ?? await inspect();
+      node ??= q.evidence.nodes.find((n: any) => purpose === 'model' ? n.id === 'chooser' :
+        purpose === 'composer' ? n.editable : n.submitControl);
+      return await invoke('decide', { ...identity, requestId: 'selected-choice-' + seq++, decision: 'choose',
+        purpose, snapshotId: q.evidence.snapshotId, ref: node.ref });
+    };
+    const draft = await page.locator('textarea').inputValue();
+    await page.evaluate(() => {
+      const w = window as any;
+      w.selectionClicks = 0; w.draftEvents = 0;
+      document.addEventListener('click', e => {
+        if ((e.target as Element).closest('[role="menuitemradio"], [role="slider"]')) w.selectionClicks++;
+      });
+      document.querySelector('textarea')!.addEventListener('input', () => w.draftEvents++);
+      // Current provider summaries can expose effort alone.
+      const render = w.render;
+      w.render = () => { render(); document.querySelector('#summary')!.textContent = w.labels[w.powerValue]; };
+      w.version = 'Aurora-8'; w.render();
+      // Both versions have the identical footer; that footer alone must not pass.
+      document.querySelector('#chooser')!.textContent = 'Balanced';
+    });
+    const mismatch = await choose('model');
+    assert.equal(mismatch.isError, true, 'same effort under the wrong version is not proof');
+    assert.equal(mismatch.structuredContent.errorCode, 'provider.configuration-stale');
+    assert.equal((await inspect()).choices.model, undefined);
+    // Reset only fixture UI state, never through a provider configuration action.
+    await page.evaluate(() => {
+      const w = window as any; w.version = 'Aurora-9'; w.render();
+      (document.querySelector('#versions') as HTMLElement).hidden = true;
+      (document.querySelector('#configuration') as HTMLElement).hidden = true;
+      document.querySelector('#chooser')!.setAttribute('aria-expanded', 'false');
+      document.querySelector('#chooser')!.setAttribute('aria-controls', 'configuration');
+    });
+    const recorded = await choose('model');
+    assert.equal(recorded.isError, false, JSON.stringify(recorded));
+    assert.deepEqual((recorded.structuredContent as any).choices.model.configurationVerification,
+      { version: 'Aurora-9', effort: 'Balanced', surface: 'chat' });
+    assert.equal((recorded.structuredContent as any).promptSubmitted, false);
+    assert.equal((recorded.structuredContent as any).choices.submit, undefined);
+    assert.equal(await page.locator('textarea').inputValue(), draft);
+    assert.deepEqual(await page.evaluate(() => {
+      const w = window as any; return [w.selectionClicks, w.draftEvents, w.submits];
+    }), [0, 0, 0]);
+    // Save a Submit that is still blocked by the absent composer choice. Verification
+    // must neither resume it nor restore an older composer over a human draft.
+    await choose('submit');
+    assert.ok((await inspect()).choices.submit);
+    await page.locator('textarea').fill('Preserved newer human draft');
+    await page.evaluate(() => { (window as any).draftEvents = 0; });
+    const recordOnly = await choose('model');
+    assert.equal(recordOnly.isError, false, JSON.stringify(recordOnly));
+    assert.equal((recordOnly.structuredContent as any).promptSubmitted, false);
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved newer human draft');
+    assert.equal(await page.evaluate(() => (window as any).draftEvents), 0);
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+    await page.locator('textarea').fill(draft);
+    // An exact footer can survive version drift after recording. Submission must
+    // reverify the full selection instead of trusting that surviving label.
+    await page.evaluate(() => {
+      const w = window as any; w.version = 'Aurora-8'; w.render();
+      document.querySelector('#chooser')!.textContent = 'Balanced';
+    });
+    const submit = await choose('composer');
+    assert.equal(submit.isError, false, JSON.stringify(submit));
+    assert.equal((submit.structuredContent as any).errorCode, 'provider.preparation-required');
+    assert.match((submit.structuredContent as any).message, /does not match/);
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
+    assert.equal((await inspect()).promptSubmitted, false);
+    assert.equal((await inspect()).submissionState, 'prepared');
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserve this prepared request');
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('strict selected-state reading rejects mode, ambiguity and draft changes without selection fallback', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-selected-state-guards-'));
+  const service = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await service.browserOwner!.createPage();
+    const reset = async () => {
+      await page.setContent(fixture.replace('<textarea', '<textarea id="prompt-textarea"')
+        .replace('<script>', '<script>(() => {').replace('</script>', '})();</script>'));
+      await page.locator('#chooser').evaluate(node => { (node as HTMLElement).hidden = false; });
+      await page.evaluate(() => {
+        (window as any).selectionClicks = 0;
+        document.addEventListener('click', e => {
+          if ((e.target as Element).closest('[role="menuitemradio"], [role="slider"]')) (window as any).selectionClicks++;
+        });
+      });
+    };
+    const verify = () => new ChatGptConfigurationMenu(page, 'strict-guards').reobserveSelection('Aurora-9 Thinking', 'Balanced', true);
+    await reset();
+    await page.locator('[role="radio"]').evaluate(node => { node.textContent = 'Work'; });
+    await assert.rejects(verify, /Chat mode/);
+    assert.equal(await page.evaluate(() => (window as any).opens), 0);
+    await reset();
+    await page.locator('#summary').evaluate(node => node.addEventListener('click', () =>
+      document.querySelectorAll('#versions [role="menuitemradio"]')[1]!.setAttribute('aria-checked', 'true')));
+    await assert.rejects(verify, /ambiguous/);
+    assert.equal(await page.evaluate(() => (window as any).selectionClicks), 0);
+    await reset();
+    await assert.rejects(() => new ChatGptConfigurationMenu(page, 'strict-effort').reobserveSelection('Aurora-9', 'Deep', true), /does not match/);
+    assert.equal(await page.evaluate(() => (window as any).powerValue), 1);
+    await reset();
+    await page.locator('#summary').evaluate(node => node.addEventListener('click', () => {
+      document.querySelector('textarea')!.value = 'New human draft';
+    }));
+    await assert.rejects(verify, /draft.*changed/);
+    assert.equal(await page.locator('textarea').inputValue(), 'New human draft');
+    assert.equal(await page.evaluate(() => (window as any).selectionClicks), 0);
+    await reset();
+    await page.evaluate(() => {
+      // Retained submenu route cannot be dismissed except through a checked
+      // option in this provider variant. Verification must refuse that fallback.
+      const chooser = document.querySelector('#chooser') as HTMLElement;
+      chooser.setAttribute('aria-expanded', 'true'); chooser.setAttribute('aria-controls', 'versions');
+      (document.querySelector('#versions') as HTMLElement).hidden = false;
+      chooser.onclick = () => {
+        const open = chooser.getAttribute('aria-expanded') !== 'true';
+        chooser.setAttribute('aria-expanded', String(open));
+        chooser.setAttribute('aria-controls', 'versions');
+        (document.querySelector('#versions') as HTMLElement).hidden = !open;
+        (document.querySelector('#configuration') as HTMLElement).hidden = true;
+        (window as any).render();
+      };
+    });
+    await assert.rejects(verify, /without a selection action/);
+    assert.equal(await page.evaluate(() => (window as any).selectionClicks), 0);
+    assert.equal(await page.evaluate(() => (window as any).submits), 0);
   } finally { await service.close(); rmSync(root, { recursive: true, force: true }); }
 });

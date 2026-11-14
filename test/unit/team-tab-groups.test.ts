@@ -1,6 +1,39 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { syncNativeTeamGroups, resolveNativeTeamTabs } from '../../src/browser/team-tab-groups.ts';
+import { DatabaseSync } from 'node:sqlite';
+import { focusNativeTab, syncNativeTeamGroups, resolveNativeTeamTabs } from '../../src/browser/team-tab-groups.ts';
+import { PageBindingRepository } from '../../src/storage/page-binding-repository.ts';
+
+test('explicit native focus confirms the exact tab and window, and rejects unverified activation', async () => {
+  const original = (globalThis as any).chrome;
+  const tab = { id: 7, windowId: 11, active: false, incognito: false, url: 'https://chatgpt.com/c/exact' };
+  const window = { focused: false };
+  let ignoreWindow = false, ignoreTab = false, mutations = 0;
+  (globalThis as any).chrome = {
+    debugger: { getTargets: async () => [{ id: 'exact', tabId: 7 }, { id: 'other', tabId: 8 }] },
+    tabs: { get: async (id: number) => { assert.equal(id, 7); return { ...tab }; },
+      update: async (id: number, update: any) => {
+        assert.equal(id, 7); mutations++; if (!ignoreTab) Object.assign(tab, update);
+      } },
+    windows: { get: async (id: number) => { assert.equal(id, 11); return { ...window }; },
+      update: async (id: number, update: any) => {
+        assert.equal(id, 11); mutations++; if (!ignoreWindow) Object.assign(window, update);
+      } },
+  };
+  const input = { targetId: 'exact', url: tab.url };
+  try {
+    assert.deepEqual(await focusNativeTab(input), { targetId: 'exact', tabId: 7, windowId: 11,
+      tabActive: true, windowFocused: true });
+    window.focused = false; ignoreWindow = true;
+    await assert.rejects(focusNativeTab(input), /not confirmed/);
+    ignoreWindow = false; tab.active = false; ignoreTab = true;
+    await assert.rejects(focusNativeTab(input), /not confirmed/);
+    const before = mutations;
+    await assert.rejects(focusNativeTab({ ...input, targetId: 'missing' }), /unavailable/);
+    await assert.rejects(focusNativeTab({ ...input, url: 'https://chatgpt.com/c/other' }), /identity/);
+    assert.equal(mutations, before, 'Unknown/mismatched targets cannot select another tab');
+  } finally { (globalThis as any).chrome = original; }
+});
 
 test('native team groups follow create/replace/close/delete without changing unmanaged tabs or focus', async () => {
   const tabs = [
@@ -42,6 +75,13 @@ test('native team groups follow create/replace/close/delete without changing unm
     assert.equal(tabs[4]!.groupId, -1, 'Incognito remains outside this owner');
     assert.equal(tabs[3]!.groupId, -1, 'User unmanaged tab stays untouched');
     const a = tabs[0]!.groupId;
+    delete saved.teams['stable-a'];
+    await syncNativeTeamGroups([
+      { teamId: 'stable-a', title: 'Maetda', targetIds: ['target-1', 'target-2'] },
+      { teamId: 'stable-b', title: 'Webturn', targetIds: ['target-3', 'target-5'] },
+    ]);
+    assert.equal(tabs[0]!.groupId, a, 'A lost saved mapping reuses the existing exact same-team group');
+    assert.equal(groups.length, 2, 'Restoring the mapping creates no extra group');
     const restored = resolveNativeTeamTabs([
       { targetId: 'target-1', sessionId: 'current', state: 'owned', url: 'https://chatgpt.com/c/original' },
     ], tabs.map(tab => ({ targetId: `target-${tab.id}`, type: 'page', url: `https://chatgpt.com/c/${tab.id === 2 ? 'retained' : 'unmanaged'}` })), [],
@@ -79,4 +119,52 @@ test('restored native targets retain their exact durable team group without adop
   ], ['other-context'], resolve);
   assert.deepEqual(groups, [{ teamId: 'stable-a', title: 'Maetda', targetIds: ['live', 'pre-adoption-crashed'] }],
     'The tab retained by Chrome must not invalidate its saved group simply because Playwright omitted it');
+});
+
+test('an identity-lost page keeps its exact durable conversation group without regaining page ownership', () => {
+  const binding = { targetId: 'retained', sessionId: 'original', state: 'identity_lost', url: 'https://chatgpt.com/c/known-conversation' };
+  const result = resolveNativeTeamTabs([binding], [], [], (sessionId, conversationId) => {
+    assert.equal(sessionId, null, 'Lost mutation ownership must not be treated as a live owned session');
+    return conversationId === 'known-conversation' ? { teamId: 'stable-a', title: 'Project' } : null;
+  });
+  assert.deepEqual(result, [{ teamId: 'stable-a', title: 'Project', targetIds: ['retained'] }]);
+  assert.equal(binding.state, 'identity_lost');
+  assert.deepEqual(resolveNativeTeamTabs([{ ...binding, url: 'https://chatgpt.com/c/unknown-conversation' }], [], [],
+    (_sessionId, conversationId) => conversationId === 'known-conversation' ? { teamId: 'stable-a', title: 'Project' } : null), []);
+});
+
+test('restored home targets retain unique durable team membership without claiming page ownership', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec('CREATE TABLE page_bindings(target_id TEXT, team_id TEXT)');
+  database.exec(`INSERT INTO page_bindings VALUES ('restored-home','stable-a'), ('restored-home',NULL),
+    ('conflicting-home','stable-a'), ('conflicting-home','stable-b')`);
+  const repository = new PageBindingRepository(database);
+  const resolve = (_sessionId: string | null, _conversationId: string | null, targetId: string) => {
+    const teamId = repository.uniqueTeamForTarget(targetId);
+    return teamId ? { teamId, title: 'Project' } : null;
+  };
+  const binding = { targetId: 'restored-home', sessionId: null, state: 'unbound', url: 'https://chatgpt.com/' };
+  try {
+    const result = resolveNativeTeamTabs([binding], [
+      { targetId: 'restored-home', type: 'page', url: 'https://chatgpt.com/' },
+      { targetId: 'unknown-home', type: 'page', url: 'https://chatgpt.com/' },
+      { targetId: 'conflicting-home', type: 'page', url: 'https://chatgpt.com/' },
+      { targetId: 'restored-home', type: 'page', url: 'https://chatgpt.com/', browserContextId: 'private' },
+    ], ['private'], resolve);
+    assert.deepEqual(result, [{ teamId: 'stable-a', title: 'Project', targetIds: ['restored-home'] }]);
+    assert.equal(binding.sessionId, null, 'Grouping never rebinds an unowned home page');
+    assert.equal(repository.uniqueTeamForTarget('conflicting-home'), null);
+    assert.equal(repository.uniqueTeamForTarget('unknown-home'), null);
+    assert.deepEqual(resolveNativeTeamTabs([], [
+      { targetId: 'restored-home', type: 'page', url: 'https://chatgpt.com/' },
+    ], [], resolve), result, 'Native targets omitted by Playwright retain the same exact team');
+    assert.deepEqual(resolveNativeTeamTabs([], [
+      { targetId: 'restored-home', type: 'page', url: 'https://other.example/' },
+      { targetId: 'restored-home', type: 'page', url: 'https://chatgpt.com/', browserContextId: 'private' },
+    ], ['private'], resolve), [], 'Foreign sites and private targets remain excluded');
+    const unknown = { ...binding, sessionId: 'pending-original', state: 'identity_lost', url: 'https://chatgpt.com/c/not-yet-acknowledged' };
+    assert.deepEqual(resolveNativeTeamTabs([unknown], [], [], resolve), result,
+      'Exact retained target groups before canonical conversation/ACK recovery');
+    assert.equal(unknown.state, 'identity_lost', 'Organization does not restore mutation ownership');
+  } finally { database.close(); }
 });

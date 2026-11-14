@@ -1,6 +1,6 @@
 {
   "name": "sessionplane",
-  "version": "0.4.93",
+  "version": "0.4.94",
   "description": "Durable local runtime for role-addressed browser-backed AI chat sessions",
   "private": true,
   "type": "module",
@@ -15,24 +15,32 @@
     "bin/runtime-state.mjs",
     "dist",
     "skills",
-    "README.md"
+    "README.md",
+    "scripts/offline-state-rehearsal.mjs"
   ],
   "scripts": {
     "prepack": "npm run build",
     "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsc -p tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.json && node scripts/release-preflight.mjs --emit-build-identity",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "node --test --test-concurrency=1 --experimental-strip-types test/**/*.test.ts",
-    "test:ci": "node --test --test-concurrency=1 --experimental-strip-types $(find test -name '*.test.ts' ! -path 'test/browser/*' ! -path 'test/integration/browser-cli-mcp.test.ts' | sort)",
-    "test:acceptance": "node --test --test-concurrency=1 --experimental-strip-types test/reliability/soak.test.ts test/integration/session-send.test.ts test/integration/large-answer-transport.test.ts test/integration/team-session-rpc.test.ts",
-    "test:reliability": "node --test --test-concurrency=1 --experimental-strip-types test/reliability/*.test.ts test/integration/restart-recovery.test.ts test/browser/browser-restart-recovery.test.ts",
+    "test": "npm run test:ci && npm run test:browser",
+    "test:ci": "node --test --test-concurrency=1 --experimental-strip-types test/integration/public-cli.test.ts test/integration/public-task-rpc.test.ts test/integration/public-second-slot.test.ts test/integration/offline-state-rehearsal.test.ts test/integration/live-task-acceptance.test.ts test/integration/live-candidate-preflight.test.ts test/integration/health-rpc.test.ts test/integration/public-remote-ssh.test.ts test/unit/*.test.ts test/reliability/soak.test.ts test/contract/handover.test.ts",
+    "test:acceptance": "npm run test:ci && npm run test:browser && npm run test:package",
+    "test:reliability": "node --test --test-concurrency=1 --experimental-strip-types test/unit/durable-task-kernel.test.ts test/unit/managed-continuation.test.ts test/integration/public-cli.test.ts test/browser/semantic-core-composition.test.ts test/reliability/soak.test.ts",
     "test:package": "node scripts/package-smoke.mjs",
     "release:preflight": "node scripts/release-preflight.mjs",
     "dev": "node --watch --experimental-strip-types src/main.ts",
     "doctor": "node --experimental-strip-types src/cli/main.ts doctor --json",
     "start": "node dist/main.js",
     "verify": "npm run typecheck && npm test && npm run build && npm run doctor",
-    "verify:clean": "node scripts/clean-checkout-gate.mjs"
+    "verify:clean": "node scripts/clean-checkout-gate.mjs",
+    "test:legacy": "node --test --test-concurrency=1 --experimental-strip-types $(find test -name '*.test.ts' ! -path 'test/browser/*' ! -path 'test/integration/browser-cli-mcp.test.ts' | sort)",
+    "test:browser": "node --test --test-concurrency=1 --experimental-strip-types test/browser/semantic-core-composition.test.ts test/browser/closed-pro-model.test.ts test/browser/four-project-background.test.ts",
+    "test:live-preflight": "node scripts/live-candidate-preflight.mjs",
+    "test:live-task": "node scripts/live-task-acceptance.mjs",
+    "test:background-l2": "SESSIONPLANE_RUN_HEADLESS_BROWSER_L2=1 node --test --experimental-strip-types test/browser/owned-page-liveness.benchmark.test.ts",
+    "test:browser-transport-l2": "SESSIONPLANE_COMPARE_BROWSER_TRANSPORT_L2=1 node --test --experimental-strip-types test/browser/owned-page-transport.comparison.test.ts",
+    "test:candidate": "node scripts/candidate-acceptance.mjs"
   },
   "dependencies": {
     "playwright-core": "1.64.0",

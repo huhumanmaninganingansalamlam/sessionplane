@@ -7,6 +7,14 @@ import { providerArtifactsMigration } from './0004-provider-artifacts.ts';
 import { teamOwnerIndexMigration } from './0005-team-owner-index.ts';
 import { pageTargetIdentityMigration } from './0006-page-target-identity.ts';
 import { conversationLoadRecoveryMigration } from './0007-conversation-load-recovery.ts';
+import { generationEventIndexMigration } from './0008-generation-event-index.ts';
+import { durableTaskKernelMigration } from './0009-durable-task-kernel.ts';
+import { kernelDispatchEvidenceMigration } from './0010-kernel-dispatch-evidence.ts';
+import { kernelAttemptSessionBindingMigration } from './0011-kernel-attempt-session-binding.ts';
+import { kernelBackendReadPacingMigration } from './0012-kernel-backend-read-pacing.ts';
+import { publicTaskAdmissionMigration } from './0013-public-task-admission.ts';
+import { kernelRootDispatchEvidenceMigration } from './0014-kernel-root-dispatch-evidence.ts';
+import { kernelTaskCancelReceiptsMigration } from './0015-kernel-task-cancel-receipts.ts';
 
 export interface Migration {
   readonly version: number;
@@ -22,6 +30,14 @@ export const migrations: readonly Migration[] = [
   teamOwnerIndexMigration,
   pageTargetIdentityMigration,
   conversationLoadRecoveryMigration,
+  generationEventIndexMigration,
+  durableTaskKernelMigration,
+  kernelDispatchEvidenceMigration,
+  kernelAttemptSessionBindingMigration,
+  kernelBackendReadPacingMigration,
+  publicTaskAdmissionMigration,
+  kernelRootDispatchEvidenceMigration,
+  kernelTaskCancelReceiptsMigration,
 ];
 
 export function runMigrations(database: DatabaseSync, now: () => Date = () => new Date()): number {

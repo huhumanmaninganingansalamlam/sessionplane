@@ -1,8 +1,6 @@
 import { CoreMaintenance } from './core/maintenance.ts';
 import { ThinkingFailureRecovery } from './core/thinking-failure-recovery.ts';
 import { ConversationLoadRecovery } from './core/conversation-load-recovery.ts';
-import { TeamWorkflow } from './core/team-workflow.ts';
-import { registerWorkflowMethods } from './rpc/methods/workflow.ts';
 import { SessionRepository } from './storage/session-repository.ts';
 import { EventRepository } from './storage/event-repository.ts';
 import { homedir } from 'node:os';
@@ -22,20 +20,13 @@ import { RecoveryService } from './core/recovery-service.ts';
 import { StopService } from './core/stop-service.ts';
 import { TeamDirectory } from './core/team-directory.ts';
 import { SubmissionService } from './core/submission-service.ts';
-import { ConversationCleanupService } from './core/conversation-cleanup-service.ts';
 import { SessionUiService } from './core/session-ui-service.ts';
 import { createLogger, type Logger } from './logging.ts';
 import { RpcRouter } from './rpc/router.ts';
 import { RpcServer } from './rpc/server.ts';
 import { registerBrowserMethods } from './rpc/methods/browser.ts';
-import { registerBrowserControlMethods } from './rpc/methods/browser-control.ts';
-import { registerArtifactMethods } from './rpc/methods/artifact.ts';
-import { registerSessionMethods } from './rpc/methods/session.ts';
-import { registerSessionUiMethods } from './rpc/methods/session-ui.ts';
-import { registerSendMethods } from './rpc/methods/send.ts';
-import { registerStopMethods } from './rpc/methods/stop.ts';
-import { registerTeamMethods } from './rpc/methods/team.ts';
-import { registerWaitMethods } from './rpc/methods/wait.ts';
+import { registerTaskMethods } from './rpc/methods/task.ts';
+import { PublicTaskAdmissionService } from './core/public-task-admission.ts';
 import { ActorScheduler } from './scheduler/actor-scheduler.ts';
 import { ProbeCoordinator } from './scheduler/probe-coordinator.ts';
 import { SessionPlaneDatabase } from './storage/database.ts';
@@ -43,6 +34,10 @@ import { PageBindingRepository } from './storage/page-binding-repository.ts';
 import { ReceiptRepository } from './storage/receipt-repository.ts';
 import { RuntimeMetrics } from './telemetry/metrics.ts';
 import { ChatGptAdapter } from './providers/chatgpt/adapter.ts';
+import { createSemanticCoreRuntime, type SemanticCoreRuntime } from './core/semantic-core-runtime.ts';
+import type { DurableTaskKernel } from './core/durable-task-kernel.ts';
+import type { SemanticProviderRegistry } from './providers/semantic-provider-registry.ts';
+import type { TaskKernelRepository } from './storage/task-kernel-repository.ts';
 import { GeminiAdapter } from './providers/gemini/adapter.ts';
 import { GrokAdapter } from './providers/grok/adapter.ts';
 import {
@@ -69,6 +64,12 @@ export interface CoreService {
   readonly metrics: RuntimeMetrics;
   readonly pageBindings: PageBindingRepository;
   readonly providerAdapters: ProviderAdapterRegistry;
+  readonly semanticProviders: SemanticProviderRegistry;
+  readonly semanticTaskRepository: TaskKernelRepository;
+  readonly semanticTaskKernel: DurableTaskKernel;
+  readonly semanticDecisionGateway: SemanticCoreRuntime['decisionGateway'];
+  readonly semanticManagedContinuation: SemanticCoreRuntime['managedContinuation'];
+  readonly semanticTaskBindAttemptSession: SemanticCoreRuntime['bindAttemptSession'];
   readonly observationService: ObservationService;
   readonly thinkingFailureRecovery: ThinkingFailureRecovery;
   readonly conversationLoadRecovery: ConversationLoadRecovery;
@@ -88,7 +89,6 @@ export interface StartCoreOptions {
   readonly browserHeadless?: boolean;
   readonly providerAdapters?: readonly ProviderAdapter[];
   readonly recoveryNavigatePage?: (page: Page, url: string) => Promise<void>;
-  readonly enableInternalBrowserControlRpc?: boolean;
 }
 
 export async function startCore(options: StartCoreOptions = {}): Promise<CoreService> {
@@ -124,12 +124,13 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
           browserPreference: config.browserPreference,
           browserExecutable: config.browserExecutable,
           launchTimeoutMs: config.browserLaunchTimeoutMs,
-          resolveTeam: (sessionId, conversationId) => {
+          resolveTeam: (sessionId, conversationId, targetId) => {
             const sessions = new SessionRepository(database.raw);
             const session = sessionId ? sessions.getSession(sessionId)
               : conversationId ? sessions.getUniqueConversationSession(conversationId) : null;
-            if (!session) return null;
-            const team = teamDirectory.getTeam(session.teamId);
+            const teamId = session?.teamId ?? (targetId ? pageBindings.uniqueTeamForTarget(targetId) : null);
+            if (!teamId) return null;
+            const team = teamDirectory.getTeam(teamId);
             return { teamId: team.teamId, title: team.name?.trim() || team.teamId };
           },
         });
@@ -199,6 +200,29 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       config.enabledProviders.includes(adapter.provider as ProviderName),
     ),
   );
+  const { providers: semanticProviders, repository: semanticTaskRepository,
+    kernel: semanticTaskKernel,
+    decisionGateway: semanticDecisionGateway,
+    managedContinuation: semanticManagedContinuation,
+    bindAttemptSession: semanticTaskBindAttemptSession } = createSemanticCoreRuntime({
+    database, browserOwner, pageRegistry, teamDirectory, actorScheduler, pageMutationMutex,
+    enabledProviders: config.enabledProviders, chatgptUrl: config.chatgptUrl,
+    backendRequestTimeoutMs: config.backendRequestTimeoutMs,
+    tokenCacheTtlMs: config.tokenCacheTtlMs,
+    onBackendRateLimit: evidence => logger.warn('semantic.backend.rate-limit-observed', {
+      status: evidence.status, method: evidence.method,
+      endpointCategory: evidence.endpointCategory, receivedAt: evidence.receivedAt,
+      retryAfterSource: evidence.retryAfterSource,
+      retryAfterDurationMs: evidence.retryAfterDurationMs,
+    }),
+    canRunContinuation: () => !maintenance.paused,
+  });
+  // Reconcile only attempts which irreversibly entered dispatch before the
+  // previous Core died. A missing ACK is uncertain, never permission to send.
+  const interruptedSemantic = semanticTaskRepository.recoverInterruptedDispatches();
+  if (interruptedSemantic > 0) {
+    logger.warn('semantic.dispatch.recovered_uncertain', { attempts: interruptedSemantic });
+  }
   const probeCoordinator = new ProbeCoordinator({
     database,
     successIntervalMs: config.probeSuccessIntervalMs,
@@ -372,21 +396,6 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     profileDir: config.profileDir,
     recoverBrowser: () => restartBrowser(),
   });
-  if (options.enableInternalBrowserControlRpc === true) {
-    registerBrowserControlMethods(router, browserControl);
-  }
-  registerArtifactMethods(router, artifactService);
-  const cleanup = new ConversationCleanupService({
-    directory: teamDirectory, onDeleted: sessionId => recovery.forgetSession(sessionId),
-    verifyPreservingReplacement: session => ui.verifyPreservingReplacement(session),
-    isFailedConversationPage: async (pageKey, session) => session.conversationId !== null && browserOwner !== null &&
-      await browserOwner.isFailedConversationPage(pageKey, session.provider, session.conversationId),
-    closeCrashedPages: async (session, canClose) => session.conversationId === null || browserOwner === null
-      ? { closedPages: 0, pageErrors: [] }
-      : await browserOwner.closeCrashedConversationPages(session.provider, session.conversationId, canClose),
-    database, scheduler: actorScheduler, adapters: providerAdapters,
-    pageMutex: pageMutationMutex, registry: pageRegistry,
-  });
   const ui = new SessionUiService({
     browserOwner,
     submissions: submissionService,
@@ -394,21 +403,13 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     chatgptUrl: config.chatgptUrl,
     quietWindowMs: config.observationQuietWindowMs,
   });
-  registerSessionMethods(router, teamDirectory, receipts, cleanup, ui);
   thinkingFailureRecovery = new ThinkingFailureRecovery({ maintenance, database, submissions: submissionService, ui });
-  registerSessionUiMethods(router, ui);
-  registerTeamMethods(router, teamDirectory, receipts, cleanup, stopService);
-  registerWorkflowMethods(router, new TeamWorkflow({
-    database, directory: teamDirectory, receipts, submissions: submissionService, ui,
-    scheduler: actorScheduler, artifacts: artifactService, stops: stopService, cleanup,
-    pageMutex: pageMutationMutex,
-    enabledProviders: config.enabledProviders,
-    retireObservation: sessionId => recovery.forgetSession(sessionId),
-    ensurePage: (sessionId, generation, options) => recovery.ensurePage(sessionId, generation, options),
-  }));
-  registerSendMethods(router, submissionService);
-  registerStopMethods(router, stopService);
-  registerWaitMethods(router, teamDirectory, actorScheduler);
+  registerTaskMethods(router, {
+    repository: semanticTaskRepository, gateway: semanticDecisionGateway,
+    admission: new PublicTaskAdmissionService({
+      database, repository: semanticTaskRepository, teamDirectory,
+    }),
+  });
 
   const rpcServer = new RpcServer({
     socketPath: config.socketPath,
@@ -466,6 +467,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       ).finally(release);
   }, 5_000);
   browserRecoveryTimer?.unref();
+  semanticManagedContinuation.start();
   return {
     maintenance,
     config,
@@ -483,6 +485,12 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     metrics,
     pageBindings,
     providerAdapters,
+    semanticProviders,
+    semanticTaskRepository,
+    semanticTaskKernel,
+    semanticDecisionGateway,
+    semanticManagedContinuation,
+    semanticTaskBindAttemptSession,
     observationService,
     thinkingFailureRecovery,
     conversationLoadRecovery,
@@ -498,6 +506,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
         return;
       }
       closed = true;
+      await semanticManagedContinuation.close();
       maintenance.resume();
       if (browserRecoveryTimer !== null) clearInterval(browserRecoveryTimer);
       await browserRecovery?.catch(() => undefined);

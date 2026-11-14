@@ -3,7 +3,7 @@
 Require issuer coordination for legacy cores, or explicitly use a live core admission fence.
 Sampled health is never a substitute for either protection.
 """
-import argparse, datetime, hashlib, json, os, pathlib, pwd, signal, socket, sqlite3, subprocess, sys, tarfile, tempfile, time
+import argparse, datetime, hashlib, json, os, pathlib, pwd, shutil, signal, socket, sqlite3, subprocess, sys, tarfile, tempfile, time, uuid
 from contextlib import closing, contextmanager
 
 if not __debug__:
@@ -269,14 +269,34 @@ def frozen_guard(current, expected, ticks, chrome_ticks, target, identity, recov
     no_writer(expected['database']['path'])
 
 
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with pathlib.Path(path).open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def verify_package(installed, pkg, manifest):
     with tarfile.open(pkg) as archive:
         for member in archive.getmembers():
             if member.isfile():
-                assert (installed/member.name.removeprefix('package/')).read_bytes() == archive.extractfile(member).read(), 'Package bytes differ'
+                target = installed/member.name.removeprefix('package/')
+                assert target.is_file() and target.read_bytes() == archive.extractfile(member).read(), 'Package bytes differ'
+    identity = json.loads((installed/'dist/build-identity.json').read_text())
+    assert identity['sourceCommit'] == manifest['sourceCommit'], 'Candidate build commit differs'
+    assert identity.get('sourceTree') == manifest.get('sourceTree'), 'Candidate build tree differs'
+    assert identity['sourceState'] == 'clean', 'Candidate build is not a clean committed source'
+    assert identity['version'] == manifest['version'], 'Candidate build version differs'
     script = "import {pathToFileURL} from 'node:url'; import {createHash} from 'node:crypto'; const {MCP_TOOLS}=await import(pathToFileURL(process.argv[1]).href); console.log(createHash('sha256').update(JSON.stringify(MCP_TOOLS)).digest('hex'));"
     catalog = subprocess.check_output(['node', '--input-type=module', '-e', script, str(installed/'dist/mcp/tools.js')], text=True).strip()
     assert catalog == manifest['installedCatalogSha256'], 'MCP catalog differs'
+    browser_owner = sha256_file(installed/'dist/browser/browser-owner.js')
+    assert browser_owner == manifest['candidateBrowserOwnerSha256'], 'Candidate BrowserOwner differs'
+    assert (installed/'scripts/offline-state-rehearsal.mjs').is_file(), 'Candidate omits offline state helper'
+    help_text = subprocess.check_output([str(installed/'bin/sessplane.mjs'), '--help'], text=True)
+    for name in ['project', 'task']:
+        assert name in help_text, 'Candidate public CLI contract missing'
     return catalog
 
 
@@ -487,9 +507,35 @@ def verify_pre_signal_resume(prior, h, installed, pkg, manifest, target):
 
 def validate_candidate(manifest, local_validation):
     if local_validation is None:
-        assert manifest['ciConclusion'] == 'success', 'Candidate CI not successful'
+        assert manifest.get('ciConclusion') == 'success', 'Candidate CI not successful'
         return
     report = json.loads(local_validation.read_text())
+    if report.get('contract') == 'sessionplane-candidate-acceptance-v1':
+        source = report.get('source', {})
+        assert source.get('head') == manifest['sourceCommit'], 'Local validation source differs'
+        assert source.get('tree') == manifest.get('sourceTree'), 'Local validation tree differs'
+        assert source.get('currentHead') == source.get('head') and source.get('currentTree') == source.get('tree'), 'Candidate source changed during acceptance'
+        assert source.get('currentWorktreeClean') is True and source.get('buildMatchesCleanHead') is True, 'Candidate acceptance was not clean and bound'
+        assert source.get('sourceIssues') == [], 'Candidate source provenance has issues'
+        assert report.get('externalPackageSha256') == manifest['packageSha256'], 'Local validation package differs'
+        assert report.get('candidateL1L2L4Passed') is True, 'Candidate acceptance gates did not pass'
+        required = manifest.get('requiredGates', [
+            'typecheck', 'public-core-ci', 'chromium-composition', 'four-background-tabs',
+            'browser-transport-comparison', 'semantic-adapter', 'clean-build',
+            'installed-tarball-core'])
+        gates = {gate.get('name'): gate for gate in report.get('gates', [])}
+        assert set(required).issubset(gates), 'Candidate acceptance is missing required gates'
+        for name in required:
+            gate = gates[name]
+            assert gate.get('passed') is True and gate.get('exitCode') == 0, 'Candidate gate failed: ' + name
+            if gate.get('assertionsFailed') is not None:
+                assert gate['assertionsFailed'] == 0, 'Candidate assertions failed: ' + name
+            if gate.get('skipped') is not None:
+                assert gate['skipped'] == 0, 'Candidate gate skipped assertions: ' + name
+        return
+    # Retain the established legacy local receipt parser for old same-schema
+    # bundles. A schema-transition bundle must use the acceptance-v1 contract.
+    assert 'schemaTransition' not in manifest, 'Schema transition needs candidate-acceptance-v1 evidence'
     assert report['sourceCommit'] == manifest['sourceCommit'], 'Local validation source differs'
     assert report['packageSha256'] == manifest['packageSha256'], 'Local validation package differs'
     assert report['typecheck'] == report['build'] == 'success', 'Local build validation incomplete'
@@ -508,6 +554,16 @@ def validate_candidate(manifest, local_validation):
         assert count > 0 and all(line in focused for line in [f'ℹ tests {count}\n', f'ℹ pass {count}\n',
             'ℹ fail 0\n', 'ℹ cancelled 0\n', 'ℹ skipped 0\n']), 'Focused suite incomplete'
 
+
+def schema_transition(manifest, current_schema):
+    transition = manifest.get('schemaTransition')
+    if transition is None:
+        return None
+    assert set(transition) == {'from', 'to'}, 'Schema transition contract is ambiguous'
+    source, target = transition['from'], transition['to']
+    assert isinstance(source, int) and isinstance(target, int) and target >= source >= 0
+    assert current_schema == source, 'Live schema differs from transition source'
+    return source, target
 
 def require_admission_fence(h, required):
     if required:
@@ -551,6 +607,399 @@ def prepare_maintenance(h, recovery_handover=False):
         **lease_owner(h), 'drainTimeoutMs': 5000, 'leaseMs': 30000})
 
 
+class LiveSuccessorError(RuntimeError):
+    pass
+
+
+def sqlite_schema(path):
+    with closing(sqlite3.connect(pathlib.Path(path).resolve().as_uri() + '?mode=ro', uri=True)) as db:
+        row = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").fetchone()
+        return int(db.execute('SELECT COALESCE(MAX(version),0) FROM schema_migrations').fetchone()[0]) if row else 0
+
+
+def verify_sqlite(path, expected_schema=None):
+    with closing(sqlite3.connect(pathlib.Path(path).resolve().as_uri() + '?mode=ro', uri=True)) as db:
+        integrity = db.execute('PRAGMA integrity_check').fetchall()
+        assert integrity == [('ok',)], 'SQLite full integrity check failed'
+        foreign = db.execute('PRAGMA foreign_key_check').fetchall()
+        assert not foreign, 'SQLite foreign-key check failed'
+        schema = sqlite_schema(path)
+        if expected_schema is not None:
+            assert schema == expected_schema, f'Expected schema {expected_schema}, got {schema}'
+        return {'schemaVersion': schema, 'integrity': 'ok', 'foreignKeyViolations': 0}
+
+
+def run_offline(candidate, mode, options, log_path, timeout=1800):
+    helper = candidate/'scripts/offline-state-rehearsal.mjs'
+    command = ['node', str(helper), mode]
+    for key, value in options.items():
+        command += ['--' + key, str(value)]
+    result = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
+    pathlib.Path(log_path).write_text(json.dumps({
+        'command': command, 'exitCode': result.returncode,
+        'stdout': result.stdout, 'stderr': result.stderr,
+    }, indent=2))
+    pathlib.Path(log_path).chmod(0o600)
+    if result.returncode != 0:
+        raise RuntimeError(f'Offline state {mode} failed; inspect {log_path}')
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    assert lines, 'Offline state helper returned no receipt'
+    return json.loads(lines[-1])
+
+
+def seed_transition_evidence(candidate, database_path, receipt):
+    marker = 'handover-' + uuid.uuid4().hex
+    script = r"""
+import { pathToFileURL } from 'node:url';
+const [root, file, marker] = process.argv.slice(1);
+const { SessionPlaneDatabase } = await import(pathToFileURL(root + '/dist/storage/database.js').href);
+const { TaskKernelRepository } = await import(pathToFileURL(root + '/dist/storage/task-kernel-repository.js').href);
+const database = SessionPlaneDatabase.open(file);
+try {
+  const store = new TaskKernelRepository(database);
+  for (const [index, phase] of ['uncertain', 'final', 'draft'].entries()) {
+    const projectId = marker + '-project-' + index;
+    const taskId = marker + '-task-' + index;
+    const attemptId = marker + '-attempt-' + index;
+    store.openProject({ projectId, clientId: marker, projectKey: projectId, displayName: phase });
+    store.openSlot({ projectId, clientId: marker, slotId: 'main', roleKey: 'main', providerKey: 'chatgpt' });
+    store.startTask({ taskId, projectId, slotId: 'main', clientId: marker,
+      requestId: marker + '-start-' + phase, expectedSlotRevision: 1, prompt: 'handover ' + phase });
+    store.planAttempt({ taskId, clientId: marker, attemptId,
+      kind: 'initial', turnKey: 'root', content: 'handover ' + phase });
+    if (phase !== 'draft') store.beginDispatch(taskId, marker, attemptId);
+    if (phase === 'uncertain') store.markUncertain(taskId, marker, attemptId, 'handover-lost-ack');
+    if (phase === 'final') {
+      store.acknowledgeAttempt({ taskId, clientId: marker, attemptId, externalTurnId: marker + '-turn' });
+      store.recordFinal({ taskId, clientId: marker, attemptId,
+        externalTurnId: marker + '-turn', resultId: marker + '-result',
+        answerText: 'handover exact final\n  retained', completeTask: true });
+    }
+  }
+} finally { database.close(); }
+console.log(JSON.stringify({ marker }));
+"""
+    result = subprocess.run(['node', '--input-type=module', '-e', script,
+        str(candidate), str(database_path), marker], text=True, capture_output=True, timeout=60)
+    save(receipt/'rehearsal-task-write.json', {'exitCode': result.returncode,
+        'stdout': result.stdout, 'stderr': result.stderr, 'marker': marker})
+    if result.returncode != 0:
+        raise RuntimeError('Unable to write isolated rollback rehearsal evidence')
+    return marker
+
+
+def verify_transition_evidence(path, marker):
+    verify_sqlite(path)
+    with closing(sqlite3.connect(pathlib.Path(path))) as db:
+        rows = db.execute('SELECT task_id,state FROM kernel_attempts WHERE task_id LIKE ? ORDER BY task_id',
+                          (marker + '-task-%',)).fetchall()
+        answer = db.execute('SELECT answer_text FROM kernel_results WHERE task_id LIKE ?',
+                            (marker + '-task-%',)).fetchone()
+    assert [row[1] for row in rows] == ['uncertain', 'acknowledged', 'planned'], 'Rollback evidence states changed'
+    assert answer == ('handover exact final\n  retained',), 'Rollback FINAL bytes changed'
+    return {'marker': marker, 'attemptStates': [row[1] for row in rows],
+            'finalSha256': hashlib.sha256(answer[0].encode()).hexdigest()}
+
+
+def rehearse_schema_transition(candidate, source_path, transition, receipt):
+    source_schema, target_schema = transition
+    migration = receipt/'preflight-migration'
+    rollback = receipt/'preflight-rollback'
+    migrated = run_offline(candidate, 'migrate', {
+        'source': source_path, 'destination': migration,
+    }, receipt/'preflight-migration.log')
+    assert migrated['sourceSchemaVersion'] == source_schema, 'Rehearsal source schema differs'
+    assert migrated['schemaVersion'] == target_schema, 'Rehearsal target schema differs'
+    assert migrated['integrityCheck'] == 'ok' and migrated['foreignKeyViolations'] == 0
+    assert all(row['count'] == 0 for row in migrated.get('createdKernelTables', [])), 'Task/slot collision in migrated copy'
+    candidate_db = migration/'candidate.sqlite'
+    marker = seed_transition_evidence(candidate, candidate_db, receipt)
+    candidate_hash = sha256_file(candidate_db)
+    rolled = run_offline(candidate, 'rollback', {
+        'migration': migration, 'candidate': candidate_db, 'destination': rollback,
+    }, receipt/'preflight-rollback.log')
+    assert rolled['candidateWasNeverOverwritten'] and rolled['postMigrationEvidencePreserved']
+    assert sha256_file(candidate_db) == candidate_hash, 'Rollback rehearsal overwrote candidate'
+    evidence = verify_transition_evidence(rollback/'post-migration-evidence.sqlite', marker)
+    verify_sqlite(rollback/'restored-original.sqlite', source_schema)
+    report = {'migration': migrated, 'rollback': rolled, 'evidence': evidence,
+              'candidateSha256AfterTaskWrites': candidate_hash}
+    save(receipt/'schema-transition-rehearsal.json', report)
+    return report
+
+
+def promote_database(database_path, migration_dir, receipt, transition):
+    source_schema, target_schema = transition
+    database_path = pathlib.Path(database_path)
+    candidate = pathlib.Path(migration_dir)/'candidate.sqlite'
+    verify_sqlite(candidate, target_schema)
+    verify_sqlite(pathlib.Path(migration_dir)/'source-snapshot.sqlite', source_schema)
+    assert candidate.stat().st_dev == database_path.parent.stat().st_dev, 'Database promotion must be same-filesystem'
+    # Keep the sealed migrated candidate beside its manifest. A private copy is
+    # the only file renamed into the live path, so the migration receipt remains
+    # independently verifiable after success or rollback.
+    staged = database_path.parent/('.sessionplane-promote-' + uuid.uuid4().hex + '.sqlite')
+    shutil.copy2(candidate, staged); staged.chmod(0o600)
+    verify_sqlite(staged, target_schema)
+    archive = receipt/'database-archive'
+    archive.mkdir(mode=0o700)
+    moved = []
+    try:
+        for suffix in ['', '-wal', '-shm']:
+            current = pathlib.Path(str(database_path) + suffix)
+            if current.exists():
+                target = archive/(database_path.name + suffix)
+                current.rename(target)
+                moved.append((target, current))
+        staged.rename(database_path)
+        verify_sqlite(database_path, target_schema)
+    except BaseException:
+        if database_path.exists() and sqlite_schema(database_path) == target_schema:
+            failed = archive/'uncommitted-candidate.sqlite'
+            if not failed.exists(): database_path.rename(failed)
+        if staged.exists(): staged.unlink()
+        for archived, original in reversed(moved):
+            if archived.exists() and not original.exists(): archived.rename(original)
+        raise
+    report = {'phase': 'promoted', 'sourceSchemaVersion': source_schema,
+              'targetSchemaVersion': target_schema, 'livePath': str(database_path),
+              'archive': str(archive), 'archivedFiles': [str(pair[0]) for pair in moved],
+              'sealedCandidate': str(candidate), 'sealedCandidateSha256': sha256_file(candidate),
+              'liveSha256': sha256_file(database_path)}
+    save(receipt/'database-promotion.json', report)
+    return report
+
+def systemd_properties(unit):
+    result = subprocess.check_output(['systemctl', '--user', 'show', unit,
+        '-p', 'ActiveState', '-p', 'SubState', '-p', 'MainPID', '-p', 'Restart',
+        '--no-pager'], text=True)
+    values = {}
+    for line in result.splitlines():
+        if '=' in line:
+            key, value = line.split('=', 1); values[key] = value
+    values['MainPID'] = int(values.get('MainPID', '0') or 0)
+    return values
+
+
+def verify_systemd_owner(unit, pid):
+    props = systemd_properties(unit)
+    assert props['MainPID'] == pid and props['ActiveState'] == 'active', 'Systemd unit does not own exact old Core'
+    assert props.get('Restart') == 'no', 'Core-only maintenance exit requires Restart=no'
+    return props
+
+
+def start_systemd_core(unit, receipt, label):
+    subprocess.run(['systemctl', '--user', 'start', unit], check=True,
+                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    props = systemd_properties(unit)
+    save(receipt/(label + '-systemd.json'), props)
+    assert props['MainPID'] > 0, 'Systemd did not start a Core process'
+    return props['MainPID']
+
+
+def await_systemd_ready(unit, expected_pid, timeout=180):
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        props = systemd_properties(unit)
+        if props['MainPID'] not in (0, expected_pid):
+            raise RuntimeError('Systemd replaced the pinned successor unexpectedly')
+        if props['MainPID'] == 0 or props['ActiveState'] in ('failed', 'inactive'):
+            raise RuntimeError('Core exited before readiness')
+        try:
+            last = health()
+            if last['process']['pid'] != expected_pid:
+                raise RuntimeError('Socket has a different Core owner')
+            if last['browser']['state'] == 'error':
+                raise LiveSuccessorError('Live successor reports browser failure; preserve it')
+            if last['requestOk'] and last['browser']['state'] == 'ready':
+                return last
+        except (subprocess.SubprocessError, ValueError, FileNotFoundError):
+            pass
+        time.sleep(1)
+    if live(expected_pid):
+        raise LiveSuccessorError('Live successor did not become ready in bounded observation; preserve it')
+    raise RuntimeError('Core exited before readiness')
+
+
+def archive_failed_candidate(database_path, destination):
+    destination.mkdir(mode=0o700)
+    moved = []
+    for suffix in ['', '-wal', '-shm']:
+        current = pathlib.Path(str(database_path) + suffix)
+        if current.exists():
+            target = destination/(pathlib.Path(database_path).name + suffix)
+            current.rename(target); moved.append(str(target))
+    return moved
+
+
+def restore_original_database(database_path, restored_path):
+    database_path = pathlib.Path(database_path)
+    restored_path = pathlib.Path(restored_path)
+    assert restored_path.stat().st_dev == database_path.parent.stat().st_dev
+    staged = database_path.parent/('.sessionplane-restore-' + uuid.uuid4().hex + '.sqlite')
+    shutil.copy2(restored_path, staged); staged.chmod(0o600)
+    staged.rename(database_path)
+
+def restart_original_systemd(h, unit, installed, stage, receipt, target, identity, chrome_ticks,
+                             restore_files=False):
+    if restore_files:
+        restore_install(installed, stage, receipt)
+    verify_sqlite(h['database']['path'], h['database']['schemaVersion'])
+    old = start_systemd_core(unit, receipt, 'rollback-core')
+    save(receipt/'rollback-core.json', {'pid': old, 'startedAtUnix': time.time()})
+    after = await_systemd_ready(unit, old)
+    assert after['database']['schemaVersion'] == h['database']['schemaVersion']
+    for key in ['browserPid', 'profileDir', 'debuggingPort']:
+        assert after['browser'][key] == h['browser'][key]
+    assert after['browser']['ownership'] == 'adopted'
+    assert procstat(h['browser']['browserPid'])[19] == chrome_ticks
+    post = request_identity(after, target)
+    assert post['request'] == identity['request'] and post['anchor'] == identity['anchor']
+    save(receipt/'rollback-health.json', after)
+    save(receipt/'rollback.json', {'phase': 'original-core-restored', 'pid': old,
+                                   'databaseRestored': False})
+    return after
+
+
+def execute_schema_transition(h, transition, manifest, installed, candidate, stage, receipt,
+                              unit, target, identity, chrome_ticks, catalog_hash):
+    database_path = pathlib.Path(h['database']['path'])
+    package_promoted = False
+    database_promoted = False
+    successor_pid = None
+    final_migration = receipt/'final-migration'
+    try:
+        final = run_offline(candidate, 'migrate', {
+            'source': database_path, 'destination': final_migration,
+        }, receipt/'final-migration.log')
+        assert final['sourceSchemaVersion'] == transition[0] and final['schemaVersion'] == transition[1]
+        assert final['integrityCheck'] == 'ok' and final['foreignKeyViolations'] == 0
+        assert all(row['count'] == 0 for row in final.get('createdKernelTables', []))
+        save(receipt/'final-migration.json', final)
+        promote_package(installed, candidate, stage, receipt); package_promoted = True
+        promote_database(database_path, final_migration, receipt, transition); database_promoted = True
+        successor_pid = start_systemd_core(unit, receipt, 'successor')
+        save(receipt/'successor.json', {'pid': successor_pid, 'startedAtUnix': time.time(),
+                                       'systemdUnit': unit})
+        after = await_systemd_ready(unit, successor_pid)
+        return after, successor_pid
+    except LiveSuccessorError:
+        save(receipt/'rollback-blocked.json', {'reason': 'successor-live',
+            'pid': successor_pid, 'action': 'preserve live successor, browser, database and evidence'})
+        raise
+    except Exception as error:
+        save(receipt/'startup-failure.json', {'error': str(error), 'packagePromoted': package_promoted,
+             'databasePromoted': database_promoted, 'successorPid': successor_pid})
+        props = systemd_properties(unit)
+        if props['MainPID'] and live(props['MainPID']):
+            save(receipt/'rollback-blocked.json', {'reason': 'successor-live',
+                'pid': props['MainPID'], 'action': 'preserve live successor; no automatic rollback'})
+            raise LiveSuccessorError('Transition failed while successor is live; rollback blocked') from error
+        if database_promoted:
+            rollback_dir = receipt/'failed-candidate-rollback'
+            rolled = run_offline(installed, 'rollback', {
+                'migration': final_migration, 'candidate': database_path,
+                'destination': rollback_dir,
+            }, receipt/'failed-candidate-rollback.log')
+            assert rolled['postMigrationEvidencePreserved'] and rolled['candidateWasNeverOverwritten']
+            failed_files = archive_failed_candidate(database_path, receipt/'failed-candidate-database')
+            restore_original_database(database_path, rollback_dir/'restored-original.sqlite')
+            verify_sqlite(database_path, transition[0])
+            save(receipt/'failed-candidate-evidence.json', {'rollback': rolled,
+                 'archivedLiveFiles': failed_files,
+                 'postMigrationEvidence': str(rollback_dir/'post-migration-evidence.sqlite')})
+            restart_original_systemd(h, unit, installed, stage, receipt, target, identity,
+                                     chrome_ticks, restore_files=package_promoted)
+        elif package_promoted:
+            restart_original_systemd(h, unit, installed, stage, receipt, target, identity,
+                                     chrome_ticks, restore_files=True)
+        else:
+            restart_original_systemd(h, unit, installed, stage, receipt, target, identity,
+                                     chrome_ticks, restore_files=False)
+        raise RuntimeError('Schema transition failed; original Core restored with evidence preserved') from error
+
+
+def single_core_writer(database_path, expected_pid):
+    report = lock_report(database_path)
+    holders = {row['holder']['pid'] for row in report['locks'] if row['holder']['pid'] not in (None, 0)}
+    assert holders.issubset({expected_pid}), 'Foreign or duplicate database holder after handover'
+    return report
+
+
+def materialize_bundle(policy_path, package_path, acceptance_path, destination, rollback_install):
+    policy = json.loads(pathlib.Path(policy_path).read_text())
+    assert policy.get('kind') == 'sessionplane-core-handover-policy-v2'
+    assert policy.get('manifestVersion') == 2
+    assert policy.get('validationContract') == 'sessionplane-candidate-acceptance-v1'
+    package_path = pathlib.Path(package_path).resolve()
+    acceptance_path = pathlib.Path(acceptance_path).resolve()
+    destination = pathlib.Path(destination).resolve()
+    rollback_install = pathlib.Path(rollback_install).resolve()
+    assert package_path.is_file() and acceptance_path.is_file()
+    assert rollback_install.is_dir() and not rollback_install.is_symlink()
+    destination.mkdir(mode=0o700)
+    copied = destination/package_path.name
+    shutil.copy2(package_path, copied)
+    stage = pathlib.Path(tempfile.mkdtemp(prefix='sessionplane-bundle-inspect-'))
+    try:
+        subprocess.run(['npm', 'install', '-g', '--prefix', str(stage), '--ignore-scripts',
+                        '--no-audit', '--no-fund', str(copied)], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        installed = stage/'lib/node_modules/sessionplane'
+        identity = json.loads((installed/'dist/build-identity.json').read_text())
+        script = "import {pathToFileURL} from 'node:url'; import {createHash} from 'node:crypto'; const {MCP_TOOLS}=await import(pathToFileURL(process.argv[1]).href); console.log(createHash('sha256').update(JSON.stringify(MCP_TOOLS)).digest('hex'));"
+        catalog = subprocess.check_output(['node', '--input-type=module', '-e', script,
+            str(installed/'dist/mcp/tools.js')], text=True).strip()
+        manifest = {
+            'kind': 'sessionplane-core-handover-bundle-v2',
+            'manifestVersion': 2,
+            'validationContract': policy['validationContract'],
+            'sourceCommit': identity['sourceCommit'],
+            'sourceTree': identity['sourceTree'],
+            'sourceState': identity['sourceState'],
+            'version': identity['version'],
+            'package': copied.name,
+            'packageSha256': sha256_file(copied),
+            'installedCatalogSha256': catalog,
+            'candidateBrowserOwnerSha256': sha256_file(installed/'dist/browser/browser-owner.js'),
+            'rollbackRuntimeBrowserOwnerSha256': sha256_file(rollback_install/'dist/browser/browser-owner.js'),
+            'schemaTransition': policy['schemaTransition'],
+            'requiredGates': policy['requiredGates'],
+            'ciConclusion': None,
+        }
+        assert manifest['sourceState'] == 'clean'
+        validate_candidate(manifest, acceptance_path)
+        verify_package(installed, copied, manifest)
+        save(destination/'manifest.json', manifest)
+        save(destination/'bundle-receipt.json', {
+            'manifestSha256': sha256_file(destination/'manifest.json'),
+            'packageSha256': manifest['packageSha256'],
+            'acceptance': str(acceptance_path),
+            'rollbackInstall': str(rollback_install),
+        })
+        return manifest
+    except BaseException:
+        if not (destination/'manifest.json').exists():
+            shutil.rmtree(destination, ignore_errors=True)
+        raise
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def bundle_main(argv):
+    parser = argparse.ArgumentParser(description='Materialize an exact reviewed handover bundle')
+    parser.add_argument('--policy', type=pathlib.Path, required=True)
+    parser.add_argument('--package', type=pathlib.Path, required=True)
+    parser.add_argument('--acceptance', type=pathlib.Path, required=True)
+    parser.add_argument('--destination', type=pathlib.Path, required=True)
+    parser.add_argument('--rollback-install', type=pathlib.Path, required=True)
+    args = parser.parse_args(argv)
+    manifest = materialize_bundle(args.policy, args.package, args.acceptance,
+                                  args.destination, args.rollback_install)
+    print(json.dumps(manifest, indent=2))
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--apply', action='store_true')
@@ -571,6 +1020,7 @@ def main():
     parser.add_argument('--resume-pre-signal', type=pathlib.Path)
     parser.add_argument('--resume-staged', type=pathlib.Path)
     parser.add_argument('--receipt-dir', type=pathlib.Path)
+    parser.add_argument('--systemd-unit', help='Exact user unit that owns the Core; required for schema transitions')
     args=parser.parse_args()
     assert not (args.resume_staged and args.resume_pre_signal), 'Choose exactly one reentry contract'
     if args.apply and not (args.issuers_quiesced or args.core_maintenance):
@@ -587,6 +1037,11 @@ def main():
         assert args.resume_pre_signal is not None or args.resume_staged is not None, 'Existing attempt: inspect and explicitly resume a proven pre-signal abort'
         assert (args.resume_staged or args.resume_pre_signal).resolve() == (root/'local-receipt').resolve(), 'Existing bundle receipt must be the inspected prior attempt'
     h=health(); assert h['process']['pid']==args.core_pid and h['browser']['browserPid']==args.chrome_pid, 'PID differs from supplied live receipt'
+    schema_change = schema_transition(manifest, h['database']['schemaVersion'])
+    if schema_change is not None:
+        assert args.systemd_unit, 'Schema transition requires the exact systemd unit owner'
+        assert args.core_maintenance, 'Schema transition requires Core-owned maintenance fencing'
+        verify_systemd_owner(args.systemd_unit, args.core_pid)
     require_admission_fence(h, args.core_maintenance)
     if args.legacy_recovery_handover:
         assert args.core_maintenance and h.get('maintenance', {}).get('coordinatedDrain') and not h['maintenance'].get('durableRecoveryHandover'), 'Legacy recovery migration requires the old coordinated admission fence'
@@ -607,7 +1062,8 @@ def main():
         assert args.receipt_dir is not None and args.receipt_dir.resolve() != args.resume_staged.resolve(), 'Staged reentry needs a new receipt; preserve prior evidence'
         verify_staged_resume(args.resume_staged.resolve(), h, installed, args)
     # Rollback may restart only the reviewed browser-preserving adoption implementation.
-    assert hashlib.sha256((installed/'dist/browser/browser-owner.js').read_bytes()).hexdigest() == manifest['runtimeBrowserOwnerSha256'], 'Unreviewed original browser adoption; no automatic rollback path'
+    rollback_owner_sha = manifest.get('rollbackRuntimeBrowserOwnerSha256', manifest.get('runtimeBrowserOwnerSha256'))
+    assert rollback_owner_sha and sha256_file(installed/'dist/browser/browser-owner.js') == rollback_owner_sha, 'Unreviewed original browser adoption; no automatic rollback path'
     identity=request_identity(h, args)
     # The supported fence drains recovery actors atomically. An idle sample before
     # acquiring it races those actors; all post-fence guards still require idle.
@@ -627,7 +1083,9 @@ def main():
         'sourceCommit': manifest['sourceCommit'], 'packageSha256': manifest['packageSha256'],
         'localValidation': json.loads(args.local_validation.read_text()) if args.local_validation else None,
         'admission': 'core-maintenance' if args.core_maintenance else 'issuers-quiesced',
-        'legacyRecoveryHandover': args.legacy_recovery_handover})
+        'legacyRecoveryHandover': args.legacy_recovery_handover,
+        'schemaTransition': manifest.get('schemaTransition'),
+        'systemdUnit': args.systemd_unit})
     save(receipt/'before-health.json',h); save(receipt/'before-identity.json',identity)
     if args.resume_pre_signal is not None:
         save(receipt/'resumes.json', {'priorReceipt': str(args.resume_pre_signal.resolve()), 'meaning': 'same original live core; pinned candidate already on disk; runtime SHA not inferred from disk'})
@@ -638,6 +1096,8 @@ def main():
     with read_db(h) as db, closing(sqlite3.connect(receipt/'predeploy.sqlite')) as backup:
         db.backup(backup); assert backup.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
     stage, candidate, catalog_hash = stage_package(installed, pkg, manifest, receipt)
+    if schema_change is not None:
+        rehearse_schema_transition(candidate, h['database']['path'], schema_change, receipt)
     # Pin the exact process lifetime. No process groups, killall, SIGTERM, or browser signals.
     fd=os.pidfd_open(pid)
     lease = None
@@ -687,37 +1147,57 @@ def main():
     assert not live(pid), 'Old core still live: do not launch duplicate'
     assert live(args.chrome_pid) and procstat(args.chrome_pid)[19]==chrome_ticks, 'Browser no longer preserved: stop'
     successor = None
-    try:
-        promote_package(installed, candidate, stage, receipt)
-        successor = launch_core(cmd, cwd, runtime_env, receipt, 'successor')
-        save(receipt/'successor.json', {'pid': successor.pid, 'startedAtUnix': time.time()})
-        after = await_ready(successor)
-    except Exception as error:
-        save(receipt/'startup-failure.json', {'error': str(error), 'rollback': 'pending'})
+    if schema_change is not None:
+        after, successor_pid = execute_schema_transition(
+            h, schema_change, manifest, installed, candidate, stage, receipt,
+            args.systemd_unit, args, identity, chrome_ticks, catalog_hash)
+    else:
         try:
-            rollback_exited(h, pid, successor, chrome_ticks, installed, stage, receipt,
-                           cmd, cwd, runtime_env, args, identity)
-        except Exception as recovery_error:
-            save(receipt/'rollback-blocked.json', {'error': str(recovery_error), 'action': 'preserve browser/DB and inspect; do not retry'})
-            raise RuntimeError('Handover failed; recovery not confirmed; inspect receipts') from recovery_error
-        raise RuntimeError('Handover failed; original core restored; release issuer hold, do not repeat') from error
+            promote_package(installed, candidate, stage, receipt)
+            successor = launch_core(cmd, cwd, runtime_env, receipt, 'successor')
+            save(receipt/'successor.json', {'pid': successor.pid, 'startedAtUnix': time.time()})
+            after = await_ready(successor)
+            successor_pid = successor.pid
+        except Exception as error:
+            save(receipt/'startup-failure.json', {'error': str(error), 'rollback': 'pending'})
+            try:
+                rollback_exited(h, pid, successor, chrome_ticks, installed, stage, receipt,
+                               cmd, cwd, runtime_env, args, identity)
+            except Exception as recovery_error:
+                save(receipt/'rollback-blocked.json', {'error': str(recovery_error), 'action': 'preserve browser/DB and inspect; do not retry'})
+                raise RuntimeError('Handover failed; recovery not confirmed; inspect receipts') from recovery_error
+            raise RuntimeError('Handover failed; original core restored; release issuer hold, do not repeat') from error
     assert (after['database'].get('readable') is True or after['database']['integrity']=='ok') and after['database']['path']==h['database']['path']
-    assert after['database']['schemaVersion']==h['database']['schemaVersion']
+    expected_schema = schema_change[1] if schema_change is not None else h['database']['schemaVersion']
+    assert after['database']['schemaVersion']==expected_schema
     assert after['providers']['enabled']==h['providers']['enabled']
+    assert after.get('sourceCommit') == manifest['sourceCommit'] and after.get('sourceTree') == manifest.get('sourceTree')
+    assert after.get('sourceState') == 'clean'
     for key in ['browserPid','profileDir','debuggingPort']: assert after['browser'][key]==h['browser'][key]
     assert after['browser']['ownership']=='adopted'
     assert procstat(args.chrome_pid)[19]==chrome_ticks
-    post=request_identity(after, args)
+    post=request_identity(after,args)
     assert post['request']==identity['request'] and post['anchor']==identity['anchor']
     assert all(post['requests'].get(k)==v for k,v in identity['requests'].items()), 'Durable request changed'
     verify_bindings(after, identity['bindings'], post['bindings'])
+    locks = single_core_writer(h['database']['path'], successor_pid)
+    save(receipt/'after-locks.json', locks)
     save(receipt/'after-health.json',after)
     save(receipt/'after-identity.json',post)
-    result={'sourceCommit':manifest['sourceCommit'],'packageSha256':manifest['packageSha256'],'oldPid':pid,'newPid':successor.pid,'chromePid':args.chrome_pid,'databaseIntegrity':'ok','requestAndAnchorPreserved':True,'bindingIdentityPreserved':True,'browserIdentityPreserved':True,'installedCatalogSha256':catalog_hash,'loadedClientCatalog':'not reloaded; existing request schemas unchanged','draftSelectionVisualCheck':'required by original owner; no browser protocol used by this script','answerRecovery':'not yet verified'}
+    result={'sourceCommit':manifest['sourceCommit'],'sourceTree':manifest.get('sourceTree'),
+        'packageSha256':manifest['packageSha256'],'oldPid':pid,'newPid':successor_pid,
+        'chromePid':args.chrome_pid,'schemaBefore':h['database']['schemaVersion'],
+        'schemaAfter':expected_schema,'databaseIntegrity':'ok',
+        'requestAndAnchorPreserved':True,'bindingIdentityPreserved':True,
+        'browserIdentityPreserved':True,'browserOwnership':'adopted',
+        'singleCoreWriterVerified':True,'installedCatalogSha256':catalog_hash,
+        'systemdUnit':args.systemd_unit,'liveL3':'pending'}
     save(receipt/'result.json',result); print(json.dumps(result,indent=2))
 
 if __name__=='__main__':
-    if sys.argv[1:2] == ['locks']:
+    if sys.argv[1:2] == ['bundle']:
+        bundle_main(sys.argv[2:])
+    elif sys.argv[1:2] == ['locks']:
         parser = argparse.ArgumentParser(description='Read-only current lock metadata; no SQLite connection or core call')
         parser.add_argument('--database', required=True)
         args = parser.parse_args(sys.argv[2:])

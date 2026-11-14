@@ -70,11 +70,16 @@ export class SessionActor {
     };
   }
 
-  approveFollowupCollector(requestRef: string, followupUserMessageId: string): void {
+  approveCollector(requestRef: string, followupUserMessageId?: string): void {
+    let changed = false;
     for (const collector of this.#collectors.values()) {
-      if (collector.requestRef === requestRef && collector.followupUserMessageId === followupUserMessageId)
+      if (collector.requestRef === requestRef && collector.followupUserMessageId === followupUserMessageId && !collector.continuationApproved) {
         collector.continuationApproved = true;
+        changed = true;
+      }
     }
+    // Wake the existing wait to consume its new approval; no provider revision or new subscriber.
+    if (changed) for (const waiter of this.#waiters.values()) waiter.finish(false);
   }
 
   snapshot(): SessionWaitSnapshot {

@@ -136,6 +136,56 @@ test('preparation displays selectable controls and exact continuation commands w
   assert.deepEqual(JSON.parse(json.result().stdout), input);
 });
 
+test('a guarded recovery refusal preserves its error without claiming the acknowledged request was unsent', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-cli-recovery-error-'));
+  const socketPath = path.join(root, 'core.sock');
+  const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const failure = { code: -32000, message: 'Preserve the original turn before stream Retry: retry-obscured',
+    data: { errorCode: 'provider.preparation-required', details: {
+      anchorPresent: true, laterUserFound: false, observedUserMessageId: 'retained-ack',
+    } } };
+  const server = createServer(socket => {
+    let input = '';
+    socket.setEncoding('utf8');
+    socket.on('data', chunk => {
+      input += chunk;
+      if (!input.includes('\n')) return;
+      const request = JSON.parse(input.split('\n')[0]!);
+      requests.push(request);
+      socket.end(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, error: failure })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
+    for (const json of [false, true]) {
+      const output = capture();
+      const code = await runCli(['request', 'continue', 'retained-team', 'retained-request',
+        '--request-id', 'original-recovery', '--continuation-approved', '--wait-ms', '0',
+        '--socket', socketPath, ...(json ? ['--json'] : [])], output.io);
+      assert.equal(code, 1);
+      assert.equal(output.result().stdout, '');
+      if (json) assert.deepEqual(JSON.parse(output.result().stderr), {
+        requestOk: false, errorCode: failure.data.errorCode, message: failure.message, details: failure.data.details,
+      });
+      else {
+        assert.doesNotMatch(output.result().stderr, /request is not sent/i);
+        assert.match(output.result().stderr, /Inspect the same request/);
+        assert.match(output.result().stderr, /do not resend/i);
+      }
+    }
+    assert.equal(requests.length, 2, 'each CLI invocation must return its refusal without retrying or collecting');
+    for (const request of requests) {
+      assert.equal(request.method, 'workflow.decide');
+      assert.equal(request.params.decision, 'continue');
+      assert.equal(request.params.requestRef, 'retained-request');
+      assert.equal(request.params.requestId, 'original-recovery');
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('timeout, provider failure and partial cleanup never masquerade as generation or deletion success', () => {
   const waiting = capture();
   writeCliResult(waiting.io, false, { teamId: 'team', results: [{ requestRef: 'request', submissionState: 'submitted', terminal: false, waitExpired: true }] });

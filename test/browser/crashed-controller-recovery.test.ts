@@ -8,10 +8,17 @@ import { chromium, type ConnectOverCDPOptions, type ConnectOverCDPTransport } fr
 import { BrowserOwner } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 
+const virtualHeaded = process.env.SESSIONPLANE_RUN_VIRTUAL_HEADED_BROWSER_L2 === '1';
+
 test('same-target controller recovery preserves Chrome, request binding, saved draft and sibling generation', async t => {
+  if (virtualHeaded) {
+    assert.equal(process.env.DISPLAY, undefined, 'Never use the real X display');
+    assert.match(process.env.WAYLAND_DISPLAY ?? '', /^sessionplane-l2-/,
+      'Headed crash/recovery fixture requires isolated Mutter Wayland');
+  }
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-crash-controller-'));
   const registry = new PageRegistry();
-  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: !virtualHeaded });
   let loads = 0;
   let redirect = false;
   const server = createServer((request, response) => {

@@ -65,6 +65,18 @@ the agent selects by observed labels, values and requested intent. Freshness,
 ownership and operation-specific checks still run at execution. Submitted
 request observations do not advertise preparation actions.
 
+When a provider question replaces the composer, pending-request evidence exposes
+`providerQuestion` with its current text, exact answer options, availability and
+`evidenceHash`. The owning Coordinator relays its authorized choice with
+`decide answer_question` (`answer`, `evidenceHash`, stable `requestId`), or
+`sessplane request answer_question TEAM_ID REQUEST_REF --answer EXACT_OPTION --evidence-hash HASH`.
+This clicks one enabled option on the exact owned question; it never chooses the
+recommended option automatically, grants a permission, or submits the saved prompt.
+Drafts, holds, explicit Work/conflicts, active generation and permission dialogs
+remain guarded. After an uncertain click, inspect without repeating the answer.
+After success, inspect the same prepared request and resume normal configuration,
+composer and Submit only when available; keep one original result collector after submission.
+
 ## Configuration selection
 
 Preparation evidence exposes `preparationAvailability`. Without a visible,

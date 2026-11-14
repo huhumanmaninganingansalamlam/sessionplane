@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 
 import type { SessionSnapshot } from '../../src/domain/session.ts';
+import { ChatGptSemanticAdapter } from '../../src/providers/chatgpt/semantic-adapter.ts';
 import type { ProviderAcknowledgementRecoveryEvidence } from '../../src/providers/provider-adapter.ts';
 import {
   ChatGptBackendRecovery,
@@ -91,6 +92,8 @@ test('late ACK uses durable dispatch identity among duplicate questions, never r
   const ack = recover(payload);
   assert.equal(ack?.submittedUserMessageId, 'new-user');
   assert.equal(recoverExactServerFinal(payload, ack!).responseMessageId, 'new-answer');
+  assert.equal(recoverExactServerAcknowledgement(payload, CONVERSATION_ID, 'Different question', [attempt]), null,
+    'Captured POST identity cannot authorize a different recovery prompt');
   assert.equal(recover(payload, [{ ...attempt, parentMessageId: 'wrong-parent' }])?.dispatchParent?.matches, false,
     'Server acceptance of exact captured bytes is separate from parent provenance');
   assert.equal(recover(payload, [{ ...attempt, textHash: '0'.repeat(64) }]), null);
@@ -135,6 +138,73 @@ test('backend recovery accepts only an exact final on the current branch', () =>
   assert.equal(result.kind, 'complete');
   assert.equal(result.responseMessageId, 'assistant-message-1');
   assert.equal(result.answerText, 'Exact server answer');
+});
+
+test('canonical FINAL preserves significant leading and trailing whitespace', () => {
+  const exactText = '  Leading spaces\nStructured answer  \n\n';
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('assistant-node', 'user-node', finalAssistant('answer', exactText)),
+  ], 'assistant-node');
+  const result = recoverExactServerFinal(payload, identity());
+  assert.equal(result.kind, 'complete');
+  assert.equal(result.answerText, exactText,
+    'a canonical answer must not be silently trimmed during exact recovery');
+});
+
+test('backend FINAL rejects repeated or conflicting bound user IDs on the current branch', () => {
+  for (const duplicate of [
+    userMessage('user-message-1', 'user-turn-1'),
+    userMessage('user-message-1', 'foreign-turn'),
+    userMessage('foreign-message', 'user-turn-1'),
+  ]) {
+    const payload = conversationPayload([
+      node('root', null, null),
+      node('user-a', 'root', userMessage('user-message-1', 'user-turn-1')),
+      node('answer-a', 'user-a', finalAssistant('answer-a', 'First answer')),
+      node('user-b', 'answer-a', duplicate),
+      node('answer-b', 'user-b', finalAssistant('answer-b', 'Second answer')),
+    ], 'answer-b');
+    const result = recoverExactServerFinal(payload, identity());
+    assert.equal(result.kind, 'unverified', 'a conflicting bound ID cannot select the first answer');
+    assert.equal(result.reason, 'backend-user-anchor-ambiguous-on-current-branch');
+    assert.equal(result.answerText, null);
+    assert.equal(recoverExactServerAcknowledgement(payload, CONVERSATION_ID, 'Question'), null,
+      'ambiguous canonical user IDs are not exact ACK evidence');
+  }
+});
+
+test('canonical FINAL requires both submitted message and turn identities when bound', () => {
+  const payload = (user: Record<string, unknown>) => conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', user),
+    node('answer-node', 'user-node', finalAssistant('answer', 'Do not adopt wrong turn')),
+  ], 'answer-node');
+  for (const foreign of [
+    userMessage('user-message-1', 'foreign-turn'),
+    userMessage('foreign-message', 'user-turn-1'),
+  ]) {
+    const result = recoverExactServerFinal(payload(foreign), identity());
+    assert.equal(result.kind, 'unverified', 'one correct ID cannot override the conflicting other ID');
+    assert.equal(result.answerText, null);
+  }
+  const withoutTurnField = { ...userMessage('user-message-1', 'unused'), turn_id: undefined };
+  assert.equal(recoverExactServerFinal(payload(withoutTurnField), {
+    ...identity(), submittedUserTurnId: 'user-node',
+  }).kind, 'complete', 'canonical node ID remains a valid exact turn fallback');
+  const withoutMessageField = { ...userMessage('unused', 'user-turn-1'), id: undefined };
+  assert.equal(recoverExactServerFinal(payload(withoutMessageField), {
+    ...identity(), submittedUserMessageId: 'user-node',
+  }).kind, 'complete', 'canonical node ID remains a valid exact message fallback');
+  assert.equal(recoverExactServerFinal(payload(userMessage('user-message-1', 'user-turn-1')), {
+    ...identity(), submittedUserTurnId: 'user-node',
+  }).kind, 'unverified',
+    'canonical node ID cannot override an explicit conflicting turn ID');
+  assert.equal(recoverExactServerFinal(payload(userMessage('user-message-1', 'user-turn-1')), {
+    ...identity(), submittedUserMessageId: 'user-node',
+  }).kind, 'unverified',
+    'canonical node ID cannot override an explicit conflicting message ID');
 });
 
 test('direct final and ACK reject missing or conflicting conversation aliases even with the same message ID', () => {
@@ -303,6 +373,152 @@ test('backend client caches access token in memory and classifies Retry-After 42
   );
 });
 
+test('configured token cache spans paced reads and refreshes after auth rejection', async () => {
+  let clock = Date.parse('2026-11-13T00:00:00.000Z');
+  let authReads = 0;
+  let conversationReads = 0;
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('exact-user', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('assistant', 'exact-user', finalAssistant('answer-1', 'Cached answer')),
+  ], 'assistant');
+  const client: BackendJsonClient = { async get(url) {
+    if (url.endsWith('/api/auth/session')) {
+      authReads++;
+      return { status: 200, headers: {}, body: { accessToken: `memory-token-${authReads}` } };
+    }
+    conversationReads++;
+    return conversationReads === 2
+      ? { status: 403, headers: {}, body: null }
+      : { status: 200, headers: {}, body: payload };
+  } };
+  const recovery = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 5 * 60_000,
+    now: () => new Date(clock),
+  });
+
+  assert.equal((await recovery.recoverExactTurn(
+    identity(), client, 'https://chatgpt.com')).kind, 'complete');
+  clock += 65_000;
+  const rejected = await recovery.recoverExactTurn(identity(), client, 'https://chatgpt.com');
+  assert.equal(rejected.reason, 'backend-auth-rejected');
+  assert.equal(authReads, 1, 'paced read must reuse the configured live token');
+  clock += 65_000;
+  assert.equal((await recovery.recoverExactTurn(
+    identity(), client, 'https://chatgpt.com')).kind, 'complete');
+  assert.equal(authReads, 2, '401/403 clears the cached token before the next read');
+});
+
+test('oversized Retry-After remains a bounded deferral without a second GET', async () => {
+  const now = new Date('2026-11-10T00:00:00.000Z');
+  let conversationReads = 0;
+  const client: BackendJsonClient = { async get(url) {
+    if (url.endsWith('/api/auth/session')) return {
+      status: 200, headers: {}, body: { accessToken: 'synthetic-token' },
+    };
+    conversationReads++;
+    return { status: 429, headers: { 'retry-after': '1e308' }, body: null };
+  } };
+  const recovery = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1_000, tokenCacheTtlMs: 60_000, now: () => now,
+  });
+  const first = await recovery.recoverExactTurn(identity(), client, 'https://chatgpt.com');
+  assert.equal(first.kind, 'deferred');
+  assert.equal(first.retryAfterMs, null, 'overflow must be classified as invalid, not Infinity');
+  const second = await recovery.recoverExactTurn(identity(), client, 'https://chatgpt.com');
+  assert.equal(second.kind, 'deferred');
+  assert.equal(conversationReads, 1, 'a malformed server delay cannot trigger a repeated probe');
+});
+
+test('backend recovery never reuses an auth token across trusted ChatGPT origins', async () => {
+  let clock = Date.parse('2026-11-08T00:00:00.000Z');
+  const authOrigins: string[] = [];
+  const authorizedRequests: string[] = [];
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('exact-user', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('assistant', 'exact-user', finalAssistant('answer-1', 'Origin-bound answer')),
+  ], 'assistant');
+  const client: BackendJsonClient = { async get(url, options) {
+    const origin = new URL(url).origin;
+    if (url.endsWith('/api/auth/session')) {
+      authOrigins.push(origin);
+      return { status: 200, headers: {}, body: { accessToken: origin === 'https://chatgpt.com'
+        ? 'chatgpt-origin-token' : 'legacy-origin-token' } };
+    }
+    authorizedRequests.push(origin + ':' + options.headers?.authorization);
+    return { status: 200, headers: {}, body: payload };
+  } };
+  const recovery = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1_000, tokenCacheTtlMs: 60_000, now: () => new Date(clock),
+  });
+  const request = { session: sessionSnapshot(), generation: 1 } as const;
+  assert.equal((await recovery.recover(request, client, 'https://chatgpt.com')).kind, 'complete');
+  clock += 6_000;
+  assert.equal((await recovery.recover(request, client, 'https://chat.openai.com')).kind, 'complete');
+  assert.deepEqual(authOrigins, ['https://chatgpt.com', 'https://chat.openai.com']);
+  assert.deepEqual(authorizedRequests, [
+    'https://chatgpt.com:Bearer chatgpt-origin-token',
+    'https://chat.openai.com:Bearer legacy-origin-token',
+  ]);
+});
+
+test('backend recovery rejects nonstandard ChatGPT ports before any authenticated GET', async () => {
+  const urls: string[] = [];
+  const client: BackendJsonClient = { async get(url) {
+    urls.push(url);
+    return { status: 200, headers: {}, body: { accessToken: 'synthetic-auth-token' } };
+  } };
+  const recovery = new ChatGptBackendRecovery({ requestTimeoutMs: 1_000, tokenCacheTtlMs: 60_000 });
+  const result = await recovery.recoverExactTurn(identity(), client, 'https://chatgpt.com:8443');
+  assert.equal(result.kind, 'unavailable');
+  assert.equal(result.reason, 'backend-origin-untrusted');
+  assert.deepEqual(urls, [], 'no auth/session or conversation request may target a custom port');
+});
+test('backend auth cache never crosses different clients on the same trusted origin', async () => {
+  let clock = Date.parse('2026-11-08T00:00:00.000Z');
+  const authenticated: string[] = [];
+  const conversationReads: string[] = [];
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('exact-user', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('assistant', 'exact-user', finalAssistant('answer-1', 'Client-bound answer')),
+  ], 'assistant');
+  const client = (label: string): BackendJsonClient => ({ async get(url, options) {
+    if (url.endsWith('/api/auth/session')) {
+      authenticated.push(label);
+      return { status: 200, headers: {}, body: { accessToken: label + '-token' } };
+    }
+    conversationReads.push(label + ':' + options.headers?.authorization);
+    return { status: 200, headers: {}, body: payload };
+  } });
+  const recovery = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1_000, tokenCacheTtlMs: 60_000, now: () => new Date(clock),
+  });
+  const request = { session: sessionSnapshot(), generation: 1 } as const;
+  assert.equal((await recovery.recover(request, client('profile-a'), 'https://chatgpt.com')).kind, 'complete');
+  clock += 6_000;
+  assert.equal((await recovery.recover(request, client('profile-b'), 'https://chatgpt.com')).kind, 'complete');
+  assert.deepEqual(authenticated, ['profile-a', 'profile-b']);
+  assert.deepEqual(conversationReads, [
+    'profile-a:Bearer profile-a-token',
+    'profile-b:Bearer profile-b-token',
+  ]);
+  // The semantic adapter recreates transport wrappers for the same browser
+  // context. A stable authenticated scope retains the intended cache benefit.
+  const cookieJar = {};
+  const wrapped = (): BackendJsonClient => ({ ...client('profile-c'), authScope: cookieJar });
+  clock += 6_000;
+  assert.equal((await recovery.recover(request, wrapped(), 'https://chatgpt.com')).kind, 'complete');
+  clock += 6_000;
+  assert.equal((await recovery.recover(request, wrapped(), 'https://chatgpt.com')).kind, 'complete');
+  assert.deepEqual(authenticated, ['profile-a', 'profile-b', 'profile-c']);
+  assert.deepEqual(conversationReads.slice(2), [
+    'profile-c:Bearer profile-c-token',
+    'profile-c:Bearer profile-c-token',
+  ]);
+});
+
 test('auth GET429 keeps its own safe provenance and cannot leak or create a conversation request', async () => {
   const evidence: BackendRateLimitEvidence[] = [], urls: string[] = [];
   const recovery = new ChatGptBackendRecovery({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000,
@@ -321,6 +537,42 @@ test('auth GET429 keeps its own safe provenance and cannot leak or create a conv
     receivedAt: new Date(0).toISOString(), source: 'sessionplane-backend-recovery',
     headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-scope': 'endpoint' },
     retryAfterSource: 'header-invalid-fallback', retryAfterDurationMs: null }]);
+});
+
+test('semantic exact-turn rate limits expose safe endpoint provenance', async () => {
+  const evidence: BackendRateLimitEvidence[] = [];
+  const authRecovery = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 60000, now: () => new Date(0),
+    onRateLimitEvidence: value => evidence.push(value),
+  });
+  const authClient: BackendJsonClient = { async get(url) {
+    assert.equal(url, 'https://chatgpt.com/api/auth/session');
+    return { status: 429, headers: { 'retry-after': '60', authorization: 'private' }, body: null };
+  } };
+  assert.equal((await authRecovery.recoverExactTurn(
+    identity(), authClient, 'https://chatgpt.com')).reason, 'backend-http-429');
+  assert.deepEqual(evidence.map(value => ({ endpointCategory: value.endpointCategory,
+    retryAfterDurationMs: value.retryAfterDurationMs, headers: value.headers })), [{
+      endpointCategory: 'auth-session', retryAfterDurationMs: 60_000,
+      headers: { 'retry-after': '60' },
+    }]);
+
+  evidence.length = 0;
+  const detailRecovery = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 60000, now: () => new Date(0),
+    onRateLimitEvidence: value => evidence.push(value),
+  });
+  const detailClient: BackendJsonClient = { async get(url) {
+    return url.endsWith('/api/auth/session')
+      ? { status: 200, headers: {}, body: { accessToken: 'memory-only-token' } }
+      : { status: 429, headers: { 'retry-after': '120' }, body: null };
+  } };
+  assert.equal((await detailRecovery.recoverExactTurn(
+    identity(), detailClient, 'https://chatgpt.com')).reason, 'backend-http-429');
+  assert.deepEqual(evidence.map(value => ({ endpointCategory: value.endpointCategory,
+    retryAfterDurationMs: value.retryAfterDurationMs })), [{
+      endpointCategory: 'conversation-detail', retryAfterDurationMs: 120_000,
+    }]);
 });
 
 test('backend acknowledgement requires one exact user prompt on the verified current branch', () => {
@@ -483,6 +735,67 @@ test('explicit selected ACK gets the next permitted read ahead of background UNK
   assert.equal(reads.length, 4, 'Background reads cannot renew an abandoned explicit selection indefinitely');
 });
 
+test('semantic root ACK durable identity does not claim interactive selected-read priority', async () => {
+  let selectedMessageId: string | undefined = 'not-called';
+  class RootAckBackend extends ChatGptBackendRecovery {
+    override async recoverAcknowledgement(
+      ...args: Parameters<ChatGptBackendRecovery['recoverAcknowledgement']>
+    ) {
+      selectedMessageId = args[6];
+      const attempt = args[4]?.[0];
+      assert.ok(attempt);
+      return {
+        conversationId: args[0],
+        submittedUserMessageId: attempt.messageId,
+        submittedUserTurnId: 'root-turn',
+        dispatchParent: {
+          capturedParentMessageId: attempt.parentMessageId,
+          canonicalParentNodeId: 'canonical-parent',
+          canonicalParentMessageId: attempt.parentMessageId,
+          matches: true,
+        },
+      };
+    }
+  }
+  const backend = new RootAckBackend({ requestTimeoutMs: 1000, tokenCacheTtlMs: 60000 });
+  const client: BackendJsonClient = { async get() {
+    throw new Error('The spy backend must intercept the read');
+  } };
+  const adapter = new ChatGptSemanticAdapter({
+    isExactLease: () => false,
+    resolvePage: () => { throw new Error('Root ACK recovery must remain page-less'); },
+    backendClient: client,
+    backendOrigin: 'https://chatgpt.com',
+    backendRecovery: backend,
+  });
+  const prompt = 'Root question';
+  const rootPost = {
+    requestConversationId: null,
+    messageId: 'root-message',
+    parentMessageId: 'client-created-root',
+    textHash: createHash('sha256').update(prompt).digest('hex'),
+    observedAt: new Date(0).toISOString(),
+  } as const;
+
+  assert.deepEqual(await adapter.recover({
+    kind: 'ack', prompt, rootPost,
+    candidateConversationId: 'canonical-root-conversation',
+    context: {
+      projectId: 'project', slotId: 'main', slotRevision: 1, taskId: 'root-task',
+      providerConversationId: null,
+      submittedUserMessageId: null, submittedUserTurnId: null,
+      pageLease: null,
+    },
+  }), {
+    kind: 'verified_root_ack',
+    conversationId: 'canonical-root-conversation',
+    externalTurnId: 'root-turn',
+    messageId: 'root-message',
+  });
+  assert.equal(selectedMessageId, undefined,
+    'durable root POST UUID/hash must not reserve the interactive selected queue');
+});
+
 test('canonical ACK evidence separates no match and access rejection from a recovered original answer', async () => {
   let now = 0;
   let status = 200;
@@ -521,6 +834,97 @@ test('canonical ACK evidence separates no match and access rejection from a reco
   assert.equal(recoverExactServerFinal(payload, acknowledgement!).answerText, 'Original result');
   assert.equal(evidence.length, 3, 'successful recovery does not retain a new failure');
 });
+
+test('ChatGPT semantic FINAL uses the owned auth context after the page is gone', async () => {
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', userMessage('exact-user', 'exact-turn')),
+    node('answer-node', 'user-node', finalAssistant('exact-answer', 'Page-less canonical FINAL')),
+  ], 'answer-node');
+  let authReads = 0;
+  let detailReads = 0;
+  const contextIdentity = {};
+  const client: BackendJsonClient = {
+    authScope: contextIdentity,
+    async get(url) {
+      if (url.endsWith('/api/auth/session')) {
+        authReads++;
+        return { status: 200, headers: {}, body: { accessToken: 'synthetic-only' } };
+      }
+      detailReads++;
+      return { status: 200, headers: {}, body: payload };
+    },
+  };
+  const adapter = new ChatGptSemanticAdapter({
+    isExactLease: () => false,
+    resolvePage: () => { throw new Error('A missing page must never be reopened'); },
+    backendClientProvider: () => client,
+    backendOrigin: 'https://chatgpt.com',
+  });
+  assert.deepEqual(await adapter.recover({
+    kind: 'final',
+    context: {
+      projectId: 'project', slotId: 'main', slotRevision: 1, taskId: 'exact-task',
+      providerConversationId: CONVERSATION_ID,
+      submittedUserMessageId: 'exact-user', submittedUserTurnId: 'exact-turn',
+      pageLease: null,
+    },
+  }), {
+    kind: 'exact_final', externalTurnId: 'exact-turn', answerText: 'Page-less canonical FINAL',
+  }, 'recovery must not require the UI or a retained Page lease');
+  assert.equal(authReads, 1);
+  assert.equal(detailReads, 1);
+});
+test('ChatGPT semantic FINAL keeps backend 429 nonterminal and respects Retry-After', async () => {
+  let now = 100_000;
+  let detailReads = 0;
+  const backend = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 180_000, now: () => new Date(now),
+  });
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', userMessage('user-message-1', 'user-turn-1')),
+    node('final-node', 'user-node', finalAssistant('answer-1', 'Canonical final')),
+  ], 'final-node');
+  const client: BackendJsonClient = { async get(url) {
+    if (url.endsWith('/api/auth/session')) {
+      return { status: 200, headers: {}, body: { accessToken: 'synthetic-memory-token' } };
+    }
+    detailReads++;
+    return detailReads === 1
+      ? { status: 429, headers: { 'retry-after': '120' }, body: null }
+      : { status: 200, headers: {}, body: payload };
+  } };
+  const adapter = new ChatGptSemanticAdapter({
+    isExactLease: () => false,
+    resolvePage: () => { throw new Error('No live page should be read'); },
+    backendClient: client,
+    backendOrigin: 'https://chatgpt.com',
+    backendRecovery: backend,
+  });
+  const context = {
+    projectId: 'project-1', slotId: 'main', slotRevision: 1,
+    taskId: 'task-1', providerConversationId: CONVERSATION_ID,
+    submittedUserMessageId: 'user-message-1', submittedUserTurnId: 'user-turn-1',
+    pageLease: null,
+  } as const;
+  const recover = () => adapter.recover({ context, kind: 'final' });
+
+  assert.deepEqual(await recover(), { kind: 'pending', reason: 'backend-http-429' },
+    'temporary canonical GET deferral cannot become permanent unavailability');
+  assert.equal(detailReads, 1);
+  now += 1_000;
+  assert.deepEqual(await recover(), {
+    kind: 'pending', reason: 'backend-conversation-probe-paced',
+  }, 'same adapter must not repeat a deferred GET before the server delay');
+  assert.equal(detailReads, 1, 'no retry while the server is rate-limiting');
+  now += 120_001;
+  assert.deepEqual(await recover(), {
+    kind: 'exact_final', externalTurnId: 'user-turn-1', answerText: 'Canonical final',
+  });
+  assert.equal(detailReads, 2);
+});
+
 
 function identity() {
   return {
@@ -590,3 +994,90 @@ function sessionSnapshot(): SessionSnapshot {
     promptSubmitted: true,
   };
 }
+test('backend pacing persistence failure never traps the read lock or permits an unjournaled GET', async () => {
+  let calls = 0;
+  let getCalls = 0;
+  let now = 100_000;
+  const recover = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 10_000,
+    now: () => new Date(now),
+    onConversationRetryAtMs: () => {
+      if (++calls === 1) throw new Error('fixture SQLite write refused');
+    },
+  });
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', userMessage('exact-user', 'exact-turn')),
+    node('answer-node', 'user-node', finalAssistant('exact-answer', 'Unlocked after recovery')),
+  ], 'answer-node');
+  const client: BackendJsonClient = {
+    async get(url) {
+      getCalls++;
+      return {
+        status: 200, headers: {},
+        body: url.endsWith('/api/auth/session')
+          ? { accessToken: 'fixture-token-only' } : payload,
+      };
+    },
+  };
+  const identity = {
+    conversationId: CONVERSATION_ID,
+    submittedUserMessageId: 'exact-user', submittedUserTurnId: 'exact-turn',
+  };
+  await assert.rejects(
+    recover.recoverExactTurn(identity, client, 'https://chatgpt.com'),
+    /fixture SQLite write refused/,
+  );
+  assert.equal(getCalls, 0, 'failed durable reservation must prevent any network read');
+  const premature = await recover.recoverExactTurn(identity, client, 'https://chatgpt.com');
+  assert.equal(premature.kind, 'deferred',
+    'local GET cooldown remains active even if SQLite persistence fails');
+  assert.equal(getCalls, 0);
+  now += 5_001;
+  const retried = await recover.recoverExactTurn(identity, client, 'https://chatgpt.com');
+  assert.equal(retried.kind, 'complete',
+    'the process-local in-flight lock must not stick after persistence failure');
+  assert.equal(getCalls, 2, 'the first completed read includes one auth and one detail GET');
+  assert.equal(calls, 2);
+});
+test('failed persistence after a real 429 cannot shorten the in-memory Retry-After', async () => {
+  let now = 100_000;
+  let reservations = 0, detailReads = 0;
+  const backend = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 180_000,
+    now: () => new Date(now),
+    onConversationRetryAtMs: () => {
+      if (++reservations === 2) throw new Error('fixture SQLite unavailable after 429');
+    },
+  });
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', userMessage('exact-user', 'exact-turn')),
+    node('answer-node', 'user-node', finalAssistant('exact-answer', 'Late verified final')),
+  ], 'answer-node');
+  const client: BackendJsonClient = {
+    async get(url) {
+      if (url.endsWith('/api/auth/session')) {
+        return { status: 200, headers: {}, body: { accessToken: 'fixture-memory-only' } };
+      }
+      detailReads++;
+      return detailReads === 1
+        ? { status: 429, headers: { 'retry-after': '120' }, body: null }
+        : { status: 200, headers: {}, body: payload };
+    },
+  };
+  const identity = {
+    conversationId: CONVERSATION_ID,
+    submittedUserMessageId: 'exact-user', submittedUserTurnId: 'exact-turn',
+  };
+  await assert.rejects(backend.recoverExactTurn(identity, client, 'https://chatgpt.com'),
+    /fixture SQLite unavailable after 429/);
+  assert.equal(detailReads, 1);
+  assert.equal((await backend.recoverExactTurn(identity, client, 'https://chatgpt.com')).kind,
+    'deferred', 'a persistence error after 429 must still preserve the provider cooldown');
+  assert.equal(detailReads, 1, 'no early second GET after a failed cooldown write');
+  now += 120_001;
+  assert.equal((await backend.recoverExactTurn(identity, client, 'https://chatgpt.com')).kind,
+    'complete', 'reads resume after the actual Retry-After');
+  assert.equal(detailReads, 2);
+});

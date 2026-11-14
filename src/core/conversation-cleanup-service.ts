@@ -15,11 +15,24 @@ import { OutboxRepository } from '../storage/outbox-repository.ts';
 import type { StopService } from './stop-service.ts';
 import { isProviderUrl } from '../browser/page-binding.ts';
 import { ConversationLoadRecoveryRepository } from '../storage/conversation-load-recovery-repository.ts';
+import { PageBindingRepository } from '../storage/page-binding-repository.ts';
 
 export interface UnresolvedHandoff {
   requestRef: string;
   approvalRef: string;
 }
+
+export interface TeamPageCleanupResume {
+  deletionRequestId: string;
+  sessionId: string;
+  targetId: string;
+  evidenceRef: string;
+  /** Legacy receipts lack retainedPages; require a native team-scoped ownership receipt. */
+  ownershipRequestId?: string | undefined;
+  discardDraft?: true | undefined;
+}
+
+type RetainedTeamPage = { targetId: string; url: string; conversationId: string | null; generation: number };
 
 export interface ConversationDeleteInput {
   readonly clientId: string;
@@ -28,7 +41,7 @@ export interface ConversationDeleteInput {
   readonly generation: number;
   readonly conversationId: string;
   readonly outputsRetrieved: true;
-  readonly discardRetiredObservation?: { conversationId: string; evidenceRef: string } | undefined;
+  readonly discardRetiredObservation?: { conversationId: string; evidenceRef: string; discardPageState?: true | undefined } | undefined;
 }
 
 export interface ReplacementCleanup {
@@ -67,20 +80,22 @@ export class ConversationCleanupService {
     this.#options = options;
   }
 
-  async deleteTeam(input: { clientId: string; requestId: string; teamId: string }, stops: StopService) {
+  async deleteTeam(input: { clientId: string; requestId: string; teamId: string; resumePageCleanup?: TeamPageCleanupResume | undefined }, stops: StopService) {
     const { database, directory, scheduler, registry } = this.#options;
     const receipts = new ReceiptRepository(database);
     const teams = new TeamRepository(database.raw);
     const sessions = new SessionRepository(database.raw);
-    const requestHash = hashCanonical({ method: 'team.delete', payload: { teamId: input.teamId } });
+    const requestHash = hashCanonical({ method: 'team.delete', payload: { teamId: input.teamId,
+      ...(input.resumePageCleanup === undefined ? {} : { resumePageCleanup: input.resumePageCleanup }) } });
     return await this.#replacements.runExclusive('team:' + input.teamId, async () => {
       const prior = receipts.get(input.clientId, input.requestId);
       if (prior !== null) {
         if (prior.method !== 'team.delete' || prior.requestHash !== requestHash) {
           throw new SessionPlaneDomainError('input.idempotency-conflict', 'Team deletion request payload changed');
         }
-        if (prior.status === 'complete') return JSON.parse(prior.resultJson) as TeamDeletionResult;
+        if (prior.status === 'complete') return JSON.parse(prior.resultJson) as TeamDeletionResult | TeamPageCleanupResult;
       }
+      if (input.resumePageCleanup !== undefined) return await this.#resumeDeletedTeamPage(input, input.resumePageCleanup, requestHash);
       directory.getTeam(input.teamId);
       const result: TeamDeletionResult = { requestOk: true, teamId: input.teamId, deleted: false, sessions: [] };
       database.transaction(() => {
@@ -92,7 +107,13 @@ export class ConversationCleanupService {
         const cleanup = { sessionId: initial.sessionId, providerDeleted: false,
           providerError: null as string | null, stopError: null as string | null,
           providerErrorDetails: null as ReturnType<typeof cleanupProviderErrorDetails>,
-          closedPages: 0, pageErrors: [] as string[] };
+          closedPages: 0, pageErrors: [] as string[], retainedPages: [] as RetainedTeamPage[] };
+        const ownedPages = registry.listBindings({ includeClosed: false }).filter(b => b.targetId != null &&
+          b.conversationId === initial.conversationId && isProviderUrl(initial.provider, b.url) &&
+          ((b.sessionId === initial.sessionId && (b.state === 'owned' || b.state === 'reserved') &&
+            b.expectedConversationId === initial.conversationId) || (b.sessionId === null && initial.conversationId !== null &&
+            b.conversationId === initial.conversationId && isProviderUrl(initial.provider, b.url) &&
+            !sessions.conversationCleanupBlocker(initial.sessionId, initial.conversationId, true))));
         const requestId = 'team-delete:' + hashCanonical({ requestId: input.requestId, sessionId: initial.sessionId });
         if (!initial.terminal && initial.generation > 0) {
           try {
@@ -124,6 +145,10 @@ export class ConversationCleanupService {
         const remainingPages = await this.#closeSessionPages(current);
         cleanup.closedPages += remainingPages.closedPages;
         cleanup.pageErrors = [...new Set([...cleanup.pageErrors, ...remainingPages.pageErrors])];
+        // Retain exact failed ownership before unbinding/deleting the team. Replays
+        // of the original delete remain immutable; page-only recovery is separate.
+        cleanup.retainedPages = ownedPages.filter(b => registry.getBinding(b.pageKey).state !== 'closed')
+          .map(b => ({ targetId: b.targetId!, url: b.url, conversationId: b.conversationId, generation: initial.generation }));
         // Remove live ownership even if the provider or browser rejected cleanup.
         for (const binding of registry.listBindings({ includeClosed: true })) {
           if (binding.sessionId === current.sessionId) registry.unbindPage(binding.pageKey);
@@ -135,6 +160,93 @@ export class ConversationCleanupService {
         result.deleted = true;
         receipts.record({ ...input, method: 'team.delete', requestHash, status: 'complete', result });
       });
+      return result;
+    });
+  }
+
+  async #resumeDeletedTeamPage(input: { clientId: string; requestId: string; teamId: string },
+    resume: TeamPageCleanupResume, requestHash: string): Promise<TeamPageCleanupResult> {
+    const { database, registry, pageMutex } = this.#options;
+    const receipts = new ReceiptRepository(database);
+    const original = receipts.get(input.clientId, resume.deletionRequestId);
+    const deleted = original?.method === 'team.delete' && original.status === 'complete' &&
+      original.requestHash === hashCanonical({ method: 'team.delete', payload: { teamId: input.teamId } })
+      ? JSON.parse(original.resultJson) as TeamDeletionResult : null;
+    const cleanup = deleted?.sessions?.find(s => s.sessionId === resume.sessionId);
+    if (!deleted?.deleted || deleted.teamId !== input.teamId || !cleanup?.pageErrors.length ||
+        new TeamRepository(database.raw).getTeam(input.teamId) !== null) {
+      throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Page-only recovery requires a completed deleted-team receipt with failed page cleanup');
+    }
+    let proof = cleanup.retainedPages?.find(p => p.targetId === resume.targetId);
+    if (cleanup.retainedPages === undefined && resume.ownershipRequestId !== undefined) {
+      const ownership = receipts.get(input.clientId, resume.ownershipRequestId);
+      const stored = ownership?.status === 'complete' && ownership.createdAt <= original!.createdAt &&
+        ['session.stop', 'workflow.latest', 'workflow.focus', 'workflow.session_replace'].includes(ownership.method)
+        ? JSON.parse(ownership.resultJson) as Record<string, unknown> : null;
+      // The caller supplies the archived exact target/evidenceRef, never a URL.
+      // Conversation identity comes only from this team's native retained receipt.
+      if (stored?.requestOk === true && stored.sessionId === resume.sessionId &&
+          typeof stored.conversationId === 'string' && typeof stored.generation === 'number' &&
+          (stored.teamId === undefined || stored.teamId === input.teamId)) {
+        proof = { targetId: resume.targetId, url: 'https://chatgpt.com/c/' + stored.conversationId,
+          conversationId: stored.conversationId, generation: stored.generation };
+      }
+    }
+    if (proof === undefined) throw new SessionPlaneDomainError('session.page-identity-unverified', 'No retained ownership evidence for this failed target');
+    const expected = proof;
+    const bindings = registry.listBindings({ includeClosed: false }).filter(b => b.targetId === expected.targetId);
+    if (bindings.length > 1) throw new SessionPlaneDomainError('session.page-identity-unverified', 'Exact target is not unique');
+    const result: TeamPageCleanupResult = { requestOk: true, teamId: input.teamId, deleted: true,
+      pageCleanupOnly: true, providerDeletionAttempted: false, stopAttempted: false,
+      deletionRequestId: resume.deletionRequestId, sessionId: resume.sessionId, targetId: expected.targetId,
+      conversationId: expected.conversationId, evidenceRef: resume.evidenceRef,
+      pageCleanup: { closedPages: 0, pageErrors: [], targetAbsent: bindings.length === 0 } };
+    const attempted = receipts.get(input.clientId, input.requestId);
+    if (attempted?.status === 'attempted') {
+      const prior = JSON.parse(attempted.resultJson) as TeamPageCleanupResult;
+      if (prior.preservedDraft !== undefined) result.preservedDraft = prior.preservedDraft;
+    }
+    const record = () => receipts.record({ ...input, method: 'team.delete', requestHash, status: 'complete', result });
+    if (bindings.length === 0) { record(); return result; }
+    return await pageMutex.runExclusive(bindings[0]!.pageKey, async () => {
+      const check = () => {
+        const current = registry.refreshPage(bindings[0]!.pageKey);
+        const storedOwner = new PageBindingRepository(database.raw).hasCurrentTargetOwner(expected.targetId);
+        const shared = expected.conversationId !== null && new SessionRepository(database.raw)
+          .conversationCleanupBlocker(resume.sessionId, expected.conversationId, true);
+        if (current.targetId !== expected.targetId || current.url !== expected.url ||
+            current.conversationId !== expected.conversationId || current.sessionId !== null || current.state !== 'unbound' ||
+            storedOwner || shared || registry.findByConversation(expected.conversationId ?? '').length > 1) {
+          throw new SessionPlaneDomainError('session.page-identity-unverified', 'Failed target changed or has current/shared ownership; preserve it');
+        }
+        return current;
+      };
+      const current = check();
+      const page = registry.pageForObservation(current.pageKey, current.bindingEpoch);
+      if (resume.discardDraft === true) {
+        const drafts = await page.locator('textarea, [contenteditable="true"]:not(article *, [data-message-author-role] *, [data-chatgpt-search-message-ids] *)')
+          .evaluateAll(nodes => [...new Set(nodes.map(n => n instanceof HTMLTextAreaElement ? n.value : (n as HTMLElement).innerText ?? '').filter(s => s.trim()))]);
+        if (drafts.length > 1) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Multiple drafts require preservation before cleanup');
+        if (drafts[0] !== undefined) {
+          if (result.preservedDraft !== undefined && result.preservedDraft !== drafts[0])
+            throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Draft changed after the retained cleanup attempt');
+          result.preservedDraft = drafts[0];
+        }
+      }
+      await requireIdleConversationPage(page, result.preservedDraft);
+      if (await page.locator('[role="dialog"], [role="alertdialog"], dialog[open], [aria-modal="true"]').evaluateAll(nodes =>
+        nodes.some(n => n.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }))) ||
+          await page.getByRole('button', { name: /^(?:always allow|allow once|항상 허용|한 번만 허용)/i })
+            .evaluateAll(nodes => nodes.some(n => n.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })))) {
+        throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve the protected dialog before page cleanup');
+      }
+      if (check().bindingEpoch !== current.bindingEpoch) throw new SessionPlaneDomainError('session.page-identity-unverified', 'Target changed during cleanup');
+      // Escrow any explicitly disposed draft before the irreversible local close.
+      receipts.record({ ...input, method: 'team.delete', requestHash, status: 'attempted', result });
+      await page.close();
+      result.pageCleanup.closedPages = 1;
+      result.pageCleanup.targetAbsent = true;
+      record();
       return result;
     });
   }
@@ -359,7 +471,89 @@ export class ConversationCleanupService {
     });
   }
 
-  async #closeSessionPages(session: SessionSnapshot) {
+  async closePages(input: { sessionId: string; generation: number; conversationId: string | null; evidenceRef: string; obsoleteEmptyTargetId?: string | undefined; emptyTargetId?: string | undefined }) {
+    return await this.#options.scheduler.actorFor(input.sessionId).enqueue(async () => {
+      const sessions = new SessionRepository(this.#options.database.raw);
+      const session = sessions.getSnapshot(input.sessionId);
+      if (!session || session.generation !== input.generation || session.conversationId !== input.conversationId) {
+        throw new SessionPlaneDomainError('session.conversation-mismatch', 'Tab cleanup requires the exact durable conversation and generation');
+      }
+      if (input.emptyTargetId !== undefined) {
+        const { database, registry, pageMutex } = this.#options;
+        const bindings = new PageBindingRepository(database.raw);
+        const eligible = () => this.#options.scheduler.collectors(session.sessionId).length === 0 &&
+          bindings.isUnusedCurrentEmptyTarget(session.sessionId, input.emptyTargetId!);
+        const matches = registry.listBindings({ includeClosed: false }).filter(b => b.targetId === input.emptyTargetId);
+        const binding = matches.length === 1 ? matches[0] : undefined;
+        if (!input.evidenceRef.trim() || !eligible() || !binding)
+          throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve a submitted, foreign or unidentified empty page');
+        await pageMutex.runExclusive(binding.pageKey, async () => {
+          const before = registry.refreshPage(binding.pageKey);
+          const isOwnedEmpty = () => ['unbound', 'reserved'].includes(before.state) && before.conversationId === null &&
+            (before.sessionId === null || (before.sessionId === session.sessionId && before.generation === 0)) &&
+            before.url === 'https://chatgpt.com/';
+          if (!eligible() || !isOwnedEmpty()) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve changed empty-page ownership');
+          const page = registry.pageForObservation(before.pageKey, before.bindingEpoch);
+          await requireEmptyConversationPage(page);
+          const after = registry.refreshPage(binding.pageKey);
+          if (!eligible() || after.bindingEpoch !== before.bindingEpoch || after.targetId !== before.targetId ||
+              after.url !== before.url || after.state !== before.state)
+            throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Page changed during empty-page inspection');
+          await page.close();
+          if (!sessions.updateCurrentGeneration(session.sessionId, 0, { pageKey: null }, new Date().toISOString()))
+            throw new SessionPlaneDomainError('session.generation-superseded', 'Empty session changed during cleanup');
+        });
+        return { requestOk: true, sessionId: session.sessionId, generation: 0, conversationId: null,
+          emptyTargetId: input.emptyTargetId, evidenceRef: input.evidenceRef, providerDeletionAttempted: false,
+          pageCleanup: { closedPages: 1, pageErrors: [] } };
+      }
+      if (input.conversationId === null)
+        throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Empty-page cleanup requires an exact target');
+      if (input.obsoleteEmptyTargetId !== undefined) {
+        const { registry, pageMutex } = this.#options;
+        const bindings = new PageBindingRepository(this.#options.database.raw);
+        const matches = registry.listBindings({ includeClosed: false }).filter(p => p.targetId === input.obsoleteEmptyTargetId);
+        const binding = matches.length === 1 ? matches[0] : undefined;
+        const eligible = () => {
+          const destination = registry.findByConversation(input.conversationId!);
+          return bindings.isObsoleteEmptyTarget(session.sessionId, input.obsoleteEmptyTargetId!) && destination.length === 1 &&
+            destination[0]!.targetId !== input.obsoleteEmptyTargetId &&
+            ((destination[0]!.state === 'unbound' && destination[0]!.sessionId === null) ||
+              (destination[0]!.sessionId === session.sessionId && destination[0]!.generation === session.generation &&
+                ['reserved', 'owned'].includes(destination[0]!.state)));
+        };
+        if (!input.evidenceRef.trim() || !eligible() || matches.length > 1) {
+          throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve a current, foreign or unidentified empty target');
+        }
+        const pageCleanup = { closedPages: 0, pageErrors: [] as string[] };
+        if (binding) await pageMutex.runExclusive(binding.pageKey, async () => {
+          const before = registry.refreshPage(binding.pageKey);
+          if (!eligible() || before.state !== 'unbound' || before.sessionId !== null || before.conversationId !== null ||
+              before.url !== 'https://chatgpt.com/') throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve a changed startup target');
+          const page = registry.pageForObservation(before.pageKey, before.bindingEpoch);
+          await requireEmptyConversationPage(page);
+          const after = registry.refreshPage(binding.pageKey);
+          if (!eligible() || after.bindingEpoch !== before.bindingEpoch || after.url !== before.url ||
+              after.state !== before.state || after.targetId !== before.targetId) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve messages, alerts or changed ownership');
+          await page.close();
+          pageCleanup.closedPages = 1;
+        });
+        return { requestOk: true, sessionId: session.sessionId, generation: session.generation,
+          conversationId: session.conversationId, obsoleteEmptyTargetId: input.obsoleteEmptyTargetId,
+          providerDeletionAttempted: false, evidenceRef: input.evidenceRef, pageCleanup };
+      }
+      if (!input.evidenceRef.trim() || (!hasCollectedFinal(session) &&
+          !sessions.canDiscardRetiredObservation(session.sessionId, session.generation))) {
+        throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Retrieve the final output or explicitly retire the displaced observation before closing tabs');
+      }
+      const pageCleanup = await this.#closeSessionPages(session);
+      return { requestOk: pageCleanup.pageErrors.length === 0, sessionId: session.sessionId,
+        generation: session.generation, conversationId: session.conversationId,
+        providerDeletionAttempted: false, evidenceRef: input.evidenceRef, pageCleanup };
+    });
+  }
+
+  async #closeSessionPages(session: SessionSnapshot, discardPageState = false) {
     const { database, registry, pageMutex } = this.#options;
     const sessions = new SessionRepository(database.raw);
     const result = { closedPages: 0, pageErrors: [] as string[] };
@@ -393,7 +587,9 @@ export class ConversationCleanupService {
             if (failedNavigation) throw new SessionPlaneDomainError('session.page-identity-unverified', 'Failed navigation target changed during cleanup; preserve it');
             return;
           }
-          await requireIdleConversationPage(page);
+          if (discardPageState && this.#options.scheduler.collectors(session.sessionId).length > 0)
+            throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Consume obsolete observation collectors before discarding its page');
+          if (!discardPageState || !isExactOwnedConversationPage(current, session)) await requireIdleConversationPage(page);
           const final = registry.refreshPage(binding.pageKey);
           if (final.bindingEpoch !== current.bindingEpoch || final.state !== current.state || final.url !== current.url ||
               (failedNavigation && !await this.#options.isFailedConversationPage?.(binding.pageKey, session))) {
@@ -420,7 +616,7 @@ export class ConversationCleanupService {
     if ((!result.deleted || !result.requestOk) && result.pageCleanup === undefined) return result;
     const session = new SessionRepository(this.#options.database.raw).getSnapshot(result.sessionId);
     if (session === null || session.generation !== result.generation || session.conversationId !== result.conversationId) return result;
-    const pages = await this.#closeSessionPages(session);
+    const pages = await this.#closeSessionPages(session, result.discardedPageState === true);
     return { ...result, pageCleanup: { closedPages: (result.pageCleanup?.closedPages ?? 0) + pages.closedPages, pageErrors: pages.pageErrors } };
   }
 
@@ -468,16 +664,23 @@ export class ConversationCleanupService {
             'Explicit disposal requires the exact conversation, evidence and a retired observation on a displaced or retired role');
         }
         if (!input.outputsRetrieved || (!options.replacement && !session.terminal) ||
-            sessions.conversationCleanupBlocker(input.sessionId, input.conversationId, options.replacement === true,
+            sessions.conversationCleanupBlocker(input.sessionId, input.conversationId, options.replacement === true ||
+              (disposal !== undefined && sessions.hasUnresolvedConversationDisposal(input.sessionId, input.generation, input.conversationId)),
               disposal ? session.generation : null)) {
           throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Conversation has active, unresolved or shared work; retrieve completed outputs before deletion');
         }
+        const discardPageState = disposal?.discardPageState === true;
+        if (discardPageState && (!sessions.hasUnresolvedConversationDisposal(input.sessionId, input.generation, input.conversationId) ||
+            scheduler.collectors(session.sessionId).length > 0)) throw new SessionPlaneDomainError('session.cleanup-not-ready',
+          'Page-state disposal requires explicit unresolved observation retirement and consumed collectors');
         for (const binding of registry.listBindings({ includeClosed: false })) {
           if (binding.sessionId === session.sessionId || (binding.sessionId === null && binding.conversationId === session.conversationId && isProviderUrl(session.provider, binding.url)) ||
               (binding.state === 'unbound' && binding.url === 'chrome-error://chromewebdata/' &&
                 await this.#options.isFailedConversationPage?.(binding.pageKey, session))) {
             await pageMutex.runExclusive(binding.pageKey, async () => {
-              await requireIdleConversationPage(registry.pageForObservation(binding.pageKey, binding.bindingEpoch));
+              const current = registry.refreshPage(binding.pageKey);
+              const page = registry.pageForObservation(binding.pageKey, binding.bindingEpoch);
+              if (!discardPageState || !isExactOwnedConversationPage(current, session)) await requireIdleConversationPage(page);
             });
           }
         }
@@ -493,7 +696,7 @@ export class ConversationCleanupService {
           // failure and pacing separately from cleanup of the verified idle page.
           if (error instanceof ProviderSubmissionError) {
             if (options.replacement) throw new SessionPlaneDomainError(error.errorCode, error.message, error.details);
-            const pageCleanup = await this.#closeSessionPages(session);
+            const pageCleanup = await this.#closeSessionPages(session, discardPageState);
             throw new SessionPlaneDomainError(error.errorCode, error.message, {
               ...(error.details !== null && typeof error.details === 'object' ? error.details : { providerDetails: error.details }),
               sessionId: session.sessionId, generation: session.generation,
@@ -505,6 +708,7 @@ export class ConversationCleanupService {
         const result: DeletionResult = prior !== null ? JSON.parse(prior.resultJson) as DeletionResult : {
           requestOk: false, sessionId: input.sessionId, generation: input.generation,
           conversationId: input.conversationId, deleted: false, errorCode: 'provider.deletion-unknown',
+          ...(discardPageState ? { discardedPageState: true as const } : {}),
         };
         let recordedStatus: 'attempted' | 'complete' | null = prior?.status === 'attempted' ? 'attempted' : null;
         const record = (status: 'attempted' | 'complete') => {
@@ -548,7 +752,7 @@ export class ConversationCleanupService {
           await operation.close().catch(() => {});
           // Replacement/team cleanup owns its separate unresolved-work policy.
           if (!options.replacement || (result.requestOk && result.deleted)) {
-            const pages = await this.#closeSessionPages(session);
+            const pages = await this.#closeSessionPages(session, result.discardedPageState === true);
             result.pageCleanup = { closedPages: (result.pageCleanup?.closedPages ?? 0) + pages.closedPages, pageErrors: pages.pageErrors };
             if (recordedStatus !== null) record(recordedStatus);
           }
@@ -564,6 +768,7 @@ interface DeletionResult {
   conversationId: string;
   deleted: boolean;
   errorCode: string | null;
+  discardedPageState?: true;
   pageCleanup?: { closedPages: number; pageErrors: string[] };
 }
 
@@ -573,7 +778,15 @@ interface TeamDeletionResult {
   deleted: boolean;
   sessions: Array<{ sessionId: string; providerDeleted: boolean; providerError: string | null;
     providerErrorDetails: ReturnType<typeof cleanupProviderErrorDetails>;
-    stopError: string | null; closedPages: number; pageErrors: string[] }>;
+    stopError: string | null; closedPages: number; pageErrors: string[]; retainedPages?: RetainedTeamPage[] }>;
+}
+
+interface TeamPageCleanupResult {
+  requestOk: true; teamId: string; deleted: true; pageCleanupOnly: true;
+  providerDeletionAttempted: false; stopAttempted: false;
+  deletionRequestId: string; sessionId: string; targetId: string; conversationId: string | null;
+  evidenceRef: string; preservedDraft?: string;
+  pageCleanup: { closedPages: number; pageErrors: string[]; targetAbsent: boolean };
 }
 
 function cleanupProviderErrorDetails(error: unknown) {
@@ -589,6 +802,12 @@ function cleanupProviderErrorDetails(error: unknown) {
 function cleanupErrorCode(error: unknown): string {
   return error !== null && typeof error === 'object' && 'errorCode' in error
     ? String(error.errorCode) : 'browser.unavailable';
+}
+
+function isExactOwnedConversationPage(binding: ReturnType<PageRegistry['getBinding']>, session: SessionSnapshot): boolean {
+  return binding.state === 'owned' && binding.sessionId === session.sessionId && binding.generation === session.generation &&
+    session.conversationId !== null && binding.conversationId === session.conversationId &&
+    binding.expectedConversationId === session.conversationId && isProviderUrl(session.provider, binding.url);
 }
 
 // Replacement owns tab cleanup separately from deletion of uncertain history.
@@ -622,3 +841,9 @@ export async function requireIdleConversationPage(page: import('playwright-core'
     if (unsafe) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve the page draft or active generation before cleanup');
   }
 
+async function requireEmptyConversationPage(page: import('playwright-core').Page) {
+  await requireIdleConversationPage(page);
+  const occupied = await page.locator('article, [data-message-author-role], [data-chatgpt-selection-message-id], [data-message-id], [role="alert"], [role="alertdialog"], [role="dialog"], dialog[open], [aria-modal="true"]').evaluateAll(nodes =>
+    nodes.some(node => node.closest('[inert], [aria-hidden="true"]') === null && node.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })));
+  if (occupied) throw new SessionPlaneDomainError('session.cleanup-not-ready', 'Preserve messages, dialogs or alerts on the empty page');
+}

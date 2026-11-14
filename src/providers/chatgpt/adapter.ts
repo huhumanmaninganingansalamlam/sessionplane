@@ -1,5 +1,5 @@
 import { PageMutationMutex } from '../../browser/page-mutex.ts';
-import { discoverFileCards, downloadFileCard } from './file-cards.ts';
+import { discoverFileCards, downloadFileCard, exactRoot } from './file-cards.ts';
 import { createHash } from 'node:crypto';
 import type { Page } from 'playwright-core';
 import path from 'node:path';
@@ -39,7 +39,8 @@ import { ChatGptNetworkObserver } from './network-observer.ts';
 import { readChatGptMessages } from './message-dom.ts';
 import { restoreLatestPosition } from './latest-position-recovery.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
-import { ChatGptSubmission, recoverChatGptAcknowledgement } from './submission.ts';
+import { streamRetrySurface } from './stream-retry.ts';
+import { ChatGptSubmission, recoverChatGptAcknowledgement, inspectChatGptSubmissionCandidates } from './submission.ts';
 
 export interface ChatGptAdapterOptions {
   readonly onBackendRateLimit?: ChatGptBackendRecoveryOptions['onRateLimit'];
@@ -81,6 +82,8 @@ export class ChatGptAdapter implements ProviderAdapter {
   }
 
   async openSubmission(request: ProviderSubmissionRequest): Promise<ProviderSubmission> {
+    if (request.surface != null && !['chat', 'normal'].includes(request.surface.trim().toLowerCase()))
+      throw new ProviderSubmissionError('capability.unsupported', 'Chat is the only supported surface; no page was opened');
     let createdPage: Page | null = null;
     try {
       let pageKey = request.session.pageKey;
@@ -182,25 +185,37 @@ export class ChatGptAdapter implements ProviderAdapter {
     try {
       const binding = this.#pageRegistry.refreshPage(pageKey);
       if (conversationId === null) {
-        // Finding history is not acceptance. Only an explicit selection plus
-        // canonical exact-prompt evidence can bind the retained UNKNOWN page.
-        if (request.selection === undefined) return null;
+        // A retained target is not acceptance. Canonical full-prompt evidence,
+        // a stable mounted ACK and a cleared composer must all agree before binding.
         const candidate = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);
         if (new URL(candidate.page.url()).origin !== new URL(this.#loginUrl).origin) return null;
         const foundId = candidate.binding.conversationId!;
+        let selection = request.selection;
+        let server: ProviderSubmissionAcknowledgement | null = null;
+        if (selection === undefined) {
+          server = await this.#backendRecovery.recoverAcknowledgement(
+            foundId, request.prompt, backendClient(candidate.page), new URL(candidate.page.url()).origin,
+            request.attempts, request.onRecoveryObservation);
+          if (server === null) return null;
+          const messageId = server.submittedUserMessageId;
+          const mounted = (await inspectChatGptSubmissionCandidates(candidate.page, foundId))
+            .filter(message => message.messageId === messageId);
+          if (mounted.length !== 1) return null;
+          selection = mounted[0]!;
+        }
         // Preserve the selected DOM/hash unchanged. Diagnostic expansion can
         // change its control text and invalidate that evidence before canonical
         // verification; only the server's full-text proof establishes acceptance.
-        const selected = await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, request.selection);
+        const selected = await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, selection);
         if (selected === null) return null;
-        const server = await this.#backendRecovery.recoverAcknowledgement(
+        server ??= await this.#backendRecovery.recoverAcknowledgement(
           foundId, request.prompt, backendClient(candidate.page), new URL(candidate.page.url()).origin,
-          request.attempts, request.onRecoveryObservation, request.selection.messageId);
+          request.attempts, request.onRecoveryObservation, selection.messageId);
         if (server === null || server.submittedUserMessageId !== selected.submittedUserMessageId ||
             server.submittedUserTurnId !== selected.submittedUserTurnId) return null;
         const fresh = this.#pageRegistry.unknownConversationCandidate(pageKey, request.session);
         if (fresh.binding.bindingEpoch !== binding.bindingEpoch ||
-            await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, request.selection) === null) return null;
+            await recoverChatGptAcknowledgement(candidate.page, request.prompt, foundId, selection) === null) return null;
         if (this.#pageRegistry.refreshPage(pageKey).bindingEpoch !== binding.bindingEpoch) return null;
         this.#pageRegistry.bindPage(pageKey, { sessionId: request.session.sessionId,
           generation: request.generation, conversationId: foundId });
@@ -290,7 +305,7 @@ export class ChatGptAdapter implements ProviderAdapter {
         conversationId,
       )
         ? this.#pageRegistry.pageForObservation(pageKey)
-        : this.#pageRegistry.requireOwnedPage(pageKey, {
+        : await this.#browserOwner.preparePageInteraction(pageKey, {
             sessionId: request.session.sessionId,
             generation: request.generation,
             conversationId,
@@ -456,6 +471,21 @@ export class ChatGptAdapter implements ProviderAdapter {
       return await discoverFileCards(page, request, () => { this.#requireExactArtifactPage(request); });
     });
     const rows = [...(message.artifacts ?? []), ...cards];
+    const { conversationId, submittedUserMessageId } = request.session;
+    if (rows.length === 0 && conversationId !== null && submittedUserMessageId !== null) {
+      // The provider's Outputs document list is not an answer-bound file
+      // card or download. Do not silently report zero verified artifacts.
+      this.#requireExactArtifactPage(request);
+      const output = await page.evaluate(streamRetrySurface, {
+        origin: new URL(page.url()).origin, conversationId,
+        anchor: submittedUserMessageId, click: false, outputPanel: 'inspect' as const,
+      });
+      this.#requireExactArtifactPage(request);
+      if (['output-popover-open', 'output-popover-closing', 'output-panel-inactive'].includes(output.reason)) {
+        throw new ProviderSubmissionError('provider.artifacts-unavailable',
+          'ChatGPT output document has no exact answer-bound downloadable artifact identity');
+      }
+    }
     const seen = new Set<string>();
     const candidates: ProviderArtifactCandidate[] = [];
     for (const row of rows) {
@@ -481,36 +511,71 @@ export class ChatGptAdapter implements ProviderAdapter {
     candidate: ProviderArtifactCandidate,
   ): Promise<ProviderArtifactDownload> {
     const page = this.#requireExactArtifactPage(request);
+    const expectedId = `chatgpt-link-${createHash('sha256').update(candidate.sourceUrl).digest('hex')}`;
+    if (candidate.providerArtifactId !== expectedId) {
+      throw new ProviderSubmissionError('provider.artifacts-unavailable', 'Artifact candidate identity is invalid');
+    }
     if (candidate.sourceUrl.startsWith('sessionplane-file-card:')) {
       return await this.#pageMutex.runExclusive(request.session.pageKey!, async () => {
         this.#requireExactArtifactPage(request);
         return await downloadFileCard(page, request, candidate, () => { this.#requireExactArtifactPage(request); }, this.#browserOwner);
       });
     }
-    const result = await page.evaluate(async (sourceUrl) => {
-      const response = await fetch(sourceUrl, { credentials: 'include' }).catch(() => null);
-      if (response === null || !response.ok) {
-        return { ok: false as const, status: response?.status ?? 0, base64: '' };
+    return await this.#pageMutex.runExclusive(request.session.pageKey!, async () => {
+      this.#requireExactArtifactPage(request);
+      const exactAnswer = await exactRoot(page, request);
+      let result;
+      try {
+        result = await exactAnswer.evaluate(async (root, { sourceUrl, selector, expectedName, expectedMediaType, fallbackName }) => {
+          const links = [...root.querySelectorAll<HTMLAnchorElement | HTMLImageElement>(selector)];
+          const matches = links.filter(element =>
+            (element instanceof HTMLAnchorElement ? element.href : element.src) === sourceUrl);
+          if (!root.isConnected || matches.length !== 1) {
+            return { sourceVerified: false, name: '', mediaType: null as string | null,
+              ok: false, status: 0, base64: '' };
+          }
+          const element = matches[0]!;
+          const name = (element instanceof HTMLAnchorElement ? element.download : element.alt) ||
+            element.textContent?.trim() || '';
+          const mediaType = element instanceof HTMLImageElement ? 'image/*' : null;
+          const normalizedName = (name || fallbackName).trim().replaceAll(/[\\/\u0000]/g, '_');
+          if ((normalizedName || 'chatgpt-artifact').slice(0, 255) !== expectedName ||
+              mediaType !== expectedMediaType) {
+            return { sourceVerified: false, name, mediaType,
+              ok: false, status: 0, base64: '' };
+          }
+          const response = await fetch(sourceUrl, { credentials: 'include' }).catch(() => null);
+          if (response === null || !response.ok) {
+            return { sourceVerified: root.isConnected, name, mediaType,
+              ok: false, status: response?.status ?? 0, base64: '' };
+          }
+          const bytes = new Uint8Array(await response.arrayBuffer());
+          let binary = '';
+          const chunkSize = 0x8000;
+          for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+            binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+          }
+          return { sourceVerified: root.isConnected, name, mediaType,
+            ok: true, status: response.status, base64: btoa(binary) };
+        }, { sourceUrl: candidate.sourceUrl, selector: CHATGPT_SELECTORS.artifactLinks.join(', '),
+          expectedName: candidate.name, expectedMediaType: candidate.mediaType,
+          fallbackName: nameFromSource(candidate.sourceUrl) });
+      } finally { await exactAnswer.dispose(); }
+      this.#requireExactArtifactPage(request);
+      if (!result.sourceVerified ||
+        candidate.name !== sanitizeArtifactName(result.name || nameFromSource(candidate.sourceUrl)) ||
+        candidate.mediaType !== result.mediaType) {
+        throw new ProviderSubmissionError('provider.artifacts-unavailable', 'Exact answer artifact source changed');
       }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      let binary = '';
-      const chunkSize = 0x8000;
-      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-        binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+      if (!result.ok) {
+        throw new ProviderSubmissionError(
+          'provider.artifact-download-failed',
+          `ChatGPT artifact download failed with status ${result.status}`,
+          { promptSubmitted: request.session.promptSubmitted },
+        );
       }
-      return { ok: true as const, status: response.status, base64: btoa(binary) };
-    }, candidate.sourceUrl);
-    if (!result.ok) {
-      throw new ProviderSubmissionError(
-        'provider.artifact-download-failed',
-        `ChatGPT artifact download failed with status ${result.status}`,
-        { promptSubmitted: request.session.promptSubmitted },
-      );
-    }
-    return {
-      candidate,
-      bytes: Uint8Array.from(Buffer.from(result.base64, 'base64')),
-    };
+      return { candidate, bytes: Uint8Array.from(Buffer.from(result.base64, 'base64')) };
+    });
   }
 
   async openStop(request: ProviderStopRequest): Promise<ProviderStopOperation> {

@@ -11,16 +11,16 @@ export function resolveNativeTeamTabs(
   bindings: readonly Pick<PageBindingSnapshot, 'targetId' | 'sessionId' | 'state' | 'url'>[],
   nativeTargets: readonly { targetId: string; type: string; url: string; browserContextId?: string }[],
   otherContexts: readonly string[],
-  resolveTeam: (sessionId: string | null, conversationId: string | null) => { teamId: string; title: string } | null,
+  resolveTeam: (sessionId: string | null, conversationId: string | null, targetId: string) => { teamId: string; title: string } | null,
 ): TeamTabs[] {
   const teams = new Map<string, { teamId: string; title: string; targetIds: string[] }>();
   for (const binding of bindings) {
     if (!binding.targetId) continue;
     const owned = binding.sessionId && ['owned', 'reserved'].includes(binding.state);
-    const conversationId = !binding.sessionId && ['unbound', 'conflict'].includes(binding.state) && isChatGptUrl(binding.url)
-      ? parseProviderConversationId(binding.url) : null;
-    if (!owned && !conversationId) continue;
-    const owner = resolveTeam(owned ? binding.sessionId : null, conversationId);
+    const restored = ['unbound', 'conflict', 'identity_lost'].includes(binding.state) && isChatGptUrl(binding.url);
+    const conversationId = restored ? parseProviderConversationId(binding.url) : null;
+    if (!owned && !restored) continue;
+    const owner = resolveTeam(owned ? binding.sessionId : null, conversationId, binding.targetId);
     if (!owner) continue;
     const team = teams.get(owner.teamId) ?? { ...owner, targetIds: [] };
     team.targetIds.push(binding.targetId);
@@ -33,7 +33,7 @@ export function resolveNativeTeamTabs(
         (target.browserContextId !== undefined && otherContexts.includes(target.browserContextId)) ||
         !isChatGptUrl(target.url)) continue;
     const conversationId = parseProviderConversationId(target.url);
-    const owner = conversationId ? resolveTeam(null, conversationId) : null;
+    const owner = resolveTeam(null, conversationId, target.targetId);
     if (!owner) continue;
     const team = teams.get(owner.teamId) ?? { ...owner, targetIds: [] };
     team.targetIds.push(target.targetId);
@@ -63,10 +63,13 @@ export async function syncNativeTeamGroups(teams: readonly TeamTabs[]) {
   const result = [];
   for (const team of requested) {
     if (!team.tabs.length) continue;
-    // Never adopt a user group or modify its unmanaged members. A saved native
-    // group is usable only while every member remains owned by this exact team.
-    let group = groups.find(group => group.id === saved[team.teamId] &&
-      tabs.filter(tab => tab.groupId === group.id).every(tab => membership.get(tab.id) === team.teamId));
+    // Reuse exact member ownership if a restart lost the saved group mapping.
+    // Titles never establish team identity; unmanaged members remain untouched.
+    const ownedGroups = groups.filter(group => {
+      const members = tabs.filter(tab => tab.groupId === group.id);
+      return members.length > 0 && members.every(tab => membership.get(tab.id) === team.teamId);
+    });
+    let group = ownedGroups.find(group => group.id === saved[team.teamId]) ?? ownedGroups.sort((a, b) => a.id - b.id)[0];
     const active = team.tabs.find(tab => tab.active && windows.some(window => window.id === tab.windowId && window.focused));
     const windowId = active?.windowId ?? group?.windowId ?? team.tabs[0]!.windowId;
     if (group && group.windowId !== windowId) group = undefined;
@@ -88,6 +91,26 @@ export async function syncNativeTeamGroups(teams: readonly TeamTabs[]) {
     targetId: targets.find(target => target.tabId === tab.id)?.id ?? null,
     windowId: tab.windowId, groupId: tab.groupId, active: tab.active, incognito: tab.incognito,
     title: tab.title ?? '', url: tab.url ?? '' })) };
+}
+
+/** Explicit user focus only. Renderer focus can be emulated on a background tab. */
+export async function focusNativeTab(input: { targetId: string; url: string }) {
+  const chrome = (globalThis as any).chrome;
+  const target = (await chrome.debugger.getTargets()).find((target: any) => target.id === input.targetId);
+  if (!Number.isInteger(target?.tabId)) throw new Error('Exact native focus target is unavailable');
+  const before = await chrome.tabs.get(target.tabId);
+  if (before.incognito || before.url !== input.url) throw new Error('Exact native focus target identity changed');
+  await chrome.tabs.update(before.id, { active: true });
+  await chrome.windows.update(before.windowId, { focused: true });
+  const tab = await chrome.tabs.get(before.id);
+  const window = await chrome.windows.get(before.windowId);
+  const current = (await chrome.debugger.getTargets()).find((target: any) => target.id === input.targetId);
+  if (current?.tabId !== tab.id || tab.url !== input.url || tab.windowId !== before.windowId ||
+      tab.incognito || tab.active !== true || window.focused !== true) {
+    throw new Error('Exact native tab/window activation was not confirmed');
+  }
+  return { targetId: input.targetId, tabId: tab.id as number, windowId: tab.windowId as number,
+    tabActive: true, windowFocused: true };
 }
 
 // Public extension identity only; no signing key or website access is retained.

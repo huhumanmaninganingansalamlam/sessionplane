@@ -1,7 +1,7 @@
 import type { ElementHandle, Page, Response } from 'playwright-core';
 import type { BrowserOwner } from '../../browser/browser-owner.ts';
 import { ProviderSubmissionError, type ProviderArtifactCandidate, type ProviderArtifactRequest } from '../provider-adapter.ts';
-import { readChatGptMessages } from './message-dom.ts';
+import { matchesSubmittedChatGptUser, readChatGptMessages } from './message-dom.ts';
 import { CHATGPT_SELECTORS } from './selectors.ts';
 
 const downloadSelector = 'button[aria-label="Download file"],button[aria-label="파일 다운로드"]';
@@ -11,14 +11,12 @@ function unavailable(message: string): never {
   throw new ProviderSubmissionError('provider.artifacts-unavailable', message);
 }
 
-async function exactRoot(page: Page, request: ProviderArtifactRequest, requireAnchor = true): Promise<ElementHandle<HTMLElement>> {
+export async function exactRoot(page: Page, request: ProviderArtifactRequest, requireAnchor = true): Promise<ElementHandle<HTMLElement>> {
   const messages = await readChatGptMessages(page, true);
   const answers = messages.filter(m => m.role === 'assistant' && m.messageId === request.session.responseMessageId);
   if (answers.length !== 1 || answers[0]?.elementIndex === undefined) unavailable('Exact artifact answer is not unique');
   const answer = answers[0];
-  const anchors = messages.filter(m => m.role === 'user' &&
-    ((request.session.submittedUserMessageId !== null && m.messageId === request.session.submittedUserMessageId) ||
-     (request.session.submittedUserTurnId !== null && m.turnId === request.session.submittedUserTurnId)));
+  const anchors = messages.filter(m => matchesSubmittedChatGptUser(m, request.session));
   if (requireAnchor && anchors.length !== 1) unavailable('Exact artifact user anchor is not unique');
   if (requireAnchor && anchors[0]!.rootIndex !== answer.rootIndex) unavailable('Artifact answer belongs to another DOM root');
   const start = messages.indexOf(anchors[0]!);
@@ -32,7 +30,23 @@ async function exactRoot(page: Page, request: ProviderArtifactRequest, requireAn
     return (root.getAttribute('data-message-id') ?? el.getAttribute('data-message-id') ?? el.getAttribute('data-dil-message-id') ?? (ids.length === 1 ? ids[0] : null)) === expected;
   }, request.session.responseMessageId);
   if (!stillExact) { await node.dispose(); unavailable('Artifact response identity changed'); }
-  const handle = await node.evaluateHandle(el => el.closest<HTMLElement>('[data-message-id], [data-turn-id]') ?? el as HTMLElement);
+  const handle = await node.evaluateHandle((el, expected) => {
+    const legacy = el.closest<HTMLElement>('[data-message-id], [data-turn-id]');
+    if (legacy !== null || expected === null || el.getAttribute('data-dil-message-id') !== expected) {
+      return legacy ?? (el as HTMLElement);
+    }
+    // The current DIL file card may sit beside the authored answer, inside
+    // its one-message assistant group. An ambiguous group cannot own it.
+    const group = el.closest<HTMLElement>('[data-chatgpt-search-message-ids]');
+    const selection = el.closest<HTMLElement>('[data-chatgpt-selection-message-id]');
+    const groupIds = [...new Set((group?.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/).filter(Boolean))];
+    return group?.getAttribute('data-chatgpt-search-unit-key')?.endsWith(':assistant') === true &&
+      groupIds.length === 1 && groupIds[0] === expected &&
+      selection?.getAttribute('data-chatgpt-selection-message-id') === expected &&
+      group.querySelectorAll('[data-dil-message-id]').length === 1 &&
+      group.contains(selection)
+      ? group : (el as HTMLElement);
+  }, request.session.responseMessageId);
   await node.dispose();
   const root = handle.asElement();
   if (root === null) unavailable('Exact artifact answer disappeared');
@@ -85,6 +99,9 @@ export async function downloadFileCard(page: Page, request: ProviderArtifactRequ
   try {
     const found = (await cards(root)).filter(c => source(request.session.responseMessageId!, c.name) === candidate.sourceUrl);
     if (found.length !== 1) unavailable('Exact file card is missing or ambiguous');
+    const sanitized = found[0]!.name.trim().replaceAll(/[\\/\u0000]/g, '_');
+    if (candidate.name !== (sanitized || 'chatgpt-artifact').slice(0, 255) ||
+        candidate.mediaType !== null) unavailable('Exact file card metadata changed');
     const buttons = await root.$$(downloadSelector);
     const button = buttons[found[0]!.index];
     if (!button || !await button.isVisible() || !await button.isEnabled()) unavailable('Exact download control is unavailable');

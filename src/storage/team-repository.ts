@@ -202,6 +202,10 @@ export class TeamRepository {
       .run(retiredAt, roleId);
   }
 
+  rename(teamId: string, name: string, updatedAt: string): void {
+    this.#database.prepare('UPDATE teams SET name = ?, updated_at = ? WHERE team_id = ?').run(name, updatedAt, teamId);
+  }
+
   insertBrief(
     teamId: string,
     version: number,

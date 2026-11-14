@@ -47,11 +47,16 @@ and confirm the final active controls; unavailable intent requires a user decisi
   with the current evidence instead of repeating an already recorded choice.
 - `decide` with `decision:"focus"`, teamId, requestRef and a stable requestId
   activates the exact currently connected tab for explicit human viewing or control.
+  Success verifies the native selected tab and focused Chrome window; renderer
+  visibility or focus emulation alone cannot establish activation. A denied or
+  unverified activation returns an error rather than `activated:true`.
   It works for pending and completed current requests, without navigation, reload,
   submission, model changes or new tabs. Missing, mismatched, replaced or superseded
   targets fail instead of selecting another tab. Replaying a completed requestId
   returns its receipt without stealing focus again; a new user action uses a fresh ID.
-  Automatic observation and recovery remain independent of foreground focus.
+  Background observation never selects the native tab or window. Opening an exact
+  owned observer restores its per-page rendering emulation after Core adoption;
+  this allows pending animation-frame updates without changing drafts or ACKs.
 - `decide` with `decision:"refresh"`, teamId, requestRef and a stable requestId
   reloads only that request's currently owned ChatGPT page. No UI ref is needed.
   Use when the user requests refresh or visible provider recovery failure warrants
@@ -214,12 +219,31 @@ without retrying. Original failed receipts and answers retain separate identitie
 A new SessionPlane send starts the next generation; completed results
 remain immutable and cannot be overwritten by later conversation activity.
 
+For an existing collector with `continuationApproved:true`, native broad review
+defaults to 20 minutes (1200000ms). This is review eligibility, not a guaranteed
+send: live work, permission/hold, original ACK, draft, single-owner and provider
+Retry-After guards still apply. Explicit wait durations and approval choices
+remain unchanged. Normal Core handover applies the default to existing approved
+original chains; retained ordinary exact-followup reviews use the current default
+without rewriting receipts. Earlier explicit rearming and real backend deferrals
+retain their deadlines. Held, unapproved and terminal requests are not resumed.
+
 `team_delete` removes the entire team, its roles, sessions, requests, events and
 artifact references. It retires roles before cleanup, stops owned work and closes
 owned tabs. Provider conversation deletion is attempted once; failure does not
 block local deletion and is reported per session. Retrieve needed outputs first.
 Shared content blobs, exported files and idempotency receipts remain. Retry with
 the same requestId to receive the deletion result without repeating provider actions.
+If `sessions[].pageErrors` remain, a new `team_delete` requestId with
+`resumePageCleanup:{deletionRequestId,sessionId,targetId,evidenceRef}` resumes only
+that failed exact local page after team deletion. `retainedPages` preserves its
+identity before bindings are removed. Legacy receipts require an additional
+`ownershipRequestId` referencing a native ownership result in the same team/client
+scope and the explicitly archived original target. The caller cannot supply a
+replacement URL. Changed/current/shared targets, active Stop, attachments and
+protected dialogs are refused. `discardDraft:true` explicitly escrows an obsolete
+draft in the new receipt before closing. Original deletion results stay immutable;
+recovery never repeats provider deletion, Stop, sends or observation.
 
 ## Human terminal client
 

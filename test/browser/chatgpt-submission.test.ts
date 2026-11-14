@@ -13,6 +13,88 @@ import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ProviderSubmissionError, type ProviderSubmissionAttempt } from '../../src/providers/provider-adapter.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
 import { ChatGptSubmission, recoverChatGptAcknowledgement, inspectChatGptSubmissionCandidates } from '../../src/providers/chatgpt/submission.ts';
+import { observeChatGptSurface } from '../../src/providers/chatgpt/surface.ts';
+
+test('Chat default remains selected through preparation and a later Work drift blocks the actual submit', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chat-mode-submit-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: `<main>
+      <div role="radiogroup"><button type="button" id="chat" role="radio" aria-checked="true">Chat</button>
+        <button type="button" id="work" role="radio" aria-checked="false" onclick="window.workClicks++">Work</button></div>
+      <div id="prompt-textarea" contenteditable="true"></div>
+      <button data-testid="send-button" type="button" onclick="window.sends++">Send</button>
+      <script>window.sends=0;window.workClicks=0;</script></main>` }));
+    await page.goto('https://chatgpt.com/');
+    registry.reservePage(binding.pageKey, { sessionId: 'chat-default', generation: 1 });
+    const submission = new ChatGptSubmission({ page, pageKey: binding.pageKey, pageRegistry: registry,
+      request: { session: sessionSnapshot({ sessionId: 'chat-default', pageKey: binding.pageKey }),
+        generation: 1, prompt: 'Preserve exact prompt', model: null }, acknowledgementTimeoutMs: 100 });
+    await prepareFixture(submission, page);
+    assert.equal((await observeChatGptSurface(page)).mode, 'chat');
+    assert.equal(await page.locator('#prompt-textarea').innerText(), 'Preserve exact prompt');
+    await page.evaluate(() => {
+      document.querySelector('#chat')!.setAttribute('aria-checked', 'false');
+      document.querySelector('#work')!.setAttribute('aria-checked', 'true');
+    });
+    await assert.rejects(submission.submitOnce(), /composer is Work/);
+    assert.equal(await page.locator('#prompt-textarea').innerText(), 'Preserve exact prompt');
+    assert.deepEqual(await page.evaluate(() => [(window as any).sends, (window as any).workClicks]), [0, 0]);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('same-conversation follow-up without optional mode chrome submits its exact prepared prompt once and captures ACK', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chat-default-followup-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', async route => {
+      if (route.request().url().endsWith('/api/auth/session')) return await route.fulfill({ json: { accessToken: 'isolated-fixture-token' } });
+      if (route.request().method() === 'POST') return await route.fulfill({ json: {} });
+      await route.fulfill({ contentType: 'text/html', body: `<main>
+        <div data-message-author-role="user" data-message-id="original-ack">Original preserved</div>
+        <div data-message-author-role="assistant" data-message-id="original-answer">Original result preserved</div>
+        <div id="prompt-textarea" role="textbox" contenteditable="true">Retained draft</div>
+        <button data-testid="send-button" type="button">Send</button>
+        <script>window.sends=0;
+          document.querySelector('button').onclick=async()=>{
+            window.sends++; const composer=document.querySelector('#prompt-textarea'); const text=composer.innerText;
+            await fetch('/backend-api/f/conversation',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+              action:'next',conversation_id:'followup-chat',parent_message_id:'original-answer',messages:[{
+                id:'followup-ack',author:{role:'user'},content:{content_type:'text',parts:[text]}}]})});
+            const user=document.createElement('div'); user.dataset.messageAuthorRole='user'; user.dataset.messageId='followup-ack';
+            user.textContent=text; document.querySelector('main').append(user); composer.textContent='';
+          };
+        </script></main>` });
+    });
+    await page.goto('https://chatgpt.com/c/followup-chat');
+    registry.reservePage(binding.pageKey, { sessionId: 'followup', generation: 2, conversationId: 'followup-chat' });
+    const submission = new ChatGptSubmission({ page, pageKey: binding.pageKey, pageRegistry: registry,
+      request: { session: { ...sessionSnapshot({ sessionId: 'followup', pageKey: binding.pageKey }), generation: 2,
+        conversationId: 'followup-chat' }, generation: 2, prompt: 'Exact authorized follow-up', model: null }, acknowledgementTimeoutMs: 2000 });
+    await submission.prepareForObservation();
+    const snapshot = await new BrowserRefSnapshotStore().capture({ page, pageKey: binding.pageKey, bindingEpoch: 1, interactive: false });
+    const composer = snapshot.nodes.find(n => n.role === 'textbox' && n.editable)!;
+    const submit = snapshot.nodes.find(n => n.role === 'button' && n.name === 'Send')!;
+    assert.ok(composer); assert.ok(submit);
+    await submission.prepare({ composer: { ...composer, purpose: 'composer', selectedValue: null },
+      submit: { ...submit, purpose: 'submit', selectedValue: null } });
+    assert.equal((await observeChatGptSurface(page)).source, 'chat-default');
+    assert.equal(await page.locator('#prompt-textarea').innerText(), 'Exact authorized follow-up');
+    await submission.submitOnce();
+    const ack = await submission.captureAcknowledgement();
+    assert.equal(ack?.conversationId, 'followup-chat');
+    assert.equal(ack?.submittedUserMessageId, 'followup-ack');
+    assert.equal(await page.locator('[data-message-id="followup-ack"]').innerText(), 'Exact authorized follow-up');
+    assert.equal(await page.locator('[data-message-id="original-answer"]').innerText(), 'Original result preserved');
+    assert.equal(await page.evaluate(() => (window as any).sends), 1);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 for (const dispatch of [true, false]) test(`continuation Enter ${dispatch ? 'dispatches and accepts the exact ACK' : 'reports a no-op without claiming delivery or clicking Stop'}`, async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-enter-continuation-'));
@@ -135,6 +217,50 @@ test('UNKNOWN history acknowledgement requires retained ownership, empty draft a
     assert.equal(ack?.conversationId, 'recovered123456');
     assert.equal(await page.locator('button').innerText(), 'More', 'ACK recovery preserves the selected message surface');
     assert.equal(registry.requireSessionPage(binding.pageKey, { ...session, conversationId: 'recovered123456' }), page);
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('retained UNKNOWN with a collapsed user bubble recovers only the full canonical original without sending', async t => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-unknown-collapsed-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  const prompt = 'Exact original ' + 'context '.repeat(180) + 'final tail';
+  try {
+    await owner.start();
+    const { page, binding } = await owner.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body:
+      '<main><textarea id="prompt-textarea"></textarea><div data-message-author-role="user" data-message-id="retained-user">Exact original…<button>더 보기</button></div><button data-testid="stop-button">Stop</button></main><script>window.clicks=0;document.querySelectorAll("button").forEach(b=>b.onclick=()=>window.clicks++)</script>' }));
+    await page.goto('https://chatgpt.com/');
+    registry.reservePage(binding.pageKey, { sessionId: 'original', generation: 1 });
+    await page.evaluate(() => history.pushState({}, '', '/c/collapsedoriginal'));
+    const session = { ...sessionSnapshot({ sessionId: 'original', pageKey: binding.pageKey }),
+      submissionState: 'submission_unknown' as const, promptSubmitted: true };
+    let canonical = prompt + ' wrong';
+    t.mock.method(page.context().request, 'get', async (url: string) => ({
+      status: () => 200, headers: () => ({}), dispose: async () => {},
+      json: async () => url.endsWith('/api/auth/session') ? { accessToken: 'isolated-fixture-token' } : {
+        id: 'collapsedoriginal', current_node: 'retained-user', mapping: {
+          'retained-user': { parent: null, message: { id: 'retained-user', author: { role: 'user' },
+            content: { content_type: 'text', parts: [canonical] } } },
+        },
+      },
+    }));
+    const recover = () => new ChatGptAdapter({ browserOwner: owner, pageRegistry: registry,
+      loginUrl: 'https://chatgpt.com/' }).recoverAcknowledgement({ session, generation: 1, prompt });
+    assert.equal(await recover(), null, 'Prefix/collapsed DOM never overrides a canonical tail mismatch');
+    assert.equal(registry.getBinding(binding.pageKey).state, 'identity_lost');
+    canonical = prompt;
+    await page.locator('textarea').fill('Preserve human draft');
+    assert.equal(await recover(), null, 'Canonical proof cannot clear or adopt a human draft');
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserve human draft');
+    await page.locator('textarea').fill('');
+    const recovered = await recover();
+    assert.equal(recovered?.submittedUserMessageId, 'retained-user');
+    assert.equal(recovered?.conversationId, 'collapsedoriginal');
+    assert.equal(recovered?.evidence, 'backend-exact-user');
+    assert.equal(registry.getBinding(binding.pageKey).state, 'owned');
+    assert.equal(await page.evaluate(() => (window as any).clicks), 0, 'No More/Stop/Submit button is needed');
+    assert.equal(await page.locator('textarea').inputValue(), '');
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

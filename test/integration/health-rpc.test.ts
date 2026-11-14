@@ -35,6 +35,11 @@ test('system.health is served over an owner-only Unix socket and durable SQLite 
 
     assert.equal(result.requestOk, true);
     assert.equal(result.service, 'sessionplane');
+    assert.equal(result.schemaVersion, migrations.at(-1)!.version);
+    assert.ok(result.sourceCommit === null ||
+      typeof result.sourceCommit === 'string' && /^[0-9a-f]{40}$/.test(result.sourceCommit));
+    assert.equal(result.packageSha256, null,
+      'an unverified install receipt must never manufacture a tarball checksum');
     assert.equal((result.database as Record<string, unknown>).schemaVersion, migrations.at(-1)!.version);
     assert.equal((result.database as Record<string, unknown>).journalMode, 'wal');
     assert.equal((result.database as Record<string, unknown>).foreignKeys, true);

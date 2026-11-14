@@ -14,7 +14,7 @@ import {
 import { createServer } from 'node:net';
 import path from 'node:path';
 
-import { chromium, type Browser, type BrowserContext, type CDPSession, type Page } from 'playwright-core';
+import { chromium, type APIRequestContext, type Browser, type BrowserContext, type CDPSession, type Page } from 'playwright-core';
 
 import {
   findHostBrowser,
@@ -25,7 +25,7 @@ import {
 } from './browser-health.ts';
 import { isChatGptUrl, isProviderUrl, parseProviderConversationId, type PageBindingSnapshot } from './page-binding.ts';
 import { PageRegistry } from './page-registry.ts';
-import { syncNativeTeamGroups, teamGroupsManifest, TEAM_GROUPS_EXTENSION_ID, resolveNativeTeamTabs, type TeamTabs } from './team-tab-groups.ts';
+import { focusNativeTab, syncNativeTeamGroups, teamGroupsManifest, TEAM_GROUPS_EXTENSION_ID, resolveNativeTeamTabs, type TeamTabs } from './team-tab-groups.ts';
 import {
   assertDedicatedBrowserProfile,
   BrowserProfileError,
@@ -72,7 +72,7 @@ export interface ManualLoginResumeSnapshot {
 }
 
 export interface BrowserOwnerOptions {
-  readonly resolveTeam?: (sessionId: string | null, conversationId: string | null) => { teamId: string; title: string } | null;
+  readonly resolveTeam?: (sessionId: string | null, conversationId: string | null, targetId: string) => { teamId: string; title: string } | null;
   readonly profileDir: string;
   readonly scopeProfileByBrowser?: boolean;
   readonly pageRegistry: PageRegistry;
@@ -163,6 +163,17 @@ export class BrowserOwner {
   }
 
   get teamGroupsBusy(): boolean { return this.#groupSync !== null; }
+  /** Reuse the current dedicated profile for page-less authenticated recovery.
+   * This is an internal GET transport, not a tab or a second browser owner.
+   */
+  recoveryRequestContext(): APIRequestContext {
+    return this.#requireContext().request;
+  }
+
+  async syncTeamGroups(): Promise<void> {
+    this.#scheduleGroups();
+    await this.#groupSync;
+  }
 
   async start(): Promise<void> {
     if (this.#state === 'ready' || this.#state === 'manual') return;
@@ -324,8 +335,32 @@ export class BrowserOwner {
       bindings: this.#pageRegistry.listBindings({ includeClosed: false }) };
   }
 
+  /** Only the public explicit-focus decision may select a tab and focus its window. */
+  async focusPage(pageKey: string, page: Page) {
+    const binding = this.#pageRegistry.getBinding(pageKey);
+    if (this.#pageRegistry.pageForObservation(pageKey, binding.bindingEpoch) !== page || !binding.targetId)
+      throw new BrowserOwnerError('browser.unavailable', 'Exact native focus target is unavailable');
+    const controller = this.#requireContext().pages().find(page =>
+      page.url() === `chrome-extension://${TEAM_GROUPS_EXTENSION_ID}/groups.html`);
+    if (!controller) throw new BrowserOwnerError('browser.unavailable', 'Native tab activation controller is unavailable');
+    const result = await controller.evaluate(focusNativeTab, { targetId: binding.targetId, url: page.url() });
+    if (this.#pageRegistry.pageForObservation(pageKey, binding.bindingEpoch) !== page)
+      throw new BrowserOwnerError('browser.unavailable', 'Exact native focus target changed');
+    return result;
+  }
+
   async captureDownload(page: Page, name: string, activate: () => Promise<void>): Promise<Uint8Array> {
     if (this.#browser === null || this.#state !== 'ready') throw new BrowserOwnerError('browser.unavailable', 'Download owner is not ready');
+    // Only a currently owned Page from this exact browser can activate a download.
+    const owned = this.#pageRegistry.listBindings({ includeClosed: false }).filter(binding => {
+      if (binding.state !== 'owned' || binding.targetId === null) return false;
+      try { return this.#pageRegistry.pageForObservation(binding.pageKey, binding.bindingEpoch) === page; }
+      catch { return false; }
+    });
+    if (page.context() !== this.#requireContext() || owned.length !== 1) {
+      throw new BrowserOwnerError('session.page-identity-unverified', 'Download requires one exact owned page');
+    }
+    const exactOwner = owned[0]!;
     // noDefaults adoption intentionally skips Playwright's download setup. Restore
     // only the dedicated profile's download transport, without per-page overrides.
     const directory = path.join(this.#profileDir, 'sessionplane-downloads');
@@ -373,6 +408,13 @@ export class BrowserOwner {
     control.on('Browser.downloadProgress', onProgress);
     const timer = setTimeout(() => fail('No confirmed download completion'), 15_000);
     try {
+      const current = this.#pageRegistry.refreshPage(exactOwner.pageKey);
+      if (current.state !== 'owned' || current.bindingEpoch !== exactOwner.bindingEpoch ||
+          current.targetId !== exactOwner.targetId || current.sessionId !== exactOwner.sessionId ||
+          current.generation !== exactOwner.generation || current.conversationId !== exactOwner.conversationId ||
+          this.#pageRegistry.pageForObservation(exactOwner.pageKey, exactOwner.bindingEpoch) !== page) {
+        throw new BrowserOwnerError('session.page-identity-unverified', 'Download page ownership changed before activation');
+      }
       await activate();
       const result = await settled;
       if ('error' in result) throw result.error;

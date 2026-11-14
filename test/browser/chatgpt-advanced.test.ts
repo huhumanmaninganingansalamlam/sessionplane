@@ -547,7 +547,7 @@ test('ChatGPT Work surface is rejected before composer mutation', async () => {
   }
 });
 
-test('existing-thread composer selection is observable without sending; missing or conflicting evidence stays unknown', async () => {
+test('existing-thread Chat defaults without an optional selector; actual Work and conflicting evidence stay guarded', async () => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-chatgpt-surface-'));
   const registry = new PageRegistry();
   const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
@@ -559,19 +559,29 @@ test('existing-thread composer selection is observable without sending; missing 
     await page.goto('https://chatgpt.com/c/surface-existing');
     registry.refreshPage(binding.pageKey);
     registry.reservePage(binding.pageKey, { sessionId: 'surface-session', generation: 1, conversationId: 'surface-existing' });
-    assert.equal((await observeChatGptSurface(page)).mode, 'unknown', 'Effort is not mode');
+    assert.equal((await observeChatGptSurface(page)).source, 'chat-default', 'Default is not model/effort or selected-control proof');
     const submission = new ChatGptSubmission({ page, pageKey: binding.pageKey, pageRegistry: registry,
       request: { session: { ...sessionSnapshot(binding.pageKey), sessionId: 'surface-session', conversationId: 'surface-existing' },
         generation: 1, prompt: 'Do not send', model: null, surface: 'chat' }, acknowledgementTimeoutMs: 100 });
-    await assert.rejects(submission.prepare(), /selection is unverified/);
+    await assert.rejects(submission.prepare(), /Choose the composer/);
     const setWork = (work: boolean) => page.evaluate(work => {
       Object.assign(document.querySelector('[data-chatgpt-composer]')!, {
         __reactFiber$fixture: { memoizedProps: {}, return: { memoizedProps: { isWorkConversation: work } } },
       });
     }, work);
     await setWork(false);
+    await page.evaluate(() => document.body.insertAdjacentHTML('beforeend', '<nav><button aria-pressed="true">Work</button></nav>'));
+    const inherited = await observeChatGptSurface(page);
+    assert.deepEqual(inherited.modeControls?.map(c => ({ label: c.label, pressed: c.pressed, navigation: c.navigation })),
+      [{ label: 'work', pressed: 'true', navigation: true }], 'Mode chrome diagnostics expose no bodies, selectors or action refs');
+    await page.locator('nav').evaluate(node => node.remove());
+    assert.equal(inherited.mode, 'chat'); assert.equal(inherited.source, 'chat-default');
+    await page.evaluate(() => document.body.insertAdjacentHTML('beforeend', '<button id="actual-chat" style="visibility:hidden" role="radio" aria-checked="true">Chat</button>'));
+    assert.equal((await observeChatGptSurface(page)).source, 'chat-default', 'A CSS-hidden Chat control is not selected-control proof');
+    await page.locator('#actual-chat').evaluate(node => (node as HTMLElement).style.visibility = 'visible');
     const chat = await observeChatGptSurface(page);
-    assert.equal(chat.mode, 'chat'); assert.equal(chat.source, 'composer-state');
+    assert.equal(chat.mode, 'chat'); assert.equal(chat.source, 'selected-control');
+    await page.locator('#actual-chat').evaluate(node => node.remove());
     await setWork(true);
     assert.equal((await observeChatGptSurface(page)).mode, 'work');
     await assert.rejects(submission.prepare(), /composer is Work/);
@@ -579,6 +589,40 @@ test('existing-thread composer selection is observable without sending; missing 
     const conflict = await observeChatGptSurface(page);
     assert.equal(conflict.mode, 'unknown'); assert.equal(conflict.source, 'conflicting-evidence');
     assert.equal(await page.locator('textarea').inputValue(), 'Keep my draft');
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('actual pressed Chat/Work groups prove mode; incomplete/conflicting controls stay guarded and absent controls retain Chat default', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-pressed-surface-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: registry, headless: true });
+  try {
+    await owner.start();
+    const { page } = await owner.createPage();
+    const pair = (chat: string, work: string) => `<div role="group"><button aria-pressed="${chat}" data-state="closed">Chat</button><button aria-pressed="${work}" data-state="closed">Work</button></div>`;
+    const read = async (chrome: string) => {
+      await page.setContent(`<main><form data-chatgpt-composer><textarea>Preserved draft</textarea></form>${chrome}</main>`);
+      const surface = await observeChatGptSurface(page);
+      assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
+      return surface;
+    };
+    assert.equal((await read(pair('true', 'false'))).mode, 'chat');
+    assert.equal((await read(pair('false', 'true'))).mode, 'work');
+    for (const chrome of [pair('true', 'true'), pair('false', 'false'),
+      '<div role="group"><button aria-pressed="true">Chat</button></div>',
+      '<div role="group"><button aria-pressed="true">Chat</button></div><div role="group"><button aria-pressed="false">Work</button></div>',
+      pair('true', 'false').replace('</div>', '<button aria-pressed="true">Chat</button></div>'),
+      pair('true', 'false') + pair('false', 'true')]) {
+      assert.equal((await read(chrome)).mode, 'unknown', chrome);
+    }
+    for (const chrome of ['', `<nav>${pair('true', 'false')}</nav>`, `<article>${pair('true', 'false')}</article>`,
+      pair('true', 'false').replace('<div ', '<div hidden ')]) {
+      assert.equal((await read(chrome)).source, 'chat-default', chrome);
+    }
+    await page.setContent('<main>No usable composer</main>');
+    assert.equal((await observeChatGptSurface(page)).mode, 'unknown');
+    await page.setContent(pair('true', 'false') + '<button role="radio" aria-checked="true">Work</button>');
+    assert.equal((await observeChatGptSurface(page)).source, 'conflicting-evidence');
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -10,6 +10,439 @@ import { Readable, Writable } from 'node:stream';
 import { invokeMcpTool } from '../../src/mcp/tools.ts';
 import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
+import { SessionUiService } from '../../src/core/session-ui-service.ts';
+import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
+import { callRpc } from '../../src/cli/client.ts';
+import { ConversationLoadRecoveryRepository } from '../../src/storage/conversation-load-recovery-repository.ts';
+import { controlHostSpanPermission, inspectHostSpanActivity, revealHostSpanActivity } from '../../src/providers/chatgpt/hostspan-permission.ts';
+
+test('owned permission inspection records redacted modal structure before close without granting or reading form values', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-permission-details-'));
+  const core = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    providerAdapters: [new FakeProviderAdapter()], logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: '<main></main>' }));
+    await page.goto('https://chatgpt.com/c/details-fixture');
+    for (const variant of ['label-only', 'rendered-json', 'value-only', 'hidden-json', 'changed-ack']) {
+      await page.setContent(`<main>
+        <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+        <section><div role="alert">hostspan-desktop Process Start
+          <button onclick="document.querySelector('#details').hidden=false;${variant === 'changed-ack'
+            ? "document.querySelector('[data-message-id]').setAttribute('data-message-id','later-ack')" : ''}">View details</button></div>
+          <button onclick="window.grants++">Allow once</button></section>
+        <section role="dialog" id="details" hidden><h2>Details</h2>
+          <p>ChatGPT가 hostspan-desktop의 Process Start 도구를 호출합니다.</p>
+          ${variant === 'rendered-json' ? '<pre><code>{"argv":["private-command"],"password":"private-secret"}</code></pre>' : ''}
+          ${variant === 'value-only' ? '<input value="private-secret"><textarea>private-draft</textarea>' : ''}
+          ${variant === 'hidden-json' ? '<pre hidden>{"argv":["private-hidden-command"]}</pre>' : ''}
+          <button aria-label="Close dialog" onclick="window.closes++;this.closest('[role=dialog]').hidden=true">Close dialog</button>
+        </section><textarea id="prompt-textarea">Preserved consumer draft</textarea>
+        <script>window.grants=0;window.closes=0</script></main>`);
+      const inspect = () => controlHostSpanPermission(page, {
+        action: 'inspect', appName: 'hostspan-desktop', toolName: 'Process Start',
+      }, 'current-ack');
+      if (variant === 'changed-ack') {
+        await assert.rejects(inspect, /ACK or details dialog changed/);
+        assert.equal(await page.evaluate(() => (window as any).closes), 0);
+      } else {
+        const result = await inspect();
+        assert.equal(result.outcome, 'inspected');
+        assert.ok('detailsInspection' in result);
+        assert.equal(result.detailsInspection.length, 1);
+        const diagnostic = result.detailsInspection[0]!;
+        assert.equal(diagnostic.submittedUserMessageId, 'current-ack');
+        assert.equal(diagnostic.beforeClose, true);
+        assert.equal(diagnostic.argumentValuesIncluded, false);
+        assert.equal(diagnostic.formValuesRead, false);
+        assert.equal(diagnostic.structureTruncated, false);
+        assert.doesNotMatch(JSON.stringify(diagnostic), /private-|Preserved consumer draft/);
+        assert.equal(diagnostic.argumentMarkersPresent, variant === 'rendered-json');
+        assert.equal(diagnostic.renderedElements.code, variant === 'rendered-json' ? 1 : 0);
+        assert.equal(diagnostic.renderedElements.input, variant === 'value-only' ? 1 : 0);
+        assert.equal(diagnostic.renderedElements.textarea, variant === 'value-only' ? 1 : 0);
+        if (variant === 'label-only' || variant === 'hidden-json') assert.equal(diagnostic.additionalTextCharacters, 0);
+        assert.equal(await page.evaluate(() => (window as any).closes), 1);
+        assert.equal(await page.locator('#details').isVisible(), false);
+      }
+      assert.equal(await page.locator('#prompt-textarea').inputValue(), 'Preserved consumer draft');
+      assert.equal(await page.evaluate(() => (window as any).grants), 0);
+    }
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a buttonless current provider alert blocks continuation without fabricating a user action', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-alert-blocker-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [new FakeProviderAdapter()],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const team = core.teamDirectory.createTeam({ clientId: 'fixture-owner' });
+    const initial = core.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
+    const { page, binding } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<main>
+      <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+      <div role="alert">hostspan-desktop 다시 연결. 연결이 만료되었습니다.</div>
+      <textarea id="prompt-textarea"></textarea></main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    core.pageRegistry.reservePage(binding.pageKey, { sessionId: initial.sessionId, generation: initial.generation, conversationId: 'fixture' });
+    const session = { ...core.teamDirectory.getSession(initial.sessionId), pageKey: binding.pageKey,
+      conversationId: 'fixture', submittedUserMessageId: 'current-ack', submittedUserTurnId: 'current-ack',
+      submissionState: 'submitted' as const, promptSubmitted: true };
+    const ui = new SessionUiService({ submissions: core.submissionService, registry: core.pageRegistry,
+      browserOwner: core.browserOwner, chatgptUrl: 'https://chatgpt.com/' });
+    await assert.rejects(ui.hostspanPermission({ ...session, terminal: true }, {
+      action: 'decline', appName: 'hostspan-desktop', toolName: 'Process Cancel', evidenceHash: 'a'.repeat(64),
+    }), /completed turn permits inspection only/);
+    await assert.rejects(ui.verifyContinuation(session, session), error => {
+      assert.ok(error instanceof SessionPlaneDomainError);
+      assert.equal(error.errorCode, 'provider.preparation-required');
+      const details = error.details as any;
+      assert.equal(details.kind, 'provider-alert');
+      assert.equal(details.submittedUserMessageId, 'current-ack');
+      assert.deepEqual(details.providerAlerts, ['hostspan-desktop 다시 연결. 연결이 만료되었습니다.']);
+      assert.equal(details.actionVerified, false);
+      assert.equal(details.requiredUserAction, null);
+      return true;
+    });
+    assert.equal(await page.getByRole('alert').textContent(), 'hostspan-desktop 다시 연결. 연결이 만료되었습니다.');
+    assert.equal(await page.locator('textarea').inputValue(), '');
+    assert.equal(await page.locator('[data-message-author-role="user"]').count(), 1);
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="later-user">Other work</div>'));
+    await assert.rejects(ui.verifyContinuation(session, session), error => {
+      assert.ok(error instanceof SessionPlaneDomainError);
+      assert.equal(error.errorCode, 'provider.preparation-required');
+      assert.equal(error.details, undefined, 'A later user cannot inherit the original blocker provenance');
+      return true;
+    });
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const label of ['Decline', '거부Esc']) test(`permission ${label} rejects only the freshly inspected owned card without granting Cancel`, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-permission-decline-'));
+  const core = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    providerAdapters: [new FakeProviderAdapter()], logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<main>
+      <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+      <section id="card"><div role="alert">hostspan-desktop Process Cancel <span id="target">proc_unknown</span></div>
+        <button onclick="throw Error('Never grant Cancel')">Allow once</button>
+        <button id="decline" onclick="window.declines=(window.declines||0)+1;document.querySelector('#card').remove()">${label}</button>
+      </section><textarea id="prompt-textarea">Preserved draft</textarea></main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    const input = { appName: 'hostspan-desktop', toolName: 'Process Cancel' };
+    const inspected = await controlHostSpanPermission(page, { ...input, action: 'inspect' }, 'current-ack');
+    assert.equal(inspected.outcome, 'inspected');
+    assert.ok('evidenceHash' in inspected && inspected.evidenceHash);
+    const reject = { ...input, action: 'decline' as const, evidenceHash: inspected.evidenceHash };
+    await assert.rejects(controlHostSpanPermission(page, { ...reject, evidenceHash: undefined }, 'current-ack'), /evidenceHash/);
+    await assert.rejects(controlHostSpanPermission(page, { ...reject, toolName: undefined }, 'current-ack'), /observed tool name/);
+    await assert.rejects(controlHostSpanPermission(page, { ...reject, toolName: 'File Patch' }, 'current-ack'), /absent or ambiguous/);
+    await page.locator('#target').evaluate(node => node.textContent = 'proc_changed');
+    await assert.rejects(controlHostSpanPermission(page, reject, 'current-ack'), /current exact permission/);
+    await page.locator('#target').evaluate(node => node.textContent = 'proc_unknown');
+    await page.locator('#decline').evaluate(node => node.setAttribute('disabled', ''));
+    await assert.rejects(controlHostSpanPermission(page, reject, 'current-ack'), /Decline control/);
+    await page.locator('#decline').evaluate(node => { node.removeAttribute('disabled'); node.after(node.cloneNode(true)); });
+    await assert.rejects(controlHostSpanPermission(page, reject, 'current-ack'), /current exact permission/);
+    await page.locator('#decline').last().evaluate(node => node.remove());
+    await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="later-user">Later work</div>'));
+    await assert.rejects(controlHostSpanPermission(page, reject, 'current-ack'), /current user anchor/);
+    await page.locator('[data-message-id="later-user"]').evaluate(node => node.remove());
+    assert.equal(await page.evaluate(() => (window as any).declines ?? 0), 0);
+    const result = await controlHostSpanPermission(page, reject, 'current-ack');
+    assert.equal(result.outcome, 'decline-clicked');
+    assert.ok('grantAttempted' in result && result.grantAttempted === false);
+    assert.ok('permissionStillVisible' in result && result.permissionStillVisible === false);
+    assert.equal(await page.evaluate(() => (window as any).declines), 1);
+    assert.equal(await page.locator('#prompt-textarea').inputValue(), 'Preserved draft');
+    assert.equal(await page.locator('[data-message-author-role="user"]').count(), 1);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('previous activity reveals only its structurally contained same-ACK HostSpan surface and reports links without secrets', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-previous-activity-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [new FakeProviderAdapter()],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<main>
+      <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+      <section><button aria-expanded="false" onclick="throw Error('Unrelated disclosure')">이전 활동</button></section>
+      <section id="owned"><button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#hidden-work').hidden=false">이전 활동</button>
+      <div hidden id="hidden-work"><div class="group/activity-header"><button aria-expanded="false">hostspan-desktop 및 Personal Context 통합 사용함</button></div>
+      <section><div role="alert">hostspan-desktop reconnect</div><a href="https://connector.example/authorize?client_id=existing&state=private-value">Reconnect existing link</a><a href="http://[invalid">Malformed</a><a href="javascript:alert('private-value')">Unsafe scheme</a><button onclick="window.reconnects=(window.reconnects||0)+1">다시 연결⏎</button></section></div></section>
+      <textarea>Preserved draft</textarea></main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    const read = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(read.available);
+    const previous = read.disclosures.filter(item => item.name === '이전 활동');
+    assert.equal(previous[0]!.revealAvailable, false, 'A nearby app cannot qualify an unrelated disclosure');
+    assert.equal(previous[0]!.containedActivity, null);
+    assert.ok(previous[1]!.activityEvidenceHash);
+    assert.equal(previous[1]!.containedApp?.name, 'hostspan-desktop 및 Personal Context 통합 사용함');
+    assert.match(previous[1]!.containedActivity!.text, /hostspan-desktop reconnect/);
+    const hiddenLink = previous[1]!.containedActivity!.controls.find(control => control.role === 'link')!;
+    assert.equal(hiddenLink.visible, false, 'Read hidden controls without revealing or resuming a held turn');
+    assert.equal(hiddenLink.href, 'https://connector.example/authorize');
+    assert.doesNotMatch(JSON.stringify(previous[1]!.containedActivity), /private-value/);
+    assert.equal(await page.locator('#hidden-work').isVisible(), false);
+    assert.ok(read.cards.some(card => card.role === null && card.controls.some(control => control.name === '다시 연결⏎')),
+      'Reconnect controls beside an alert are diagnostic candidates, not a permission grant');
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-other', previous[1]!.activityEvidenceHash!), /different app/);
+    await page.locator('#hidden-work [class~="group/activity-header"] button').evaluate(element => element.replaceWith(element.cloneNode(true)));
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', previous[1]!.activityEvidenceHash!), /fresh HostSpan activityEvidenceHash/);
+    const fresh = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(fresh.available);
+    const selected = fresh.disclosures.find(item => item.containedApp !== null)!;
+    const result = await revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', selected.activityEvidenceHash!);
+    assert.equal(result.grantAttempted, false);
+    assert.equal(result.activityUserMessageId, 'current-ack');
+    assert.ok(result.activity.available);
+    const link = result.activity.cards.flatMap(card => card.controls).find(control => control.role === 'link')!;
+    assert.equal(link.visible, true);
+    assert.equal(link.href, 'https://connector.example/authorize');
+    assert.deepEqual(link.urlParameterNames, ['client_id', 'state']);
+    for (const name of ['Malformed', 'Unsafe scheme'])
+      assert.equal(result.activity.cards.flatMap(card => card.controls).find(control => control.name === name)!.href, null);
+    assert.doesNotMatch(JSON.stringify(result.activity), /private-value/);
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
+    assert.equal(await page.evaluate(() => (window as any).reconnects ?? 0), 0, 'Inspection never opens authentication');
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', selected.activityEvidenceHash!), /fresh HostSpan activityEvidenceHash/);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('collapsed activity diagnostics preserve parent identity without reading payloads or enabling reveal', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-activity-structure-'));
+  const core = await startCore({ config: resolveConfig({ cwd: root, env: {}, stateDir: '.state' }), browserHeadless: true,
+    providerAdapters: [new FakeProviderAdapter()], logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    // The retained Webturn packet proves six hidden disclosures, but not their
+    // ancestry. This synthetic topology checks diagnostics, not its live shape.
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html; charset=utf-8', body: `<main>
+      <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+      <section class="activity-shell"><button aria-expanded="false" aria-controls="hidden-work" onclick="throw Error('private-handler')">이전 활동</button>
+        <div hidden id="hidden-work">${Array.from({ length: 6 }, (_, i) => `<section><div class="group/activity-header"><button aria-expanded="false">hostspan-desktop 통합 사용함</button></div>
+          <pre>private-tool-body-${i}</pre><input value="private-credential"><textarea>private-draft</textarea></section>`).join('')}</div>
+      </section>
+      <section><div class="group/activity-header"><button aria-expanded="false">hostspan-desktop separate activity</button></div></section>
+      <textarea id="prompt-textarea">Preserved draft</textarea></main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    const read = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(read.available);
+    const opener = read.disclosures.find(item => item.name === '이전 활동')!;
+    const headers = read.disclosures.filter(item => item.name === 'hostspan-desktop 통합 사용함');
+    assert.equal(opener.activityEvidenceHash, null);
+    assert.equal(opener.revealAvailable, false, 'Diagnostics cannot authorize a multi-header reveal');
+    assert.equal(opener.structure!.tag, 'button');
+    const container = opener.structure!.ancestors[0]!;
+    assert.deepEqual(container.classes, ['activity-shell']);
+    assert.equal(opener.structure!.parentRef, container.ref);
+    const controlled = opener.structure!.controlled[0]!;
+    assert.equal(controlled.matches, 1);
+    assert.equal(controlled.target!.parentRef, container.ref);
+    assert.equal(headers.length, 6);
+    for (const header of headers) {
+      assert.equal(header.structure!.visible, false);
+      assert.equal(header.structure!.owningUserMessageId, 'current-ack');
+      assert.ok(header.structure!.ancestors.some(node => node.ref === controlled.target!.ref));
+      assert.equal(header.structure!.ancestors[0]!.classes[0], 'group/activity-header');
+    }
+    const unrelated = read.disclosures.find(item => item.name === 'hostspan-desktop separate activity')!;
+    assert.ok(!unrelated.structure!.ancestors.some(node => node.ref === container.ref));
+    assert.doesNotMatch(JSON.stringify(read.disclosures.map(item => item.structure)), /private-|Preserved draft/);
+    assert.equal(await page.locator('#hidden-work').isVisible(), false);
+    assert.equal(await page.locator('#prompt-textarea').inputValue(), 'Preserved draft');
+    await page.locator('#hidden-work').evaluate(node => node.insertAdjacentHTML('afterend', '<div id="hidden-work"></div>'));
+    const ambiguous = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(ambiguous.available);
+    const duplicate = ambiguous.disclosures.find(item => item.name === '이전 활동')!.structure!.controlled[0]!;
+    assert.equal(duplicate.matches, 2);
+    assert.equal(duplicate.target, null, 'An ambiguous controls ID cannot acquire structural identity');
+    await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="later-user">Later work</div>'));
+    assert.equal((await inspectHostSpanActivity(page, 'current-ack')).available, false);
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('identical activity labels keep exact mounted element identity across reads and reordering', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-identical-activity-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [new FakeProviderAdapter()],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: `<main>
+      <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+      ${[1, 2, 3].map(id => `<section id="activity-${id}"><div class="group/activity-header"><button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#output-${id}').hidden=false">hostspan-desktop 통합 사용함</button></div><div hidden id="output-${id}">Original output ${id}</div></section>`).join('')}
+      <textarea>Preserved draft</textarea></main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    const read = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(read.available);
+    const hashes = read.disclosures.map(item => item.activityEvidenceHash!);
+    assert.equal(hashes.length, 3);
+    assert.equal(new Set(hashes).size, 3, 'Identical names, ACKs and states must not collide');
+    const again = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(again.available);
+    assert.deepEqual(again.disclosures.map(item => item.activityEvidenceHash), hashes);
+    await page.locator('#activity-2').evaluate(element => element.parentElement!.insertBefore(element, element.parentElement!.querySelector('#activity-1')));
+    const reveal = await revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', hashes[1]!);
+    assert.equal(reveal.grantAttempted, false);
+    assert.equal(await page.locator('#output-2').isVisible(), true);
+    assert.equal(await page.locator('#output-1').isVisible(), false);
+    assert.equal(await page.locator('#output-3').isVisible(), false);
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', hashes[1]!), /fresh HostSpan activityEvidenceHash/);
+    await page.locator('#activity-3 button').evaluate(element => element.replaceWith(element.cloneNode(true)));
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(), 'hostspan-desktop', hashes[2]!), /fresh HostSpan activityEvidenceHash/);
+    assert.equal(await page.locator('#output-3').isVisible(), false, 'A replacement with the same label cannot inherit identity');
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('passive evidence reads only an already-expanded exact HostSpan response without inferring execution', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-expanded-response-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [new FakeProviderAdapter()],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    // Retained Bible576 evidence: successful outer/group/individual reveal, but
+    // expanded disclosures had containedActivity:null. Fixture bodies are synthetic.
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: `<main>
+      <div data-message-author-role="user" data-message-id="current-ack">Original work</div>
+      <section><div class="group/activity-header"><button aria-expanded="true">hostspan-desktop</button></div>
+        <section><div class="group/activity-header"><button aria-expanded="true">monitor 2 calls</button></div>
+          <section id="running"><div class="group/activity-header"><button aria-expanded="true" aria-controls="running-body">monitor</button></div>
+            <pre id="running-body">{"processId":"proc_exact_running","status":"running","stdout":"partial","access_token":"private-token"}
+Authorization: Bearer private-bearer
+https://example.test/result?token=private-query#private-fragment</pre>
+            <textarea>private-draft</textarea><input type="password" value="private-password">
+          </section>
+          <section id="terminal"><div class="group/activity-header"><button aria-expanded="true">monitor</button></div>
+            <pre>{"processId":"proc_exact_done","status":"exited","exitCode":0,"stdout":"done","stderr":""}</pre>
+            <pre hidden>private-hidden</pre><a href="https://example.test/?token=private-link">private-link-label</a>
+          </section>
+          <section id="missing"><div class="group/activity-header"><button aria-expanded="true">monitor source inventory proc_not_evidence</button></div></section>
+          <section id="collapsed"><div class="group/activity-header"><button aria-expanded="false" onclick="throw Error('No reveal')">monitor</button></div>
+            <pre>private-collapsed</pre></section>
+        </section>
+      </section>
+      <section><div class="group/activity-header"><button aria-expanded="true">unrelated</button></div><pre>private-other-app</pre></section>
+      <textarea id="prompt-textarea">Preserved draft</textarea><button onclick="throw Error('No grant')">Always allow</button>
+      </main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    await page.evaluate(() => document.addEventListener('click', () => {
+      (window as any).inspectionClicks = ((window as any).inspectionClicks ?? 0) + 1;
+    }, true));
+    const read = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(read.available);
+    assert.equal(read.providerMutation, false);
+    const bodies = read.disclosures.filter(item => item.containedActivity !== null);
+    assert.equal(bodies.length, 2, 'Parent/group bodies must not pool sibling or nested call output');
+    const running = bodies.find(item => item.containedActivity!.text.includes('proc_exact_running'))!;
+    const terminal = bodies.find(item => item.containedActivity!.text.includes('proc_exact_done'))!;
+    assert.equal(running.owningUserMessageId, 'current-ack');
+    assert.match(running.containedActivity!.text, /"status":"running"/);
+    assert.doesNotMatch(running.containedActivity!.text, /proc_exact_done/);
+    assert.match(terminal.containedActivity!.text, /"exitCode":0/);
+    assert.match(terminal.containedActivity!.text, /"stderr":""/);
+    assert.equal(read.disclosures.find(item => item.name.includes('source inventory'))!.containedActivity, null,
+      'A tool label without returned body is UNKNOWN, not a process receipt');
+    assert.equal(read.disclosures.find(item => item.expanded === 'false')!.containedActivity, null);
+    assert.doesNotMatch(JSON.stringify(bodies), /private-|proc_not_evidence/);
+    assert.equal(await page.locator('#prompt-textarea').inputValue(), 'Preserved draft');
+    assert.equal(await page.locator('#collapsed button').getAttribute('aria-expanded'), 'false');
+    assert.equal(await page.evaluate(() => (window as any).inspectionClicks ?? 0), 0);
+    await page.locator('#terminal pre').first().evaluate(element => element.textContent = 'x'.repeat(5000));
+    const bounded = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(bounded.available);
+    const long = bounded.disclosures.find(item => item.activityRef === terminal.activityRef)!.containedActivity!;
+    assert.equal(long.text.length, 4000);
+    assert.equal(long.textTruncated, true, 'Incomplete output is explicit, never a completion inference');
+    await page.locator('#running button').evaluate(element => element.setAttribute('aria-controls', 'running-body missing-body'));
+    const absent = await inspectHostSpanActivity(page, 'current-ack');
+    assert.ok(absent.available);
+    assert.equal(absent.disclosures.find(item => item.activityRef === running.activityRef)!.containedActivity, null);
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="later-user">Later work</div>'));
+    const later = await inspectHostSpanActivity(page, 'current-ack');
+    assert.equal(later.available, false);
+    assert.equal('disclosures' in later, false, 'A stale ACK cannot expose current tool responses');
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('retained activity is read only under its stored ACK, never reassigned to the current request', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-retained-activity-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({ config, browserHeadless: true, providerAdapters: [new FakeProviderAdapter()],
+    logger: { debug() {}, info() {}, warn() {}, error() {} } });
+  try {
+    const { page } = await core.browserOwner!.createPage();
+    await page.route('https://chatgpt.com/**', route => route.fulfill({ contentType: 'text/html', body: `<main>
+      <div data-message-author-role="user" data-message-id="owned-older-ack">Original work</div>
+      <div data-message-author-role="assistant" data-message-id="older-answer">
+        <section id="app-activity"><div class="group/activity-header"><button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#retained-body').hidden=false">hostspan-desktop previous activity</button></div>
+        <section hidden id="retained-body">hostspan-desktop File Patch<button onclick="throw Error('No allow')">Always allow</button>
+          <section><div class="group/activity-header"><button aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#child-output').hidden=false">Exact child tool activity</button></div>
+          <div hidden id="child-output">Original tool output</div></section>
+        </section></section>
+        <section><div class="group/activity-header"><button aria-expanded="false" onclick="throw Error('Unrelated sibling must stay closed')">Unrelated sibling</button></div></section>
+      </div>
+      <div data-message-author-role="user" data-message-id="unowned-user">Unrelated manual question</div>
+      <div role="alert">hostspan-desktop unrelated permission<button>Allow</button></div>
+      <div data-message-author-role="user" data-message-id="current-ack">New contextual follow-up</div>
+      <div role="alert">hostspan-desktop current warning</div><textarea>Preserved draft</textarea></main>` }));
+    await page.goto('https://chatgpt.com/c/fixture');
+    const currentOnly = await inspectHostSpanActivity(page, 'current-ack');
+    assert.equal(currentOnly.available, true);
+    assert.doesNotMatch(JSON.stringify(currentOnly), /File Patch|unrelated permission/);
+    const read = await inspectHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']));
+    assert.equal(read.available, true);
+    if (!read.available) return;
+    const older = read.cards.find(card => card.text.includes('File Patch'))!;
+    assert.equal(older.association, 'retained-acknowledged-turn');
+    assert.equal(older.owningUserMessageId, 'owned-older-ack');
+    assert.equal(older.visible, false);
+    assert.equal(read.disclosures.find(item => item.owningUserMessageId === 'owned-older-ack')?.expanded, 'false');
+    assert.doesNotMatch(JSON.stringify(read), /unrelated permission|evidenceHash/);
+    const selected = read.disclosures.find(item => item.activityEvidenceHash !== null)!;
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']),
+      'hostspan-other', selected.activityEvidenceHash!), /different app/);
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="new-user">Different request</div>'));
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']),
+      'hostspan-desktop', selected.activityEvidenceHash!), /exact-current-ack-not-mounted/);
+    await page.locator('[data-message-id="new-user"]').evaluate(element => element.remove());
+    const revealed = await revealHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']),
+      'hostspan-desktop', selected.activityEvidenceHash!);
+    assert.equal(revealed.revealClicked, true);
+    assert.equal(revealed.grantAttempted, false);
+    assert.equal(revealed.activityUserMessageId, 'owned-older-ack');
+    assert.equal(await page.locator('#retained-body').isVisible(), true);
+    const child = revealed.activity.available && revealed.activity.disclosures.find(item => item.name === 'Exact child tool activity');
+    assert.ok(child && child.activityEvidenceHash);
+    assert.equal(child.appActivity?.name, 'hostspan-desktop previous activity');
+    assert.equal(child.owningUserMessageId, 'owned-older-ack');
+    assert.equal(revealed.activity.available && revealed.activity.disclosures.find(item => item.name === 'Unrelated sibling')?.revealAvailable, false);
+    await page.getByRole('button', { name: 'hostspan-desktop previous activity', exact: true }).evaluate(element => element.textContent = 'another-app previous activity');
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']),
+      'hostspan-desktop', child.activityEvidenceHash), /fresh HostSpan activityEvidenceHash/);
+    await page.getByRole('button', { name: 'another-app previous activity', exact: true }).evaluate(element => element.textContent = 'hostspan-desktop previous activity');
+    const childResult = await revealHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']),
+      'hostspan-desktop', child.activityEvidenceHash);
+    assert.equal(childResult.grantAttempted, false);
+    assert.equal(await page.locator('#child-output').isVisible(), true);
+
+    await assert.rejects(revealHostSpanActivity(page, 'current-ack', new Set(['owned-older-ack']),
+      'hostspan-desktop', selected.activityEvidenceHash!), /fresh HostSpan activityEvidenceHash/);
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
+  } finally { await core.close(); rmSync(root, { recursive: true, force: true }); }
+});
 
 for(const displaced of [false,true]) test(`explicit HostSpan permission ${displaced ? 'inspects a preserved predecessor' : 'controls only the current exact grant'}, preserving work and idempotency`, async t => {
   const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-hostspan-permission-'));
@@ -26,6 +459,7 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
       <div data-message-author-role="user" data-message-id="old-question">Unrelated earlier work</div>
       <section role="alert" hidden>hostspan-desktop Process Start Old permission</section>
       <div data-message-author-role="user" data-message-id="user-message-1">Fixture question</div>
+      <button type="button" role="radio" aria-checked="true">Chat</button>
       <div class="group/activity-header"><button aria-expanded="false" onclick="window.unrelatedClicks=(window.unrelatedClicks||0)+1">hostspan-desktop 통합 사용함</button></div>
       <div id="activity"><div class="group/activity-header"><button aria-expanded="false" aria-labelledby="work-label" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#work').hidden=false"></button><span id="work-label">이전 활동</span></div>
       <span id="elapsed">1 hour 14 seconds working</span>
@@ -56,6 +490,43 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
       teamId: team.teamId, requestRefs: [row.outbox_id], waitMs: 60000, continuationApproved: true,
     }, socketPath: config.socketPath, timeoutMs: 10000, maxLineBytes: config.rpcMaxLineBytes });
     assert.equal(waited.structuredContent.results[0].errorCode, 'provider.actionable-alert', JSON.stringify(waited));
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend', `
+      <div data-message-author-role="assistant" data-message-id="activity-answer">
+        <button aria-expanded="false" onclick="throw Error('Read must not reveal')">Previous activity</button>
+        <section hidden id="roleless-card">hostspan-desktop File Patch (no ARIA alert)
+          <button onclick="throw Error('Read must not grant')">Always allow</button>
+        </section>
+      </div>`));
+    const original = core.teamDirectory.getSession(session.sessionId);
+    const read = await callRpc<any>({ socketPath: config.socketPath, method: 'session.submission.inspect',
+      params: { clientId: 'fixture-owner', requestId: 'original', sessionId: session.sessionId, generation: 1 },
+      timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    const activity = read.evidence.submissionVerification.hostspanActivity;
+    assert.equal(activity.available, true, JSON.stringify(activity));
+    assert.equal(activity.providerMutation, false);
+    assert.equal(activity.workUserMessageId, 'user-message-1');
+    assert.ok(activity.disclosures.some((item: any) => item.name === 'Previous activity' && item.expanded === 'false'));
+    assert.ok(activity.cards.some((item: any) => item.role === null && !item.visible &&
+      item.text.includes('File Patch') && item.controls.some((control: any) => control.name === 'Always allow')),
+      'Read evidence includes hidden roleless controls inside assistant activity omitted by preparation snapshots');
+    assert.doesNotMatch(JSON.stringify(activity), /Old permission|Unrelated earlier work/);
+    assert.equal(activity.evidenceHash, undefined, 'Diagnostic candidates do not authorize a permission');
+    const afterRead = core.teamDirectory.getSession(session.sessionId);
+    for (const key of ['generation', 'submissionState', 'submittedUserMessageId', 'submittedUserTurnId',
+      'conversationId', 'pageKey', 'answerText', 'responseMessageId', 'terminal'] as const)
+      assert.equal(afterRead[key], original[key], 'A read preserves request identity/result while its original observer can progress');
+    assert.equal(await page.locator('textarea').inputValue(), 'Keep my draft');
+    assert.equal(await page.locator('button[aria-labelledby="work-label"]').getAttribute('aria-expanded'), 'false');
+    await assert.rejects(callRpc({ socketPath: config.socketPath, method: 'session.submission.inspect',
+      params: { clientId: 'another-owner', requestId: 'original', sessionId: session.sessionId, generation: 1 },
+      timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes }), /Exact caller-owned submission/);
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend',
+      '<div data-message-author-role="user" data-message-id="later-work">Different work</div>'));
+    const later = await inspectHostSpanActivity(page, 'user-message-1');
+    assert.equal(later.available, false, 'A later work question cannot be inspected as the original request');
+    assert.equal('cards' in later, false);
+    await page.locator('[data-message-id="later-work"]').evaluate(element => element.remove());
+    await page.locator('#roleless-card').evaluate(element => element.parentElement!.remove());
     assert.equal(await page.locator('button[aria-labelledby="work-label"]').getAttribute('aria-expanded'), 'false');
     assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0);
     assert.equal(fake.submitCount, 1, 'Hidden permission returns the existing collector without another Continue');
@@ -64,6 +535,40 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
       name: 'sessionplane_decide', arguments: { teamId: team.teamId, requestRef: row.outbox_id, requestId,
         decision: 'hostspan_permission', appName: 'hostspan-desktop', toolName: 'Process Start', ...extra },
       socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    const review = async (action: 'pause' | 'resume') => invokeMcpTool({
+      name: 'sessionplane_decide', arguments: { teamId: team.teamId, requestRef: row.outbox_id,
+        requestId: `permission-review-${action}`, decision: 'human_review', action },
+      socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    assert.equal((await review('pause')).isError, false);
+    const loads = new ConversationLoadRecoveryRepository(core.database);
+    const held = loads.get(original.conversationId!);
+    const heldSession = core.teamDirectory.getSession(session.sessionId);
+    const observationCount = fake.observationOpenCount;
+    await page.locator('main').evaluate(element => element.insertAdjacentHTML('beforeend', `
+      <section id="selected-activity"><div class="group/activity-header"><button aria-expanded="false"
+        onclick="this.setAttribute('aria-expanded','true');document.querySelector('#activity-body').hidden=false">hostspan-desktop exact activity</button></div>
+        <div id="activity-body" hidden>hostspan-desktop File Patch<button onclick="throw Error('No grant')">Always allow</button></div></section>`));
+    const surface = await callRpc<any>({ socketPath: config.socketPath, method: 'session.submission.inspect',
+      params: { clientId: 'fixture-owner', requestId: 'original', sessionId: session.sessionId, generation: 1 },
+      timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    const selectedHash = surface.evidence!.submissionVerification!.hostspanActivity!.disclosures
+      .find(item => item.name === 'hostspan-desktop exact activity')!.activityEvidenceHash;
+    const reveal = await decide('inspect-observed-activity', { action: 'inspect', toolName: undefined, evidenceHash: selectedHash });
+    assert.equal(reveal.isError, false, JSON.stringify(reveal));
+    assert.equal((reveal.structuredContent.permission as any).outcome, 'activity-revealed');
+    assert.equal((reveal.structuredContent.permission as any).grantAttempted, false);
+    const expanded = await invokeMcpTool({ name: 'sessionplane_team_get', arguments: {
+      teamId: team.teamId, requestRef: row.outbox_id, view: 'evidence', maxNodes: 300,
+    }, socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    assert.equal(expanded.isError, false, JSON.stringify(expanded));
+    const disclosure = (expanded.structuredContent as any).request.evidence.submissionVerification.hostspanActivity.disclosures
+      .find((item: any) => item.name === 'hostspan-desktop exact activity');
+    assert.equal(disclosure.structure.tag, 'button', 'Normal public evidence retains structural diagnostics');
+    assert.equal(disclosure.structure.parentRef, disclosure.structure.ancestors[0].ref);
+    const body = disclosure.containedActivity;
+    assert.match(body.text, /hostspan-desktop File Patch/, 'Public evidence reads the revealed exact body despite preparation snapshots excluding it');
+    assert.doesNotMatch(body.text, /Fixture question|Keep my draft|Always allow/);
+    await page.locator('#selected-activity').evaluate(element => element.remove());
     t.mock.method(page, 'bringToFront', async () => { throw Error('Must not focus'); });
     const prepare = t.mock.method(core.browserOwner!, 'preparePageInteraction');
     let output = '';
@@ -73,9 +578,49 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
       { stdin: Readable.from([]), stdout: stream, stderr: stream }), 0, output);
     const inspected = { structuredContent: JSON.parse(output) };
     assert.equal(inspected.structuredContent.requestOk, true, JSON.stringify(inspected));
+    assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0,
+      'Inspect reveals the unknown pending arguments without granting or launching the tool');
+    assert.match(inspected.structuredContent.permission.permissionText, /Command: original work/);
+    assert.equal(fake.submitCount, 1, 'Inspect must not submit a new provider turn');
     assert.equal(await page.evaluate(() => (window as any).unrelatedClicks ?? 0), 0,
       'Explicit permission inspection opens only the card-linked disclosure, never integration controls or another work question');
     assert.equal(prepare.mock.callCount(), 1, 'Use the existing exact-page background interaction lifecycle');
+    for (const action of ['allow', 'decline']) {
+      const blocked = await decide(`held-${action}`, { action,
+        evidenceHash: inspected.structuredContent.permission.evidenceHash });
+      assert.equal(blocked.isError, true);
+      assert.match(JSON.stringify(blocked), /paused for review/);
+    }
+    const blockedContinue = await invokeMcpTool({ name: 'sessionplane_decide', arguments: {
+      teamId: team.teamId, requestRef: row.outbox_id, requestId: 'held-continue',
+      decision: 'continue', continuationApproved: true,
+    }, socketPath: config.socketPath, timeoutMs: 10_000, maxLineBytes: config.rpcMaxLineBytes });
+    assert.equal(blockedContinue.isError, true);
+    assert.match(JSON.stringify(blockedContinue), /paused for review/);
+    assert.deepEqual(loads.get(original.conversationId!), held, 'Inspect preserves the exact review hold');
+    assert.deepEqual(core.teamDirectory.getSession(session.sessionId), heldSession);
+    assert.deepEqual(core.actorScheduler.collectors(session.sessionId), []);
+    assert.equal(fake.observationOpenCount, observationCount, 'Inspect never starts observation');
+    assert.equal(fake.stopCount, 0);
+    assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0);
+    assert.equal(await page.locator('textarea').inputValue(), 'Keep my draft');
+    assert.equal(fake.submitCount, 1);
+    assert.equal((await review('resume')).isError, false, 'Only this fixture resumes for the remaining grant tests');
+    await page.locator('[role=radio]').evaluate(node => node.remove());
+    const hiddenMode = await decide('inspect-without-composer-mode', { action: 'inspect' });
+    assert.equal(hiddenMode.isError, false, JSON.stringify(hiddenMode));
+    assert.equal((hiddenMode.structuredContent.permission as any).detailsInspection[0].beforeClose, true);
+    const missingCardEvidence = await decide('no-unverified-grant', { action: 'allow' });
+    assert.equal(missingCardEvidence.isError, true);
+    assert.match(JSON.stringify(missingCardEvidence), /same allowMode.*evidenceHash/);
+    await page.locator('main').evaluate(node => node.insertAdjacentHTML('beforeend', '<button role=radio aria-checked=true>Work</button>'));
+    assert.equal((await decide('inspect-work-read-only', { action: 'inspect' })).isError, false);
+    assert.equal(await page.evaluate(() => (window as any).grants ?? 0), 0);
+    await page.locator('[role=radio]').evaluate(node => { node.textContent = 'Chat'; });
+    await page.locator('[role=radio]').evaluate(node => node.remove());
+    await page.locator('textarea').evaluate(node => { node.hidden = true; });
+    assert.equal(await page.locator('[role=radio]').count(), 0,
+      'The original request must finish authorized grant/decline, including always, without mode chrome or historical mode records');
     if(successor){
       const granted=await decide('retained-exact-grant',{action:'allow',evidenceHash:inspected.structuredContent.permission.evidenceHash});
       assert.equal(granted.isError,false,JSON.stringify(granted));
@@ -131,6 +676,29 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
     assert.equal((await decide('unverified-card-action', { action: 'inspect' })).isError, true,
       'An unknown card action cannot broaden evidence to the entire conversation');
     await page.locator('main > section').evaluateAll(elements => elements.forEach(element => element.remove()));
+    await page.evaluate(() => document.querySelector('main')!.insertAdjacentHTML('beforeend',
+      `<section id="decline-card"><div role="alert">hostspan-desktop Process Cancel proc_unknown</div>
+      <button onclick="throw Error('Decline must never grant')">Allow once</button>
+      <button onclick="window.declines=(window.declines||0)+1;document.querySelector('#decline-card').remove()">거부Esc</button></section>`));
+    const cancelCard = await decide('inspect-cancel-for-decline', { action: 'inspect', toolName: 'Process Cancel' });
+    assert.equal(cancelCard.isError, false, JSON.stringify(cancelCard));
+    const cancelHash = (cancelCard.structuredContent.permission as { evidenceHash: string }).evidenceHash;
+    output = '';
+    const declineArgs = ['request', 'hostspan_permission', team.teamId, String(row.outbox_id), '--action', 'decline',
+      '--app-name', 'hostspan-desktop', '--tool-name', 'Process Cancel', '--evidence-hash', cancelHash,
+      '--request-id', 'cli-decline', '--socket', config.socketPath, '--json'];
+    assert.equal(await runCli(declineArgs, { stdin: Readable.from([]), stdout: stream, stderr: stream }), 0, output);
+    const declined = JSON.parse(output);
+    assert.equal(declined.permission.outcome, 'decline-clicked');
+    assert.equal(declined.permission.grantAttempted, false);
+    assert.equal(declined.permission.permissionStillVisible, false);
+    output = '';
+    assert.equal(await runCli(declineArgs, { stdin: Readable.from([]), stdout: stream, stderr: stream }), 0, output);
+    assert.deepEqual(JSON.parse(output), declined, 'The same decline requestId returns its receipt without another click');
+    assert.equal(await page.evaluate(() => (window as any).declines), 1);
+    assert.equal(await page.evaluate(() => (window as any).grants), 2);
+    assert.equal(fake.submitCount, 1, 'Decline does not resend or continue the product prompt');
+    assert.equal(await page.locator('textarea').inputValue(), 'Keep my draft');
     await page.evaluate(() => document.querySelector('main')!.insertAdjacentHTML('beforeend',
       `<section id="persistent"><div role="alert">hostspan-desktop Process Start Command: authorized development</div>
       <button onclick="throw Error('Must not choose once')">Allow once</button>
@@ -191,13 +759,20 @@ for(const displaced of [false,true]) test(`explicit HostSpan permission ${displa
     assert.equal(fake.stopCount, 0);
     assert.equal(core.teamDirectory.getSession(session.sessionId).generation, 1);
     assert.equal(core.teamDirectory.getSession(session.sessionId).terminal, false);
-    await page.setContent(`<main>
+    await page.setContent(`<main><button type="button" role="radio" aria-checked="true">Chat</button>
       <div data-message-author-role="user" data-message-id="older-work-user">Existing implementation question</div>
       <button aria-expanded="false" aria-controls="earlier" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#earlier').hidden=false">작업함</button>
       <section id="earlier" hidden><div role="alert">hostspan-desktop File Patch</div>
         <button onclick="throw Error('Must not choose once')">Allow once</button>
         <button onclick="window.earlierGrants=(window.earlierGrants||0)+1;document.querySelector('#earlier').remove()">Always allow</button></section>
       <div data-message-author-role="user" data-message-id="user-message-1">계속</div><textarea>Preserved draft</textarea></main>`);
+    const retained = await inspectHostSpanActivity(page, 'user-message-1');
+    assert.equal(retained.available, true);
+    if (retained.available) {
+      assert.equal(retained.workUserMessageId, 'older-work-user');
+      assert.ok(retained.cards.some(card => !card.visible && card.text.includes('File Patch')));
+      assert.equal(retained.disclosures[0]?.expanded, 'false', 'Reading does not reveal earlier activity');
+    }
     output = '';
     assert.equal(await runCli(['request', 'hostspan_permission', team.teamId, String(row.outbox_id), '--action', 'inspect',
       '--app-name', 'hostspan-desktop', '--allow-mode', 'always', '--request-id', 'discover-earlier-card',

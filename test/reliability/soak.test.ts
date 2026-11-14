@@ -6,384 +6,151 @@ import test from 'node:test';
 
 import { callRpc } from '../../src/cli/client.ts';
 import { resolveConfig } from '../../src/config.ts';
-import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore, type CoreService } from '../../src/main.ts';
-import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
+import { invokeMcpTool } from '../../src/mcp/tools.ts';
 
-interface TeamSnapshot {
-  readonly teamId: string;
-  readonly roles: readonly Array<{
-    readonly roleKey: string;
-    readonly currentSessionId: string | null;
-  }>;
-}
+const silentLogger = { debug() {}, info() {}, warn() {}, error() {} };
 
-interface WaitSnapshot extends SessionSnapshot {
-  readonly latestEventSequence: number;
-}
-
-interface HealthSnapshot {
-  readonly metrics: Readonly<Record<string, unknown>>;
-}
-
-test('restart preserves exact identity across four sessions and 20 concurrent waits', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-reliability-soak-'));
-  const initialConfig = resolveConfig({
-    cwd: root,
-    env: {},
-    stateDir: '.state',
-    observationActiveSweepMs: 20,
-    observationQuietSweepMs: 50,
-    observationQuietWindowMs: 20,
-    backendRecoveryAfterMs: 60_000,
-  });
-  const firstAdapter = new FakeProviderAdapter();
-  let service: CoreService = await startCore({
-    config: initialConfig,
-    startBrowser: false,
-    providerAdapters: [firstAdapter],
-    logger: silentLogger(),
-  });
+/** One real Core and SQLite owner: four independent public project Tasks,
+ * twenty concurrent revision waits, then Core restart and exact receipt
+ * replay. No browser/provider is launched: an unacknowledged prompt may never
+ * be sent by a disconnected test client.
+ */
+test('public Task restart preserves four independent Main leases and wakes 20 concurrent clients exactly once', {
+  timeout: 60_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-public-reliability-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const clientId = 'reliability-public-client';
+  let core: CoreService | null = null;
+  const rpc = async <Result = any>(method: string, params: Record<string, unknown>) =>
+    await callRpc<Result>({
+      socketPath: config.socketPath,
+      method, params, timeoutMs: 10_000,
+      maxLineBytes: config.rpcMaxLineBytes,
+    });
 
   try {
-    const firstTeam = await createTeamWithExpert(
-      initialConfig.socketPath,
-      'reliability-a',
-    );
-    const secondTeam = await createTeamWithExpert(
-      initialConfig.socketPath,
-      'reliability-b',
-    );
-    assert.notEqual(firstTeam.teamId, secondTeam.teamId);
-    assert.deepEqual(
-      firstTeam.roles.map((role) => role.roleKey),
-      ['main', 'expert.backend'],
-    );
-    assert.deepEqual(
-      secondTeam.roles.map((role) => role.roleKey),
-      ['main', 'expert.backend'],
-    );
+    core = await startCore({ config, startBrowser: false, logger: silentLogger });
+    assert.equal(core.browserOwner, null);
+    const opens = Array.from({ length: 4 }, (_, index) => ({
+      clientId, requestId: 'reliability-open-' + index,
+      projectKey: 'durable-public-reliability-' + index,
+      displayName: 'Disposable independent public project ' + index,
+      provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'Pro',
+    }));
+    const projects = await Promise.all(opens.map(open => rpc('project.open', open)));
+    assert.equal(new Set(projects.map(p => p.projectId)).size, 4);
+    assert.ok(projects.every(p => p.mainConversationSlotId === 'main'));
+    assert.ok(projects.every(p => p.conversationRevision === 1));
 
-    const sessions = await Promise.all([
-      createSession(initialConfig.socketPath, firstTeam.teamId, 'main', 'a-main'),
-      createSession(
-        initialConfig.socketPath,
-        firstTeam.teamId,
-        'expert.backend',
-        'a-expert',
-      ),
-      createSession(initialConfig.socketPath, secondTeam.teamId, 'main', 'b-main'),
-      createSession(
-        initialConfig.socketPath,
-        secondTeam.teamId,
-        'expert.backend',
-        'b-expert',
-      ),
+    const requests = projects.map((project, index) => ({
+      clientId, projectId: project.projectId,
+      requestId: 'reliability-initial-' + index,
+      expectedConversationRevision: project.conversationRevision,
+      prompt: 'Exact independent test-only question ' + index,
+    }));
+    const [first, repeatedFirst, ...other] = await Promise.all([
+      rpc('task.start', requests[0]!),
+      rpc('task.start', requests[0]!),
+      ...requests.slice(1).map(request => rpc('task.start', request)),
     ]);
-    assert.equal(new Set(sessions.map((session) => session.sessionId)).size, 4);
+    assert.deepEqual(repeatedFirst, first, 'Concurrent identical starts must share one receipt');
+    const tasks = [first, ...other];
+    assert.equal(tasks.length, 4);
+    assert.equal(new Set(tasks.map(task => task.taskId)).size, 4);
+    assert.deepEqual(tasks.map(task => task.projectId), projects.map(project => project.projectId));
 
-    const firstSend = {
-      clientId: 'reliability-client',
-      requestId: 'reliability-send-a-main',
-      sessionId: sessions[0]?.sessionId,
-      prompt: 'Reliability generation for a-main',
-      sessionDeadlineSec: 7_200,
-    } as const;
-    const [firstResult, duplicateResult, ...otherResults] = await Promise.all([
-      rpc<SessionSnapshot>(initialConfig.socketPath, 'session.send', firstSend),
-      rpc<SessionSnapshot>(initialConfig.socketPath, 'session.send', firstSend),
-      ...sessions.slice(1).map((session, index) =>
-        rpc<SessionSnapshot>(initialConfig.socketPath, 'session.send', {
-          clientId: 'reliability-client',
-          requestId: `reliability-send-${index + 1}`,
-          sessionId: session.sessionId,
-          prompt: `Reliability generation ${index + 1}`,
-          sessionDeadlineSec: 7_200,
-        }),
-      ),
-    ]);
-    assert.deepEqual(duplicateResult, firstResult);
-    assert.equal(otherResults.length, 3);
-    assert.equal(firstAdapter.submitCount, 4);
+    const originalSnapshots = await Promise.all(tasks.map(task =>
+      rpc('task.get', { clientId, taskId: task.taskId, view: 'evidence' })));
+    assert.ok(originalSnapshots.every(s => s.conversationSlotId === 'main'));
+    assert.ok(originalSnapshots.every(s => !s.submission.attempted && !s.submission.acknowledged));
+    assert.ok(originalSnapshots.every(s => !s.resultAvailable && s.evidence.attempts.length === 1));
+    assert.ok(originalSnapshots.every(s => s.evidence.attempts[0].state === 'planned'));
+    assert.ok(originalSnapshots.every(s => s.evidence.rootPost === null));
+    assert.ok(originalSnapshots.every(s => s.evidence.conversation.providerConversationId === null));
 
-    const expectedIdentity = new Map(
-      [firstResult, ...otherResults].map((snapshot) => [
-        snapshot.sessionId,
-        {
-          teamId: snapshot.teamId,
-          roleKey: snapshot.roleKey,
-          generation: snapshot.generation,
-          conversationId: snapshot.conversationId,
-        },
-      ]),
-    );
-
-    await verifyIdentityCheckpoint(
-      initialConfig.socketPath,
-      sessions.map((session) => session.sessionId),
-      expectedIdentity,
-      'before restart',
-    );
-
-    await service.close();
-
-    const restartConfig = resolveConfig({
-      cwd: root,
-      env: {},
-      stateDir: '.state',
-      observationActiveSweepMs: 20,
-      observationQuietSweepMs: 50,
-      observationQuietWindowMs: 20,
-      backendRecoveryAfterMs: 20,
-      probeSuccessIntervalMs: 5_000,
-      probeMin429BackoffMs: 5_000,
-      probeMax429BackoffMs: 5_000,
-    });
-    const restartedAdapter = new FakeProviderAdapter();
-    for (const session of sessions) {
-      restartedAdapter.queueRecovery(session.sessionId, {
-        kind: 'deferred',
-        observationTransport: 'deferred',
-        responseMessageId: null,
-        answerText: null,
-        reason: 'backend-http-429',
-        retryAfterMs: 50,
-        nextCheckAt: null,
-      });
-    }
-    service = await startCore({
-      config: restartConfig,
-      startBrowser: false,
-      providerAdapters: [restartedAdapter],
-      logger: silentLogger(),
-    });
-    assert.equal(restartedAdapter.openCount, 0);
-    assert.equal(restartedAdapter.submitCount, 0);
-    assert.equal(restartedAdapter.observationOpenCount, 4);
-
-    const deferredHealth = await waitForHealth(
-      restartConfig.socketPath,
-      (health) => Number(health.metrics.backend_probe_429_total) >= 1,
-    );
-    assert.ok(Number(deferredHealth.metrics.backend_probe_deferred_total) >= 1);
-
-    await verifyIdentityCheckpoint(
-      restartConfig.socketPath,
-      sessions.map((session) => session.sessionId),
-      expectedIdentity,
-      'after restart',
-    );
-
-    const waitSession = sessions[0];
-    assert.notEqual(waitSession, undefined);
-    if (waitSession === undefined) {
-      throw new Error('Reliability fixture did not create the primary wait session');
-    }
-    assert.equal(service.observationService.stop(waitSession.sessionId, 1), true);
-
-    const cursor = await rpc<WaitSnapshot>(restartConfig.socketPath, 'session.wait', {
-      clientId: 'reliability-client',
-      sessionId: waitSession.sessionId,
-      generation: 1,
-      waitMs: 0,
-    });
+    // A public Task wait is only a bounded read; it has no collector/timer
+    // authority. One durable cancellation wakes all twenty waiters without
+    // a duplicate original attempt or cross-project completion.
+    const firstTask = tasks[0]!;
+    const revision = originalSnapshots[0]!.revision;
     const waits = Array.from({ length: 20 }, () =>
-      rpc<WaitSnapshot>(restartConfig.socketPath, 'session.wait', {
-        clientId: 'reliability-client',
-        sessionId: waitSession.sessionId,
-        generation: 1,
-        afterEventSequence: cursor.latestEventSequence,
-        waitMs: 2_000,
-      }),
-    );
-    await waitForHealth(
-      restartConfig.socketPath,
-      (health) => Number(health.metrics.wait_subscriber_count) === 20,
-    );
+      rpc('task.wait', {
+        clientId, taskId: firstTask.taskId,
+        afterRevision: revision, waitMs: 4_000,
+      }));
+    await new Promise(resolve => setTimeout(resolve, 40));
+    const canceled = await rpc('task.cancel', {
+      clientId, taskId: firstTask.taskId, requestId: 'reliability-cancel-once',
+    });
+    assert.equal(canceled.state, 'canceled');
+    assert.equal(canceled.cancelOutcome, 'not_submitted');
+    const wake = await Promise.all(waits);
+    assert.equal(wake.length, 20);
+    assert.ok(wake.every(s => s.taskId === firstTask.taskId));
+    assert.ok(wake.every(s => s.state === 'canceled'));
+    assert.ok(wake.every(s => s.revision > revision));
+    assert.ok(wake.every(s => !s.submission.attempted));
 
-    await service.actorScheduler.updateGeneration(
-      waitSession.sessionId,
-      1,
-      {
-        sessionState: 'complete',
-        providerState: 'complete',
-        observationTransport: 'fresh',
-        responseMessageId: 'reliability-final-0',
-        answerText: 'Reliability final 0',
-        completedAt: new Date().toISOString(),
-        reason: 'reliability-multiwait-complete',
-        errorCode: null,
-      },
-      'generation.reliability-complete',
-    );
-
-    for (const [index, session] of sessions.slice(1).entries()) {
-      restartedAdapter.emitObservation(session.sessionId, {
-        dialogKind: null,
-        candidate: {
-          responseMessageId: `reliability-final-${index + 1}`,
-          answerText: `Reliability final ${index + 1}`,
-          terminalMarker: true,
-          streamingMarker: false,
-        },
-        activity: 'none',
-        networkActivity: false,
+    for (const task of tasks.slice(1)) {
+      const independent = await rpc('task.get', {
+        clientId, taskId: task.taskId, view: 'evidence',
       });
+      assert.notEqual(independent.state, 'canceled', 'Another Main Task cannot be canceled by a foreign wait');
+      assert.notEqual(independent.state, 'completed', 'No provider final was ever returned');
+      assert.equal(independent.evidence.attempts.length, 1);
+      assert.equal(independent.submission.attempted, false);
+    }
+    await core.close();
+    core = null;
+
+    // No cached client/server object survives this boundary. The old database,
+    // idempotency receipts and Task evidence are read from a newly opened Core.
+    core = await startCore({ config, startBrowser: false, logger: silentLogger });
+    assert.equal(core.browserOwner, null);
+    const reopenedHealth = await rpc('system.health', {});
+    assert.equal(reopenedHealth.database.readable, true);
+    assert.equal(reopenedHealth.database.schemaVersion, core.database.schemaVersion);
+    const reopenedProjects = await Promise.all(opens.map(open => rpc('project.open', open)));
+    assert.deepEqual(reopenedProjects.map(project => project.projectId),
+      projects.map(project => project.projectId));
+    const reopenedTasks = await Promise.all(requests.map(request =>
+      rpc('task.start', request)));
+    assert.deepEqual(reopenedTasks.map(task => task.taskId), tasks.map(task => task.taskId));
+    assert.deepEqual(await rpc('task.cancel', {
+      clientId, taskId: firstTask.taskId, requestId: 'reliability-cancel-once',
+    }), canceled, 'Cancel receipt must be exact after Core restart');
+
+    const afterRestart = await Promise.all(tasks.map(task =>
+      rpc('task.get', { clientId, taskId: task.taskId, view: 'evidence' })));
+    assert.equal(afterRestart[0]!.state, 'canceled');
+    for (const result of afterRestart) {
+      assert.equal(result.evidence.attempts.length, 1,
+        'Restart and concurrent wait may never create a second original POST');
+      assert.equal(result.evidence.rootPost, null);
+      assert.equal(result.submission.attempted, false);
+      assert.equal(result.resultAvailable, false);
     }
 
-    const waitResults = await Promise.all(waits);
-    assert.ok(waitResults.every((snapshot) => snapshot.terminal && !snapshot.waitExpired));
-    const finals = await Promise.all(
-      sessions.map((session) =>
-        waitForTerminal(restartConfig.socketPath, session.sessionId),
-      ),
-    );
-    assert.equal(new Set(finals.map((snapshot) => snapshot.responseMessageId)).size, 4);
-
-    const settledHealth = await waitForHealth(
-      restartConfig.socketPath,
-      (health) =>
-        Number(health.metrics.observer_count) === 0 &&
-        Number(health.metrics.session_actor_count) === 0 &&
-        Number(health.metrics.wait_subscriber_count) === 0,
-    );
-    for (const name of [
-      'wrong_session_total',
-      'wrong_generation_total',
-      'duplicate_submit_total',
-      'focus_switch_total',
-    ] as const) {
-      assert.equal(settledHealth.metrics[name], 0, `${name} must remain zero`);
+    const mcp = await invokeMcpTool({
+      name: 'sessionplane_task_get',
+      arguments: { clientId, taskId: firstTask.taskId, view: 'evidence' },
+      socketPath: config.socketPath, timeoutMs: 10_000,
+      maxLineBytes: config.rpcMaxLineBytes,
+    });
+    assert.equal(mcp.isError, false);
+    assert.deepEqual(mcp.structuredContent, afterRestart[0],
+      'Restarted MCP must use the same durable Task as the CLI and RPC');
+    const health = await rpc('system.health', {});
+    for (const field of ['duplicate_submit_total', 'focus_switch_total',
+      'wrong_session_total', 'wrong_generation_total']) {
+      assert.equal(health.metrics[field], 0, field + ' must remain zero');
     }
-    assert.equal(settledHealth.metrics.session_actor_count, 0);
-    assert.equal(settledHealth.metrics.session_actor_queue_depth, 0);
-    assert.equal(settledHealth.metrics.wait_subscriber_count, 0);
-    assert.equal(settledHealth.metrics.observer_count, 0);
-    assert.ok(Number(settledHealth.metrics.backend_probe_total) >= 1);
-    assert.ok(Number(settledHealth.metrics.backend_probe_429_total) >= 1);
-    assert.ok(Number(settledHealth.metrics.backend_probe_deferred_total) >= 1);
-
-    const integrity = service.database.raw.prepare('PRAGMA quick_check').get() as Record<
-      string,
-      unknown
-    >;
-    assert.equal(Object.values(integrity)[0], 'ok');
-    assert.equal(firstAdapter.submitCount + restartedAdapter.submitCount, 4);
+    assert.equal(health.metrics.wait_subscriber_count, 0);
+    assert.equal(core.database.raw.prepare('PRAGMA quick_check').get()!.quick_check, 'ok');
   } finally {
-    await service.close();
+    await core?.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
-
-async function createTeamWithExpert(socketPath: string, suffix: string): Promise<TeamSnapshot> {
-  const team = await rpc<TeamSnapshot>(socketPath, 'team.create', {
-    clientId: 'reliability-client',
-    requestId: `${suffix}-team`,
-    name: suffix,
-    primaryRoleKey: 'main',
-  });
-  return await rpc<TeamSnapshot>(socketPath, 'team.role.create', {
-    clientId: 'reliability-client',
-    requestId: `${suffix}-expert-role`,
-    teamId: team.teamId,
-    roleKey: 'expert.backend',
-    roleType: 'expert',
-    reportsToRoleKey: 'main',
-  });
-}
-
-async function createSession(
-  socketPath: string,
-  teamId: string,
-  roleKey: string,
-  suffix: string,
-): Promise<SessionSnapshot> {
-  return await rpc<SessionSnapshot>(socketPath, 'session.create', {
-    clientId: 'reliability-client',
-    requestId: `${suffix}-session`,
-    teamId,
-    roleKey,
-    provider: 'chatgpt',
-  });
-}
-
-async function verifyIdentityCheckpoint(
-  socketPath: string,
-  sessionIds: readonly string[],
-  expected: ReadonlyMap<
-    string,
-    {
-      readonly teamId: string;
-      readonly roleKey: string;
-      readonly generation: number;
-      readonly conversationId: string | null;
-    }
-  >,
-  phase: string,
-): Promise<void> {
-  const snapshots = await Promise.all(
-    sessionIds.map((sessionId) =>
-      rpc<SessionSnapshot>(socketPath, 'session.get', {
-        clientId: 'reliability-client',
-        sessionId,
-      }),
-    ),
-  );
-  for (const snapshot of snapshots) {
-    const identity = expected.get(snapshot.sessionId);
-    assert.notEqual(identity, undefined, `${phase}: unexpected session`);
-    assert.equal(snapshot.teamId, identity?.teamId, `${phase}: team mismatch`);
-    assert.equal(snapshot.roleKey, identity?.roleKey, `${phase}: role mismatch`);
-    assert.equal(snapshot.generation, identity?.generation, `${phase}: generation mismatch`);
-    assert.equal(
-      snapshot.conversationId,
-      identity?.conversationId,
-      `${phase}: conversation mismatch`,
-    );
-  }
-}
-
-async function waitForTerminal(socketPath: string, sessionId: string): Promise<WaitSnapshot> {
-  let cursor = 0;
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    const snapshot = await rpc<WaitSnapshot>(socketPath, 'session.wait', {
-      clientId: 'reliability-client',
-      sessionId,
-      generation: 1,
-      afterEventSequence: cursor,
-      waitMs: 25,
-    });
-    cursor = Math.max(cursor, snapshot.latestEventSequence);
-    if (snapshot.terminal) {
-      return snapshot;
-    }
-  }
-  throw new Error(`Timed out waiting for terminal session ${sessionId}`);
-}
-
-async function waitForHealth(
-  socketPath: string,
-  predicate: (health: HealthSnapshot) => boolean,
-): Promise<HealthSnapshot> {
-  for (let attempt = 0; attempt < 500; attempt += 1) {
-    const health = await rpc<HealthSnapshot>(socketPath, 'system.health', {});
-    if (predicate(health)) {
-      return health;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  throw new Error('Timed out waiting for reliability health state');
-}
-
-async function rpc<Result>(socketPath: string, method: string, params: unknown): Promise<Result> {
-  return await callRpc<Result>({ socketPath, method, params, timeoutMs: 5_000 });
-}
-
-function silentLogger() {
-  return {
-    debug() {},
-    info() {},
-    warn() {},
-    error() {},
-  };
-}

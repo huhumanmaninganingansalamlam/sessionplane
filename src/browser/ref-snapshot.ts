@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { ElementHandle, Page } from 'playwright-core';
 import type { PreparationTarget } from '../providers/provider-adapter.ts';
 
-const REF_PROPERTY = '__sessionplaneRefToken';
+export const REF_PROPERTY = '__sessionplaneRefToken';
 
 export interface BrowserSnapshotNode {
   readonly ref: string;

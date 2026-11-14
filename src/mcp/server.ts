@@ -274,29 +274,17 @@ function callToolResult(
   isError: boolean,
 ): Readonly<Record<string, unknown>> {
   const serialized = JSON.stringify(structuredContent);
-  const request = structuredContent.request;
-  const required = [structuredContent, structuredContent.request,
-    ...(Array.isArray(structuredContent.results) ? structuredContent.results : []),
-    ...(Array.isArray(structuredContent.roles) ? structuredContent.roles : [])]
-    .filter(value => isRecord(value) && value.userActionRequired === true);
-  const recoveryRequired = [...new Map(required.map(value => [value.requestRef,
-    { requestRef: value.requestRef, status: value.status, userActionRequired: true, message: value.message, recovery: value.recovery }])).values()];
-  const text =
-    Buffer.byteLength(serialized, 'utf8') <= 64 * 1024
-      ? serialized
-      : JSON.stringify({
-          requestOk: structuredContent.requestOk ?? !isError,
-          ...(isRecord(request) ? { request: Object.fromEntries(
-            ['requestRef', 'teamId', 'roleId', 'roleKey', 'sessionId', 'generation', 'conversationId',
-              'submittedUserMessageId', 'submittedUserTurnId', 'submissionState', 'sessionState', 'providerState',
-              'promptSubmitted', 'terminal', 'status', 'errorCode', 'reason', 'nextCheckAt', 'userActionRequired']
-              .filter(key => key in request)
-              .map(key => [key, request[key]])) } : {}),
-          truncatedInText: true,
-          byteLength: Buffer.byteLength(serialized, 'utf8'),
-          note: 'The exact full result is available in structuredContent.',
-          ...(recoveryRequired.length === 0 ? {} : { recoveryRequired }),
-        });
+  const size = Buffer.byteLength(serialized, 'utf8');
+  // Exact result text remains available in structuredContent even if a
+  // front-end cannot render a large text block. Never truncate the result.
+  const text = size <= 64 * 1024 ? serialized : JSON.stringify({
+    taskId: structuredContent.taskId ?? null,
+    state: structuredContent.state ?? null,
+    revision: structuredContent.revision ?? null,
+    resultAvailable: structuredContent.resultAvailable ?? null,
+    byteLength: size,
+    structuredContentRetainsExactResult: true,
+  });
   return {
     content: [{ type: 'text', text }],
     structuredContent,
@@ -306,12 +294,13 @@ function callToolResult(
 
 function serverInstructions(): string {
   return [
-    'Keep teamId; copy roleRef for sends and requestRef for all request controls. Use stable unique requestId values and reuse only identical mutations.',
-    'team_get defaults to compact stored summary without provider probes. Use view:result for the exact answer and view:evidence for fresh UI, original prompt/candidates and controls. Stored ACK, connected collector, tool evidence and final answer are separate facts.',
-    'needs_decision preserves the same request. Select an observed configurationCatalog option by configurationId or option.selection; configure never submits. Choose composer and submit from fresh evidence. Honor exact requested model/effort and Chat; incomplete discovery does not prove model unavailability.',
-    'Keep one positive wait per chain. When normal same-chat continuation is user-approved, pass continuationApproved:true; it retains broad reviews and successor collection. Pacing and routine expiry remain inside the client. nextCheckAt paces backend probes, not DOM collection. Retain original requests and Retry-After; never replay UNKNOWN submissions.',
-    'For UNKNOWN, compare the full original prompt and candidate through view:evidence before acknowledge. Existing recovery decisions preserve original identity and drafts; returned errors and human-review requirements must reach the user.',
-    'Do not refresh automatically. For user intervention, human_review pause actually holds observation and Continue without stopping provider work; focus the exact tab and report its current error and required action. Resume after user completion. A report alone does not pause Core. A normal final ends managed recovery; separately authorized next-work follow-ups belong to the owner.',
+    'Use project.open to bind one owner-scoped project and Main slot.',
+    'Start each question with task.start and the current conversationRevision.',
+    'Core prepares, sends, recovers canonical ACK/FINAL and owns approved continuation timers.',
+    'Use task.get or one bounded task.wait to read progress; client exit cannot cancel work.',
+    'Use the current task.decide decisionId/actionRef with only advertised input.',
+    'task.cancel records intent and revokes future Continue. Uncertain sends are not replayed.',
+    'A URL change or a button click does not prove a provider acknowledgement.',
   ].join(' ');
 }
 

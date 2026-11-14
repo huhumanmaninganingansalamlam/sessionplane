@@ -11,6 +11,7 @@ import { SessionUiService } from '../../src/core/session-ui-service.ts';
 import { SessionPlaneDomainError } from '../../src/domain/errors.ts';
 import { ProviderSubmissionError } from '../../src/providers/provider-adapter.ts';
 import { ConversationLoadRecoveryRepository } from '../../src/storage/conversation-load-recovery-repository.ts';
+import { ReceiptRepository } from '../../src/storage/receipt-repository.ts';
 import { EventRepository } from '../../src/storage/event-repository.ts';
 import { workflowWaitOutcome } from '../../src/domain/workflow-wait.ts';
 import { runCli } from '../../src/cli/main.ts';
@@ -41,6 +42,146 @@ async function fixture() {
   return { core, config, fake, invoke, team, sent, untilSubscribed,
     close: async () => { await core.close(); rmSync(root, { recursive: true, force: true }); } };
 }
+
+test('CLI and MCP retain one exact selected ACK through valid deferrals and return fresh validation failures', async t => {
+  for (const client of ['cli', 'mcp'] as const) for (const stale of [false, true])
+  await t.test(`${client}: ${stale ? 'changed evidence is actionable' : 'selected ACK completes'}`, async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-selected-ack-'));
+    const socketPath = path.join(root, 'rpc.sock');
+    const params = { teamId: 'team', requestRef: 'original', requestId: 'selected-ack',
+      decision: 'acknowledge', messageId: 'selected-user', evidenceHash: 'a'.repeat(64) };
+    const observed: any[] = [];
+    let nextCheck = 0;
+    const server = net.createServer(socket => {
+      let input = '';
+      socket.on('data', chunk => {
+        input += chunk;
+        if (!input.includes('\n')) return;
+        const request = JSON.parse(input.trim()); observed.push(request);
+        assert.equal(request.method, 'workflow.decide', 'No wait, new collector or provider operation');
+        assert.deepEqual(request.params, params, 'Keep exact owner-selected identity and idempotency arguments');
+        assert.ok(Date.now() >= nextCheck, 'Never retry before the actual provider nextCheckAt');
+        let response;
+        if (observed.length === 1) {
+          nextCheck = Date.now() + 1100;
+          response = { error: { code: -32000, message: 'Canonical observation deferred', data: {
+            errorCode: 'provider.observation-deferred', details: { kind: 'deferred', source: 'backend',
+              reason: 'backend-http-429', httpStatus: 429, requestRef: 'original', automaticResubmit: false,
+              nextCheckAt: new Date(nextCheck).toISOString() } } } };
+        } else if (stale) response = { error: { code: -32000, message: 'Fresh selected evidence changed',
+          data: { errorCode: 'browser.snapshot-stale' } } };
+        else response = { result: { requestOk: true, requestRef: 'original', generation: 1,
+          submissionState: 'submitted', submittedUserMessageId: 'selected-user', terminal: false } };
+        socket.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, ...response }) + '\n');
+      });
+    });
+    await new Promise<void>(resolve => server.listen(socketPath, resolve));
+    try {
+      if (client === 'mcp') {
+        const result = await invokeMcpTool({ name: 'sessionplane_decide', arguments: params,
+          socketPath, timeoutMs: 5000, maxLineBytes: 4096 });
+        assert.equal(result.isError, stale);
+        assert.equal(result.structuredContent[stale ? 'errorCode' : 'submittedUserMessageId'],
+          stale ? 'browser.snapshot-stale' : 'selected-user');
+      } else {
+        let output = '', error = '';
+        const code = await runCli(['request', 'acknowledge', 'team', 'original', '--request-id', 'selected-ack',
+          '--message-id', 'selected-user', '--evidence-hash', 'a'.repeat(64), '--socket', socketPath, '--json'], {
+          stdin: Readable.from([]), stdout: new Writable({ write(c, _e, done) { output += c; done(); } }),
+          stderr: new Writable({ write(c, _e, done) { error += c; done(); } }) });
+        assert.equal(code, stale ? 1 : 0, error);
+        if (!stale) assert.equal(JSON.parse(output).submittedUserMessageId, 'selected-user');
+        else assert.match(output + error, /browser.snapshot-stale/);
+      }
+      assert.equal(observed.length, 2, 'One selected operation; no repeated owner wake or retry after a real failure');
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test('selected ACK collection does not retry a foreign or unpaced deferral', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-ack-deferral-guard-'));
+  const socketPath = path.join(root, 'rpc.sock');
+  let calls = 0, foreign = true;
+  const server = net.createServer(socket => {
+    socket.once('data', raw => {
+      const request = JSON.parse(raw.toString()); calls++;
+      socket.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, error: { code: -32000, message: 'Deferred',
+        data: { errorCode: 'provider.observation-deferred', details: { kind: 'deferred',
+          requestRef: foreign ? 'another-request' : 'original', automaticResubmit: false,
+          nextCheckAt: foreign ? new Date(Date.now() + 1000).toISOString() : null } } } }) + '\n');
+    });
+  });
+  await new Promise<void>(resolve => server.listen(socketPath, resolve));
+  try {
+    for (foreign of [true, false]) {
+      const before = calls;
+      const result = await invokeMcpTool({ name: 'sessionplane_decide', arguments: {
+        teamId: 'team', requestRef: 'original', requestId: 'selection', decision: 'acknowledge',
+        messageId: 'selected-user', evidenceHash: 'a'.repeat(64) }, socketPath, timeoutMs: 5000, maxLineBytes: 4096 });
+      assert.equal(result.isError, true);
+      assert.equal(result.structuredContent.errorCode, 'provider.observation-deferred');
+      assert.equal(calls, before + 1, 'No authorized same-request provider deadline, so no automatic retry');
+    }
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const candidates of [[], [{ messageId: 'unverified-existing-user', evidenceHash: 'fresh-comparison' }]])
+test(`UNKNOWN without a bound conversation returns reconciliation despite retained ACK pacing (${candidates.length} candidates)`, async t => {
+  const f = await fixture();
+  const controller = new AbortController();
+  let waiting: Promise<any> | undefined;
+  try {
+    const sessionId = f.sent.sessionId as string;
+    await f.core.actorScheduler.updateGeneration(sessionId, 1, {
+      submissionState: 'submission_unknown', conversationId: null,
+      submittedUserMessageId: null, submittedUserTurnId: null, providerState: 'unknown',
+      observationTransport: 'unavailable', reason: 'acknowledgement-missing', errorCode: 'session.submission-unknown',
+    });
+    const preserved = f.core.teamDirectory.getSession(sessionId);
+    const deferred = { kind: 'deferred', source: 'backend', reason: 'backend-http-429', httpStatus: 429,
+      observedAt: '2026-10-27T15:32:19.233Z', nextCheckAt: '2026-10-27T15:32:40.233Z',
+      requestRef: f.sent.requestRef, conversationId: null, pageKey: preserved.pageKey };
+    new EventRepository(f.core.database.raw).append({ teamId: f.team.teamId as string, sessionId, generation: 1,
+      eventType: 'generation.acknowledgement-recovery', createdAt: deferred.observedAt, payload: deferred });
+    t.mock.method(SessionUiService.prototype, 'isSubmissionPageLost', () => false);
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+      snapshot: preserved, requested: { prompt: 'Original prompt' },
+      evidence: { nodes: [], submissionCandidates: candidates },
+    })) as any);
+    const sends = f.fake.submitCount, probes = f.fake.acknowledgementRecoveryCount;
+    let returned = false;
+    waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef], waitMs: 1000 },
+      controller.signal).then(value => { returned = true; return value; });
+    for (let i = 0; i < 100 && !returned; i++) await flush();
+    assert.equal(returned, true, 'A missing conversation cannot progress through automatic ACK recovery');
+    const result = (await waiting).structuredContent.results[0];
+    assert.equal(result.requestRef, f.sent.requestRef);
+    assert.equal(result.recovery.reason, 'acknowledgement-selection-required');
+    assert.equal(result.recovery.decisionRequired, true);
+    assert.equal(result.recovery.userActionRequired, false);
+    assert.equal(result.recovery.automaticResubmit, false);
+    assert.equal(result.recovery.nextAction, 'inspect_same_request');
+    assert.equal(result.submissionState, 'submission_unknown');
+    assert.equal(result.terminal, false);
+    assert.equal(result.conversationId, null);
+    assert.deepEqual(result.evidence.submissionCandidates, candidates);
+    assert.deepEqual(result.acknowledgementRecovery, { ...deferred, automaticResubmit: false, currentIdentityMatches: true });
+    assert.deepEqual(f.core.teamDirectory.getSession(sessionId), preserved);
+    assert.equal(f.core.actorScheduler.collectors(sessionId).length, 0);
+    assert.equal(f.fake.submitCount, sends);
+    assert.equal(f.fake.acknowledgementRecoveryCount, probes);
+  } finally {
+    controller.abort();
+    await waiting?.catch(() => {});
+    await f.close();
+  }
+});
 
 test('a continuation with no observed dispatch returns a decision instead of remaining in a paced ACK wait', async t => {
   const f = await fixture();
@@ -120,8 +261,44 @@ test('explicit evidence reads a held request without resuming observation or ack
   } finally { t.mock.restoreAll(); await f.close(); }
 });
 
-test('managed collection recovers only a literal continuation lineage without rebinding a lost ACK', async t => {
-  for (const { complete, continuation } of [
+test('explicit completed evidence reads the current page without resuming work or changing the stored final', async t => {
+  const f = await fixture();
+  try {
+    const sessionId = f.sent.sessionId as string;
+    await f.core.actorScheduler.updateGeneration(sessionId, 1, {
+      sessionState: 'complete', providerState: 'complete', answerText: 'Original final', responseMessageId: 'original-final' });
+    const before = f.core.teamDirectory.getSession(sessionId);
+    let reads = 0, unavailable = false;
+    t.mock.method(f.core.recoveryService, 'ensurePage', async (_id, _generation, options) => {
+      assert.deepEqual(options, { openMissing: false, passive: true });
+      if (unavailable) throw new SessionPlaneDomainError('browser.unavailable', 'Original tab unavailable');
+    });
+    t.mock.method(f.core.submissionService, 'recoverAcknowledgement', () => assert.fail('No ACK probe'));
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async (input: any) => {
+      assert.equal(input.readOnly, true);
+      return await f.core.submissionService.inspectSubmission(input, async () => {
+        reads++;
+        return { submissionVerification: { hostspanActivity: { available: true, disclosures: [{ name: 'Previous activity' }] } } };
+      });
+    }) as any);
+    for (const view of ['summary', 'result']) await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view });
+    assert.equal(reads, 0);
+    const read = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view: 'evidence' })).structuredContent.request;
+    assert.equal(reads, 1);
+    assert.equal(read.evidence.submissionVerification.hostspanActivity.disclosures[0].name, 'Previous activity');
+    assert.equal(read.answerText, 'Original final');
+    assert.equal(read.terminal, true);
+    unavailable = true;
+    const missing = (await f.invoke('team_get', { teamId: f.team.teamId, requestRef: f.sent.requestRef, view: 'evidence' })).structuredContent.request;
+    assert.equal(missing.inspectionError.errorCode, 'browser.unavailable');
+    assert.deepEqual(f.core.teamDirectory.getSession(sessionId), before);
+    assert.equal(f.fake.submitCount, 1);
+    assert.deepEqual(f.core.actorScheduler.collectors(sessionId), []);
+  } finally { t.mock.restoreAll(); await f.close(); }
+});
+
+test('original collection recovers only a literal continuation lineage without rebinding a lost ACK', async t => {
+  for (const approved of [false, true]) for (const { complete, continuation } of [
     { complete: false, continuation: true }, { complete: true, continuation: true },
     { complete: true, continuation: false },
   ]) {
@@ -156,6 +333,7 @@ test('managed collection recovers only a literal continuation lineage without re
         reads++; assert.equal(original.generation, 1); assert.equal(owner.generation, 2);
         return { originalAnchorPresent: true, originalUserMessageId: f.sent.submittedUserMessageId,
           responseUserMessageId: 'visible-literal-continue', submittedUserMessageId: 'visible-literal-continue',
+          association: 'exact-original-question-and-literal-continuations', providerMutation: false,
           terminal: complete, responseMessageId: complete ? 'actual-followup-final' : null,
           answerText: complete ? 'Actual collected answer' : null,
           activity: complete ? 'none' : 'weak', activityReason: complete ? null : 'unverified-stop-control' };
@@ -170,21 +348,39 @@ test('managed collection recovers only a literal continuation lineage without re
           observedAt: new Date().toISOString(), originalPartialResponses: [],
         }));
       }) as any);
+      const generations = f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(sessionId);
       let returned = false;
       waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef],
-        waitMs: 600000, continuationApproved: true }, controller.signal).then(x => { returned = true; return x; });
+        waitMs: 600000, ...(approved ? { continuationApproved: true } : {}) }, controller.signal).then(x => { returned = true; return x; });
       for (let i = 0; i < 50; i++) await flush();
       assert.equal(reads > 0, continuation, 'A distinct product request must never inherit the previous WP final');
       if (complete && continuation) {
+        assert.equal(returned, true, 'Observe-only collection must deliver the verified original FINAL without permission to continue');
         const [result] = (await waiting).structuredContent.results;
-        assert.equal(result.followup.originalRequestRef, f.sent.requestRef);
-        assert.equal(result.followup.responseMessageId, 'actual-followup-final');
-        assert.equal(result.followup.answerText, 'Actual collected answer');
-        assert.equal(reconciliations, 1);
-        const [reconnected] = (await f.invoke('wait', { teamId: f.team.teamId,
-          requestRefs: [next.requestRef], waitMs: 0 })).structuredContent.results;
-        assert.deepEqual(reconnected.followup, result.followup, 'Reconnect returns the separate durable follow-up without reconciling again');
-        assert.equal(reconciliations, 1);
+        assert.equal(workflowWaitOutcome(result), true, 'The CLI/MCP client must return the FINAL instead of opening another routine round');
+        if (!approved) {
+          assert.equal(result.terminal, false, 'The missing successor ACK remains unresolved');
+          assert.equal(result.responseMessageId, null);
+          assert.equal(result.workResult.originalRequestRef, f.sent.requestRef);
+          assert.equal(result.workResult.responseMessageId, 'actual-followup-final');
+          assert.equal(result.workResult.answerText, 'Actual collected answer');
+          assert.equal(result.followup.originalRequestRef, f.sent.requestRef);
+          assert.equal(result.followup.userMessageId, 'visible-literal-continue');
+          assert.equal(result.followup.terminal, true, 'Existing connected CLI clients recognize this separate result without a reload');
+          assert.equal(result.followup.answerText, 'Actual collected answer');
+          assert.equal(result.waitExpired, false);
+          assert.equal(reconciliations, 0, 'Reading a FINAL must not reconcile or grant continuation');
+          assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM generations WHERE session_id=? ORDER BY generation').all(sessionId), generations);
+        } else {
+          assert.equal(result.followup.originalRequestRef, f.sent.requestRef);
+          assert.equal(result.followup.responseMessageId, 'actual-followup-final');
+          assert.equal(result.followup.answerText, 'Actual collected answer');
+          assert.equal(reconciliations, 1);
+          const [reconnected] = (await f.invoke('wait', { teamId: f.team.teamId,
+            requestRefs: [next.requestRef], waitMs: 0 })).structuredContent.results;
+          assert.deepEqual(reconnected.followup, result.followup, 'Reconnect returns the separate durable follow-up without reconciling again');
+          assert.equal(reconciliations, 1);
+        }
       } else {
         if (continuation) assert.equal(returned, false, 'A Stop control or backend pacing is neither a final nor proof of fresh tool progress');
         assert.equal(reconciliations, 0);
@@ -460,7 +656,8 @@ test('ten-minute wait survives the TabletAuto observation timeout then returns t
 });
 
 
-test('CLI retains paced UNKNOWN ACK recovery through collection without a selection or replay', async t => {
+for (const unknownConversation of [false, true])
+test(`CLI retains paced UNKNOWN ACK recovery through collection without a selection or replay (unknown conversation: ${unknownConversation})`, async t => {
   const f = await fixture();
   try {
     await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, {
@@ -470,6 +667,7 @@ test('CLI retains paced UNKNOWN ACK recovery through collection without a select
       sessionId: f.sent.sessionId as string, expectedGeneration: 1, prompt: 'Exact next prompt', sessionDeadlineSec: 60 }));
     const request = f.core.database.raw.prepare('SELECT outbox_id FROM outbox WHERE session_id=? AND generation=2')
       .get(f.sent.sessionId as string) as { outbox_id: string };
+    if (unknownConversation) await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 2, { conversationId: null });
     let probes = 0;
     const nextCheckAt = new Date(Date.now() + 150).toISOString();
     f.fake.recoverAcknowledgement = async input => {
@@ -481,10 +679,11 @@ test('CLI retains paced UNKNOWN ACK recovery through collection without a select
       }
       assert.ok(Date.now() >= Date.parse(nextCheckAt), 'Respect the actual provider delay');
       assert.equal(input.selection, undefined, 'Do not choose a rendered candidate to bypass canonical proof');
-      return { conversationId: input.session.conversationId!, submittedUserMessageId: 'exact-canonical-user',
+      return { conversationId: input.session.conversationId ?? 'new-canonical-conversation', evidence: 'backend-exact-user', submittedUserMessageId: 'exact-canonical-user',
         submittedUserTurnId: 'exact-canonical-user' };
     };
     t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+    t.mock.method(SessionUiService.prototype, 'isSubmissionPageLost', () => false);
     t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async function(input: any) {
       return await f.core.submissionService.inspectSubmission(input, async snapshot => ({
         submissionCandidates: snapshot.submissionState === 'submission_unknown' ? [{ messageId: 'visible-user' }] : [] }));
@@ -514,7 +713,7 @@ test('CLI retains paced UNKNOWN ACK recovery through collection without a select
 });
 
 
-test('authorized broad continuation review stays inside the wait and runs at thirty-minute intervals', async t => {
+test('authorized broad continuation review stays inside the wait and runs at twenty-minute intervals', async t => {
   const f = await fixture();
   try {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
@@ -547,15 +746,20 @@ test('authorized broad continuation review stays inside the wait and runs at thi
     const before = await status();
     assert.deepEqual(before.collection.waits, [{ requestRef: f.sent.requestRef, continuationApproved: true }]);
     assert.equal(before.managedContinuation.active, true);
+    assert.equal(before.managedContinuation.reviewIntervalMs, 1200000);
     assert.ok(Date.parse(before.managedContinuation.nextReviewAt) > Date.now());
-    t.mock.timers.tick(1800000);
+    t.mock.timers.tick(Date.parse(before.managedContinuation.nextReviewAt) - Date.now() - 1);
+    for (let i = 0; i < 20; i++) await flush();
+    assert.equal(reviews, 0, 'No broad review before the twenty-minute boundary');
+    t.mock.timers.tick(1);
+    await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, { reason: 'review-boundary-wakeup' });
     for (let i = 0; i < 20; i++) await flush();
     assert.equal(reviews, 1);
     assert.equal(returned, false);
     const reviewed = await status();
     assert.equal(reviewed.managedContinuation.lastReviewReason, 'provider.failure-unverified');
     assert.equal(Date.parse(reviewed.managedContinuation.nextReviewAt) -
-      Date.parse(reviewed.managedContinuation.lastReviewAt), 1800000);
+      Date.parse(reviewed.managedContinuation.lastReviewAt), 1200000);
     await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 1, { reason: 'provider-stream-disconnected' });
     for (let i = 0; i < 20; i++) await flush();
     assert.equal(reviews, 1, 'Progress cannot cause rapid broad reviews');
@@ -568,7 +772,7 @@ test('authorized broad continuation review stays inside the wait and runs at thi
 });
 
 
-test('approved broad review recovers an exact idle unanswered turn while backend probes are paced', async t => {
+for (const alert of [false, true]) test(`approved broad review returns ${alert ? 'a provider blocker without inventing a user action' : 'an exact idle recovery failure while backend probes are paced'}`, async t => {
   const f = await fixture();
   try {
     t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
@@ -585,18 +789,31 @@ test('approved broad review recovers an exact idle unanswered turn while backend
     const reviews: any[] = [];
     t.mock.method(SessionUiService.prototype, 'prepareContinuation', async input => {
       reviews.push(input);
-      throw new SessionPlaneDomainError('provider.preparation-required', 'Actual fresh submit control unavailable');
+      throw new SessionPlaneDomainError('provider.preparation-required', 'Actual fresh submit control unavailable',
+        !alert ? undefined : { kind: 'provider-alert', source: 'dom',
+          submittedUserMessageId: f.sent.submittedUserMessageId,
+          providerAlerts: ['hostspan-desktop reconnect warning'], actionVerified: false, requiredUserAction: null });
     });
     const waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef],
       waitMs: 3600000, untilResult: false, continuationApproved: true });
     await f.untilSubscribed(f.sent.sessionId as string);
     assert.equal(reviews.length, 0, 'A new ACK must not immediately trigger another continue');
-    t.mock.timers.tick(1800000);
+    t.mock.timers.tick(1200000);
     for (let i = 0; i < 30; i++) await flush();
     const result = (await waiting).structuredContent;
     assert.equal(reviews.length, 1);
     assert.equal(reviews[0].userConfirmedInterruption.submittedUserMessageId, f.sent.submittedUserMessageId);
-    assert.equal(result.results[0].recovery.userActionRequired, true, 'A real inability to submit is returned');
+    const recovery = result.results[0].recovery;
+    assert.equal(recovery.userActionRequired, !alert, 'An alert refusal alone cannot establish a required human action');
+    if (alert) {
+      assert.equal(recovery.state, 'blocked');
+      assert.equal(recovery.decisionRequired, false);
+      assert.equal(recovery.requiredUserAction, null);
+      assert.equal(recovery.providerBlocker.submittedUserMessageId, f.sent.submittedUserMessageId);
+      assert.deepEqual(recovery.providerBlocker.providerAlerts, ['hostspan-desktop reconnect warning']);
+      assert.equal(recovery.automaticContinuation, false);
+      assert.equal(workflowWaitOutcome(result.results[0]), true, 'The original wait returns without another collection/retry');
+    }
     assert.equal(f.fake.submitCount, 1, 'A failed fresh control check never submits');
   } finally { t.mock.timers.reset(); await f.close(); }
 });
@@ -892,9 +1109,9 @@ test('direct successor collection paces a carried disconnect from the submitted 
     const resumed = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef],
       waitMs: 3600000, untilResult: false, continuationApproved: true });
     await f.untilSubscribed(f.sent.sessionId as string);
-    t.mock.timers.tick(30 * 60000 - 13848 - 1);
+    t.mock.timers.tick(20 * 60000 - 13848 - 1);
     for (let i = 0; i < 30; i++) await flush();
-    assert.equal(reviews, 0, 'No follow-up before thirty minutes from actual ACK');
+    assert.equal(reviews, 0, 'No follow-up before twenty minutes from actual ACK');
     t.mock.timers.tick(2);
     await f.core.actorScheduler.updateGeneration(f.sent.sessionId as string, 2, { reason: 'cadence-review-wakeup' });
     for (let i = 0; i < 30; i++) await flush();
@@ -903,4 +1120,129 @@ test('direct successor collection paces a carried disconnect from the submitted 
     assert.equal(row.recovery.reason, 'provider.failure-unverified');
     assert.equal(f.fake.submitCount, 2);
   } finally { t.mock.timers.reset(); t.mock.restoreAll(); await f.close(); }
+});
+
+
+test('manage-only approves the sole existing ordinary ACK collector and delivers its exact recovery failure', async t => {
+  const f = await fixture();
+  const controller = new AbortController();
+  let waiting: Promise<any> | undefined;
+  try {
+    const id = f.sent.sessionId as string;
+    const parent = f.sent.requestRef as string;
+    await f.core.actorScheduler.updateGeneration(id, 1, { sessionState: 'complete', providerState: 'complete',
+      responseMessageId: 'retained-checkpoint', answerText: 'Retained checkpoint' });
+    const next = (await f.invoke('send', { teamId: f.team.teamId, roleRef: `${id}:1`,
+      requestId: `continue:managed-continuation:${parent}`, prompt: '계속' })).structuredContent;
+    f.core.database.raw.prepare("UPDATE outbox SET payload_json=json_set(payload_json, '$.continuationOf', ?) WHERE outbox_id=?")
+      .run(parent, next.requestRef);
+    const receipts = new ReceiptRepository(f.core.database);
+    receipts.record({ clientId: `team:${f.team.teamId}`, requestId: `managed-continuation:${parent}`,
+      method: 'session.continuation.prepare', requestHash: 'fixture', status: 'complete',
+      result: { evidence: { disconnectedRecovery: true, conversationId: next.conversationId } } });
+    receipts.record({ clientId: `team:${f.team.teamId}`, requestId: `managed-recovery-review:${next.requestRef}`,
+      method: 'workflow.managed_recovery_review', requestHash: 'review', status: 'complete', result: { decisionRequired: true } });
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() + 21 * 60_000 });
+    t.mock.method(f.core.recoveryService, 'ensurePage', async () => {});
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async () => ({
+      snapshot: f.core.teamDirectory.getSession(id), evidence: { submissionVerification: {
+        pageKey: next.pageKey, conversationId: next.conversationId, submittedUserMessageId: next.submittedUserMessageId,
+        anchorPresent: true, laterUserFound: false, activity: 'unknown', activityReason: 'provider-stream-disconnected',
+        turnBoundary: [{ role: 'user', text: '계속' }], responseCandidate: null } }, requested: {},
+    })) as any);
+    t.mock.method(EventRepository.prototype, 'latestServerObservation', () => null);
+    let reviews = 0;
+    t.mock.method(SessionUiService.prototype, 'prepareContinuation', async () => {
+      reviews++;
+      throw new SessionPlaneDomainError('provider.preparation-required', 'Exact current permission/draft remains protected');
+    });
+    waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [next.requestRef], waitMs: 600000 }, controller.signal);
+    await f.untilSubscribed(id);
+    const actor = f.core.actorScheduler.actorFor(id);
+    assert.deepEqual(actor.collectors, [{ requestRef: next.requestRef, continuationApproved: false }]);
+    const before = f.core.teamDirectory.getSession(id);
+    const args = { teamId: f.team.teamId, requestRef: next.requestRef, requestId: 'approve-existing-ordinary',
+      decision: 'continue', continuationApproved: true, manageOnly: true, followupUserMessageId: next.submittedUserMessageId };
+    const approved = await f.invoke('decide', args);
+    assert.equal(approved.isError, false, JSON.stringify(approved));
+    assert.equal(approved.structuredContent.providerMutation, false);
+    assert.equal(approved.structuredContent.management.kind, 'management-approved');
+    const result = (await waiting).structuredContent.results[0];
+    assert.equal(reviews, 1, 'The existing observer wakes and performs one normal guarded recovery review');
+    assert.equal(result.recovery.reason, 'provider.preparation-required');
+    assert.equal(result.recovery.message, 'Exact current permission/draft remains protected');
+    assert.equal(result.terminal, false);
+    assert.equal(result.requestRef, next.requestRef);
+    assert.equal(f.fake.submitCount, 2, 'Only the preexisting fixture sends; no management send or guard bypass');
+    assert.deepEqual(f.core.teamDirectory.getSession(id), before);
+    assert.equal(actor.collectors.length, 0, 'The original call returns its actual decision and releases itself');
+    await f.core.actorScheduler.updateGeneration(id, 2, { sessionState: 'complete', providerState: 'complete',
+      responseMessageId: 'later-checkpoint', answerText: 'Later checkpoint' });
+    await f.invoke('send', { teamId: f.team.teamId, roleRef: `${id}:2`, requestId: 'unrelated-next-work', prompt: 'Different authorized work' });
+    const newer = f.core.teamDirectory.getSession(id);
+    const replay = await f.invoke('decide', args);
+    assert.equal(replay.isError, false, 'Same completed management operation replays without needing another collector');
+    assert.deepEqual(replay.structuredContent, approved.structuredContent);
+    assert.deepEqual(f.core.teamDirectory.getSession(id), newer, 'Replay never approves or changes the newer generation');
+    assert.equal(reviews, 1);
+  } finally { controller.abort(); await waiting?.catch(() => {}); t.mock.timers.reset(); await f.close(); }
+});
+
+
+test('ordinary management preserves holds, UNKNOWN, later users, page identity and the sole collector boundary', async t => {
+  const f = await fixture();
+  try {
+    const id = f.sent.sessionId as string;
+    const current = f.core.teamDirectory.getSession(id);
+    const actor = f.core.actorScheduler.actorFor(id);
+    const original = f.core.database.raw.prepare('SELECT * FROM outbox').all();
+    let evidence: any = { pageKey: current.pageKey, conversationId: current.conversationId,
+      submittedUserMessageId: current.submittedUserMessageId, anchorPresent: true, laterUserFound: false };
+    t.mock.method(SessionUiService.prototype, 'inspectSubmission', (async (input: any) => {
+      assert.equal(input.readOnly, true);
+      return { snapshot: current, evidence: { submissionVerification: evidence }, requested: {} };
+    }) as any);
+    let operation = 0;
+    const approve = () => f.invoke('decide', { teamId: f.team.teamId, requestRef: f.sent.requestRef,
+      requestId: `guard-${++operation}`, decision: 'continue', manageOnly: true, continuationApproved: true });
+    assert.equal((await approve()).structuredContent.errorCode, 'session.busy', 'Management creates no missing collector');
+    const release = actor.retainCollector(String(f.sent.requestRef), false);
+    const extra = actor.retainCollector(String(f.sent.requestRef), false);
+    assert.equal((await approve()).structuredContent.errorCode, 'session.busy'); extra();
+    const held = new ConversationLoadRecoveryRepository(f.core.database);
+    held.save({ conversationId: current.conversationId!, sessionId: id, pageKey: current.pageKey!, bindingEpoch: 1,
+      url: `https://chatgpt.com/c/${current.conversationId}`, attempts: 0, state: 'held', reason: 'user-review',
+      lastOutcome: null, lastCheckedAt: new Date().toISOString(), lastAttemptAt: null, notifiedAt: null });
+    assert.equal((await approve()).structuredContent.errorCode, 'provider.preparation-required');
+    held.save({ ...held.get(current.conversationId!)!, state: 'recovered', reason: 'user-review-completed' });
+    for (const changed of [{ anchorPresent: false }, { laterUserFound: true }, { pageKey: 'another-page' },
+      { submittedUserMessageId: 'another-ACK' }, { conversationId: 'another-chat' }]) {
+      const before = evidence; evidence = { ...evidence, ...changed };
+      assert.equal((await approve()).structuredContent.errorCode, 'session.page-identity-unverified'); evidence = before;
+    }
+    await f.core.actorScheduler.updateGeneration(id, 1, { submissionState: 'submission_unknown', submittedUserMessageId: null });
+    assert.equal((await approve()).structuredContent.errorCode, 'provider.preparation-required');
+    assert.deepEqual(actor.collectors, [{ requestRef: f.sent.requestRef, continuationApproved: false }]);
+    assert.equal(f.fake.submitCount, 1);
+    assert.deepEqual(f.core.database.raw.prepare('SELECT * FROM outbox').all(), original);
+    assert.equal(f.core.database.raw.prepare("SELECT count(*) AS n FROM request_receipts WHERE method='workflow.continuation.management'").get()!.n, 0);
+    release();
+  } finally { await f.close(); }
+});
+
+
+test('an unrelated public operation ID cannot authorize an observe-only collector', async () => {
+  const f = await fixture();
+  const controller = new AbortController();
+  let waiting: Promise<any> | undefined;
+  try {
+    new ReceiptRepository(f.core.database).record({ clientId: `team:${f.team.teamId}`,
+      requestId: `continuation-management:${f.sent.requestRef}`, method: 'workflow.focus',
+      requestHash: 'public-operation', status: 'complete', result: { requestOk: true } });
+    waiting = f.invoke('wait', { teamId: f.team.teamId, requestRefs: [f.sent.requestRef], waitMs: 600000 }, controller.signal);
+    await f.untilSubscribed(f.sent.sessionId as string);
+    assert.deepEqual(f.core.actorScheduler.collectors(f.sent.sessionId as string),
+      [{ requestRef: f.sent.requestRef, continuationApproved: false }]);
+    assert.equal(f.fake.submitCount, 1);
+  } finally { controller.abort(); await waiting?.catch(() => {}); await f.close(); }
 });

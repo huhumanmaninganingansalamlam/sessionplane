@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { BrowserOwner } from '../../src/browser/browser-owner.ts';
+import { BrowserOwner, BrowserOwnerError } from '../../src/browser/browser-owner.ts';
 import { PageRegistry } from '../../src/browser/page-registry.ts';
 import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { ChatGptAdapter } from '../../src/providers/chatgpt/adapter.ts';
@@ -13,6 +14,7 @@ import { observeChatGptActivity } from '../../src/providers/chatgpt/activity-obs
 import { ExactFinalTracker } from '../../src/providers/chatgpt/exact-final.ts';
 import { inspectChatGptSubmissionCandidates, recoverChatGptAcknowledgement } from '../../src/providers/chatgpt/submission.ts';
 import { restoreLatestPosition } from '../../src/providers/chatgpt/latest-position-recovery.ts';
+import { streamRetrySurface } from '../../src/providers/chatgpt/stream-retry.ts';
 
 const CONVERSATION_ID = 'conversation-observer-123456';
 
@@ -156,6 +158,13 @@ test('completed exact artifact discovery restores a virtualized answer through t
       return route.fulfill({ status: 200, contentType: 'text/html', body: '<main></main>' });
     });
     await page.goto(`https://chatgpt.com/c/${CONVERSATION_ID}`);
+    let unownedActivations = 0;
+    await assert.rejects(() => owner.captureDownload(page, 'unowned.txt', async () => {
+      unownedActivations++;
+      throw new Error('Unowned download callback was invoked');
+    }), (error: unknown) => error instanceof BrowserOwnerError &&
+      error.errorCode === 'session.page-identity-unverified');
+    assert.equal(unownedActivations, 0, 'an unowned page must not be activated');
     registry.bindPage(binding.pageKey, { sessionId: 'session-observer', generation: 1, conversationId: CONVERSATION_ID });
     await page.setContent(`<main><div id="turns"><article data-message-author-role="user" data-message-id="old">Old turn</article></div>
       <textarea></textarea><button aria-label="맨 아래로 스크롤">↓</button></main>`);
@@ -183,6 +192,154 @@ test('completed exact artifact discovery restores a virtualized answer through t
     assert.equal(await page.locator('textarea').inputValue(), '');
     assert.deepEqual(session, original);
     assert.equal(registry.getBinding(binding.pageKey).sessionId, original.sessionId);
+
+    // Current ChatGPT DIL puts the exact answer ID on the inner authored
+    // node. A download link and a file card may be siblings in its uniquely
+    // bound assistant group; unrelated links outside it must never leak in.
+    await page.setContent(`<main>
+      <section>
+        <div data-chatgpt-search-unit-key="user-message-1:user"
+          data-chatgpt-search-message-ids="user-message-1">
+          <div data-user-message-bubble>Original question</div>
+        </div>
+        <div data-chatgpt-search-unit-key="original-final:assistant"
+          data-chatgpt-search-message-ids="original-final">
+          <div data-chatgpt-selection-message-id="original-final">
+            <div data-dil-message-id="original-final">Original final</div>
+            <a download="dil-link.txt" href="data:text/plain,DIL-LINK-BYTES">Download link</a>
+            <div>
+              <button aria-label="Open preview of dil-card.md">Preview</button>
+              <button aria-label="Download file"
+                onclick="window.cardClicks++">Download file card</button>
+            </div>
+          </div>
+        </div>
+      </section>
+      <a download="foreign.txt" href="data:text/plain,FOREIGN">Unrelated link</a>
+      <textarea></textarea>
+      <script>window.cardClicks=0;</script>
+    </main>`);
+    await page.locator('button[aria-label="Download file"]').evaluate(button => {
+      button.addEventListener('click', () => {
+        const link = document.createElement('a');
+        link.download = 'dil-card.md';
+        link.href = 'data:text/plain,DIL-CARD-BYTES';
+        link.click();
+      });
+    });
+    const dilFiles = await adapter.discoverArtifacts(request);
+    assert.deepEqual(dilFiles.map(file => file.name).sort(), ['dil-card.md', 'dil-link.txt']);
+    const dilLink = dilFiles.find(file => file.name === 'dil-link.txt')!;
+    assert.equal(Buffer.from((await adapter.downloadArtifact(request, dilLink)).bytes).toString(),
+      'DIL-LINK-BYTES');
+    await page.evaluate(() => {
+      (window as any).artifactFetches = 0;
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = (...args) => {
+        (window as any).artifactFetches++;
+        return originalFetch(...args);
+      };
+    });
+    for (const forgedLink of [
+      { ...dilLink, name: 'forged-link.txt' },
+      { ...dilLink, mediaType: 'text/plain' },
+    ]) {
+      await assert.rejects(() => adapter.downloadArtifact(request, forgedLink),
+        { errorCode: 'provider.artifacts-unavailable' });
+    }
+    assert.equal(await page.evaluate(() => (window as any).artifactFetches), 0,
+      'wrong link metadata must be rejected before fetch');
+    assert.equal(await page.evaluate(() => (window as any).cardClicks), 0,
+      'discovering a file card never activates its download');
+    const foreignSource = 'data:text/plain,FOREIGN';
+    const forgedCandidate = {
+      ...dilLink,
+      sourceUrl: foreignSource,
+      name: 'foreign.txt',
+      providerArtifactId: `chatgpt-link-${createHash('sha256').update(foreignSource).digest('hex')}`,
+    };
+    await assert.rejects(() => adapter.downloadArtifact(request, forgedCandidate),
+      { errorCode: 'provider.artifacts-unavailable' },
+      'an unscoped source must not be fetched just because its candidate ID is well formed');
+    await page.locator('[data-chatgpt-search-unit-key="original-final:assistant"]')
+      .evaluate(node => node.setAttribute('data-chatgpt-search-message-ids', 'original-final original-final'));
+    const repeatedFiles = await adapter.discoverArtifacts(request);
+    assert.deepEqual(repeatedFiles.map(file => file.name).sort(),
+      ['dil-card.md', 'dil-link.txt'],
+      'repeating one verified assistant ID does not create an ambiguous group');
+    assert.equal(await page.evaluate(() => (window as any).cardClicks), 0);
+    const exactCard = repeatedFiles.find(file => file.name === 'dil-card.md')!;
+    for (const forgedCard of [
+      { ...exactCard, providerArtifactId: 'forged-card-id' },
+      { ...exactCard, name: 'forged-card.md' },
+      { ...exactCard, mediaType: 'text/plain' },
+    ]) {
+      await assert.rejects(() => adapter.downloadArtifact(request, forgedCard),
+        { errorCode: 'provider.artifacts-unavailable' },
+        'a file card cannot download under a forged artifact identity or metadata');
+    }
+    assert.equal(await page.evaluate(() => (window as any).cardClicks), 0,
+      'forged file-card candidates must not activate the download');
+    const explicitlyBound = { ...request, session: { ...session,
+      submittedUserMessageId: 'user-message-1', submittedUserTurnId: 'turn-expected' } };
+    const userRoot = page.locator('[data-chatgpt-search-unit-key="user-message-1:user"]');
+    await userRoot.evaluate(node => node.setAttribute('data-turn-id', 'foreign-turn'));
+    await assert.rejects(() => adapter.downloadArtifact(explicitlyBound, exactCard),
+      { errorCode: 'provider.artifacts-unavailable' },
+      'a matching message ID cannot override an explicitly conflicting turn ID');
+    await userRoot.evaluate(node => {
+      node.setAttribute('data-turn-id', 'turn-expected');
+      node.setAttribute('data-chatgpt-search-message-ids', 'foreign-user');
+    });
+    await assert.rejects(() => adapter.downloadArtifact(explicitlyBound, exactCard),
+      { errorCode: 'provider.artifacts-unavailable' },
+      'a matching turn ID cannot override a conflicting message ID');
+    assert.equal(await page.evaluate(() => (window as any).cardClicks), 0);
+    await userRoot.evaluate(node => {
+      node.removeAttribute('data-turn-id');
+      node.setAttribute('data-chatgpt-search-message-ids', 'user-message-1');
+    });
+    assert.equal(Buffer.from((await adapter.downloadArtifact(request, exactCard)).bytes).toString(),
+      'DIL-CARD-BYTES', 'the exact file card downloads through the owned byte sink');
+    assert.equal(await page.evaluate(() => (window as any).cardClicks), 1);
+
+    await page.locator('[data-chatgpt-search-unit-key="original-final:assistant"]')
+      .evaluate(node => node.setAttribute('data-chatgpt-search-message-ids', 'original-final foreign-id'));
+    assert.deepEqual((await adapter.discoverArtifacts(request)).map(file => file.name), [],
+      'a group with multiple message IDs cannot own the exact answer artifacts');
+    await assert.rejects(() => adapter.downloadArtifact(request, exactCard));
+    assert.equal(await page.evaluate(() => (window as any).cardClicks), 1,
+      'a foreign ID must block download without clicking');
+
+    // The live ChatGPT Outputs popover is a document surface, not a
+    // verified download card. A file-like title cannot silently disappear.
+    await page.setContent(`<main>
+      <article data-message-author-role="user" data-message-id="user-message-1">Create a file</article>
+      <article data-message-author-role="assistant" data-message-id="original-final">
+        Created and byte-verified sessionplane-output.txt</article>
+      <button type="button" aria-controls="outputs-dialog" aria-haspopup="dialog" aria-expanded="true"
+        style="position:fixed;left:12px;top:12px;width:120px;height:32px;z-index:10">요약 전환</button>
+      <div role="dialog" id="outputs-dialog" data-state="open"
+        style="position:fixed;left:12px;top:60px;background:white">
+        <button aria-expanded="true">출력</button>
+        <button aria-describedby="doc-kind" onclick="window.outputOpens++">sessionplane-output.txt 열기</button>
+        <span id="doc-kind">문서</span>
+      </div>
+      <textarea></textarea><script>window.outputOpens=0;</script></main>`);
+    const output = await page.evaluate(streamRetrySurface, { origin: 'https://chatgpt.com',
+      conversationId: CONVERSATION_ID, anchor: 'user-message-1', click: false, outputPanel: 'inspect' });
+    assert.equal(output.reason, 'output-popover-open', 'fixture matches the real document panel');
+    await page.locator('[data-message-id="original-final"]').evaluate(node =>
+      node.insertAdjacentHTML('beforeend', '<a download="linked.txt" href="data:text/plain,EXACT-LINK">Linked file</a>'));
+    assert.deepEqual((await adapter.discoverArtifacts(request)).map(file => file.name), ['linked.txt'],
+      'an exact answer-bound file link remains discoverable beside unrelated output chrome');
+    await page.locator('a[download="linked.txt"]').evaluate(node => node.remove());
+    await assert.rejects(() => adapter.discoverArtifacts(request),
+      { errorCode: 'provider.artifacts-unavailable' },
+      'an unbound output document must not be reported as zero verified artifacts');
+    assert.equal(await page.evaluate(() => (window as any).outputOpens), 0,
+      'discovery must never open a document whose exact artifact identity is missing');
+
   } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -341,6 +498,31 @@ test('thinking-failed activity headers report an exact nonterminal provider erro
     await owner.close();
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('owned result reads do not require getElementById on an activity header root', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-header-root-'));
+  const owner = new BrowserOwner({ profileDir: path.join(root, 'profile'), pageRegistry: new PageRegistry(), headless: true });
+  try {
+    await owner.start();
+    const { page } = await owner.createPage();
+    await page.setContent(`<main>
+      <div data-message-author-role="user" data-message-id="original">Implement</div>
+      <div class="group/activity-header"><button aria-labelledby="activity-label"></button><span id="activity-label">Working</span></div>
+      <div data-message-author-role="assistant" data-message-id="answer">Retained answer</div>
+      <textarea>Preserved draft</textarea></main>`);
+    // Some provider roots expose scoped queries without getElementById.
+    await page.evaluate(() => Object.defineProperty(document, 'getElementById', { value: undefined }));
+    const identity = { submittedUserMessageId: 'original', submittedUserTurnId: null };
+    const observed = await observeChatGptDom(page, identity);
+    assert.equal(observed.submittedUserFound, true);
+    assert.equal(observed.candidate?.responseMessageId, 'answer');
+    assert.equal(observed.candidate?.answerText, 'Retained answer');
+    assert.deepEqual(observed.providerAlerts, []);
+    await page.locator('[id="activity-label"]').evaluate(label => { label.textContent = 'Thinking failed'; });
+    assert.deepEqual(await observeChatGptAlerts(page, identity, true), ['Thinking failed']);
+    assert.equal(await page.locator('textarea').inputValue(), 'Preserved draft');
+  } finally { await owner.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test('automatic and selected UNKNOWN recovery require the exact canonical user, preserving failed POST uncertainty', async (t) => {

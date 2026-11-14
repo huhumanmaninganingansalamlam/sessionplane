@@ -27,6 +27,9 @@ export interface BackendJsonResponse {
 }
 
 export interface BackendJsonClient {
+  /** Stable identity of the authenticated request context. Rotate on account changes;
+   * wrappers for the same context may share this opaque identity. */
+  readonly authScope?: object;
   get(
     url: string,
     options: {
@@ -40,11 +43,17 @@ export interface ChatGptBackendRecoveryOptions {
   readonly requestTimeoutMs: number;
   readonly tokenCacheTtlMs: number;
   readonly acknowledgementRetryAtMs?: number;
+  /** Persist the GET cooldown before the next network request. */
+  readonly onConversationRetryAtMs?: (nextAllowedAtMs: number) => void;
   readonly now?: () => Date;
   readonly onRateLimit?: (request: ProviderRecoveryRequest, evidence: BackendRateLimitEvidence) => void;
+  /** Safe endpoint/Retry-After metadata for semantic and legacy reads alike. */
+  readonly onRateLimitEvidence?: (evidence: BackendRateLimitEvidence) => void;
 }
 
 interface CachedToken {
+  readonly origin: string;
+  readonly authScope: object;
   readonly value: string;
   readonly expiresAtMs: number;
 }
@@ -54,6 +63,8 @@ export class ChatGptBackendRecovery {
   readonly #tokenCacheTtlMs: number;
   readonly #now: () => Date;
   readonly #onRateLimit: ChatGptBackendRecoveryOptions['onRateLimit'];
+  readonly #onRateLimitEvidence: ChatGptBackendRecoveryOptions['onRateLimitEvidence'];
+  readonly #onConversationRetryAtMs: ChatGptBackendRecoveryOptions['onConversationRetryAtMs'];
   #token: CachedToken | null = null;
   #conversationRetryAt = 0;
   readonly #conversationWaiting = new Map<string, { expiresAt: number; selected: boolean }>();
@@ -64,7 +75,18 @@ export class ChatGptBackendRecovery {
     this.#tokenCacheTtlMs = options.tokenCacheTtlMs;
     this.#now = options.now ?? (() => new Date());
     this.#onRateLimit = options.onRateLimit;
+    this.#onRateLimitEvidence = options.onRateLimitEvidence;
+    this.#onConversationRetryAtMs = options.onConversationRetryAtMs;
     this.#conversationRetryAt = options.acknowledgementRetryAtMs ?? 0;
+  }
+
+  #extendConversationRetryAt(nextAllowedAtMs: number): void {
+    if (nextAllowedAtMs <= this.#conversationRetryAt) return;
+    // Reserve locally first. A failed SQLite write still preserves the
+    // Retry-After barrier in this Core and never grants an early second GET.
+    this.#conversationRetryAt = nextAllowedAtMs;
+    // Persist before any network read; no tokens, bodies or task content.
+    this.#onConversationRetryAtMs?.(nextAllowedAtMs);
   }
 
   async recover(
@@ -88,6 +110,33 @@ export class ChatGptBackendRecovery {
       conversationId,
       submittedUserMessageId: request.session.submittedUserMessageId,
       submittedUserTurnId: request.session.submittedUserTurnId,
+    });
+  }
+
+  /**
+   * New semantic adapter entry point. Uses the same rate-limited, authenticated
+   * read-only backend transport as legacy recovery without fabricating a
+   * SessionSnapshot. No UI focus or submission is permitted here.
+   */
+  async recoverExactTurn(
+    identity: {
+      readonly conversationId: string | null;
+      readonly submittedUserMessageId: string | null;
+      readonly submittedUserTurnId: string | null;
+    },
+    client: BackendJsonClient,
+    origin: string,
+  ): Promise<ProviderRecoveryResult> {
+    if (identity.conversationId === null ||
+      (identity.submittedUserMessageId === null && identity.submittedUserTurnId === null)) {
+      return unavailable('backend-identity-incomplete');
+    }
+    const result = await this.#conversation(identity.conversationId, client, origin);
+    if ('recovery' in result) return result.recovery;
+    return recoverExactServerFinal(result.body, {
+      conversationId: identity.conversationId,
+      submittedUserMessageId: identity.submittedUserMessageId,
+      submittedUserTurnId: identity.submittedUserTurnId,
     });
   }
 
@@ -194,11 +243,11 @@ export class ChatGptBackendRecovery {
     }
     this.#conversationWaiting.delete(conversationId);
     this.#conversationInFlight = true;
-    this.#conversationRetryAt = now + 5_000;
     try {
+      this.#extendConversationRetryAt(now + 5_000);
       const result = await this.#readConversation(conversationId, client, origin, observe);
       if ('recovery' in result && result.recovery.kind === 'deferred') {
-        this.#conversationRetryAt = this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0);
+        this.#extendConversationRetryAt(this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0));
         if (selected) this.#conversationWaiting.set(conversationId, {
           expiresAt: this.#conversationRetryAt + graceMs, selected: true,
         });
@@ -243,7 +292,9 @@ export class ChatGptBackendRecovery {
     }
 
     if (response.status === 429) {
-      return { recovery: rateLimited(response.headers, this.#now(), 'conversation-detail', observe), httpStatus: response.status, endpointCategory: 'conversation-detail' };
+      return { recovery: rateLimited(response.headers, this.#now(), 'conversation-detail',
+        evidence => { observe?.(evidence); this.#onRateLimitEvidence?.(evidence); }),
+        httpStatus: response.status, endpointCategory: 'conversation-detail' };
     }
     if (response.status === 401 || response.status === 403) {
       this.#token = null;
@@ -265,7 +316,9 @@ export class ChatGptBackendRecovery {
     observe?: (evidence: BackendRateLimitEvidence) => void,
   ): Promise<{ readonly token: string } | { readonly recovery: ProviderRecoveryResult; readonly httpStatus?: number; readonly endpointCategory?: 'auth-session' }> {
     const nowMs = this.#now().getTime();
-    if (this.#token !== null && this.#token.expiresAtMs > nowMs) {
+    const authScope = client.authScope ?? client;
+    if (this.#token !== null && this.#token.origin === origin &&
+      this.#token.authScope === authScope && this.#token.expiresAtMs > nowMs) {
       return { token: this.#token.value };
     }
 
@@ -279,7 +332,9 @@ export class ChatGptBackendRecovery {
       return { recovery: unavailable('backend-auth-session-failed') };
     }
     if (response.status === 429) {
-      return { recovery: rateLimited(response.headers, this.#now(), 'auth-session', observe), httpStatus: response.status, endpointCategory: 'auth-session' };
+      return { recovery: rateLimited(response.headers, this.#now(), 'auth-session',
+        evidence => { observe?.(evidence); this.#onRateLimitEvidence?.(evidence); }),
+        httpStatus: response.status, endpointCategory: 'auth-session' };
     }
     if (response.status < 200 || response.status >= 300) {
       return { recovery: unavailable(`backend-auth-http-${response.status}`), httpStatus: response.status, endpointCategory: 'auth-session' };
@@ -289,6 +344,8 @@ export class ChatGptBackendRecovery {
       return { recovery: unavailable('backend-access-token-missing'), httpStatus: response.status, endpointCategory: 'auth-session' };
     }
     this.#token = {
+      origin,
+      authScope,
       value: token,
       expiresAtMs: nowMs + this.#tokenCacheTtlMs,
     };
@@ -299,10 +356,10 @@ export class ChatGptBackendRecovery {
 function trustedOrigin(value: string): string | null {
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' &&
-      (url.hostname === 'chatgpt.com' || url.hostname === 'chat.openai.com')
-      ? url.origin
-      : null;
+    // Exact HTTPS origins only: a trusted hostname on another TLS port
+    // is not an authorized endpoint for fetching an account bearer token.
+    return url.origin === 'https://chatgpt.com' || url.origin === 'https://chat.openai.com'
+      ? url.origin : null;
   } catch {
     return null;
   }
@@ -321,6 +378,8 @@ export function recoverExactServerAcknowledgement(
     a.conversationId, a.messageId, a.parentMessageId, a.textHash]), a])).values()] : [];
   if (attempted.length > 1 || attempted.some(a => a.conversationId !== conversationId)) return null;
   const exactAttempt = attempted[0];
+  if (exactAttempt !== undefined &&
+    createHash('sha256').update(prompt.replaceAll('\r\n', '\n')).digest('hex') !== exactAttempt.textHash) return null;
   const matches = Object.entries(mapping).flatMap(([nodeId, node]) => {
     const message = messageForNode(node);
     if (message === null || messageRole(message) !== 'user') return [];
@@ -421,16 +480,26 @@ export function recoverExactServerFinal(
   branchIds.reverse();
 
   let submittedIndex = -1;
+  let boundUserIndex = -1;
   for (let index = 0; index < branchIds.length; index += 1) {
     const nodeId = branchIds[index];
     if (nodeId === undefined) {
       continue;
     }
     const message = messageForNode(mapping[nodeId]);
-    if (message !== null && isExactSubmittedUser(nodeId, message, identity)) {
-      submittedIndex = index;
-      break;
+    if (message === null) continue;
+    // A duplicate of either bound identity component makes the entire
+    // current-branch ancestry ambiguous, even when the other component differs.
+    const matchesBoundId = isExactSubmittedUser(nodeId, message, {
+      submittedUserMessageId: identity.submittedUserMessageId, submittedUserTurnId: null,
+    }) || isExactSubmittedUser(nodeId, message, {
+      submittedUserMessageId: null, submittedUserTurnId: identity.submittedUserTurnId,
+    });
+    if (matchesBoundId) {
+      if (boundUserIndex >= 0) return unverified('backend-user-anchor-ambiguous-on-current-branch');
+      boundUserIndex = index;
     }
+    if (isExactSubmittedUser(nodeId, message, identity)) submittedIndex = index;
   }
   if (submittedIndex < 0) {
     const onOtherBranch = Object.entries(mapping).some(([nodeId, node]) => {
@@ -530,8 +599,8 @@ function exactServerFinal(
   ) {
     return null;
   }
-  const text = messageText(message).trim();
-  if (text.length === 0) {
+  const text = messageText(message);
+  if (text.trim().length === 0) {
     return null;
   }
   return {
@@ -557,13 +626,16 @@ function isExactSubmittedUser(
     readStringField(message, 'turn_id') ??
     readStringField(metadata, 'turn_id') ??
     readStringField(metadata, 'turnId');
-  return (
-    (identity.submittedUserMessageId !== null &&
-      (messageId === identity.submittedUserMessageId ||
-        nodeId === identity.submittedUserMessageId)) ||
-    (identity.submittedUserTurnId !== null &&
-      (turnId === identity.submittedUserTurnId || nodeId === identity.submittedUserTurnId))
-  );
+  if (identity.submittedUserMessageId === null && identity.submittedUserTurnId === null) return false;
+  if (identity.submittedUserMessageId !== null) {
+    const canonicalMessageId = messageId ?? nodeId;
+    if (canonicalMessageId !== identity.submittedUserMessageId) return false;
+  }
+  if (identity.submittedUserTurnId !== null) {
+    const canonicalTurnId = turnId ?? nodeId;
+    if (canonicalTurnId !== identity.submittedUserTurnId) return false;
+  }
+  return true;
 }
 
 export function parseRetryAfterMs(
@@ -578,7 +650,9 @@ export function parseRetryAfterMs(
   }
   const seconds = Number(value);
   if (Number.isFinite(seconds) && seconds >= 0) {
-    return Math.round(seconds * 1_000);
+    const durationMs = Math.round(seconds * 1_000);
+    return Number.isFinite(durationMs) && now.getTime() + durationMs <= 8.64e15
+      ? durationMs : null;
   }
   const timestamp = Date.parse(value);
   return Number.isFinite(timestamp) ? Math.max(0, timestamp - now.getTime()) : null;

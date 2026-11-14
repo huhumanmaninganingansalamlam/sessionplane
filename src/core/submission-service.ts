@@ -39,6 +39,14 @@ export interface UserConfirmedInterruption {
   readonly conversationId: string;
   readonly submittedUserMessageId: string;
   readonly evidenceRef: string;
+  /** Caller attests completed app recovery and the recovered original operation;
+   * this never establishes a tool result or changes the retained alert. */
+  readonly resolvedToolAlert?: {
+    readonly appName: string;
+    readonly alertSha256: string;
+    readonly originalOperationOutcome: 'not-started' | 'completed' | 'unknown';
+    readonly readOnlyOperationInactive?: true | undefined;
+  } | undefined;
 }
 
 export interface FailureContinuation {
@@ -325,7 +333,16 @@ export class SubmissionService {
         throw new SessionPlaneDomainError('session.generation-superseded', 'Acknowledgement requires the current caller-owned request');
       }
       if (snapshot.provider !== 'chatgpt') throw new SessionPlaneDomainError('capability.unsupported', 'Observed message selection currently supports ChatGPT only');
-      const recovered = await this.recoverAcknowledgement(snapshot, { messageId: input.messageId, evidenceHash: input.evidenceHash });
+      let recovered: SessionSnapshot;
+      try { recovered = await this.recoverAcknowledgement(snapshot, { messageId: input.messageId, evidenceHash: input.evidenceHash }); }
+      catch (error) {
+        if (error instanceof SessionPlaneDomainError && error.errorCode === 'provider.observation-deferred') {
+          receipts.record({ clientId: input.clientId, requestId: input.decisionId, method, requestHash, status: 'attempted',
+            result: { requestRef: outbox.outboxId, generation: input.generation,
+              messageId: input.messageId, evidenceHash: input.evidenceHash } });
+        }
+        throw error;
+      }
       if (recovered.generation !== input.generation || recovered.submittedUserMessageId !== input.messageId) {
         throw new SessionPlaneDomainError('browser.snapshot-stale', 'Selected submission evidence is unavailable or no longer current; inspect the same request');
       }
@@ -340,7 +357,6 @@ export class SubmissionService {
       snapshot.submissionState !== 'submission_unknown' ||
       !snapshot.promptSubmitted ||
       snapshot.pageKey === null ||
-      (snapshot.conversationId === null && selection === undefined) ||
       !this.#adapters.has(snapshot.provider)
     ) {
       return snapshot;
@@ -363,8 +379,7 @@ export class SubmissionService {
         current.generation !== snapshot.generation || current.terminal ||
         current.submissionState !== 'submission_unknown' ||
         !current.promptSubmitted ||
-        current.pageKey === null ||
-        (currentConversationId === null && selection === undefined)
+        current.pageKey === null
       ) {
         return current;
       }
@@ -379,13 +394,15 @@ export class SubmissionService {
         if (selection !== undefined && this.#sessions.submittedMessageIds(current.sessionId).has(selection.messageId)) {
           throw new SessionPlaneDomainError('input.invalid', 'Selected message already belongs to another generation');
         }
-        if (this.accountCooldown(current)) return current;
+        const cooldown = this.accountCooldown(current);
         const attempts = this.#events.submissionAttempts(current.sessionId, current.generation)
           .filter(e => e.requestRef === currentOutbox.outboxId && e.conversationId === currentConversationId &&
             e.promptHash === createHash('sha256').update(currentPrompt).digest('hex'))
           .map(e => e.attempt as ProviderSubmissionAttempt);
         let recoveryEvidence: ProviderAcknowledgementRecoveryEvidence | undefined;
-        const acknowledgement = await adapter.recoverAcknowledgement?.({
+        if (cooldown !== null) recoveryEvidence = { kind: 'deferred', source: 'pacing', reason: 'account-cooldown',
+          observedAt: this.#now().toISOString(), nextCheckAt: cooldown, httpStatus: null, endpointCategory: null };
+        const acknowledgement = cooldown !== null ? null : await adapter.recoverAcknowledgement?.({
           session: current,
           generation: current.generation,
           prompt: currentPrompt,
@@ -418,7 +435,9 @@ export class SubmissionService {
           (selection !== undefined && acknowledgement.submittedUserMessageId !== selection.messageId) ||
           (acknowledgement.conversationId !== currentConversationId &&
             !(current.provider === 'chatgpt' &&
-              (currentConversationId === null && selection !== undefined || currentConversationId?.startsWith('WEB:')) &&
+              (currentConversationId === null && (selection !== undefined ||
+                acknowledgement.evidence === 'backend-exact-user' || acknowledgement.evidence === 'backend-exact-editor-text') ||
+                currentConversationId?.startsWith('WEB:')) &&
               !acknowledgement.conversationId.startsWith('WEB:')))
         ) {
           return current;
@@ -505,7 +524,7 @@ export class SubmissionService {
     const model = normalizeOptional(input.model);
     const effort = normalizeOptional(input.effort);
     const surface = normalizeOptional(input.surface);
-    if (surface?.toLowerCase() === 'work') {
+    if (surface !== null && !['chat', 'normal'].includes(surface.toLowerCase())) {
       throw new SessionPlaneDomainError(
         'capability.unsupported',
         'SessionPlane supports the Chat surface only; ChatGPT Work is not supported',
@@ -655,7 +674,7 @@ export class SubmissionService {
         prompt: input.prompt,
         model: normalizeOptional(input.model),
         effort: normalizeOptional(input.effort),
-        surface: normalizeOptional(input.surface),
+        surface: normalizeOptional(input.surface) ?? 'chat',
         attachments,
         onSubmissionAttempt: attempt => {
           const current = this.#outbox.requireById(prepared.outbox.outboxId);
