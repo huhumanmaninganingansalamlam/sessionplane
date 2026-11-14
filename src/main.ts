@@ -124,7 +124,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     decisionGateway: semanticDecisionGateway,
     managedContinuation: semanticManagedContinuation,
     bindAttemptSession: semanticTaskBindAttemptSession } = createSemanticCoreRuntime({
-    database, browserOwner, pageRegistry, teamDirectory, actorScheduler, pageMutationMutex,
+    database, browserOwner, pageRegistry, pageBindings, teamDirectory, actorScheduler, pageMutationMutex,
     enabledProviders: config.enabledProviders, chatgptUrl: config.chatgptUrl,
     backendRequestTimeoutMs: config.backendRequestTimeoutMs,
     tokenCacheTtlMs: config.tokenCacheTtlMs,

@@ -167,6 +167,7 @@ export function createSemanticCoreRuntime(input: {
   readonly database: SessionPlaneDatabase;
   readonly browserOwner: BrowserOwner | null;
   readonly pageRegistry: PageRegistry;
+  readonly pageBindings?: PageBindingRepository;
   /** Existing Core actor scheduler; never create a second session executor. */
   readonly actorScheduler?: ActorScheduler;
   readonly teamDirectory: TeamDirectory;
@@ -710,6 +711,7 @@ export function createSemanticCoreRuntime(input: {
     ? new PublicTaskPreparationService({
         repository, teams: input.teamDirectory, scheduler: input.actorScheduler,
         browserOwner: input.browserOwner, pages: input.pageRegistry,
+        ...(input.pageBindings ? { pageBindings: input.pageBindings } : {}),
         chatgptUrl: input.chatgptUrl,
       })
     : null;
