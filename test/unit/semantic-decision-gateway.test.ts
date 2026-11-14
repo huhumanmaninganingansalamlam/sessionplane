@@ -265,6 +265,72 @@ test('agent-first stall packet persists without a live browser context', async t
   assert.equal(adapter.clicks, 0);
 });
 
+
+test('an unsendable approved Continue becomes a durable actionless agent packet before POST', async t => {
+  const env = fixture(t);
+  const approval = JSON.stringify({
+    contract: 'approved_continuation_v1', approvalRef: 'verified-original',
+    sourceAttemptId: 'initial-1', message: '계속', intervalMs: 1_200_000,
+  });
+  env.store.scheduleTimer({
+    taskId: 'task-1', clientId: 'alice', timerId: 'continuation-due:initial-1',
+    kind: 'continuation_due', dueAt: new Date(Date.now() - 10_000).toISOString(),
+    contextJson: approval,
+  });
+  assert.equal(env.store.claimDueTimers(new Date().toISOString(), 1, 'continuation_due').length, 1);
+  env.store.planAttempt({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'continue-planned',
+    kind: 'continuation', turnKey: 'managed-unable-to-send', content: '계속',
+  });
+  const adapter = new FakeSemanticAdapter(env.store);
+  adapter.mode = 'none';
+  const gateway = env.getGateway(adapter);
+  const packet = await gateway.requireNoProgressReview({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'continue-planned',
+  });
+  assert.equal(packet?.kind, 'recovery_choice');
+  assert.equal(packet?.reason, 'managed-continuation-safe-send-unavailable');
+  assert.equal(packet?.humanOnly, false);
+  assert.deepEqual(packet?.options, []);
+  const full = env.store.getFullTask('task-1', 'alice');
+  assert.equal(full.task.state, 'agent_input_required');
+  assert.equal(full.attempts[1]!.state, 'planned');
+  assert.equal(full.attempts[1]!.dispatchedAt, null);
+  assert.equal(adapter.observed, 0);
+  assert.equal(adapter.clicks, 0);
+  const refreshed = await gateway.refreshCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: packet!.decisionId,
+    requestId: 'read-only-after-unsafe-send',
+  });
+  assert.equal(refreshed.kind, 'refresh_required');
+  const resumed = env.store.getFullTask('task-1', 'alice');
+  assert.equal(resumed.attempts[1]!.state, 'planned');
+  assert.equal(resumed.task.state, 'working');
+  const timer = resumed.timers.find(row =>
+    row.timerId === 'continuation-agent-resume:' + packet!.decisionId);
+  assert.equal(timer?.status, 'pending');
+  assert.equal(timer?.contextJson, approval);
+  assert.deepEqual(await gateway.refreshCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: packet!.decisionId,
+    requestId: 'read-only-after-unsafe-send',
+  }), refreshed, 'same read-only request must not schedule another timer');
+  assert.equal(env.store.getFullTask('task-1', 'alice').attempts.length, 2);
+});
+
+test('an exact initial ACK with a foreign later turn requires agent judgment, not Continue', async t => {
+  const env = fixture(t);
+  const adapter = new FakeSemanticAdapter(env.store);
+  const packet = await env.getGateway(adapter).requireNoProgressReview({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+  });
+  assert.equal(packet?.kind, 'recovery_choice');
+  assert.equal(packet?.reason, 'managed-continuation-later-user-boundary');
+  assert.deepEqual(packet?.options, []);
+  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.getFullTask('task-1', 'alice').attempts.length, 1);
+  assert.equal(adapter.clicks, 0);
+});
+
 test('agent question persists, rejects disabled options and consumes one exact typed decision', async t => {
   const env = fixture(t);
   const adapter = new FakeSemanticAdapter(env.store);

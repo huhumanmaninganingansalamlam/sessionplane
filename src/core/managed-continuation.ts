@@ -432,7 +432,25 @@ export class ManagedContinuationService {
       resultId: 'public-final:' + source.attemptId, completeTask: true,
     });
     if (observed.kind === 'exact_final') return 'ignored';
-    if (observed.kind === 'unavailable') {
+    // Retry-After, paced GETs and unknown transport are NOT verified absence
+    // of an answer. Only a fresh canonical conversation view can justify a
+    // Continue. A later foreign user turn requires agent judgment instead.
+    if (observed.kind === 'pending' &&
+        observed.reason === 'backend-next-user-turn-before-final') {
+      if (this.#requestAgentReview) {
+        try {
+          await this.#requestAgentReview({
+            taskId: timer.taskId, clientId, attemptId: source.attemptId,
+          });
+          return 'deferred';
+        } catch { /* Durable review unavailable: hold without a new send. */ }
+      }
+      this.#rearmReview(timer, clientId, context, now);
+      return 'deferred';
+    }
+    if (observed.kind !== 'pending' ||
+        (observed.reason !== 'backend-assistant-missing' &&
+          observed.reason !== 'backend-assistant-not-final')) {
       this.#rearmReview(timer, clientId, context, now);
       return 'deferred';
     }
@@ -471,6 +489,14 @@ export class ManagedContinuationService {
     } catch {
       this.#repository.recordObservationDeferred(timer.taskId, clientId,
         'managed-continuation-owned-binding-unavailable');
+      if (this.#requestAgentReview) {
+        try {
+          await this.#requestAgentReview({
+            taskId: timer.taskId, clientId, attemptId: continuationId,
+          });
+          return 'deferred';
+        } catch { /* A lost binding must not trigger an unowned send. */ }
+      }
       this.#rearmReview(timer, clientId, context, now);
       return 'deferred';
     }
@@ -483,6 +509,19 @@ export class ManagedContinuationService {
     }
     if (attempt?.state === 'planned' &&
         !state.cancelRequested && state.state !== 'completed') {
+      // The canonical answer is absent, but the current UI/lease was not
+      // safely sendable. Do not silently defer the user's stuck work for
+      // another 20 minutes; hand immutable evidence to the agent.
+      this.#repository.recordObservationDeferred(timer.taskId, clientId,
+        'managed-continuation-safe-send-agent-review-required');
+      if (this.#requestAgentReview) {
+        try {
+          await this.#requestAgentReview({
+            taskId: timer.taskId, clientId, attemptId: continuationId,
+          });
+          return 'deferred';
+        } catch { /* A failed handoff is never permission to send. */ }
+      }
       this.#rearmReview(timer, clientId, context, now);
       return 'deferred';
     }

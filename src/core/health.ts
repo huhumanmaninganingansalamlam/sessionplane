@@ -8,7 +8,6 @@ import type { PageRegistry } from '../browser/page-registry.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import type { RuntimeMetrics } from '../telemetry/metrics.ts';
-import type { ObservationService } from './observation-service.ts';
 
 /** Build identity is embedded by release preflight in dist. The TypeScript
  * source runtime deliberately reports unknown instead of borrowing a stale
@@ -53,7 +52,6 @@ export interface HealthContext {
   readonly browserOwner: BrowserOwner | null;
   readonly pageRegistry: PageRegistry;
   readonly actorScheduler: ActorScheduler;
-  readonly observationService: ObservationService;
   readonly metrics: RuntimeMetrics;
 }
 
@@ -103,7 +101,7 @@ export function getSystemHealth(context: HealthContext): Readonly<Record<string,
       sessionActorCount: context.actorScheduler.actorCount,
       sessionActorQueueDepth: context.actorScheduler.totalQueueDepth,
       waitSubscriberCount: context.actorScheduler.totalSubscriberCount,
-      observerCount: context.observationService.observerCount,
+      observerCount: 0,
     }),
   };
 }

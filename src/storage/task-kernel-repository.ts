@@ -1479,6 +1479,29 @@ export class TaskKernelRepository {
     return row?.modelIntent ?? null;
   }
 
+
+  /** Rebind pages only for active public Tasks, never archived legacy sessions. */
+  listCurrentPublicPageOwners(): readonly {
+    taskId: string; projectId: string; slotId: string;
+    slotRevision: number; providerConversationId: string | null;
+  }[] {
+    return this.#database.raw.prepare(
+      `SELECT t.task_id AS taskId,t.project_id AS projectId,t.slot_id AS slotId,
+          t.slot_revision AS slotRevision,
+          s.provider_conversation_id AS providerConversationId
+        FROM kernel_tasks t
+        JOIN kernel_public_task_policies p ON p.task_id=t.task_id
+        JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
+          AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
+        WHERE t.cancel_requested=0 AND t.state IN
+          ('working','uncertain','agent_input_required')
+          AND s.provider_key='chatgpt'
+        ORDER BY t.created_at,t.task_id`,
+    ).all() as Array<{
+      taskId: string; projectId: string; slotId: string;
+      slotRevision: number; providerConversationId: string | null;
+    }>;
+  }
   /**
    * Preparation can own one reserved root page before ChatGPT creates its
    * conversation ID. It never enters the irreversible dispatch journal.

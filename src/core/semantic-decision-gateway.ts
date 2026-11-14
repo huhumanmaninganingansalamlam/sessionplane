@@ -218,9 +218,9 @@ export class SemanticDecisionGateway {
       taskRevision: full.task.revision };
   }
 
-  /** The first unanswered approved Continue exhausts that automatic approval.
-   * An agent, not a human popup or a second speculative POST, gets durable
-   * exact-turn evidence. This packet has no permission-granting actionRef.
+  /** A no-progress Continue, an unsendable approved Continue, or a foreign
+   * later user turn must move to an agent before another speculative POST.
+   * The durable packet grants no executable provider action.
    */
   async requireNoProgressReview(input: {
     taskId: string; clientId: string; attemptId: string;
@@ -230,11 +230,21 @@ export class SemanticDecisionGateway {
     if (full.task.cancelRequested || full.task.state !== 'working') return null;
     const attempt = full.attempts.find(row => row.attemptId === input.attemptId);
     const latest = full.attempts.filter(row => row.kind !== 'stop').at(-1);
-    if (!attempt || attempt.kind !== 'continuation' ||
-        attempt.state !== 'acknowledged' || attempt.externalTurnId === null ||
-        latest?.attemptId !== attempt.attemptId ||
+    if (!attempt || latest?.attemptId !== attempt.attemptId ||
         full.results.some(row => row.attemptId === attempt.attemptId)) {
-      throw new Error('Agent review requires latest unanswered exact Continue ACK');
+      throw new Error('Agent review requires the current unanswered exact attempt');
+    }
+    const previous = full.attempts.find(row => row.sequence === attempt.sequence - 1);
+    const acknowledged = attempt.state === 'acknowledged' &&
+      attempt.externalTurnId !== null &&
+      (attempt.kind === 'continuation' || attempt.kind === 'initial');
+    const unableToSend = attempt.kind === 'continuation' &&
+      attempt.state === 'planned' && attempt.dispatchedAt === null &&
+      previous?.state === 'acknowledged' && previous.externalTurnId !== null &&
+      previous.kind !== 'stop' &&
+      !full.results.some(row => row.attemptId === previous.attemptId);
+    if (!acknowledged && !unableToSend) {
+      throw new Error('Agent review requires an unanswered ACK or an unsent approved Continue');
     }
     const slot = this.#repository.getSlot(full.task.projectId, full.task.slotId, input.clientId);
     if (slot.activeTaskId !== input.taskId || slot.revision !== full.task.slotRevision) {
@@ -259,7 +269,7 @@ export class SemanticDecisionGateway {
         slotRevision: full.task.slotRevision, taskId: input.taskId,
         providerConversationId: binding.providerConversationId,
         submittedUserMessageId: null,
-        submittedUserTurnId: attempt.externalTurnId,
+        submittedUserTurnId: attempt.externalTurnId ?? previous?.externalTurnId ?? null,
         pageLease: null,
       };
     }
@@ -274,7 +284,9 @@ export class SemanticDecisionGateway {
     const packet = countBytes({
       taskId: input.taskId, taskRevision: full.task.revision + 1, decisionId,
       kind: 'recovery_choice',
-      reason: 'managed-continuation-no-final-after-approved-continue',
+      reason: attempt.kind === 'initial' ? 'managed-continuation-later-user-boundary'
+        : unableToSend ? 'managed-continuation-safe-send-unavailable'
+          : 'managed-continuation-no-final-after-approved-continue',
       humanOnly: false, observedAt: now,
       expiresAt: new Date(Date.now() + 30_000).toISOString(),
       snapshotId: null, questionText: null, permission: null,
@@ -516,10 +528,13 @@ export class SemanticDecisionGateway {
     // exact unsubmitted Pro-root observation raced by a page operation.
     const stalledContinuation =
       original.packet.kind === 'recovery_choice' &&
-      original.packet.reason === 'managed-continuation-no-final-after-approved-continue' &&
       original.packet.options.length === 0 && !original.packet.humanOnly &&
-      originalAttempt.kind === 'continuation' &&
-      originalAttempt.state === 'acknowledged';
+      ((original.packet.reason === 'managed-continuation-no-final-after-approved-continue' &&
+        originalAttempt.kind === 'continuation' && originalAttempt.state === 'acknowledged') ||
+       (original.packet.reason === 'managed-continuation-safe-send-unavailable' &&
+        originalAttempt.kind === 'continuation' && originalAttempt.state === 'planned') ||
+       (original.packet.reason === 'managed-continuation-later-user-boundary' &&
+        originalAttempt.kind === 'initial' && originalAttempt.state === 'acknowledged'));
     const transientModelRace =
       original.packet.kind === 'adapter_unsupported' &&
       original.packet.reason === 'semantic-observation-superseded-by-page-operation' &&
@@ -559,6 +574,9 @@ export class SemanticDecisionGateway {
               original.context.requiredModel)! } : {}),
         });
       }
+      if (next === null && original.packet.reason === 'managed-continuation-safe-send-unavailable') {
+        this.#scheduleUnsentContinuationReview(input.taskId, input.clientId, input.decisionId);
+      }
       return { kind: 'refresh_required', packet: next };
     }
     const packet = original.packet;
@@ -582,6 +600,9 @@ export class SemanticDecisionGateway {
     try {
       const next = await this.refresh({ ...input, attemptId: original.attemptId,
         modelChoice: transientModelRace });
+      if (next === null && original.packet.reason === 'managed-continuation-safe-send-unavailable') {
+        this.#scheduleUnsentContinuationReview(input.taskId, input.clientId, input.decisionId);
+      }
       return { kind: 'refresh_required', packet: next };
     } catch (error) {
       // Concurrent identical refreshes may race the SQLite reservation. Only
@@ -596,6 +617,41 @@ export class SemanticDecisionGateway {
       }
       throw error;
     }
+  }
+
+  /**
+   * Read-only agent refresh never sends. If the original approved Continue
+   * was never attempted, restore one Core-owned retry review from the exact
+   * fired timer, without minting a new request/attempt/approval.
+   */
+  #scheduleUnsentContinuationReview(taskId: string, clientId: string, decisionId: string): void {
+    const full = this.#repository.getFullTask(taskId, clientId);
+    if (full.task.cancelRequested || full.task.state !== 'working' ||
+        full.task.pendingDecisionId !== null) return;
+    const latest = full.attempts.filter(attempt => attempt.kind !== 'stop').at(-1);
+    if (latest?.kind !== 'continuation' || latest.state !== 'planned' ||
+        latest.dispatchedAt !== null) return;
+    const source = full.attempts.find(row => row.sequence === latest.sequence - 1);
+    if (source?.state !== 'acknowledged' || source.externalTurnId === null ||
+        full.results.some(row => row.attemptId === source.attemptId)) return;
+    const timerId = 'continuation-agent-resume:' + decisionId;
+    if (full.timers.some(row => row.timerId === timerId)) return;
+    const original = full.timers.find(timer => {
+      if (timer.kind !== 'continuation_due') return false;
+      try {
+        const context: unknown = JSON.parse(timer.contextJson);
+        return context !== null && typeof context === 'object' &&
+          (context as { contract?: unknown; sourceAttemptId?: unknown }).contract ===
+            'approved_continuation_v1' &&
+          (context as { sourceAttemptId?: unknown }).sourceAttemptId === source.attemptId;
+      } catch { return false; }
+    });
+    if (!original) return; // A packet alone does not invent authorization.
+    this.#repository.scheduleTimer({
+      taskId, clientId, timerId, kind: 'continuation_due',
+      dueAt: new Date(Date.now() + 30_000).toISOString(),
+      contextJson: original.contextJson,
+    });
   }
 
   /** Public decision entry point: the exact attempt stays server-owned.

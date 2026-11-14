@@ -23,6 +23,8 @@ class FakeProvider implements ExactTaskProviderPort {
   readonly pendingInitialFinals = new Set<string>();
   readonly readyContinuationFinals = new Set<string>();
   readonly unavailableFinals = new Set<string>();
+  readonly pending429Finals = new Set<string>();
+  readonly laterUserFinals = new Set<string>();
   async preflight(intent: ExactSendIntent): Promise<
     { kind: 'ready' } | { kind: 'unavailable'; reason: string }
   > {
@@ -41,10 +43,16 @@ class FakeProvider implements ExactTaskProviderPort {
     if (this.unavailableFinals.has(query.attemptId)) {
       return { kind: 'unavailable', reason: 'fixture-backend-http-429' };
     }
+    if (this.pending429Finals.has(query.attemptId)) {
+      return { kind: 'pending', reason: 'backend-http-429' };
+    }
+    if (this.laterUserFinals.has(query.attemptId)) {
+      return { kind: 'pending', reason: 'backend-next-user-turn-before-final' };
+    }
     if (this.pendingInitialFinals.has(query.attemptId) ||
         (query.attemptId.startsWith('managed-continuation:') &&
           !this.readyContinuationFinals.has(query.attemptId))) {
-      return { kind: 'pending', reason: 'fixture-no-final' };
+      return { kind: 'pending', reason: 'backend-assistant-missing' };
     }
     return { kind: 'exact_final',
       externalTurnId: query.externalTurnId!, answerText: 'Exact final for ' + query.attemptId };
@@ -82,8 +90,11 @@ function fixture(t: TestContext) {
       attemptId: 'initial:' + taskId, resultId: 'result:' + taskId,
       completeTask: false });
   };
-  const createService = () => new ManagedContinuationService({
+  const createService = (requestAgentReview?: (input: {
+    taskId: string; clientId: string; attemptId: string;
+  }) => Promise<void>) => new ManagedContinuationService({
     repository: store, kernel, now: () => new Date(current),
+    ...(requestAgentReview ? { requestAgentReview } : {}),
   });
   const seedPublicPolicy = (taskId: string, enabled = false) => {
     database.raw.prepare(
@@ -276,30 +287,84 @@ test('unavailable canonical FINAL read at due defers without speculative Continu
   assert.equal(env.fake.sends.length, 2);
 });
 
-test('blocked task does not starve another; next due retries only the same planned attempt', async t => {
+
+test('a paced 429 FINAL probe never licenses a speculative 20-minute Continue POST', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  await env.ack('task-a');
+  const service = env.createService();
+  service.activate({ taskId: 'task-a', clientId: 'alice',
+    sourceAttemptId: 'initial:task-a', approvalRef: 'approved', message: '계속' });
+  env.fake.pending429Finals.add('initial:task-a');
+  env.now += CONTINUATION_INTERVAL_MS;
+  assert.deepEqual(await service.tick(),
+    { timersClaimed: 1, dispatchesAttempted: 0, deferred: 1 });
+  assert.equal(env.fake.sends.length, 1);
+  assert.equal(env.store.getFullTask('task-a', 'alice').attempts.length, 1);
+  env.fake.pending429Finals.delete('initial:task-a');
+  env.now += CONTINUATION_INTERVAL_MS;
+  assert.equal((await service.tick()).dispatchesAttempted, 1);
+  assert.equal(env.fake.sends.length, 2);
+});
+
+test('a later foreign user turn becomes an agent decision, never another automatic POST', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  await env.ack('task-a');
+  const reviews: string[] = [];
+  const service = env.createService(async owner => {
+    reviews.push(owner.attemptId);
+    env.store.requireDecision({
+      taskId: owner.taskId, clientId: owner.clientId,
+      decisionId: 'foreign-review', audience: 'agent',
+      contextJson: JSON.stringify({ kind: 'foreign-user-review', attemptId: owner.attemptId }),
+    });
+  });
+  service.activate({ taskId: 'task-a', clientId: 'alice',
+    sourceAttemptId: 'initial:task-a', approvalRef: 'approved', message: '계속' });
+  env.fake.laterUserFinals.add('initial:task-a');
+  env.now += CONTINUATION_INTERVAL_MS;
+  assert.deepEqual(await service.tick(),
+    { timersClaimed: 1, dispatchesAttempted: 0, deferred: 1 });
+  assert.deepEqual(reviews, ['initial:task-a']);
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
+  assert.equal(env.fake.sends.length, 1);
+});
+
+test('an unsafe composer yields a durable agent decision without starving other due Tasks', async t => {
   const env = fixture(t);
   env.startTask('task-a', 'main');
   env.startTask('task-b', 'review');
   await env.ack('task-a');
   await env.ack('task-b');
-  const service = env.createService();
+  const reviews: string[] = [];
+  const service = env.createService(async owner => {
+    reviews.push(owner.taskId);
+    env.store.requireDecision({
+      taskId: owner.taskId, clientId: owner.clientId,
+      decisionId: 'review:' + owner.taskId, audience: 'agent',
+      contextJson: JSON.stringify({ kind: 'blocked-send-review', attemptId: owner.attemptId }),
+    });
+  });
   for (const taskId of ['task-a', 'task-b']) {
     service.activate({ taskId, clientId: 'alice', sourceAttemptId: 'initial:' + taskId,
       approvalRef: 'approved-' + taskId, message: '계속' });
   }
   env.fake.blocked.add('task-a');
   env.now += CONTINUATION_INTERVAL_MS;
-  const first = await service.tick();
-  assert.deepEqual(first, { timersClaimed: 2, dispatchesAttempted: 1, deferred: 1 });
+  assert.deepEqual(await service.tick(),
+    { timersClaimed: 2, dispatchesAttempted: 1, deferred: 1 });
   assert.equal(env.store.getFullTask('task-a', 'alice').attempts[1]!.state, 'planned');
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
+  assert.deepEqual(reviews, ['task-a']);
   assert.equal(env.fake.sends.filter(s => s.taskId === 'task-a').length, 1);
   assert.equal(env.fake.sends.filter(s => s.taskId === 'task-b').length, 2);
   env.fake.blocked.delete('task-a');
   env.now += CONTINUATION_INTERVAL_MS;
-  assert.equal((await service.tick()).dispatchesAttempted, 1);
-  assert.equal(env.fake.sends.filter(s => s.taskId === 'task-a').length, 2);
-  assert.equal(env.store.getFullTask('task-a', 'alice').attempts.length, 2,
-    'a retry review does not invent another continuation attempt');
+  await service.tick();
+  assert.equal(env.fake.sends.filter(s => s.taskId === 'task-a').length, 1,
+    'an agent decision cannot silently replay the unsent Continue');
+  assert.equal(env.store.getFullTask('task-a', 'alice').attempts.length, 2);
 });
 
 test('cancellation revokes pending due timers and prevents later continuation', async t => {
