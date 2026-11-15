@@ -955,6 +955,7 @@ test('ChatGPT semantic FINAL keeps backend 429 nonterminal and respects Retry-Af
   now += 1_000;
   assert.deepEqual(await recover(), {
     kind: 'pending', reason: 'backend-conversation-probe-paced',
+    nextCheckAt: new Date(220_000).toISOString(),
   }, 'same adapter must not repeat a deferred GET before the server delay');
   assert.equal(detailReads, 1, 'no retry while the server is rate-limiting');
   now += 120_001;

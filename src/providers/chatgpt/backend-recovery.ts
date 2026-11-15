@@ -246,7 +246,7 @@ export class ChatGptBackendRecovery {
     this.#conversationInFlight = true;
     try {
       this.#extendConversationRetryAt(now + 5_000);
-      const result = await this.#readConversation(conversationId, client, origin, observe);
+      let result = await this.#readConversation(conversationId, client, origin, observe);
       if ('recovery' in result && result.recovery.kind === 'deferred') {
         // A persistent server 429 may keep returning a short Retry-After.
         // Increase our own cooldown as well; never shorten a server-specified delay.
@@ -257,8 +257,15 @@ export class ChatGptBackendRecovery {
         const exponential429Ms = repeated429
           ? Math.min(15 * 60_000, 60_000 * 2 ** (this.#consecutiveConversation429s - 1))
           : 0;
-        this.#extendConversationRetryAt(this.#now().getTime() +
-          Math.max(5_000, result.recovery.retryAfterMs ?? 0, exponential429Ms));
+        const extendedAt = this.#now().getTime() +
+          Math.max(5_000, result.recovery.retryAfterMs ?? 0, exponential429Ms);
+        this.#extendConversationRetryAt(extendedAt);
+        // Keep retryAfterMs as parsed server evidence. Local exponential pacing
+        // is represented by nextCheckAt and must not fabricate a server delay.
+        // This preserves safe provenance for absent or malformed headers.
+        result = { ...result, recovery: { ...result.recovery,
+          nextCheckAt: new Date(this.#conversationRetryAt).toISOString(),
+        } };
         if (selected) this.#conversationWaiting.set(conversationId, {
           expiresAt: this.#conversationRetryAt + graceMs, selected: true,
         });

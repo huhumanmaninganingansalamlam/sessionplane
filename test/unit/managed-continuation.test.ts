@@ -28,6 +28,7 @@ class FakeProvider implements ExactTaskProviderPort {
   readonly unavailableFinals = new Set<string>();
   readonly pending429Finals = new Set<string>();
   readonly pacedFinals = new Set<string>();
+  pacedNextCheckAt: string | null = null;
   readonly laterUserFinals = new Set<string>();
   async preflight(intent: ExactSendIntent): Promise<
     { kind: 'ready' } | { kind: 'unavailable'; reason: string }
@@ -54,7 +55,8 @@ class FakeProvider implements ExactTaskProviderPort {
       return { kind: 'pending', reason: 'backend-http-429' };
     }
     if (this.pacedFinals.has(query.attemptId)) {
-      return { kind: 'pending', reason: 'backend-conversation-probe-paced' };
+      return { kind: 'pending', reason: 'backend-conversation-probe-paced',
+        nextCheckAt: this.pacedNextCheckAt };
     }
     if (this.laterUserFinals.has(query.attemptId)) {
       return { kind: 'pending', reason: 'backend-next-user-turn-before-final' };
@@ -318,6 +320,67 @@ test('a paced 429 FINAL probe never licenses a speculative 20-minute Continue PO
   env.now += CONTINUATION_INTERVAL_MS;
   assert.equal((await service.tick()).dispatchesAttempted, 1);
   assert.equal(env.fake.sends.length, 2);
+});
+
+test('transient paced FINAL read retries at its read fence, then sends only after fresh no-FINAL', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  await env.ack('task-a');
+  const service = env.createService();
+  service.activate({ taskId: 'task-a', clientId: 'alice',
+    sourceAttemptId: 'initial:task-a', approvalRef: 'approved', message: '계속' });
+  env.fake.pacedFinals.add('initial:task-a');
+  env.fake.pacedNextCheckAt = new Date(START + CONTINUATION_INTERVAL_MS + 7_000).toISOString();
+  env.now += CONTINUATION_INTERVAL_MS;
+  assert.deepEqual(await service.tick(),
+    { timersClaimed: 1, dispatchesAttempted: 0, deferred: 1 });
+  let full = env.store.getFullTask('task-a', 'alice');
+  assert.equal(env.fake.sends.length, 1, 'paced read never licenses Continue');
+  assert.equal(full.attempts.length, 1);
+  assert.equal(full.timers.some(timer => timer.status === 'pending' &&
+    timer.dueAt === env.fake.pacedNextCheckAt &&
+    timer.timerId.startsWith('continuation-read-review:')), true);
+
+  env.fake.pacedFinals.delete('initial:task-a');
+  env.now = Date.parse(env.fake.pacedNextCheckAt);
+  assert.deepEqual(await service.tick(),
+    { timersClaimed: 1, dispatchesAttempted: 1, deferred: 0 });
+  full = env.store.getFullTask('task-a', 'alice');
+  assert.equal(env.fake.sends.length, 2);
+  assert.equal(full.attempts.filter(attempt => attempt.kind === 'continuation').length, 1);
+});
+
+test('fresh no-FINAL observer repairs an older full-interval pacing review without sending directly', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  env.seedPublicPolicy('task-a', true);
+  await env.ack('task-a');
+  const service = env.createService();
+  const original = service.activate({ taskId: 'task-a', clientId: 'alice',
+    sourceAttemptId: 'initial:task-a', approvalRef: 'approved-public', message: '계속' });
+  env.fake.pacedFinals.add('initial:task-a');
+  env.now += CONTINUATION_INTERVAL_MS;
+  env.store.claimDueTimers(new Date(env.now).toISOString(), 1, 'continuation_due');
+  env.store.scheduleTimer({ taskId: 'task-a', clientId: 'alice',
+    timerId: 'continuation-review:initial:task-a:' + (env.now + CONTINUATION_INTERVAL_MS),
+    kind: 'continuation_due',
+    dueAt: new Date(env.now + CONTINUATION_INTERVAL_MS).toISOString(),
+    contextJson: original.contextJson });
+  env.fake.pacedFinals.delete('initial:task-a');
+
+  assert.deepEqual(await service.tick(),
+    { timersClaimed: 0, dispatchesAttempted: 0, deferred: 0 });
+  let full = env.store.getFullTask('task-a', 'alice');
+  const repaired = full.timers.find(timer => timer.status === 'pending' &&
+    timer.timerId.startsWith('continuation-read-review:'))!;
+  assert.ok(repaired, 'fresh canonical no-FINAL schedules a read-only repair review');
+  assert.equal(env.fake.sends.length, 1, 'observer never sends directly');
+
+  env.now = Date.parse(repaired.dueAt);
+  assert.equal((await service.tick()).dispatchesAttempted, 1);
+  full = env.store.getFullTask('task-a', 'alice');
+  assert.equal(env.fake.sends.length, 2);
+  assert.equal(full.attempts.filter(attempt => attempt.kind === 'continuation').length, 1);
 });
 
 test('pending unbound root POSTs recover ACK fairly across a sixteen-slot limit', async t => {

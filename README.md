@@ -87,7 +87,7 @@ rather than automatically resubmitted.
 
 Use the matching package version after that release is published:
 
-VERSION=0.4.103
+VERSION=0.4.104
     npm install -g ./sessionplane-$VERSION.tgz
     sessplane doctor --json
 
@@ -137,21 +137,28 @@ The result distinguishes the **installed Core schema/source** from the locally
 built candidate. A logged-in ChatGPT page and Pro UI are not proof that a
 different, uninstalled Core implementation was exercised. A mismatched
 installed schema or source is reported as a blocker, not silently upgraded.
+The bounded DOM sample is diagnostic only: an archived or unhydrated sampled
+tab without a composer does not block the exact Task path, which revalidates its
+own current page before every provider mutation.
 
-After a separately verified candidate is installed in the **same** Core
+After a separately verified candidate is installed as the exact active Core
 (runtime ownership and data migration are separate reviewed operations),
-the bounded live acceptance runner uses a new dedicated project/owner and
-only three synthetic prompts. It records stable request IDs before sending.
-Run start and resume as distinct processes to prove that a client exit does
-not own generation, ACK recovery or timers:
+the bounded live acceptance runner uses a dedicated project/owner and only
+three synthetic prompts. It records stable request IDs before sending. The
+current SessionPlane-owned browser may be `spawned` or `adopted`; historical
+PIDs, CDP ports and target IDs are diagnostics, not acceptance identity. Run
+start and resume as distinct processes to prove that a client exit or a later
+Core/browser/host restart does not own generation, ACK recovery or timers:
 
     node scripts/live-task-acceptance.mjs --phase start --client-id sessionplane-l3-UNIQUEOWNER --project-key sessionplane-l3-UNIQUEPROJECT --receipt-dir /ABSOLUTE/TEST-RECEIPT --allow-live-send
     node scripts/live-task-acceptance.mjs --phase resume --client-id sessionplane-l3-UNIQUEOWNER --project-key sessionplane-l3-UNIQUEPROJECT --receipt-dir /ABSOLUTE/TEST-RECEIPT --allow-live-send
 
 The runner checks one original POST/ACK, exact FINAL byte hashes, and the same
-canonical Main conversation across three Tasks. A blocked agent decision,
-uncertain provider effect or failing answer stays recorded and **never** causes
-a guessed replay. The script does not choose permissions or switch models.
+canonical Main conversation across three Tasks. On resume it reconciles a stale
+local receipt from the Core's durable Task state, including after browser/host
+replacement, before creating a later Task. A blocked agent decision, uncertain
+provider effect or failing answer stays recorded and **never** causes a guessed
+replay. The script does not choose permissions or switch models.
 This is an L3 test runner, **not** a bypass around a currently installed old
 Core; it refuses every mutation until the installed Core matches the candidate
 schema and verified source identity. It does not by itself prove a natural

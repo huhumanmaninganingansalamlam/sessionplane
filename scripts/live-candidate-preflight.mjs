@@ -130,6 +130,7 @@ async function readStructure(target, timeoutMs = 6000) {
 export function evaluateInstalledCandidate({ health, pages, targets, observations, candidate }) {
   const schema = migrations.at(-1)?.version ?? null;
   const blockers = [];
+  const warnings = [];
   // An installed Core's commit label alone is not sufficient provenance:
   // a stale/malformed build identity could carry that label with different
   // compiled content. The exact 40-hex source tree is a separate required
@@ -141,6 +142,8 @@ export function evaluateInstalledCandidate({ health, pages, targets, observation
   const sourceMatchesCandidate = sourceCommitKnown && sourceTreeMatchesCandidate &&
     health?.sourceCommit === candidate.sourceCommit &&
     health?.sourceState === 'clean' && candidate.sourceState === 'clean';
+  // Validate the current owner only. Historical browser PID, target IDs, CDP
+  // port, and spawned/adopted transitions are deliberately not compared here.
   const browserOwnership = health?.browser?.ownership;
   if (health?.browser?.state !== 'ready' ||
       !['spawned', 'adopted'].includes(browserOwnership)) {
@@ -159,7 +162,11 @@ export function evaluateInstalledCandidate({ health, pages, targets, observation
     item.kind === 'conversation' && item.readyState === 'complete' &&
     item.composerPresent && item.composerEditable);
   const pro = ready.filter(item => item.modelProVisible);
-  if (ready.length === 0) blockers.push('no_usable_authenticated_chatgpt_composer_observed');
+  // A bounded, arbitrary DOM sample is diagnostic only. The exact Task path
+  // performs its own current-page semantic/pre-submit checks before any POST.
+  // Do not block an installed exact Core merely because the first sampled tabs
+  // are archived, still hydrating, or temporarily lack a mounted composer.
+  if (ready.length === 0) warnings.push('no_usable_authenticated_chatgpt_composer_sampled');
   return {
     contract: 'sessionplane-live-readonly-preflight-v1',
     mode: 'read_only',
@@ -193,6 +200,7 @@ export function evaluateInstalledCandidate({ health, pages, targets, observation
       mutationPerformed: false,
       liveTaskSubmitted: false,
       blockers,
+      warnings,
     },
   };
 }

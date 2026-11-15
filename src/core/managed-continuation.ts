@@ -4,6 +4,7 @@ import type {
 } from '../storage/task-kernel-repository.ts';
 
 export const CONTINUATION_INTERVAL_MS = 20 * 60_000;
+export const CONTINUATION_READ_RETRY_MIN_MS = 5_000;
 const PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT = 5;
 const PERSISTENT_READ_LIMIT_AGENT_REVIEW_DELAY_MS =
   (PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT - 1) * CONTINUATION_INTERVAL_MS;
@@ -324,6 +325,12 @@ export class ManagedContinuationService {
           attemptId: pending.attemptId, resultId: 'public-final:' + pending.attemptId,
           completeTask: true,
         });
+        if (observed.kind === 'pending' &&
+            (observed.reason === 'backend-assistant-missing' ||
+              observed.reason === 'backend-assistant-not-final')) {
+          this.#scheduleFreshFinalReview(pending.taskId, pending.clientId,
+            pending.attemptId, now);
+        }
         if (observed.kind !== 'exact_final' &&
             (observed.reason === 'backend-http-429' ||
               observed.reason === 'backend-conversation-probe-paced') &&
@@ -398,6 +405,49 @@ export class ManagedContinuationService {
         this.#rearmReview(sourceTimer, clientId, context, now);
       }
     }
+  }
+
+  #rearmReadReview(
+    timer: TimerRecord, clientId: string, context: ContinuationContext, now: string,
+    nextCheckAt?: string | null,
+  ): void {
+    const nowMs = Date.parse(now);
+    const requestedMs = Date.parse(nextCheckAt ?? '');
+    const nextMs = Math.max(nowMs + CONTINUATION_READ_RETRY_MIN_MS,
+      Number.isFinite(requestedMs) ? requestedMs : 0);
+    const full = this.#repository.getFullTask(timer.taskId, clientId);
+    const alreadyEarlier = full.timers.some(existing => existing.kind === TIMER_KIND &&
+      existing.status === 'pending' &&
+      parseContext(existing.contextJson)?.sourceAttemptId === context.sourceAttemptId &&
+      Date.parse(existing.dueAt) <= nextMs);
+    if (alreadyEarlier) return;
+    this.#repository.scheduleTimer({
+      taskId: timer.taskId, clientId,
+      timerId: 'continuation-read-review:' + context.sourceAttemptId + ':' + nextMs,
+      kind: TIMER_KIND, dueAt: new Date(nextMs).toISOString(),
+      contextJson: JSON.stringify(context),
+    });
+  }
+
+  #scheduleFreshFinalReview(
+    taskId: string, clientId: string, attemptId: string, now: string,
+  ): void {
+    const full = this.#repository.getFullTask(taskId, clientId);
+    if (full.task.cancelRequested || full.task.state !== 'working' ||
+        full.task.pendingDecisionId !== null ||
+        full.results.some(result => result.attemptId === attemptId)) return;
+    const latest = full.attempts.filter(attempt => attempt.kind !== 'stop').at(-1);
+    if (latest?.attemptId !== attemptId) return;
+    const fired = full.timers.filter(timer => timer.kind === TIMER_KIND &&
+      timer.status === 'fired' &&
+      parseContext(timer.contextJson)?.sourceAttemptId === attemptId).at(-1);
+    if (!fired) return;
+    const context = parseContext(fired.contextJson);
+    if (!context) return;
+    // The observer result never authorizes a POST. It only restores a prompt
+    // read-only review after an older Core stretched a transient pacing race to
+    // a full continuation interval; #handle performs another exact fresh read.
+    this.#rearmReadReview(fired, clientId, context, now, now);
   }
 
   #rearmReview(
@@ -529,6 +579,10 @@ export class ManagedContinuationService {
         });
         return 'deferred';
       } catch { /* Unavailable handoff never licenses a speculative POST. */ }
+    }
+    if (observed.reason === 'backend-conversation-probe-paced') {
+      this.#rearmReadReview(timer, clientId, context, now, observed.nextCheckAt);
+      return 'deferred';
     }
     if (observed.kind !== 'pending' ||
         (observed.reason !== 'backend-assistant-missing' &&

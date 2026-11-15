@@ -27,6 +27,14 @@ unit is started after package and database promotion, so the successor is not an
 unmanaged background process. The successor must adopt the same Chrome PID,
 profile and CDP port.
 
+These PID/start-tick/port checks are scoped only to the interval from this
+handover's preflight through its `result.json`. They prevent signaling or
+promoting against the wrong live process. After a completed cutover, a normal
+browser crash, host reboot, or later service restart may create new PIDs, ports,
+target IDs, and `spawned` ownership. That does not invalidate the cutover receipt
+or durable Task evidence and must not block normal development, recovery, or L3;
+those paths revalidate the dedicated profile and canonical conversation instead.
+
 A later exact-package refresh may declare an equal source and target schema
 (for example 16 to 16). It still runs the same WAL-consistent copy, evidence-first
 rollback rehearsal, raw DB archive, systemd ownership and browser-adoption checks;
@@ -143,7 +151,9 @@ rollback and process-phase file.
 This receipt does not claim live provider acceptance. Run
 `scripts/live-task-acceptance.mjs` only after the exact installed source/schema
 preflight succeeds. Provider L3, four independent live projects, and the actual
-20-minute continuation are separate receipts.
+20-minute continuation are separate receipts. Those later receipts rely on
+durable request/Task/conversation evidence; they do not require the historical
+handover Chrome PID, target IDs, CDP port, or `adopted` label to remain unchanged.
 
 ## Lock diagnostics
 
