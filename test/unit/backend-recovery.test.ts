@@ -633,6 +633,45 @@ test('backend acknowledgement preserves uncertainty and Retry-After without repe
   assert.equal(calls, 4);
 });
 
+test('repeated canonical GET 429s back off exponentially without replaying or weakening Retry-After', async () => {
+  let now = 0;
+  let detailReads = 0;
+  const reservations: number[] = [];
+  const recovery = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 60_000,
+    now: () => new Date(now), onConversationRetryAtMs: next => reservations.push(next),
+  });
+  const client: BackendJsonClient = { async get(url) {
+    if (url.endsWith('/api/auth/session')) {
+      return { status: 200, headers: {}, body: { accessToken: 'fixture-token' } };
+    }
+    detailReads++;
+    return detailReads === 4
+      ? { status: 200, headers: {}, body: { id: CONVERSATION_ID, mapping: {} } }
+      : { status: 429, headers: { 'retry-after': '1' }, body: null };
+  } };
+  const inspect = () => recovery.recoverAcknowledgement(CONVERSATION_ID, 'unanswered', client, 'https://chatgpt.com');
+
+  await inspect();
+  assert.equal(detailReads, 1);
+  assert.equal(reservations.at(-1), 60_000, 'first 429 must use a 60s minimum');
+  now = 1_000; await inspect();
+  assert.equal(detailReads, 1, 'an ACK observation never bypasses the cooldown');
+  now = 60_001; await inspect();
+  assert.equal(detailReads, 2);
+  assert.equal(reservations.at(-1), 180_001, 'second 429 doubles the independent cooldown');
+  now = 120_001; await inspect();
+  assert.equal(detailReads, 2, 'repeat 429 must not permit fixed 60s hammering');
+  now = 180_002; await inspect();
+  assert.equal(detailReads, 3);
+  assert.equal(reservations.at(-1), 420_002, 'third consecutive 429 reaches 4m');
+  now = 420_003; await inspect();
+  assert.equal(detailReads, 4, 'canonical HTTP success resumes safely after the extended cooldown');
+  now = 425_004; await inspect();
+  assert.equal(detailReads, 5);
+  assert.equal(reservations.at(-1), 485_004, 'a successful canonical response resets exponential failures');
+});
+
 test('ACK reads give the waiting conversation its turn without retaining a stopped caller', async () => {
   let now = 0;
   const reads: string[] = [];
@@ -695,7 +734,7 @@ test('ordinary collection cannot consume a waiting ACK slot or ignore its shared
   now = 13000;
   assert.equal(await ack(), null);
   assert.deepEqual(reads, ['ongoing-generation', CONVERSATION_ID, 'ongoing-generation']);
-  now = 62001;
+  now = 72001;
   assert.equal((await collect()).kind, 'deferred', 'A client honoring a long server delay retains its queue slot');
   assert.equal((await ack())?.submittedUserMessageId, 'user-message-1');
   assert.deepEqual(reads, ['ongoing-generation', CONVERSATION_ID, 'ongoing-generation', CONVERSATION_ID]);
@@ -715,22 +754,22 @@ test('explicit selected ACK gets the next permitted read ahead of background UNK
   now = 1000; await ack('background');
   now = 2000; await ack('selected', 'original-user');
   assert.deepEqual(reads, ['background'], 'An explicit selection never bypasses Retry-After');
-  now = 50001;
+  now = 60001;
   await ack('background');
   assert.deepEqual(reads, ['background'], 'Repeated background no-match recovery must leave the interactive read available');
   await ack('selected');
   assert.deepEqual(reads, ['background'], 'The same conversation cannot spend an explicit selection with an unselected background read');
   await ack('selected', 'original-user');
   assert.deepEqual(reads, ['background', 'selected']);
-  now = 100002;
+  now = 180002;
   await ack('selected');
   assert.deepEqual(reads, ['background', 'selected'], 'A server 429 preserves the explicit caller next legal turn');
   await ack('selected', 'original-user');
   assert.deepEqual(reads, ['background', 'selected', 'selected']);
-  now = 150003;
+  now = 420003;
   await ack('selected');
   assert.equal(reads.length, 3);
-  now = 160003;
+  now = 430003;
   await ack('selected');
   assert.equal(reads.length, 4, 'Background reads cannot renew an abandoned explicit selection indefinitely');
 });
