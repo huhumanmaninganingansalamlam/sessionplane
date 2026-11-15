@@ -9,7 +9,7 @@ import type { PageRegistry } from '../browser/page-registry.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import { ChatGptSemanticAdapter, chatGptBackendJsonClient } from '../providers/chatgpt/semantic-adapter.ts';
 import { SemanticProviderRegistry } from '../providers/semantic-provider-registry.ts';
-import type { SemanticTaskContext } from '../providers/semantic-adapter.ts';
+import type { SemanticRootPostEvidence, SemanticTaskContext } from '../providers/semantic-adapter.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import { TaskKernelRepository, type AttemptSessionBindingRecord } from '../storage/task-kernel-repository.ts';
 import type { PageBindingRepository } from '../storage/page-binding-repository.ts';
@@ -183,6 +183,8 @@ export function createSemanticCoreRuntime(input: {
   readonly onBackendRateLimit?: (evidence: BackendRateLimitEvidence) => void;
   /** Deterministic backend pacing clock for isolated recovery tests. */
   readonly backendRecoveryNow?: () => Date;
+  /** Exact rendered FINAL quiet window; production uses the adapter default. */
+  readonly rendererRecoveryQuietWindowMs?: number;
   /** Dedicated deterministic due clock for isolated Core timer tests. */
   readonly continuationNow?: () => Date;
   readonly canRunContinuation?: () => boolean;
@@ -558,6 +560,46 @@ export function createSemanticCoreRuntime(input: {
     } catch { return null; }
     return { root, binding, conversationId };
   };
+  const resolveRootRecoveryPage = (request: {
+    context: SemanticTaskContext; conversationId: string; root: SemanticRootPostEvidence;
+  }) => {
+    const { context, conversationId, root } = request;
+    if (context.pageLease !== null || context.providerConversationId !== null ||
+        context.submittedUserMessageId !== null || context.submittedUserTurnId !== null) return null;
+    const clientId = repository.dispatchClientId(context.taskId);
+    if (!clientId) return null;
+    try {
+      const full = repository.getFullTask(context.taskId, clientId);
+      const task = full.task;
+      const slot = repository.getSlot(task.projectId, task.slotId, clientId);
+      if (task.projectId !== context.projectId || task.slotId !== context.slotId ||
+          task.slotRevision !== context.slotRevision || slot.activeTaskId !== task.taskId ||
+          slot.revision !== task.slotRevision || slot.providerKey !== 'chatgpt' ||
+          slot.providerConversationId !== null) return null;
+      const attempts = full.attempts.filter(attempt => {
+        if (attempt.kind !== 'initial' || !['dispatched', 'uncertain'].includes(attempt.state)) return false;
+        const stored = repository.getRootPost({
+          taskId: context.taskId, clientId, attemptId: attempt.attemptId,
+        });
+        return stored !== null && !stored.ambiguous && stored.observationCount === 1 &&
+          stored.canonicalConversationId === null && stored.messageId === root.messageId &&
+          stored.parentMessageId === root.parentMessageId && stored.textHash === root.textHash &&
+          stored.observedAt === root.observedAt;
+      });
+      if (attempts.length !== 1) return null;
+      const candidate = rootPageCandidate({
+        taskId: context.taskId, clientId, attemptId: attempts[0]!.attemptId,
+      }, conversationId);
+      if (!candidate || candidate.root.messageId !== root.messageId ||
+          candidate.root.parentMessageId !== root.parentMessageId ||
+          candidate.root.textHash !== root.textHash || candidate.root.observedAt !== root.observedAt) {
+        return null;
+      }
+      return input.pageRegistry.pageForObservation(
+        candidate.binding.pageKey, candidate.binding.bindingEpoch);
+    } catch { return null; }
+  };
+
   const bindRootAttempt = async (owner: {
     taskId: string; clientId: string; attemptId: string;
   }): Promise<void> => {
@@ -637,7 +679,10 @@ export function createSemanticCoreRuntime(input: {
       backendRecovery,
       isExactLease,
       resolvePage: identity => input.pageRegistry.pageForObservation(identity.pageKey, identity.bindingEpoch),
+      resolveRootRecoveryPage,
       pageMutationMutex: input.pageMutationMutex,
+      ...(input.rendererRecoveryQuietWindowMs !== undefined
+        ? { rendererRecoveryQuietWindowMs: input.rendererRecoveryQuietWindowMs } : {}),
       isAuthorizedAttempt: authorizedAttempt,
       isAuthorizedDecision: authorizedDecision,
       onDispatchObserved: ({ context, attemptId, evidence }) => {

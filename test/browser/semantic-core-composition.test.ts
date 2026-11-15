@@ -1736,6 +1736,15 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
               }),
             });
             history.pushState({}, '', '/c/root-canonical');
+            const main = document.querySelector('main');
+            const user = document.createElement('div');
+            user.setAttribute('data-chatgpt-search-unit-key', 'fallback-turn-0:0:user');
+            user.setAttribute('data-chatgpt-search-message-ids', 'root-user-message');
+            const bubble = document.createElement('div');
+            bubble.setAttribute('data-user-message-bubble', 'true');
+            bubble.textContent = editor.innerText;
+            user.appendChild(bubble);
+            main.insertBefore(user, main.firstChild);
             editor.textContent = '';
           };
         </script>` });
@@ -1766,23 +1775,6 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
 
     let virtualNow = 1_000_000;
     let detailReads = 0;
-    const payload = (conversationId: string, messageId: string) => ({
-      id: conversationId, current_node: 'root-answer-node',
-      mapping: {
-        'root-parent': { id: 'root-parent', parent: null, children: [], message: null },
-        'root-user-node': {
-          id: 'root-user-node', parent: 'root-parent', children: [],
-          message: { id: messageId, turn_id: 'root-turn',
-            author: { role: 'user' }, content: { parts: [prompt] } },
-        },
-        'root-answer-node': {
-          id: 'root-answer-node', parent: 'root-user-node', children: [],
-          message: { id: 'root-answer', author: { role: 'assistant' },
-            channel: 'final', status: 'finished_successfully', end_turn: true,
-            content: { parts: ['Canonical root answer'] }, metadata: {} },
-        },
-      },
-    });
     const backend: BackendJsonClient = {
       authScope: {},
       async get(url) {
@@ -1790,19 +1782,7 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
           return { status: 200, headers: {}, body: { accessToken: 'fixture-only' } };
         }
         detailReads++;
-        if (detailReads === 1) {
-          return { status: 429, headers: { 'retry-after': '2' }, body: null };
-        }
-        if (detailReads === 2) {
-          return { status: 200, headers: {},
-            body: payload('foreign-conversation', 'root-user-message') };
-        }
-        if (detailReads === 3) {
-          return { status: 200, headers: {},
-            body: payload('root-canonical', 'foreign-user-message') };
-        }
-        return { status: 200, headers: {},
-          body: payload('root-canonical', 'root-user-message') };
+        return { status: 429, headers: { 'retry-after': '60' }, body: null };
       },
     };
     const createRuntime = () => createSemanticCoreRuntime({
@@ -1811,10 +1791,9 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
       actorScheduler: core.actorScheduler, pageMutationMutex: core.pageMutationMutex,
       enabledProviders: ['chatgpt'], chatgptUrl: 'https://chatgpt.com',
       backendClientProvider: () => backend,
-      backendRecovery: new ChatGptBackendRecovery({
-        requestTimeoutMs: 500, tokenCacheTtlMs: 10_000,
-        now: () => new Date(virtualNow),
-      }),
+      backendRequestTimeoutMs: 500, tokenCacheTtlMs: 10_000,
+      backendRecoveryNow: () => new Date(virtualNow),
+      rendererRecoveryQuietWindowMs: 1,
       continuationNow: () => new Date(virtualNow),
     });
     runtime = createRuntime();
@@ -1855,28 +1834,30 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
     // evidence must recover read-only and must never click Send again.
     await runtime.managedContinuation.close();
     runtime = undefined;
+    const retainedRootPage = core.pageRegistry.pageForObservation(prepared.pageKey!);
+    await retainedRootPage.evaluate(() => {
+      const user = document.querySelector('[data-chatgpt-search-unit-key="fallback-turn-0:0:user"]');
+      if (!user || document.querySelector('[data-chatgpt-search-unit-key="fallback-turn-0:2:assistant"]')) {
+        throw new Error('Exact rendered user boundary unavailable or assistant already exists');
+      }
+      const assistant = document.createElement('div');
+      assistant.setAttribute('data-chatgpt-search-unit-key', 'fallback-turn-0:2:assistant');
+      assistant.setAttribute('data-chatgpt-search-message-ids', 'root-answer root-answer');
+      const answer = document.createElement('div');
+      answer.setAttribute('data-chatgpt-selection-message-id', 'root-answer');
+      answer.textContent = 'Canonical root answer';
+      assistant.appendChild(answer);
+      user.parentElement!.insertBefore(assistant, user.nextSibling);
+    });
     restarted = createRuntime();
     await restarted.managedContinuation.tick();
-    assert.equal(detailReads, 2);
-    assert.equal(sendPosts, 1);
-    assert.equal(core.semanticTaskRepository.getFullTask(
-      task.taskId, clientId).attempts[0]!.state, 'uncertain',
-    'a different canonical conversation cannot promote the root');
-
-    virtualNow += 5_001;
-    await restarted.managedContinuation.tick();
-    assert.equal(detailReads, 3);
-    assert.equal(sendPosts, 1);
-    assert.equal(core.semanticTaskRepository.getFullTask(
-      task.taskId, clientId).attempts[0]!.state, 'uncertain',
-    'a different canonical message cannot promote the root');
-
-    virtualNow += 5_001;
-    await restarted.managedContinuation.tick();
     full = core.semanticTaskRepository.getFullTask(task.taskId, clientId);
-    assert.equal(full.attempts[0]!.state, 'acknowledged');
-    assert.equal(full.attempts[0]!.externalTurnId, 'root-turn');
+    assert.equal(detailReads, 1,
+      'the restarted Core honors the persisted backend 429 cooldown');
     assert.equal(sendPosts, 1);
+    assert.equal(full.attempts[0]!.state, 'acknowledged',
+      'the exact identity-lost root renderer recovers ACK read-only');
+    assert.equal(full.attempts[0]!.externalTurnId, 'root-user-message');
     assert.equal(core.semanticTaskRepository.getRootPost({
       taskId: task.taskId, clientId, attemptId: attempt.attemptId,
     })?.canonicalConversationId, 'root-canonical');
@@ -1885,14 +1866,16 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
     const boundSession = core.teamDirectory.getCurrentSession(project.projectId, 'main');
     assert.equal(boundSession.conversationId, 'root-canonical');
     assert.equal(boundSession.submittedUserMessageId, 'root-user-message');
-    assert.equal(boundSession.submittedUserTurnId, 'root-turn');
+    assert.equal(boundSession.submittedUserTurnId, 'root-user-message');
     assert.equal(boundSession.promptSubmitted, true);
     const boundPage = core.pageRegistry.getBinding(boundSession.pageKey!);
     assert.equal(boundPage.state, 'owned');
     assert.equal(boundPage.conversationId, 'root-canonical');
     assert.equal(boundPage.targetId, recorded?.targetId);
 
-    virtualNow += 5_001;
+    await new Promise(resolve => setTimeout(resolve, 5));
+    await restarted.managedContinuation.tick();
+    await new Promise(resolve => setTimeout(resolve, 5));
     await restarted.managedContinuation.tick();
     const exact = await callRpc<any>({
       socketPath: config.socketPath, method: 'task.get',
@@ -1900,7 +1883,9 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
     });
     assert.equal(exact.state, 'completed');
     assert.equal(exact.result.answerText, 'Canonical root answer');
-    assert.equal(exact.result.externalTurnId, 'root-turn');
+    assert.equal(exact.result.externalTurnId, 'root-user-message');
+    assert.equal(detailReads, 1,
+      'ACK and FINAL renderer recovery perform no extra canonical GET during cooldown');
     assert.equal(sendPosts, 1);
     assert.equal(core.semanticTaskRepository.getFullTask(
       task.taskId, clientId).attempts.length, 1);
