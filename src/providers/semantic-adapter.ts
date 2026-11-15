@@ -169,7 +169,7 @@ export interface SemanticExactQuery {
   readonly attempts?: readonly SemanticDispatchEvidence[];
   /** Exact first POST observed before the provider assigned a conversation. */
   readonly rootPost?: SemanticRootPostEvidence;
-  /** URL-derived candidate only; canonical GET must still verify it. */
+  /** URL-derived candidate only; backend or exact provider-rendered turn evidence must still verify it. */
   readonly candidateConversationId?: string;
 }
 export type SemanticVerification =
@@ -201,7 +201,7 @@ export interface SemanticProviderAdapter {
   readonly capabilities: SemanticCapabilityManifest;
   observe(context: SemanticTaskContext): Promise<SemanticObservation>;
   act(request: SemanticActRequest): Promise<SemanticActResult>;
-  /** Read-only canonical evidence; a page draft or optimistic user node is never an ACK. */
+  /** Read-only exact evidence; a page draft or optimistic user node is never an ACK. */
   verify(query: SemanticExactQuery): Promise<SemanticVerification>;
   /** Always read-only, even when the page is missing or the Core restarted. */
   recover(query: SemanticExactQuery): Promise<SemanticVerification>;

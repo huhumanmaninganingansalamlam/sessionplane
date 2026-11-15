@@ -13,8 +13,10 @@ import type {
 import { semanticConfigurationIntent, semanticConfigurationMatches } from '../semantic-adapter.ts';
 import { ChatGptBackendRecovery, type BackendJsonClient } from './backend-recovery.ts';
 import { observeChatGptDialog } from './dialog-observer.ts';
+import { observeChatGptActivity } from './activity-observer.ts';
 import { observeChatGptDom, observeChatGptAlerts } from './dom-observer.ts';
 import { hasMountedChatGptStream } from './message-dom.ts';
+import { ExactFinalTracker } from './exact-final.ts';
 import { inspectChatGptQuestion, answerChatGptQuestion } from './question.ts';
 import { inspectChatGptFreeTextQuestion, answerChatGptFreeTextQuestion } from './semantic-free-text-question.ts';
 import { inspectSemanticHostSpanPermission } from './semantic-hostspan-permission.ts';
@@ -81,6 +83,8 @@ export interface ChatGptSemanticAdapterOptions {
   /** Rebind to the current Core-owned auth context when a page is missing. */
   readonly backendClientProvider?: () => BackendJsonClient | Promise<BackendJsonClient>;
   readonly backendRecovery?: ChatGptBackendRecovery;
+  /** Quiet stability required before a rate-limited backend FINAL may use exact provider-rendered evidence. */
+  readonly rendererRecoveryQuietWindowMs?: number;
   /** Synchronous durable callback on the exact page POST, before an ACK probe.
    * It must never send, modify the UI, or log the message content.
    */
@@ -115,7 +119,8 @@ export interface ChatGptSemanticAdapterOptions {
 /**
  * B-first semantic port. All selectors and DOM fallbacks stay here; the
  * DurableTaskKernel sees only semantic choices. Existing canonical backend
- * parsers prove ACK/FINAL. An act receipt is never an ACK.
+ * parsers prove ACK/FINAL. Under backend 429 only, a unique provider-rendered
+ * user+assistant turn may prove the same identity; an act receipt or optimistic user node never can.
  */
 export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
   readonly providerKey = 'chatgpt';
@@ -126,6 +131,8 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
   readonly #options: ChatGptSemanticAdapterOptions;
   readonly #gate: PageOperationGate;
   readonly #backend: ChatGptBackendRecovery;
+  readonly #rendererRecoveryQuietWindowMs: number;
+  readonly #rendererFinalTrackers = new Map<string, ExactFinalTracker>();
   readonly #latest = new Map<string, ActiveSnapshot>();
   /** Monotonic identity token: a published+consumed snapshot cannot ABA to absent. */
   readonly #revision = new Map<string, object>();
@@ -136,6 +143,11 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     this.#backend = options.backendRecovery ?? new ChatGptBackendRecovery({
       requestTimeoutMs: 15_000, tokenCacheTtlMs: 60_000,
     });
+    this.#rendererRecoveryQuietWindowMs = options.rendererRecoveryQuietWindowMs ?? 1_500;
+    if (!Number.isSafeInteger(this.#rendererRecoveryQuietWindowMs) ||
+        this.#rendererRecoveryQuietWindowMs <= 0) {
+      throw new Error('rendererRecoveryQuietWindowMs must be a positive integer');
+    }
   }
 
   async observe(context: SemanticTaskContext): Promise<SemanticObservation> {
@@ -953,6 +965,11 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         return { kind: 'unavailable', reason: 'canonical-ack-bound-turn-mismatch' };
       }
       if (ack === null) {
+        if (root !== null) {
+          const rendered = await this.#recoverRootAckFromRenderer(
+            id, conversationId, root, query.prompt!, latestReason);
+          if (rendered !== null) return rendered;
+        }
         return { kind: 'pending', reason: latestReason ?? 'canonical-ack-not-observed' };
       }
       if (root !== null) {
@@ -980,11 +997,104 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         answerText: final.answerText,
       };
     }
+    const renderedFinal = await this.#recoverFinalFromRenderer(
+      id, conversationId, final.reason);
+    if (renderedFinal !== null) return renderedFinal;
     // A rate-limited canonical GET is deferred, not absent. Preserve its
     // nonterminal state while backend recovery enforces Retry-After.
     return final.kind === 'pending' || final.kind === 'deferred'
       ? { kind: 'pending', reason: final.reason }
       : { kind: 'unavailable', reason: final.reason };
+  }
+
+  #rendererRecoveryReason(reason: string | null): boolean {
+    return reason === 'backend-http-429' ||
+      reason === 'backend-acknowledgement-probe-paced' ||
+      reason === 'backend-acknowledgement-probe-queued' ||
+      reason === 'backend-conversation-probe-paced';
+  }
+
+  async #recoverRootAckFromRenderer(
+    context: SemanticTaskContext,
+    conversationId: string,
+    root: SemanticRootPostEvidence,
+    prompt: string,
+    backendReason: string | null,
+  ): Promise<SemanticVerification | null> {
+    if (!this.#rendererRecoveryReason(backendReason) || context.pageLease === null ||
+        root.textHash !== sha(prompt.replaceAll('\r\n', '\n'))) return null;
+    let exact: { lease: OwnedPageIdentity; page: Page };
+    try { exact = await this.#exactPage(context); } catch { return null; }
+    try {
+      const url = new URL(exact.page.url());
+      if (url.pathname !== `/c/${encodeURIComponent(conversationId)}` ||
+          url.search !== '' || url.hash !== '') return null;
+      const dom = await observeChatGptDom(exact.page, {
+        submittedUserMessageId: root.messageId,
+        submittedUserTurnId: root.messageId,
+      });
+      const exactUsers = dom.turnBoundary.filter(message =>
+        message.role === 'user' && message.messageId === root.messageId &&
+        message.turnId === root.messageId &&
+        sha(message.text.replaceAll('\r\n', '\n')) === root.textHash);
+      const assistant = dom.candidate;
+      if (exactUsers.length !== 1 || !dom.submittedUserFound || dom.laterUserFound ||
+          dom.actionableAlert || assistant === null || assistant.streamingMarker ||
+          assistant.responseMessageId.startsWith('request-placeholder-') ||
+          assistant.answerText.trim().length === 0) return null;
+      return { kind: 'verified_root_ack', conversationId,
+        externalTurnId: root.messageId, messageId: root.messageId };
+    } catch { return null; }
+  }
+
+  async #recoverFinalFromRenderer(
+    context: SemanticTaskContext,
+    conversationId: string,
+    backendReason: string,
+  ): Promise<SemanticVerification | null> {
+    if (!this.#rendererRecoveryReason(backendReason) || context.pageLease === null ||
+        context.submittedUserMessageId === null ||
+        context.submittedUserTurnId === null) return null;
+    let exact: { lease: OwnedPageIdentity; page: Page };
+    try { exact = await this.#exactPage(context); } catch { return null; }
+    try {
+      const url = new URL(exact.page.url());
+      if (url.pathname !== `/c/${encodeURIComponent(conversationId)}` ||
+          url.search !== '' || url.hash !== '') return null;
+      const dom = await observeChatGptDom(exact.page, {
+        submittedUserMessageId: context.submittedUserMessageId,
+        submittedUserTurnId: context.submittedUserTurnId,
+      });
+      const activity = await observeChatGptActivity(exact.page, dom);
+      const dialog = await observeChatGptDialog(exact.page);
+      const key = [exact.lease.pageKey, exact.lease.bindingEpoch, conversationId,
+        context.submittedUserMessageId, context.submittedUserTurnId].join(':');
+      let tracker = this.#rendererFinalTrackers.get(key);
+      if (!tracker) {
+        if (this.#rendererFinalTrackers.size >= 128) this.#rendererFinalTrackers.clear();
+        tracker = new ExactFinalTracker(this.#rendererRecoveryQuietWindowMs);
+        this.#rendererFinalTrackers.set(key, tracker);
+      }
+      const decision = tracker.evaluate({
+        provider: this.providerKey,
+        pageKey: exact.lease.pageKey,
+        bindingEpoch: exact.lease.bindingEpoch,
+        observedAt: new Date().toISOString(),
+        conversationId,
+        submittedUserFound: dom.submittedUserFound,
+        laterUserFound: dom.laterUserFound,
+        candidate: dom.candidate,
+        activity: activity.strength,
+        dialogKind: dialog.kind,
+        networkActivity: false,
+        observationTransport: 'fresh',
+        reason: dialog.reason ?? activity.reason,
+      }, Date.now());
+      if (decision.kind !== 'complete' || decision.answerText === null) return null;
+      this.#rendererFinalTrackers.delete(key);
+      return { kind: 'exact_final', externalTurnId: context.submittedUserTurnId,
+        answerText: decision.answerText };
+    } catch { return null; }
   }
 
   async #exactPage(context: SemanticTaskContext): Promise<{ lease: OwnedPageIdentity; page: Page }> {
