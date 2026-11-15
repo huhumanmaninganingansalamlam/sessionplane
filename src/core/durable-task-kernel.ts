@@ -22,8 +22,10 @@ export interface ExactSendIntent {
   readonly kind: AttemptKind;
   readonly content: string;
 }
+export type FinalReadPriority = 'ordinary' | 'due';
 export interface ExactTurnQuery extends ExactSendIntent {
   readonly externalTurnId: string | null;
+  readonly readPriority?: FinalReadPriority;
 }
 export type SendOutcome =
   | { readonly kind: 'verified_ack'; readonly externalTurnId: string }
@@ -53,6 +55,9 @@ export interface ExactTaskProviderPort {
   >;
   sendOnce(intent: ExactSendIntent): Promise<SendOutcome>;
   recoverAck(query: ExactTurnQuery): Promise<RecoveryOutcome>;
+  /** Optional provider-local reservation for a future exact due read. It is
+   * scheduling only and can never authorize a POST or prove no-FINAL. */
+  reserveFinalRead?(query: ExactTurnQuery, notBefore: string): Promise<void>;
   observeFinal(query: ExactTurnQuery): Promise<FinalObservation>;
 }
 
@@ -153,6 +158,27 @@ export class DurableTaskKernel {
     return this.#storage.getTask(taskId, clientId);
   }
 
+  async reserveFinalRead(input: {
+    taskId: string;
+    clientId: string;
+    attemptId: string;
+    notBefore: string;
+  }): Promise<void> {
+    const dueMs = Date.parse(input.notBefore);
+    if (!Number.isFinite(dueMs)) throw new Error('Invalid FINAL read reservation');
+    const { attempt, provider, intent } = this.#resolve(
+      input.taskId, input.clientId, input.attemptId,
+    );
+    if (attempt.kind === 'stop' || attempt.state !== 'acknowledged' ||
+        attempt.externalTurnId === null) {
+      throw new Error('No exact ACK for FINAL read reservation');
+    }
+    if (!provider.reserveFinalRead) return;
+    await provider.reserveFinalRead({
+      ...intent, externalTurnId: attempt.externalTurnId, readPriority: 'due',
+    }, input.notBefore);
+  }
+
   async observeFinal(input: {
     taskId: string;
     clientId: string;
@@ -173,6 +199,7 @@ export class DurableTaskKernel {
     attemptId: string;
     resultId: string;
     completeTask: boolean;
+    readPriority?: FinalReadPriority;
   }): Promise<FinalProbeOutcome> {
     const { attempt, provider, intent } = this.#resolve(
       input.taskId, input.clientId, input.attemptId,
@@ -181,6 +208,7 @@ export class DurableTaskKernel {
       attempt.externalTurnId === null) throw new Error('No exact ACK for FINAL observation');
     const observation = await provider.observeFinal({
       ...intent, externalTurnId: attempt.externalTurnId,
+      readPriority: input.readPriority ?? 'ordinary',
     });
     if (observation.kind !== 'exact_final') {
       const code = observation.reason && /^[a-z0-9_.:-]{1,100}$/i.test(observation.reason)

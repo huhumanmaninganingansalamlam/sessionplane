@@ -171,6 +171,8 @@ export interface SemanticExactQuery {
   readonly rootPost?: SemanticRootPostEvidence;
   /** URL-derived candidate only; backend or exact provider-rendered turn evidence must still verify it. */
   readonly candidateConversationId?: string;
+  /** Provider-local canonical read scheduling; never evidence of absence. */
+  readonly readPriority?: 'ordinary' | 'due';
 }
 export type SemanticVerification =
   | { readonly kind: 'verified_ack'; readonly externalTurnId: string; readonly messageId: string }
@@ -206,6 +208,10 @@ export interface SemanticProviderAdapter {
   verify(query: SemanticExactQuery): Promise<SemanticVerification>;
   /** Always read-only, even when the page is missing or the Core restarted. */
   recover(query: SemanticExactQuery): Promise<SemanticVerification>;
+  /** Optional provider-local reservation for an exact future FINAL read. */
+  reserveFinalRead?(input: {
+    readonly context: SemanticTaskContext; readonly notBefore: string;
+  }): Promise<void>;
   /** Optional, read-only file retrieval. No POST, file-path selection or
    * permission grant; Core independently verifies exact provenance/hash.
    */

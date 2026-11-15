@@ -365,6 +365,24 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
     }
   }
 
+  async reserveFinalRead(query: ExactTurnQuery, notBefore: string): Promise<void> {
+    if (!this.#adapter.reserveFinalRead || !supportsConversation(this.#adapter) ||
+        !query.externalTurnId || !Number.isFinite(Date.parse(notBefore))) return;
+    const evidence = this.#journal.read(query);
+    if (evidence === null || !correlate(query, evidence)) return;
+    const context = await this.#context(query);
+    if (!sameTask(query, context) ||
+        (context.submittedUserTurnId !== null &&
+          context.submittedUserTurnId !== query.externalTurnId) ||
+        (context.submittedUserMessageId !== null &&
+          context.submittedUserMessageId !== evidence.messageId)) return;
+    await this.#adapter.reserveFinalRead({
+      context: { ...context, submittedUserMessageId: evidence.messageId,
+        submittedUserTurnId: query.externalTurnId },
+      notBefore,
+    });
+  }
+
   async observeFinal(query: ExactTurnQuery): Promise<FinalObservation> {
     if (!supportsConversation(this.#adapter)) {
       return { kind: 'unavailable', reason: 'semantic-conversation-capability-unavailable' };
@@ -393,7 +411,10 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
         submittedUserMessageId: evidence.messageId,
         submittedUserTurnId: query.externalTurnId,
       };
-      const final = await this.#adapter.recover({ context: exactContext, kind: 'final' });
+      const final = await this.#adapter.recover({
+        context: exactContext, kind: 'final',
+        ...(query.readPriority ? { readPriority: query.readPriority } : {}),
+      });
       if (final.kind === 'exact_final' && final.externalTurnId === query.externalTurnId) {
         return { kind: 'exact_final', externalTurnId: final.externalTurnId,
           answerText: final.answerText };

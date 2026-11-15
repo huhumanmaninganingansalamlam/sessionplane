@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 
 import {
-  CONTINUATION_INTERVAL_MS, ManagedContinuationService,
+  CONTINUATION_DUE_READ_RESERVATION_MS, CONTINUATION_INTERVAL_MS,
+  ManagedContinuationService,
 } from '../../src/core/managed-continuation.ts';
 import { DurableTaskKernel } from '../../src/core/durable-task-kernel.ts';
 import type {
@@ -23,11 +24,14 @@ class FakeProvider implements ExactTaskProviderPort {
   readonly pendingInitialFinals = new Set<string>();
   readonly readyContinuationFinals = new Set<string>();
   readonly observedFinalAttemptIds: string[] = [];
+  readonly observedFinalPriorities: Array<string | undefined> = [];
+  readonly finalReadReservations: Array<{ attemptId: string; notBefore: string }> = [];
   readonly preflightAttemptIds: string[] = [];
   readonly recoveredAckAttemptIds: string[] = [];
   readonly unavailableFinals = new Set<string>();
   readonly pending429Finals = new Set<string>();
   readonly pacedFinals = new Set<string>();
+  pending429NextCheckAt: string | null = null;
   pacedNextCheckAt: string | null = null;
   readonly laterUserFinals = new Set<string>();
   async preflight(intent: ExactSendIntent): Promise<
@@ -46,13 +50,18 @@ class FakeProvider implements ExactTaskProviderPort {
     this.recoveredAckAttemptIds.push(query.attemptId);
     return { kind: 'unavailable', reason: 'fake-no-backend' };
   }
+  async reserveFinalRead(query: ExactTurnQuery, notBefore: string): Promise<void> {
+    this.finalReadReservations.push({ attemptId: query.attemptId, notBefore });
+  }
   async observeFinal(query: ExactTurnQuery): Promise<FinalObservation> {
     this.observedFinalAttemptIds.push(query.attemptId);
+    this.observedFinalPriorities.push(query.readPriority);
     if (this.unavailableFinals.has(query.attemptId)) {
       return { kind: 'unavailable', reason: 'fixture-backend-http-429' };
     }
     if (this.pending429Finals.has(query.attemptId)) {
-      return { kind: 'pending', reason: 'backend-http-429' };
+      return { kind: 'pending', reason: 'backend-http-429',
+        nextCheckAt: this.pending429NextCheckAt };
     }
     if (this.pacedFinals.has(query.attemptId)) {
       return { kind: 'pending', reason: 'backend-conversation-probe-paced',
@@ -303,7 +312,7 @@ test('unavailable canonical FINAL read at due defers without speculative Continu
 });
 
 
-test('a paced 429 FINAL probe never licenses a speculative 20-minute Continue POST', async t => {
+test('a direct 429 FINAL read retries at its exact fence without speculative Continue', async t => {
   const env = fixture(t);
   env.startTask('task-a', 'main');
   await env.ack('task-a');
@@ -311,15 +320,55 @@ test('a paced 429 FINAL probe never licenses a speculative 20-minute Continue PO
   service.activate({ taskId: 'task-a', clientId: 'alice',
     sourceAttemptId: 'initial:task-a', approvalRef: 'approved', message: '계속' });
   env.fake.pending429Finals.add('initial:task-a');
+  env.fake.pending429NextCheckAt =
+    new Date(START + CONTINUATION_INTERVAL_MS + 61_000).toISOString();
   env.now += CONTINUATION_INTERVAL_MS;
   assert.deepEqual(await service.tick(),
     { timersClaimed: 1, dispatchesAttempted: 0, deferred: 1 });
+  let full = env.store.getFullTask('task-a', 'alice');
   assert.equal(env.fake.sends.length, 1);
-  assert.equal(env.store.getFullTask('task-a', 'alice').attempts.length, 1);
+  assert.equal(full.attempts.length, 1);
+  assert.equal(full.timers.some(timer => timer.status === 'pending' &&
+    timer.dueAt === env.fake.pending429NextCheckAt &&
+    timer.timerId.startsWith('continuation-read-review:')), true);
+
   env.fake.pending429Finals.delete('initial:task-a');
-  env.now += CONTINUATION_INTERVAL_MS;
+  env.now = Date.parse(env.fake.pending429NextCheckAt);
   assert.equal((await service.tick()).dispatchesAttempted, 1);
+  full = env.store.getFullTask('task-a', 'alice');
   assert.equal(env.fake.sends.length, 2);
+  assert.equal(full.attempts.filter(attempt => attempt.kind === 'continuation').length, 1);
+});
+
+test('provider canonical reads are reserved before an approved due beyond the scan batch', async t => {
+  const env = fixture(t);
+  for (let index = 0; index < 9; index++) {
+    const taskId = 'task-' + String(index).padStart(2, '0');
+    env.startTask(taskId, 'slot-' + taskId);
+    env.seedPublicPolicy(taskId);
+    await env.ack(taskId);
+  }
+  env.startTask('task-z', 'main');
+  env.seedPublicPolicy('task-z', true);
+  await env.ack('task-z');
+  const service = env.createService();
+  service.activate({ taskId: 'task-z', clientId: 'alice',
+    sourceAttemptId: 'initial:task-z', approvalRef: 'approved-public', message: '계속' });
+
+  env.now = START + CONTINUATION_INTERVAL_MS - CONTINUATION_DUE_READ_RESERVATION_MS;
+  assert.deepEqual(await service.tick(),
+    { timersClaimed: 0, dispatchesAttempted: 0, deferred: 0 });
+  assert.equal(env.fake.finalReadReservations.some(reservation =>
+    reservation.attemptId === 'initial:task-z' &&
+    reservation.notBefore === new Date(START + CONTINUATION_INTERVAL_MS).toISOString()), true,
+  'a due outside the eight-row FINAL batch must still register its exact reservation');
+
+  env.now = START + CONTINUATION_INTERVAL_MS;
+  assert.equal((await service.tick()).dispatchesAttempted, 1);
+  assert.equal(env.fake.sends.length, 11);
+  assert.equal(env.fake.observedFinalAttemptIds.some((attemptId, index) =>
+    attemptId === 'initial:task-z' && env.fake.observedFinalPriorities[index] === 'due'), true,
+  'the actual due performs a selected canonical read');
 });
 
 test('transient paced FINAL read retries at its read fence, then sends only after fresh no-FINAL', async t => {
