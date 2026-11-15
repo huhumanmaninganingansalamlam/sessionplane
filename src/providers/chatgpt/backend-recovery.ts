@@ -67,6 +67,7 @@ export class ChatGptBackendRecovery {
   readonly #onConversationRetryAtMs: ChatGptBackendRecoveryOptions['onConversationRetryAtMs'];
   #token: CachedToken | null = null;
   #conversationRetryAt = 0;
+  #consecutiveConversation429s = 0;
   readonly #conversationWaiting = new Map<string, { expiresAt: number; selected: boolean }>();
   #conversationInFlight = false;
 
@@ -247,10 +248,22 @@ export class ChatGptBackendRecovery {
       this.#extendConversationRetryAt(now + 5_000);
       const result = await this.#readConversation(conversationId, client, origin, observe);
       if ('recovery' in result && result.recovery.kind === 'deferred') {
-        this.#extendConversationRetryAt(this.#now().getTime() + Math.max(5_000, result.recovery.retryAfterMs ?? 0));
+        // A persistent server 429 may keep returning a short Retry-After.
+        // Increase our own cooldown as well; never shorten a server-specified delay.
+        const repeated429 = result.recovery.reason === 'backend-http-429';
+        if (repeated429) {
+          this.#consecutiveConversation429s = Math.min(5, this.#consecutiveConversation429s + 1);
+        }
+        const exponential429Ms = repeated429
+          ? Math.min(15 * 60_000, 60_000 * 2 ** (this.#consecutiveConversation429s - 1))
+          : 0;
+        this.#extendConversationRetryAt(this.#now().getTime() +
+          Math.max(5_000, result.recovery.retryAfterMs ?? 0, exponential429Ms));
         if (selected) this.#conversationWaiting.set(conversationId, {
           expiresAt: this.#conversationRetryAt + graceMs, selected: true,
         });
+      } else if (!('recovery' in result)) {
+        this.#consecutiveConversation429s = 0;
       }
       // A caller honoring Retry-After must not expire before its allowed turn.
       for (const entry of this.#conversationWaiting.values()) {
