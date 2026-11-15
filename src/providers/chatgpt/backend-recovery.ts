@@ -68,7 +68,9 @@ export class ChatGptBackendRecovery {
   #token: CachedToken | null = null;
   #conversationRetryAt = 0;
   #consecutiveConversation429s = 0;
-  readonly #conversationWaiting = new Map<string, { expiresAt: number; selected: boolean }>();
+  readonly #conversationWaiting = new Map<string, {
+    expiresAt: number; selected: boolean; priorityAt: number;
+  }>();
   #conversationInFlight = false;
 
   constructor(options: ChatGptBackendRecoveryOptions) {
@@ -119,6 +121,21 @@ export class ChatGptBackendRecovery {
    * read-only backend transport as legacy recovery without fabricating a
    * SessionSnapshot. No UI focus or submission is permitted here.
    */
+  reserveExactTurn(conversationId: string, notBefore: string): void {
+    if (!/^[A-Za-z0-9_-]{1,160}$/.test(conversationId)) {
+      throw new Error('Invalid canonical conversation reservation');
+    }
+    const dueMs = Date.parse(notBefore);
+    if (!Number.isFinite(dueMs)) throw new Error('Invalid canonical read time');
+    const graceMs = 2 * Math.max(5_000, this.#requestTimeoutMs);
+    const existing = this.#conversationWaiting.get(conversationId);
+    this.#conversationWaiting.set(conversationId, {
+      expiresAt: Math.max(existing?.expiresAt ?? 0, dueMs + graceMs),
+      selected: true,
+      priorityAt: Math.min(existing?.priorityAt ?? dueMs, dueMs),
+    });
+  }
+
   async recoverExactTurn(
     identity: {
       readonly conversationId: string | null;
@@ -127,12 +144,14 @@ export class ChatGptBackendRecovery {
     },
     client: BackendJsonClient,
     origin: string,
+    selected = false,
   ): Promise<ProviderRecoveryResult> {
     if (identity.conversationId === null ||
       (identity.submittedUserMessageId === null && identity.submittedUserTurnId === null)) {
       return unavailable('backend-identity-incomplete');
     }
-    const result = await this.#conversation(identity.conversationId, client, origin);
+    const result = await this.#conversation(
+      identity.conversationId, client, origin, undefined, false, selected);
     if ('recovery' in result) return result.recovery;
     return recoverExactServerFinal(result.body, {
       conversationId: identity.conversationId,
@@ -228,11 +247,19 @@ export class ChatGptBackendRecovery {
     }
     const waiting = this.#conversationWaiting.get(conversationId);
     if (selected || !waiting?.selected) {
-      this.#conversationWaiting.set(conversationId, { expiresAt: Math.max(now, this.#conversationRetryAt) + graceMs, selected });
+      this.#conversationWaiting.set(conversationId, {
+        expiresAt: Math.max(waiting?.expiresAt ?? 0,
+          Math.max(now, this.#conversationRetryAt) + graceMs),
+        selected,
+        priorityAt: selected ? Math.min(waiting?.priorityAt ?? now, now)
+          : waiting?.priorityAt ?? Number.MAX_SAFE_INTEGER,
+      });
     }
-    // A user-selected ACK gets the next legal slot ahead of repeated background
-    // UNKNOWN polling. It still obeys the same Retry-After and in-flight guard.
-    const nextSelected = [...this.#conversationWaiting].find(([, entry]) => entry.selected)?.[0];
+    // A user-selected ACK or an approved due FINAL gets the next legal slot
+    // ahead of repeated background reads. Both still obey Retry-After.
+    const nextSelected = [...this.#conversationWaiting]
+      .filter(([, entry]) => entry.selected)
+      .sort((left, right) => left[1].priorityAt - right[1].priorityAt)[0]?.[0];
     const queued = (nextSelected ?? this.#conversationWaiting.keys().next().value) !== conversationId ||
       (!selected && waiting?.selected === true);
     if (now < this.#conversationRetryAt || queued || this.#conversationInFlight) {
@@ -268,6 +295,7 @@ export class ChatGptBackendRecovery {
         } };
         if (selected) this.#conversationWaiting.set(conversationId, {
           expiresAt: this.#conversationRetryAt + graceMs, selected: true,
+          priorityAt: waiting?.priorityAt ?? now,
         });
       } else if (!('recovery' in result)) {
         this.#consecutiveConversation429s = 0;

@@ -907,6 +907,15 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     return await this.recover(query);
   }
 
+  async reserveFinalRead(input: {
+    readonly context: SemanticTaskContext; readonly notBefore: string;
+  }): Promise<void> {
+    const conversationId = input.context.providerConversationId;
+    if (conversationId === null || input.context.submittedUserMessageId === null ||
+        input.context.submittedUserTurnId === null) return;
+    this.#backend.reserveExactTurn(conversationId, input.notBefore);
+  }
+
   async recover(query: SemanticExactQuery): Promise<SemanticVerification> {
     const id = query.context;
     const rootAck = query.kind === 'ack' && id.providerConversationId === null;
@@ -996,7 +1005,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       conversationId,
       submittedUserMessageId: id.submittedUserMessageId,
       submittedUserTurnId: id.submittedUserTurnId,
-    }, client, origin);
+    }, client, origin, query.readPriority === 'due');
     if (final.kind === 'complete' && final.answerText !== null) {
       return {
         kind: 'exact_final',
@@ -1008,15 +1017,15 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       id, conversationId, final.reason);
     if (renderedFinal !== null) return renderedFinal;
     // A rate-limited canonical GET is deferred, not absent. Preserve its
-    // nonterminal state while backend recovery enforces Retry-After.
-    // Expose the exact read fence only for a locally paced retry. The initial
-    // 429 keeps the established semantic result shape; its server evidence is
-    // journaled separately and never authorizes a continuation POST.
-    const pacing = final.reason === 'backend-conversation-probe-paced' &&
+    // nonterminal state and exact local read fence for both the first 429 and
+    // a paced retry. The fence is scheduling evidence only; it never proves
+    // no-FINAL and therefore never authorizes a continuation POST.
+    const readFence = (final.reason === 'backend-http-429' ||
+        final.reason === 'backend-conversation-probe-paced') &&
       final.nextCheckAt !== null ? { nextCheckAt: final.nextCheckAt } : {};
     return final.kind === 'pending' || final.kind === 'deferred'
-      ? { kind: 'pending', reason: final.reason, ...pacing }
-      : { kind: 'unavailable', reason: final.reason, ...pacing };
+      ? { kind: 'pending', reason: final.reason, ...readFence }
+      : { kind: 'unavailable', reason: final.reason, ...readFence };
   }
 
   #rendererRecoveryReason(reason: string | null): boolean {

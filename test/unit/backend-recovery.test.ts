@@ -914,6 +914,46 @@ test('ChatGPT semantic FINAL uses the owned auth context after the page is gone'
   assert.equal(authReads, 1);
   assert.equal(detailReads, 1);
 });
+test('reserved due FINAL owns the next canonical slot while background reads stay paced', async () => {
+  let now = 100_000;
+  let detailReads = 0;
+  const backend = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 180_000, now: () => new Date(now),
+  });
+  const dueConversation = CONVERSATION_ID;
+  const otherConversation = 'conversation-other-reserved';
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', userMessage('user-message-1', 'user-turn-1')),
+  ], 'user-node');
+  const client: BackendJsonClient = { async get(url) {
+    if (url.endsWith('/api/auth/session')) {
+      return { status: 200, headers: {}, body: { accessToken: 'synthetic-memory-token' } };
+    }
+    detailReads++;
+    return { status: 200, headers: {}, body: payload };
+  } };
+  const dueAt = new Date(now + 60_000).toISOString();
+  backend.reserveExactTurn(dueConversation, dueAt);
+  assert.equal((await backend.recoverExactTurn({
+    conversationId: otherConversation,
+    submittedUserMessageId: 'other-message', submittedUserTurnId: 'other-turn',
+  }, client, 'https://chatgpt.com')).reason, 'backend-conversation-probe-paced');
+  assert.equal((await backend.recoverExactTurn({
+    conversationId: dueConversation,
+    submittedUserMessageId: 'user-message-1', submittedUserTurnId: 'user-turn-1',
+  }, client, 'https://chatgpt.com')).reason, 'backend-conversation-probe-paced');
+  assert.equal(detailReads, 0, 'reservation itself and background probes issue no GET');
+
+  now = Date.parse(dueAt);
+  const due = await backend.recoverExactTurn({
+    conversationId: dueConversation,
+    submittedUserMessageId: 'user-message-1', submittedUserTurnId: 'user-turn-1',
+  }, client, 'https://chatgpt.com', true);
+  assert.equal(due.reason, 'backend-assistant-missing');
+  assert.equal(detailReads, 1, 'only the selected due read consumes the canonical slot');
+});
+
 test('ChatGPT semantic FINAL keeps backend 429 nonterminal and respects Retry-After', async () => {
   let now = 100_000;
   let detailReads = 0;
@@ -949,8 +989,10 @@ test('ChatGPT semantic FINAL keeps backend 429 nonterminal and respects Retry-Af
   } as const;
   const recover = () => adapter.recover({ context, kind: 'final' });
 
-  assert.deepEqual(await recover(), { kind: 'pending', reason: 'backend-http-429' },
-    'temporary canonical GET deferral cannot become permanent unavailability');
+  assert.deepEqual(await recover(), {
+    kind: 'pending', reason: 'backend-http-429',
+    nextCheckAt: new Date(220_000).toISOString(),
+  }, 'temporary canonical GET deferral exposes its exact local read fence');
   assert.equal(detailReads, 1);
   now += 1_000;
   assert.deepEqual(await recover(), {

@@ -5,6 +5,11 @@ import type {
 
 export const CONTINUATION_INTERVAL_MS = 20 * 60_000;
 export const CONTINUATION_READ_RETRY_MIN_MS = 5_000;
+// ChatGPT canonical detail reads may locally back off for at most fifteen
+// minutes after a 429. Reserve one extra minute for the Core tick boundary so
+// ordinary FINAL observation cannot consume the provider read slot needed by
+// an approved twenty-minute due check.
+export const CONTINUATION_DUE_READ_RESERVATION_MS = 16 * 60_000;
 const PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT = 5;
 const PERSISTENT_READ_LIMIT_AGENT_REVIEW_DELAY_MS =
   (PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT - 1) * CONTINUATION_INTERVAL_MS;
@@ -290,9 +295,23 @@ export class ManagedContinuationService {
     }
     // Reconcile an ACK after a Core crash between its exact journal write and
     // next timer scheduling. There is one idempotent timer per ACK.
-    for (const owner of this.#repository.listContinuationTaskOwners()) {
+    const continuationOwners = this.#repository.listContinuationTaskOwners();
+    for (const owner of continuationOwners) {
       try { this.#reconcileOwner(owner.taskId, owner.clientId, now); }
       catch { /* One task must not starve the other due slots. */ }
+    }
+    // During the maximum local ChatGPT 429 backoff window, register the exact
+    // due conversation as provider-selected. Generic providers may ignore the
+    // optional reservation and retain their normal fair FINAL scanner.
+    for (const owner of continuationOwners) {
+      const reservation = this.#upcomingDueRead(owner.taskId, owner.clientId, now);
+      if (reservation === null) continue;
+      try {
+        await this.#kernel.reserveFinalRead({
+          taskId: owner.taskId, clientId: owner.clientId,
+          attemptId: reservation.attemptId, notBefore: reservation.dueAt,
+        });
+      } catch { /* A scheduling hint never licenses a send or blocks the due timer. */ }
     }
     const claimed = this.#repository.claimDueTimers(now, 50, TIMER_KIND);
     let dispatchesAttempted = 0;
@@ -317,7 +336,8 @@ export class ManagedContinuationService {
     }
     // A standalone public Task must finish even when every client has exited.
     // This read-only observer never takes over the provider or retries a POST.
-    // Process due sends first; a slow FINAL GET cannot starve another Task's due.
+    // Process due sends first; provider-local reservation decides which actual
+    // canonical GET owns a scarce account slot without disabling fair scans.
     for (const pending of this.#repository.listPendingPublicFinals(8)) {
       try {
         const observed = await this.#kernel.probeFinal({
@@ -358,6 +378,34 @@ export class ManagedContinuationService {
       catch { deferred++; }
     }
     return { timersClaimed: claimed.length, dispatchesAttempted, deferred };
+  }
+
+  #upcomingDueRead(
+    taskId: string, clientId: string, now: string,
+  ): { attemptId: string; dueAt: string } | null {
+    const nowMs = Date.parse(now);
+    if (!Number.isFinite(nowMs)) return null;
+    try {
+      const full = this.#repository.getFullTask(taskId, clientId);
+      if (full.task.cancelRequested || full.task.state !== 'working' ||
+          full.task.pendingDecisionId !== null) return null;
+      const candidates = full.timers.flatMap(timer => {
+        const context = parseContext(timer.contextJson);
+        if (timer.kind !== TIMER_KIND || timer.status !== 'pending' || context === null) return [];
+        const dueMs = Date.parse(timer.dueAt);
+        if (!Number.isFinite(dueMs) || dueMs <= nowMs ||
+            dueMs - nowMs > CONTINUATION_DUE_READ_RESERVATION_MS) return [];
+        const source = full.attempts.find(row => row.attemptId === context.sourceAttemptId);
+        if (source?.state !== 'acknowledged' || source.externalTurnId === null ||
+            full.results.some(result => result.attemptId === source.attemptId)) return [];
+        return [{ attemptId: source.attemptId, dueAt: timer.dueAt, dueMs }];
+      }).sort((left, right) => left.dueMs - right.dueMs);
+      return candidates.length === 0 ? null : {
+        attemptId: candidates[0]!.attemptId, dueAt: candidates[0]!.dueAt,
+      };
+    } catch {
+      return null;
+    }
   }
 
   #armFromAck(
@@ -550,6 +598,7 @@ export class ManagedContinuationService {
     const observed = await this.#kernel.probeFinal({
       taskId: timer.taskId, clientId, attemptId: source.attemptId,
       resultId: 'public-final:' + source.attemptId, completeTask: true,
+      readPriority: 'due',
     });
     if (observed.kind === 'exact_final') return 'ignored';
     // Retry-After, paced GETs and unknown transport are NOT verified absence
@@ -580,7 +629,8 @@ export class ManagedContinuationService {
         return 'deferred';
       } catch { /* Unavailable handoff never licenses a speculative POST. */ }
     }
-    if (observed.reason === 'backend-conversation-probe-paced') {
+    if (observed.reason === 'backend-conversation-probe-paced' ||
+        (observed.reason === 'backend-http-429' && observed.nextCheckAt != null)) {
       this.#rearmReadReview(timer, clientId, context, now, observed.nextCheckAt);
       return 'deferred';
     }
