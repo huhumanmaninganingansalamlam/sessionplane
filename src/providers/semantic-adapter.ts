@@ -177,7 +177,8 @@ export type SemanticVerification =
   | { readonly kind: 'verified_root_ack'; readonly conversationId: string;
       readonly externalTurnId: string; readonly messageId: string }
   | { readonly kind: 'exact_final'; readonly externalTurnId: string; readonly answerText: string }
-  | { readonly kind: 'pending' | 'unavailable'; readonly reason: string };
+  | { readonly kind: 'pending' | 'unavailable'; readonly reason: string;
+      readonly nextCheckAt?: string | null };
 /** Optional result-file channel. A provider name/URL is not a trusted output
  * path, and an advertised artifact capability is never itself a verified
  * download. The Core supplies its already durable FINAL identity.

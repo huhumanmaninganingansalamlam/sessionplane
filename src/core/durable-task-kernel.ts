@@ -36,12 +36,12 @@ export type RecoveryOutcome =
   | { readonly kind: 'unavailable'; readonly reason: string };
 export type FinalObservation =
   | { readonly kind: 'exact_final'; readonly externalTurnId: string; readonly answerText: string }
-  | { readonly kind: 'pending'; readonly reason?: string }
-  | { readonly kind: 'unavailable'; readonly reason: string };
+  | { readonly kind: 'pending'; readonly reason?: string; readonly nextCheckAt?: string | null }
+  | { readonly kind: 'unavailable'; readonly reason: string; readonly nextCheckAt?: string | null };
 export type FinalProbeOutcome =
   | { readonly kind: 'exact_final'; readonly result: ResultRecord }
-  | { readonly kind: 'pending'; readonly reason?: string }
-  | { readonly kind: 'unavailable'; readonly reason: string };
+  | { readonly kind: 'pending'; readonly reason?: string; readonly nextCheckAt?: string | null }
+  | { readonly kind: 'unavailable'; readonly reason: string; readonly nextCheckAt?: string | null };
 
 export interface ExactTaskProviderPort {
   readonly providerKey: string;

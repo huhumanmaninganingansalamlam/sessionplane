@@ -1009,9 +1009,14 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if (renderedFinal !== null) return renderedFinal;
     // A rate-limited canonical GET is deferred, not absent. Preserve its
     // nonterminal state while backend recovery enforces Retry-After.
+    // Expose the exact read fence only for a locally paced retry. The initial
+    // 429 keeps the established semantic result shape; its server evidence is
+    // journaled separately and never authorizes a continuation POST.
+    const pacing = final.reason === 'backend-conversation-probe-paced' &&
+      final.nextCheckAt !== null ? { nextCheckAt: final.nextCheckAt } : {};
     return final.kind === 'pending' || final.kind === 'deferred'
-      ? { kind: 'pending', reason: final.reason }
-      : { kind: 'unavailable', reason: final.reason };
+      ? { kind: 'pending', reason: final.reason, ...pacing }
+      : { kind: 'unavailable', reason: final.reason, ...pacing };
   }
 
   #rendererRecoveryReason(reason: string | null): boolean {

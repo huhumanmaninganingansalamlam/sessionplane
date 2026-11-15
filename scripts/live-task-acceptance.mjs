@@ -8,6 +8,8 @@
  * receives benign synthetic prompt submissions after --allow-live-send.
  *
  * Run phase=start then exit; phase=resume is a separate client process.
+ * Resume is valid after Core/browser/host replacement: durable Task/attempt and
+ * canonical conversation evidence is identity, not historical PID/target data.
  * Replaying a phase never generates new mutation IDs or re-sends an original.
  */
 import { randomBytes } from 'node:crypto';

@@ -77,6 +77,29 @@ test('an exact successor that adopted the preserved browser is a valid live cand
   assert.equal(report.installed.browserOwner, 'adopted');
 });
 
+test('historical PID, target and ownership replacement is not a live-candidate blocker', () => {
+  const observations = [{ kind: 'conversation', readyState: 'complete',
+    composerPresent: true, composerEditable: true, modelProVisible: true }];
+  const before = evaluateInstalledCandidate({
+    health: { ...health, browser: { ...health.browser, browserPid: 6639,
+      debuggingPort: 43865, ownership: 'adopted' } },
+    pages: [{ state: 'owned', targetId: 'old-target' }],
+    targets: [{ type: 'page', url: 'https://chatgpt.com/c/canonical', id: 'old-target' }],
+    observations, candidate,
+  });
+  const after = evaluateInstalledCandidate({
+    health: { ...health, browser: { ...health.browser, browserPid: 17005,
+      debuggingPort: 41351, ownership: 'spawned' } },
+    pages: [{ state: 'owned', targetId: 'replacement-target' }],
+    targets: [{ type: 'page', url: 'https://chatgpt.com/c/canonical', id: 'replacement-target' }],
+    observations, candidate,
+  });
+  assert.equal(before.outcome.candidateMatchesLiveCore, true);
+  assert.equal(after.outcome.candidateMatchesLiveCore, true);
+  assert.deepEqual(after.outcome.blockers, []);
+  assert.equal(after.installed.browserOwner, 'spawned');
+});
+
 test('live preflight fails closed on mismatched or missing source tree despite matching version and commit', () => {
   for (const badTree of ['c'.repeat(40), undefined, null]) {
     const report = evaluateInstalledCandidate({
@@ -91,6 +114,22 @@ test('live preflight fails closed on mismatched or missing source tree despite m
     assert.ok(report.outcome.blockers.includes('installed_core_source_not_verified_as_candidate'));
     assert.equal(report.installed.sourceMatchesCandidate, false);
   }
+});
+
+test('missing composer in an arbitrary bounded sample is diagnostic, not a mutation blocker', () => {
+  const report = evaluateInstalledCandidate({
+    health, pages: [{ state: 'owned' }], targets,
+    observations: [
+      { kind: 'root', readyState: 'loading', composerPresent: false },
+      { kind: 'conversation', readyState: 'complete', composerPresent: false,
+        composerEditable: false, modelProVisible: false },
+    ], candidate,
+  });
+  assert.equal(report.outcome.candidateMatchesLiveCore, true);
+  assert.deepEqual(report.outcome.blockers, []);
+  assert.deepEqual(report.outcome.warnings,
+    ['no_usable_authenticated_chatgpt_composer_sampled']);
+  assert.equal(report.outcome.mutationPerformed, false);
 });
 
 test('matching Core and Pro composer are compatible but a preflight never submits', () => {

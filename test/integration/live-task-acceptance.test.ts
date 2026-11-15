@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -201,6 +201,42 @@ test('start exits after one Task, resume verifies exact root ACK and three Main 
     assert.equal(f.records.size, 3);
     assert.equal(f.calls.filter(item => item.method === 'task.start').length, 3,
       'Resume must never create a fourth Task');
+  } finally { rmSync(f.dir, { recursive: true, force: true }); }
+});
+
+test('stale receipt after browser or host replacement reconciles completed turn without replay', async () => {
+  const f = makeFixture();
+  try {
+    const initial = await runLiveTaskAcceptance(options(f.dir, f.call, 'start'));
+    assert.equal(initial.status, 'owner_client_exited_after_initial');
+    const first = [...f.records.values()][0]!;
+    first.finished = true; // The durable Core completed while this runner was absent.
+
+    const statePath = join(f.dir, 'receipt', 'state.json');
+    const stale = JSON.parse(readFileSync(statePath, 'utf8'));
+    stale.tasks[0].lastState = 'uncertain';
+    stale.tasks[0].lastRevision = 49;
+    stale.tasks[0].resultSha256 = null;
+    writeFileSync(statePath, JSON.stringify(stale, null, 2) + '\n');
+
+    f.calls.length = 0; // Model a new process/browser/host lifetime.
+    const resumed = await runLiveTaskAcceptance(options(f.dir, f.call, 'resume'));
+    assert.equal(resumed.status, 'three_turns_canonical_final_verified');
+    assert.equal(f.records.size, 3);
+
+    const starts = f.calls.filter(item => item.method === 'task.start');
+    assert.equal(starts.length, 2,
+      'resume creates only turns 2 and 3; the completed first POST is never replayed');
+    const plan = JSON.parse(readFileSync(join(f.dir, 'receipt', 'plan.json'), 'utf8'));
+    assert.deepEqual(starts.map(item => item.params.requestId),
+      plan.tasks.slice(1).map((task: any) => task.requestId));
+    assert.equal(f.calls.some(item => item.method === 'task.start' &&
+      item.params.requestId === plan.tasks[0].requestId), false);
+
+    const repaired = JSON.parse(readFileSync(statePath, 'utf8'));
+    assert.equal(repaired.tasks[0].exactAnswerMatched, true);
+    assert.equal(repaired.tasks[0].providerConversationBindingVerified, true);
+    assert.equal(typeof repaired.tasks[0].resultSha256, 'string');
   } finally { rmSync(f.dir, { recursive: true, force: true }); }
 });
 

@@ -8,7 +8,12 @@ precedence over implementation convenience.
 
 - Never use the active tab, page title, recency, or page-array order as identity.
 - Never call `bringToFront()` in normal runtime code.
-- One core process owns one dedicated persistent Chrome profile.
+- At any instant, one core process owns one dedicated persistent Chrome profile.
+  A later Core, browser, or host restart may replace OS processes while durable
+  request, Task, attempt, conversation, and turn evidence remains authoritative.
+- OS PIDs, CDP ports, browser target IDs, and `spawned`/`adopted` ownership labels
+  are runtime diagnostics, not durable product identity or routine development/L3
+  gates. Pin them only inside an active handover critical section.
 - One session has one actor and one page has one mutation owner.
 - A client wait timeout never terminalizes a provider generation.
 - A submit with ambiguous acknowledgement is never retried automatically.
@@ -20,14 +25,15 @@ precedence over implementation convenience.
 
 ## Development
 
-- Start routine development only on the canonical `dev` branch, not on a new task
-  branch, worktree, or `main`. Check the current branch before editing and never discard existing work
-  to switch branches.
-- Publish development changes through `origin/dev` and promote release candidates
-  through a reviewed `dev` to `main` pull request with successful CI. Publication
-  access failures do not block authorized local fixes, installation or runtime checks.
-- `main` is the release line. Run release preflight and create version tags only
-  from a clean `main` matching `origin/main`. Never move a published release tag.
+- Work in the current checkout and preserve unrelated user work. Branch choice,
+  worktree layout, a dirty tree, and remote publication state must not block an
+  authorized local fix, test, runtime recovery, or acceptance continuation. Never
+  discard work merely to satisfy a branch convention.
+- Branch, review, clean-tree, provenance, and ancestry checks apply when publishing
+  commits, packages, tags, or releases. Use the repository's reviewed promotion
+  workflow for publication, but do not impose it on local development.
+- Create version tags and release artifacts only from the reviewed clean release
+  commit matching its remote. Never move a published release tag.
 - Runtime: Node.js 24, TypeScript, ESM.
 - Browser integration uses `playwright-core` only as the controller for an explicitly selected user-installed Chrome, Chromium, Edge, Brave, or custom Chromium-family executable. SessionPlane never downloads or installs a browser and never attaches to the user's personal/default profile.
 - SessionPlane launches the selected host browser itself with a positive
