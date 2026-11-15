@@ -83,6 +83,13 @@ export interface ChatGptSemanticAdapterOptions {
   /** Rebind to the current Core-owned auth context when a page is missing. */
   readonly backendClientProvider?: () => BackendJsonClient | Promise<BackendJsonClient>;
   readonly backendRecovery?: ChatGptBackendRecovery;
+  /** Read-only exact root target after the first POST changed an owned root into
+   * an identity-lost conversation candidate. This can never authorize an act. */
+  readonly resolveRootRecoveryPage?: (input: {
+    readonly context: SemanticTaskContext;
+    readonly conversationId: string;
+    readonly root: SemanticRootPostEvidence;
+  }) => Page | null | Promise<Page | null>;
   /** Quiet stability required before a rate-limited backend FINAL may use exact provider-rendered evidence. */
   readonly rendererRecoveryQuietWindowMs?: number;
   /** Synchronous durable callback on the exact page POST, before an ACK probe.
@@ -1021,15 +1028,26 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     prompt: string,
     backendReason: string | null,
   ): Promise<SemanticVerification | null> {
-    if (!this.#rendererRecoveryReason(backendReason) || context.pageLease === null ||
+    if (!this.#rendererRecoveryReason(backendReason) ||
         root.textHash !== sha(prompt.replaceAll('\r\n', '\n'))) return null;
-    let exact: { lease: OwnedPageIdentity; page: Page };
-    try { exact = await this.#exactPage(context); } catch { return null; }
+    let page: Page;
     try {
-      const url = new URL(exact.page.url());
+      if (context.pageLease !== null) {
+        page = (await this.#exactPage(context)).page;
+      } else {
+        const resolve = this.#options.resolveRootRecoveryPage;
+        if (!resolve) return null;
+        const recovered = await resolve({ context, conversationId, root });
+        if (recovered === null) return null;
+        this.#checkOrigin(recovered);
+        page = recovered;
+      }
+    } catch { return null; }
+    try {
+      const url = new URL(page.url());
       if (url.pathname !== `/c/${encodeURIComponent(conversationId)}` ||
           url.search !== '' || url.hash !== '') return null;
-      const dom = await observeChatGptDom(exact.page, {
+      const dom = await observeChatGptDom(page, {
         submittedUserMessageId: root.messageId,
         submittedUserTurnId: root.messageId,
       });

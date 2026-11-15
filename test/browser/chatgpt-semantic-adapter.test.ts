@@ -2443,7 +2443,7 @@ test('backend 429 recovers one exact root ACK and stable FINAL from provider-ren
     const rootContext: SemanticTaskContext = {
       projectId: lease.projectId, slotId: lease.slotId, slotRevision: lease.slotRevision,
       taskId: lease.taskId, providerConversationId: null,
-      submittedUserMessageId: null, submittedUserTurnId: null, pageLease: lease,
+      submittedUserMessageId: null, submittedUserTurnId: null, pageLease: null,
     };
     const rootPost = {
       requestConversationId: null, messageId: userId, parentMessageId: 'client-created-root',
@@ -2460,6 +2460,12 @@ test('backend 429 recovers one exact root ACK and stable FINAL from provider-ren
     const adapter = new ChatGptSemanticAdapter({
       isExactLease: value => value === lease,
       resolvePage: value => registry.pageForObservation(value.pageKey, value.bindingEpoch),
+      resolveRootRecoveryPage: input => {
+        assert.equal(input.context, rootContext);
+        assert.equal(input.conversationId, conversationId);
+        assert.deepEqual(input.root, rootPost);
+        return page;
+      },
       backendClient: client, backendOrigin: 'https://chatgpt.com',
       rendererRecoveryQuietWindowMs: 1,
     });
@@ -2485,6 +2491,7 @@ test('backend 429 recovers one exact root ACK and stable FINAL from provider-ren
     const bound: SemanticTaskContext = {
       ...rootContext, providerConversationId: conversationId,
       submittedUserMessageId: userId, submittedUserTurnId: userId,
+      pageLease: lease,
     };
     const firstFinal = await adapter.recover({ context: bound, kind: 'final' });
     assert.equal(firstFinal.kind, 'pending', 'first quiet sample cannot finalize');
