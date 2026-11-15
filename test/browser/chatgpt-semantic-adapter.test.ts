@@ -2413,6 +2413,92 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
   }
 });
 
+test('backend 429 recovers one exact root ACK and stable FINAL from provider-rendered turn evidence', {
+  timeout: 35_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-rendered-recovery-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'disposable-profile'), pageRegistry: registry, headless: true,
+  });
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    const page = created.page;
+    await page.route('https://chatgpt.com/**', route => route.fulfill({
+      contentType: 'text/html', body: '<main></main>',
+    }));
+    const conversationId = 'rendered-root-conversation';
+    const userId = 'rendered-root-user';
+    const assistantId = 'rendered-root-assistant';
+    const prompt = 'Exact rendered root question';
+    const answer = 'Exact rendered answer';
+    await page.goto('https://chatgpt.com/c/' + conversationId);
+    const currentBinding = registry.refreshPage(created.binding.pageKey);
+    const lease: OwnedPageIdentity = {
+      projectId: 'project-rendered', slotId: 'main', slotRevision: 1,
+      taskId: 'task-rendered', pageKey: currentBinding.pageKey,
+      targetId: currentBinding.targetId!, bindingEpoch: currentBinding.bindingEpoch,
+    };
+    const rootContext: SemanticTaskContext = {
+      projectId: lease.projectId, slotId: lease.slotId, slotRevision: lease.slotRevision,
+      taskId: lease.taskId, providerConversationId: null,
+      submittedUserMessageId: null, submittedUserTurnId: null, pageLease: lease,
+    };
+    const rootPost = {
+      requestConversationId: null, messageId: userId, parentMessageId: 'client-created-root',
+      textHash: digest(prompt), observedAt: new Date(0).toISOString(),
+    };
+    let reads = 0;
+    const client: BackendJsonClient = { async get(url) {
+      reads++;
+      if (url.endsWith('/api/auth/session')) {
+        return { status: 200, headers: {}, body: { accessToken: 'rendered-recovery-token' } };
+      }
+      return { status: 429, headers: { 'retry-after': '60' }, body: null };
+    } };
+    const adapter = new ChatGptSemanticAdapter({
+      isExactLease: value => value === lease,
+      resolvePage: value => registry.pageForObservation(value.pageKey, value.bindingEpoch),
+      backendClient: client, backendOrigin: 'https://chatgpt.com',
+      rendererRecoveryQuietWindowMs: 1,
+    });
+    const userOnly = '<main><div data-chatgpt-search-unit-key="fallback-turn-0:0:user" ' +
+      'data-chatgpt-search-message-ids="' + userId + '"><div data-user-message-bubble>' +
+      prompt + '</div></div><div id="prompt-textarea" contenteditable="true"></div></main>';
+    await page.setContent(userOnly);
+    assert.deepEqual(await adapter.recover({
+      context: rootContext, kind: 'ack', prompt, rootPost,
+      candidateConversationId: conversationId,
+    }), { kind: 'pending', reason: 'backend-http-429' },
+    'an optimistic exact user bubble alone is never an ACK');
+    await page.setContent(userOnly.replace('</main>',
+      '<div data-chatgpt-search-unit-key="fallback-turn-0:2:assistant" ' +
+      'data-chatgpt-search-message-ids="' + assistantId + ' ' + assistantId + '">' +
+      '<div data-chatgpt-selection-message-id="' + assistantId + '">' + answer +
+      '</div></div></main>'));
+    assert.deepEqual(await adapter.recover({
+      context: rootContext, kind: 'ack', prompt, rootPost,
+      candidateConversationId: conversationId,
+    }), { kind: 'verified_root_ack', conversationId,
+      externalTurnId: userId, messageId: userId });
+    const bound: SemanticTaskContext = {
+      ...rootContext, providerConversationId: conversationId,
+      submittedUserMessageId: userId, submittedUserTurnId: userId,
+    };
+    const firstFinal = await adapter.recover({ context: bound, kind: 'final' });
+    assert.equal(firstFinal.kind, 'pending', 'first quiet sample cannot finalize');
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.deepEqual(await adapter.recover({ context: bound, kind: 'final' }), {
+      kind: 'exact_final', externalTurnId: userId, answerText: answer,
+    });
+    assert.equal(reads, 2, 'renderer recovery honors the backend 429 cooldown without another GET');
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('canonical ACK and FINAL recovery works read-only without a page or foreground activation', async () => {
   const cid = 'conversation-b', prompt = 'Exact question', userId = 'user-b', userTurn = 'turn-b';
   const user = { id: userId, turn_id: userTurn, author: { role: 'user' }, content: { parts: [prompt] } };
