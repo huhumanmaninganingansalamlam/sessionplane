@@ -28,8 +28,6 @@ export class PublicTaskPreparationService {
   readonly #pages: PageRegistry;
   readonly #pageBindings: PageBindingRepository | undefined;
   readonly #chatgptUrl: string;
-  #lastScannedTaskId: string | null = null;
-  #preferBoundTask = false;
 
   constructor(input: {
     repository: TaskKernelRepository;
@@ -56,19 +54,15 @@ export class PublicTaskPreparationService {
     }
     // An existing canonical Main requires a safely owned page just as a new
     // root does. Alternate preparation classes to avoid starving either one.
-    const preferBoundTask = this.#preferBoundTask;
-    this.#preferBoundTask = !preferBoundTask;
+    const preferBoundTask = this.#repository.claimPublicPreparationPrefersBound();
     if (preferBoundTask) {
       const bound = await this.#prepareBoundConversation();
       if (bound.kind !== 'none') return bound;
     }
-    // Keyset rotation is fair to other projects even if an earlier Task
-    // remains on its already reserved root. The cursor owns no lifecycle.
-    let pending = this.#repository.listPendingPublicPreparations(
-      1, this.#lastScannedTaskId)[0];
-    if (!pending) pending = this.#repository.listPendingPublicPreparations(1)[0];
+    // The root cursor survives Core restart. Selecting one candidate does
+    // not allocate a tab, POST or authorize a provider action.
+    const pending = this.#repository.listPendingPublicPreparations(1)[0];
     if (!pending) return await this.#prepareBoundConversation();
-    this.#lastScannedTaskId = pending.taskId;
     if (pending.providerKey !== 'chatgpt') {
       return { kind: 'waiting', taskId: pending.taskId };
     }
@@ -178,7 +172,7 @@ export class PublicTaskPreparationService {
    * A live foreign/ambiguous target is held rather than adopted or navigated.
    */
   async #prepareBoundConversation(): Promise<PreparationReport> {
-    for (const planned of this.#repository.listPendingPublicInitials(8)) {
+    for (const planned of this.#repository.listPendingPublicBoundPreparations(8)) {
       const { taskId, clientId, attemptId } = planned;
       const task = this.#repository.getTask(taskId, clientId);
       const slot = this.#repository.getSlot(task.projectId, task.slotId, clientId);

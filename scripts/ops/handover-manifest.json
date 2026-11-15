@@ -3,8 +3,8 @@
   "manifestVersion": 2,
   "validationContract": "sessionplane-candidate-acceptance-v1",
   "schemaTransition": {
-    "from": 8,
-    "to": 15
+    "from": 15,
+    "to": 16
   },
   "requiredGates": [
     "typecheck",

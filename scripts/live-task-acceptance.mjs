@@ -266,7 +266,13 @@ async function acceptOneTask({ plan, state, index, call, receiptDir, limitMs, wa
           summary.decision?.decisionId === previous.decision?.decisionId) break;
       continue;
     }
-    if (summary.state !== 'working') break;
+    // A dispatched request with an uncertain canonical ACK is still owned
+    // by the Core. Attach only to its durable revision; the Core may recover
+    // a rate-limited ACK without ever sending the original again. Never turn
+    // a cancel/Stop uncertainty into a new submission or decision.
+    const awaitingCanonicalAck = summary.state === 'uncertain' &&
+      summary.submission?.attempted === true && summary.cancelRequested !== true;
+    if (summary.state !== 'working' && !awaitingCanonicalAck) break;
     summary = await call('task.wait', {
       clientId: plan.clientId, taskId: row.taskId,
       afterRevision: summary.revision,

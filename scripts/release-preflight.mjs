@@ -28,6 +28,18 @@ if (documentedVersion !== version) {
     `documented release install version ${documentedVersion ?? '(missing)'} does not match package version ${version}`,
   );
 }
+const packageLock = JSON.parse(
+  readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
+const lockRoot = packageLock.packages?.[''];
+if (packageLock.name !== packageJson.name ||
+    packageLock.version !== version ||
+    lockRoot?.name !== packageJson.name ||
+    lockRoot?.version !== version) {
+  throw new Error(
+    'package-lock root identity/version does not match package.json',
+  );
+}
+
 if (process.argv.includes('--emit-build-identity')) {
   // The artifact identifies its source without embedding the hash of its own tarball.
   // In a copied test checkout without .git, report unknown instead of guessing.

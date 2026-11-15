@@ -537,7 +537,12 @@ export class SemanticDecisionGateway {
        (original.packet.reason === 'managed-continuation-safe-send-unavailable' &&
         originalAttempt.kind === 'continuation' && originalAttempt.state === 'planned') ||
        (original.packet.reason === 'managed-continuation-later-user-boundary' &&
-        originalAttempt.kind === 'initial' && originalAttempt.state === 'acknowledged'));
+        originalAttempt.kind === 'initial' && originalAttempt.state === 'acknowledged') ||
+       // The fifth-slot 429 packet has no executable provider option. Only an
+       // explicit agent read-only refresh can release its durable hold.
+       (original.packet.reason === 'canonical-final-rate-limit-persistent' &&
+        (originalAttempt.kind === 'initial' || originalAttempt.kind === 'continuation') &&
+        originalAttempt.state === 'acknowledged'));
     const transientModelRace =
       original.packet.kind === 'adapter_unsupported' &&
       original.packet.reason === 'semantic-observation-superseded-by-page-operation' &&

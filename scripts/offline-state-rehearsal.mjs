@@ -280,7 +280,9 @@ function assertOriginalFacts(db, expected, label) {
   }
 }
 
-function assertOriginalRowsRetained(sourceDb, candidateDb, tableName, label) {
+function assertOriginalRowsRetained(
+  sourceDb, candidateDb, tableName, label, allowSchedulerPositionChanges = false,
+) {
   const sourceColumns = sourceDb.prepare('PRAGMA table_info(' + quote(tableName) + ')').all();
   const candidateColumns = new Set(candidateDb.prepare(
     'PRAGMA table_info(' + quote(tableName) + ')').all().map(column => String(column.name)));
@@ -307,7 +309,11 @@ function assertOriginalRowsRetained(sourceDb, candidateDb, tableName, label) {
   for (const sourceRow of sourceRows.iterate()) {
     const key = primaryKey.map(column => sourceRow[String(column.name)]);
     const candidateRow = lookup.get(...key);
-    if (!candidateRow || canonicalRow(candidateRow) !== canonicalRow(sourceRow)) {
+    // Cursor positions and preparation phase are scheduling hints, not
+    // submission evidence. Their values advance under normal Core operation,
+    // but the original primary-key identities must still be present.
+    if (!candidateRow || (!allowSchedulerPositionChanges &&
+        canonicalRow(candidateRow) !== canonicalRow(sourceRow))) {
       throw new Error(label + ' changed or removed a source row: ' + tableName);
     }
   }
@@ -323,13 +329,20 @@ function assertRollbackCandidate(candidateDb, sourceDb, manifest, label) {
     if (retained && retained.count === original.count && retained.sha256 === original.sha256) {
       continue;
     }
-    // During an exact-package refresh (for example schema 15 -> 15), the
-    // isolated successor is expected to add Task/attempt/result evidence to
-    // pre-existing kernel tables. Prove every source row is still byte-exact,
-    // but permit only additive changes in those durable evidence tables.
-    if (manifest.sourceSchemaVersion === manifest.schemaVersion &&
-        original.name.startsWith('kernel_')) {
-      assertOriginalRowsRetained(sourceDb, candidateDb, original.name, label);
+    // Both an equal-schema refresh and an additive schema transition can
+    // accumulate exact Task/attempt/result evidence after migration. For an
+    // existing durable kernel table, permit only additional rows while
+    // verifying every original primary-keyed row remains byte-exact. The
+    // original legacy/session/outbox tables still require full table hashes.
+    // A table without provable source primary keys fails closed.
+    if (original.name.startsWith('kernel_')) {
+      // Only these two bounded scheduler metadata tables can update their
+      // position fields. All Task, attempt, result, and submission evidence
+      // remains byte-exact by original primary key.
+      const mutableSchedulerPosition = original.name === 'kernel_public_scan_cursors' ||
+        original.name === 'kernel_public_preparation_phase';
+      assertOriginalRowsRetained(sourceDb, candidateDb, original.name, label,
+        mutableSchedulerPosition);
       continue;
     }
     throw new Error(label + ' does not match source manifest: ' + original.name);

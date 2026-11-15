@@ -15,6 +15,7 @@ import { TaskKernelRepository, type AttemptSessionBindingRecord } from '../stora
 import type { PageBindingRepository } from '../storage/page-binding-repository.ts';
 import { DurableTaskKernel, type ExactSendIntent } from './durable-task-kernel.ts';
 import { SemanticDecisionGateway } from './semantic-decision-gateway.ts';
+import { SemanticTaskArtifactReader } from './semantic-task-artifact-reader.ts';
 import { ManagedContinuationService } from './managed-continuation.ts';
 import { PublicTaskPreparationService } from './public-task-preparation.ts';
 import { SemanticExactTaskPort } from './semantic-exact-task-port.ts';
@@ -25,6 +26,7 @@ export interface SemanticCoreRuntime {
   readonly repository: TaskKernelRepository;
   readonly kernel: DurableTaskKernel;
   readonly decisionGateway: SemanticDecisionGateway;
+  readonly artifactReader: SemanticTaskArtifactReader;
   readonly managedContinuation: ManagedContinuationService;
   readonly bindAttemptSession: (input: {
     taskId: string; clientId: string; attemptId: string;
@@ -768,6 +770,7 @@ export function createSemanticCoreRuntime(input: {
       });
     },
   });
+  const artifactReader = new SemanticTaskArtifactReader({ repository, providers });
   return { providers, repository, kernel, managedContinuation,
-    decisionGateway, bindAttemptSession };
+    decisionGateway, artifactReader, bindAttemptSession };
 }

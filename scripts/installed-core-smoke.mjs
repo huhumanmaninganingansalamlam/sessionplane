@@ -286,7 +286,7 @@ try {
 
 
 /** Exercise the compiled, installed modules, never a TS unit-test import.
- * Both scenarios are clock-accelerated in disposable SQLite; no real provider
+ * All continuation scenarios are clock-accelerated in disposable SQLite; no real provider
  * POST, Chrome, profile, or operational Core participates.
  */
 async function verifyInstalledContinuation(moduleAt, work) {
@@ -304,8 +304,11 @@ async function verifyInstalledContinuation(moduleAt, work) {
   const store = new TaskKernelRepository(db, () => new Date(nowMs).toISOString());
   const pending = new Set(['initial:no-final', 'initial:rate-limited']);
   const rateLimited = new Set(['initial:rate-limited']);
+  const paced = new Set();
   const ready = new Set();
   const sends = [];
+  const finalReads = [];
+  const reviews = [];
   const provider = {
     providerKey: 'compiled-fixture',
     async preflight() { return { kind: 'ready' }; },
@@ -315,8 +318,12 @@ async function verifyInstalledContinuation(moduleAt, work) {
     },
     async recoverAck() { return { kind: 'unavailable', reason: 'fixture-no-recovery' }; },
     async observeFinal(query) {
+      finalReads.push(query.attemptId);
       if (rateLimited.has(query.attemptId)) {
         return { kind: 'pending', reason: 'backend-http-429' };
+      }
+      if (paced.has(query.attemptId)) {
+        return { kind: 'pending', reason: 'backend-conversation-probe-paced' };
       }
       if (pending.has(query.attemptId) ||
           (query.attemptId.startsWith('managed-continuation:') && !ready.has(query.attemptId))) {
@@ -331,6 +338,18 @@ async function verifyInstalledContinuation(moduleAt, work) {
   const kernel = new DurableTaskKernel(store, [provider]);
   const service = new ManagedContinuationService({
     repository: store, kernel, now: () => new Date(nowMs),
+    requestAgentReview: async input => {
+      reviews.push(input);
+      store.requireDecision({
+        taskId: input.taskId, clientId: input.clientId,
+        decisionId: 'installed-review:' + input.attemptId, audience: 'agent',
+        contextJson: JSON.stringify({
+          kind: 'semantic_action', attemptId: input.attemptId,
+          packet: { reason: input.cause === 'persistent_backend_read_throttle'
+            ? 'canonical-final-rate-limit-persistent' : 'other-agent-review' },
+        }),
+      });
+    },
   });
   const projectId = 'installed-continuation-project';
   try {
@@ -400,10 +419,145 @@ async function verifyInstalledContinuation(moduleAt, work) {
     assert.equal((await service.tick()).dispatchesAttempted, 1);
     assert.deepEqual(sends.filter(send => send.taskId === rateTask)
       .map(send => send.kind), ['initial', 'continuation']);
+    ready.add('managed-continuation:initial:rate-limited');
+    nowMs += 1_000;
+    await service.tick();
+    assert.equal(store.getTask(rateTask, clientId).state, 'completed');
+
+    const sustainedRate = await prepare('sustained-rate-limited', 'sustained-rate');
+    rateLimited.add('initial:sustained-rate-limited');
+    const reviewsBefore = reviews.length;
+    for (let slot = 1; slot < 5; slot++) {
+      nowMs += CONTINUATION_INTERVAL_MS;
+      assert.equal((await service.tick()).dispatchesAttempted, 0);
+      assert.equal(reviews.length, reviewsBefore,
+        'installed JS must hold the first four blocked slots without agent review');
+      assert.equal(store.getTask(sustainedRate, clientId).state, 'working');
+      assert.equal(sends.filter(send => send.taskId === sustainedRate).length, 1);
+    }
+    nowMs += CONTINUATION_INTERVAL_MS;
+    assert.equal((await service.tick()).dispatchesAttempted, 0);
+    assert.deepEqual(reviews.slice(reviewsBefore).map(review => review.cause),
+      ['persistent_backend_read_throttle']);
+    assert.equal(store.getTask(sustainedRate, clientId).state, 'agent_input_required');
+    assert.equal(store.getFullTask(sustainedRate, clientId).attempts.length, 1);
+    assert.equal(sends.filter(send => send.taskId === sustainedRate).length, 1);
+    // An explicit agent read-only release must not immediately regenerate
+    // the same rate-limit decision from events before that durable receipt.
+    store.resolveDecision({
+      taskId: sustainedRate, clientId,
+      decisionId: 'installed-review:initial:sustained-rate-limited',
+      resolutionJson: JSON.stringify({ kind: 'read_only_refresh',
+        requestId: 'installed-rate-review-refresh' }),
+    });
+    rateLimited.delete('initial:sustained-rate-limited');
+    paced.add('initial:sustained-rate-limited');
+    nowMs += 1_000;
+    await service.tick();
+    assert.equal(store.getTask(sustainedRate, clientId).state, 'working');
+    nowMs += CONTINUATION_INTERVAL_MS;
+    await service.tick();
+    assert.equal(store.getTask(sustainedRate, clientId).state, 'working');
+    assert.deepEqual(reviews.filter(r => r.taskId === sustainedRate).map(r => r.cause),
+      ['persistent_backend_read_throttle'], 'resolved 429 cannot escalate itself');
+    const persistent429ExtraPosts = sends.filter(send => send.taskId === sustainedRate).length - 1;
+    assert.equal(persistent429ExtraPosts, 0);
+
+    // Exercise fair scanning of the actual compiled modules in a disposable
+    // database. All twelve distinct public Tasks have confirmed initial ACKs
+    // but no exact FINAL, and their identical observations are deduplicated.
+    const fairAttemptIds = [];
+    const sendsBeforeFairTasks = sends.length;
+    for (let index = 0; index < 12; index++) {
+      const name = 'fair-' + String(index).padStart(2, '0');
+      const taskId = 'task:' + name;
+      const attemptId = 'initial:' + name;
+      const slotId = 'slot:' + name;
+      store.openSlot({
+        projectId, slotId, roleKey: slotId, providerKey: provider.providerKey, clientId,
+      });
+      store.startTask({
+        taskId, projectId, slotId, clientId, requestId: 'request:' + name,
+        expectedSlotRevision: 1, prompt: 'Fixture question ' + name,
+      });
+      store.observeConversation({
+        projectId, slotId, clientId, taskId,
+        expectedRevision: 1, providerConversationId: 'conversation:' + name,
+      });
+      store.planAttempt({
+        taskId, clientId, attemptId, kind: 'initial',
+        turnKey: 'original', content: 'Fixture question ' + name,
+      });
+      db.raw.prepare(
+        'INSERT INTO kernel_public_task_policies' +
+        '(task_id,policy_json,input_sha256,accepted_revision,created_at)' +
+        ' VALUES(?,?,?,?,?)',
+      ).run(taskId, JSON.stringify({ enabled: false }),
+        'compiled-fixture-hash', 1, new Date(nowMs).toISOString());
+      pending.add(attemptId);
+      await kernel.dispatch(taskId, clientId, attemptId);
+      fairAttemptIds.push(attemptId);
+    }
+    assert.equal(sends.length - sendsBeforeFairTasks, 12, 'one initial send per fixture Task');
+    for (let scan = 0; scan < 4; scan++) {
+      nowMs += 1_000;
+      // Each tick uses a newly constructed installed Core scheduler. The
+      // cursor must be recovered from SQLite, not from an instance field.
+      const restartedScanner = new ManagedContinuationService({
+        repository: store, kernel, now: () => new Date(nowMs),
+      });
+      try { await restartedScanner.tick(); } finally { await restartedScanner.close(); }
+    }
+    const fairReadCounts = fairAttemptIds.map(attemptId =>
+      finalReads.filter(id => id === attemptId).length);
+    assert.ok(fairReadCounts.every(count => count >= 2),
+      'compiled FINAL scanner must revisit all twelve pending Tasks: ' +
+      JSON.stringify(fairReadCounts));
+    assert.equal(sends.length - sendsBeforeFairTasks, 12,
+      'repeated read-only scans cannot submit continuations');
+
+    // The installed cursor also covers browser *preparation*, which must not
+    // silently choose the first Task again after every new Core instance.
+    const prepIds = [];
+    const sendsBeforePreparation = sends.length;
+    for (let index = 0; index < 12; index++) {
+      const name = 'prepare-' + String(index).padStart(2, '0');
+      const taskId = 'task:' + name;
+      const slotId = 'slot:' + name;
+      store.openSlot({ projectId, slotId, roleKey: slotId, clientId,
+        providerKey: provider.providerKey });
+      store.startTask({ taskId, projectId, slotId, clientId,
+        requestId: 'request:' + name, expectedSlotRevision: 1,
+        prompt: 'Fixture question ' + name });
+      store.planAttempt({ taskId, clientId, attemptId: 'initial:' + name,
+        kind: 'initial', turnKey: 'original', content: 'Fixture question ' + name });
+      db.raw.prepare(
+        'INSERT INTO kernel_public_task_policies' +
+        '(task_id,policy_json,input_sha256,accepted_revision,created_at)' +
+        ' VALUES(?,?,?,?,?)',
+      ).run(taskId, JSON.stringify({ enabled: false }),
+        'compiled-fixture-hash', 1, new Date(nowMs).toISOString());
+      prepIds.push(taskId);
+    }
+    const chosen = [];
+    for (let index = 0; index < prepIds.length; index++) {
+      const restartedRepo = new TaskKernelRepository(db, () => new Date(nowMs).toISOString());
+      assert.equal(restartedRepo.claimPublicPreparationPrefersBound(), index % 2 === 1);
+      chosen.push(restartedRepo.listPendingPublicPreparations(1)[0]?.taskId);
+    }
+    assert.deepEqual(chosen, prepIds,
+      'installed JS must persist fair browser preparation across Core instances');
+    assert.equal(sends.length, sendsBeforePreparation,
+      'prepared-only synthetic Tasks cannot send any provider action');
     return {
       installedNoFinal20MinuteContinue: true,
       installedExactFinalStopsContinuation: true,
       installed429NeverLicensesContinue: true,
+      installedPersistent429FifthSlotAgentReview: true,
+      installedPersistent429ReviewResumesOnce: true,
+      installedPersistent429ExtraPosts: persistent429ExtraPosts,
+      installedPublicFinalFairRotation: true,
+      installedPublicPreparationFairRotation: true,
     };
   } finally {
     await service.close();

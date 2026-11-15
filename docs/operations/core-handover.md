@@ -3,7 +3,7 @@
 This procedure replaces one running, same-user SessionPlane Core without closing
 the dedicated Chrome profile. It is the supported path for the production
 SQLite transition declared by `scripts/ops/handover-manifest.json` (currently
-schema 8 to schema 15). It never treats a package version string as source
+schema 15 to schema 16). It never treats a package version string as source
 identity and never starts two Cores against one profile or database.
 
 ## Safety contract
@@ -16,13 +16,19 @@ then invokes `system.maintenance.commit`. That RPC closes SQLite and exits the
 Core without calling browser shutdown. Ordinary `SIGTERM`, `SIGINT`, process
 group signals, Chrome signals, and profile-lock deletion are not used.
 
+The checked-in handover policy describes the *next development candidate*
+(15 -> 16); it is not a deployment order or an acceptance receipt. Never use
+an old 8 -> 15 manifest against the installed schema-15 Core, and never
+bypass clean source, tarball, all required acceptance gates, exact handover
+identity, and review just because the policy names the new schema.
+
 The exact user systemd unit must own the old PID and use `Restart=no`. The same
 unit is started after package and database promotion, so the successor is not an
 unmanaged background process. The successor must adopt the same Chrome PID,
 profile and CDP port.
 
 A later exact-package refresh may declare an equal source and target schema
-(for example 15 to 15). It still runs the same WAL-consistent copy, evidence-first
+(for example 16 to 16). It still runs the same WAL-consistent copy, evidence-first
 rollback rehearsal, raw DB archive, systemd ownership and browser-adoption checks;
 it is not a shortcut around the handover contract.
 
@@ -37,18 +43,24 @@ a separate restored original.
 
 After the exact old Core exits, the helper repeats migration from the now-static
 production database. The original raw DB/WAL/SHM files are moved into a private
-archive. A copy of the sealed schema-15 candidate is atomically renamed into the
+archive. A copy of the sealed schema-16 candidate is atomically renamed into the
 live DB path; the sealed migration candidate and source snapshot remain beside
 their manifest.
 
 If the new Core exits before readiness, rollback uses the schema-15 package to
 retain the live candidate as `post-migration-evidence.sqlite`, archives its raw
-DB/WAL/SHM files, restores a schema-8 copy, restores the old package, and starts
+DB/WAL/SHM files, restores a schema-15 copy, restores the old package, and starts
 the same systemd unit once. A live but unhealthy successor is preserved and
 blocks automatic rollback. Never kill it or launch another Core to force a green
 result.
 
 ## Build and bind an exact bundle
+
+Bundle verification reads the *installed candidate's compiled migration registry*
+and requires its highest schema version to match the policy target (16). A
+version label, Git commit label, or edited policy alone cannot establish schema
+compatibility; a mismatch aborts bundle construction without accessing the live
+Core or database.
 
 The committed `handover-manifest.json` is a policy, not a stale package receipt.
 After committing a clean `dev` candidate and obtaining a successful
@@ -59,7 +71,7 @@ and materialize an exact bundle:
 npm pack --silent --pack-destination /absolute/package-dir
 python3 scripts/ops/handover.py bundle \
   --policy scripts/ops/handover-manifest.json \
-  --package /absolute/package-dir/sessionplane-0.4.93.tgz \
+  --package /absolute/package-dir/sessionplane-CANDIDATE_VERSION.tgz \
   --acceptance /absolute/candidate-acceptance.json \
   --rollback-install /home/USER/.nvm/versions/node/VERSION/lib/node_modules/sessionplane \
   --destination /absolute/private-handover-bundle
@@ -110,7 +122,7 @@ The mutating order is fixed:
 4. Acquire the old Core maintenance fence and prove drain/identity twice.
 5. Commit the exact old Core only; prove Chrome is still the same process.
 6. Migrate the final static DB, archive old DB/WAL/SHM, promote package and DB.
-7. Start the same systemd unit and verify the exact candidate commit/tree, schema 15, adopted Chrome, sentinel, request hashes, bindings and sole DB holder.
+7. Start the same systemd unit and verify the exact candidate commit/tree, schema 16, adopted Chrome, sentinel, request hashes, bindings and sole DB holder.
 
 An issued receipt is never reused blindly. Preserve every migration, archive,
 rollback and process-phase file.
@@ -120,11 +132,11 @@ rollback and process-phase file.
 `result.json` is a cutover receipt only when all of these hold:
 
 - old and new Core PIDs differ, and the new PID is the systemd unit MainPID;
-- health reports the bundle commit/tree as clean and schema 15;
+- health reports the bundle commit/tree as clean and schema 16;
 - Chrome PID/start ticks, profile and CDP port are unchanged, with ownership `adopted`;
 - the sentinel request/anchor, every pre-existing request hash and binding identity are preserved;
 - full SQLite integrity and foreign keys passed on source snapshot and candidate;
-- the schema-8 source snapshot and raw DB/WAL/SHM archive remain available;
+- the schema-15 source snapshot and raw DB/WAL/SHM archive remain available;
 - only the new Core holds SQLite locks; and
 - the installed six-tool public catalog matches the accepted package.
 

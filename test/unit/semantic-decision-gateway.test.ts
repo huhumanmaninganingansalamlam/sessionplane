@@ -250,6 +250,41 @@ test('persistent canonical 429 creates a reasoned, agent-first decision on the o
   }))?.decisionId, packet?.decisionId, 'repeat scans preserve the pending decision');
 });
 
+test('persistent 429 review can be explicitly reobserved after restart without any provider action', async t => {
+  const env = fixture(t);
+  const initial = env.getGateway(new FakeSemanticAdapter(env.store));
+  const packet = await initial.requireNoProgressReview({
+    taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+    cause: 'persistent_backend_read_throttle',
+  });
+  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  env.reopen();
+  const adapter = new FakeSemanticAdapter(env.store);
+  adapter.mode = 'none';
+  const resumed = env.getGateway(adapter);
+  await assert.rejects(() => resumed.decideCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: packet!.decisionId,
+    requestId: 'forged-action', actionRef: 'invented-provider-action',
+  }), /stale|option|decision/i);
+  const refresh = {
+    taskId: 'task-1', clientId: 'alice', decisionId: packet!.decisionId,
+    requestId: 'explicit-read-only-review',
+  };
+  assert.deepEqual(await resumed.refreshCurrent(refresh),
+    { kind: 'refresh_required', packet: null });
+  assert.equal(env.store.getTask('task-1', 'alice').state, 'working');
+  assert.equal(env.store.getTask('task-1', 'alice').pendingDecisionId, null);
+  assert.deepEqual(await resumed.refreshCurrent(refresh),
+    { kind: 'refresh_required', packet: null }, 'replayed receipt is read-only');
+  await assert.rejects(() => resumed.refreshCurrent({
+    ...refresh, requestId: 'another-agent-request',
+  }), /different request|stale/i);
+  assert.equal(adapter.clicks, 0);
+  assert.equal(env.store.getFullTask('task-1', 'alice').attempts.length, 1);
+  assert.equal(env.store.getFullTask('task-1', 'alice').attempts[0]!.state, 'acknowledged');
+  assert.equal(env.store.getFullTask('task-1', 'alice').results.length, 0);
+});
+
 test('unanswered continuation creates durable agent review; refresh is read-only and late FINAL completes', async t => {
   const env = fixture(t);
   env.store.planAttempt({

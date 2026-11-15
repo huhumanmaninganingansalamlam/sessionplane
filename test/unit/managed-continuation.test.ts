@@ -22,6 +22,9 @@ class FakeProvider implements ExactTaskProviderPort {
   readonly blocked = new Set<string>();
   readonly pendingInitialFinals = new Set<string>();
   readonly readyContinuationFinals = new Set<string>();
+  readonly observedFinalAttemptIds: string[] = [];
+  readonly preflightAttemptIds: string[] = [];
+  readonly recoveredAckAttemptIds: string[] = [];
   readonly unavailableFinals = new Set<string>();
   readonly pending429Finals = new Set<string>();
   readonly pacedFinals = new Set<string>();
@@ -29,6 +32,7 @@ class FakeProvider implements ExactTaskProviderPort {
   async preflight(intent: ExactSendIntent): Promise<
     { kind: 'ready' } | { kind: 'unavailable'; reason: string }
   > {
+    this.preflightAttemptIds.push(intent.attemptId);
     return this.blocked.has(intent.taskId)
       ? { kind: 'unavailable', reason: 'fixture-provider-streaming' }
       : { kind: 'ready' };
@@ -37,10 +41,12 @@ class FakeProvider implements ExactTaskProviderPort {
     this.sends.push(intent);
     return { kind: 'verified_ack', externalTurnId: 'turn:' + intent.attemptId };
   }
-  async recoverAck(_query: ExactTurnQuery): Promise<RecoveryOutcome> {
+  async recoverAck(query: ExactTurnQuery): Promise<RecoveryOutcome> {
+    this.recoveredAckAttemptIds.push(query.attemptId);
     return { kind: 'unavailable', reason: 'fake-no-backend' };
   }
   async observeFinal(query: ExactTurnQuery): Promise<FinalObservation> {
+    this.observedFinalAttemptIds.push(query.attemptId);
     if (this.unavailableFinals.has(query.attemptId)) {
       return { kind: 'unavailable', reason: 'fixture-backend-http-429' };
     }
@@ -64,6 +70,7 @@ class FakeProvider implements ExactTaskProviderPort {
 }
 
 const START = Date.parse('2026-11-12T00:00:00.000Z');
+const PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT = 5;
 
 function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), 'sessionplane-managed-continuation-'));
@@ -123,6 +130,7 @@ function fixture(t: TestContext) {
   return {
     fake, startTask, ack, createService, seedPublicPolicy, seedModelIntent,
     get store() { return store; },
+    get database() { return database; },
     get kernel() { return kernel; },
     get now() { return current; },
     set now(value: number) { current = value; },
@@ -312,7 +320,233 @@ test('a paced 429 FINAL probe never licenses a speculative 20-minute Continue PO
   assert.equal(env.fake.sends.length, 2);
 });
 
-test('public FINAL sustained 429/pacing creates a durable agent decision without continuation approval', async t => {
+test('pending unbound root POSTs recover ACK fairly across a sixteen-slot limit', async t => {
+  const env = fixture(t);
+  const ids = Array.from({ length: 18 }, (_, index) => 'root-ack-' + String(index).padStart(2, '0'));
+  for (const taskId of ids) {
+    env.store.openSlot({
+      projectId: 'project', slotId: 'slot-' + taskId, clientId: 'alice',
+      roleKey: 'slot-' + taskId, providerKey: env.fake.providerKey,
+    });
+    env.store.startTask({
+      taskId, projectId: 'project', slotId: 'slot-' + taskId,
+      clientId: 'alice', requestId: 'request:' + taskId,
+      expectedSlotRevision: 1, prompt: 'Question ' + taskId,
+    });
+    const attemptId = 'initial:' + taskId;
+    env.store.planAttempt({
+      taskId, clientId: 'alice', attemptId,
+      kind: 'initial', turnKey: 'original', content: 'Question ' + taskId,
+    });
+    env.seedPublicPolicy(taskId);
+    env.store.beginDispatch(taskId, 'alice', attemptId);
+    env.store.recordRootPost({
+      taskId, clientId: 'alice', attemptId,
+      evidence: {
+        sessionId: 'session-' + taskId, generation: 1,
+        pageKey: 'owned-' + taskId, targetId: 'target-' + taskId,
+        bindingEpoch: 1, messageId: 'message-' + taskId,
+        parentMessageId: 'parent-' + taskId,
+        textHash: createHash('sha256').update('Question ' + taskId).digest('hex'),
+        observedAt: new Date(env.now).toISOString(), requestConversationId: null,
+      },
+    });
+  }
+  const first = env.createService();
+  await first.tick();
+  await first.close();
+  env.reopen();
+  await env.createService().tick();
+  const recovered = new Set(env.fake.recoveredAckAttemptIds);
+  assert.ok(ids.every(taskId => recovered.has('initial:' + taskId)),
+    'every retained root POST must have a read-only canonical ACK recovery chance');
+  assert.equal(env.fake.sends.length, 0, 'root reconciliation never resends initial POST');
+  assert.ok(ids.every(taskId => env.store.getFullTask(taskId, 'alice')
+    .attempts[0]!.state === 'uncertain'));
+});
+
+test('unbound root initial scans visit all waiting Tasks despite an eight-slot limit', async t => {
+  const env = fixture(t);
+  const ids = Array.from({ length: 12 }, (_, index) => 'root-' + String(index).padStart(2, '0'));
+  for (const taskId of ids) {
+    env.store.openSlot({
+      projectId: 'project', slotId: 'slot-' + taskId, clientId: 'alice',
+      roleKey: 'slot-' + taskId, providerKey: env.fake.providerKey,
+    });
+    env.store.startTask({
+      taskId, projectId: 'project', slotId: 'slot-' + taskId,
+      clientId: 'alice', requestId: 'request:' + taskId,
+      expectedSlotRevision: 1, prompt: 'Question ' + taskId,
+    });
+    env.store.planAttempt({
+      taskId, clientId: 'alice', attemptId: 'initial:' + taskId,
+      kind: 'initial', turnKey: 'original', content: 'Question ' + taskId,
+    });
+    env.seedPublicPolicy(taskId);
+    // Known not-ready preflight: no POST, only a durable defer.
+    env.fake.blocked.add(taskId);
+  }
+  const first = env.createService();
+  await first.tick();
+  await first.close();
+  env.reopen();
+  await env.createService().tick();
+  const observed = new Set(env.fake.preflightAttemptIds);
+  assert.ok(ids.every(taskId => observed.has('initial:' + taskId)),
+    'bounded root scan must rotate past the first eight blocked Tasks');
+  assert.equal(env.fake.sends.length, 0);
+  assert.ok(ids.every(taskId => env.store.getFullTask(taskId, 'alice')
+    .attempts[0]!.state === 'planned'));
+});
+
+test('read-only ACK reconciliation rotates past eight uncertain exact attempts', async t => {
+  const env = fixture(t);
+  const ids = Array.from({ length: 12 }, (_, index) => 'ack-' + String(index).padStart(2, '0'));
+  for (const taskId of ids) {
+    env.startTask(taskId, 'slot-' + taskId);
+    env.seedPublicPolicy(taskId);
+    const attemptId = 'initial:' + taskId;
+    env.store.beginDispatch(taskId, 'alice', attemptId);
+    env.store.recordDispatchEvidence({
+      taskId, clientId: 'alice', attemptId,
+      evidence: {
+        conversationId: 'conversation:' + taskId,
+        messageId: 'message:' + taskId, parentMessageId: 'parent:' + taskId,
+        textHash: createHash('sha256').update('Question ' + taskId).digest('hex'),
+        observedAt: new Date(env.now).toISOString(),
+      },
+    });
+    env.store.markUncertain(taskId, 'alice', attemptId, 'fixture-lost-ack');
+  }
+  const first = env.createService();
+  await first.tick();
+  await first.close();
+  env.reopen();
+  await env.createService().tick();
+  const observed = new Set(env.fake.recoveredAckAttemptIds);
+  assert.ok(ids.every(taskId => observed.has('initial:' + taskId)),
+    'all uncertain attempts must get read-only ACK recovery opportunities');
+  assert.equal(env.fake.sends.length, 0, 'ACK recovery must never replay a POST');
+  assert.ok(ids.every(taskId =>
+    env.store.getFullTask(taskId, 'alice').attempts[0]!.state === 'uncertain'));
+});
+
+test('unready early public initials never starve later safe Tasks past the scan limit', async t => {
+  const env = fixture(t);
+  const ids = Array.from({ length: 12 }, (_, index) => 'task-' + String(index).padStart(2, '0'));
+  for (const [index, taskId] of ids.entries()) {
+    env.startTask(taskId, 'slot-' + taskId);
+    env.seedPublicPolicy(taskId);
+    if (index < 8) env.fake.blocked.add(taskId);
+  }
+  const first = env.createService();
+  await first.tick();
+  await first.close();
+  env.reopen();
+  await env.createService().tick();
+  const sentIds = env.fake.sends.map(sent => sent.taskId);
+  assert.deepEqual(sentIds.slice().sort(), ids.slice(8),
+    'a blocked leading batch cannot monopolize every future initial scan');
+  assert.ok(ids.slice(0, 8).every(taskId =>
+    env.store.getFullTask(taskId, 'alice').attempts[0]!.state === 'planned'));
+});
+
+test('stable single-Task scan does not rewrite the same durable cursor every tick', async t => {
+  const env = fixture(t);
+  env.startTask('only-task', 'main');
+  env.seedPublicPolicy('only-task');
+  await env.ack('only-task');
+  assert.deepEqual(env.store.listPendingPublicFinals(8)
+    .map(item => item.taskId), ['only-task']);
+  const cursor = env.database.raw.prepare(
+    "SELECT scan_kind AS kind,last_task_id AS taskId FROM kernel_public_scan_cursors").all();
+  assert.deepEqual(cursor.map(row => ({
+    kind: String(row.kind), taskId: String(row.taskId),
+  })), [{ kind: 'final', taskId: 'only-task' }]);
+  const writesAfterFirst = Number((env.database.raw.prepare(
+    'SELECT total_changes() AS changes').get() as { changes: number }).changes);
+  for (let i = 0; i < 4; i++) {
+    assert.deepEqual(env.store.listPendingPublicFinals(8)
+      .map(item => item.taskId), ['only-task']);
+  }
+  const writesAfterRepeat = Number((env.database.raw.prepare(
+    'SELECT total_changes() AS changes').get() as { changes: number }).changes);
+  assert.equal(writesAfterRepeat, writesAfterFirst,
+    'an unchanged cursor cannot inflate SQLite writes or Task revisions');
+});
+
+test('durable FINAL scan selection advances atomically without changing Task evidence', async t => {
+  const env = fixture(t);
+  const ids = Array.from({ length: 12 }, (_, index) =>
+    'cursor-final-' + String(index).padStart(2, '0'));
+  for (const taskId of ids) {
+    env.startTask(taskId, 'slot-' + taskId);
+    env.seedPublicPolicy(taskId);
+    await env.ack(taskId);
+  }
+  const before = ids.map(taskId => env.store.getTask(taskId, 'alice').revision);
+  const first = env.store.listPendingPublicFinals(8);
+  assert.deepEqual(first.map(row => row.taskId), ids.slice(0, 8));
+  assert.deepEqual(ids.map(taskId => env.store.getTask(taskId, 'alice').revision), before,
+    'fairness selection is not a durable Task event');
+  env.reopen();
+  const second = env.store.listPendingPublicFinals(8);
+  assert.deepEqual(second.map(row => row.taskId), [...ids.slice(8), ...ids.slice(0, 4)]);
+  const third = env.store.listPendingPublicFinals(8);
+  assert.deepEqual(third.map(row => row.taskId), ids.slice(4));
+  assert.deepEqual(ids.map(taskId => env.store.getTask(taskId, 'alice').revision), before);
+  assert.equal(env.fake.sends.length, 12);
+});
+
+test('FINAL scan fairness survives SQLite/Core reopen after every bounded tick', async t => {
+  const env = fixture(t);
+  const ids = Array.from({ length: 12 }, (_, index) =>
+    'restart-final-' + String(index).padStart(2, '0'));
+  for (const taskId of ids) {
+    env.startTask(taskId, 'slot-' + taskId);
+    env.seedPublicPolicy(taskId);
+    await env.ack(taskId);
+  }
+  for (let scan = 0; scan < 4; scan++) {
+    const service = env.createService();
+    await service.tick();
+    await service.close();
+    env.reopen(); // new repository and Core service each time
+  }
+  const readCounts = ids.map(taskId => env.fake.observedFinalAttemptIds
+    .filter(id => id === 'initial:' + taskId).length);
+  assert.ok(readCounts.every(count => count >= 2),
+    'each restart must resume the bounded cursor, not reset to first eight: ' +
+    JSON.stringify(readCounts));
+  assert.equal(env.fake.sends.length, 12, 'recovery never replays POST');
+  assert.ok(ids.every(taskId => env.store.getTask(taskId, 'alice').state === 'working'));
+});
+
+test('bounded public FINAL observer revisits every Task beyond its eight-slot limit', async t => {
+  const env = fixture(t);
+  const ids = Array.from({ length: 12 }, (_, index) => 'task-' + String(index).padStart(2, '0'));
+  for (const taskId of ids) {
+    env.startTask(taskId, 'slot-' + taskId);
+    env.seedPublicPolicy(taskId);
+    await env.ack(taskId);
+  }
+  const service = env.createService();
+  // Identical 'backend-assistant-missing' results are durably deduplicated.
+  // An updated_at-ordered LIMIT 8 would therefore starve some Tasks forever.
+  for (let scan = 1; scan <= 4; scan++) {
+    env.now = START + scan * 1_000;
+    await service.tick();
+  }
+  const readCounts = ids.map(taskId => env.fake.observedFinalAttemptIds
+    .filter(id => id === 'initial:' + taskId).length);
+  assert.ok(readCounts.every(count => count >= 2),
+    'every Task needs a second opportunity despite identical deferred observations: ' +
+    JSON.stringify(readCounts));
+  assert.equal(env.fake.sends.length, ids.length, 'read-only rotation never sends a follow-up');
+  assert.ok(ids.every(taskId => env.store.getTask(taskId, 'alice').state === 'working'));
+});
+
+test('public FINAL sustained 429/pacing waits until the fifth blocked slot before agent review', async t => {
   const env = fixture(t);
   env.startTask('task-a', 'main');
   env.seedPublicPolicy('task-a');
@@ -337,12 +571,14 @@ test('public FINAL sustained 429/pacing creates a durable agent decision without
   // The real backend can remain paced for a long Retry-After with no new GET.
   env.fake.pending429Finals.delete('initial:task-a');
   env.fake.pacedFinals.add('initial:task-a');
-  env.now = START + CONTINUATION_INTERVAL_MS - 1;
+  const fifthBlockedSlot = START +
+    (PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT - 1) * CONTINUATION_INTERVAL_MS;
+  env.now = fifthBlockedSlot - 1;
   await service.tick();
-  assert.deepEqual(reviews, [], 'one 429 is not immediately escalated');
+  assert.deepEqual(reviews, [], 'four blocked slots must not escalate');
   env.reopen();
   const resumed = env.createService(review);
-  env.now++;
+  env.now = fifthBlockedSlot;
   await resumed.tick();
   assert.deepEqual(reviews, [{
     attemptId: 'initial:task-a', cause: 'persistent_backend_read_throttle',
@@ -371,9 +607,14 @@ test('a successful canonical observation resets 429 escalation and exact FINAL c
   env.fake.pending429Finals.add('initial:task-a');
   env.now = START + 2 * CONTINUATION_INTERVAL_MS;
   await service.tick();
+  env.fake.pending429Finals.delete('initial:task-a');
+  env.fake.pacedFinals.add('initial:task-a');
+  env.now = START +
+    (PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT - 1) * CONTINUATION_INTERVAL_MS;
+  await service.tick();
   assert.deepEqual(reviews, [], 'old 429 cannot leak across a successful read');
   assert.equal(env.store.getTask('task-a', 'alice').state, 'working');
-  env.fake.pending429Finals.delete('initial:task-a');
+  env.fake.pacedFinals.delete('initial:task-a');
   env.fake.pendingInitialFinals.delete('initial:task-a');
   env.now += 1_000;
   await service.tick();
@@ -382,7 +623,7 @@ test('a successful canonical observation resets 429 escalation and exact FINAL c
   assert.equal(env.fake.sends.length, 1);
 });
 
-test('standalone approved due 429 raises agent review at the second blocked slot', async t => {
+test('standalone approved due 429 raises agent review at the fifth blocked slot', async t => {
   const env = fixture(t);
   env.startTask('task-a', 'main');
   await env.ack('task-a');
@@ -400,17 +641,142 @@ test('standalone approved due 429 raises agent review at the second blocked slot
     taskId: 'task-a', clientId: 'alice', sourceAttemptId: 'initial:task-a',
     approvalRef: 'approved', message: '계속',
   });
-  env.now = START + CONTINUATION_INTERVAL_MS;
-  assert.equal((await service.tick()).dispatchesAttempted, 0);
-  assert.deepEqual(reviews, []);
-  assert.equal(env.fake.sends.length, 1);
-  env.now = START + 2 * CONTINUATION_INTERVAL_MS;
+  for (let slot = 1; slot < PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT; slot++) {
+    env.now = START + slot * CONTINUATION_INTERVAL_MS;
+    assert.equal((await service.tick()).dispatchesAttempted, 0);
+    assert.deepEqual(reviews, [], 'blocked slot ' + slot + ' must not escalate');
+    assert.equal(env.store.getTask('task-a', 'alice').state, 'working');
+    assert.equal(env.fake.sends.length, 1);
+  }
+  env.now = START +
+    PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT * CONTINUATION_INTERVAL_MS;
   assert.equal((await service.tick()).dispatchesAttempted, 0);
   assert.deepEqual(reviews, ['persistent_backend_read_throttle']);
   assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
   assert.equal(env.store.getFullTask('task-a', 'alice').timers
     .filter(timer => timer.status === 'pending').length, 0);
   assert.equal(env.fake.sends.length, 1);
+});
+
+test('explicit agent release of a fifth-slot 429 review resets only the old blocked streak', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  env.seedPublicPolicy('task-a');
+  await env.ack('task-a');
+  env.fake.pending429Finals.add('initial:task-a');
+  const reviews: string[] = [];
+  const review = async (owner: {
+    taskId: string; clientId: string; attemptId: string;
+    cause?: 'persistent_backend_read_throttle';
+  }) => {
+    const decisionId = 'rate-review-' + (reviews.length + 1);
+    reviews.push(decisionId);
+    env.store.requireDecision({
+      taskId: owner.taskId, clientId: owner.clientId, decisionId,
+      audience: 'agent', contextJson: JSON.stringify({
+        kind: 'semantic_action', attemptId: owner.attemptId,
+        packet: { reason: 'canonical-final-rate-limit-persistent' },
+      }),
+    });
+  };
+  let service = env.createService(review);
+  await service.tick(); // actual 429 is blocked review slot one
+  env.fake.pending429Finals.delete('initial:task-a');
+  env.fake.pacedFinals.add('initial:task-a');
+  env.now += 4 * CONTINUATION_INTERVAL_MS;
+  await service.tick();
+  assert.deepEqual(reviews, ['rate-review-1']);
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
+  env.store.resolveDecision({
+    taskId: 'task-a', clientId: 'alice', decisionId: reviews[0]!,
+    resolutionJson: JSON.stringify({ kind: 'read_only_refresh', requestId: 'agent-resume-1' }),
+  });
+  env.reopen();
+  service = env.createService(review);
+  await service.tick();
+  assert.deepEqual(reviews, ['rate-review-1'], 'an old throttle must not re-escalate on resume');
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'working');
+  assert.equal(env.fake.sends.length, 1);
+  env.now += CONTINUATION_INTERVAL_MS;
+  await service.tick();
+  assert.deepEqual(reviews, ['rate-review-1'], 'paced GET alone is not a new real 429');
+  env.fake.pacedFinals.delete('initial:task-a');
+  env.fake.pending429Finals.add('initial:task-a');
+  env.now += CONTINUATION_INTERVAL_MS;
+  await service.tick(); // a new actual 429 opens the next streak
+  env.fake.pending429Finals.delete('initial:task-a');
+  env.fake.pacedFinals.add('initial:task-a');
+  env.now += 4 * CONTINUATION_INTERVAL_MS - 1;
+  await service.tick();
+  assert.deepEqual(reviews, ['rate-review-1']);
+  env.now++;
+  await service.tick();
+  assert.deepEqual(reviews, ['rate-review-1', 'rate-review-2']);
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
+  assert.equal(env.fake.sends.length, 1, 'explicit review never permits a speculative POST');
+});
+
+test('approved fifth-slot 429 review resumes a single fixed due without catch-up POST', async t => {
+  const env = fixture(t);
+  env.startTask('task-a', 'main');
+  env.seedPublicPolicy('task-a', true);
+  await env.ack('task-a');
+  env.fake.pending429Finals.add('initial:task-a');
+  const reviews: string[] = [];
+  const review = async (owner: {
+    taskId: string; clientId: string; attemptId: string;
+    cause?: 'persistent_backend_read_throttle';
+  }) => {
+    reviews.push(owner.cause ?? 'missing-cause');
+    env.store.requireDecision({
+      taskId: owner.taskId, clientId: owner.clientId,
+      decisionId: 'fifth-slot-approved-review', audience: 'agent',
+      contextJson: JSON.stringify({
+        attemptId: owner.attemptId,
+        packet: { reason: 'canonical-final-rate-limit-persistent' },
+      }),
+    });
+  };
+  env.createService(review).activate({
+    taskId: 'task-a', clientId: 'alice', sourceAttemptId: 'initial:task-a',
+    approvalRef: 'approved-public', message: '계속',
+  });
+  const service = env.createService(review);
+  for (let slot = 1; slot <= 5; slot++) {
+    env.now = START + slot * CONTINUATION_INTERVAL_MS;
+    await service.tick();
+    assert.equal(env.fake.sends.length, 1);
+  }
+  assert.deepEqual(reviews, ['persistent_backend_read_throttle']);
+  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
+  env.fake.pending429Finals.delete('initial:task-a');
+  env.fake.pacedFinals.add('initial:task-a');
+  env.now = START + 6 * CONTINUATION_INTERVAL_MS - 1;
+  await service.tick(); // hold stays durable while agent is away
+  assert.equal(env.fake.sends.length, 1);
+  env.store.resolveDecision({
+    taskId: 'task-a', clientId: 'alice', decisionId: 'fifth-slot-approved-review',
+    resolutionJson: JSON.stringify({ kind: 'read_only_refresh', requestId: 'agent-checked-429' }),
+  });
+  env.reopen();
+  const resumed = env.createService(review);
+  await resumed.tick();
+  const pending = env.store.getFullTask('task-a', 'alice').timers
+    .filter(timer => timer.status === 'pending' && timer.kind === 'continuation_due');
+  assert.equal(pending.length, 1, 'existing approval resumes one due after agent review');
+  assert.equal(pending[0]!.dueAt,
+    new Date(START + 6 * CONTINUATION_INTERVAL_MS).toISOString());
+  assert.equal(env.fake.sends.length, 1);
+  env.now = START + 6 * CONTINUATION_INTERVAL_MS;
+  await resumed.tick();
+  assert.equal(env.fake.sends.length, 1, 'pacing remains non-authoritative for POST');
+  env.fake.pacedFinals.delete('initial:task-a');
+  env.now = START + 7 * CONTINUATION_INTERVAL_MS;
+  await resumed.tick();
+  assert.equal(env.fake.sends.length, 2, 'later verified absence permits one approved Continue');
+  assert.equal(env.fake.sends[1]!.kind, 'continuation');
+  assert.equal(env.fake.sends[1]!.content, '계속');
+  assert.deepEqual(reviews, ['persistent_backend_read_throttle']);
 });
 
 test('a later foreign user turn becomes an agent decision, never another automatic POST', async t => {

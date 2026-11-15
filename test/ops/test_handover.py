@@ -767,6 +767,86 @@ class HandoverTests(unittest.TestCase):
                 with self.subTest(mutate=mutate), self.assertRaises(AssertionError):
                     handover.validate_candidate(manifest, receipt)
 
+    def test_bundle_rejects_policy_not_matching_compiled_candidate_schema(self):
+        with tempfile.TemporaryDirectory() as directory:
+            installed = pathlib.Path(directory)
+            migrations = installed/'dist/storage/migrations'
+            migrations.mkdir(parents=True)
+            (installed/'package.json').write_text('{"type":"module"}')
+            (migrations/'index.js').write_text(
+                'export const migrations = Array.from({length:16},(_,i)=>({version:i+1}));')
+            policy = {'schemaTransition': {'from': 15, 'to': 16}}
+            self.assertEqual(handover.verify_candidate_schema(installed, policy), 16)
+            for bad in [
+                {'schemaTransition': {'from': 8, 'to': 15}},
+                {'schemaTransition': {'from': 15, 'to': 17}},
+            ]:
+                with self.subTest(bad=bad), self.assertRaisesRegex(
+                        AssertionError, 'Candidate migration schema differs from handover policy'):
+                    handover.verify_candidate_schema(installed, bad)
+            (migrations/'index.js').write_text(
+                'export const migrations = Array.from({length:15},(_,i)=>({version:i+1}));')
+            with self.assertRaisesRegex(
+                    AssertionError, 'Candidate migration schema differs from handover policy'):
+                handover.verify_candidate_schema(installed, policy)
+
+    def test_checked_in_policy_requires_current_15_to_16_upgrade_and_no_old_schema(self):
+        root = pathlib.Path(__file__).resolve().parents[2]
+        policy = json.loads((root/'scripts/ops/handover-manifest.json').read_text())
+        transition = policy['schemaTransition']
+        current_migration = max(int(path.name[:4]) for path in
+                                (root/'src/storage/migrations').glob('[0-9][0-9][0-9][0-9]-*.ts'))
+        self.assertEqual(transition, {'from': 15, 'to': 16},
+                         'A schema-8-to-15 handover policy cannot deploy schema-16 dev code')
+        self.assertEqual(transition['to'], current_migration,
+                         'Bundle policy must never authorize an obsolete SQLite schema')
+        self.assertEqual(handover.schema_transition(policy, 15), (15, 16))
+        for obsolete in [8, 14, 16]:
+            with self.subTest(obsolete=obsolete), self.assertRaisesRegex(
+                    AssertionError, 'Live schema differs from transition source'):
+                handover.schema_transition(policy, obsolete)
+
+    def test_synthetic_15_to_16_promotion_preserves_source_and_archives_wal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            live = root/'sessionplane.sqlite'
+            migration = root/'migration'; migration.mkdir()
+            receipt = root/'receipt'; receipt.mkdir()
+            original = migration/'source-snapshot.sqlite'
+            candidate = migration/'candidate.sqlite'
+
+            def make(path, schema, marker):
+                db = sqlite3.connect(path)
+                db.execute('CREATE TABLE schema_migrations('
+                           'version INTEGER PRIMARY KEY,name TEXT,applied_at TEXT)')
+                db.execute('INSERT INTO schema_migrations VALUES(?,?,?)',
+                           (schema, marker, 'now'))
+                db.execute('CREATE TABLE preserved(id TEXT PRIMARY KEY,value TEXT)')
+                db.execute('INSERT INTO preserved VALUES(?,?)', ('original', 'fixed'))
+                if schema == 16:
+                    db.execute('CREATE TABLE kernel_public_scan_cursors('
+                               'scan_kind TEXT PRIMARY KEY,last_task_id TEXT,'
+                               'last_attempt_sequence INTEGER)')
+                db.commit()
+                db.close()
+
+            make(live, 15, 'live-v15')
+            make(original, 15, 'live-v15')
+            make(candidate, 16, 'candidate-v16')
+            pathlib.Path(str(live)+'-wal').write_bytes(b'synthetic-old-wal')
+            report = handover.promote_database(live, migration, receipt, (15, 16))
+            self.assertEqual(report['sourceSchemaVersion'], 15)
+            self.assertEqual(report['targetSchemaVersion'], 16)
+            self.assertEqual(handover.sqlite_schema(live), 16)
+            self.assertEqual(handover.sqlite_schema(original), 15)
+            self.assertEqual(handover.sqlite_schema(receipt/'database-archive/sessionplane.sqlite'), 15)
+            self.assertEqual((receipt/'database-archive/sessionplane.sqlite-wal').read_bytes(),
+                             b'synthetic-old-wal')
+            with sqlite3.connect(live) as db:
+                self.assertEqual(db.execute('SELECT value FROM preserved WHERE id=?',
+                                            ('original',)).fetchone(), ('fixed',))
+            self.assertEqual(report['sealedCandidateSha256'], handover.sha256_file(candidate))
+
     def test_schema_transition_is_explicit_and_database_promotion_archives_original_sidecars(self):
         self.assertEqual(handover.schema_transition(
             {'schemaTransition': {'from': 8, 'to': 15}}, 8), (8, 15))
