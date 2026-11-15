@@ -543,9 +543,12 @@ export class SemanticDecisionGateway {
        (original.packet.reason === 'canonical-final-rate-limit-persistent' &&
         (originalAttempt.kind === 'initial' || originalAttempt.kind === 'continuation') &&
         originalAttempt.state === 'acknowledged'));
-    const transientModelRace =
+    // A cold owned Pro root can be unverified before its Chat composer hydrates.
+    // Refresh only that exact unsent root; an actual Work surface stays blocked.
+    const transientRootObservation =
       original.packet.kind === 'adapter_unsupported' &&
-      original.packet.reason === 'semantic-observation-superseded-by-page-operation' &&
+      (original.packet.reason === 'semantic-observation-superseded-by-page-operation' ||
+       original.packet.reason === 'chat-surface-unverified') &&
       original.packet.options.length === 0 && !original.packet.humanOnly &&
       original.context.requiredModel === 'Pro' &&
       original.context.providerConversationId === null &&
@@ -585,8 +588,8 @@ export class SemanticDecisionGateway {
         }
         if (next === null) next = await this.inspect({
           taskId: input.taskId, clientId: input.clientId, attemptId: original.attemptId,
-          modelChoice: original.packet.kind === 'model_choice' || transientModelRace,
-          ...(original.packet.requestedModel || (transientModelRace ? original.context.requiredModel : null)
+          modelChoice: original.packet.kind === 'model_choice' || transientRootObservation,
+          ...(original.packet.requestedModel || (transientRootObservation ? original.context.requiredModel : null)
             ? { modelIntent: (original.packet.requestedModel ??
               original.context.requiredModel)! } : {}),
         });
@@ -600,7 +603,7 @@ export class SemanticDecisionGateway {
     const option = packet.options[0];
     if (row.status !== 'pending' || full.task.pendingDecisionId !== input.decisionId ||
         full.task.cancelRequested ||
-        (packet.kind !== 'model_choice' && !transientModelRace &&
+        (packet.kind !== 'model_choice' && !transientRootObservation &&
          !transientBoundSurface && !stalledContinuation) ||
         packet.humanOnly ||
         (packet.kind === 'model_choice' && !packet.requestedModel) ||
@@ -616,7 +619,7 @@ export class SemanticDecisionGateway {
     }
     try {
       const next = await this.refresh({ ...input, attemptId: original.attemptId,
-        modelChoice: transientModelRace });
+        modelChoice: transientRootObservation });
       if (next === null && original.packet.reason === 'managed-continuation-safe-send-unavailable') {
         this.#scheduleUnsentContinuationReview(input.taskId, input.clientId, input.decisionId);
       }

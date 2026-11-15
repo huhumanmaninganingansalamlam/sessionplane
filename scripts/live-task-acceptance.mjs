@@ -190,7 +190,8 @@ async function acceptOneTask({ plan, state, index, call, receiptDir, limitMs, wa
         const transientRootRace = index === 0 &&
           state.conversationId === null && summary.submission?.attempted === false &&
           decision?.kind === 'adapter_unsupported' &&
-          decision.reason === 'semantic-observation-superseded-by-page-operation' &&
+          (decision.reason === 'semantic-observation-superseded-by-page-operation' ||
+           decision.reason === 'chat-surface-unverified') &&
           decision.humanOnly === false && decision.requestedModel === null &&
           Array.isArray(decision.options) && decision.options.length === 0;
         const expiredOrEmptyModel = decision?.kind === 'model_choice' &&

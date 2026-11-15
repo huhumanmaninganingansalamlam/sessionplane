@@ -643,6 +643,58 @@ test('transient unsubmitted Pro root page race can be refreshed read-only, not c
   assert.equal(store.getFullTask('task-race', 'alice').attempts[0]?.state, 'planned');
 });
 
+test('transient unsubmitted Pro root Chat hydration can be refreshed without any provider POST', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'sessionplane-model-race-'));
+  const db = SessionPlaneDatabase.open(join(directory, 'state.sqlite'));
+  t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
+  const store = new TaskKernelRepository(db);
+  store.openProject({ projectId: 'project-race', projectKey: 'root-race',
+    displayName: 'Race', clientId: 'alice' });
+  store.openSlot({ projectId: 'project-race', slotId: 'main',
+    roleKey: 'Main', providerKey: 'fixture-provider', clientId: 'alice' });
+  store.startTask({ taskId: 'task-race', projectId: 'project-race', slotId: 'main',
+    expectedSlotRevision: 1, clientId: 'alice', requestId: 'root-1', prompt: 'Only once' });
+  store.planAttempt({ taskId: 'task-race', clientId: 'alice',
+    attemptId: 'attempt-race', kind: 'initial', turnKey: 'root', content: 'Only once' });
+  const context: SemanticTaskContext = {
+    taskId: 'task-race', projectId: 'project-race', slotId: 'main', slotRevision: 1,
+    providerConversationId: null, submittedUserMessageId: null,
+    submittedUserTurnId: null, requiredModel: 'Pro',
+    pageLease: { projectId: 'project-race', slotId: 'main', slotRevision: 1,
+      taskId: 'task-race', pageKey: 'isolated-root', targetId: 'single-target',
+      bindingEpoch: 1 },
+  };
+  const adapter = new FakeSemanticAdapter(store);
+  adapter.mode = 'surface_unverified';
+  const gateway = new SemanticDecisionGateway({
+    repository: store, providers: new SemanticProviderRegistry([adapter]),
+    resolveContext: () => context,
+  });
+  const first = (await gateway.inspect({ taskId: 'task-race', clientId: 'alice',
+    attemptId: 'attempt-race', modelChoice: true, modelIntent: 'Pro' }))!;
+  assert.equal(first.kind, 'adapter_unsupported');
+  assert.equal(first.reason, 'chat-surface-unverified');
+  assert.deepEqual(first.options, []);
+  adapter.mode = 'model';
+  const request = {
+    taskId: 'task-race', clientId: 'alice',
+    decisionId: first.decisionId, requestId: 'read-only-reobserve-1',
+  };
+  const refreshed = await gateway.refreshCurrent(request);
+  assert.equal(refreshed.kind, 'refresh_required');
+  if (refreshed.kind !== 'refresh_required') throw new Error('Missing refreshed packet');
+  assert.equal(refreshed.packet?.kind, 'model_choice');
+  assert.equal(refreshed.packet?.requestedModel, 'Pro');
+  assert.equal(refreshed.packet?.options[0]?.purpose, 'open_model_chooser');
+  assert.equal(adapter.clicks, 0, 'A race refresh must not mutate the provider UI');
+  const previousObserved = adapter.observed;
+  assert.equal((await gateway.refreshCurrent(request)).kind, 'refresh_required');
+  assert.equal(adapter.observed, previousObserved);
+  await assert.rejects(gateway.refreshCurrent({ ...request, requestId: 'different-id' }),
+    /different request/);
+  assert.equal(store.getFullTask('task-race', 'alice').attempts[0]?.state, 'planned');
+});
+
 test('bounded free-text and oversized evidence never broaden a provider action', async t => {
   const env = fixture(t);
   const adapter = new FakeSemanticAdapter(env.store);
