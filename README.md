@@ -33,10 +33,12 @@ deadline; the Core keeps the Task alive after clients disconnect. Agent
 decisions carry a current decisionId and semantic actionRef; callers may
 submit only the advertised bounded input. Result view exposes the complete
 answer; evidence view exposes bounded provenance. Approved continuation
-requires recorded user delegation and stays under the Core-owned timer. Before
-an approved 20-minute due, the Core reserves only that exact canonical
-conversation's next provider read; ordinary background reads cannot consume the
-slot and extend a 429 fence past the due. A direct 429 is retried at its exact
+requires recorded user delegation and stays under the Core-owned timer. From
+the exact ACK through its approved 20-minute due, the Core reserves only that
+canonical conversation's next provider read. It permits at most one immediate
+completion check while even the worst local 429 backoff still clears before the
+due; later background reads cannot consume the authoritative due slot. A direct
+429 is retried at its exact
 `nextCheckAt`, and only a later fresh canonical no-FINAL observation may license
 the single approved Continue POST. After the exact draft is committed, the Core
 may briefly re-observe the unchanged lease/model/draft until the unique Send

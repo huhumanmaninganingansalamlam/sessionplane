@@ -58,6 +58,9 @@ interface CachedToken {
   readonly expiresAtMs: number;
 }
 
+const MAX_CONVERSATION_429_BACKOFF_MS = 15 * 60_000;
+const RESERVED_BACKGROUND_READ_SAFETY_MS = MAX_CONVERSATION_429_BACKOFF_MS + 60_000;
+
 export class ChatGptBackendRecovery {
   readonly #requestTimeoutMs: number;
   readonly #tokenCacheTtlMs: number;
@@ -70,6 +73,7 @@ export class ChatGptBackendRecovery {
   #consecutiveConversation429s = 0;
   readonly #conversationWaiting = new Map<string, {
     expiresAt: number; selected: boolean; priorityAt: number;
+    backgroundReadAvailable: boolean;
   }>();
   #conversationInFlight = false;
 
@@ -129,10 +133,17 @@ export class ChatGptBackendRecovery {
     if (!Number.isFinite(dueMs)) throw new Error('Invalid canonical read time');
     const graceMs = 2 * Math.max(5_000, this.#requestTimeoutMs);
     const existing = this.#conversationWaiting.get(conversationId);
+    // One immediate completion check is safe only while even the maximum local
+    // 429 backoff still clears before the fixed due. Re-registering the same
+    // reservation never restores an already consumed background read.
+    const earlyReadIsSafe = dueMs - this.#now().getTime() >=
+      RESERVED_BACKGROUND_READ_SAFETY_MS;
     this.#conversationWaiting.set(conversationId, {
       expiresAt: Math.max(existing?.expiresAt ?? 0, dueMs + graceMs),
       selected: true,
       priorityAt: Math.min(existing?.priorityAt ?? dueMs, dueMs),
+      backgroundReadAvailable: existing?.selected === true
+        ? existing.backgroundReadAvailable : earlyReadIsSafe,
     });
   }
 
@@ -246,6 +257,13 @@ export class ChatGptBackendRecovery {
       if (now > entry.expiresAt) this.#conversationWaiting.delete(id);
     }
     const waiting = this.#conversationWaiting.get(conversationId);
+    const reservedBackgroundRead = !selected && waiting?.selected === true &&
+      waiting.backgroundReadAvailable;
+    // Consume before checking the shared fence. If the exact ACK just used a
+    // canonical slot, this bounded observation is paced and cannot reappear on
+    // the next tick; if no backend read was needed for ACK, it may collect an
+    // already-finished FINAL without weakening the fixed due reservation.
+    if (reservedBackgroundRead) waiting.backgroundReadAvailable = false;
     if (selected || !waiting?.selected) {
       this.#conversationWaiting.set(conversationId, {
         expiresAt: Math.max(waiting?.expiresAt ?? 0,
@@ -253,15 +271,17 @@ export class ChatGptBackendRecovery {
         selected,
         priorityAt: selected ? Math.min(waiting?.priorityAt ?? now, now)
           : waiting?.priorityAt ?? Number.MAX_SAFE_INTEGER,
+        backgroundReadAvailable: waiting?.backgroundReadAvailable ?? false,
       });
     }
     // A user-selected ACK or an approved due FINAL gets the next legal slot
-    // ahead of repeated background reads. Both still obey Retry-After.
+    // ahead of repeated background reads. Both still obey Retry-After. An
+    // approved due permits at most the one safe early completion check above.
     const nextSelected = [...this.#conversationWaiting]
       .filter(([, entry]) => entry.selected)
       .sort((left, right) => left[1].priorityAt - right[1].priorityAt)[0]?.[0];
     const queued = (nextSelected ?? this.#conversationWaiting.keys().next().value) !== conversationId ||
-      (!selected && waiting?.selected === true);
+      (!selected && waiting?.selected === true && !reservedBackgroundRead);
     if (now < this.#conversationRetryAt || queued || this.#conversationInFlight) {
       const next = Math.max(now + 5_000, this.#conversationRetryAt);
       return { pacing: true, recovery: { ...unavailable(acknowledgement
@@ -269,7 +289,7 @@ export class ChatGptBackendRecovery {
         : 'backend-conversation-probe-paced'), kind: 'deferred', retryAfterMs: next - now,
         nextCheckAt: new Date(next).toISOString() } };
     }
-    this.#conversationWaiting.delete(conversationId);
+    if (!reservedBackgroundRead) this.#conversationWaiting.delete(conversationId);
     this.#conversationInFlight = true;
     try {
       this.#extendConversationRetryAt(now + 5_000);
@@ -282,7 +302,8 @@ export class ChatGptBackendRecovery {
           this.#consecutiveConversation429s = Math.min(5, this.#consecutiveConversation429s + 1);
         }
         const exponential429Ms = repeated429
-          ? Math.min(15 * 60_000, 60_000 * 2 ** (this.#consecutiveConversation429s - 1))
+          ? Math.min(MAX_CONVERSATION_429_BACKOFF_MS,
+            60_000 * 2 ** (this.#consecutiveConversation429s - 1))
           : 0;
         const extendedAt = this.#now().getTime() +
           Math.max(5_000, result.recovery.retryAfterMs ?? 0, exponential429Ms);
@@ -296,6 +317,7 @@ export class ChatGptBackendRecovery {
         if (selected) this.#conversationWaiting.set(conversationId, {
           expiresAt: this.#conversationRetryAt + graceMs, selected: true,
           priorityAt: waiting?.priorityAt ?? now,
+          backgroundReadAvailable: false,
         });
       } else if (!('recovery' in result)) {
         this.#consecutiveConversation429s = 0;
