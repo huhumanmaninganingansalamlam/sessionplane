@@ -391,6 +391,192 @@ test('semantic Core port requires a stable declared conversation capability befo
   assert.equal(journalWrites, 0);
 });
 
+test('evidence-free initial ACK recovery never invokes rendered dispatch adoption', async () => {
+  const query: ExactTurnQuery = {
+    clientId: 'alice', projectId: 'project-1', slotId: 'main', slotRevision: 1,
+    providerConversationId: 'conv-1', taskId: 'task-1', attemptId: 'initial-attempt',
+    kind: 'initial', content: 'new initial question', externalTurnId: null,
+  };
+  let recoverDispatchCalls = 0;
+  let recoverCalls = 0;
+  const adapter: SemanticProviderAdapter = {
+    providerKey: 'fixture-semantic',
+    capabilities: { providerKey: 'fixture-semantic', browserRequired: false,
+      contractVersion: 1, supports: ['conversation'] },
+    async observe() { throw new Error('recovery cannot observe or draft'); },
+    async act() { throw new Error('recovery cannot click or POST'); },
+    async verify() { throw new Error('recovery cannot verify through a mutation path'); },
+    async recoverDispatch() {
+      recoverDispatchCalls++;
+      return {
+        conversationId: 'conv-1', messageId: 'new-initial-message',
+        parentMessageId: 'prior-assistant', textHash: hash(query.content),
+        observedAt: SENT_AT,
+      };
+    },
+    async recover() {
+      recoverCalls++;
+      throw new Error('missing initial evidence cannot enter canonical ACK recovery');
+    },
+  };
+  const port = new SemanticExactTaskPort({
+    adapter,
+    resolveContext: () => ({
+      projectId: query.projectId, slotId: query.slotId,
+      slotRevision: query.slotRevision, taskId: query.taskId,
+      providerConversationId: query.providerConversationId,
+      submittedUserMessageId: 'prior-user-message',
+      submittedUserTurnId: 'prior-user-turn', pageLease: null,
+    }),
+    dispatchJournal: { record: () => {
+      throw new Error('initial evidence cannot be synthesized from the renderer');
+    }, read: () => null },
+  });
+
+  assert.deepEqual(await port.recoverAck(query), {
+    kind: 'unavailable', reason: 'durable-exact-dispatch-evidence-unavailable',
+  });
+  assert.equal(recoverDispatchCalls, 0);
+  assert.equal(recoverCalls, 0);
+});
+
+test('semantic continuation ACK recovery records exact dispatch, refreshes context, and never replays', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'sessionplane-rendered-dispatch-recovery-'));
+  const db = SessionPlaneDatabase.open(join(dir, 'kernel.sqlite'));
+  const store = new TaskKernelRepository(db, () => SENT_AT);
+  t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+  store.openProject({ projectId: 'project-1', projectKey: 'recovery.demo',
+    displayName: 'Recovery', clientId: 'alice' });
+  store.openSlot({ projectId: 'project-1', slotId: 'main', roleKey: 'Main',
+    providerKey: 'fixture-semantic', clientId: 'alice' });
+  store.startTask({ taskId: 'task-1', projectId: 'project-1', slotId: 'main',
+    expectedSlotRevision: 1, clientId: 'alice', requestId: 'request-1',
+    prompt: 'original question' });
+  store.observeConversation({ taskId: 'task-1', projectId: 'project-1',
+    slotId: 'main', expectedRevision: 1, clientId: 'alice',
+    providerConversationId: 'conv-1' });
+
+  const sourceEvidence: SemanticDispatchEvidence = {
+    conversationId: 'conv-1', messageId: 'source-message', parentMessageId: 'root',
+    textHash: hash('original question'), observedAt: SENT_AT,
+  };
+  store.planAttempt({ taskId: 'task-1', clientId: 'alice', attemptId: 'source-attempt',
+    kind: 'initial', turnKey: 'original', content: 'original question' });
+  store.beginDispatch('task-1', 'alice', 'source-attempt');
+  store.recordDispatchEvidence({ taskId: 'task-1', clientId: 'alice',
+    attemptId: 'source-attempt', evidence: sourceEvidence });
+  store.acknowledgeAttempt({ taskId: 'task-1', clientId: 'alice',
+    attemptId: 'source-attempt', externalTurnId: 'source-turn' });
+
+  store.planAttempt({ taskId: 'task-1', clientId: 'alice', attemptId: 'continue-attempt',
+    kind: 'continuation', turnKey: 'managed-continue', content: '계속' });
+  store.beginDispatch('task-1', 'alice', 'continue-attempt');
+  store.markUncertain('task-1', 'alice', 'continue-attempt', 'semantic-action-not-verified');
+
+  const recoveredEvidence: SemanticDispatchEvidence = {
+    conversationId: 'conv-1', messageId: 'continuation-message',
+    parentMessageId: 'source-assistant', textHash: hash('계속'), observedAt: SENT_AT,
+  };
+  let observeCalls = 0;
+  let actCalls = 0;
+  let verifyCalls = 0;
+  let recoverDispatchCalls = 0;
+  let recoverCalls = 0;
+  let journalWrites = 0;
+  const resolvedMessages: Array<string | null> = [];
+  const adapter: SemanticProviderAdapter = {
+    providerKey: 'fixture-semantic',
+    capabilities: { providerKey: 'fixture-semantic', browserRequired: false,
+      contractVersion: 1, supports: ['conversation'] },
+    async observe() {
+      observeCalls++;
+      throw new Error('read-only recovery must not observe or draft the provider UI');
+    },
+    async act() {
+      actCalls++;
+      throw new Error('read-only recovery must not click or POST');
+    },
+    async verify() {
+      verifyCalls++;
+      throw new Error('restart recovery must use the canonical recover path');
+    },
+    async recoverDispatch({ context, prompt }) {
+      recoverDispatchCalls++;
+      assert.equal(prompt, '계속');
+      assert.equal(context.submittedUserMessageId, 'source-message',
+        'the first context intentionally anchors the prior acknowledged source turn');
+      assert.equal(context.submittedUserTurnId, 'source-turn');
+      return recoveredEvidence;
+    },
+    async recover(query) {
+      recoverCalls++;
+      assert.equal(query.kind, 'ack');
+      assert.equal(query.prompt, '계속');
+      assert.equal(query.context.submittedUserMessageId, 'continuation-message',
+        'context must be re-derived only after the evidence is durable');
+      assert.equal(query.context.submittedUserTurnId, null);
+      assert.deepEqual(query.attempts, [recoveredEvidence]);
+      return { kind: 'verified_ack', externalTurnId: 'continuation-turn',
+        messageId: 'continuation-message' };
+    },
+  };
+  const port = new SemanticExactTaskPort({
+    adapter,
+    resolveContext: query => {
+      const evidence = store.getDispatchEvidence({ taskId: query.taskId,
+        clientId: query.clientId, attemptId: query.attemptId });
+      const attempt = store.getFullTask(query.taskId, query.clientId).attempts
+        .find(row => row.attemptId === query.attemptId)!;
+      const submittedUserMessageId = evidence?.messageId ?? sourceEvidence.messageId;
+      const submittedUserTurnId = evidence === null
+        ? 'source-turn' : attempt.externalTurnId;
+      resolvedMessages.push(submittedUserMessageId);
+      return {
+        projectId: query.projectId, slotId: query.slotId,
+        slotRevision: query.slotRevision, taskId: query.taskId,
+        providerConversationId: query.providerConversationId,
+        submittedUserMessageId, submittedUserTurnId, pageLease: null,
+      };
+    },
+    dispatchJournal: {
+      record(query, evidence) {
+        journalWrites++;
+        store.recordDispatchEvidence({ taskId: query.taskId, clientId: query.clientId,
+          attemptId: query.attemptId, evidence });
+      },
+      read(query) {
+        return store.getDispatchEvidence({ taskId: query.taskId, clientId: query.clientId,
+          attemptId: query.attemptId });
+      },
+    },
+  });
+  let kernel = new DurableTaskKernel(store, [port]);
+  const recovered = await kernel.recoverAck('task-1', 'alice', 'continue-attempt');
+  assert.equal(recovered.state, 'working');
+  assert.deepEqual(resolvedMessages, ['source-message', 'continuation-message']);
+  assert.equal(store.getDispatchEvidence({ taskId: 'task-1', clientId: 'alice',
+    attemptId: 'continue-attempt' })?.messageId, 'continuation-message');
+  assert.equal(store.getFullTask('task-1', 'alice').attempts.at(-1)?.state, 'acknowledged');
+  assert.equal(store.getFullTask('task-1', 'alice').attempts.length, 2);
+  assert.equal(recoverDispatchCalls, 1);
+  assert.equal(recoverCalls, 1);
+  assert.equal(journalWrites, 1);
+  assert.equal(observeCalls, 0);
+  assert.equal(actCalls, 0);
+  assert.equal(verifyCalls, 0);
+
+  const revision = recovered.revision;
+  kernel = new DurableTaskKernel(store, [port]);
+  const repeated = await kernel.recoverAck('task-1', 'alice', 'continue-attempt');
+  assert.equal(repeated.revision, revision);
+  assert.equal(recoverDispatchCalls, 1, 'an acknowledged restart cannot recover or POST again');
+  assert.equal(recoverCalls, 1);
+  assert.equal(journalWrites, 1);
+  assert.equal(store.getFullTask('task-1', 'alice').events.filter(
+    row => row.event.type === 'attempt.dispatch_evidence_recorded').length, 2,
+  'one source evidence plus one recovered continuation evidence are durable exactly once');
+});
+
 test('semantic ACK recovery rejects a turn conflicting with the exact task context', async () => {
   const fake = new FakeSemanticProvider();
   fake.ackReady = true;

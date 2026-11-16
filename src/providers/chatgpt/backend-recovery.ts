@@ -248,6 +248,35 @@ export class ChatGptBackendRecovery {
     return acknowledgement;
   }
 
+  async recoverRenderedDispatchEvidence(
+    conversationId: string, prompt: string, selectedMessageId: string,
+    client: BackendJsonClient, origin: string,
+  ): Promise<ProviderSubmissionAttempt | null> {
+    if (!/^[A-Za-z0-9_-]{1,160}$/.test(conversationId) ||
+        !/^[A-Za-z0-9_-]{1,200}$/.test(selectedMessageId)) return null;
+    const result = await this.#conversation(conversationId, client, origin,
+      undefined, true, true);
+    if ('recovery' in result) return null;
+    const ack = recoverExactServerAcknowledgement(
+      result.body, conversationId, prompt, undefined, selectedMessageId);
+    if (ack === null || ack.submittedUserMessageId !== selectedMessageId ||
+        !isRecord(result.body) || !isRecord(result.body.mapping)) return null;
+    const mapping = result.body.mapping as Record<string, unknown>;
+    const matches = Object.entries(mapping).filter(([, node]) => {
+      const message = messageForNode(node);
+      return message !== null && messageRole(message) === 'user' &&
+        readStringField(message, 'id') === selectedMessageId &&
+        messageText(message).replaceAll('\r\n', '\n') === prompt.replaceAll('\r\n', '\n');
+    });
+    if (matches.length !== 1) return null;
+    const parent = readStringField(matches[0]![1], 'parent');
+    if (parent === null || parent.length === 0) return null;
+    return { conversationId, messageId: selectedMessageId,
+      parentMessageId: parent,
+      textHash: createHash('sha256').update(prompt.replaceAll('\r\n', '\n')).digest('hex'),
+      observedAt: this.#now().toISOString() };
+  }
+
   async #conversation(conversationId: string, client: BackendJsonClient, origin: string,
     observe?: (evidence: BackendRateLimitEvidence) => void, acknowledgement = false, selected = false):
     Promise<{ body: unknown; httpStatus: number } | { recovery: ProviderRecoveryResult; httpStatus?: number; endpointCategory?: 'auth-session' | 'conversation-detail'; pacing?: boolean }> {

@@ -15,7 +15,7 @@ import { ChatGptBackendRecovery, type BackendJsonClient } from './backend-recove
 import { observeChatGptDialog } from './dialog-observer.ts';
 import { observeChatGptActivity } from './activity-observer.ts';
 import { observeChatGptDom, observeChatGptAlerts } from './dom-observer.ts';
-import { hasMountedChatGptStream } from './message-dom.ts';
+import { hasMountedChatGptStream, matchesSubmittedChatGptUser, readChatGptMessages } from './message-dom.ts';
 import { ExactFinalTracker } from './exact-final.ts';
 import { inspectChatGptQuestion, answerChatGptQuestion } from './question.ts';
 import { inspectChatGptFreeTextQuestion, answerChatGptFreeTextQuestion } from './semantic-free-text-question.ts';
@@ -901,6 +901,41 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         contentSha256: request.expectedContentSha256 ?? null, input: request.input ?? null,
       });
     } catch { return false; }
+  }
+
+  async recoverDispatch(input: {
+    readonly context: SemanticTaskContext; readonly prompt: string;
+  }): Promise<SemanticDispatchEvidence | null> {
+    const { context, prompt } = input;
+    if (context.pageLease === null || context.providerConversationId === null ||
+        context.submittedUserMessageId === null || context.submittedUserTurnId === null) return null;
+    let page: Page;
+    try { page = (await this.#exactPage(context)).page; } catch { return null; }
+    try {
+      const url = new URL(page.url());
+      if (url.pathname !== `/c/${encodeURIComponent(context.providerConversationId)}` ||
+          url.search !== '' || url.hash !== '') return null;
+      const messages = await readChatGptMessages(page);
+      const anchors = messages.map((message, index) => ({ message, index })).filter(({ message }) =>
+        matchesSubmittedChatGptUser(message, {
+          submittedUserMessageId: context.submittedUserMessageId,
+          submittedUserTurnId: context.submittedUserTurnId,
+        }));
+      if (anchors.length !== 1) return null;
+      const laterUsers = messages.slice(anchors[0]!.index + 1).filter(message => message.role === 'user');
+      const candidate = laterUsers.length === 1 ? laterUsers[0]! : null;
+      if (candidate === null || candidate.messageId === null ||
+          candidate.text.replaceAll('\r\n', '\n') !== prompt.replaceAll('\r\n', '\n') ||
+          messages.filter(message => message.role === 'user').at(-1) !== candidate) return null;
+      const client = this.#options.backendClient ??
+        (this.#options.backendClientProvider
+          ? await this.#options.backendClientProvider() : await this.#pageBackendClient(context));
+      const origin = this.#options.backendOrigin ??
+        (this.#options.backendClient || this.#options.backendClientProvider
+          ? 'https://chatgpt.com' : url.origin);
+      return await this.#backend.recoverRenderedDispatchEvidence(
+        context.providerConversationId, prompt, candidate.messageId, client, origin);
+    } catch { return null; }
   }
 
   async verify(query: SemanticExactQuery): Promise<SemanticVerification> {

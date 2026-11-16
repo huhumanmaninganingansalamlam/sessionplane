@@ -76,6 +76,101 @@ test('captured exact ACK preserves server reparenting provenance and rejects a d
   }
 });
 
+test('rendered continuation dispatch recovery requires one exact canonical user on the current branch', async () => {
+  const observedAt = '2026-11-16T04:59:49.805Z';
+  const selectedMessageId = 'continuation-message';
+  const continuationMessage = (turnId = 'continuation-turn') => ({
+    ...userMessage(selectedMessageId, turnId),
+    content: { content_type: 'text', parts: ['계속'] },
+  });
+  const exactPayload = conversationPayload([
+    node('root', null, null),
+    node('source-user', 'root', userMessage('source-message', 'source-turn')),
+    node('source-answer', 'source-user',
+      finalAssistant('source-answer-message', 'Earlier exact answer')),
+    node('continuation-user', 'source-answer', continuationMessage()),
+    node('continuation-answer', 'continuation-user',
+      finalAssistant('continuation-answer-message', 'Continuation answer')),
+  ], 'continuation-answer');
+  const inspect = async (
+    payload: unknown,
+    input: { conversationId?: string; prompt?: string; selectedMessageId?: string } = {},
+  ) => {
+    const urls: string[] = [];
+    const recovery = new ChatGptBackendRecovery({
+      requestTimeoutMs: 1_000, tokenCacheTtlMs: 60_000,
+      now: () => new Date(observedAt),
+    });
+    const client: BackendJsonClient = {
+      async get(url) {
+        urls.push(url);
+        return {
+          status: 200, headers: {},
+          body: url.endsWith('/api/auth/session')
+            ? { accessToken: 'memory-only-token' } : payload,
+        };
+      },
+    };
+    const evidence = await recovery.recoverRenderedDispatchEvidence(
+      input.conversationId ?? CONVERSATION_ID,
+      input.prompt ?? '계속',
+      input.selectedMessageId ?? selectedMessageId,
+      client,
+      'https://chatgpt.com',
+    );
+    return { evidence, urls };
+  };
+
+  const exact = await inspect(exactPayload);
+  assert.deepEqual(exact.evidence, {
+    conversationId: CONVERSATION_ID,
+    messageId: selectedMessageId,
+    parentMessageId: 'source-answer',
+    textHash: createHash('sha256').update('계속').digest('hex'),
+    observedAt,
+  });
+  assert.deepEqual(exact.urls, [
+    'https://chatgpt.com/api/auth/session',
+    `https://chatgpt.com/backend-api/conversation/${CONVERSATION_ID}`,
+  ], 'dispatch recovery performs only the two canonical GETs');
+
+  const duplicate = conversationPayload([
+    node('root', null, null),
+    node('continuation-a', 'root', continuationMessage('continuation-turn-a')),
+    node('answer-a', 'continuation-a', finalAssistant('answer-a', 'First answer')),
+    node('continuation-b', 'answer-a', continuationMessage('continuation-turn-b')),
+    node('answer-b', 'continuation-b', finalAssistant('answer-b', 'Second answer')),
+  ], 'answer-b');
+  const otherBranch = conversationPayload([
+    node('root', null, null),
+    node('continuation-user', 'root', continuationMessage()),
+    node('other-user', 'root', userMessage('other-message', 'other-turn')),
+    node('other-answer', 'other-user', finalAssistant('other-answer', 'Other branch')),
+  ], 'other-answer');
+  const noParent = conversationPayload([
+    node('continuation-user', null, continuationMessage()),
+  ], 'continuation-user');
+  const missingParent = conversationPayload([
+    node('continuation-user', 'missing-parent', continuationMessage()),
+  ], 'continuation-user');
+
+  for (const [name, payload, input] of [
+    ['prompt mismatch', exactPayload, { prompt: '계속 ' }],
+    ['renderer message ID mismatch', exactPayload, { selectedMessageId: 'other-message' }],
+    ['canonical duplicate', duplicate, {}],
+    ['different conversation', { ...exactPayload, id: 'foreign-conversation' }, {}],
+    ['different branch', otherBranch, {}],
+    ['missing canonical parent', noParent, {}],
+    ['unresolved canonical parent', missingParent, {}],
+  ] as const) {
+    assert.equal((await inspect(payload, input)).evidence, null, name);
+  }
+
+  const invalid = await inspect(exactPayload, { selectedMessageId: 'invalid/message/id' });
+  assert.equal(invalid.evidence, null);
+  assert.deepEqual(invalid.urls, [], 'an invalid renderer identity is rejected before auth or backend GET');
+});
+
 test('late ACK uses durable dispatch identity among duplicate questions, never recency', () => {
   const old = [node('root', null, null), node('old-user', 'root', userMessage('old-user', 'old-turn')),
     node('old-final', 'old-user', finalAssistant('old-answer', 'Previous answer'))];

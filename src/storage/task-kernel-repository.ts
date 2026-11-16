@@ -1607,15 +1607,17 @@ export class TaskKernelRepository {
           FROM kernel_tasks t
           JOIN kernel_public_task_policies p ON p.task_id=t.task_id
           JOIN kernel_attempts a ON a.task_id=t.task_id
-          JOIN kernel_dispatch_evidence e ON e.attempt_id=a.attempt_id AND e.task_id=t.task_id
+          LEFT JOIN kernel_dispatch_evidence e ON e.attempt_id=a.attempt_id AND e.task_id=t.task_id
           JOIN kernel_slots s ON s.project_id=t.project_id AND s.slot_id=t.slot_id
             AND s.revision=t.slot_revision AND s.active_task_id=t.task_id
           WHERE t.cancel_requested=0 AND t.state IN ('working','uncertain')
             AND t.pending_decision_id IS NULL
             AND a.kind!='stop' AND a.state IN ('dispatched','uncertain')
             AND s.provider_conversation_id IS NOT NULL
-            AND e.provider_key=s.provider_key
-            AND e.provider_conversation_id=s.provider_conversation_id
+            AND (e.attempt_id IS NOT NULL OR a.kind='continuation')
+            AND (e.attempt_id IS NULL OR
+              (e.provider_key=s.provider_key AND
+               e.provider_conversation_id=s.provider_conversation_id))
             AND NOT EXISTS (SELECT 1 FROM kernel_root_dispatch_evidence r
               WHERE r.attempt_id=a.attempt_id)
             AND NOT EXISTS (SELECT 1 FROM kernel_attempts newer

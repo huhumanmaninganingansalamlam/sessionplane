@@ -208,6 +208,12 @@ export interface SemanticProviderAdapter {
   verify(query: SemanticExactQuery): Promise<SemanticVerification>;
   /** Always read-only, even when the page is missing or the Core restarted. */
   recover(query: SemanticExactQuery): Promise<SemanticVerification>;
+  /** Recover exact non-root POST provenance after an ambiguous send effect.
+   * Renderer identity selects a candidate; canonical provider data supplies its
+   * parent and branch proof. This hook can never draft, click or resend. */
+  recoverDispatch?(input: {
+    readonly context: SemanticTaskContext; readonly prompt: string;
+  }): Promise<SemanticDispatchEvidence | null>;
   /** Optional provider-local reservation for an exact future FINAL read. */
   reserveFinalRead?(input: {
     readonly context: SemanticTaskContext; readonly notBefore: string;
