@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { cleanCandidateDisposableChromes } from './disposable-browser-guard.mjs';
 
@@ -29,7 +28,7 @@ export async function runIsolatedCandidateCommand(command, args, {
     throw new TypeError('Invalid bounded candidate command');
   }
   const gateToken = randomUUID();
-  const gateRoot = mkdtempSync(path.join(tmpdir(), 'sessionplane-gate-'));
+  const gateRoot = mkdtempSync(path.join('/tmp', 'spg-'));
   return await new Promise(resolve => {
     let child;
     try {
