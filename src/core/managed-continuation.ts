@@ -10,9 +10,6 @@ export const CONTINUATION_READ_RETRY_MIN_MS = 5_000;
 // GET can open a provider throttle that outlives the local fifteen-minute fence
 // and steals the only authoritative no-FINAL read at the twenty-minute due.
 export const CONTINUATION_DUE_READ_RESERVATION_MS = CONTINUATION_INTERVAL_MS;
-const PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT = 5;
-const PERSISTENT_READ_LIMIT_AGENT_REVIEW_DELAY_MS =
-  (PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT - 1) * CONTINUATION_INTERVAL_MS;
 const TIMER_KIND = 'continuation_due';
 
 interface ContinuationContext {
@@ -21,6 +18,8 @@ interface ContinuationContext {
   readonly intervalMs: number;
   readonly message: string;
   readonly sourceAttemptId: string;
+  readonly agentReviewAfterMs?: number;
+  readonly stagnationSince?: string;
 }
 
 export interface ContinuationReviewReport {
@@ -33,7 +32,7 @@ interface ContinuationAgentReviewInput {
   readonly taskId: string;
   readonly clientId: string;
   readonly attemptId: string;
-  readonly cause?: 'persistent_backend_read_throttle';
+  readonly cause?: 'persistent_backend_read_throttle' | 'repeated_no_progress';
 }
 
 /**
@@ -104,10 +103,13 @@ export class ManagedContinuationService {
    */
   activate(input: {
     taskId: string; clientId: string; sourceAttemptId: string;
-    approvalRef: string; message: string;
+    approvalRef: string; message: string; agentReviewAfterMs?: number;
   }): TimerRecord {
     if (input.approvalRef.trim().length === 0 || input.approvalRef.length > 512 ||
-        input.message.trim().length === 0 || input.message.length > 4_096) {
+        input.message.trim().length === 0 || input.message.length > 4_096 ||
+        (input.agentReviewAfterMs !== undefined &&
+          (!Number.isSafeInteger(input.agentReviewAfterMs) ||
+           input.agentReviewAfterMs < CONTINUATION_INTERVAL_MS))) {
       throw new Error('Explicit bounded continuation approval and message required');
     }
     const full = this.#repository.getFullTask(input.taskId, input.clientId);
@@ -134,12 +136,68 @@ export class ManagedContinuationService {
     if (slot.providerKey === 'chatgpt' && input.message !== '계속') {
       throw new Error('ChatGPT continuation requires the exact approved literal 계속');
     }
+    const existingPending = full.timers.find(timer => {
+      if (timer.kind !== TIMER_KIND || timer.status !== 'pending') return false;
+      const context = parseContext(timer.contextJson);
+      return context?.sourceAttemptId === source.attemptId &&
+        context.approvalRef === input.approvalRef && context.message === input.message;
+    });
+    if (existingPending) return existingPending;
+    const prior = full.timers.filter(timer => timer.kind === TIMER_KIND)
+      .map(timer => parseContext(timer.contextJson))
+      .filter((value): value is ContinuationContext => value !== null)
+      .filter(context => context.approvalRef === input.approvalRef &&
+        context.message === input.message).at(-1);
     return this.#armFromAck(full, input.clientId, source, {
       contract: 'approved_continuation_v1',
       approvalRef: input.approvalRef,
       intervalMs: CONTINUATION_INTERVAL_MS,
       message: input.message,
       sourceAttemptId: source.attemptId,
+      stagnationSince: prior?.stagnationSince ?? source.acknowledgedAt,
+      ...(input.agentReviewAfterMs === undefined ? {} : {
+        agentReviewAfterMs: input.agentReviewAfterMs,
+      }),
+    });
+  }
+
+  /**
+   * Continue the exact approved policy after an agent decision. Resume resets
+   * the stagnation epoch and runs the due immediately; wait preserves the
+   * epoch and schedules one observation boundary without performing a send.
+   */
+  resumeAfterAgentDecision(input: {
+    taskId: string; clientId: string; attemptId: string; mode: 'wait' | 'resume';
+  }): TimerRecord {
+    const full = this.#repository.getFullTask(input.taskId, input.clientId);
+    if (full.task.cancelRequested || full.task.state !== 'working' ||
+        full.task.pendingDecisionId !== null) {
+      throw new Error('Agent continuation resume requires the exact working Task');
+    }
+    const attempt = full.attempts.find(row => row.attemptId === input.attemptId);
+    const latest = full.attempts.filter(row => row.kind !== 'stop').at(-1);
+    if (!attempt || latest?.attemptId !== attempt.attemptId ||
+        attempt.kind !== 'continuation' || attempt.state !== 'acknowledged' ||
+        attempt.acknowledgedAt === null ||
+        full.results.some(result => result.attemptId === attempt.attemptId)) {
+      throw new Error('Agent continuation resume requires the current unanswered ACK');
+    }
+    const context = full.timers.filter(timer => timer.kind === TIMER_KIND)
+      .map(timer => parseContext(timer.contextJson))
+      .filter((value): value is ContinuationContext => value !== null)
+      .at(-1);
+    if (!context) throw new Error('Approved continuation policy is unavailable');
+    const now = this.#now().toISOString();
+    const dueAt = input.mode === 'resume' ? now
+      : new Date(Date.parse(now) + context.intervalMs).toISOString();
+    const next: ContinuationContext = {
+      ...context, sourceAttemptId: attempt.attemptId,
+      ...(input.mode === 'resume' ? { stagnationSince: now } : {}),
+    };
+    return this.#repository.scheduleTimer({
+      taskId: input.taskId, clientId: input.clientId,
+      timerId: `continuation-agent-${input.mode}:${attempt.attemptId}:${Date.parse(dueAt)}`,
+      kind: TIMER_KIND, dueAt, contextJson: JSON.stringify(next),
     });
   }
 
@@ -278,7 +336,7 @@ export class ManagedContinuationService {
         if (!policy || typeof policy !== 'object') continue;
         const approved = policy as {
           enabled?: unknown; intervalMs?: unknown;
-          approvalRef?: unknown; message?: unknown;
+          approvalRef?: unknown; message?: unknown; agentReviewAfterMs?: unknown;
         };
         if (approved.enabled !== true || approved.intervalMs !== CONTINUATION_INTERVAL_MS ||
             typeof approved.approvalRef !== 'string' ||
@@ -290,6 +348,8 @@ export class ManagedContinuationService {
           taskId: candidate.taskId, clientId: candidate.clientId,
           sourceAttemptId: latest.attemptId, approvalRef: approved.approvalRef,
           message: approved.message,
+          ...(typeof approved.agentReviewAfterMs === 'number'
+            ? { agentReviewAfterMs: approved.agentReviewAfterMs } : {}),
         });
       } catch { /* One unready Task must not block any other due slot. */ }
     }
@@ -351,18 +411,9 @@ export class ManagedContinuationService {
           this.#scheduleFreshFinalReview(pending.taskId, pending.clientId,
             pending.attemptId, now);
         }
-        if (observed.kind !== 'exact_final' &&
-            (observed.reason === 'backend-http-429' ||
-              observed.reason === 'backend-conversation-probe-paced') &&
-            this.#requestAgentReview &&
-            this.#repository.getTask(pending.taskId, pending.clientId).state === 'working' &&
-            this.#hasPersistentReadLimit(pending.taskId, pending.clientId,
-              pending.attemptId, now)) {
-          await this.#requestAgentReview({
-            taskId: pending.taskId, clientId: pending.clientId,
-            attemptId: pending.attemptId, cause: 'persistent_backend_read_throttle',
-          });
-        }
+        // Backend pacing is observation evidence, not a hidden attempt counter.
+        // Agent escalation is governed only by an explicit Task policy on its
+        // exact continuation timer; ordinary FINAL scans remain read-only.
       } catch {
         try {
           this.#repository.recordObservationDeferred(pending.taskId, pending.clientId,
@@ -420,7 +471,8 @@ export class ManagedContinuationService {
       taskId: full.task.taskId, clientId,
       timerId: 'continuation-due:' + source.attemptId,
       kind: TIMER_KIND, dueAt,
-      contextJson: JSON.stringify({ ...approved, sourceAttemptId: source.attemptId }),
+      contextJson: JSON.stringify({ ...approved, sourceAttemptId: source.attemptId,
+        stagnationSince: approved.stagnationSince ?? source.acknowledgedAt }),
     });
   }
 
@@ -514,13 +566,12 @@ export class ManagedContinuationService {
   }
 
   /** An extended 429 is not evidence of an absent answer. The actual 429
-   * opens blocked review slot one; four further twenty-minute boundaries
-   * must pass before the fifth blocked slot creates durable agent review.
-   * Identical pacing events are deduplicated and are not backend requests,
-   * so elapsed review slots—not event or probe count—define the threshold.
+   * may request agent review only after an explicit policy duration. There is
+   * no built-in probe count, slot count or hidden retry ceiling.
    */
   #hasPersistentReadLimit(
     taskId: string, clientId: string, attemptId: string, now: string,
+    reviewAfterMs: number,
   ): boolean {
     const full = this.#repository.getFullTask(taskId, clientId);
     const events = full.events;
@@ -560,7 +611,7 @@ export class ManagedContinuationService {
       }
     }
     return first429At !== null && Number.isFinite(first429At) &&
-      Date.parse(now) - first429At >= PERSISTENT_READ_LIMIT_AGENT_REVIEW_DELAY_MS;
+      Date.parse(now) - first429At >= reviewAfterMs;
   }
 
   async #handle(timer: TimerRecord, now: string): Promise<'attempted' | 'deferred' | 'ignored'> {
@@ -577,7 +628,14 @@ export class ManagedContinuationService {
       this.#rearmReview(timer, clientId, context, now);
       return 'deferred';
     }
-    const continuationId = 'managed-continuation:' + source.attemptId;
+    const successor = full.attempts.find(attempt =>
+      attempt.kind === 'continuation' && attempt.sequence === source.sequence + 1);
+    // Preserve v0.4.108's first managed identifier for durable compatibility.
+    // Later approved turns use a bounded sequence identity instead of recursively
+    // embedding every predecessor attempt ID.
+    const continuationId = successor?.attemptId ?? (source.kind === 'initial'
+      ? 'managed-continuation:' + source.attemptId
+      : `managed-continuation:${timer.taskId}:${source.sequence + 1}`);
     const latest = full.attempts.filter(attempt => attempt.kind !== 'stop').at(-1);
     if (latest?.attemptId !== source.attemptId &&
         latest?.attemptId !== continuationId) return 'ignored';
@@ -619,8 +677,9 @@ export class ManagedContinuationService {
     }
     if ((observed.reason === 'backend-http-429' ||
           observed.reason === 'backend-conversation-probe-paced') &&
-        this.#requestAgentReview &&
-        this.#hasPersistentReadLimit(timer.taskId, clientId, source.attemptId, now)) {
+        context.agentReviewAfterMs !== undefined && this.#requestAgentReview &&
+        this.#hasPersistentReadLimit(timer.taskId, clientId, source.attemptId, now,
+          context.agentReviewAfterMs)) {
       try {
         await this.#requestAgentReview({
           taskId: timer.taskId, clientId, attemptId: source.attemptId,
@@ -640,28 +699,31 @@ export class ManagedContinuationService {
       this.#rearmReview(timer, clientId, context, now);
       return 'deferred';
     }
-    // An unanswered, already approved Continue is repeated lack of progress.
-    // No second automatic send may be inferred from the same approval. Core
-    // raises a durable agent-first packet; if that cannot be persisted, hold
-    // the exact Task and retry the review without submitting anything.
-    if (source.kind === 'continuation') {
+    const stagnationSince = Date.parse(context.stagnationSince ?? source.acknowledgedAt!);
+    if (source.kind === 'continuation' && context.agentReviewAfterMs !== undefined &&
+        Number.isFinite(stagnationSince) &&
+        Date.parse(now) - stagnationSince >= context.agentReviewAfterMs) {
       this.#repository.recordObservationDeferred(timer.taskId, clientId,
-        'managed-continuation-agent-review-required');
+        'managed-continuation-no-progress-policy-reached');
       if (this.#requestAgentReview) {
         try {
           await this.#requestAgentReview({
             taskId: timer.taskId, clientId, attemptId: source.attemptId,
+            cause: 'repeated_no_progress',
           });
           return 'deferred';
-        } catch { /* Failed durable handoff is not permission to resend. */ }
+        } catch { /* Missing handoff never authorizes another automatic send. */ }
       }
       this.#rearmReview(timer, clientId, context, now);
       return 'deferred';
     }
+    // Each due is a distinct approved execution slot. Reusing the same attempt
+    // is forbidden, but an exact ACK with no FINAL may advance to one new
+    // continuation attempt under the still-active policy.
     if (latest.attemptId === source.attemptId) {
       this.#repository.planAttempt({
         taskId: timer.taskId, clientId, attemptId: continuationId,
-        kind: 'continuation', turnKey: continuationId, content: context.message,
+        kind: 'continuation', turnKey: 'managed-after:' + source.attemptId, content: context.message,
       });
     } else if (latest.state !== 'planned') {
       // A dispatched or uncertain continuation can never be sent again.
@@ -724,7 +786,13 @@ function parseContext(raw: string): ContinuationContext | null {
       typeof v.approvalRef === 'string' && v.approvalRef.length > 0 &&
       typeof v.message === 'string' && v.message.length > 0 &&
       v.intervalMs === CONTINUATION_INTERVAL_MS &&
-      typeof v.sourceAttemptId === 'string' && v.sourceAttemptId.length > 0
+      typeof v.sourceAttemptId === 'string' && v.sourceAttemptId.length > 0 &&
+      (v.agentReviewAfterMs === undefined ||
+       (Number.isSafeInteger(v.agentReviewAfterMs) &&
+        v.agentReviewAfterMs! >= CONTINUATION_INTERVAL_MS)) &&
+      (v.stagnationSince === undefined ||
+       (typeof v.stagnationSince === 'string' &&
+        Number.isFinite(Date.parse(v.stagnationSince))))
       ? v as ContinuationContext : null;
   } catch { return null; }
 }

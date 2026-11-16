@@ -279,6 +279,8 @@ test('Core-assembled semantic ChatGPT sends initial and continuation once each w
       pendingQuestion?.decisionId);
     assert.equal(await page.evaluate(() => (window as any).sends), 1);
     assert.equal(await page.evaluate(() => (window as any).decisionClicks), 0);
+    continuedBackend = true;
+    virtualNow += 5_001;
     assert.deepEqual(await runtime.decisionGateway.decide({
       taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-continue',
       decisionId: pendingQuestion!.decisionId, requestId: 'choose-before-continue',
@@ -286,13 +288,10 @@ test('Core-assembled semantic ChatGPT sends initial and continuation once each w
     }), { kind: 'performed', effect: 'question_answered' });
     assert.equal(await page.evaluate(() => (window as any).decisionClicks), 1);
     assert.equal(runtime.repository.getTask('exact-task', 'fixture-alice').state, 'working');
-    continuedBackend = true;
-    virtualNow += 5_001;
-    await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-continue');
     const continued = runtime.repository.getFullTask('exact-task', 'fixture-alice')
       .attempts.find(row => row.attemptId === 'attempt-continue')!;
     assert.equal(continued.state, 'acknowledged',
-      'a planned continuation must use the previously finalized turn as its UI anchor');
+      'the verified decision effect must automatically resume the same planned continuation');
     assert.equal(continued.externalTurnId, 'turn-continue');
     assert.equal(await page.evaluate(() => (window as any).sends), 2);
     const continuationEvidence = runtime.repository.getDispatchEvidence({
@@ -523,7 +522,7 @@ test('Core accepts only the exact resolved question decision once', {
       decisionId: 'wrong-option', audience: 'agent', contextJson: makeContext() });
     store.resolveDecision({ taskId: 'decision-task', clientId,
       decisionId: 'wrong-option', resolutionJson: JSON.stringify({
-        kind: 'semantic_action', input: 'Decline',
+        kind: 'semantic_action', actionRef: action.actionRef, input: 'Decline',
       }) });
     const denied = await adapter.act({
       context: decisionContext, snapshotId: observation.snapshotId,
@@ -586,7 +585,7 @@ test('Core accepts only the exact resolved question decision once', {
       }) });
     store.resolveDecision({ taskId: 'decision-task', clientId,
       decisionId: 'model-open', resolutionJson: JSON.stringify({
-        kind: 'semantic_action', input: null,
+        kind: 'semantic_action', actionRef: openModel.actionRef, input: null,
       }) });
     assert.deepEqual(await adapter.act({
       context: decisionContext, snapshotId: closedModel.snapshotId,
@@ -605,7 +604,7 @@ test('Core accepts only the exact resolved question decision once', {
       }) });
     store.resolveDecision({ taskId: 'decision-task', clientId,
       decisionId: 'model-select', resolutionJson: JSON.stringify({
-        kind: 'semantic_action', input: 'Pro',
+        kind: 'semantic_action', actionRef: chooseModel.actionRef, input: 'Pro',
       }) });
     assert.deepEqual(await adapter.act({
       context: decisionContext, snapshotId: openedModel.snapshotId,
@@ -637,7 +636,7 @@ test('Core accepts only the exact resolved question decision once', {
       }) });
     store.resolveDecision({ taskId: 'decision-task', clientId,
       decisionId: 'stream-retry', resolutionJson: JSON.stringify({
-        kind: 'semantic_action', input: null,
+        kind: 'semantic_action', actionRef: retryAction.actionRef, input: null,
       }) });
     const retried = await adapter.act({
       context: decisionContext, snapshotId: retryObserved.snapshotId,

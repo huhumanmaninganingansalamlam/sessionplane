@@ -36,10 +36,10 @@ export function resolveMcpToolTimeoutMs(options: {
 }
 
 const taskDescriptions: Record<keyof typeof taskSchemas, string> = {
-  start: 'Start one exact project conversation Task. Core owns preparation, dispatch, canonical ACK, FINAL and approved continuation. Reuse requestId only for an identical request.',
-  get: 'Read the durable Task. Select view=result for the complete exact answer or view=evidence for bounded provenance; never invokes provider mutation.',
+  start: 'Start one exact project conversation Task. Core owns preparation, dispatch, canonical ACK, FINAL and every due in an approved repeating continuation policy. Optional permission grants must name one exact HostSpan app/tool and once mode. Reuse requestId only for an identical request.',
+  get: 'Read the durable Task. Use view=result for the complete exact answer, view=evidence for bounded provenance, or view=decision with decisionId/section/cursor to page the full stored decision evidence. Never invokes provider mutation.',
   wait: 'Wait once, bounded by waitMs, for a newer Task revision. A client disconnect never cancels Core work.',
-  decide: 'Consume an exact decisionId/actionRef once, or use refresh:true only for read-only reinspection of an unactionable/expired model decision. Never grants permission or replays a provider POST.',
+  decide: 'Select one exact current provider action or Task control. Verified effects resume the same Task automatically; reobserve/wait/resume/cancel/request-human controls stay bound to the decision. A permission grant executes only inside an exact task.start delegation. refresh:true is read-only compatibility reinspection and never replays a provider POST.',
   cancel: 'Persist Task cancellation intent and revoke future Continue; ambiguous external stop remains uncertain.',
 };
 

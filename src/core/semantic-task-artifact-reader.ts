@@ -23,7 +23,7 @@ export type VerifiedTaskArtifactRead =
       readonly mediaType: string; readonly bytes: Uint8Array };
 
 /**
- * Provider-neutral X04 artifact seam, deliberately independent of legacy
+ * Provider-neutral X04 artifact seam, deliberately independent of provider-specific
  * artifact storage, browser paths, names, and the public text-only B-first API.
  *
  * The provider may supply bytes only for an exact recorded FINAL belonging to

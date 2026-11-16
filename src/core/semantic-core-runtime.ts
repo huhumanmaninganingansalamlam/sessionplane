@@ -38,7 +38,7 @@ export interface SemanticCoreRuntime {
 /**
  * Re-associate only retained native Chrome targets belonging to active public
  * Tasks after Core adoption. Never create/navigate a page, repeat a POST, or
- * restore legacy observation/submission workers. A missing, ambiguous or
+ * restore any parallel observation/submission worker. A missing, ambiguous or
  * foreign target remains unbound and awaits an agent decision.
  */
 export async function restoreSemanticPageBindings(input: {
@@ -163,7 +163,7 @@ function sameDecisionContext(expected: SemanticTaskContext, actual: unknown): bo
 
 /** One journal, browser owner, and page mutex for the new Core path.
  * This assembly never creates another browser/DB writer or registers a
- * competing legacy RPC route.
+ * competing RPC mutation route.
  */
 export function createSemanticCoreRuntime(input: {
   readonly database: SessionPlaneDatabase;
@@ -223,7 +223,7 @@ export function createSemanticCoreRuntime(input: {
       const slot = repository.getSlot(identity.projectId, identity.slotId, clientId);
       if (task.projectId !== identity.projectId || task.slotId !== identity.slotId ||
         task.slotRevision !== identity.slotRevision || task.cancelRequested ||
-        !['working', 'agent_input_required', 'uncertain'].includes(task.state) ||
+        !['working', 'agent_input_required', 'human_input_required', 'uncertain'].includes(task.state) ||
         slot.activeTaskId !== identity.taskId || slot.revision !== identity.slotRevision ||
         slot.providerKey !== 'chatgpt' || slot.providerConversationId === null) return null;
       const full = repository.getFullTask(identity.taskId, clientId);
@@ -231,24 +231,29 @@ export function createSemanticCoreRuntime(input: {
         attempt.kind !== 'stop' && attempt.state !== 'failed_before_dispatch' &&
         !full.results.some(result => result.attemptId === attempt.attemptId));
       const latest = unresolved.at(-1);
-      if (!latest || unresolved.length > 2) return null;
-      if (unresolved.length === 2) {
-        // A timed Continue is valid precisely because the first ACK still has
-        // NO FINAL. Both outstanding turns must own the same exact generation;
-        // never adopt another Task, session, page or unverified POST.
-        const source = unresolved[0]!;
-        if (source.state !== 'acknowledged' || source.externalTurnId === null ||
-            latest.kind !== 'continuation' || latest.sequence !== source.sequence + 1) return null;
-        const earlier = repository.getAttemptSessionBinding({
-          taskId: identity.taskId, clientId, attemptId: source.attemptId,
+      if (!latest) return null;
+      // An approved repeated continuation policy can leave several exact ACKs
+      // without a FINAL. They are one contiguous turn chain, not competing
+      // mutations. Every predecessor must be acknowledged and every turn must
+      // retain the same immutable session generation and conversation.
+      let chainBinding: ReturnType<typeof repository.getAttemptSessionBinding> = null;
+      for (let index = 0; index < unresolved.length; index += 1) {
+        const attempt = unresolved[index]!;
+        if (index > 0) {
+          const previous = unresolved[index - 1]!;
+          if (attempt.kind !== 'continuation' || attempt.sequence !== previous.sequence + 1) return null;
+        }
+        if (index < unresolved.length - 1 &&
+            (attempt.state !== 'acknowledged' || attempt.externalTurnId === null)) return null;
+        const bound = repository.getAttemptSessionBinding({
+          taskId: identity.taskId, clientId, attemptId: attempt.attemptId,
         });
-        const following = repository.getAttemptSessionBinding({
-          taskId: identity.taskId, clientId, attemptId: latest.attemptId,
-        });
-        if (!earlier || !following ||
-            earlier.sessionId !== following.sessionId ||
-            earlier.generation !== following.generation ||
-            earlier.conversationId !== following.conversationId) return null;
+        if (!bound) return null;
+        if (chainBinding !== null &&
+            (chainBinding.sessionId !== bound.sessionId ||
+             chainBinding.generation !== bound.generation ||
+             chainBinding.conversationId !== bound.conversationId)) return null;
+        chainBinding = bound;
       }
       const sessionBinding = repository.getAttemptSessionBinding({
         taskId: identity.taskId, clientId, attemptId: latest.attemptId,
@@ -460,6 +465,7 @@ export function createSemanticCoreRuntime(input: {
       submittedUserTurnId,
       ...(repository.publicModelIntent(intent.projectId, intent.clientId)
         ? { requiredModel: repository.publicModelIntent(intent.projectId, intent.clientId) } : {}),
+      permissionGrants: repository.publicPermissionGrants(intent.taskId, intent.clientId),
       pageLease: activeSlot && candidate !== null && isExactLease(candidate) ? candidate : null,
     };
   };
@@ -490,7 +496,9 @@ export function createSemanticCoreRuntime(input: {
   const authorizedDecision = (approval: {
     context: SemanticTaskContext;
     purpose: 'open_model_chooser' | 'close_model_chooser' |
-      'choose_model' | 'choose_reasoning_effort' | 'answer_question' | 'retry';
+      'choose_model' | 'choose_reasoning_effort' | 'answer_question' |
+      'grant_permission' | 'decline_permission' | 'activate_control' |
+      'set_control_value' | 'retry';
     decisionId: string; snapshotId: string; actionRef: string;
     evidenceHash: string; input: string | null;
   }): boolean => {
@@ -508,13 +516,21 @@ export function createSemanticCoreRuntime(input: {
           row.resolutionJson === null) return false;
       const envelope = JSON.parse(row.contextJson);
       const resolution = JSON.parse(row.resolutionJson);
+      const storedAction = Array.isArray(envelope?.actions)
+        ? envelope.actions.find((candidate: any) =>
+            candidate?.purpose === approval.purpose &&
+            candidate?.snapshotId === approval.snapshotId &&
+            candidate?.actionRef === approval.actionRef &&
+            candidate?.evidenceHash === approval.evidenceHash)
+        : envelope?.purpose === approval.purpose &&
+          envelope?.snapshotId === approval.snapshotId &&
+          envelope?.actionRef === approval.actionRef &&
+          envelope?.evidenceHash === approval.evidenceHash
+          ? envelope : null;
       if (envelope?.kind !== 'semantic_action' ||
-          !sameDecisionContext(context, envelope.context) ||
-          envelope.purpose !== approval.purpose ||
-          envelope.snapshotId !== approval.snapshotId ||
-          envelope.actionRef !== approval.actionRef ||
-          envelope.evidenceHash !== approval.evidenceHash ||
+          !sameDecisionContext(context, envelope.context) || !storedAction ||
           resolution?.kind !== 'semantic_action' ||
+          resolution.actionRef !== approval.actionRef ||
           resolution.input !== approval.input) return false;
       return repository.consumeDecisionAction(context.taskId, clientId, approval.decisionId);
     } catch { return false; }
@@ -720,8 +736,13 @@ export function createSemanticCoreRuntime(input: {
     }),
   ] : []);
   const chat = providers.resolve('chatgpt', 'conversation');
+  let resumeTask: (input: {
+    taskId: string; clientId: string; attemptId: string;
+    mode: 'wait' | 'resume' | 'provider_effect';
+  }) => Promise<void> = async () => {};
   const decisionGateway = new SemanticDecisionGateway({
     repository, providers, resolveContext,
+    onTaskResumed: input => resumeTask(input),
   });
   const ports = chat.kind === 'available' ? [new SemanticExactTaskPort({
     adapter: chat.adapter, resolveContext,
@@ -815,6 +836,25 @@ export function createSemanticCoreRuntime(input: {
       });
     },
   });
+  resumeTask = async ({ taskId, clientId, attemptId, mode }) => {
+    // A verified provider effect returns to the same exact attempt immediately.
+    // A control-only wait/resume does not invent a send; the ordinary durable
+    // scanners decide whether observation, an approved due or dispatch is next.
+    if (mode === 'wait' || mode === 'resume') {
+      managedContinuation.resumeAfterAgentDecision({
+        taskId, clientId, attemptId, mode,
+      });
+    }
+    if (mode === 'provider_effect') {
+      const full = repository.getFullTask(taskId, clientId);
+      const attempt = full.attempts.find(row => row.attemptId === attemptId);
+      if (full.task.state === 'working' && !full.task.cancelRequested &&
+          attempt?.state === 'planned') {
+        await kernel.dispatch(taskId, clientId, attemptId);
+      }
+    }
+    await managedContinuation.tick();
+  };
   const artifactReader = new SemanticTaskArtifactReader({ repository, providers });
   return { providers, repository, kernel, managedContinuation,
     decisionGateway, artifactReader, bindAttemptSession };

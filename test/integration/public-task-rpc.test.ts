@@ -109,6 +109,78 @@ test('Task wait returns a revision and MCP get uses the same Core state', async 
     'reads and wait never submit or plan external attempts');
 });
 
+test('task.get pages full decision evidence without dropping the executable decision', async t => {
+  const { taskId, projectId, clientId, store, rpc } = await fixture(t);
+  const decisionId = randomUUID();
+  const question = 'Q'.repeat(16_000);
+  const actionRef = randomUUID();
+  const packet = {
+    taskId, taskRevision: 2, decisionId, kind: 'provider_question',
+    reason: 'provider-question-requires-decision', humanOnly: false,
+    observedAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    snapshotId: 'snapshot-paged-question', questionText: question.slice(0, 4_096),
+    permission: null, requestedModel: null,
+    options: [{
+      actionRef, purpose: 'answer_question', effect: 'Answer exact provider question',
+      risk: 'send_once', evidenceHash: 'evidence-paged-question',
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      inputSchema: { kind: 'text', maxLength: 2_000 },
+    }],
+    controls: [{
+      actionRef: `control:${decisionId}:reobserve`, purpose: 'reobserve',
+      effect: 'Read latest exact state', risk: 'read_only',
+      evidenceHash: 'control-evidence', inputSchema: { kind: 'none' },
+    }],
+    evidenceSections: [{
+      section: 'provider_question', totalBytes: Buffer.byteLength(question),
+      preview: question.slice(0, 4_096), previewBytes: 4_096, nextCursor: 4_096,
+    }],
+    resumePoint: 'same exact Task after selected answer', evidenceBytes: 5_000,
+  };
+  store.requireDecision({
+    taskId, clientId, decisionId, audience: 'agent',
+    contextJson: JSON.stringify({
+      kind: 'semantic_action', attemptId: 'initial:' + taskId,
+      context: {
+        projectId, slotId: 'main', slotRevision: 1, taskId,
+        providerConversationId: null, submittedUserMessageId: null,
+        submittedUserTurnId: null, pageLease: null,
+      },
+      purpose: 'answer_question', snapshotId: packet.snapshotId,
+      actionRef, evidenceHash: 'evidence-paged-question',
+      actions: [{ purpose: 'answer_question', snapshotId: packet.snapshotId,
+        actionRef, evidenceHash: 'evidence-paged-question' }],
+      evidence: {
+        original_request: 'Exact public question', current_attempt: '',
+        provider_question: question, permission: '', partial_answer: '', capability_issues: '',
+      },
+      packet,
+    }),
+  });
+  const summary = await rpc<any>('task.get', { taskId, clientId });
+  assert.equal(summary.decision.options.length, 1);
+  assert.equal(summary.decision.questionText.length, 4_096);
+  assert.equal(summary.decision.evidenceSections[0].nextCursor, 4_096);
+
+  let cursor = 0;
+  let restored = '';
+  while (true) {
+    const page = await rpc<any>('task.get', {
+      taskId, clientId, view: 'decision', decisionId,
+      section: 'provider_question', cursor, maxBytes: 1_024,
+    });
+    restored += page.text;
+    if (page.nextCursor === null) break;
+    assert.ok(page.nextCursor > cursor);
+    cursor = page.nextCursor;
+  }
+  assert.equal(restored, question);
+  assert.equal(store.getTask(taskId, clientId).pendingDecisionId, decisionId);
+  assert.equal(store.getFullTask(taskId, clientId).attempts.length, 0,
+    'paged evidence is a read and cannot create a provider attempt');
+});
+
 test('Task cancel revokes a never-submitted task; an attempted external mutation remains uncertain', async t => {
   const { taskId, clientId, store, rpc } = await fixture(t);
   store.planAttempt({
@@ -307,7 +379,11 @@ test('task.start atomically plans one original attempt and returns current slot 
     continuationPolicy: {
       enabled: true, intervalMs: 1_200_000,
       message: '계속', approvalRef: 'user-delegated-review',
+      agentReviewAfterMs: 7_200_000,
     },
+    agentPermissionGrants: [{
+      appName: 'HOSTSPAN-GIT', toolName: 'repository_read', allowMode: 'once' as const,
+    }],
   };
   const started = await rpc<any>('task.start', input);
   assert.match(started.taskId, /^[0-9a-f-]{36}$/i);
@@ -321,6 +397,9 @@ test('task.start atomically plans one original attempt and returns current slot 
   assert.equal(full.attempts.length, 1);
   assert.equal(full.attempts[0]!.state, 'planned');
   assert.equal(full.attempts[0]!.content, input.prompt);
+  assert.deepEqual(store.publicPermissionGrants(started.taskId, 'alice'), [{
+    appName: 'hostspan-git', toolName: 'repository_read', allowMode: 'once',
+  }]);
   assert.equal((await rpc<any>('task.get', {
     clientId: 'alice', taskId: started.taskId,
   })).conversationRevision, 2);
@@ -352,6 +431,24 @@ test('task.start atomically plans one original attempt and returns current slot 
     ...input, continuationPolicy: { ...input.continuationPolicy, message: 'not exact 계속' },
   }), (error: any) => {
     assert.equal(error.data?.errorCode, 'invalid_request');
+    return true;
+  });
+  await assert.rejects(rpc('task.start', {
+    ...input,
+    agentPermissionGrants: [{
+      appName: 'not-hostspan', toolName: 'repository_read', allowMode: 'once',
+    }],
+  }), (error: any) => {
+    assert.equal(error.data?.errorCode, 'invalid_request');
+    return true;
+  });
+  await assert.rejects(rpc('task.start', {
+    ...input,
+    agentPermissionGrants: [{
+      appName: 'hostspan-git', toolName: 'repository_write', allowMode: 'once',
+    }],
+  }), (error: any) => {
+    assert.equal(error.data?.errorCode, 'idempotency_conflict');
     return true;
   });
   const mcp = await invokeMcpTool({

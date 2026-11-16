@@ -1,6 +1,6 @@
 {
   "name": "sessionplane",
-  "version": "0.4.108",
+  "version": "0.4.109",
   "description": "Durable local runtime for role-addressed browser-backed AI chat sessions",
   "private": true,
   "type": "module",
@@ -34,7 +34,6 @@
     "start": "node dist/main.js",
     "verify": "npm run typecheck && npm test && npm run build && npm run doctor",
     "verify:clean": "node scripts/clean-checkout-gate.mjs",
-    "test:legacy": "node --test --test-concurrency=1 --experimental-strip-types $(find test -name '*.test.ts' ! -path 'test/browser/*' ! -path 'test/integration/browser-cli-mcp.test.ts' | sort)",
     "test:browser": "node --test --test-concurrency=1 --experimental-strip-types test/browser/semantic-core-composition.test.ts test/browser/closed-pro-model.test.ts test/browser/four-project-background.test.ts",
     "test:live-preflight": "node scripts/live-candidate-preflight.mjs",
     "test:live-task": "node scripts/live-task-acceptance.mjs",

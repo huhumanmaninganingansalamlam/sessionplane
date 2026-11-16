@@ -1,53 +1,91 @@
 # SessionPlane
 
-SessionPlane is a durable project/task conversation runtime. One Core owns its
-dedicated Chromium profile, SQLite journals, actor scheduler, exact ChatGPT
-POST evidence, canonical ACK and FINAL recovery, and approved continuation.
-The CLI and MCP use the same socket transport; they do not execute a separate
-browser, scheduler, or collector.
+SessionPlane is a durable project/task conversation service. One Core owns the
+SQLite Task lifetime, exact browser conversation, provider mutations, canonical
+ACK/FINAL recovery, approved timers and decision execution. CLI and MCP are
+clients of that Core; disconnecting them never stops the Task or authorizes a
+replay.
+
+The authoritative product contract is [docs/PRD.md](docs/PRD.md).
 
 ## Public interface
 
-The current dev interface is project/task-oriented. The former team, role,
-request and workflow public commands are removed rather than translated.
+Open one project/Main conversation and start independent Tasks in it:
 
     sessplane project open --key example --name Example --request-id open-1 --model Pro --json
-    sessplane task start PROJECT_ID --expected-conversation-revision 1 --request-id question-1 --prompt-file question.txt --json
+    sessplane task start PROJECT_ID --expected-conversation-revision 1 \
+      --request-id question-1 --prompt-file question.txt --json
     sessplane task get TASK_ID --json
     sessplane task wait TASK_ID --after-revision 1 --wait-ms 30000 --json
     sessplane task get TASK_ID --view result --json
-    sessplane task decide TASK_ID DECISION_ID ACTION_REF --request-id decide-1 --input "Pro" --json
     sessplane task cancel TASK_ID --request-id cancel-1 --json
 
-Use a stable --client-id for ownership, and a unique --request-id for each
-distinct mutation. Reuse that identity only for an identical request. The
-project response includes projectId, mainConversationSlotId and current
-conversationRevision. Task start uses Main by default. The first POST is
-durably journaled, then bound to the conversation only after an authenticated
-canonical GET confirms the exact message and turn. The Pro model must be
-verified as actually selected. Missing ACK, HTTP 429, or an interrupted POST
-does not authorize resending the same question.
+A Task can carry an explicitly delegated repeating continuation policy:
 
-Task get and task wait are read-only. A wait runs once with a bounded
-deadline; the Core keeps the Task alive after clients disconnect. Agent
-decisions carry a current decisionId and semantic actionRef; callers may
-submit only the advertised bounded input. Result view exposes the complete
-answer; evidence view exposes bounded provenance. Approved continuation
-requires recorded user delegation and stays under the Core-owned timer. From
-the exact ACK through its approved 20-minute due, the Core reserves only that
-canonical conversation's next provider read. It permits at most one immediate
-completion check while even the worst local 429 backoff still clears before the
-due; later background reads cannot consume the authoritative due slot. A direct
-429 is retried at its exact
-`nextCheckAt`, and only a later fresh canonical no-FINAL observation may license
-the single approved Continue POST. After the exact draft is committed, the Core
-may briefly re-observe the unchanged lease/model/draft until the unique Send
-control becomes enabled; that bounded wait performs no second fill and no POST,
-then consumes the exact send action once.
+    sessplane task start PROJECT_ID --expected-conversation-revision 1 \
+      --request-id long-work-1 --prompt-file question.txt \
+      --continuation-approved --approval-ref user-delegated-continue \
+      --agent-review-after-ms 7200000 --json
+
+The interval is exactly 20 minutes and the ChatGPT continuation text is exactly
+`계속`. Every due is a distinct Attempt. The Core may repeat approved due turns;
+it never repeats the same Attempt. `--agent-review-after-ms` is optional and is
+the only time-based no-progress escalation policy—there is no hidden one-turn or
+fifth-probe limit.
+
+Exact once-only provider permissions can be delegated at Task admission:
+
+    sessplane task start PROJECT_ID --expected-conversation-revision 1 \
+      --request-id delegated-read-1 --prompt-file question.txt \
+      --agent-permissions-file grants.json --json
+
+`grants.json` contains an array of exact HostSpan app/tool grants:
+
+```json
+[
+  {
+    "appName": "hostspan-git",
+    "toolName": "repository_read",
+    "allowMode": "once"
+  }
+]
+```
+
+Provider text alone never grants authority. Missing, broader or sensitive
+permission requests remain non-executable and can be escalated by the agent.
+
+## Agent decisions
+
+A decision packet contains current provider actions, Task controls, bounded
+previews and cursors for complete evidence. The agent may page a section:
+
+    sessplane task get TASK_ID --view decision --decision-id DECISION_ID \
+      --section provider_question --cursor 0 --max-bytes 12288 --json
+
+Sections include `original_request`, `current_attempt`, `provider_question`,
+`permission`, `partial_answer`, `capability_issues`, `provider_controls` and
+`decision_options`. Continue at `nextCursor` until it is null. Information size
+does not delete the question or its choices.
+
+Select an exact provider action or Task control:
+
+    sessplane task decide TASK_ID DECISION_ID ACTION_REF \
+      --request-id decide-1 --input-file answer.txt --json
+
+Task controls include reobserve, wait, resume, cancel and request-human when
+available. A verified provider effect automatically resumes the same Task. A
+stale control returns a fresh decision instead of clicking the changed element.
+FINAL observation remains active while an agent or person decision is pending;
+an exact terminal FINAL completes the Task and supersedes obsolete decisions.
+
+`task.get`, `task.wait` and decision evidence paging are read-only. Result view
+returns the complete exact answer. Evidence view returns bounded Task
+provenance. A missing ACK, interrupted POST, 429 or read failure never licenses
+the same provider submission again.
 
 ## MCP
 
-Run the standard MCP stdio server:
+Run the stdio server:
 
     sessplane mcp
 
@@ -55,16 +93,19 @@ Register in Codex:
 
     codex mcp add sessionplane -- sessplane mcp
 
-The default MCP catalogue contains exactly:
-- sessionplane_project_open
-- sessionplane_task_start
-- sessionplane_task_get
-- sessionplane_task_wait
-- sessionplane_task_decide
-- sessionplane_task_cancel
+The catalogue contains exactly:
 
-There is no legacy catalogue, no --public switch, no provider-selector
-mutation tool, and no client-managed continuation collection.
+- `sessionplane_project_open`
+- `sessionplane_task_start`
+- `sessionplane_task_get`
+- `sessionplane_task_wait`
+- `sessionplane_task_decide`
+- `sessionplane_task_cancel`
+
+Modern metadata negotiation and standard MCP 2025 `initialize` negotiation use
+the same Task RPCs. There is no alternate SessionPlane execution engine, public
+team/workflow catalogue, provider-selector mutation tool or client-owned
+continuation collector.
 
 ## Operator commands
 
@@ -97,7 +138,7 @@ rather than automatically resubmitted.
 
 Use the matching package version after that release is published:
 
-VERSION=0.4.108
+VERSION=0.4.109
     npm install -g ./sessionplane-$VERSION.tgz
     sessplane doctor --json
 
@@ -168,7 +209,7 @@ canonical Main conversation across three Tasks. On resume it reconciles a stale
 local receipt from the Core's durable Task state, including after browser/host
 replacement, before creating a later Task. A blocked agent decision, uncertain
 provider effect or failing answer stays recorded and **never** causes a guessed
-replay. The script does not choose permissions or switch models.
+replay. The L3 runner itself does not invent permission delegation or switch models; those must be explicit Task inputs.
 This is an L3 test runner, **not** a bypass around a currently installed old
 Core; it refuses every mutation until the installed Core matches the candidate
 schema and verified source identity. It does not by itself prove a natural

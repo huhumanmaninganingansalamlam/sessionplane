@@ -3,8 +3,8 @@ import { pathToFileURL } from 'node:url';
 
 import { resolveConfig, type SessionPlaneConfig } from '../config.ts';
 import {
-  MCP_LEGACY_PROTOCOL_VERSION,
-  MCP_LEGACY_PROTOCOL_VERSIONS,
+  MCP_STANDARD_PROTOCOL_VERSION,
+  MCP_STANDARD_PROTOCOL_VERSIONS,
   MCP_MODERN_PROTOCOL_VERSION,
   MCP_SERVER_INFO,
   McpProtocolError,
@@ -33,7 +33,7 @@ export interface McpServerOptions {
   readonly config?: SessionPlaneConfig;
 }
 
-type ProtocolMode = 'modern' | 'legacy';
+type ProtocolMode = 'modern' | 'standard';
 
 export async function runMcpServer(options: McpServerOptions = {}): Promise<void> {
   const config = options.config ?? resolveConfig();
@@ -63,7 +63,7 @@ class SessionPlaneMcpServer {
   readonly #output: NodeJS.WritableStream;
   readonly #error: NodeJS.WritableStream;
   readonly #inFlight = new Map<string, AbortController>();
-  #legacyInitialized = false;
+  #standardInitialized = false;
   #writeTail: Promise<void> = Promise.resolve();
 
   constructor(options: {
@@ -146,7 +146,7 @@ class SessionPlaneMcpServer {
         });
       }
       case 'initialize':
-        return this.#initializeLegacy(request.params);
+        return this.#initializeStandard(request.params);
       case 'tools/list': {
         const mode = this.#requestMode(request.params);
         const result = {
@@ -170,7 +170,7 @@ class SessionPlaneMcpServer {
     }
   }
 
-  #initializeLegacy(params: unknown): Readonly<Record<string, unknown>> {
+  #initializeStandard(params: unknown): Readonly<Record<string, unknown>> {
     if (!isRecord(params)) {
       throw new McpProtocolError(-32602, 'Invalid initialize params');
     }
@@ -178,9 +178,9 @@ class SessionPlaneMcpServer {
     if (typeof requested !== 'string' || requested.length === 0) {
       throw new McpProtocolError(-32602, 'Invalid initialize protocol version');
     }
-    this.#legacyInitialized = true;
+    this.#standardInitialized = true;
     return {
-      protocolVersion: MCP_LEGACY_PROTOCOL_VERSIONS.includes(requested) ? requested : MCP_LEGACY_PROTOCOL_VERSION,
+      protocolVersion: MCP_STANDARD_PROTOCOL_VERSIONS.includes(requested) ? requested : MCP_STANDARD_PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: false } },
       serverInfo: MCP_SERVER_INFO,
       instructions: serverInstructions(),
@@ -242,7 +242,7 @@ class SessionPlaneMcpServer {
   }
 
   #requestMode(params: unknown): ProtocolMode {
-    if (this.#legacyInitialized) return 'legacy';
+    if (this.#standardInitialized) return 'standard';
     requireModernMetadata(params);
     return 'modern';
   }

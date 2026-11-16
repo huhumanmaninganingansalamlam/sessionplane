@@ -357,7 +357,7 @@ async function verifyInstalledContinuation(moduleAt, work) {
       projectId, projectKey: 'installed.continuation',
       displayName: 'No real browser package contract', clientId,
     });
-    const prepare = async (name, slotId) => {
+    const prepare = async (name, slotId, agentReviewAfterMs = undefined) => {
       const taskId = 'task:' + name;
       const attemptId = 'initial:' + name;
       store.openSlot({ projectId, slotId, roleKey: slotId,
@@ -376,10 +376,12 @@ async function verifyInstalledContinuation(moduleAt, work) {
       ).run(taskId, JSON.stringify({
         enabled: true, approvalRef: 'explicit-compiled-fixture-approval',
         message: '계속', intervalMs: CONTINUATION_INTERVAL_MS,
+        ...(agentReviewAfterMs === undefined ? {} : { agentReviewAfterMs }),
       }), 'compiled-fixture-hash', 1, new Date(nowMs).toISOString());
       await kernel.dispatch(taskId, clientId, attemptId);
       service.activate({ taskId, clientId, sourceAttemptId: attemptId,
-        approvalRef: 'explicit-compiled-fixture-approval', message: '계속' });
+        approvalRef: 'explicit-compiled-fixture-approval', message: '계속',
+        ...(agentReviewAfterMs === undefined ? {} : { agentReviewAfterMs }) });
       return taskId;
     };
     const noFinal = await prepare('no-final', 'main');
@@ -424,7 +426,8 @@ async function verifyInstalledContinuation(moduleAt, work) {
     await service.tick();
     assert.equal(store.getTask(rateTask, clientId).state, 'completed');
 
-    const sustainedRate = await prepare('sustained-rate-limited', 'sustained-rate');
+    const sustainedRate = await prepare('sustained-rate-limited', 'sustained-rate',
+      4 * CONTINUATION_INTERVAL_MS);
     rateLimited.add('initial:sustained-rate-limited');
     const reviewsBefore = reviews.length;
     for (let slot = 1; slot < 5; slot++) {

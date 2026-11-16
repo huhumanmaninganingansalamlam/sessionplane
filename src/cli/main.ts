@@ -30,7 +30,9 @@ const VALUE_OPTIONS = new Set([
   'view', 'remote', 'remote-executable', 'remote-socket', 'remote-control-path',
   'state-dir', 'browser', 'browser-executable', 'providers', 'socket',
   'client-id', 'request-id', 'expected-conversation-revision', 'conversation-slot',
-  'after-revision', 'approval-ref', 'input', 'name', 'provider', 'prompt',
+  'after-revision', 'approval-ref', 'agent-review-after-ms',
+  'agent-permissions-file', 'decision-id', 'section', 'cursor', 'max-bytes',
+  'input', 'input-file', 'name', 'provider', 'prompt',
   'prompt-file', 'model', 'surface', 'wait-ms', 'key', 'url', 'skill', 'target',
 ]);
 
@@ -196,6 +198,7 @@ async function runPublicTaskCommand(
       publicCommandOptions(parsed, 'task start', 3, [
         'request-id', 'expected-conversation-revision', 'conversation-slot',
         'prompt', 'prompt-file', 'prompt-stdin', 'continuation-approved', 'approval-ref',
+        'agent-review-after-ms', 'agent-permissions-file',
       ]);
       const sources = [
         parsed.options.prompt !== undefined,
@@ -208,9 +211,12 @@ async function runPublicTaskCommand(
           ? readFileSync(parsed.options['prompt-file'], 'utf8')
           : await readInput(io.stdin));
       const approved = parsed.options['continuation-approved'] === 'true';
-      if (!approved && parsed.options['approval-ref'] !== undefined) {
-        throw new Error('--approval-ref requires --continuation-approved');
+      if (!approved && (parsed.options['approval-ref'] !== undefined ||
+          parsed.options['agent-review-after-ms'] !== undefined)) {
+        throw new Error('--approval-ref and --agent-review-after-ms require --continuation-approved');
       }
+      const grants = parsed.options['agent-permissions-file'] === undefined ? undefined
+        : readJsonFile(parsed.options['agent-permissions-file'], 'agent permission grants');
       requireOption(parsed, 'expected-conversation-revision');
       const params = taskSchemas.start.parse({
         clientId: owner, requestId: requireOption(parsed, 'request-id'),
@@ -224,15 +230,37 @@ async function runPublicTaskCommand(
         ...(approved ? { continuationPolicy: {
           enabled: true, intervalMs: 1_200_000, message: '계속',
           approvalRef: requireOption(parsed, 'approval-ref'),
+          ...(parsed.options['agent-review-after-ms'] === undefined ? {} : {
+            agentReviewAfterMs: integerOption(parsed, 'agent-review-after-ms',
+              1_200_000, 1_200_000, 604_800_000),
+          }),
         } } : {}),
+        ...(grants === undefined ? {} : { agentPermissionGrants: grants }),
       });
       return await printRpc(io, parsed, config, 'task.start', params);
     }
     case 'get': {
-      publicCommandOptions(parsed, 'task get', 3, ['view']);
-      return await printRpc(io, parsed, config, 'task.get', taskSchemas.get.parse({
-        clientId: owner, taskId: requirePositional(parsed.words, 2, 'taskId'), ...viewOption,
-      }));
+      publicCommandOptions(parsed, 'task get', 3, [
+        'view', 'decision-id', 'section', 'cursor', 'max-bytes',
+      ]);
+      const selectedView = parsed.options.view ?? 'summary';
+      const decisionOptions = ['decision-id', 'section', 'cursor', 'max-bytes']
+        .filter(name => parsed.options[name] !== undefined);
+      if (selectedView !== 'decision' && decisionOptions.length > 0) {
+        throw new Error('--decision-id/--section/--cursor/--max-bytes require --view decision');
+      }
+      const params = selectedView === 'decision' ? {
+        clientId: owner, taskId: requirePositional(parsed.words, 2, 'taskId'),
+        view: 'decision' as const,
+        decisionId: requireOption(parsed, 'decision-id'),
+        section: requireOption(parsed, 'section'),
+        cursor: integerOption(parsed, 'cursor', 0, 0),
+        maxBytes: integerOption(parsed, 'max-bytes', 12 * 1024, 256, 64 * 1024),
+      } : {
+        clientId: owner, taskId: requirePositional(parsed.words, 2, 'taskId'),
+        view: selectedView,
+      };
+      return await printRpc(io, parsed, config, 'task.get', taskSchemas.get.parse(params));
     }
     case 'wait': {
       publicCommandOptions(parsed, 'task wait', 3, [
@@ -249,14 +277,25 @@ async function runPublicTaskCommand(
     case 'decide': {
       const refresh = parsed.options.refresh === 'true';
       publicCommandOptions(parsed, 'task decide', refresh ? 4 : 5,
-        refresh ? ['request-id', 'refresh'] : ['request-id', 'input']);
+        refresh ? ['request-id', 'refresh'] : ['request-id', 'input', 'input-file']);
+      if (refresh && (parsed.options.input !== undefined ||
+          parsed.options['input-file'] !== undefined)) {
+        throw new Error('--refresh does not accept --input or --input-file');
+      }
+      if (!refresh && parsed.options.input !== undefined &&
+          parsed.options['input-file'] !== undefined) {
+        throw new Error('Specify at most one of --input or --input-file');
+      }
+      const decisionInput = parsed.options.input ??
+        (parsed.options['input-file'] === undefined ? undefined
+          : readTextFile(parsed.options['input-file'], 'decision input', 200_000));
       return await printRpc(io, parsed, config, 'task.decide', taskSchemas.decide.parse({
         clientId: owner, taskId: requirePositional(parsed.words, 2, 'taskId'),
         decisionId: requirePositional(parsed.words, 3, 'decisionId'),
         requestId: requireOption(parsed, 'request-id'),
         ...(refresh ? { refresh: true } : {
           actionRef: requirePositional(parsed.words, 4, 'actionRef'),
-          ...(parsed.options.input === undefined ? {} : { input: parsed.options.input }),
+          ...(decisionInput === undefined ? {} : { input: decisionInput }),
         }),
       }));
     }
@@ -342,6 +381,23 @@ function integerOption(
   }
   return value;
 }
+function readTextFile(file: string, label: string, maxCharacters: number): string {
+  const value = readFileSync(file, 'utf8');
+  if (value.length === 0 || value.length > maxCharacters) {
+    throw new Error(label + ' must contain 1 to ' + maxCharacters + ' characters');
+  }
+  return value;
+}
+
+function readJsonFile(file: string, label: string): unknown {
+  const raw = readFileSync(file);
+  if (raw.length === 0 || raw.length > 1_048_576) {
+    throw new Error(label + ' file must contain 1 to 1048576 bytes');
+  }
+  try { return JSON.parse(raw.toString('utf8')); }
+  catch { throw new Error(label + ' file must contain valid JSON'); }
+}
+
 async function readInput(stream: NodeJS.ReadableStream): Promise<string> {
   stream.setEncoding('utf8');
   let value = '';
@@ -382,10 +438,14 @@ function helpText(): string {
     '  sessplane project open --key KEY --name NAME --request-id ID [--model Pro] --json',
     '  sessplane task start PROJECT_ID --expected-conversation-revision N --request-id ID',
     '    (--prompt TEXT | --prompt-file PATH | --prompt-stdin) [--conversation-slot ID]',
-    '    [--continuation-approved --approval-ref EXISTING_USER_DELEGATION] --json',
+    '    [--continuation-approved --approval-ref EXISTING_USER_DELEGATION]',
+    '    [--agent-review-after-ms N] [--agent-permissions-file GRANTS.json] --json',
     '  sessplane task get TASK_ID [--view summary|result|evidence] --json',
+    '  sessplane task get TASK_ID --view decision --decision-id ID --section NAME',
+    '    [--cursor N] [--max-bytes N] --json',
     '  sessplane task wait TASK_ID --after-revision N [--wait-ms 30000] --json',
-    '  sessplane task decide TASK_ID DECISION_ID ACTION_REF --request-id ID [--input TEXT] --json',
+    '  sessplane task decide TASK_ID DECISION_ID ACTION_REF --request-id ID',
+    '    [--input TEXT | --input-file PATH] --json',
     '  sessplane task decide TASK_ID DECISION_ID --refresh --request-id ID --json',
     '  sessplane task cancel TASK_ID --request-id ID --json',
     '  sessplane mcp',

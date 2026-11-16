@@ -9,11 +9,9 @@ export interface SemanticHostSpanPermission {
   readonly argumentsSummary: string | null;
   readonly detailState: 'not_visible' | 'visible_unverified' | 'truncated' | 'redacted';
   readonly evidenceHash: string;
-  readonly canGrant: false;
+  readonly canGrant: boolean;
 }
 
-const MAX_SUMMARY = 1600;
-const MAX_ARGUMENTS = 1600;
 const SECRET_MARKER = /[\"']?(?:password|secret|token|api[_-]?key|private[_-]?key|cookie|authorization)[\"']?\s*[:=]|\bbearer\s+[A-Za-z0-9._~+/-]{8,}|\b(?:sk|ghp|gho|github_pat)[-_][A-Za-z0-9_-]{8,}/i;
 
 /**
@@ -26,7 +24,7 @@ const SECRET_MARKER = /[\"']?(?:password|secret|token|api[_-]?key|private[_-]?ke
 export async function inspectSemanticHostSpanPermission(
   page: Page, submittedUserMessageId: string,
 ): Promise<SemanticHostSpanPermission | null> {
-  const raw = await page.evaluate(({ userId, maxSummary, maxArguments }) => {
+  const raw = await page.evaluate(({ userId }) => {
     const visible = (e: Element) =>
       e.closest('[aria-hidden="true"], [inert]') === null &&
       e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) &&
@@ -51,7 +49,7 @@ export async function inspectSemanticHostSpanPermission(
         ...(node.getAttribute('data-chatgpt-search-message-ids') ?? '').split(/\s+/),
       ].filter((id): id is string => id !== null && id !== ''))];
       if (messageIds.length > 0) return messageIds.length === 1 ? messageIds[0]! : null;
-      // A legacy turn ID may fill a missing message ID, never override one.
+      // A provider turn ID may fill a missing message ID, never override one.
       const turnIds = [...new Set([
         identity.getAttribute('data-turn-id'), node.getAttribute('data-turn-id'),
       ].filter((id): id is string => id !== null && id !== ''))];
@@ -85,7 +83,7 @@ export async function inspectSemanticHostSpanPermission(
     const card = candidates[0]!;
     const text = card.innerText.trim();
     const appName = text.match(/\bhostspan(?:-[a-z0-9_-]+)?\b/i)?.[0] ?? '';
-    if (!appName || text.length > 8_000) return null;
+    if (!appName) return null;
     const fromKorean = text.match(/\bhostspan(?:-[a-z0-9_-]+)?의\s+([\w.-]{1,100})\s+도구/i)?.[1];
     const fromEnglish = text.match(/\b(?:calling|call)\s+(?:the\s+)?([\w.-]{1,100})\s+tool\s+(?:from|of)\s+hostspan/i)?.[1];
     const marked = card.querySelector<HTMLElement>('[data-tool-name]')?.getAttribute('data-tool-name');
@@ -96,22 +94,18 @@ export async function inspectSemanticHostSpanPermission(
     return {
       appName: appName.toLowerCase(), toolName: validTool,
       text, argument,
-      summaryTooLong: text.length > maxSummary,
-      argumentsTooLong: argument !== null && argument.length > maxArguments,
     };
-  }, { userId: submittedUserMessageId, maxSummary: MAX_SUMMARY, maxArguments: MAX_ARGUMENTS });
+  }, { userId: submittedUserMessageId });
   if (!raw) return null;
   const hasSecret = SECRET_MARKER.test(raw.text) ||
     (raw.argument !== null && SECRET_MARKER.test(raw.argument));
   const detailState: SemanticHostSpanPermission['detailState'] = hasSecret
-    ? 'redacted' : raw.summaryTooLong || raw.argumentsTooLong
-      ? 'truncated' : raw.argument === null
-        ? 'not_visible' : 'visible_unverified';
-  // Never turn raw provider text into permission or return unbounded details.
+    ? 'redacted' : raw.argument === null ? 'not_visible' : 'visible_unverified';
+  // Provider text is evidence, never authorization. Non-sensitive details are
+  // retained exactly and paged by the decision gateway; secrets remain redacted.
   const visibleSummary = hasSecret
     ? '[Sensitive permission details withheld; explicit secure review required]'
-    : raw.summaryTooLong ? '[Permission details exceed bounded review packet; expansion required]'
-      : raw.text;
+    : raw.text;
   const argumentsSummary = detailState === 'visible_unverified' ? raw.argument : null;
   return {
     appName: raw.appName, toolName: raw.toolName,

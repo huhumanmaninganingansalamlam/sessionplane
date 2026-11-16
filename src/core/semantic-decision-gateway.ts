@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 
 import type { ExactSendIntent } from './durable-task-kernel.ts';
@@ -6,17 +6,21 @@ import type { SemanticContextResolver } from './semantic-exact-task-port.ts';
 import type {
   SemanticActionCandidate, SemanticActionPurpose, SemanticActResult,
   SemanticInput, SemanticObservation, SemanticPermissionEvidence,
-  SemanticTaskContext,
+  SemanticControlDescriptor, SemanticTaskContext,
 } from '../providers/semantic-adapter.ts';
 import { semanticConfigurationMatches } from '../providers/semantic-adapter.ts';
 import type { SemanticProviderRegistry } from '../providers/semantic-provider-registry.ts';
 import type { DecisionRecord, TaskKernelRepository } from '../storage/task-kernel-repository.ts';
 
-const MAX_PACKET_BYTES = 12 * 1024;
+const DEFAULT_PACKET_PREVIEW_BYTES = 2 * 1024;
+const DEFAULT_PACKET_OPTIONS_BYTES = 4 * 1024;
+const DEFAULT_PACKET_EVIDENCE_BYTES = 4 * 1024;
+const DEFAULT_PACKET_MAX_BYTES = 12 * 1024;
+const DEFAULT_EVIDENCE_PAGE_BYTES = 12 * 1024;
 const MAX_REASON_LENGTH = 120;
 
 export type AgentDecisionKind =
-  | 'model_choice' | 'provider_question' | 'tool_permission'
+  | 'model_choice' | 'provider_question' | 'tool_permission' | 'provider_control'
   | 'recovery_choice' | 'adapter_unsupported' | 'human_verification';
 
 export interface AgentDecisionOption {
@@ -27,6 +31,30 @@ export interface AgentDecisionOption {
   readonly evidenceHash: string;
   readonly expiresAt: string;
   readonly inputSchema: SemanticInput;
+  readonly inputOptionCount?: number | undefined;
+  readonly control?: SemanticControlDescriptor | undefined;
+}
+
+export type AgentTaskControlPurpose =
+  | 'reobserve' | 'wait' | 'resume' | 'cancel' | 'request_human';
+
+export interface AgentDecisionControl {
+  readonly actionRef: string;
+  readonly purpose: AgentTaskControlPurpose;
+  readonly effect: string;
+  readonly risk: 'read_only' | 'task_control' | 'human_escalation';
+  readonly evidenceHash: string;
+  readonly inputSchema: { readonly kind: 'none' };
+}
+
+export interface AgentDecisionEvidenceSection {
+  readonly section: 'original_request' | 'current_attempt' | 'provider_question' |
+    'permission' | 'partial_answer' | 'capability_issues' | 'provider_controls' |
+    'decision_options';
+  readonly totalBytes: number;
+  readonly preview: string;
+  readonly previewBytes: number;
+  readonly nextCursor: number | null;
 }
 
 export interface AgentDecisionPacket {
@@ -43,17 +71,46 @@ export interface AgentDecisionPacket {
   readonly permission: SemanticPermissionEvidence | null;
   readonly requestedModel: string | null;
   readonly options: readonly AgentDecisionOption[];
+  readonly controls: readonly AgentDecisionControl[];
+  readonly evidenceSections: readonly AgentDecisionEvidenceSection[];
+  readonly optionCount?: number | undefined;
+  readonly observedControls: readonly SemanticControlDescriptor[];
+  readonly observedControlCount?: number | undefined;
+  readonly resumePoint: string;
   readonly evidenceBytes: number;
+}
+
+interface StoredProviderAction {
+  readonly purpose: SemanticActionPurpose;
+  readonly snapshotId: string;
+  readonly actionRef: string;
+  readonly evidenceHash: string;
+}
+
+interface StoredDecisionEvidence {
+  readonly original_request: string;
+  readonly current_attempt: string;
+  readonly provider_question: string;
+  readonly permission: string;
+  readonly partial_answer: string;
+  readonly capability_issues: string;
+  readonly provider_controls: string;
+  readonly decision_options: string;
 }
 
 interface StoredDecision {
   readonly kind: 'semantic_action';
   readonly context: SemanticTaskContext;
   readonly attemptId: string;
+  /** v0.4.108 single-action envelope retained for durable replay compatibility. */
   readonly purpose: SemanticActionPurpose | null;
   readonly snapshotId: string | null;
   readonly actionRef: string | null;
   readonly evidenceHash: string | null;
+  readonly actions?: readonly StoredProviderAction[];
+  readonly allOptions?: readonly AgentDecisionOption[];
+  readonly reconcilesUncertainReasoningEffort?: boolean;
+  readonly evidence?: StoredDecisionEvidence;
   readonly packet: AgentDecisionPacket;
 }
 
@@ -61,6 +118,163 @@ export type AgentDecisionOutcome =
   | { readonly kind: 'performed'; readonly effect: string }
   | { readonly kind: 'refresh_required'; readonly packet: AgentDecisionPacket | null }
   | { readonly kind: 'uncertain'; readonly reason: string };
+
+function sha(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function preview(value: string, maxBytes = DEFAULT_PACKET_PREVIEW_BYTES): {
+  text: string; bytes: number; nextCursor: number | null;
+} {
+  let cursor = 0;
+  let bytes = 0;
+  for (const point of value) {
+    const size = Buffer.byteLength(point, 'utf8');
+    if (bytes + size > maxBytes) break;
+    bytes += size;
+    cursor += point.length;
+  }
+  return { text: value.slice(0, cursor), bytes,
+    nextCursor: cursor < value.length ? cursor : null };
+}
+
+function evidenceSection(
+  section: AgentDecisionEvidenceSection['section'], value: string,
+): AgentDecisionEvidenceSection {
+  const page = preview(value);
+  return { section, totalBytes: Buffer.byteLength(value, 'utf8'), preview: page.text,
+    previewBytes: page.bytes, nextCursor: page.nextCursor };
+}
+
+function evidenceSections(
+  evidence: StoredDecisionEvidence,
+): readonly AgentDecisionEvidenceSection[] {
+  let remaining = DEFAULT_PACKET_EVIDENCE_BYTES;
+  const result: AgentDecisionEvidenceSection[] = [];
+  for (const [section, value] of Object.entries(evidence) as Array<[
+    AgentDecisionEvidenceSection['section'], string
+  ]>) {
+    if (value.length === 0) continue;
+    const allowance = remaining <= 0 ? 0 : Math.min(1_024, remaining);
+    const page = preview(value, allowance);
+    result.push({
+      section, totalBytes: Buffer.byteLength(value, 'utf8'), preview: page.text,
+      previewBytes: page.bytes, nextCursor: page.nextCursor,
+    });
+    remaining -= page.bytes;
+  }
+  return result;
+}
+
+function compactDecisionOption(option: AgentDecisionOption): AgentDecisionOption {
+  if (option.inputSchema.kind !== 'option') {
+    return {
+      ...option, effect: preview(option.effect, 512).text,
+      ...(option.control ? { control: {
+        ...option.control, contextSummary: preview(option.control.contextSummary, 512).text,
+      } } : {}),
+    };
+  }
+  const selected: Array<{ value: string; enabled: boolean }> = [];
+  let bytes = 0;
+  for (const candidate of option.inputSchema.options) {
+    const size = Buffer.byteLength(JSON.stringify(candidate), 'utf8');
+    if (bytes + size > 1_536) break;
+    selected.push(candidate);
+    bytes += size;
+  }
+  return {
+    ...option, effect: preview(option.effect, 512).text,
+    inputSchema: { kind: 'option', options: selected },
+    inputOptionCount: option.inputSchema.options.length,
+    ...(option.control ? { control: {
+      ...option.control, contextSummary: preview(option.control.contextSummary, 512).text,
+    } } : {}),
+  };
+}
+
+function packetOptions(options: readonly AgentDecisionOption[]): readonly AgentDecisionOption[] {
+  const selected: AgentDecisionOption[] = [];
+  let bytes = 0;
+  for (const option of options) {
+    const compact = compactDecisionOption(option);
+    const size = Buffer.byteLength(JSON.stringify(compact), 'utf8');
+    if (selected.length > 0 && bytes + size > DEFAULT_PACKET_OPTIONS_BYTES) break;
+    selected.push(compact);
+    bytes += size;
+  }
+  return selected;
+}
+
+function compactObservedControls(
+  controls: readonly SemanticControlDescriptor[],
+): readonly SemanticControlDescriptor[] {
+  const selected: SemanticControlDescriptor[] = [];
+  let bytes = 0;
+  for (const control of controls) {
+    const compact = { ...control,
+      contextSummary: preview(control.contextSummary, 256).text,
+      options: control.options.slice(0, 16),
+    };
+    const size = Buffer.byteLength(JSON.stringify(compact), 'utf8');
+    if (selected.length > 0 && bytes + size > 2_048) break;
+    selected.push(compact);
+    bytes += size;
+  }
+  return selected;
+}
+
+function boundedPacket(packet: AgentDecisionPacket): AgentDecisionPacket {
+  let bounded = countBytes(packet);
+  if (bounded.evidenceBytes <= DEFAULT_PACKET_MAX_BYTES) return bounded;
+  bounded = countBytes({
+    ...bounded,
+    questionText: bounded.questionText === null ? null : preview(bounded.questionText, 512).text,
+    permission: bounded.permission === null ? null : {
+      ...bounded.permission,
+      visibleSummary: preview(bounded.permission.visibleSummary, 512).text,
+      argumentsSummary: bounded.permission.argumentsSummary === null ? null
+        : preview(bounded.permission.argumentsSummary, 512).text,
+    },
+    evidenceSections: bounded.evidenceSections.map(section => ({
+      ...section, preview: '', previewBytes: 0,
+      nextCursor: section.totalBytes > 0 ? 0 : null,
+    })),
+    observedControls: [],
+    evidenceBytes: 0,
+  });
+  return bounded;
+}
+
+function decisionControls(
+  decisionId: string, reason: string, humanOnly: boolean,
+): readonly AgentDecisionControl[] {
+  const controls: Array<{ purpose: AgentTaskControlPurpose; effect: string;
+    risk: AgentDecisionControl['risk'] }> = [
+    { purpose: 'reobserve', effect: 'Read the latest exact task and provider state', risk: 'read_only' },
+    { purpose: 'wait', effect: 'Resume read-only observation without performing a provider mutation', risk: 'read_only' },
+    { purpose: 'cancel', effect: 'Request cancellation of this exact task', risk: 'task_control' },
+  ];
+  if (!humanOnly) controls.push({
+    purpose: 'request_human', effect: 'Escalate this exact decision with its evidence to a person',
+    risk: 'human_escalation',
+  });
+  if (reason === 'managed-continuation-no-final-after-approved-continue' ||
+      reason === 'managed-continuation-no-progress-policy-reached' ||
+      reason === 'managed-continuation-safe-send-unavailable') {
+    controls.splice(2, 0, {
+      purpose: 'resume',
+      effect: 'Re-enter the approved continuation flow for this exact task',
+      risk: 'task_control',
+    });
+  }
+  return controls.map(control => ({
+    actionRef: `control:${decisionId}:${control.purpose}`,
+    purpose: control.purpose, effect: control.effect, risk: control.risk,
+    evidenceHash: sha(JSON.stringify({ decisionId, reason, purpose: control.purpose })),
+    inputSchema: { kind: 'none' },
+  }));
+}
 
 function countBytes(packet: AgentDecisionPacket): AgentDecisionPacket {
   let size = Buffer.byteLength(JSON.stringify(packet));
@@ -84,14 +298,11 @@ function selectionIsValid(schema: SemanticInput, value: string | undefined): boo
     schema.options.some(option => option.value === value && option.enabled);
 }
 
-const UNCERTAIN_EFFORT_REASON = 'reasoning-effort-previous-action-uncertain';
-
 /**
- * A configured Power click is non-idempotent. Core must not expose a second
- * choose_reasoning_effort decision after the prior one was reserved without
- * a confirmed receipt, or returned uncertain. This applies across processes,
- * even when an older runner or another public client does not know the
- * receipt's requestId. Refresh-only decisions never click and are excluded.
+ * Detect a prior reasoning-effort effect whose outcome was not confirmed. A
+ * stale pre-existing action remains blocked, but a fresh exact observation may
+ * publish a new current-state action. Configuration effects are reconciled by
+ * observing the current selector, never by permanently sealing the Task.
  */
 function priorUncertainReasoningEffort(decisions: readonly DecisionRecord[]): boolean {
   for (const row of decisions) {
@@ -99,7 +310,9 @@ function priorUncertainReasoningEffort(decisions: readonly DecisionRecord[]): bo
     let stored: StoredDecision;
     try { stored = storedContext(row.contextJson); }
     catch { return true; } // Malformed durable decision history fails closed.
-    if (stored.purpose !== 'choose_reasoning_effort') continue;
+    const hasEffort = stored.purpose === 'choose_reasoning_effort' ||
+      stored.actions?.some(action => action.purpose === 'choose_reasoning_effort') === true;
+    if (!hasEffort) continue;
     if (row.resolutionJson === null) return true;
     let receipt: Record<string, unknown>;
     try { receipt = JSON.parse(row.resolutionJson) as Record<string, unknown>; }
@@ -120,12 +333,10 @@ function priorUncertainReasoningEffort(decisions: readonly DecisionRecord[]): bo
   return false;
 }
 
-function oneAction(
+function matchingActions(
   observation: SemanticObservation, purposes: readonly SemanticActionPurpose[],
-): SemanticActionCandidate | null {
-  const candidates = observation.actions.filter(action => purposes.includes(action.purpose) &&
-    action.purpose !== 'grant_permission' && action.risk !== 'permission_grant');
-  return candidates.length === 1 ? candidates[0]! : null;
+): readonly SemanticActionCandidate[] {
+  return observation.actions.filter(action => purposes.includes(action.purpose));
 }
 
 function decisionKind(
@@ -134,6 +345,7 @@ function decisionKind(
   switch (observation.blocker) {
     case 'provider_question': return 'provider_question';
     case 'provider_permission': return 'tool_permission';
+    case 'provider_control': return 'provider_control';
     case 'provider_retry':
     case 'rate_limit': return 'recovery_choice';
     case 'human_verification': return 'human_verification';
@@ -195,15 +407,24 @@ export class SemanticDecisionGateway {
   readonly #repository: TaskKernelRepository;
   readonly #providers: SemanticProviderRegistry;
   readonly #resolveContext: SemanticContextResolver;
+  readonly #onTaskResumed: ((input: {
+    taskId: string; clientId: string; attemptId: string;
+    mode: 'wait' | 'resume' | 'provider_effect';
+  }) => Promise<void>) | undefined;
 
   constructor(input: {
     repository: TaskKernelRepository;
     providers: SemanticProviderRegistry;
     resolveContext: SemanticContextResolver;
+    onTaskResumed?: (input: {
+      taskId: string; clientId: string; attemptId: string;
+      mode: 'wait' | 'resume' | 'provider_effect';
+    }) => Promise<void>;
   }) {
     this.#repository = input.repository;
     this.#providers = input.providers;
     this.#resolveContext = input.resolveContext;
+    this.#onTaskResumed = input.onTaskResumed;
   }
 
   /** Reconnection needs only Task identity, not a live browser or caller wait. */
@@ -218,13 +439,42 @@ export class SemanticDecisionGateway {
       taskRevision: full.task.revision };
   }
 
+  readEvidence(input: {
+    taskId: string; clientId: string; decisionId: string;
+    section: AgentDecisionEvidenceSection['section'];
+    cursor?: number; maxBytes?: number;
+  }): {
+    decisionId: string; section: AgentDecisionEvidenceSection['section'];
+    cursor: number; text: string; returnedBytes: number;
+    totalBytes: number; nextCursor: number | null;
+  } {
+    const full = this.#repository.getFullTask(input.taskId, input.clientId);
+    const row = full.decisions.find(decision => decision.decisionId === input.decisionId);
+    if (!row) throw new SessionPlaneDomainError('stale_decision', 'Unknown decision identity');
+    const stored = storedContext(row.contextJson);
+    const value = stored.evidence?.[input.section] ?? '';
+    const cursor = input.cursor ?? 0;
+    const maxBytes = input.maxBytes ?? DEFAULT_EVIDENCE_PAGE_BYTES;
+    if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > value.length ||
+        !Number.isSafeInteger(maxBytes) || maxBytes < 256 || maxBytes > 64 * 1024) {
+      throw new SessionPlaneDomainError('invalid_request', 'Invalid decision evidence page');
+    }
+    const page = preview(value.slice(cursor), maxBytes);
+    return {
+      decisionId: input.decisionId, section: input.section, cursor,
+      text: page.text, returnedBytes: page.bytes,
+      totalBytes: Buffer.byteLength(value, 'utf8'),
+      nextCursor: page.nextCursor === null ? null : cursor + page.nextCursor,
+    };
+  }
+
   /** A no-progress Continue, an unsendable approved Continue, or a foreign
    * later user turn must move to an agent before another speculative POST.
    * The durable packet grants no executable provider action.
    */
   async requireNoProgressReview(input: {
     taskId: string; clientId: string; attemptId: string;
-    cause?: 'persistent_backend_read_throttle';
+    cause?: 'persistent_backend_read_throttle' | 'repeated_no_progress';
   }): Promise<AgentDecisionPacket | null> {
     const full = this.#repository.getFullTask(input.taskId, input.clientId);
     if (full.task.pendingDecisionId !== null) return this.get(input.taskId, input.clientId);
@@ -282,23 +532,49 @@ export class SemanticDecisionGateway {
     }
     const now = new Date().toISOString();
     const decisionId = randomUUID();
-    const packet = countBytes({
-      taskId: input.taskId, taskRevision: full.task.revision + 1, decisionId,
-      kind: 'recovery_choice',
-      reason: input.cause === 'persistent_backend_read_throttle'
-        ? 'canonical-final-rate-limit-persistent'
+    const reason = input.cause === 'persistent_backend_read_throttle'
+      ? 'canonical-final-rate-limit-persistent'
+      : input.cause === 'repeated_no_progress'
+        ? 'managed-continuation-no-progress-policy-reached'
         : attempt.kind === 'initial' ? 'managed-continuation-later-user-boundary'
-        : unableToSend ? 'managed-continuation-safe-send-unavailable'
-          : 'managed-continuation-no-final-after-approved-continue',
+      : unableToSend ? 'managed-continuation-safe-send-unavailable'
+        : 'managed-continuation-no-final-after-approved-continue';
+    const evidence: StoredDecisionEvidence = {
+      original_request: full.task.originalPrompt,
+      current_attempt: JSON.stringify({
+        attemptId: attempt.attemptId, sequence: attempt.sequence, kind: attempt.kind,
+        state: attempt.state, content: attempt.content,
+        dispatchedAt: attempt.dispatchedAt, acknowledgedAt: attempt.acknowledgedAt,
+        previousAttemptId: previous?.attemptId ?? null,
+        attemptHistory: full.attempts.filter(row => row.kind !== 'stop').map(row => ({
+          attemptId: row.attemptId, sequence: row.sequence, kind: row.kind,
+          state: row.state, dispatchedAt: row.dispatchedAt,
+          acknowledgedAt: row.acknowledgedAt, externalTurnId: row.externalTurnId,
+          hasFinal: full.results.some(result => result.attemptId === row.attemptId),
+        })),
+      }, null, 2),
+      provider_question: '', permission: '', partial_answer: '', capability_issues: '',
+      provider_controls: '', decision_options: '[]',
+    };
+    const packet = boundedPacket({
+      taskId: input.taskId, taskRevision: full.task.revision + 1, decisionId,
+      kind: 'recovery_choice', reason,
       humanOnly: false, observedAt: now,
-      expiresAt: new Date(Date.now() + 30_000).toISOString(),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
       snapshotId: null, questionText: null, permission: null,
-      requestedModel: null, options: [], evidenceBytes: 0,
+      requestedModel: null, options: [], optionCount: 0,
+      controls: decisionControls(decisionId, reason, false),
+      evidenceSections: evidenceSections(evidence),
+      observedControls: [], observedControlCount: 0,
+      resumePoint: unableToSend
+        ? 'retry the existing planned continuation through the Core-owned due path'
+        : 'observe the same exact acknowledged turn and continue this task',
+      evidenceBytes: 0,
     });
     const envelope: StoredDecision = {
       kind: 'semantic_action', context, attemptId: attempt.attemptId,
       purpose: null, snapshotId: null, actionRef: null,
-      evidenceHash: null, packet,
+      evidenceHash: null, actions: [], allOptions: [], evidence, packet,
     };
     try {
       this.#repository.requireDecision({
@@ -407,51 +683,92 @@ export class SemanticDecisionGateway {
     const purposes: SemanticActionPurpose[] = kind === 'provider_question'
       ? ['answer_question'] : kind === 'model_choice'
         ? ['open_model_chooser', 'close_model_chooser',
-          'choose_model', 'choose_reasoning_effort'] : kind === 'recovery_choice'
-          ? ['retry'] : [];
-    // A prior Power action with an uncertain external effect is an explicit
-    // durable barrier. No new agent decision, however fresh its DOM evidence,
-    // may authorize another Power click on this Task.
+          'choose_model', 'choose_reasoning_effort'] : kind === 'tool_permission'
+          ? ['grant_permission', 'decline_permission'] : kind === 'provider_control'
+            ? ['activate_control', 'set_control_value'] : kind === 'recovery_choice'
+            ? ['retry'] : [];
     const uncertainEffort = kind === 'model_choice' &&
       priorUncertainReasoningEffort(full.decisions);
-    const action = uncertainEffort ? null :
-      observation ? oneAction(observation, purposes) : null;
+    const actions = observation ? matchingActions(observation, purposes) : [];
+    const reconcilesUncertainReasoningEffort = uncertainEffort &&
+      actions.some(action => action.purpose === 'choose_reasoning_effort');
     const now = new Date().toISOString();
     const decisionId = randomUUID();
-    const option: AgentDecisionOption[] = action ? [{
+    const options: AgentDecisionOption[] = actions.map(action => ({
       actionRef: action.actionRef, purpose: action.purpose, effect: action.effect,
       risk: action.risk, evidenceHash: action.evidenceHash,
       expiresAt: action.expiresAt, inputSchema: action.input,
-    }] : [];
-    const reason = uncertainEffort ? UNCERTAIN_EFFORT_REASON :
-      observation ? boundedReason(observation.reason) :
+      ...(action.control ? { control: { ...action.control,
+        contextSummary: preview(action.control.contextSummary).text } } : {}),
+    }));
+    const reason = reconcilesUncertainReasoningEffort
+      ? 'reasoning-effort-current-state-reobserved'
+      : observation ? boundedReason(observation.reason) :
         provider.kind === 'unsupported' ? provider.reason : 'semantic-observation-unavailable';
+    const humanOnly = kind === 'human_verification';
+    const permissionPreview = observation?.permission ? {
+      ...observation.permission,
+      visibleSummary: preview(observation.permission.visibleSummary).text,
+      argumentsSummary: observation.permission.argumentsSummary === null ? null
+        : preview(observation.permission.argumentsSummary).text,
+    } : null;
+    const observedControlPreviews = (observation?.controls ?? []).map(control => ({
+      ...control, contextSummary: preview(control.contextSummary).text,
+    }));
+    const evidence: StoredDecisionEvidence = {
+      original_request: full.task.originalPrompt,
+      current_attempt: JSON.stringify({
+        attemptId: attempt.attemptId, sequence: attempt.sequence, kind: attempt.kind,
+        state: attempt.state, content: attempt.content,
+        dispatchedAt: attempt.dispatchedAt, acknowledgedAt: attempt.acknowledgedAt,
+      }, null, 2),
+      provider_question: observation?.questionText ?? '',
+      permission: observation?.permission ? JSON.stringify(observation.permission, null, 2) : '',
+      partial_answer: observation?.turn.partialAnswer ?? '',
+      capability_issues: observation?.capabilityIssues
+        ? JSON.stringify(observation.capabilityIssues, null, 2) : '',
+      provider_controls: observation?.controls?.length
+        ? JSON.stringify(observation.controls, null, 2) : '',
+      decision_options: JSON.stringify(options, null, 2),
+    };
+    const sections = evidenceSections(evidence);
+    const questionPage = preview(evidence.provider_question);
+    const packetOptionPage = packetOptions(options);
+    const controlPage = compactObservedControls(observation?.controls ?? []);
     let packet: AgentDecisionPacket = {
       taskId: input.taskId, taskRevision: full.task.revision + 1, decisionId,
-      kind, reason, humanOnly: kind === 'human_verification',
+      kind, reason, humanOnly,
       observedAt: observation?.observedAt ?? now,
-      expiresAt: action?.expiresAt ?? new Date(Date.now() + 30_000).toISOString(),
+      expiresAt: options.length > 0
+        ? options.map(option => option.expiresAt).sort()[0]!
+        : new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
       snapshotId: observation?.snapshotId ?? null,
-      questionText: kind === 'provider_question' ? observation?.questionText ?? null : null,
-      permission: kind === 'tool_permission' ? observation?.permission ?? null : null,
+      questionText: kind === 'provider_question' ? questionPage.text || null : null,
+      permission: kind === 'tool_permission' ? permissionPreview : null,
       requestedModel: kind === 'model_choice' ? input.modelIntent ?? null : null,
-      options: option, evidenceBytes: 0,
+      options: packetOptionPage, optionCount: options.length,
+      controls: decisionControls(decisionId, reason, humanOnly),
+      evidenceSections: sections, observedControls: controlPage,
+      observedControlCount: observation?.controls?.length ?? 0,
+      resumePoint: 'return to the same task, exact conversation and current attempt after the selected effect',
+      evidenceBytes: 0,
     };
-    packet = countBytes(packet);
-    if (packet.evidenceBytes > MAX_PACKET_BYTES) {
-      // Never publish a truncated question/permission with a live actionRef.
-      packet = countBytes({ ...packet, kind: 'adapter_unsupported',
-        reason: 'decision-evidence-requires-bounded-expansion', humanOnly: false,
-        questionText: null, permission: null, options: [], evidenceBytes: 0 });
-    }
-    const actionable = packet.options.length === 1 ? packet.options[0]! : null;
+    packet = boundedPacket(packet);
+    const storedActions: StoredProviderAction[] = options.map(option => ({
+      purpose: option.purpose, snapshotId: packet.snapshotId!,
+      actionRef: option.actionRef, evidenceHash: option.evidenceHash,
+    }));
+    const compatibilityOption = options.length === 1 ? options[0]! : null;
     const envelope: StoredDecision = {
       kind: 'semantic_action', context, attemptId: input.attemptId,
-      purpose: actionable?.purpose ?? null,
+      purpose: compatibilityOption?.purpose ?? null,
       snapshotId: packet.snapshotId,
-      actionRef: actionable?.actionRef ?? null,
-      evidenceHash: actionable?.evidenceHash ?? null,
-      packet,
+      actionRef: compatibilityOption?.actionRef ?? null,
+      evidenceHash: compatibilityOption?.evidenceHash ?? null,
+      actions: storedActions, allOptions: options,
+      ...(reconcilesUncertainReasoningEffort
+        ? { reconcilesUncertainReasoningEffort: true } : {}),
+      evidence, packet,
     };
     try {
       this.#repository.requireDecision({
@@ -532,14 +849,15 @@ export class SemanticDecisionGateway {
     const stalledContinuation =
       original.packet.kind === 'recovery_choice' &&
       original.packet.options.length === 0 && !original.packet.humanOnly &&
-      ((original.packet.reason === 'managed-continuation-no-final-after-approved-continue' &&
+      (((original.packet.reason === 'managed-continuation-no-final-after-approved-continue' ||
+         original.packet.reason === 'managed-continuation-no-progress-policy-reached') &&
         originalAttempt.kind === 'continuation' && originalAttempt.state === 'acknowledged') ||
        (original.packet.reason === 'managed-continuation-safe-send-unavailable' &&
         originalAttempt.kind === 'continuation' && originalAttempt.state === 'planned') ||
        (original.packet.reason === 'managed-continuation-later-user-boundary' &&
         originalAttempt.kind === 'initial' && originalAttempt.state === 'acknowledged') ||
-       // The fifth-slot 429 packet has no executable provider option. Only an
-       // explicit agent read-only refresh can release its durable hold.
+       // A policy-authorized persistent 429 review has no provider mutation.
+       // Only an explicit read-only agent refresh releases its durable hold.
        (original.packet.reason === 'canonical-final-rate-limit-persistent' &&
         (originalAttempt.kind === 'initial' || originalAttempt.kind === 'continuation') &&
         originalAttempt.state === 'acknowledged'));
@@ -674,6 +992,136 @@ export class SemanticDecisionGateway {
     });
   }
 
+  async #decideControl(input: {
+    taskId: string; clientId: string; attemptId: string; decisionId: string;
+    requestId: string; actionRef: string; input?: string;
+    stored: StoredDecision; control: AgentDecisionControl;
+  }): Promise<AgentDecisionOutcome> {
+    const normalized = input.input ?? null;
+    if (input.control.purpose === 'request_human') {
+      const nextDecisionId = randomUUID();
+      const reason = 'agent-requested-human-assistance';
+      const currentRevision = this.#repository.getTask(input.taskId, input.clientId).revision;
+      const packet = boundedPacket({
+        ...input.stored.packet,
+        decisionId: nextDecisionId,
+        taskRevision: currentRevision + 4,
+        kind: 'human_verification', reason, humanOnly: true,
+        observedAt: new Date().toISOString(), options: [], optionCount: 0,
+        controls: decisionControls(nextDecisionId, reason, true),
+        resumePoint: 'return to this exact task after the requested human action is confirmed',
+        evidenceBytes: 0,
+      });
+      const envelope: StoredDecision = {
+        ...input.stored, purpose: null, snapshotId: null,
+        actionRef: null, evidenceHash: null, actions: [], allOptions: [], packet,
+      };
+      try {
+        this.#repository.escalateDecisionToHuman({
+          taskId: input.taskId, clientId: input.clientId,
+          decisionId: input.decisionId, requestId: input.requestId,
+          actionRef: input.actionRef, inputValue: normalized,
+          nextDecisionId, nextContextJson: JSON.stringify(envelope),
+        });
+      } catch (error) {
+        const current = this.#repository.getFullTask(input.taskId, input.clientId)
+          .decisions.find(row => row.decisionId === input.decisionId);
+        if (current?.status === 'resolved') {
+          return replayDecisionOutcome(current.resolutionJson, {
+            requestId: input.requestId, actionRef: input.actionRef, inputValue: normalized,
+          });
+        }
+        throw error;
+      }
+      return { kind: 'performed', effect: 'human_assistance_requested' };
+    }
+    try {
+      this.#repository.resolveDecision({
+        taskId: input.taskId, clientId: input.clientId, decisionId: input.decisionId,
+        resolutionJson: JSON.stringify({
+          kind: 'semantic_action', requestId: input.requestId,
+          actionRef: input.actionRef, input: normalized,
+        }),
+      });
+    } catch (error) {
+      const current = this.#repository.getFullTask(input.taskId, input.clientId)
+        .decisions.find(row => row.decisionId === input.decisionId);
+      if (current?.status === 'resolved') {
+        return replayDecisionOutcome(current.resolutionJson, {
+          requestId: input.requestId, actionRef: input.actionRef, inputValue: normalized,
+        });
+      }
+      throw error;
+    }
+    if (!this.#repository.consumeDecisionAction(
+      input.taskId, input.clientId, input.decisionId)) {
+      return { kind: 'uncertain', reason: 'task-control-consumption-unavailable' };
+    }
+
+    let outcome: AgentDecisionOutcome;
+    try {
+      switch (input.control.purpose) {
+        case 'reobserve': {
+          if (input.stored.packet.kind === 'model_choice' &&
+              input.stored.packet.requestedModel &&
+              await this.verifyModelIntent({
+                taskId: input.taskId, clientId: input.clientId,
+                attemptId: input.attemptId,
+                modelIntent: input.stored.packet.requestedModel,
+              })) {
+            outcome = { kind: 'refresh_required', packet: null };
+            break;
+          }
+          const packet = await this.inspect({
+            taskId: input.taskId, clientId: input.clientId, attemptId: input.attemptId,
+            modelChoice: input.stored.packet.kind === 'model_choice',
+            ...(input.stored.packet.requestedModel
+              ? { modelIntent: input.stored.packet.requestedModel } : {}),
+          });
+          outcome = { kind: 'refresh_required', packet };
+          break;
+        }
+        case 'wait':
+          outcome = { kind: 'performed', effect: 'observation_resumed' };
+          break;
+        case 'resume':
+          outcome = { kind: 'performed', effect: 'task_resumed' };
+          break;
+        case 'cancel':
+          this.#repository.requestCancel(input.taskId, input.clientId);
+          outcome = { kind: 'performed', effect: 'cancel_requested' };
+          break;
+      }
+    } catch {
+      outcome = { kind: 'uncertain', reason: 'task-control-effect-unverified' };
+    }
+
+    try {
+      this.#repository.recordDecisionOutcome({
+        taskId: input.taskId, clientId: input.clientId, decisionId: input.decisionId,
+        requestId: input.requestId, actionRef: input.actionRef, inputValue: normalized,
+        outcomeJson: JSON.stringify(outcome),
+      });
+    } catch {
+      return { kind: 'uncertain', reason: 'decision-outcome-receipt-unavailable' };
+    }
+    if ((input.control.purpose === 'wait' || input.control.purpose === 'resume') &&
+        this.#onTaskResumed) {
+      try {
+        await this.#onTaskResumed({
+          taskId: input.taskId, clientId: input.clientId, attemptId: input.attemptId,
+          mode: input.control.purpose,
+        });
+      } catch {
+        try {
+          this.#repository.recordObservationDeferred(input.taskId, input.clientId,
+            'decision:' + input.decisionId + ':resume-scheduled-for-core-retry');
+        } catch { /* The durable working state remains eligible for the Core scan. */ }
+      }
+    }
+    return outcome;
+  }
+
   /** Public decision entry point: the exact attempt stays server-owned.
    * Caller supplies only the current Task/decision/action identities.
    */
@@ -713,12 +1161,31 @@ export class SemanticDecisionGateway {
     }
     if (decision.status !== 'pending' || full.task.pendingDecisionId !== input.decisionId ||
         full.task.cancelRequested) throw new SessionPlaneDomainError('stale_decision', 'Decision is not pending on this Task');
-    const [option] = stored.packet.options;
-    if (stored.packet.options.length !== 1 || !option ||
-        option.actionRef !== input.actionRef || stored.actionRef !== input.actionRef ||
-        stored.purpose !== option.purpose || stored.evidenceHash !== option.evidenceHash ||
-        option.risk === 'permission_grant' || option.purpose === 'grant_permission') {
+    const option = (stored.allOptions ?? stored.packet.options)
+      .find(candidate => candidate.actionRef === input.actionRef);
+    const control = stored.packet.controls?.find(candidate => candidate.actionRef === input.actionRef);
+    if ((option ? 1 : 0) + (control ? 1 : 0) !== 1) {
       throw new SessionPlaneDomainError('stale_decision', 'Decision does not authorize the selected action');
+    }
+    if (control) {
+      if (input.input !== undefined) {
+        throw new SessionPlaneDomainError('invalid_request', 'Task controls do not accept provider input');
+      }
+      return await this.#decideControl({ ...input, stored, control });
+    }
+    if (!option || (option.purpose === 'grant_permission' &&
+        stored.packet.permission?.canGrant !== true)) {
+      throw new SessionPlaneDomainError('stale_decision', 'Decision does not authorize the selected action');
+    }
+    const boundAction = stored.actions?.find(candidate =>
+      candidate.actionRef === option.actionRef && candidate.purpose === option.purpose &&
+      candidate.evidenceHash === option.evidenceHash) ??
+      (stored.actionRef === option.actionRef && stored.purpose === option.purpose &&
+       stored.evidenceHash === option.evidenceHash && stored.snapshotId !== null
+        ? { purpose: option.purpose, snapshotId: stored.snapshotId,
+          actionRef: option.actionRef, evidenceHash: option.evidenceHash } : null);
+    if (!boundAction) {
+      throw new SessionPlaneDomainError('stale_decision', 'Decision action lost its durable evidence binding');
     }
     if (!selectionIsValid(option.inputSchema, input.input)) {
       throw new SessionPlaneDomainError('invalid_request', 'Selected input does not match the enabled decision schema');
@@ -728,9 +1195,10 @@ export class SemanticDecisionGateway {
     // read-only inspection path is insufficient: another client can call
     // task.decide directly with an old exact actionRef.
     if (option.purpose === 'choose_reasoning_effort' &&
-        priorUncertainReasoningEffort(full.decisions)) {
+        priorUncertainReasoningEffort(full.decisions) &&
+        stored.reconcilesUncertainReasoningEffort !== true) {
       throw new SessionPlaneDomainError('stale_decision',
-        'A previous reasoning effort action has an uncertain external effect');
+        'A stale reasoning effort action cannot bypass current-state reobservation');
     }
     if (!Number.isFinite(Date.parse(option.expiresAt)) ||
         Date.now() > Date.parse(option.expiresAt)) {
@@ -770,7 +1238,7 @@ export class SemanticDecisionGateway {
     let result: SemanticActResult;
     try {
       result = await provider.adapter.act({
-        context: stored.context, snapshotId: stored.snapshotId!,
+        context: stored.context, snapshotId: boundAction.snapshotId,
         actionRef: option.actionRef, evidenceHash: option.evidenceHash,
         authorizedDecisionId: input.decisionId,
         ...(input.input === undefined ? {} : { input: input.input }),
@@ -819,6 +1287,18 @@ export class SemanticDecisionGateway {
         this.#repository.recordObservationDeferred(input.taskId, input.clientId,
           'decision:' + input.decisionId + ':uncertain:' + outcome.reason);
       } catch { /* The outcome receipt above is already durable. */ }
+    } else if (outcome.kind === 'performed' && this.#onTaskResumed) {
+      try {
+        await this.#onTaskResumed({
+          taskId: input.taskId, clientId: input.clientId, attemptId: input.attemptId,
+          mode: 'provider_effect',
+        });
+      } catch {
+        try {
+          this.#repository.recordObservationDeferred(input.taskId, input.clientId,
+            'decision:' + input.decisionId + ':provider-effect-resume-scheduled-for-core-retry');
+        } catch { /* The verified effect receipt remains durable and replay-safe. */ }
+      }
     }
     return outcome;
   }

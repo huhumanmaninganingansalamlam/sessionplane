@@ -1,4 +1,6 @@
 # Team-centered MCP contract
+> **Historical design record — not the current public interface.** Current behavior and commands are defined by [PRD.md](PRD.md) and the repository README. The public team/role/request/workflow catalogue described below is removed.
+
 
 The agent retains `teamId`. `sessionplane_team_get` returns roles with `roleRef`
 and requests with `requestRef`. Copy these references; do not reconstruct them.
