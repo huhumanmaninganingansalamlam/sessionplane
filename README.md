@@ -38,7 +38,10 @@ an approved 20-minute due, the Core reserves only that exact canonical
 conversation's next provider read; ordinary background reads cannot consume the
 slot and extend a 429 fence past the due. A direct 429 is retried at its exact
 `nextCheckAt`, and only a later fresh canonical no-FINAL observation may license
-the single approved Continue POST.
+the single approved Continue POST. After the exact draft is committed, the Core
+may briefly re-observe the unchanged lease/model/draft until the unique Send
+control becomes enabled; that bounded wait performs no second fill and no POST,
+then consumes the exact send action once.
 
 ## MCP
 
@@ -92,7 +95,7 @@ rather than automatically resubmitted.
 
 Use the matching package version after that release is published:
 
-VERSION=0.4.105
+VERSION=0.4.106
     npm install -g ./sessionplane-$VERSION.tgz
     sessplane doctor --json
 

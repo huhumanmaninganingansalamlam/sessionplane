@@ -33,6 +33,11 @@ export type SemanticContextResolver = (
 function sha(value: string): string {
   return createHash('sha256').update(value.replaceAll('\r\n', '\n')).digest('hex');
 }
+const POST_DRAFT_SEND_READY_TIMEOUT_MS = 5_000;
+const POST_DRAFT_SEND_READY_POLL_MS = 100;
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 function one(
   candidates: readonly SemanticActionCandidate[], purpose: SemanticActionCandidate['purpose'],
 ): SemanticActionCandidate | null {
@@ -225,14 +230,28 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
         if (drafted.kind !== 'performed' || drafted.effect !== 'draft_updated') {
           return { kind: 'uncertain', reason: failed(drafted) };
         }
-        observation = await this.#adapter.observe(context);
-        if (!isConversationObservation(observation, this.#adapter) ||
-          observation.blocker !== 'none' || observation.progress === 'streaming') {
-          return { kind: 'uncertain', reason: 'semantic-observation-changed-after-draft' };
-        }
-        if (context.requiredModel &&
-          !semanticConfigurationMatches(this.providerKey, context.requiredModel, observation)) {
-          return { kind: 'uncertain', reason: 'requested-model-changed-after-draft' };
+        const purpose = intent.kind === 'continuation' ? 'continue' : 'submit';
+        const readyBy = Date.now() + POST_DRAFT_SEND_READY_TIMEOUT_MS;
+        // A renderer may commit the exact draft one frame before its unique
+        // Send control becomes enabled. Re-observe only: every pass rechecks
+        // the same lease, turn boundary, model and exact draft through the
+        // adapter. No second fill and no provider POST occurs in this wait.
+        while (true) {
+          observation = await this.#adapter.observe(context);
+          if (!isConversationObservation(observation, this.#adapter) ||
+            observation.blocker !== 'none' || observation.progress === 'streaming') {
+            return { kind: 'uncertain', reason: 'semantic-observation-changed-after-draft' };
+          }
+          if (context.requiredModel &&
+            !semanticConfigurationMatches(this.providerKey, context.requiredModel, observation)) {
+            return { kind: 'uncertain', reason: 'requested-model-changed-after-draft' };
+          }
+          const candidate = one(observation.actions, purpose);
+          if (candidate?.risk === 'send_once' && candidate.input.kind === 'none') break;
+          if (Date.now() >= readyBy) {
+            return { kind: 'uncertain', reason: 'exact-semantic-send-candidate-unavailable' };
+          }
+          await delay(POST_DRAFT_SEND_READY_POLL_MS);
         }
       }
       const purpose = intent.kind === 'continuation' ? 'continue' : 'submit';

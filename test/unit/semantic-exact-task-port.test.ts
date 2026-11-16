@@ -35,20 +35,25 @@ class FakeSemanticProvider implements SemanticProviderAdapter {
   ackReady = false;
   finalTurn = 'turn-1';
   finalText = 'Exact answer after restart';
+  postDraftUnavailableObservations = 0;
 
   async observe(context: SemanticTaskContext): Promise<SemanticObservation> {
     assert.equal(context.pageLease, null, 'non-browser provider does not invent Chrome');
     this.observations++;
     const snapshotId = `snapshot-${++this.#generation}`;
-    const purpose = this.#draft ? 'submit' as const : 'compose' as const;
+    const purpose = this.#draft
+      ? context.submittedUserMessageId !== null && context.submittedUserTurnId !== null
+        ? 'continue' as const : 'submit' as const
+      : 'compose' as const;
     const evidenceHash = hash(JSON.stringify({ snapshotId, purpose, context }));
+    const unavailable = this.#draft !== '' && this.postDraftUnavailableObservations-- > 0;
     return {
       providerKey: this.providerKey, surface: 'chat', snapshotId, observedAt: SENT_AT,
       capabilityManifest: this.capabilities, progress: 'idle', blocker: 'none', reason: null,
       turn: { submittedUserFound: false, laterUserFound: false, submittedUserMessageId: null,
         answerMessageId: null, partialAnswer: null },
       questionText: null, evidenceBytes: 150,
-      actions: [{
+      actions: unavailable ? [] : [{
         actionRef: `action-${this.#generation}`, purpose,
         effect: purpose === 'compose' ? 'Write draft' : 'Send exact draft',
         risk: purpose === 'compose' ? 'draft_only' : 'send_once',
@@ -231,6 +236,38 @@ test('semantic Core bridge persists exact dispatch evidence and recovers ACK/FIN
   assert.throws(() => store.getDispatchEvidence({
     taskId: 'task-1', clientId: 'mallory', attemptId: 'attempt-1',
   }), /access denied/);
+});
+
+test('semantic Core waits for an asynchronously enabled exact continuation Send control', async () => {
+  const adapter = new FakeSemanticProvider();
+  adapter.postDraftUnavailableObservations = 2;
+  const intent: ExactSendIntent = {
+    clientId: 'alice', projectId: 'project-1', slotId: 'main', slotRevision: 1,
+    providerConversationId: 'conv-1', taskId: 'task-1',
+    attemptId: 'attempt-1', kind: 'continuation', content: '계속',
+  };
+  let journalWrites = 0;
+  const port = new SemanticExactTaskPort({
+    adapter,
+    resolveContext: query => ({
+      projectId: query.projectId, slotId: query.slotId,
+      slotRevision: query.slotRevision, taskId: query.taskId,
+      providerConversationId: query.providerConversationId,
+      submittedUserMessageId: 'prior-message', submittedUserTurnId: 'prior-turn',
+      pageLease: null,
+    }),
+    dispatchJournal: {
+      record: () => { journalWrites++; },
+      read: () => null,
+    },
+  });
+  assert.deepEqual(await port.sendOnce(intent), {
+    kind: 'uncertain', reason: 'canonical-ack-still-unverified',
+  });
+  assert.equal(adapter.observations, 4,
+    'one compose observation plus bounded read-only readiness observations');
+  assert.equal(adapter.sends, 1, 'the exact continuation is sent only once');
+  assert.equal(journalWrites, 1, 'the one provider POST receives one evidence write');
 });
 
 test('unbound new conversation is not submitted or re-created optimistically', async t => {
