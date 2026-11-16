@@ -1,8 +1,8 @@
 # SessionPlane Engineering Rules
 
-This repository implements the contracts in the workspace-level `../docs/PRD.md`
-and `../docs/specs/` documents. Product requirements and fixed decisions take
-precedence over implementation convenience.
+The authoritative current product contract is [docs/PRD.md](docs/PRD.md).
+This file records engineering invariants, not a separate or older product
+contract. Product requirements take precedence over implementation convenience.
 
 ## Invariants
 

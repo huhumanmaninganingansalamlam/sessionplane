@@ -1,10 +1,11 @@
-# Core-only handover with a preserved Chrome and schema transition
+# Core handover preserving Chrome and SQLite
 
-This procedure replaces one running, same-user SessionPlane Core without closing
-the dedicated Chrome profile. It is the supported path for the production
-SQLite transition declared by `scripts/ops/handover-manifest.json` (currently
-schema 15 to schema 16). It never treats a package version string as source
-identity and never starts two Cores against one profile or database.
+This procedure describes a coordinated same-user SessionPlane Core replacement
+without closing the dedicated Chrome profile. The checked-in handover manifest
+records the historical schema 15→16 migration; current installations may already
+be at schema 16, including same-schema package upgrades. Inspect the installed
+Core, target package, and exact handover policy before acting. Never start two
+Cores against the same profile or database.
 
 ## Safety contract
 
@@ -16,8 +17,9 @@ then invokes `system.maintenance.commit`. That RPC closes SQLite and exits the
 Core without calling browser shutdown. Ordinary `SIGTERM`, `SIGINT`, process
 group signals, Chrome signals, and profile-lock deletion are not used.
 
-The checked-in handover policy describes the *next development candidate*
-(15 -> 16); it is not a deployment order or an acceptance receipt. Never use
+The checked-in manifest records the historical 15 → 16 transition; it is
+not a deployment order, a current schema assertion or an acceptance receipt.
+Never use
 an old 8 -> 15 manifest against the installed schema-15 Core, and never
 bypass clean source, tarball, all required acceptance gates, exact handover
 identity, and review just because the policy names the new schema.

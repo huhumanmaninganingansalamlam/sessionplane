@@ -1,8 +1,8 @@
 # SessionPlane product contract
 
-Status: current source contract for the v0.4.109 candidate. The installed
-runtime remains whatever `sessplane health --json` reports until the candidate
-is released and handed over.
+Status: current product contract. The source version comes from `package.json`;
+the installed Core version, source identity, and browser state come from
+`sessplane health --json`. A Git checkout is not evidence of an installed release.
 
 ## Product goal
 

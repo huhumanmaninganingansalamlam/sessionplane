@@ -7,6 +7,7 @@ clients of that Core; disconnecting them never stops the Task or authorizes a
 replay.
 
 The authoritative product contract is [docs/PRD.md](docs/PRD.md).
+For focused changes, issues and PRs, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Public interface
 
@@ -138,7 +139,7 @@ rather than automatically resubmitted.
 
 Use the matching package version after that release is published:
 
-VERSION=0.4.109
+VERSION=0.4.110
     npm install -g ./sessionplane-$VERSION.tgz
     sessplane doctor --json
 
