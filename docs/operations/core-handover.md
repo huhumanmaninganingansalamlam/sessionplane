@@ -146,9 +146,20 @@ rollback and process-phase file.
 - Chrome PID/start ticks, profile and CDP port are unchanged, with ownership `adopted`;
 - the sentinel request/anchor, every pre-existing request hash and binding identity are preserved;
 - full SQLite integrity and foreign keys passed on source snapshot and candidate;
-- the schema-15 source snapshot and raw DB/WAL/SHM archive remain available;
+- one exact static pre-cutover database set and the previous package remain for
+  each of the two newest verified release cutovers;
+- redundant preflight, rollback rehearsal, candidate and raw archive SQLite
+  copies are removed only after the new Core, request/anchor, bindings, browser
+  identity, database integrity and single-writer checks all pass;
+- incomplete or failed cutovers are never automatically pruned, and a retention
+  failure is reported as a non-zero maintenance result without repeating or
+  rolling back the already-successful cutover;
 - only the new Core holds SQLite locks; and
 - the installed six-tool public catalog matches the accepted package.
+
+Small JSON/log receipts remain in place after snapshot retirement. Retention is
+bounded to the exact `release-main-*/handover` convention, never scans browser
+profiles or user attachments, and does not run as a background cleanup daemon.
 
 This receipt does not claim live provider acceptance. Run
 `scripts/live-task-acceptance.mjs` only after the exact installed source/schema

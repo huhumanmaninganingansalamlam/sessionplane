@@ -1,4 +1,9 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { cleanCandidateDisposableChromes } from './disposable-browser-guard.mjs';
 
 /**
  * Launch each acceptance gate in a new, bounded POSIX process group.
@@ -23,14 +28,19 @@ export async function runIsolatedCandidateCommand(command, args, {
       !Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1) {
     throw new TypeError('Invalid bounded candidate command');
   }
+  const gateToken = randomUUID();
+  const gateRoot = mkdtempSync(path.join(tmpdir(), 'sessionplane-gate-'));
   return await new Promise(resolve => {
     let child;
     try {
       child = spawn(command, args, {
-        cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+        cwd, env: { ...env, SESSIONPLANE_CANDIDATE_GATE_TOKEN: gateToken,
+          TMPDIR: gateRoot, TMP: gateRoot, TEMP: gateRoot },
+        detached: true, stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });
     } catch (error) {
+      rmSync(gateRoot, { recursive: true, force: true });
       resolve({
         stdout: '', stderr: '', status: null, signal: null,
         error: error.message, errorCode: error.code ?? 'ESPAWN',
@@ -76,18 +86,33 @@ export async function runIsolatedCandidateCommand(command, args, {
     });
     const deadline = setTimeout(() => abortOwnGroup('ETIMEDOUT',
       'Candidate gate exceeded its finite execution deadline'), timeoutMs);
-    child.once('close', (code, signal) => {
+    child.once('close', async (code, signal) => {
       clearTimeout(deadline);
-      // Even after npm has exited, its descendants may still own the group.
       if (fault !== null) signalOwnGroup('SIGKILL');
       if (escalation !== null) clearTimeout(escalation);
+      let cleanupError = null;
+      let cleanupResult = null;
+      try {
+        cleanupResult = await cleanCandidateDisposableChromes(gateToken, gateRoot);
+        if (cleanupResult.remaining !== 0 || cleanupResult.cleaned !== 0) {
+          cleanupError = `Candidate left ${cleanupResult.cleaned + cleanupResult.remaining} disposable Chrome process groups; ${cleanupResult.remaining} could not be stopped`;
+        }
+      } catch (error) {
+        cleanupError = `Candidate browser cleanup failed: ${error.message}`;
+      }
+      // A detected leak still fails the gate, but once every exact disposable
+      // browser is stopped its unique test root is disposable too.
+      if (cleanupResult?.remaining === 0) {
+        try { rmSync(gateRoot, { recursive: true, force: true }); }
+        catch (error) { cleanupError = `Candidate temporary root cleanup failed: ${error.message}`; }
+      }
       resolve({
         stdout: Buffer.concat(stdoutBuffers).toString('utf8'),
         stderr: Buffer.concat(stderrBuffers).toString('utf8'),
-        status: fault === null ? code : null,
+        status: fault === null && cleanupError === null ? code : null,
         signal: signal ?? null,
-        error: fault?.message ?? spawnError?.message ?? null,
-        errorCode: fault?.code ?? spawnError?.code ?? null,
+        error: cleanupError ?? fault?.message ?? spawnError?.message ?? null,
+        errorCode: cleanupError ? 'EDISPOSABLECHROME' : fault?.code ?? spawnError?.code ?? null,
       });
     });
   });
