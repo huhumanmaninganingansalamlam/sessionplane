@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { runIsolatedCandidateCommand } from '../../scripts/candidate-gate-process.mjs';
 
 test('isolated candidate process preserves stdout, stderr and successful exit', async () => {
@@ -14,6 +14,18 @@ test('isolated candidate process preserves stdout, stderr and successful exit', 
   assert.equal(result.errorCode, null);
   assert.equal(result.stdout, 'OUT');
   assert.equal(result.stderr, 'ERR');
+});
+
+test('a successful candidate removes its unique temporary root', async () => {
+  const result = await runIsolatedCandidateCommand(process.execPath,
+    ['-e', 'process.stdout.write(process.env.TMPDIR ?? "")'], {
+      cwd: process.cwd(), env: process.env, timeoutMs: 5_000,
+      maxOutputBytes: 64_000, killGraceMs: 100,
+    });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /sessionplane-gate-/);
+  assert.equal(existsSync(result.stdout), false,
+    'successful gate must not retain its private temporary root');
 });
 
 test('a deadline kills the candidate command and its own grandchild, not an unrelated process', {

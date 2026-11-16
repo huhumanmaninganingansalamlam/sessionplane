@@ -1,5 +1,6 @@
 """Offline checks only: never connect to or signal a running SessionPlane core."""
 import copy
+import hashlib
 import importlib.util
 import json
 import os
@@ -878,6 +879,173 @@ class HandoverTests(unittest.TestCase):
             self.assertEqual((receipt/'database-archive/sessionplane.sqlite-wal').read_bytes(),
                              b'archived-wal-evidence')
 
+
+
+    def test_successful_handover_retires_only_older_verified_sqlite_snapshots(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            snapshots = []
+            for i in range(1, 5):
+                receipt = state / f'release-main-0.4.{i}-fixture' / 'handover'
+                receipt.mkdir(parents=True)
+                result = {
+                    'databaseIntegrity': 'ok', 'singleCoreWriterVerified': True,
+                    'requestAndAnchorPreserved': True, 'bindingIdentityPreserved': True,
+                    'browserIdentityPreserved': True, 'sourceCommit': f'{i:040x}',
+                    'packageSha256': 'a' * 64, 'oldPid': i, 'newPid': i + 100,
+                }
+                (receipt / 'result.json').write_text(json.dumps(result))
+                (receipt / 'handover.json').write_text(json.dumps({'atUnix': 1000 + i}))
+                (receipt / 'before-identity.json').write_text('keep task evidence')
+                (receipt / 'previous-install.tgz').write_bytes(f'package-{i}'.encode())
+                (receipt / 'predeploy.sqlite').write_bytes(f'predeploy-{i}'.encode())
+                for relative in ['preflight-migration/candidate.sqlite',
+                                 'preflight-rollback/restored-original.sqlite',
+                                 'final-migration/source-snapshot.sqlite',
+                                 'database-archive/sessionplane.sqlite']:
+                    candidate = receipt / relative
+                    candidate.parent.mkdir(exist_ok=True)
+                    candidate.write_bytes(f'{relative}-{i}'.encode())
+                snapshots.append(receipt)
+
+            # Broken or unverified cutover is never treated as disposable.
+            foreign = state/'release-main-0.4.0-unverified'/'handover'
+            foreign.mkdir(parents=True)
+            (foreign/'result.json').write_text(json.dumps({
+                'databaseIntegrity': 'ok', 'singleCoreWriterVerified': False}))
+            (foreign/'predeploy.sqlite').write_text('unknown')
+            current = snapshots[-1]
+            outcome = handover.retain_successful_handover_snapshots(current, state)
+            self.assertEqual(outcome['keptRollbackReceipts'], 2)
+            self.assertEqual(outcome['compactedReceipts'], 2)
+            self.assertEqual(outcome['retiredReceipts'], 2)
+            for old in snapshots[:2]:
+                self.assertFalse((old/'predeploy.sqlite').exists())
+                self.assertFalse((old/'final-migration/source-snapshot.sqlite').exists())
+                self.assertFalse((old/'database-archive/sessionplane.sqlite').exists())
+                self.assertEqual((old/'before-identity.json').read_text(), 'keep task evidence')
+                self.assertTrue((old/'snapshot-retention.json').exists())
+            for retained in snapshots[2:]:
+                self.assertFalse((retained/'predeploy.sqlite').exists())
+                self.assertTrue((retained/'final-migration/source-snapshot.sqlite').exists())
+                self.assertFalse((retained/'preflight-migration/candidate.sqlite').exists())
+                self.assertFalse((retained/'database-archive/sessionplane.sqlite').exists())
+                self.assertTrue((retained/'previous-install.tgz').exists())
+                receipt = json.loads((retained/'snapshot-retention.json').read_text())
+                self.assertEqual(receipt['status'], 'compacted-full-rollback')
+                self.assertEqual([row['path'] for row in receipt['keptSnapshots']],
+                                 ['final-migration/source-snapshot.sqlite'])
+            self.assertEqual((foreign/'predeploy.sqlite').read_text(), 'unknown')
+            # Re-running the same retention step is idempotent.
+            rerun = handover.retain_successful_handover_snapshots(current, state)
+            self.assertEqual(rerun['retiredReceipts'], 0)
+            self.assertEqual(rerun['compactedReceipts'], 0)
+
+    def test_handover_retention_rejects_an_unverified_latest_cutover(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            receipt = state/'release-main-bad'/'handover'
+            receipt.mkdir(parents=True)
+            (receipt/'result.json').write_text(json.dumps({
+                'databaseIntegrity': 'error', 'singleCoreWriterVerified': False}))
+            (receipt/'predeploy.sqlite').write_text('preserve')
+            with self.assertRaisesRegex(AssertionError, 'verified'):
+                handover.retain_successful_handover_snapshots(receipt, state)
+            self.assertEqual((receipt/'predeploy.sqlite').read_text(), 'preserve')
+
+    def test_interrupted_snapshot_retention_merges_prior_hash_evidence_atomically(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            receipts = []
+            for i in range(3):
+                receipt = state/f'release-main-{i}'/'handover'
+                receipt.mkdir(parents=True)
+                (receipt/'result.json').write_text(json.dumps({
+                    'databaseIntegrity': 'ok', 'singleCoreWriterVerified': True,
+                    'requestAndAnchorPreserved': True, 'bindingIdentityPreserved': True,
+                    'browserIdentityPreserved': True, 'sourceCommit': f'{i:040x}',
+                    'packageSha256': 'a'*64, 'oldPid': i+1, 'newPid': i+101}))
+                (receipt/'handover.json').write_text(json.dumps({'atUnix': i+1}))
+                (receipt/'previous-install.tgz').write_text('package')
+                (receipt/'final-migration').mkdir()
+                (receipt/'final-migration/source-snapshot.sqlite').write_text('source')
+                (receipt/'database-archive').mkdir()
+                (receipt/'database-archive/sessionplane.sqlite').write_text('archive')
+                receipts.append(receipt)
+            oldest = receipts[0]
+            # Power loss after manifest publication and one unlink.
+            (oldest/'predeploy.sqlite').write_text('already removed')
+            prior_hash = hashlib.sha256(b'already removed').hexdigest()
+            (oldest/'snapshot-retention.json').write_text(json.dumps({
+                'kind': 'sessionplane-verified-snapshot-retention-v2',
+                'removedSnapshots': [{'path': 'predeploy.sqlite',
+                                      'bytes': 15, 'sha256': prior_hash}],
+                'keptSnapshots': [],
+            }))
+            (oldest/'predeploy.sqlite').unlink()
+            handover.retain_successful_handover_snapshots(receipts[-1], state)
+            manifest = json.loads((oldest/'snapshot-retention.json').read_text())
+            removed = {row['path']: row for row in manifest['removedSnapshots']}
+            self.assertEqual(removed['predeploy.sqlite']['sha256'], prior_hash)
+            self.assertIn('database-archive/sessionplane.sqlite', removed)
+            self.assertFalse(list(oldest.glob('.snapshot-retention-*.tmp')))
+
+    def test_handover_retention_requires_one_exact_rollback_and_previous_package(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            receipt = state/'release-main-current'/'handover'
+            receipt.mkdir(parents=True)
+            (receipt/'result.json').write_text(json.dumps({
+                'databaseIntegrity': 'ok', 'singleCoreWriterVerified': True,
+                'requestAndAnchorPreserved': True, 'bindingIdentityPreserved': True,
+                'browserIdentityPreserved': True, 'sourceCommit': 'a'*40,
+                'packageSha256': 'b'*64, 'oldPid': 1, 'newPid': 2}))
+            (receipt/'handover.json').write_text(json.dumps({'atUnix': 1}))
+            (receipt/'predeploy.sqlite').write_text('database')
+            with self.assertRaisesRegex(AssertionError, 'previous package'):
+                handover.retain_successful_handover_snapshots(receipt, state)
+            self.assertEqual((receipt/'predeploy.sqlite').read_text(), 'database')
+            (receipt/'previous-install.tgz').write_text('package')
+            result = handover.retain_successful_handover_snapshots(receipt, state)
+            self.assertEqual(result['compactedReceipts'], 0)
+            self.assertTrue((receipt/'predeploy.sqlite').exists())
+
+    def test_handover_retention_ignores_manual_recovery_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            receipt = root/'handover-manual'/'cutover'
+            receipt.mkdir(parents=True)
+            (receipt/'predeploy.sqlite').write_text('manual evidence')
+            result = handover.retain_successful_handover_snapshots(receipt, root)
+            self.assertEqual(result['status'], 'not-managed-release')
+            self.assertEqual((receipt/'predeploy.sqlite').read_text(), 'manual evidence')
+
+    def test_handover_retention_rejects_symlinks_and_unrecognized_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = pathlib.Path(temporary)
+            receipts = []
+            for i in range(3):
+                r = state/f'release-main-{i}'/'handover'
+                r.mkdir(parents=True)
+                (r/'result.json').write_text(json.dumps({
+                    'databaseIntegrity': 'ok', 'singleCoreWriterVerified': True,
+                    'requestAndAnchorPreserved': True, 'bindingIdentityPreserved': True,
+                    'browserIdentityPreserved': True, 'sourceCommit': f'{i:040x}',
+                    'packageSha256': 'a'*64, 'oldPid': i+1, 'newPid': i+101}))
+                (r/'handover.json').write_text(json.dumps({'atUnix': i+1}))
+                (r/'previous-install.tgz').write_text('package')
+                (r/'predeploy.sqlite').write_text('preserve')
+                (r/'database-archive').mkdir()
+                (r/'database-archive/sessionplane.sqlite').write_text('original')
+                receipts.append(r)
+            external = state/'unrelated-important.sqlite'
+            external.write_text('untouched')
+            (receipts[0]/'preflight-migration').mkdir()
+            (receipts[0]/'preflight-migration'/'candidate.sqlite').symlink_to(external)
+            with self.assertRaisesRegex(AssertionError, 'symlink'):
+                handover.retain_successful_handover_snapshots(receipts[-1], state)
+            self.assertTrue((receipts[0]/'predeploy.sqlite').exists())
+            self.assertEqual(external.read_text(), 'untouched')
 
 
 if __name__ == '__main__':
