@@ -139,7 +139,7 @@ rather than automatically resubmitted.
 
 Use the matching package version after that release is published:
 
-VERSION=0.4.110
+VERSION=0.4.111
     npm install -g ./sessionplane-$VERSION.tgz
     sessplane doctor --json
 
