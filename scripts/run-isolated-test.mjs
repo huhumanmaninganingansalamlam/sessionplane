@@ -21,7 +21,7 @@ const inheritedRoot = process.env.SESSIONPLANE_CANDIDATE_GATE_ROOT?.trim() ?? ''
 const inheritedToken = process.env.SESSIONPLANE_CANDIDATE_GATE_TOKEN?.trim() ?? '';
 const hasParentIsolation = inheritedToken.length > 0 &&
   inheritedRoot.length > 0 && path.resolve(inheritedRoot) === path.resolve(process.env.TMPDIR ?? '') &&
-  path.basename(inheritedRoot).startsWith('sessionplane-gate-');
+  path.basename(inheritedRoot).startsWith('spg-');
 let result;
 if (hasParentIsolation) {
   // Do not nest a second TMPDIR inside an already-owned candidate gate. Unix

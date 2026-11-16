@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import { runIsolatedCandidateCommand } from '../../scripts/candidate-gate-process.mjs';
 
 test('isolated candidate process preserves stdout, stderr and successful exit', async () => {
@@ -23,7 +24,9 @@ test('a successful candidate removes its unique temporary root', async () => {
       maxOutputBytes: 64_000, killGraceMs: 100,
     });
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /sessionplane-gate-/);
+  assert.match(path.basename(result.stdout), /^spg-/);
+  assert.ok(result.stdout.length < 32,
+    'candidate root must leave enough Unix-socket path budget');
   assert.equal(existsSync(result.stdout), false,
     'successful gate must not retain its private temporary root');
 });
