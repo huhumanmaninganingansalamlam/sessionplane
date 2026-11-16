@@ -1407,6 +1407,29 @@ test('ChatGPT semantic observe/act uses exact draft and one-shot send across str
     assert.match(ambiguous.reason ?? '', /composer-ambiguous/);
     assert.equal(ambiguous.actions.length, 0);
 
+    await page.setContent('<main><div data-message-author-role="user" data-message-id="user-b">Task</div>' +
+      '<div id="prompt-textarea" contenteditable="true">Exact journaled draft</div>' +
+      '<button data-testid="send-button" onclick="window.primarySends++">Send</button>' +
+      '<button id="composer-submit-button" aria-label="Send message" onclick="window.alternativeSends++">Send message</button>' +
+      '</main><script>window.primarySends=0;window.alternativeSends=0;</script>');
+    const multipleSubmit = await adapter.observe(boundContext);
+    assert.equal(multipleSubmit.blocker, 'provider_control');
+    assert.equal(multipleSubmit.reason, 'multiple-submit-controls-require-exact-ui-resolution');
+    assert.equal(multipleSubmit.actions.some(action =>
+      action.purpose === 'submit' || action.purpose === 'continue'), false,
+    'ambiguous composer controls never create direct POST authority');
+    assert.deepEqual(multipleSubmit.controls?.map(control => ({
+      label: control.label, enabled: control.enabled,
+      executable: control.executable, risk: control.risk,
+    })), [
+      { label: 'Send', enabled: true, executable: false, risk: 'requires_human' },
+      { label: 'Send message', enabled: true, executable: false, risk: 'requires_human' },
+    ]);
+    assert.deepEqual(await page.evaluate(() => ({
+      primary: (window as any).primarySends,
+      alternative: (window as any).alternativeSends,
+    })), { primary: 0, alternative: 0 });
+
     // Visible provider error and identity-check dialogs are read-only blockers.
     // Neither an available Send button nor a writable composer overrides them.
     for (const [dialogText, blocker] of [
@@ -1802,7 +1825,7 @@ test('ChatGPT permission facts do not outlive their exact user turn during obser
       if (prop === 'evaluate') return async (fn: unknown, arg: unknown) => {
         const result = await page.evaluate(fn as never, arg as never);
         if (advanceDuringPermission && typeof fn === 'function' &&
-          fn.toString().includes('maxSummary') && fn.toString().includes('userId')) {
+          fn.toString().includes('appToken') && fn.toString().includes('userId')) {
           advanceDuringPermission = false;
           advanced = true;
           await page.locator('#prompt-textarea').evaluate(editor => {
@@ -2313,7 +2336,7 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     assert.equal(free.blocker, 'provider_question');
     assert.match(free.questionText ?? '', /Which repository/);
     const option = free.actions.find(a => a.purpose === 'answer_question')!;
-    assert.deepEqual(option.input, { kind: 'text', maxLength: 2_000 });
+    assert.deepEqual(option.input, { kind: 'text', maxLength: 200_000 });
     const answered = await adapter.act({ context: task, snapshotId: free.snapshotId,
       actionRef: option.actionRef, evidenceHash: option.evidenceHash,
       input: 'sessionplane', authorizedDecisionId: 'decision-free-text' });
@@ -2426,8 +2449,8 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     assert.equal(held.blocker, 'provider_question');
     assert.equal(held.actions.length, 0, 'preexisting provider-question draft cannot be overwritten');
 
-    // An oversized combination of a partial answer and an exact provider
-    // question must not leak an unbounded semantic packet or executable ref.
+    // Evidence size is metadata, not a reason to delete the exact question
+    // or its executable decision. The gateway provides bounded paging.
     await page.setContent('<main><div data-message-author-role="user" data-message-id="user-b">Task</div>' +
       '<div data-message-author-role="assistant" data-message-id="answer-b"></div>' +
       '<div id="prompt-textarea" contenteditable="true"></div></main>');
@@ -2439,43 +2462,20 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
       panel.innerHTML = '<h3></h3><div role="radiogroup">' +
         '<button type="button" role="radio" aria-label="Proceed">Proceed</button>' +
         '<button type="button" role="radio" aria-label="Pause">Pause</button></div>';
-      panel.querySelector('h3')!.textContent = 'Q'.repeat(3900);
+      panel.querySelector('h3')!.textContent = 'Q'.repeat(16000);
       document.querySelector('main')!.append(panel);
     });
     const oversized = await adapter.observe(task);
-    assert.equal(oversized.reason, 'semantic-packet-overflow-requires-bounded-expansion');
-    assert.equal(oversized.blocker, 'unsupported');
-    assert.equal(oversized.actions.length, 0);
-    assert.ok(oversized.evidenceBytes <= 12 * 1024,
-      'an unsupported packet still cannot exceed the semantic evidence budget');
-    assert.ok(Buffer.byteLength(JSON.stringify(oversized)) <= 12 * 1024,
-      'the actual encoded observation must fit, including its evidenceBytes field');
-    assert.equal(oversized.turn.partialAnswer, null);
-    assert.ok(oversized.questionText?.startsWith('Q'.repeat(3900)),
-      'retain the exact question when only incidental partial answer caused overflow');
-    // Near 12 KiB, replacing evidenceBytes=0 with the actual byte count can
-    // overflow an otherwise eligible exact question and its action.
-    await page.evaluate(() => {
-      document.querySelector('[data-codex-composer-request-navigation] h3')!.textContent =
-        'Q'.repeat(1000);
-    });
-    const belowLimit = await adapter.observe(task);
-    assert.equal(belowLimit.blocker, 'provider_question');
-    const extraQuestionBytes = 12 * 1024 - 2 - belowLimit.evidenceBytes;
-    assert.ok(extraQuestionBytes > 0 && extraQuestionBytes < 3000,
-      'near-limit fixture must keep the exact provider question within the 4000-character cap');
-    await page.evaluate(count => {
-      document.querySelector('[data-codex-composer-request-navigation] h3')!.textContent =
-        'Q'.repeat(count);
-    }, 1000 + extraQuestionBytes);
-    const nearLimit = await adapter.observe(task);
-    assert.ok(Buffer.byteLength(JSON.stringify(nearLimit)) <= 12 * 1024,
-      'the actual encoded semantic packet must fit even at the byte boundary');
-    assert.equal(nearLimit.evidenceBytes, Buffer.byteLength(JSON.stringify(nearLimit)));
-    assert.equal(nearLimit.blocker, 'provider_question',
-      'an exact question remains actionable when the full serialized packet fits');
-    assert.equal(nearLimit.actions.filter(action => action.purpose === 'answer_question').length, 1);
-    assert.ok(nearLimit.questionText?.startsWith('Q'.repeat(1000 + extraQuestionBytes)));
+    assert.equal(oversized.blocker, 'provider_question');
+    assert.equal(oversized.reason, 'provider-question-requires-decision');
+    assert.equal(oversized.actions.filter(action => action.purpose === 'answer_question').length, 1);
+    assert.ok(oversized.questionText?.startsWith('Q'.repeat(16_000)));
+    assert.match(oversized.questionText ?? '', /Proceed/);
+    assert.match(oversized.questionText ?? '', /Pause/);
+    assert.ok(oversized.evidenceBytes > 12 * 1024,
+      'the adapter reports exact evidence size while the gateway controls response paging');
+    assert.equal(oversized.turn.partialAnswer, '가'.repeat(3000));
+
     // Visible exact-work HostSpan permission is an agent review barrier,
     // never an authorization created by page text or an auto-Allow click.
     await page.setContent('<main><div data-message-author-role="user" ' +
@@ -2567,6 +2567,198 @@ test('ChatGPT provider question offers enabled typed choices and runs once after
     assert.notEqual(quoted.blocker, 'provider_permission',
       'untrusted user text is not a real permission barrier');
     assert.equal(quoted.permission, null);
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('unknown provider dialog exposes multiple contextual controls and executes one exact current choice', {
+  timeout: 35_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-generic-controls-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'disposable-profile'), pageRegistry: registry, headless: true,
+  });
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    const page = created.page;
+    await page.route('https://chatgpt.com/**', route => route.fulfill({
+      contentType: 'text/html', body: '<main></main>',
+    }));
+    await page.goto('https://chatgpt.com/c/conversation-b');
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'generic-control-session', generation: 1, conversationId: 'conversation-b',
+    });
+    const binding = registry.getBinding(created.binding.pageKey);
+    const lease: OwnedPageIdentity = {
+      projectId: 'project-b', slotId: 'main', slotRevision: 1, taskId: 'task-b',
+      pageKey: binding.pageKey, targetId: binding.targetId!, bindingEpoch: binding.bindingEpoch,
+    };
+    const task = context(lease, 'user-b');
+    await page.setContent(`<main>
+      <div data-message-author-role="user" data-message-id="user-b" data-turn-id="turn-b">Original task</div>
+      <section role="dialog" aria-label="Optimization controls">
+        <h2>Choose how the current computation should continue</h2>
+        <button role="checkbox" aria-checked="false" aria-label="Enable extended analysis"
+          onclick="this.setAttribute('aria-checked','true');window.extended++">Extended</button>
+        <button role="checkbox" aria-checked="false" aria-label="Keep compact evidence"
+          onclick="this.setAttribute('aria-checked','true');window.compact++">Compact</button>
+        <button aria-label="Show more details" onclick="window.details++;this.remove()">Details</button>
+        <button aria-label="Confirm" onclick="window.confirmed++">Confirm</button>
+        <button aria-label="Delete unrelated history" onclick="window.deleted++">Delete</button>
+      </section>
+      <div id="prompt-textarea" contenteditable="true"></div>
+      <button data-testid="send-button">Send</button>
+    </main><script>window.extended=0;window.compact=0;window.details=0;window.confirmed=0;window.deleted=0;</script>`);
+    const authorized: string[] = [];
+    const adapter = new ChatGptSemanticAdapter({
+      isExactLease: value => value === lease,
+      resolvePage: value => registry.pageForObservation(value.pageKey, value.bindingEpoch),
+      isAuthorizedDecision: input => {
+        authorized.push(input.purpose);
+        return input.purpose === 'activate_control';
+      },
+    });
+    const observation = await adapter.observe(task);
+    assert.equal(observation.blocker, 'provider_control');
+    assert.equal(observation.reason, 'provider-controls-require-decision');
+    assert.deepEqual(observation.controls?.map(control => ({
+      label: control.label, executable: control.executable, risk: control.risk,
+    })), [
+      { label: 'Enable extended analysis', executable: true, risk: 'configuration' },
+      { label: 'Keep compact evidence', executable: true, risk: 'configuration' },
+      { label: 'Show more details', executable: true, risk: 'configuration' },
+      { label: 'Confirm', executable: false, risk: 'requires_human' },
+      { label: 'Delete unrelated history', executable: false, risk: 'requires_human' },
+    ]);
+    assert.equal(observation.actions.length, 3,
+      'multiple safe current choices remain separately selectable');
+    const staleCompact = observation.actions.find(action =>
+      action.control?.label === 'Keep compact evidence')!;
+    await page.locator('[aria-label="Keep compact evidence"]')
+      .evaluate(element => element.setAttribute('aria-label', 'Changed compact evidence'));
+    assert.deepEqual(await adapter.act({
+      context: task, snapshotId: observation.snapshotId,
+      actionRef: staleCompact.actionRef, evidenceHash: staleCompact.evidenceHash,
+      authorizedDecisionId: 'decision-stale-generic-control',
+    }), { kind: 'stale', reason: 'semantic-evidence-changed-before-action' });
+    assert.deepEqual(await page.evaluate(() => ({
+      extended: (window as any).extended, compact: (window as any).compact,
+      details: (window as any).details, confirmed: (window as any).confirmed,
+      deleted: (window as any).deleted,
+    })), { extended: 0, compact: 0, details: 0, confirmed: 0, deleted: 0 });
+
+    await page.locator('[aria-label="Changed compact evidence"]')
+      .evaluate(element => element.setAttribute('aria-label', 'Keep compact evidence'));
+    const refreshed = await adapter.observe(task);
+    const details = refreshed.actions.find(action =>
+      action.control?.label === 'Show more details')!;
+    assert.ok(details);
+    assert.deepEqual(await adapter.act({
+      context: task, snapshotId: refreshed.snapshotId,
+      actionRef: details.actionRef, evidenceHash: details.evidenceHash,
+      authorizedDecisionId: 'decision-generic-control',
+    }), { kind: 'performed', effect: 'control_activated' });
+    assert.deepEqual(await page.evaluate(() => ({
+      extended: (window as any).extended, compact: (window as any).compact,
+      details: (window as any).details, confirmed: (window as any).confirmed,
+      deleted: (window as any).deleted,
+    })), { extended: 0, compact: 0, details: 1, confirmed: 0, deleted: 0 });
+    assert.deepEqual(authorized, ['activate_control', 'activate_control']);
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('delegated exact HostSpan permission offers allow and decline with verified effects', {
+  timeout: 35_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-delegated-permission-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'disposable-profile'), pageRegistry: registry, headless: true,
+  });
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    const page = created.page;
+    await page.route('https://chatgpt.com/**', route => route.fulfill({
+      contentType: 'text/html', body: '<main></main>',
+    }));
+    await page.goto('https://chatgpt.com/c/conversation-b');
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'permission-session', generation: 1, conversationId: 'conversation-b',
+    });
+    const binding = registry.getBinding(created.binding.pageKey);
+    const lease: OwnedPageIdentity = {
+      projectId: 'project-b', slotId: 'main', slotRevision: 1, taskId: 'task-b',
+      pageKey: binding.pageKey, targetId: binding.targetId!, bindingEpoch: binding.bindingEpoch,
+    };
+    const delegated: SemanticTaskContext = {
+      ...context(lease, 'user-b'),
+      permissionGrants: [{ appName: 'hostspan-git', toolName: 'repository_read', allowMode: 'once' }],
+    };
+    const render = async () => {
+      await page.setContent(`<main>
+        <div data-message-author-role="user" data-message-id="user-b" data-turn-id="turn-b">Original task</div>
+        <div role="alert">ChatGPT is calling the repository_read tool from hostspan-git.
+          <pre>{"path":"README.md"}</pre>
+          <button type="button" onclick="window.grants++;this.closest('[role=alert]').remove()">Allow once</button>
+          <button type="button" onclick="window.declines++;this.closest('[role=alert]').remove()">Decline</button>
+        </div>
+        <div id="prompt-textarea" contenteditable="true"></div>
+        <button data-testid="send-button">Send</button>
+      </main><script>window.grants=0;window.declines=0;</script>`);
+    };
+    const authorized: string[] = [];
+    const adapter = new ChatGptSemanticAdapter({
+      isExactLease: value => value === lease,
+      resolvePage: value => registry.pageForObservation(value.pageKey, value.bindingEpoch),
+      isAuthorizedDecision: input => {
+        authorized.push(input.purpose);
+        return ['grant_permission', 'decline_permission'].includes(input.purpose);
+      },
+    });
+
+    await render();
+    const allowObservation = await adapter.observe(delegated);
+    assert.equal(allowObservation.blocker, 'provider_permission');
+    assert.equal(allowObservation.permission?.canGrant, true);
+    assert.equal(allowObservation.permission?.toolName, 'repository_read');
+    assert.deepEqual(allowObservation.actions.map(action => action.purpose),
+      ['grant_permission', 'decline_permission']);
+    const allow = allowObservation.actions.find(action => action.purpose === 'grant_permission')!;
+    assert.deepEqual(await adapter.act({
+      context: delegated, snapshotId: allowObservation.snapshotId,
+      actionRef: allow.actionRef, evidenceHash: allow.evidenceHash,
+      authorizedDecisionId: 'decision-allow-once',
+    }), { kind: 'performed', effect: 'permission_granted' });
+    assert.deepEqual(await page.evaluate(() => ({
+      grants: (window as any).grants, declines: (window as any).declines,
+    })), { grants: 1, declines: 0 });
+
+    await render();
+    const declineObservation = await adapter.observe(delegated);
+    const decline = declineObservation.actions.find(action => action.purpose === 'decline_permission')!;
+    assert.deepEqual(await adapter.act({
+      context: delegated, snapshotId: declineObservation.snapshotId,
+      actionRef: decline.actionRef, evidenceHash: decline.evidenceHash,
+      authorizedDecisionId: 'decision-decline',
+    }), { kind: 'performed', effect: 'permission_declined' });
+    assert.deepEqual(await page.evaluate(() => ({
+      grants: (window as any).grants, declines: (window as any).declines,
+    })), { grants: 0, declines: 1 });
+    assert.deepEqual(authorized, ['grant_permission', 'decline_permission']);
+
+    await render();
+    const outsideDelegation = await adapter.observe(context(lease, 'user-b'));
+    assert.equal(outsideDelegation.permission?.canGrant, false);
+    assert.equal(outsideDelegation.actions.length, 0,
+      'provider text alone can never create permission authority');
   } finally {
     await owner.close();
     rmSync(root, { recursive: true, force: true });

@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { createServer } from 'node:net';
 import path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import test from 'node:test';
@@ -10,335 +9,14 @@ import test from 'node:test';
 import { callRpc } from '../../src/cli/client.ts';
 import { runCli } from '../../src/cli/main.ts';
 import { resolveConfig } from '../../src/config.ts';
-import type { ChatGptSurface } from '../../src/providers/chatgpt/surface.ts';
-import type { SessionSnapshot } from '../../src/domain/session.ts';
 import { startCore } from '../../src/main.ts';
-import {
-  MCP_MODERN_PROTOCOL_VERSION,
-} from '../../src/mcp/schemas.ts';
-import { FakeProviderAdapter } from '../fakes/fake-provider-adapter.ts';
-
-interface TeamSnapshot {
-  readonly teamId: string;
-}
-
-test('CLI unresolved cleanup forwards explicit disposal without claiming work completion', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-cli-disposal-'));
-  const socketPath = path.join(root, 'fixture.sock');
-  const requests: Array<{ id: string; method: string; params: Record<string, unknown> }> = [];
-  const server = createServer(socket => {
-    let input = '';
-    socket.setEncoding('utf8');
-    socket.on('data', chunk => {
-      input += chunk;
-      if (!input.includes('\n')) return;
-      const request = JSON.parse(input.split('\n')[0]!);
-      requests.push(request);
-      socket.end(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { requestOk: true } }) + '\n');
-    });
-  });
-  try {
-    await new Promise<void>(resolve => server.listen(socketPath, resolve));
-    const common = ['fixture-team', 'fixture-old-request'];
-    const flags = ['--request-id', 'stable-disposal', '--socket', socketPath, '--json'];
-    const retired = await runCliJson(['request', 'retire_observation', ...common,
-      '--discard-unresolved', '--evidence-ref', 'existing-agent-handoff', ...flags]);
-    assert.equal(retired.code, 0, retired.stderr);
-    assert.equal(requests[0]!.method, 'workflow.decide');
-    assert.deepEqual(requests[0]!.params, { teamId: common[0], requestRef: common[1], requestId: 'stable-disposal',
-      decision: 'retire_observation', discardUnresolved: true, evidenceRef: 'existing-agent-handoff' });
-    const disposal = { conversationId: 'fixture-old-conversation', evidenceRef: 'existing-agent-handoff' };
-    const file = path.join(root, 'disposal.json');
-    writeFileSync(file, JSON.stringify(disposal));
-    const deleted = await runCliJson(['request', 'delete', ...common, '--outputs-retrieved',
-      '--discard-retired-observation', file, ...flags]);
-    assert.equal(deleted.code, 0, deleted.stderr);
-    assert.equal(requests[1]!.method, 'workflow.session_delete');
-    assert.deepEqual(requests[1]!.params, { teamId: common[0], requestRef: common[1], requestId: 'stable-disposal',
-      outputsRetrieved: true, discardRetiredObservation: disposal });
-    assert.equal((await runCliJson(['request', 'retire_observation', ...common,
-      '--discard-unresolved=true', ...flags])).code, 2, 'Explicit disposal remains a flag, not an arbitrary value');
-    assert.equal(requests.length, 2, 'Invalid input never reaches Core');
-    for (const action of ['inspect', 'close']) {
-      const hash = 'a'.repeat(64);
-      const output = await runCliJson(['request', 'output_panel', ...common, '--action', action,
-        ...(action === 'close' ? ['--evidence-hash', hash] : []), ...flags]);
-      assert.equal(output.code, 0, output.stderr);
-      assert.deepEqual(requests.at(-1)!.params, { teamId: common[0], requestRef: common[1], requestId: 'stable-disposal',
-        decision: 'output_panel', action, ...(action === 'close' ? { evidenceHash: hash } : {}) });
-    }
-  } finally {
-    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+import { MCP_MODERN_PROTOCOL_VERSION } from '../../src/mcp/schemas.ts';
 
 interface JsonRpcResponse {
   readonly id: string | number | null;
-  readonly result?: Readonly<Record<string, unknown>>;
+  readonly result?: Readonly<Record<string, any>>;
   readonly error?: Readonly<Record<string, unknown>>;
 }
-
-test('CLI and modern/legacy MCP expose the same core state across MCP process restart', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-cli-mcp-'));
-  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
-  const fake = new FakeProviderAdapter();
-  const service = await startCore({
-    config,
-    startBrowser: false,
-    providerAdapters: [fake],
-    logger: silentLogger(),
-  });
-
-  let modern: McpSubprocess | null = null;
-  let restarted: McpSubprocess | null = null;
-  let legacy: McpSubprocess | null = null;
-  try {
-    const teamRun = await runCliJson([
-      'team',
-      'create',
-      '--name',
-      'CLI MCP Team',
-      '--client-id',
-      'cli-mcp-client',
-      '--request-id',
-      'cli-team-create',
-      '--state-dir',
-      config.stateDir,
-      '--json',
-    ]);
-    assert.equal(teamRun.code, 0, teamRun.stderr);
-    const team = JSON.parse(teamRun.stdout) as TeamSnapshot;
-
-    const sessionRun = await runCliJson([
-      'session',
-      'create',
-      team.teamId,
-      'main',
-      '--provider',
-      'chatgpt',
-      '--client-id',
-      'cli-mcp-client',
-      '--request-id',
-      'cli-session-create',
-      '--state-dir',
-      config.stateDir,
-      '--json',
-    ]);
-    assert.equal(sessionRun.code, 0, sessionRun.stderr);
-    const created = JSON.parse(sessionRun.stdout) as SessionSnapshot;
-
-    const sendRun = await runCliJson([
-      'send',
-      '--session',
-      created.sessionId,
-      '--prompt',
-      'Return durable state through every adapter.',
-      '--client-id',
-      'cli-mcp-client',
-      '--request-id',
-      'cli-send-1',
-      '--state-dir',
-      config.stateDir,
-      '--json',
-    ]);
-    assert.equal(sendRun.code, 0, sendRun.stderr);
-    const submitted = JSON.parse(sendRun.stdout) as SessionSnapshot;
-    assert.equal(submitted.sessionId, created.sessionId);
-
-    const cliStatus = await runCliJson([
-      'status',
-      '--session',
-      created.sessionId,
-      '--client-id',
-      'cli-mcp-client',
-      '--state-dir',
-      config.stateDir,
-      '--json',
-    ]);
-    assert.equal(cliStatus.code, 0, cliStatus.stderr);
-    const cliSnapshot = JSON.parse(cliStatus.stdout) as SessionSnapshot & { observedSurface: ChatGptSurface };
-    const directSnapshot = await callRpc<SessionSnapshot & { observedSurface: ChatGptSurface }>({
-      socketPath: config.socketPath,
-      method: 'session.get',
-      params: { clientId: 'cli-mcp-client', sessionId: created.sessionId },
-    });
-    const { observedSurface: cliSurface, ...cliState } = cliSnapshot;
-    const { observedSurface: directSurface, ...directState } = directSnapshot;
-    assert.deepEqual(cliState, directState);
-    // Separate fresh reads have independent observation timestamps.
-    assert.equal(cliSurface.mode, directSurface.mode);
-    assert.equal(cliSurface.source, directSurface.source);
-    assert.ok(Number.isFinite(Date.parse(cliSurface.observedAt)));
-    assert.ok(Number.isFinite(Date.parse(directSurface.observedAt)));
-
-    const view = await callRpc<{ requests: Array<{ requestRef: string }> }>({ socketPath: config.socketPath,
-      method: 'workflow.team_get', params: { teamId: team.teamId } });
-    const requestRef = view.requests[0]!.requestRef;
-    modern = new McpSubprocess(config.stateDir);
-    const discover = await modern.request('server/discover', modernParams());
-    assert.equal(discover.error, undefined);
-    assert.equal(discover.result?.resultType, 'complete');
-    assert.ok(
-      (discover.result?.supportedVersions as unknown[]).includes(MCP_MODERN_PROTOCOL_VERSION),
-    );
-
-    const list = await modern.request('tools/list', modernParams());
-    assert.equal(list.error, undefined);
-    assert.equal(list.result?.resultType, 'complete');
-    assert.ok(
-      (list.result?.tools as Array<{ name: string }>).some(
-        (tool) => tool.name === 'sessionplane_team_get',
-      ),
-    );
-
-    const modernStatus = await modern.request(
-      'tools/call',
-      modernParams({
-        name: 'sessionplane_team_get',
-        arguments: {
-          teamId: team.teamId, requestRef,
-        },
-      }),
-    );
-    assert.equal(modernStatus.error, undefined);
-    assert.equal((modernStatus.result?.structuredContent as { request: SessionSnapshot }).request.sessionId, directSnapshot.sessionId);
-    assert.equal(modernStatus.result?.isError, false);
-
-    await modern.close();
-    modern = null;
-    const afterMcpExit = await callRpc<SessionSnapshot>({
-      socketPath: config.socketPath,
-      method: 'session.get',
-      params: { clientId: 'cli-mcp-client', sessionId: created.sessionId },
-    });
-    assert.equal(afterMcpExit.sessionId, created.sessionId);
-
-    restarted = new McpSubprocess(config.stateDir);
-    const restartedStatus = await restarted.request(
-      'tools/call',
-      modernParams({
-        name: 'sessionplane_team_get',
-        arguments: {
-          teamId: team.teamId, requestRef,
-        },
-      }),
-    );
-    assert.equal((restartedStatus.result?.structuredContent as { request: SessionSnapshot }).request.sessionId, afterMcpExit.sessionId);
-
-    for (const [requestedVersion, negotiatedVersion] of [
-      ['2025-11-25', '2025-11-25'],
-      ['2025-06-18', '2025-06-18'],
-      ['2099-01-01', '2025-11-25'],
-    ]) {
-      if (legacy !== null) await legacy.close();
-      legacy = new McpSubprocess(config.stateDir);
-      const initialized = await legacy.request('initialize', {
-        protocolVersion: requestedVersion,
-        capabilities: {},
-        clientInfo: { name: 'legacy-test', version: '1.0.0' },
-      });
-      assert.equal(initialized.result?.protocolVersion, negotiatedVersion);
-      legacy.notify('notifications/initialized', {});
-      const metadata = { 'io.modelcontextprotocol/protocolVersion': negotiatedVersion, progressToken: 'native-client' };
-      const legacyTools = await legacy.request('tools/list', { _meta: metadata });
-      assert.equal(legacyTools.error, undefined);
-      assert.ok((legacyTools.result?.tools as Array<{ name: string }>).some((tool) => tool.name === 'sessionplane_decide'));
-      const legacyStatus = await legacy.request('tools/call', {
-        _meta: metadata,
-        name: 'sessionplane_team_get',
-        arguments: {
-          teamId: team.teamId, requestRef,
-        },
-      });
-      assert.equal(legacyStatus.result?.resultType, undefined);
-      assert.equal((legacyStatus.result?.structuredContent as { request: SessionSnapshot }).request.sessionId, afterMcpExit.sessionId);
-    }
-
-    const stopArgs = [
-      'stop',
-      '--session',
-      created.sessionId,
-      '--client-id',
-      'cli-mcp-client',
-      '--request-id',
-      'cli-stop-once',
-      '--state-dir',
-      config.stateDir,
-      '--json',
-    ] as const;
-    const stopped = await runCliJson(stopArgs);
-    assert.equal(stopped.code, 0, stopped.stderr);
-    const stoppedSnapshot = JSON.parse(stopped.stdout) as SessionSnapshot;
-    assert.equal(stoppedSnapshot.sessionState, 'cancelled');
-    assert.equal(stoppedSnapshot.providerState, 'stopped');
-    const replayedStop = await runCliJson(stopArgs);
-    assert.equal(replayedStop.code, 0, replayedStop.stderr);
-    assert.deepEqual(JSON.parse(replayedStop.stdout), stoppedSnapshot);
-    assert.equal(fake.stopCount, 1);
-
-    await callRpc({
-      socketPath: config.socketPath,
-      method: 'team.role.create',
-      params: {
-        clientId: 'cli-mcp-client',
-        requestId: 'ambiguous-role',
-        teamId: team.teamId,
-        roleKey: 'expert.ambiguous-stop',
-        roleType: 'expert',
-        reportsToRoleKey: 'main',
-      },
-    });
-    const ambiguousSession = await callRpc<SessionSnapshot>({
-      socketPath: config.socketPath,
-      method: 'session.create',
-      params: {
-        clientId: 'cli-mcp-client',
-        requestId: 'ambiguous-session',
-        teamId: team.teamId,
-        roleKey: 'expert.ambiguous-stop',
-        provider: 'chatgpt',
-      },
-    });
-    await callRpc({
-      socketPath: config.socketPath,
-      method: 'session.send',
-      params: {
-        clientId: 'cli-mcp-client',
-        requestId: 'ambiguous-send',
-        sessionId: ambiguousSession.sessionId,
-        prompt: 'Keep this generation active for stop ambiguity.',
-        sessionDeadlineSec: 600,
-      },
-    });
-    fake.stopThrows = true;
-    const ambiguousArgs = [
-      'stop',
-      '--session',
-      ambiguousSession.sessionId,
-      '--client-id',
-      'cli-mcp-client',
-      '--request-id',
-      'ambiguous-stop',
-      '--state-dir',
-      config.stateDir,
-      '--json',
-    ] as const;
-    const firstAmbiguous = await runCliJson(ambiguousArgs);
-    assert.equal(firstAmbiguous.code, 1);
-    assert.equal(JSON.parse(firstAmbiguous.stderr).errorCode, 'provider.stop-unknown');
-    const stopCountAfterFirst = fake.stopCount;
-    const secondAmbiguous = await runCliJson(ambiguousArgs);
-    assert.equal(secondAmbiguous.code, 1);
-    assert.equal(fake.stopCount, stopCountAfterFirst);
-  } finally {
-    await modern?.close();
-    await restarted?.close();
-    await legacy?.close();
-    await service.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
 class CaptureWritable extends Writable {
   value = '';
@@ -353,79 +31,35 @@ class CaptureWritable extends Writable {
   }
 }
 
-test('CLI file and stdin prompts preserve literal text and reject competing sources before send', async () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-prompt-input-'));
-  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
-  const fake = new FakeProviderAdapter();
-  const service = await startCore({ config, startBrowser: false, providerAdapters: [fake], logger: silentLogger() });
-  try {
-    const prompt = "Director's report: \"quoted\" `literal` $(literal)\n한국어 🧭\n";
-    const filename = path.join(root, 'prompt.txt');
-    writeFileSync(filename, prompt);
-    const bytes = Buffer.from(prompt);
-    for (const source of [['--prompt-file', filename], ['--prompt-stdin']]) {
-      const team = service.teamDirectory.createTeam({ clientId: 'literal-client' });
-      const session = service.teamDirectory.createSession({ teamId: team.teamId, roleKey: 'main', provider: 'chatgpt' });
-      const args = ['send', '--session', session.sessionId, '--client-id', 'literal-client', '--request-id', source[0]!.slice(2), '--state-dir', config.stateDir, '--json'];
-      const rejected = await runCliJson([...args, '--prompt', 'conflict', ...source]);
-      assert.notEqual(rejected.code, 0);
-      assert.equal(service.teamDirectory.getSession(session.sessionId).generation, 0);
-      const sent = await runCliJson([...args, ...source], Array.from(bytes, (byte) => Buffer.from([byte])));
-      assert.equal(sent.code, 0, sent.stderr);
-      assert.equal(fake.submissionRequests.at(-1)?.prompt, prompt);
-      const replay = await runCliJson([...args, '--prompt', prompt]);
-      assert.equal(replay.code, 0, replay.stderr);
-      assert.equal(JSON.parse(replay.stdout).generation, JSON.parse(sent.stdout).generation);
-    }
-  } finally {
-    await service.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 async function runCliJson(argv: readonly string[], input: readonly (string | Buffer)[] = []) {
   const stdout = new CaptureWritable();
   const stderr = new CaptureWritable();
   const code = await runCli(argv, {
-    stdin: Readable.from(input),
-    stdout,
-    stderr,
+    stdin: Readable.from(input), stdout, stderr,
   });
   return { code, stdout: stdout.value.trim(), stderr: stderr.value.trim() };
 }
 
 class McpSubprocess {
   readonly #child: ChildProcessWithoutNullStreams;
-  readonly #pending = new Map<
-    string,
-    {
-      readonly resolve: (response: JsonRpcResponse) => void;
-      readonly reject: (error: Error) => void;
-      readonly timer: NodeJS.Timeout;
-    }
-  >();
+  readonly #pending = new Map<string, {
+    readonly resolve: (response: JsonRpcResponse) => void;
+    readonly reject: (error: Error) => void;
+    readonly timer: NodeJS.Timeout;
+  }>();
   #nextId = 1;
   #buffer = '';
   #stderr = '';
 
   constructor(stateDir: string) {
-    this.#child = spawn(
-      process.execPath,
-      [
-        '--experimental-strip-types',
-        path.resolve(process.cwd(), 'src/cli/main.ts'),
-        'mcp',
-        '--state-dir',
-        stateDir,
-      ],
-      { cwd: process.cwd(), env: { ...process.env } },
-    );
+    this.#child = spawn(process.execPath, [
+      '--experimental-strip-types', path.resolve(process.cwd(), 'src/cli/main.ts'),
+      'mcp', '--state-dir', stateDir,
+    ], { cwd: process.cwd(), env: { ...process.env } });
     this.#child.stdout.setEncoding('utf8');
     this.#child.stderr.setEncoding('utf8');
     this.#child.stdout.on('data', (chunk: string) => this.#handleChunk(chunk));
-    this.#child.stderr.on('data', (chunk: string) => {
-      this.#stderr += chunk;
-    });
+    this.#child.stderr.on('data', (chunk: string) => { this.#stderr += chunk; });
     this.#child.once('exit', (code, signal) => {
       const error = new Error(
         `MCP subprocess exited before response (code=${String(code)}, signal=${String(signal)}): ${this.#stderr}`,
@@ -455,19 +89,11 @@ class McpSubprocess {
   }
 
   async close(): Promise<void> {
-    if (this.#child.exitCode !== null || this.#child.signalCode !== null) {
-      return;
-    }
+    if (this.#child.exitCode !== null || this.#child.signalCode !== null) return;
     this.#child.stdin.end();
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        this.#child.kill('SIGTERM');
-        resolve();
-      }, 2_000);
-      this.#child.once('exit', () => {
-        clearTimeout(timer);
-        resolve();
-      });
+    await new Promise<void>(resolve => {
+      const timer = setTimeout(() => { this.#child.kill('SIGTERM'); resolve(); }, 2_000);
+      this.#child.once('exit', () => { clearTimeout(timer); resolve(); });
     });
   }
 
@@ -475,22 +101,15 @@ class McpSubprocess {
     this.#buffer += chunk;
     for (;;) {
       const newline = this.#buffer.indexOf('\n');
-      if (newline < 0) {
-        return;
-      }
+      if (newline < 0) return;
       const line = this.#buffer.slice(0, newline).replace(/\r$/, '');
       this.#buffer = this.#buffer.slice(newline + 1);
-      if (line.length === 0) {
-        continue;
-      }
+      if (!line) continue;
       const response = JSON.parse(line) as JsonRpcResponse;
-      const key = String(response.id);
-      const pending = this.#pending.get(key);
-      if (pending === undefined) {
-        continue;
-      }
+      const pending = this.#pending.get(String(response.id));
+      if (!pending) continue;
       clearTimeout(pending.timer);
-      this.#pending.delete(key);
+      this.#pending.delete(String(response.id));
       pending.resolve(response);
     }
   }
@@ -509,11 +128,150 @@ function modernParams(
   };
 }
 
-function silentLogger() {
-  return {
-    debug() {},
-    info() {},
-    warn() {},
-    error() {},
-  };
-}
+test('CLI and modern/standard MCP expose one durable Task across MCP process restart', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-cli-mcp-task-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({
+    config, startBrowser: false,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  const owner = 'cli-mcp-task-owner';
+  const cli = async (...args: string[]) => await runCliJson([
+    ...args, '--client-id', owner, '--state-dir', config.stateDir, '--json',
+  ]);
+  const subprocesses: McpSubprocess[] = [];
+  try {
+    const opened = await cli('project', 'open', '--key', 'cli-mcp-task',
+      '--name', 'CLI MCP Task', '--request-id', 'open-cli-mcp-task');
+    assert.equal(opened.code, 0, opened.stderr);
+    const project = JSON.parse(opened.stdout);
+    const started = await cli('task', 'start', project.projectId,
+      '--expected-conversation-revision', String(project.conversationRevision),
+      '--request-id', 'start-cli-mcp-task', '--prompt',
+      'Retain this exact Task while MCP clients disconnect and reconnect.');
+    assert.equal(started.code, 0, started.stderr);
+    const task = JSON.parse(started.stdout);
+
+    const cliRead = await cli('task', 'get', task.taskId, '--view', 'summary');
+    assert.equal(cliRead.code, 0, cliRead.stderr);
+    const exact = JSON.parse(cliRead.stdout);
+    assert.equal(exact.taskId, task.taskId);
+    assert.equal(exact.state, 'working');
+    assert.equal(exact.submission.attempted, false);
+
+    let modern = new McpSubprocess(config.stateDir);
+    subprocesses.push(modern);
+    const discover = await modern.request('server/discover', modernParams());
+    assert.equal(discover.error, undefined);
+    assert.equal(discover.result?.resultType, 'complete');
+    const listed = await modern.request('tools/list', modernParams());
+    assert.ok((listed.result?.tools as Array<{ name: string }>).some(tool =>
+      tool.name === 'sessionplane_task_get'));
+    const modernRead = await modern.request('tools/call', modernParams({
+      name: 'sessionplane_task_get',
+      arguments: { clientId: owner, taskId: task.taskId, view: 'summary' },
+    }));
+    assert.equal(modernRead.error, undefined);
+    assert.deepEqual(modernRead.result?.structuredContent, exact);
+    await modern.close();
+
+    const afterExit = await callRpc<any>({
+      socketPath: config.socketPath, method: 'task.get',
+      params: { clientId: owner, taskId: task.taskId, view: 'summary' },
+    });
+    assert.deepEqual(afterExit, exact);
+    assert.equal(core.semanticTaskRepository.getFullTask(task.taskId, owner).attempts.length, 1);
+
+    modern = new McpSubprocess(config.stateDir);
+    subprocesses.push(modern);
+    const restartedRead = await modern.request('tools/call', modernParams({
+      name: 'sessionplane_task_get',
+      arguments: { clientId: owner, taskId: task.taskId, view: 'summary' },
+    }));
+    assert.deepEqual(restartedRead.result?.structuredContent, exact);
+    await modern.close();
+
+    for (const [requestedVersion, negotiatedVersion] of [
+      ['2025-11-25', '2025-11-25'],
+      ['2025-06-18', '2025-06-18'],
+      ['2099-01-01', '2025-11-25'],
+    ] as const) {
+      const standard = new McpSubprocess(config.stateDir);
+      subprocesses.push(standard);
+      const initialized = await standard.request('initialize', {
+        protocolVersion: requestedVersion, capabilities: {},
+        clientInfo: { name: 'standard-test', version: '1.0.0' },
+      });
+      assert.equal(initialized.result?.protocolVersion, negotiatedVersion);
+      standard.notify('notifications/initialized', {});
+      const metadata = {
+        'io.modelcontextprotocol/protocolVersion': negotiatedVersion,
+        progressToken: 'standard-client',
+      };
+      const catalog = await standard.request('tools/list', { _meta: metadata });
+      assert.ok((catalog.result?.tools as Array<{ name: string }>).some(tool =>
+        tool.name === 'sessionplane_task_get'));
+      const read = await standard.request('tools/call', {
+        _meta: metadata, name: 'sessionplane_task_get',
+        arguments: { clientId: owner, taskId: task.taskId, view: 'summary' },
+      });
+      assert.equal(read.result?.resultType, undefined);
+      assert.deepEqual(read.result?.structuredContent, exact);
+      await standard.close();
+    }
+    assert.equal(core.semanticTaskRepository.getFullTask(task.taskId, owner).attempts.length, 1,
+      'MCP reconnect and protocol negotiation never create or replay an attempt');
+  } finally {
+    for (const process of subprocesses) await process.close();
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('current task.start file and stdin prompts preserve literal text and reject competing sources', async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-task-prompt-input-'));
+  const config = resolveConfig({ cwd: root, env: {}, stateDir: '.state' });
+  const core = await startCore({
+    config, startBrowser: false,
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+  const owner = 'literal-task-client';
+  const prompt = "Director's report: \"quoted\" `literal` $(literal)\n한국어 🧭\n";
+  const filename = path.join(root, 'prompt.txt');
+  writeFileSync(filename, prompt);
+  try {
+    for (const [index, source] of [
+      ['--prompt-file', filename], ['--prompt-stdin'],
+    ].entries()) {
+      const project = await callRpc<any>({
+        socketPath: config.socketPath, method: 'project.open', params: {
+          clientId: owner, requestId: `literal-project-${index}`,
+          projectKey: `literal-project-${index}`, displayName: `Literal ${index}`,
+        },
+      });
+      const base = ['task', 'start', project.projectId,
+        '--expected-conversation-revision', String(project.conversationRevision),
+        '--client-id', owner, '--request-id', `literal-task-${index}`,
+        '--state-dir', config.stateDir, '--json'];
+      const conflict = await runCliJson([...base, '--prompt', 'conflict', ...source]);
+      assert.equal(conflict.code, 2);
+      assert.equal(core.semanticTaskRepository.getSlot(project.projectId, 'main', owner)
+        .activeTaskId, null);
+      const input = source[0] === '--prompt-stdin'
+        ? Array.from(Buffer.from(prompt), byte => Buffer.from([byte])) : [];
+      const started = await runCliJson([...base, ...source], input);
+      assert.equal(started.code, 0, started.stderr);
+      const task = JSON.parse(started.stdout);
+      assert.equal(core.semanticTaskRepository.getFullTask(task.taskId, owner)
+        .attempts[0]?.content, prompt);
+      const replay = await runCliJson([...base, '--prompt', prompt]);
+      assert.equal(replay.code, 0, replay.stderr);
+      assert.equal(JSON.parse(replay.stdout).taskId, task.taskId);
+      assert.equal(core.semanticTaskRepository.getFullTask(task.taskId, owner)
+        .attempts.length, 1);
+    }
+  } finally {
+    await core.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -20,19 +20,19 @@ export async function inspectChatGptQuestion(page: Page) {
     const buttons = [...groups[0]!.querySelectorAll('button[role="radio"][type="button"]')].filter(visible);
     const options = buttons.map(e => ({ answer: (e.getAttribute('aria-label') ?? '').trim(),
       disabled: e.matches(':disabled, [aria-disabled="true"]') }));
-    if (options.length < 2 || options.length > 20 || options.some(o => !o.answer || o.answer.length > 500) ||
+    if (options.length < 2 || options.some(o => !o.answer) ||
         new Set(options.map(o => o.answer)).size !== options.length) return null;
     const editors = [...panel.querySelectorAll('textarea, input, [contenteditable="true"]')];
     const draftPresent = editors.some(e => (e instanceof HTMLInputElement || e instanceof HTMLTextAreaElement
       ? e.value : (e as HTMLElement).innerText).trim().length > 0);
     const text = (panel as HTMLElement).innerText.trim();
-    return { text: text.slice(0, 4000), truncated: text.length > 4000, options, draftPresent };
+    return { text, truncated: false, options, draftPresent };
   });
   if (question === null) return null;
   const users = (await readChatGptMessages(page)).filter(message => message.role === 'user');
   const evidenceHash = createHash('sha256').update(JSON.stringify({ url: page.url(),
     userMessageId: users.at(-1)?.messageId ?? null, text: question.text, options: question.options })).digest('hex');
-  return { ...question, evidenceHash, available: !question.truncated && !question.draftPresent };
+  return { ...question, evidenceHash, available: !question.draftPresent };
 }
 
 export async function answerChatGptQuestion(page: Page, input: { answer: string; evidenceHash: string }, beforeClick: () => void | Promise<void>) {

@@ -16,7 +16,7 @@ import type { SessionPlaneDatabase } from './database.ts';
 
 /**
  * Task Kernel storage is deliberately independent of provider selectors,
- * browser/page handles, client wait calls, and legacy TeamWorkflow/outbox.
+ * browser/page handles, client wait calls, and archived pre-Task tables.
  * Every mutation (including event + public projection) is one BEGIN IMMEDIATE
  * transaction. An external adapter MUST act only after beginDispatch commits.
  */
@@ -701,7 +701,9 @@ export class TaskKernelRepository {
              LEFT JOIN kernel_results r ON r.attempt_id=a.attempt_id
              WHERE a.task_id=? AND a.kind!='stop'
                AND a.state!='failed_before_dispatch' AND r.result_id IS NULL
-               ${latest ? 'AND a.attempt_id!=?' : ''} LIMIT 1`,
+               ${latest
+                 ? "AND a.attempt_id!=? AND (a.state!='acknowledged' OR a.external_turn_id IS NULL)"
+                 : ''} LIMIT 1`,
         ).get(task.taskId, ...(latest ? [latest.attemptId] : []));
         if (unresolved) throw new Error('Another exact attempt is unresolved');
         const slot = this.#requireSlot(task.projectId, task.slotId);
@@ -1192,6 +1194,86 @@ export class TaskKernelRepository {
     });
   }
 
+  /**
+   * Move one exact agent decision to a human request atomically. The old
+   * decision receipt, consumption proof and new pending human packet commit in
+   * one SQLite transaction, so a Core crash cannot leave the Task working with
+   * neither audience owning the next step.
+   */
+  escalateDecisionToHuman(input: {
+    taskId: string; clientId: string; decisionId: string;
+    requestId: string; actionRef: string; inputValue: string | null;
+    nextDecisionId: string; nextContextJson: string;
+  }): { source: DecisionRecord; next: DecisionRecord } {
+    for (const key of ['decisionId', 'requestId', 'actionRef', 'nextDecisionId'] as const) {
+      requireNonempty(input[key], key);
+    }
+    return this.#database.transaction(() => {
+      let task = this.#requireTask(input.taskId, input.clientId);
+      JSON.parse(input.nextContextJson);
+      let source = this.#requireDecision(input.decisionId, task.taskId);
+      const outcome = { kind: 'performed', effect: 'human_assistance_requested' } as const;
+      const resolution = {
+        kind: 'semantic_action', requestId: input.requestId,
+        actionRef: input.actionRef, input: input.inputValue, outcome,
+        nextDecisionId: input.nextDecisionId,
+      };
+      if (source.status === 'resolved') {
+        const existing = source.resolutionJson === null ? null
+          : JSON.parse(source.resolutionJson) as Record<string, unknown>;
+        if (existing?.kind !== resolution.kind || existing.requestId !== input.requestId ||
+            existing.actionRef !== input.actionRef || existing.input !== input.inputValue ||
+            existing.nextDecisionId !== input.nextDecisionId ||
+            JSON.stringify(existing.outcome) !== JSON.stringify(outcome) ||
+            !source.actionConsumed) {
+          throw new Error('Human escalation request identity conflict');
+        }
+        const next = this.#requireDecision(input.nextDecisionId, task.taskId);
+        if (next.audience !== 'human' || next.status !== 'pending' ||
+            next.contextJson !== input.nextContextJson ||
+            task.pendingDecisionId !== next.decisionId || task.state !== 'human_input_required') {
+          throw new Error('Human escalation durable continuation is inconsistent');
+        }
+        return { source, next };
+      }
+      if (source.status !== 'pending' || source.audience !== 'agent' ||
+          source.actionConsumed || task.pendingDecisionId !== source.decisionId ||
+          task.state !== 'agent_input_required' || task.cancelRequested) {
+        throw new Error('Only the exact pending agent decision may escalate to a human');
+      }
+      const conflict = this.#database.raw.prepare(
+        'SELECT decision_id FROM kernel_decisions WHERE decision_id=?',
+      ).get(input.nextDecisionId);
+      if (conflict) throw new Error('Human decision identity already exists');
+
+      task = this.#appendEvent(task, {
+        type: 'decision.resolved', decisionId: source.decisionId,
+      });
+      const changed = this.#database.raw.prepare(
+        `UPDATE kernel_decisions SET status='resolved',resolution_json=?,
+          action_consumed=1,resolved_at=? WHERE decision_id=? AND status='pending'
+          AND action_consumed=0`,
+      ).run(JSON.stringify(resolution), this.#now(), source.decisionId);
+      if (changed.changes !== 1) throw new Error('Concurrent human escalation changed');
+      task = this.#appendEvent(task, {
+        type: 'decision.action_consumed', decisionId: source.decisionId,
+      });
+      task = this.#appendEvent(task, {
+        type: 'decision.outcome_recorded', decisionId: source.decisionId,
+      });
+      task = this.#appendEvent(task, {
+        type: 'decision.required', decisionId: input.nextDecisionId, audience: 'human',
+      });
+      this.#database.raw.prepare(
+        `INSERT INTO kernel_decisions(decision_id,task_id,audience,context_json,
+          status,resolution_json,action_consumed,created_at,resolved_at)
+          VALUES(?,?, 'human', ?,'pending',NULL,0,?,NULL)`,
+      ).run(input.nextDecisionId, task.taskId, input.nextContextJson, this.#now());
+      source = this.#requireDecision(source.decisionId, task.taskId);
+      return { source, next: this.#requireDecision(input.nextDecisionId, task.taskId) };
+    });
+  }
+
   resolveDecision(input: {
     taskId: string;
     clientId: string;
@@ -1480,7 +1562,34 @@ export class TaskKernelRepository {
   }
 
 
-  /** Rebind pages only for active public Tasks, never archived legacy sessions. */
+  /** Exact agent permission delegation is durable Task admission data. */
+  publicPermissionGrants(taskId: string, clientId: string): readonly {
+    appName: string; toolName: string; allowMode: 'once';
+  }[] {
+    this.#requireTask(taskId, clientId);
+    const row = this.#database.raw.prepare(
+      'SELECT policy_json AS policyJson FROM kernel_public_task_policies WHERE task_id=?',
+    ).get(taskId) as { policyJson: string } | undefined;
+    if (!row) return [];
+    let parsed: unknown;
+    try { parsed = JSON.parse(row.policyJson); } catch { return []; }
+    const grants = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as { agentPermissionGrants?: unknown }).agentPermissionGrants : undefined;
+    if (!Array.isArray(grants) || grants.length > 32) return [];
+    const exact: Array<{ appName: string; toolName: string; allowMode: 'once' }> = [];
+    for (const grant of grants) {
+      if (!grant || typeof grant !== 'object' || Array.isArray(grant)) return [];
+      const value = grant as { appName?: unknown; toolName?: unknown; allowMode?: unknown };
+      if (typeof value.appName !== 'string' ||
+          !/^hostspan(?:-[a-z0-9_-]+)?$/.test(value.appName) ||
+          typeof value.toolName !== 'string' ||
+          !/^[A-Za-z0-9_.-]{1,100}$/.test(value.toolName) || value.allowMode !== 'once') return [];
+      exact.push({ appName: value.appName, toolName: value.toolName, allowMode: 'once' });
+    }
+    return exact;
+  }
+
+  /** Rebind pages only for active public Tasks, never archived inactive sessions. */
   listCurrentPublicPageOwners(): readonly {
     taskId: string; projectId: string; slotId: string;
     slotRevision: number; providerConversationId: string | null;
@@ -1691,7 +1800,7 @@ export class TaskKernelRepository {
           JOIN kernel_attempts a ON a.task_id=t.task_id
           LEFT JOIN kernel_results r ON r.attempt_id=a.attempt_id
           WHERE t.cancel_requested=0
-            AND t.state IN ('working','agent_input_required')
+            AND t.state IN ('working','agent_input_required','human_input_required')
             AND a.kind!='stop' AND a.state='acknowledged' AND r.result_id IS NULL
           ORDER BY CASE WHEN t.task_id > ? OR (t.task_id=? AND a.sequence>?)
             THEN 0 ELSE 1 END, t.task_id,a.sequence LIMIT ?`,

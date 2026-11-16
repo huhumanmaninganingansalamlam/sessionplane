@@ -133,6 +133,12 @@ test('public CLI rejects ambiguous prompts and unauthorized flags before any RPC
   });
   const taskId = '00000000-0000-4000-8000-000000000011';
   const decisionId = '00000000-0000-4000-8000-000000000022';
+  const grantsFile = path.join(root, 'permission-grants.json');
+  writeFileSync(grantsFile, JSON.stringify([{
+    appName: 'hostspan-git', toolName: 'repository_read', allowMode: 'once',
+  }]));
+  const decisionInputFile = path.join(root, 'decision-input.txt');
+  writeFileSync(decisionInputFile, 'Exact long-form decision input from file');
   const validStart = ['task', 'start', taskId,
     '--expected-conversation-revision', '1', '--request-id', 'safe-send'];
   const cli = async (...args: string[]) => {
@@ -151,6 +157,12 @@ test('public CLI rejects ambiguous prompts and unauthorized flags before any RPC
       [...validStart, '--prompt', 'one', '--public'],
       [...validStart, '--prompt', 'one', '--continuation-approved'],
       [...validStart, '--prompt', 'one', '--approval-ref', 'not-approved'],
+      [...validStart, '--prompt', 'one', '--agent-review-after-ms', '2400000'],
+      [...validStart, '--prompt', 'one', '--agent-permissions-file', path.join(root, 'missing.json')],
+      ['task', 'get', taskId, '--view', 'decision'],
+      ['task', 'get', taskId, '--view', 'summary', '--decision-id', decisionId],
+      ['task', 'decide', taskId, decisionId, 'a1', '--input', 'x',
+        '--input-file', decisionInputFile, '--request-id', 'ambiguous-input'],
       ['task', 'decide', taskId, decisionId, 'a1', '--input', 'choose without requestId'],
       ['task', 'wait', taskId, '--wait-ms', '0'],
       ['project', 'open', '--key', 'k', '--name', 'Project'],
@@ -172,13 +184,57 @@ test('public CLI rejects ambiguous prompts and unauthorized flags before any RPC
         input: 'exact answer',
       },
     });
+    const fileDecision = await cli('task', 'decide', taskId, decisionId, 'paged-action',
+      '--request-id', 'decision-from-file', '--input-file', decisionInputFile);
+    assert.equal(fileDecision.code, 0, fileDecision.stderr);
+    assert.deepEqual(requests[1], {
+      method: 'task.decide',
+      params: {
+        clientId: 'sessplane-cli', taskId, decisionId,
+        actionRef: 'paged-action', requestId: 'decision-from-file',
+        input: 'Exact long-form decision input from file',
+      },
+    });
+
+    const evidence = await cli('task', 'get', taskId, '--view', 'decision',
+      '--decision-id', decisionId, '--section', 'provider_question',
+      '--cursor', '1024', '--max-bytes', '4096');
+    assert.equal(evidence.code, 0, evidence.stderr);
+    assert.deepEqual(requests[2], {
+      method: 'task.get',
+      params: {
+        clientId: 'sessplane-cli', taskId, view: 'decision', decisionId,
+        section: 'provider_question', cursor: 1024, maxBytes: 4096,
+      },
+    });
+
+    const started = await cli(...validStart, '--prompt', 'one',
+      '--continuation-approved', '--approval-ref', 'user-approved',
+      '--agent-review-after-ms', '7200000',
+      '--agent-permissions-file', grantsFile);
+    assert.equal(started.code, 0, started.stderr);
+    assert.deepEqual(requests[3], {
+      method: 'task.start',
+      params: {
+        clientId: 'sessplane-cli', requestId: 'safe-send', projectId: taskId,
+        expectedConversationRevision: 1, prompt: 'one',
+        continuationPolicy: {
+          enabled: true, intervalMs: 1_200_000, message: '계속',
+          approvalRef: 'user-approved', agentReviewAfterMs: 7_200_000,
+        },
+        agentPermissionGrants: [{
+          appName: 'hostspan-git', toolName: 'repository_read', allowMode: 'once',
+        }],
+      },
+    });
+
     const wait = await cli('task', 'wait', taskId, '--after-revision', '0', '--wait-ms', '0');
     assert.equal(wait.code, 0, wait.stderr);
-    assert.deepEqual(requests[1], {
+    assert.deepEqual(requests[4], {
       method: 'task.wait',
       params: { clientId: 'sessplane-cli', taskId, afterRevision: 0, waitMs: 0, view: 'summary' },
     });
-    assert.equal(requests.length, 2, 'public CLI performs one RPC per command');
+    assert.equal(requests.length, 5, 'public CLI performs one RPC per command');
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close(error => error ? reject(error) : resolve()));

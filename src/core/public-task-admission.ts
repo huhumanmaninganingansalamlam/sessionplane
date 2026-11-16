@@ -30,10 +30,16 @@ export interface PublicProjectMapping {
   readonly surfaceIntent: string;
   readonly modelIntent: string | null;
 }
+export interface PublicAgentPermissionGrant {
+  readonly appName: string;
+  readonly toolName: string;
+  readonly allowMode: 'once';
+}
 export type PublicContinuationPolicy =
   | { readonly enabled: false }
   | { readonly enabled: true; readonly approvalRef: string;
-      readonly intervalMs: 1200000; readonly message: string };
+      readonly intervalMs: 1200000; readonly message: string;
+      readonly agentReviewAfterMs?: number | undefined };
 export interface PublicTaskStartInput {
   readonly clientId: string;
   readonly requestId: string;
@@ -42,6 +48,7 @@ export interface PublicTaskStartInput {
   readonly expectedConversationRevision: number;
   readonly prompt: string;
   readonly continuationPolicy?: PublicContinuationPolicy | undefined;
+  readonly agentPermissionGrants?: readonly PublicAgentPermissionGrant[] | undefined;
 }
 export interface PublicTaskAdmission {
   readonly taskId: string;
@@ -177,12 +184,29 @@ export class PublicTaskAdmissionService {
   }
 
   startTask(input: PublicTaskStartInput): PublicTaskAdmission {
-    const policy: PublicContinuationPolicy = input.continuationPolicy ?? { enabled: false };
-    if (policy.enabled && (policy.intervalMs !== INTERVAL_MS ||
-        policy.approvalRef.trim().length === 0 ||
-        policy.message.trim().length === 0)) {
+    const continuation: PublicContinuationPolicy = input.continuationPolicy ?? { enabled: false };
+    if (continuation.enabled && (continuation.intervalMs !== INTERVAL_MS ||
+        continuation.approvalRef.trim().length === 0 ||
+        continuation.message.trim().length === 0 ||
+        (continuation.agentReviewAfterMs !== undefined &&
+          (!Number.isSafeInteger(continuation.agentReviewAfterMs) ||
+           continuation.agentReviewAfterMs < INTERVAL_MS)))) {
       throw new SessionPlaneDomainError('invalid_request', 'Continuation approval requires exact interval, text and delegation');
     }
+    const grants = [...new Map((input.agentPermissionGrants ?? []).map(grant => {
+      const appName = grant.appName.normalize('NFKC').trim().toLowerCase();
+      const toolName = grant.toolName.normalize('NFKC').trim();
+      if (!/^hostspan(?:-[a-z0-9_-]+)?$/.test(appName) ||
+          !/^[A-Za-z0-9_.-]{1,100}$/.test(toolName) || grant.allowMode !== 'once') {
+        throw new SessionPlaneDomainError('invalid_request',
+          'Agent permission delegation requires an exact HostSpan app, tool and once mode');
+      }
+      return [appName + '\0' + toolName, { appName, toolName, allowMode: 'once' as const }];
+    })).values()];
+    if (grants.length > 32) {
+      throw new SessionPlaneDomainError('invalid_request', 'Too many delegated permission grants');
+    }
+    const policy = { ...continuation, agentPermissionGrants: grants };
     return this.#db.transaction(() => {
       const publicProject = this.#db.raw.prepare(
         'SELECT main_slot_id AS mainSlotId,provider_key AS providerKey' +
@@ -194,7 +218,7 @@ export class PublicTaskAdmissionService {
       if (slot === null) {
         throw new SessionPlaneDomainError('invalid_request', 'Unknown authorized conversation slot');
       }
-      if (slot.providerKey === 'chatgpt' && policy.enabled && policy.message !== '계속') {
+      if (slot.providerKey === 'chatgpt' && continuation.enabled && continuation.message !== '계속') {
         throw new SessionPlaneDomainError('invalid_request', 'ChatGPT managed continuation requires the exact literal 계속');
       }
       const exactInputHash = hash([

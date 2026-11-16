@@ -12,7 +12,7 @@ export type SemanticSurface = 'chat' | 'work' | 'unknown';
 export type SemanticProgress = 'unknown' | 'idle' | 'streaming' | 'final';
 
 /** Explicit semantic requirement, distinct from a provider's model-radio label.
- * Legacy public modelIntent stays compatible; only ChatGPT's exact 'Pro'
+ * Public modelIntent stays compatible; only ChatGPT's exact 'Pro'
  * means a reasoning-effort level. Never infer a level from slider numbers.
  */
 export type SemanticConfigurationIntent =
@@ -40,10 +40,11 @@ export function semanticConfigurationMatches(
 export type SemanticActionPurpose =
   | 'compose' | 'submit' | 'open_model_chooser' | 'close_model_chooser'
   | 'choose_model' | 'choose_reasoning_effort' | 'answer_question'
-  | 'grant_permission' | 'retry' | 'continue';
+  | 'grant_permission' | 'decline_permission'
+  | 'activate_control' | 'set_control_value' | 'retry' | 'continue';
 export type SemanticActionRisk =
   | 'draft_only' | 'configuration_only' | 'send_once'
-  | 'permission_grant' | 'retry_once';
+  | 'permission_grant' | 'permission_decision' | 'ui_control' | 'retry_once';
 export interface SemanticTaskContext {
   readonly projectId: string;
   readonly slotId: string;
@@ -53,8 +54,12 @@ export interface SemanticTaskContext {
   readonly submittedUserMessageId: string | null;
   readonly submittedUserTurnId: string | null;
   readonly pageLease: OwnedPageIdentity | null;
-  /** Legacy public modelIntent: ChatGPT 'Pro' means reasoning effort, not a model radio. */
+  /** Public modelIntent: ChatGPT 'Pro' means reasoning effort, not a model radio. */
   readonly requiredModel?: string | null;
+  /** Exact user delegation. Absence means the agent may inspect but never grant. */
+  readonly permissionGrants?: readonly {
+    readonly appName: string; readonly toolName: string; readonly allowMode: 'once';
+  }[];
 }
 export interface SemanticCapabilityManifest {
   readonly providerKey: string;
@@ -68,6 +73,23 @@ export type SemanticInput =
   | { readonly kind: 'option'; readonly options: readonly {
       readonly value: string; readonly enabled: boolean;
     }[] };
+
+export interface SemanticControlDescriptor {
+  readonly controlRef: string;
+  readonly role: string;
+  readonly label: string;
+  readonly contextSummary: string;
+  readonly operation: 'activate' | 'set_text' | 'select_value';
+  readonly enabled: boolean;
+  readonly selected: boolean | null;
+  readonly currentValue: string | null;
+  readonly options: readonly { readonly value: string; readonly enabled: boolean }[];
+  readonly expectedEffect: string;
+  readonly relevance: string;
+  readonly risk: 'configuration' | 'draft' | 'requires_human';
+  readonly executable: boolean;
+}
+
 export interface SemanticActionCandidate {
   readonly actionRef: string;
   readonly purpose: SemanticActionPurpose;
@@ -76,6 +98,7 @@ export interface SemanticActionCandidate {
   readonly evidenceHash: string;
   readonly expiresAt: string;
   readonly input: SemanticInput;
+  readonly control?: SemanticControlDescriptor | undefined;
 }
 export interface SemanticTurn {
   readonly submittedUserFound: boolean;
@@ -94,7 +117,7 @@ export interface SemanticPermissionEvidence {
   readonly argumentsSummary: string | null;
   readonly detailState: 'not_visible' | 'visible_unverified' | 'truncated' | 'redacted';
   readonly evidenceHash: string;
-  readonly canGrant: false;
+  readonly canGrant: boolean;
 }
 /** A single advertised capability may be unverified while other actions
  * remain usable. It never authorizes an action or changes the top-level blocker.
@@ -111,11 +134,13 @@ export interface SemanticObservation {
   readonly capabilityManifest: SemanticCapabilityManifest;
   readonly progress: SemanticProgress;
   readonly blocker: 'none' | 'rate_limit' | 'human_verification' |
-    'provider_question' | 'provider_permission' | 'provider_retry' | 'unsupported';
+    'provider_question' | 'provider_permission' | 'provider_control' |
+    'provider_retry' | 'unsupported';
   readonly reason: string | null;
   readonly turn: SemanticTurn;
   readonly questionText: string | null;
   readonly permission?: SemanticPermissionEvidence | null;
+  readonly controls?: readonly SemanticControlDescriptor[] | undefined;
   readonly actions: readonly SemanticActionCandidate[];
   /** Selected exactly one current model radio; never a reasoning badge. */
   readonly verifiedModel?: string | null;
@@ -140,7 +165,8 @@ export interface SemanticActRequest {
 export type SemanticActResult =
   | { readonly kind: 'performed'; readonly effect: 'draft_updated' | 'question_answered' |
       'model_menu_opened' | 'model_menu_closed' | 'model_selected' |
-      'reasoning_effort_selected' }
+      'reasoning_effort_selected' | 'permission_granted' | 'permission_declined' |
+      'control_activated' | 'control_value_set' }
   | { readonly kind: 'dispatched_unverified'; readonly effect: 'send';
       readonly attempts: readonly SemanticDispatchEvidence[] }
   | { readonly kind: 'root_dispatched_unverified'; readonly effect: 'send';

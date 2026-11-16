@@ -111,8 +111,8 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
 
   try {
     await browserOwner?.start();
-    // Create session actors only when a public Task needs them. Legacy
-    // nonterminal histories remain durable in SQLite, not live idle actors.
+    // Create browser session actors only when an active public Task needs them.
+    // Archived nonterminal histories remain durable in SQLite, not live idle actors.
   } catch (error) {
     actorScheduler.close();
     unsubscribePageBindings();

@@ -13,6 +13,11 @@ const requestId = z.string().trim().min(1).max(300);
 const decisionId = z.string().uuid();
 const actionRef = z.string().trim().min(1).max(512);
 const view = z.enum(['summary', 'result', 'evidence']).default('summary');
+const decisionEvidenceSection = z.enum([
+  'original_request', 'current_attempt', 'provider_question',
+  'permission', 'partial_answer', 'capability_issues', 'provider_controls',
+  'decision_options',
+]);
 export const projectOpenSchema = z.object({
   clientId, requestId,
   projectKey: z.string().trim().min(1).max(300),
@@ -21,6 +26,11 @@ export const projectOpenSchema = z.object({
   surfaceIntent: z.literal('chat').default('chat'),
   modelIntent: z.string().trim().min(1).max(200).optional(),
 }).strict();
+const agentPermissionGrant = z.object({
+  appName: z.string().trim().min(1).max(100),
+  toolName: z.string().trim().min(1).max(100),
+  allowMode: z.literal('once'),
+}).strict();
 const continuationPolicy = z.discriminatedUnion('enabled', [
   z.object({ enabled: z.literal(false) }).strict(),
   z.object({
@@ -28,6 +38,7 @@ const continuationPolicy = z.discriminatedUnion('enabled', [
     intervalMs: z.literal(1_200_000),
     message: z.string().min(1).max(4_096),
     approvalRef: z.string().trim().min(1).max(512),
+    agentReviewAfterMs: z.number().int().min(1_200_000).max(604_800_000).optional(),
   }).strict(),
 ]);
 
@@ -42,10 +53,17 @@ export const taskSchemas = {
     expectedConversationRevision: z.number().int().positive(),
     prompt: z.string().min(1).max(200_000),
     continuationPolicy: continuationPolicy.optional(),
+    agentPermissionGrants: z.array(agentPermissionGrant).max(32).optional(),
   }).strict(),
-  get: z.object({
-    clientId, taskId, view,
-  }).strict(),
+  get: z.union([
+    z.object({ clientId, taskId, view }).strict(),
+    z.object({
+      clientId, taskId, view: z.literal('decision'), decisionId,
+      section: decisionEvidenceSection,
+      cursor: z.number().int().nonnegative().default(0),
+      maxBytes: z.number().int().min(256).max(64 * 1024).default(12 * 1024),
+    }).strict(),
+  ]),
   wait: z.object({
     clientId, taskId,
     afterRevision: z.number().int().nonnegative(),
@@ -54,7 +72,7 @@ export const taskSchemas = {
   }).strict(),
   decide: z.union([z.object({
     clientId, taskId, decisionId, requestId, actionRef,
-    input: z.string().min(1).max(2_000).optional(),
+    input: z.string().min(1).max(200_000).optional(),
   }).strict(), z.object({
     // Read-only reinspection, never a provider action or permission grant.
     clientId, taskId, decisionId, requestId, refresh: z.literal(true),
@@ -162,8 +180,16 @@ export function registerTaskMethods(
   router.register('task.start', taskSchemas.start, params =>
     admission.startTask(params));
 
-  router.register('task.get', taskSchemas.get, params =>
-    readTaskSummary(repository, gateway, params.taskId, params.clientId, params.view));
+  router.register('task.get', taskSchemas.get, params => {
+    if (params.view === 'decision') {
+      return gateway.readEvidence({
+        taskId: params.taskId, clientId: params.clientId,
+        decisionId: params.decisionId, section: params.section,
+        cursor: params.cursor, maxBytes: params.maxBytes,
+      });
+    }
+    return readTaskSummary(repository, gateway, params.taskId, params.clientId, params.view);
+  });
 
   router.register('task.wait', taskSchemas.wait, async (params, context) => {
     await waitForTaskRevision(repository, {

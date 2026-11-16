@@ -44,8 +44,8 @@ export async function inspectChatGptFreeTextQuestion(page: Page) {
     shell.querySelectorAll(editorSelector + ', script, style, template').forEach(e => e.remove());
     const shellText = (shell.textContent ?? '').replace(/\s+/g, ' ').trim();
     return {
-      text: text.slice(0, 4_000), truncated: text.length > 4_000,
-      shellText: shellText.slice(0, 8_000), shellTruncated: shellText.length > 8_000,
+      text, truncated: false,
+      shellText, shellTruncated: false,
       editor: candidateEditors.length === 1 ? candidateEditors[0] : null,
       submit: candidateButtons.length === 1 ? candidateButtons[0] : null,
       editorCount: candidateEditors.length,
@@ -60,7 +60,7 @@ export async function inspectChatGptFreeTextQuestion(page: Page) {
   })).digest('hex');
   return {
     ...observed, evidenceHash,
-    available: !observed.truncated && !observed.shellTruncated && observed.text.length > 0 &&
+    available: observed.text.length > 0 &&
       observed.editorCount === 1 && observed.submitCount === 1 &&
       observed.editor?.draft.length === 0,
   };
@@ -76,8 +76,8 @@ export async function answerChatGptFreeTextQuestion(
   input: { readonly answer: string; readonly evidenceHash: string },
   beforeMutation: () => void | Promise<void>,
 ): Promise<void> {
-  if (!input.answer.trim() || input.answer.length > 2_000) {
-    throw new Error('Free-text question answer must be bounded and nonempty');
+  if (!input.answer.trim() || input.answer.length > 200_000) {
+    throw new Error('Free-text question answer must be nonempty and within the public Task input bound');
   }
   const observed = await inspectChatGptFreeTextQuestion(page);
   if (!observed?.available || observed.evidenceHash !== input.evidenceHash ||

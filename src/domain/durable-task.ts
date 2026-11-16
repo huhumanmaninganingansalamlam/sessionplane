@@ -97,9 +97,10 @@ export function reduceTaskProjection(
       // A late exact FINAL may be recorded after cancellation, but must never
       // resurrect the policy, enqueue a continuation, or erase uncertainty.
       if (cancelRequested || isTaskTerminal(state)) return current;
-      if (state === 'agent_input_required') {
-        // Only a terminal exact FINAL may supersede a waiting agent packet.
-        // A nonterminal result must not orphan its durable pending decision.
+      if (state === 'agent_input_required' || state === 'human_input_required') {
+        // A decision pauses new mutations, never exact result observation.
+        // A terminal FINAL supersedes either waiting audience; a nonterminal
+        // result must not orphan the durable pending decision.
         if (!event.completeTask) invalid(state, event);
         return { ...current, state: 'completed', pendingDecisionId: null };
       }

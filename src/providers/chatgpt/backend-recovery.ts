@@ -47,7 +47,7 @@ export interface ChatGptBackendRecoveryOptions {
   readonly onConversationRetryAtMs?: (nextAllowedAtMs: number) => void;
   readonly now?: () => Date;
   readonly onRateLimit?: (request: ProviderRecoveryRequest, evidence: BackendRateLimitEvidence) => void;
-  /** Safe endpoint/Retry-After metadata for semantic and legacy reads alike. */
+  /** Safe endpoint/Retry-After metadata for every canonical read path. */
   readonly onRateLimitEvidence?: (evidence: BackendRateLimitEvidence) => void;
 }
 
@@ -122,7 +122,7 @@ export class ChatGptBackendRecovery {
 
   /**
    * New semantic adapter entry point. Uses the same rate-limited, authenticated
-   * read-only backend transport as legacy recovery without fabricating a
+   * read-only backend transport as exact-turn recovery without fabricating a
    * SessionSnapshot. No UI focus or submission is permitted here.
    */
   reserveExactTurn(conversationId: string, notBefore: string): void {

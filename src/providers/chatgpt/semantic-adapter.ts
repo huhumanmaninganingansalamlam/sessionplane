@@ -6,8 +6,9 @@ import type { PageMutationMutex } from '../../browser/page-mutex.ts';
 import type { OwnedPageIdentity } from '../../browser/owned-page-lifecycle.ts';
 import type {
   SemanticActRequest, SemanticActResult, SemanticActionCandidate,
-  SemanticActionPurpose, SemanticCapabilityIssue, SemanticDispatchEvidence,
-  SemanticRootPostEvidence, SemanticExactQuery, SemanticObservation, SemanticProviderAdapter,
+  SemanticActionPurpose, SemanticCapabilityIssue, SemanticControlDescriptor,
+  SemanticDispatchEvidence, SemanticRootPostEvidence, SemanticExactQuery, SemanticObservation,
+  SemanticProviderAdapter,
   SemanticTaskContext, SemanticVerification,
 } from '../semantic-adapter.ts';
 import { semanticConfigurationIntent, semanticConfigurationMatches } from '../semantic-adapter.ts';
@@ -20,6 +21,9 @@ import { ExactFinalTracker } from './exact-final.ts';
 import { inspectChatGptQuestion, answerChatGptQuestion } from './question.ts';
 import { inspectChatGptFreeTextQuestion, answerChatGptFreeTextQuestion } from './semantic-free-text-question.ts';
 import { inspectSemanticHostSpanPermission } from './semantic-hostspan-permission.ts';
+import { controlHostSpanPermission } from './hostspan-permission.ts';
+import { actGenericChatGptControl, inspectGenericChatGptControls,
+  type GenericChatGptControl } from './semantic-generic-controls.ts';
 import { inspectSemanticChatGptModelMenu, openExactChatGptModelMenu,
   closeExactChatGptModelMenu, selectExactChatGptProReasoningLevel,
   selectExactChatGptModelMenu } from './semantic-model-menu.ts';
@@ -29,8 +33,7 @@ import { streamRetrySurface } from './stream-retry.ts';
 const EDITORS = 'main :is(#prompt-textarea, [data-testid="prompt-textarea"], [contenteditable="true"], textarea, [role="textbox"])';
 const BUTTONS = 'main :is(button, [role="button"])';
 const EMPTY_PROSEMIRROR_MARKER = ':scope > p.placeholder:only-child > br.ProseMirror-trailingBreak:only-child';
-const MAX_PACKET_BYTES = 12 * 1024;
-const MAX_DRAFT = 16_000;
+const MAX_DRAFT = 200_000;
 const REF_TTL_MS = 30_000;
 const SEND_LABEL = /^(send|send message|submit|전송|보내기|메시지 전송)$/i;
 
@@ -65,6 +68,11 @@ interface CachedAction {
   readonly questionHash: string | null;
   readonly modelHash: string | null;
   readonly retryHash: string | null;
+  readonly permissionHash: string | null;
+  readonly permissionApp: string | null;
+  readonly permissionTool: string | null;
+  readonly permissionMode: 'once' | null;
+  readonly genericControl: GenericChatGptControl | null;
 }
 interface ActiveSnapshot {
   readonly snapshotId: string;
@@ -74,7 +82,7 @@ export interface ChatGptSemanticAdapterOptions {
   /** Exact Task/slot/page lease from the Core, including binding epoch. */
   readonly isExactLease: (identity: OwnedPageIdentity) => boolean;
   readonly resolvePage: (identity: OwnedPageIdentity) => Promise<Page> | Page;
-  /** Share the same Core-owned page mutex as the legacy runtime during cutover. */
+  /** Share the single Core-owned page mutation mutex across every Task action. */
   readonly pageMutationMutex?: PageMutationMutex;
   /** Production accepts only ChatGPT's trusted HTTPS origins. Test overrides are isolated fixtures. */
   readonly allowedPageOrigins?: readonly string[];
@@ -114,7 +122,9 @@ export interface ChatGptSemanticAdapterOptions {
   readonly isAuthorizedDecision?: (input: {
     context: SemanticTaskContext;
     purpose: 'open_model_chooser' | 'close_model_chooser' |
-      'choose_model' | 'choose_reasoning_effort' | 'answer_question' | 'retry';
+      'choose_model' | 'choose_reasoning_effort' | 'answer_question' |
+      'grant_permission' | 'decline_permission' | 'activate_control' |
+      'set_control_value' | 'retry';
     decisionId: string; snapshotId: string; actionRef: string; evidenceHash: string; input: string | null;
   }) => boolean | Promise<boolean>;
   readonly isAuthorizedAttempt?: (input: {
@@ -230,7 +240,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         submittedUserFound: dom.submittedUserFound,
         laterUserFound: dom.laterUserFound,
         answerMessageId: dom.candidate?.responseMessageId ?? null,
-        partialAnswer: dom.candidate?.answerText.slice(0, 3_000) ?? null,
+        partialAnswer: dom.candidate?.answerText ?? null,
       };
       progress = dom.candidate?.streamingMarker ? 'streaming'
         : dom.candidate?.terminalMarker ? 'idle' : dom.submittedUserFound ? 'idle' : 'unknown';
@@ -260,14 +270,26 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       blocker = 'provider_permission';
       reason = 'scoped-tool-permission-requires-reviewed-effect-and-arguments';
     }
-    const permission = (blocker === 'none' || blocker === 'provider_permission') &&
+    const inspectedPermission = (blocker === 'none' || blocker === 'provider_permission') &&
       context.submittedUserMessageId !== null
       ? await inspectSemanticHostSpanPermission(page, context.submittedUserMessageId) : null;
+    const permissionGrant = inspectedPermission?.toolName === null ? null :
+      context.permissionGrants?.find(grant =>
+        grant.appName.toLowerCase() === inspectedPermission?.appName.toLowerCase() &&
+        grant.toolName === inspectedPermission?.toolName && grant.allowMode === 'once') ?? null;
+    const permission = inspectedPermission === null ? null : {
+      ...inspectedPermission,
+      canGrant: permissionGrant !== null &&
+        inspectedPermission.detailState === 'visible_unverified' &&
+        inspectedPermission.argumentsSummary !== null,
+    };
     if (permission !== null) {
       blocker = 'provider_permission';
-      reason = permission.detailState === 'visible_unverified'
-        ? 'scoped-permission-details-still-require-reviewed-authorization'
-        : 'scoped-permission-arguments-missing-or-protected';
+      reason = permission.canGrant
+        ? 'scoped-permission-within-agent-delegation'
+        : permission.detailState === 'visible_unverified'
+          ? 'scoped-permission-outside-agent-delegation'
+          : 'scoped-permission-arguments-missing-or-protected';
     }
     const retry = blocker === 'none' ? await inspectExactChatGptRetry(page, context) : null;
     if (retry !== null) {
@@ -283,6 +305,38 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       blocker = turn.submittedUserFound ? 'provider_question' : 'unsupported';
       reason = !turn.submittedUserFound ? 'provider-question-turn-unverified'
         : question.available ? 'provider-question-requires-decision' : 'question-evidence-incomplete-or-draft';
+    }
+    const genericControls = question === null && permission === null && retry === null &&
+        context.submittedUserMessageId !== null && turn.submittedUserFound &&
+        !turn.laterUserFound && progress !== 'streaming' &&
+        (blocker === 'none' || blocker === 'human_verification' || blocker === 'unsupported')
+      ? await inspectGenericChatGptControls(page, context.submittedUserMessageId) : [];
+    const submitControlObservations: SemanticControlDescriptor[] = ui.buttons.length > 1
+      ? ui.buttons.map(button => ({
+          controlRef: sha(JSON.stringify({
+            taskId: context.taskId, fingerprint: ui.fingerprint,
+            index: button.index, signature: button.signature,
+          })),
+          role: 'button', label: button.value || 'Submit control',
+          contextSummary: 'Multiple visible composer submit controls require exact UI resolution. Message submission remains owned by the current Task Attempt.',
+          operation: 'activate', enabled: button.enabled, selected: null,
+          currentValue: null, options: [],
+          expectedEffect: 'Submit the exact journaled Task draft through the Core-owned Attempt path',
+          relevance: 'Visible composer submit candidate for the current exact Task',
+          risk: 'requires_human', executable: false,
+        })) : [];
+    const observedControls = [
+      ...genericControls.map(control => control.descriptor),
+      ...submitControlObservations,
+    ];
+    if (ui.buttons.length > 1 && blocker === 'none') {
+      blocker = 'provider_control';
+      reason = 'multiple-submit-controls-require-exact-ui-resolution';
+    } else if (genericControls.length > 0) {
+      blocker = 'provider_control';
+      reason = genericControls.some(control => control.descriptor.executable)
+        ? 'provider-controls-require-decision'
+        : 'provider-controls-require-human-or-additional-observation';
     } else if (blocker === 'none' && progress === 'streaming') {
       blocker = 'unsupported';
       reason = 'generation-active-preserve-current-turn';
@@ -294,7 +348,10 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     const issue = (purpose: SemanticActionPurpose, effect: string,
       risk: SemanticActionCandidate['risk'], input: SemanticActionCandidate['input'],
       fingerprint: string, questionHash: string | null = null,
-      modelHash: string | null = null, retryHash: string | null = null): void => {
+      modelHash: string | null = null, retryHash: string | null = null,
+      permissionHash: string | null = null, permissionApp: string | null = null,
+      permissionTool: string | null = null, permissionMode: 'once' | null = null,
+      genericControl: GenericChatGptControl | null = null): void => {
       const evidenceHash = sha(JSON.stringify({
         identity: lease, context: contextKey(context), purpose, fingerprint,
       }));
@@ -303,15 +360,42 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       const option = {
         actionRef, purpose, effect, risk, input, evidenceHash,
         expiresAt: new Date(expiresAtMs).toISOString(),
+        ...(genericControl ? { control: genericControl.descriptor } : {}),
       };
       actions.push(option);
       cached.set(actionRef, {
         purpose, evidenceHash, uiFingerprint: fingerprint,
         contextKey: contextKey(context), expiresAtMs, questionHash, modelHash, retryHash,
+        permissionHash, permissionApp, permissionTool, permissionMode, genericControl,
       });
     };
 
-    if (blocker === 'provider_retry' && retry?.available) {
+    if (blocker === 'provider_control') {
+      for (const control of genericControls) {
+        if (!control.descriptor.executable) continue;
+        const input = control.descriptor.operation === 'set_text'
+          ? { kind: 'text' as const, maxLength: MAX_DRAFT }
+          : control.descriptor.operation === 'select_value'
+            ? { kind: 'option' as const, options: control.descriptor.options }
+            : { kind: 'none' as const };
+        issue(control.descriptor.operation === 'activate'
+          ? 'activate_control' : 'set_control_value',
+        control.descriptor.expectedEffect, 'ui_control', input,
+        ui.fingerprint, null, null, null, null, null, null, null, control);
+      }
+    } else if (blocker === 'provider_permission' && permission?.canGrant &&
+        permission.toolName !== null) {
+      issue('grant_permission',
+        `Allow ${permission.appName}.${permission.toolName} once within the exact delegated scope`,
+        'permission_grant', { kind: 'none' }, ui.fingerprint,
+        null, null, null, permission.evidenceHash,
+        permission.appName, permission.toolName, 'once');
+      issue('decline_permission',
+        `Decline ${permission.appName}.${permission.toolName} for this exact request`,
+        'permission_decision', { kind: 'none' }, ui.fingerprint,
+        null, null, null, permission.evidenceHash,
+        permission.appName, permission.toolName, 'once');
+    } else if (blocker === 'provider_retry' && retry?.available) {
       issue('retry', 'Retry one exact failed provider stream, with no prompt replay',
         'retry_once', { kind: 'none' }, ui.fingerprint, null, null, retry.evidenceHash);
     } else if (blocker === 'provider_question' && question?.available) {
@@ -319,7 +403,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         ? { kind: 'option' as const, options: radioQuestion.options.map(option => ({
           value: option.answer, enabled: !option.disabled,
         })) }
-        : { kind: 'text' as const, maxLength: 2_000 };
+        : { kind: 'text' as const, maxLength: MAX_DRAFT };
       issue('answer_question', 'Answer the exact current provider question once',
         'send_once', input, ui.fingerprint, question.evidenceHash);
     } else if (blocker === 'none') {
@@ -345,8 +429,8 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
         }
       }
       if (ui.buttons.length > 1) {
-        blocker = 'unsupported'; reason = 'submit-control-ambiguous';
-        actions.length = 0; cached.clear();
+        blocker = 'provider_control';
+        reason = 'multiple-submit-controls-require-exact-ui-resolution';
       }
       // Model/effort configuration is an explicit agent decision. Read-only
       // observe never opens either the root menu or a linked Pro submenu.
@@ -483,28 +567,14 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       providerKey: this.providerKey, surface: surface.mode, snapshotId, observedAt,
       capabilityManifest: this.capabilities, progress, blocker, reason, turn,
       questionText: blocker === 'provider_question' ? question?.text ?? null : null,
-      permission, actions, verifiedModel, verifiedReasoningLevel, evidenceBytes: 0,
+      permission, controls: observedControls,
+      actions, verifiedModel, verifiedReasoningLevel, evidenceBytes: 0,
       ...(capabilityIssues.length > 0 ? { capabilityIssues } : {}),
     };
-    let bytes = observationBytes(observation);
-    if (bytes > MAX_PACKET_BYTES) {
-      // Never truncate a material question/option and accidentally authorize it.
-      actions.length = 0; cached.clear();
-      observation = { ...observation, blocker: 'unsupported',
-        reason: 'semantic-packet-overflow-requires-bounded-expansion', actions: [],
-        turn: { ...observation.turn, partialAnswer: null } };
-      bytes = observationBytes(observation);
-      if (bytes > MAX_PACKET_BYTES) {
-        // The question/permission cannot fit intact. Require a separate
-        // bounded evidence inspection; expose neither a partial grant nor ref.
-        observation = { ...observation, questionText: null, permission: null,
-          turn: { submittedUserFound: false, laterUserFound: false,
-            submittedUserMessageId: null, answerMessageId: null, partialAnswer: null },
-          capabilityIssues: [] };
-        bytes = observationBytes(observation);
-      }
-    }
-    observation = { ...observation, evidenceBytes: bytes };
+    // Size is evidence metadata, not an authorization boundary. The agent
+    // gateway publishes bounded previews plus paged evidence while retaining
+    // the exact current actions and full provider question in SQLite.
+    observation = { ...observation, evidenceBytes: observationBytes(observation) };
     this.#latest.set(lease.pageKey, { snapshotId, actions: cached });
     this.#revision.set(lease.pageKey, {});
     return observation;
@@ -540,8 +610,19 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if (action.purpose === 'choose_model' && (!request.input || request.input.length > 160)) {
       return { kind: 'unsupported', reason: 'exact-model-option-required' };
     }
-    if (action.purpose === 'answer_question' && (!request.input || request.input.length > 2_000)) {
+    if (action.purpose === 'answer_question' && (!request.input || request.input.length > MAX_DRAFT)) {
       return { kind: 'unsupported', reason: 'question-option-required' };
+    }
+    if ((action.purpose === 'grant_permission' || action.purpose === 'decline_permission') &&
+        request.input !== undefined) {
+      return { kind: 'unsupported', reason: 'permission-decision-does-not-accept-input' };
+    }
+    if (action.purpose === 'activate_control' && request.input !== undefined) {
+      return { kind: 'unsupported', reason: 'control-activation-does-not-accept-input' };
+    }
+    if (action.purpose === 'set_control_value' &&
+        (typeof request.input !== 'string' || request.input.length > MAX_DRAFT)) {
+      return { kind: 'unsupported', reason: 'control-value-required' };
     }
     if ((action.purpose === 'submit' || action.purpose === 'continue') &&
       (!request.expectedContentSha256 || !/^[a-f0-9]{64}$/.test(request.expectedContentSha256))) {
@@ -611,13 +692,27 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
       // fingerprints cannot detect these independent UI surfaces.
       if (request.context.submittedUserMessageId !== null ||
           request.context.submittedUserTurnId !== null) {
+        const permissionAction = action.purpose === 'grant_permission' ||
+          action.purpose === 'decline_permission';
         const alerts = await observeChatGptAlerts(page, {
           submittedUserMessageId: request.context.submittedUserMessageId,
           submittedUserTurnId: request.context.submittedUserTurnId,
         });
-        if (alerts.some(alert => /^hostspan(?:-[a-z0-9_-]+)?\b/i.test(alert))) return 'stale' as const;
-        if (request.context.submittedUserMessageId !== null &&
-            await inspectSemanticHostSpanPermission(page, request.context.submittedUserMessageId) !== null) {
+        const currentPermission = request.context.submittedUserMessageId === null ? null :
+          await inspectSemanticHostSpanPermission(page, request.context.submittedUserMessageId);
+        if (permissionAction) {
+          const delegated = currentPermission?.toolName !== null &&
+            request.context.permissionGrants?.some(grant =>
+              grant.appName.toLowerCase() === currentPermission?.appName.toLowerCase() &&
+              grant.toolName === currentPermission?.toolName && grant.allowMode === 'once') === true;
+          if (currentPermission === null || currentPermission.evidenceHash !== action.permissionHash ||
+              currentPermission.appName !== action.permissionApp ||
+              currentPermission.toolName !== action.permissionTool ||
+              action.permissionMode !== 'once' || !delegated ||
+              currentPermission.detailState !== 'visible_unverified' ||
+              currentPermission.argumentsSummary === null) return 'stale' as const;
+        } else if (alerts.some(alert => /^hostspan(?:-[a-z0-9_-]+)?\b/i.test(alert)) ||
+                   currentPermission !== null) {
           return 'stale' as const;
         }
       }
@@ -628,6 +723,53 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
             (await inspectChatGptFreeTextQuestion(page)) !== null)) return 'stale' as const;
       const fresh = await captureUi(page);
       if (fresh.fingerprint !== action.uiFingerprint) return 'stale' as const;
+      if (action.purpose === 'activate_control' ||
+          action.purpose === 'set_control_value') {
+        if (request.context.submittedUserMessageId === null ||
+            action.genericControl === null) return 'stale' as const;
+        requireExactMutationIdentity();
+        const result = await actGenericChatGptControl(page,
+          request.context.submittedUserMessageId, action.genericControl, request.input);
+        if (result === 'stale') return 'stale' as const;
+        if (result === 'unverified') return 'control_effect_unverified' as const;
+        return action.purpose === 'activate_control'
+          ? 'control_activated' as const : 'control_value_set' as const;
+      }
+      if (action.purpose === 'grant_permission' ||
+          action.purpose === 'decline_permission') {
+        if (request.context.submittedUserMessageId === null ||
+            action.permissionHash === null || action.permissionApp === null ||
+            action.permissionTool === null || action.permissionMode !== 'once') return 'stale' as const;
+        const current = await inspectSemanticHostSpanPermission(
+          page, request.context.submittedUserMessageId);
+        const delegated = request.context.permissionGrants?.some(grant =>
+          grant.appName.toLowerCase() === action.permissionApp!.toLowerCase() &&
+          grant.toolName === action.permissionTool && grant.allowMode === 'once') === true;
+        if (current === null || current.evidenceHash !== action.permissionHash ||
+            current.appName !== action.permissionApp || current.toolName !== action.permissionTool ||
+            current.detailState !== 'visible_unverified' || current.argumentsSummary === null ||
+            !delegated) return 'stale' as const;
+        requireExactMutationIdentity();
+        const inspected = await controlHostSpanPermission(page, {
+          action: 'inspect', appName: action.permissionApp,
+          toolName: action.permissionTool, allowMode: 'once',
+        }, request.context.submittedUserMessageId);
+        if (inspected.outcome !== 'inspected' ||
+            inspected.appName.toLowerCase() !== action.permissionApp.toLowerCase() ||
+            inspected.toolName !== action.permissionTool ||
+            inspected.permissionUserMessageId === null) return 'stale' as const;
+        requireExactMutationIdentity();
+        const controlled = await controlHostSpanPermission(page, {
+          action: action.purpose === 'grant_permission' ? 'allow' : 'decline',
+          appName: action.permissionApp, toolName: action.permissionTool,
+          allowMode: 'once', evidenceHash: inspected.evidenceHash,
+        }, request.context.submittedUserMessageId);
+        if ('permissionStillVisible' in controlled && controlled.permissionStillVisible) {
+          return 'permission_effect_unverified' as const;
+        }
+        return action.purpose === 'grant_permission'
+          ? 'permission_granted' as const : 'permission_declined' as const;
+      }
       if (action.purpose === 'open_model_chooser' ||
           action.purpose === 'close_model_chooser' ||
           action.purpose === 'choose_reasoning_effort' ||
@@ -702,7 +844,7 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
             return 'stale' as const;
           }
         } else if (!freeText?.available || freeText.evidenceHash !== action.questionHash ||
-          request.input!.length > 2_000) {
+          request.input!.length > MAX_DRAFT) {
           return 'stale' as const;
         }
         const requireExactQuestionTurn = async () => {
@@ -867,6 +1009,12 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if (result.value === 'retry_clicked_unverified') return {
       kind: 'uncertain', reason: 'retry-clicked-provider-progress-unverified',
     };
+    if (result.value === 'permission_effect_unverified') return {
+      kind: 'uncertain', reason: 'permission-effect-unverified',
+    };
+    if (result.value === 'control_effect_unverified') return {
+      kind: 'uncertain', reason: 'provider-control-effect-unverified',
+    };
     if ((result.value === 'send' || result.value === 'root_send') &&
         dispatchSinkFailed) return {
       kind: 'uncertain', reason: 'durable-dispatch-evidence-write-failed',
@@ -884,7 +1032,9 @@ export class ChatGptSemanticAdapter implements SemanticProviderAdapter {
     if (purpose === 'compose') return true;
     if (purpose === 'open_model_chooser' || purpose === 'close_model_chooser' ||
         purpose === 'choose_model' || purpose === 'choose_reasoning_effort' ||
-        purpose === 'answer_question' || purpose === 'retry') {
+        purpose === 'answer_question' || purpose === 'grant_permission' ||
+        purpose === 'decline_permission' || purpose === 'activate_control' ||
+        purpose === 'set_control_value' || purpose === 'retry') {
       if (!request.authorizedDecisionId || !this.#options.isAuthorizedDecision) return false;
       try {
         return await this.#options.isAuthorizedDecision({
