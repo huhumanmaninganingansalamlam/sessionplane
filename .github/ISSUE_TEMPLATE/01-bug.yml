@@ -1,0 +1,34 @@
+name: 버그 신고
+description: 기대한 동작과 다른 문제를 신고합니다.
+labels: ["type/bug", "status/triage"]
+body:
+  - type: markdown
+    attributes:
+      value: 비밀번호·토큰·실제 사용자 데이터는 올리지 마세요. 원인 추측과 관찰 사실을 구분해 주세요.
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 문제와 기대 결과
+      placeholder: |
+        하려던 작업:
+        실제 결과:
+        기대한 결과:
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 재현 방법
+      description: 간헐적이면 발생 조건과 빈도를 적어 주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 관련 버전과 환경
+      description: 확인 가능한 버전, OS, 브라우저, 실행 방법만 적어 주세요.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 추가 증거
+      description: 오류 메시지나 민감정보를 제거한 로그를 첨부해 주세요.

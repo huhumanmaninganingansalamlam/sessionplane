@@ -7,6 +7,7 @@ clients of that Core; disconnecting them never stops the Task or authorizes a
 replay.
 
 The authoritative product contract is [docs/PRD.md](docs/PRD.md).
+For focused changes, issues and PRs, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Public interface
 
