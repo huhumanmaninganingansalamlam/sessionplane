@@ -846,10 +846,13 @@ test('Core-owned approved 20-minute continuation sends one exact POST without a 
           'data-message-id="user-root" data-turn-id="turn-root">Root question</article>' +
           '<section data-chatgpt-composer><div id="prompt-textarea" ' +
           'contenteditable="true" role="textbox"></div>' +
-          '<button data-testid="send-button" type="button">Send</button></section>' +
-          '</main><script>window.sends=0;' +
-          'document.querySelector("button").onclick=()=>{' +
+          '<button data-testid="send-button" type="button" disabled>Send</button></section>' +
+          '</main><script>window.sends=0;window.readyTransitions=0;' +
           'const editor=document.querySelector("#prompt-textarea");' +
+          'const send=document.querySelector("button");' +
+          'editor.addEventListener("input",()=>window.setTimeout(()=>{' +
+          'send.disabled=false;window.readyTransitions++;},150),{once:true});' +
+          'send.onclick=()=>{' +
           'const text=editor.innerText;window.sends++;' +
           'fetch("/backend-api/f/conversation",{method:"POST",' +
           'headers:{"Content-Type":"application/json"},body:JSON.stringify({' +
@@ -978,6 +981,8 @@ test('Core-owned approved 20-minute continuation sends one exact POST without a 
       timersClaimed: 1, dispatchesAttempted: 1, deferred: 0,
     }, JSON.stringify(repository.getFullTask('managed-task', clientId).events.slice(-8), null, 2));
     assert.equal(await page.evaluate(() => (window as any).sends), 1);
+    assert.equal(await page.evaluate(() => (window as any).readyTransitions), 1,
+      'the Core waits for the asynchronously enabled exact Send control');
     const exact = repository.getFullTask('managed-task', clientId).attempts[1]!;
     assert.equal(exact.kind, 'continuation');
     assert.equal(exact.content, '계속');
