@@ -340,7 +340,7 @@ test('a direct 429 FINAL read retries at its exact fence without speculative Con
   assert.equal(full.attempts.filter(attempt => attempt.kind === 'continuation').length, 1);
 });
 
-test('provider canonical reads are reserved before an approved due beyond the scan batch', async t => {
+test('provider canonical read is reserved from exact ACK through an approved due', async t => {
   const env = fixture(t);
   for (let index = 0; index < 9; index++) {
     const taskId = 'task-' + String(index).padStart(2, '0');
@@ -355,13 +355,15 @@ test('provider canonical reads are reserved before an approved due beyond the sc
   service.activate({ taskId: 'task-z', clientId: 'alice',
     sourceAttemptId: 'initial:task-z', approvalRef: 'approved-public', message: '계속' });
 
-  env.now = START + CONTINUATION_INTERVAL_MS - CONTINUATION_DUE_READ_RESERVATION_MS;
+  assert.equal(CONTINUATION_DUE_READ_RESERVATION_MS, CONTINUATION_INTERVAL_MS,
+    'an approved due owns its canonical read from the exact ACK');
+  env.now = START;
   assert.deepEqual(await service.tick(),
     { timersClaimed: 0, dispatchesAttempted: 0, deferred: 0 });
   assert.equal(env.fake.finalReadReservations.some(reservation =>
     reservation.attemptId === 'initial:task-z' &&
     reservation.notBefore === new Date(START + CONTINUATION_INTERVAL_MS).toISOString()), true,
-  'a due outside the eight-row FINAL batch must still register its exact reservation');
+  'the exact due must reserve its canonical read immediately, even outside the FINAL batch');
 
   env.now = START + CONTINUATION_INTERVAL_MS;
   assert.equal((await service.tick()).dispatchesAttempted, 1);

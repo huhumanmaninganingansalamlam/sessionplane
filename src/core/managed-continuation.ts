@@ -5,11 +5,11 @@ import type {
 
 export const CONTINUATION_INTERVAL_MS = 20 * 60_000;
 export const CONTINUATION_READ_RETRY_MIN_MS = 5_000;
-// ChatGPT canonical detail reads may locally back off for at most fifteen
-// minutes after a 429. Reserve one extra minute for the Core tick boundary so
-// ordinary FINAL observation cannot consume the provider read slot needed by
-// an approved twenty-minute due check.
-export const CONTINUATION_DUE_READ_RESERVATION_MS = 16 * 60_000;
+// An approved continuation already has a fixed canonical due at its exact ACK.
+// Reserve that conversation for the whole interval: even a pre-due background
+// GET can open a provider throttle that outlives the local fifteen-minute fence
+// and steals the only authoritative no-FINAL read at the twenty-minute due.
+export const CONTINUATION_DUE_READ_RESERVATION_MS = CONTINUATION_INTERVAL_MS;
 const PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT = 5;
 const PERSISTENT_READ_LIMIT_AGENT_REVIEW_DELAY_MS =
   (PERSISTENT_READ_LIMIT_AGENT_REVIEW_SLOT - 1) * CONTINUATION_INTERVAL_MS;

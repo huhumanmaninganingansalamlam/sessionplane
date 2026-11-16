@@ -914,6 +914,47 @@ test('ChatGPT semantic FINAL uses the owned auth context after the page is gone'
   assert.equal(authReads, 1);
   assert.equal(detailReads, 1);
 });
+test('approved due permits one safe early FINAL read without reopening the reservation', async () => {
+  let now = 100_000;
+  let detailReads = 0;
+  const backend = new ChatGptBackendRecovery({
+    requestTimeoutMs: 1000, tokenCacheTtlMs: 180_000, now: () => new Date(now),
+  });
+  const payload = conversationPayload([
+    node('root', null, null),
+    node('user-node', 'root', userMessage('user-message-1', 'user-turn-1')),
+  ], 'user-node');
+  const client: BackendJsonClient = { async get(url) {
+    if (url.endsWith('/api/auth/session')) {
+      return { status: 200, headers: {}, body: { accessToken: 'synthetic-memory-token' } };
+    }
+    detailReads++;
+    return { status: 200, headers: {}, body: payload };
+  } };
+  const dueAt = new Date(now + 20 * 60_000).toISOString();
+  backend.reserveExactTurn(CONVERSATION_ID, dueAt);
+  assert.equal((await backend.recoverExactTurn({
+    conversationId: CONVERSATION_ID,
+    submittedUserMessageId: 'user-message-1', submittedUserTurnId: 'user-turn-1',
+  }, client, 'https://chatgpt.com')).reason, 'backend-assistant-missing');
+  assert.equal(detailReads, 1, 'one early completion check is permitted');
+
+  now += 5_000;
+  backend.reserveExactTurn(CONVERSATION_ID, dueAt);
+  assert.equal((await backend.recoverExactTurn({
+    conversationId: CONVERSATION_ID,
+    submittedUserMessageId: 'user-message-1', submittedUserTurnId: 'user-turn-1',
+  }, client, 'https://chatgpt.com')).reason, 'backend-conversation-probe-paced');
+  assert.equal(detailReads, 1, 're-registering cannot restore the consumed early read');
+
+  now = Date.parse(dueAt);
+  assert.equal((await backend.recoverExactTurn({
+    conversationId: CONVERSATION_ID,
+    submittedUserMessageId: 'user-message-1', submittedUserTurnId: 'user-turn-1',
+  }, client, 'https://chatgpt.com', true)).reason, 'backend-assistant-missing');
+  assert.equal(detailReads, 2, 'the selected due retains its canonical slot');
+});
+
 test('reserved due FINAL owns the next canonical slot while background reads stay paced', async () => {
   let now = 100_000;
   let detailReads = 0;
