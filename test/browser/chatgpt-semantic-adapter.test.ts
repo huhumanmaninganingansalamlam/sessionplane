@@ -114,6 +114,166 @@ test('a literal initial prompt 계속 is a submit, not an inferred continuation'
   }
 });
 
+test('ChatGPT recoverDispatch adopts one exact later renderer user without mutating the page', {
+  timeout: 60_000,
+}, async () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-recover-dispatch-'));
+  const registry = new PageRegistry();
+  const owner = new BrowserOwner({
+    profileDir: path.join(root, 'disposable-profile'), pageRegistry: registry, headless: true,
+  });
+  try {
+    await owner.start();
+    const created = await owner.createPage();
+    const page = created.page;
+    await page.route('https://chatgpt.com/**', route => route.fulfill({
+      contentType: 'text/html', body: '<main></main>',
+    }));
+    await page.goto('https://chatgpt.com/c/conversation-b');
+    registry.reservePage(created.binding.pageKey, {
+      sessionId: 'fixture-recover-dispatch', generation: 1,
+      conversationId: 'conversation-b',
+    });
+    const binding = registry.getBinding(created.binding.pageKey);
+    const lease: OwnedPageIdentity = {
+      projectId: 'project-b', slotId: 'main', slotRevision: 1, taskId: 'task-b',
+      pageKey: binding.pageKey, targetId: binding.targetId!,
+      bindingEpoch: binding.bindingEpoch,
+    };
+    const task = context(lease, 'source-message');
+    let leaseAllowed = true;
+    let now = Date.parse('2026-11-16T04:59:49.805Z');
+    const backendUrls: string[] = [];
+    const canonical = {
+      id: 'conversation-b', current_node: 'continuation-answer', mapping: {
+        root: { id: 'root', parent: null, children: [], message: null },
+        'source-user': { id: 'source-user', parent: 'root', children: [], message: {
+          id: 'source-message', turn_id: 'turn-b', author: { role: 'user' },
+          content: { parts: ['Original request'] },
+        } },
+        'source-answer': { id: 'source-answer', parent: 'source-user', children: [], message: {
+          id: 'source-answer-message', author: { role: 'assistant' }, channel: 'final',
+          status: 'finished_successfully', end_turn: true,
+          content: { parts: ['Earlier exact answer'] }, metadata: {},
+        } },
+        'continuation-user': { id: 'continuation-user', parent: 'source-answer', children: [], message: {
+          id: 'continuation-message', turn_id: 'continuation-turn', author: { role: 'user' },
+          content: { parts: ['계속'] },
+        } },
+        'continuation-answer': { id: 'continuation-answer', parent: 'continuation-user', children: [], message: {
+          id: 'continuation-answer-message', author: { role: 'assistant' }, channel: 'final',
+          status: 'finished_successfully', end_turn: true,
+          content: { parts: ['Completed continuation'] }, metadata: {},
+        } },
+      },
+    };
+    const backendClient: BackendJsonClient = { async get(url) {
+      backendUrls.push(url);
+      return { status: 200, headers: {}, body: url.endsWith('/api/auth/session')
+        ? { accessToken: 'fixture-memory-only-token' } : canonical };
+    } };
+    const adapter = new ChatGptSemanticAdapter({
+      isExactLease: value => leaseAllowed && value === lease,
+      resolvePage: value => registry.pageForObservation(value.pageKey, value.bindingEpoch),
+      backendClient, backendOrigin: 'https://chatgpt.com',
+      backendRecovery: new ChatGptBackendRecovery({
+        requestTimeoutMs: 1_000, tokenCacheTtlMs: 60_000,
+        now: () => new Date(now),
+      }),
+    });
+    let foregroundCalls = 0;
+    Object.defineProperty(page, 'bringToFront', {
+      configurable: true,
+      value: async () => { foregroundCalls++; throw new Error('foreground mutation forbidden'); },
+    });
+    const mutations: string[] = [];
+    page.on('request', request => {
+      if (!['GET', 'HEAD'].includes(request.method())) {
+        mutations.push(request.method() + ' ' + request.url());
+      }
+    });
+    const source = '<article data-message-author-role="user" data-message-id="source-message" ' +
+      'data-turn-id="turn-b"><div data-message-content>Original request</div></article>';
+    const answer = '<article data-message-author-role="assistant" data-message-id="source-answer-message" ' +
+      'data-end-turn="true"><div data-message-content>Earlier exact answer</div></article>';
+    const candidate = (messageId: string | null = 'continuation-message', text = '계속') =>
+      '<article data-message-author-role="user" ' +
+      (messageId === null ? '' : `data-message-id="${messageId}" data-turn-id="continuation-turn" `) +
+      `><div data-message-content>${text}</div></article>`;
+    const final = '<article data-message-author-role="assistant" data-message-id="continuation-answer-message" ' +
+      'data-end-turn="true"><div data-message-content>Completed continuation</div></article>';
+    const renderer = (messages: string) => '<main>' + messages +
+      '<div id="prompt-textarea" contenteditable="true">protected-draft</div>' +
+      '<button data-testid="send-button" onclick="window.sends++">Send</button></main>' +
+      '<script>window.sends=0;</script>';
+    const readMutationState = () => page.evaluate(() => ({
+      draft: document.querySelector('#prompt-textarea')?.textContent,
+      sends: (window as any).sends,
+    }));
+    const expectRendererRejected = async (label: string, messages: string, prompt = '계속') => {
+      await page.setContent(renderer(messages));
+      const reads = backendUrls.length;
+      assert.equal(await adapter.recoverDispatch({ context: task, prompt }), null, label);
+      assert.equal(backendUrls.length, reads, label + ': renderer rejection must precede backend GET');
+      assert.deepEqual(await readMutationState(), { draft: 'protected-draft', sends: 0 }, label);
+    };
+
+    await page.setContent(renderer(source + answer + candidate() + final));
+    const evidence = await adapter.recoverDispatch({ context: task, prompt: '계속' });
+    assert.deepEqual(evidence, {
+      conversationId: 'conversation-b', messageId: 'continuation-message',
+      parentMessageId: 'source-answer', textHash: digest('계속'),
+      observedAt: new Date(now).toISOString(),
+    });
+    assert.deepEqual(backendUrls, [
+      'https://chatgpt.com/api/auth/session',
+      'https://chatgpt.com/backend-api/conversation/conversation-b',
+    ]);
+    assert.deepEqual(await readMutationState(), { draft: 'protected-draft', sends: 0 });
+    assert.deepEqual(mutations, []);
+    assert.equal(foregroundCalls, 0);
+
+    await expectRendererRejected('two later users are ambiguous',
+      source + answer + candidate() + final + candidate('foreign-later', 'Another user'));
+    await expectRendererRejected('continuation text is byte-exact',
+      source + answer + candidate('continuation-message', '계속 ') + final);
+    await expectRendererRejected('renderer candidate requires an exact message ID',
+      source + answer + candidate(null) + final);
+    await expectRendererRejected('source anchor must be unique',
+      source + source + answer + candidate() + final);
+    await expectRendererRejected('source anchor must exist',
+      answer + candidate() + final);
+
+    now += 6_000;
+    await page.setContent(renderer(source + answer + candidate('renderer-other') + final));
+    const readsBeforeCanonicalMismatch = backendUrls.length;
+    assert.equal(await adapter.recoverDispatch({ context: task, prompt: '계속' }), null,
+      'canonical mapping must contain the renderer-selected exact ID');
+    assert.equal(backendUrls.length, readsBeforeCanonicalMismatch + 1,
+      'a renderer candidate is still read-only verified by one canonical detail GET');
+
+    await page.evaluate(() => history.replaceState({}, '', '/c/conversation-b?foreign=1#fragment'));
+    const readsBeforeWrongUrl = backendUrls.length;
+    assert.equal(await adapter.recoverDispatch({ context: task, prompt: '계속' }), null);
+    assert.equal(backendUrls.length, readsBeforeWrongUrl, 'query/hash URL cannot reach canonical recovery');
+    await page.evaluate(() => history.replaceState({}, '', '/c/conversation-b'));
+
+    leaseAllowed = false;
+    assert.equal(await adapter.recoverDispatch({ context: task, prompt: '계속' }), null,
+      'a stale page lease is never adopted');
+    leaseAllowed = true;
+    assert.equal(await adapter.recoverDispatch({
+      context: { ...task, taskId: 'foreign-task' }, prompt: '계속',
+    }), null, 'Task/lease identity mismatch is never adopted');
+    assert.deepEqual(await readMutationState(), { draft: 'protected-draft', sends: 0 });
+    assert.deepEqual(mutations, []);
+    assert.equal(foregroundCalls, 0);
+  } finally {
+    await owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('ChatGPT semantic observe/act uses exact draft and one-shot send across structural/testid drift', {
   timeout: 90_000,
 }, async () => {

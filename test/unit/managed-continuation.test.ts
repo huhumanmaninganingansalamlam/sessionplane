@@ -1064,6 +1064,101 @@ test('Core drives one planned public initial send after exact bound conversation
   assert.equal(env.fake.sends.length, 1, 'completed public initial never resubmits');
 });
 
+test('public ACK scanner admits only the latest evidence-free uncertain continuation on its exact binding', t => {
+  const env = fixture(t);
+  const seedAcknowledgedSource = (taskId: string, slotId: string) => {
+    env.startTask(taskId, slotId);
+    env.seedPublicPolicy(taskId);
+    const attemptId = 'initial:' + taskId;
+    env.store.beginDispatch(taskId, 'alice', attemptId);
+    env.store.recordDispatchEvidence({
+      taskId, clientId: 'alice', attemptId,
+      evidence: {
+        conversationId: 'conversation:' + taskId,
+        messageId: 'source-user:' + taskId,
+        parentMessageId: 'root:' + taskId,
+        textHash: createHash('sha256').update('Question ' + taskId).digest('hex'),
+        observedAt: new Date(env.now).toISOString(),
+      },
+    });
+    env.store.acknowledgeAttempt({
+      taskId, clientId: 'alice', attemptId, externalTurnId: 'source-turn:' + taskId,
+    });
+  };
+  const seedUncertainContinuation = (taskId: string) => {
+    const attemptId = 'continue:' + taskId;
+    env.store.planAttempt({
+      taskId, clientId: 'alice', attemptId,
+      kind: 'continuation', turnKey: attemptId, content: '계속',
+    });
+    env.store.beginDispatch(taskId, 'alice', attemptId);
+    env.store.markUncertain(taskId, 'alice', attemptId, 'semantic-action-not-verified');
+    return attemptId;
+  };
+
+  seedAcknowledgedSource('recoverable', 'scan-recoverable');
+  const recoverable = seedUncertainContinuation('recoverable');
+
+  env.startTask('initial-no-evidence', 'scan-initial-no-evidence');
+  env.seedPublicPolicy('initial-no-evidence');
+  env.store.beginDispatch('initial-no-evidence', 'alice', 'initial:initial-no-evidence');
+  env.store.markUncertain('initial-no-evidence', 'alice',
+    'initial:initial-no-evidence', 'semantic-action-not-verified');
+
+  seedAcknowledgedSource('stop-only', 'scan-stop');
+  env.database.raw.prepare(
+    `INSERT INTO kernel_attempts(
+      attempt_id,task_id,sequence,kind,turn_key,content,state,external_turn_id,
+      dispatched_at,acknowledged_at,uncertain_reason,created_at)
+      VALUES(?,?,2,'stop',?,?,'uncertain',NULL,?,NULL,?,?)`,
+  ).run('stop:stop-only', 'stop-only', 'stop:stop-only', '',
+    new Date(env.now).toISOString(), 'semantic-action-not-verified',
+    new Date(env.now).toISOString());
+
+  seedAcknowledgedSource('superseded', 'scan-superseded');
+  const superseded = seedUncertainContinuation('superseded');
+  env.database.raw.prepare(
+    `INSERT INTO kernel_attempts(
+      attempt_id,task_id,sequence,kind,turn_key,content,state,external_turn_id,
+      dispatched_at,acknowledged_at,uncertain_reason,created_at)
+      VALUES(?,?,3,'continuation',?,?,'planned',NULL,NULL,NULL,NULL,?)`,
+  ).run('newer:superseded', 'superseded', 'newer:superseded', '계속',
+    new Date(env.now).toISOString());
+
+  seedAcknowledgedSource('stale-slot', 'scan-stale-slot');
+  const staleSlot = seedUncertainContinuation('stale-slot');
+  env.database.raw.prepare(
+    'UPDATE kernel_slots SET active_task_id=NULL WHERE project_id=? AND slot_id=?',
+  ).run('project', 'scan-stale-slot');
+
+  seedAcknowledgedSource('foreign-evidence', 'scan-foreign-evidence');
+  const foreignEvidence = seedUncertainContinuation('foreign-evidence');
+  env.store.recordDispatchEvidence({
+    taskId: 'foreign-evidence', clientId: 'alice', attemptId: foreignEvidence,
+    evidence: {
+      conversationId: 'conversation:foreign-evidence',
+      messageId: 'continued-user:foreign-evidence',
+      parentMessageId: 'source-assistant:foreign-evidence',
+      textHash: createHash('sha256').update('계속').digest('hex'),
+      observedAt: new Date(env.now).toISOString(),
+    },
+  });
+  env.database.raw.prepare(
+    'UPDATE kernel_dispatch_evidence SET provider_conversation_id=? WHERE attempt_id=?',
+  ).run('conversation:foreign', foreignEvidence);
+
+  const pending = env.store.listPendingPublicAcknowledgements(100);
+  assert.equal(pending.length, 1);
+  assert.deepEqual({ ...pending[0]! }, {
+    taskId: 'recoverable', clientId: 'alice', attemptId: recoverable,
+  });
+  assert.equal(env.store.getDispatchEvidence({
+    taskId: 'recoverable', clientId: 'alice', attemptId: recoverable,
+  }), null);
+  assert.equal(env.store.getFullTask('recoverable', 'alice').attempts.at(-1)?.state,
+    'uncertain');
+});
+
 test('Core recovers journaled public ACK after restart without another send', async t => {
   const env = fixture(t);
   env.startTask('task-a', 'main');

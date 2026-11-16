@@ -318,7 +318,7 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
       return { kind: 'unavailable', reason: 'semantic-conversation-capability-unavailable' };
     }
     try {
-      const context = await this.#context(query);
+      let context = await this.#context(query);
       if (!sameTask(query, context)) {
         return { kind: 'unavailable', reason: 'semantic-recovery-task-binding-mismatch' };
       }
@@ -357,7 +357,23 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
           ? { kind: ack.kind, reason: ack.reason }
           : { kind: 'unavailable', reason: 'canonical-root-ack-invalid-result-kind' };
       }
-      const evidence = this.#journal.read(query);
+      let evidence = this.#journal.read(query);
+      if (evidence === null && query.kind === 'continuation' &&
+          this.#adapter.recoverDispatch) {
+        const recovered = await this.#adapter.recoverDispatch({
+          context, prompt: query.content,
+        });
+        if (recovered !== null && correlate(query, recovered)) {
+          this.#journal.record(query, recovered);
+          evidence = this.#journal.read(query);
+          if (evidence !== null && correlate(query, evidence)) {
+            context = await this.#context(query);
+            if (!sameTask(query, context)) {
+              return { kind: 'unavailable', reason: 'semantic-recovery-task-binding-mismatch' };
+            }
+          }
+        }
+      }
       if (evidence === null || !correlate(query, evidence)) {
         return { kind: 'unavailable', reason: 'durable-exact-dispatch-evidence-unavailable' };
       }
