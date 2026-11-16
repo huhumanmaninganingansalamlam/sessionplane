@@ -9,7 +9,7 @@ import test from 'node:test';
 const runner = fileURLToPath(new URL('../../scripts/run-isolated-test.mjs', import.meta.url));
 
 test('nested test command reuses the exact parent gate root without another path level', () => {
-  const root = mkdtempSync(path.join(tmpdir(), 'sessionplane-gate-parent-'));
+  const root = mkdtempSync(path.join('/tmp', 'spg-'));
   try {
     const result = spawnSync(process.execPath, [runner, '--timeout-ms=5000', '--',
       '-e', 'process.stdout.write(process.env.TMPDIR ?? "")'], {
@@ -30,7 +30,7 @@ test('nested test command reuses the exact parent gate root without another path
 });
 
 test('an untrusted environment cannot claim a parent gate with mismatched TMPDIR', () => {
-  const claimed = path.join(tmpdir(), 'sessionplane-gate-claimed');
+  const claimed = path.join('/tmp', 'spg-claimed');
   const result = spawnSync(process.execPath, [runner, '--timeout-ms=5000', '--',
     '-e', 'process.stdout.write(process.env.TMPDIR ?? "")'], {
     encoding: 'utf8', env: { ...process.env,
@@ -40,7 +40,7 @@ test('an untrusted environment cannot claim a parent gate with mismatched TMPDIR
     },
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /sessionplane-gate-/);
+  assert.match(path.basename(result.stdout), /^spg-/);
   assert.notEqual(result.stdout, claimed);
   assert.equal(existsSync(result.stdout), false);
 });
