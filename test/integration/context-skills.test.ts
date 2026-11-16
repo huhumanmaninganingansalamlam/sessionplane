@@ -12,9 +12,8 @@ test('bundled skills are served and installed by the SessionPlane CLI', async ()
   try {
     const listed = await runSessplane(['skills', 'list', '--json']);
     assert.equal(listed.code, 0, listed.stderr);
-    const names = (JSON.parse(listed.stdout) as {
-      readonly skills: readonly Array<{ readonly name: string }>;
-    }).skills.map((skill) => skill.name);
+    const names = (JSON.parse(listed.stdout) as
+      readonly Array<{ readonly name: string }>).map((skill) => skill.name);
     for (const name of ['sessionplane', 'web-ai']) {
       assert.equal(names.includes(name), true, name);
     }
@@ -34,10 +33,6 @@ test('bundled skills are served and installed by the SessionPlane CLI', async ()
       'install',
       '--target',
       target,
-      '--skill',
-      'web-ai',
-      '--skill',
-      'sessionplane',
       '--json',
     ]);
     assert.equal(installed.code, 0, installed.stderr);
