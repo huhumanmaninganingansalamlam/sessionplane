@@ -35,6 +35,7 @@ export async function runIsolatedCandidateCommand(command, args, {
     try {
       child = spawn(command, args, {
         cwd, env: { ...env, SESSIONPLANE_CANDIDATE_GATE_TOKEN: gateToken,
+          SESSIONPLANE_CANDIDATE_GATE_ROOT: gateRoot,
           TMPDIR: gateRoot, TMP: gateRoot, TEMP: gateRoot },
         detached: true, stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
