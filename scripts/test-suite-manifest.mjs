@@ -26,6 +26,7 @@ const CI_CONTRACT = Object.freeze([
   'test/contract/kernel-row-codecs.test.ts',
   'test/contract/decision-envelope.test.ts',
   'test/contract/test-suite-manifest.test.ts',
+  'test/contract/verify-repository-quality.test.ts',
 ]);
 const BROWSER_FILES = Object.freeze([
   'test/browser/semantic-core-composition.test.ts',
@@ -81,7 +82,7 @@ export const TEST_SUITES = Object.freeze({
  * policy; there is no fake GitHub status and no separate candidate-only list.
  */
 export const RELEASE_GATES = Object.freeze([
-  { name: 'source-quality', script: 'lint', timeoutMs: 120_000 },
+  { name: 'source-quality', script: 'verify:repository', timeoutMs: 120_000 },
   { name: 'typecheck', script: 'typecheck', timeoutMs: 120_000 },
   { name: 'public-core-ci', script: 'test:ci', suite: 'ci', timeoutMs: 360_000 },
   { name: 'chromium-composition', script: 'test:browser', suite: 'browser', timeoutMs: 480_000 },
@@ -111,8 +112,8 @@ export const SUITE_ALIASES = Object.freeze({
 });
 
 export const WORKFLOW_GATES = Object.freeze({
-  ci: Object.freeze(['lint', 'typecheck', 'test:ci', 'build', 'doctor', 'test:package']),
-  release: Object.freeze(['lint', 'typecheck', 'test:ci', 'build', 'doctor', 'test:package']),
+  ci: Object.freeze(['lint', 'verify:repository', 'typecheck', 'test:ci', 'build', 'doctor', 'test:package']),
+  release: Object.freeze(['lint', 'verify:repository', 'typecheck', 'test:ci', 'build', 'doctor', 'test:package']),
 });
 
 export function getTestSuite(name) {

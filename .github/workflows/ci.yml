@@ -27,6 +27,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm audit --audit-level=high
       - run: npm run lint
+      - run: npm run verify:repository
       - run: npm run typecheck
       - name: Test
         shell: bash
