@@ -10,17 +10,14 @@ import { SessionPlaneDatabase } from '../../src/storage/database.ts';
 import { migrations } from '../../src/storage/migrations/index.ts';
 import { createKernelStores } from '../../src/storage/kernel/create-kernel-stores.ts';
 import type { AgentDecisionPacket } from '../../src/core/semantic-decision-gateway.ts';
+import { createDecisionEvidence } from '../support/semantic-decision-fixture.ts';
 import {
   buildDecisionEnvelopeV2, parseDecisionEnvelope, parseDecisionEnvelopeV1,
   parseDecisionEnvelopeV2, projectHistoricalDecisionForRead, reconcilePendingDecisionV1,
 } from '../../src/core/decisions/decision-envelope.ts';
 
 const legacy = readFileSync(new URL('../fixtures/decision-envelope-v1.json', import.meta.url), 'utf8');
-const blankEvidence = {
-  original_request: '', current_attempt: '', provider_question: '',
-  permission: '', partial_answer: '', capability_issues: '',
-  provider_controls: '', decision_options: '[]',
-};
+const blankEvidence = createDecisionEvidence();
 
 function packet(taskId: string, decisionId: string): AgentDecisionPacket {
   const timestamp = '2026-11-23T00:00:00.000Z';

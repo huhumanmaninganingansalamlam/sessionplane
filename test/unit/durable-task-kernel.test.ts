@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 
@@ -21,40 +19,16 @@ import {
   TASK_STATES,
   reduceTaskProjection,
 } from '../../src/domain/durable-task.ts';
-import { SessionPlaneDatabase } from '../../src/storage/database.ts';
-import { createKernelStores, type KernelStores } from '../../src/storage/kernel/create-kernel-stores.ts';
+
+import type { KernelStores } from '../../src/storage/kernel/create-kernel-stores.ts';
+import { createTaskKernelFixture, seedOwnedTaskSlot } from '../support/task-kernel-fixture.ts';
 
 function fixture(t: TestContext) {
-  const dir = mkdtempSync(join(tmpdir(), 'sessionplane-kernel-'));
-  const file = join(dir, 'kernel-test.sqlite');
-  let database = SessionPlaneDatabase.open(file);
-  let store = createKernelStores(database, () => '2026-11-08T00:00:00.000Z');
-  t.after(() => {
-    database.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
-  const reopen = () => {
-    database.close();
-    database = SessionPlaneDatabase.open(file);
-    store = createKernelStores(database, () => '2026-11-08T00:00:00.000Z');
-    return store;
-  };
-  return {
-    get store() { return store; },
-    get database() { return database; },
-    reopen,
-  };
+  return createTaskKernelFixture(t);
 }
 
 function seed(store: KernelStores, providerKey = 'chatgpt-fixture') {
-  store.projects.openProject({
-    projectId: 'project-1', projectKey: 'sessionplane.dev',
-    displayName: 'SessionPlane', clientId: 'alice',
-  });
-  return store.projects.openConversationSlot({
-    projectId: 'project-1', clientId: 'alice',
-    slotId: 'main', roleKey: 'Main', providerKey,
-  });
+  return seedOwnedTaskSlot(store, { providerKey });
 }
 
 function start(store: KernelStores, index: number, slotId = 'main') {

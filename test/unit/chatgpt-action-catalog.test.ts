@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { seedExactTurn, seedProviderControl } from '../support/chatgpt-semantic-fixture.ts';
 import {
   buildChatGptActionCatalog,
   type ChatGptActionCatalogInput,
@@ -10,9 +11,9 @@ const lease = {
   pageKey: 'main-page', targetId: 'native-target-1', bindingEpoch: 1,
 };
 const context = {
-  projectId: 'p', slotId: 'main', slotRevision: 1, taskId: 't',
-  providerConversationId: 'exact-conversation', submittedUserMessageId: 'user-anchor',
-  submittedUserTurnId: 'turn-1', pageLease: lease,
+  ...seedExactTurn({ taskId: 't', conversationId: 'exact-conversation',
+    userMessageId: 'user-anchor', userTurnId: 'turn-1' }),
+  pageLease: lease,
 };
 const scan = {
   blocker: 'provider_question', reason: 'provider-question-requires-decision',
@@ -66,4 +67,13 @@ test('no current provider effect or permission grant is invented from blocked ev
   assert.equal(blocked.actions.length, 0);
   assert.equal(blocked.cached.size, 0);
   assert.equal(blocked.blocker, 'provider_permission');
+});
+
+test('provider fixture preserves exact control metadata without a selector', () => {
+  const control = seedProviderControl({
+    purpose: 'grant_permission', effect: 'permission_verified', evidenceHash: 'exact-hash',
+  });
+  assert.equal(control.purpose, 'grant_permission');
+  assert.equal(control.evidenceHash, 'exact-hash');
+  assert.equal(Object.isFrozen(control), true);
 });

@@ -778,7 +778,7 @@ class HandoverTests(unittest.TestCase):
     def test_candidate_acceptance_v1_binds_commit_tree_package_and_all_required_gates(self):
         with tempfile.TemporaryDirectory() as directory:
             receipt = pathlib.Path(directory)/'acceptance.json'
-            names = ['typecheck', 'public-core-ci', 'chromium-composition',
+            names = ['source-quality', 'typecheck', 'public-core-ci', 'chromium-composition',
                      'four-background-tabs', 'browser-transport-comparison',
                      'semantic-adapter', 'clean-build', 'installed-tarball-core']
             manifest = {'sourceCommit': 'a'*40, 'sourceTree': 'b'*40,

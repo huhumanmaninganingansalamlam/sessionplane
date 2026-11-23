@@ -21,8 +21,7 @@ export async function inspectComposerRadixControls(
         e.getAttribute('aria-controls') === menuId && e.getAttribute('aria-expanded') === 'true' &&
         e.getAttribute('data-state') === 'open' && visible(e));
     const menus = [...document.querySelectorAll<HTMLElement>('[role="menu"][id]')]
-      .filter(e => e.id === menuId && visible(e) &&
-        e.getAttribute('aria-labelledby') === openerId);
+      .filter(e => e.id === menuId && visible(e));
     const initial = {
       optionMenuId: '', options: [] as Array<{value: string; controlLabel: string;
         enabled: boolean; selected: boolean}>,
