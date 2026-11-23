@@ -1,5 +1,8 @@
 # Core handover preserving Chrome and SQLite
 
+The [handover support matrix](handover-support-matrix.md) records the current
+compatibility evidence; it is not approval to modify the installed Core.
+
 This procedure describes a coordinated same-user SessionPlane Core replacement
 without closing the dedicated Chrome profile. The checked-in handover manifest
 now targets a reviewed schema 16→17 migration for a new candidate. Previously
