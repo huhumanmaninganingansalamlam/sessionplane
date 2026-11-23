@@ -12,9 +12,6 @@ export const QUALITY_BUDGET = Object.freeze({
 // Temporary, exact-path ratchets. Each entry has one owning child Task and
 // must disappear (not be raised) before the final integration Task.
 export const EXISTING_SIZE_CEILINGS = Object.freeze({
-  'core/semantic-decision-gateway.ts': 1192, // T-20261123033055Z-d4557f7e
-  'core/managed-continuation.ts': 694, // T-20261123033055Z-4366babb
-  'core/semantic-core-runtime.ts': 817, // T-20261123033139Z-af36a8be
   'browser/ref-snapshot.ts': 621, // T-20261123033056Z-d4464c8f
 });
 
@@ -24,10 +21,6 @@ const EXISTING_DECLARATION_CEILINGS = Object.freeze({
   'browser/ref-snapshot.ts::BrowserRefSnapshotStore.capture#0': 408, // browser lifecycle child
   'browser/ref-snapshot.ts::BrowserRefSnapshotStore.callback#0': 328,
   'config.ts::resolveConfig#0': 152, // final integration cleanup
-  'core/managed-continuation.ts::ManagedContinuationService.#run#0': 166,
-  'core/semantic-core-runtime.ts::createSemanticCoreRuntime#0': 670,
-  'core/semantic-decision-gateway.ts::SemanticDecisionGateway.inspect#0': 154,
-  'core/semantic-decision-gateway.ts::SemanticDecisionGateway.decide#0': 152,
   'main.ts::startCore#0': 245, // composition child
   'providers/chatgpt/hostspan-permission.ts::inspectHostSpanActivity#0': 204,
   'providers/chatgpt/hostspan-permission.ts::callback#10': 178,
@@ -40,14 +33,10 @@ const EXISTING_EMPTY_CATCH_COUNTS = Object.freeze({
   'browser/browser-metrics.ts': 3,
   'browser/browser-owner.ts': 3,
   'browser/ref-snapshot.ts': 1,
-  'core/managed-continuation.ts': 15,
-  'core/semantic-core-runtime.ts': 1,
-  'core/semantic-decision-gateway.ts': 7,
   'core/semantic-exact-task-port.ts': 1,
   'providers/chatgpt/hostspan-permission.ts': 1,
 });
 const EXISTING_DURABLE_JSON_CAST_COUNTS = Object.freeze({
-  'core/semantic-decision-gateway.ts': 3, // durable Decision child
 });
 const EXISTING_STORAGE_PROVIDER_TOKENS = Object.freeze({
   'storage/conversation-load-recovery-repository.ts': 9, // typed store child

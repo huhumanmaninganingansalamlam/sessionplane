@@ -4,7 +4,13 @@ import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript/unstable/ast';
 import { sourceLine, withSourceTrees, walkSource } from './source-analysis.mjs';
 
-export const COMPOSITION_ROOTS = Object.freeze(['main.ts', 'core/semantic-core-runtime.ts']);
+// Only these explicit assembly files may instantiate concrete provider runtimes.
+export const COMPOSITION_ROOTS = Object.freeze([
+  'main.ts',
+  'core/semantic-core-runtime.ts',
+  'core/runtime/assemble-semantic-runtime.ts',
+  'core/runtime/assemble-provider-runtime.ts',
+]);
 
 // These are ownership rules, not an aspirational generic layers diagram.
 // A new dependency must be justified by the consumer's responsibility.
