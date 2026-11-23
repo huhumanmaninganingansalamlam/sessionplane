@@ -1,6 +1,6 @@
 # Core handover compatibility and evidence matrix
 
-Reviewed for the local 0.4.111 / SQLite schema 17 candidate on 2026-11-23.
+Reviewed for the 0.4.113 / SQLite schema 17 patch candidate on 2026-11-24.
 This is a support inventory, not an operational cutover receipt or permission to
 attach to the currently installed Core/Chrome/profile.
 
