@@ -802,6 +802,22 @@ class HandoverTests(unittest.TestCase):
                 receipt.write_text(json.dumps(changed))
                 with self.subTest(mutate=mutate), self.assertRaises(AssertionError):
                     bundle.validate_candidate(manifest, receipt)
+            for mutate in ['required-missing', 'gate-omitted', 'gate-reordered', 'gate-duplicated']:
+                changed_manifest = copy.deepcopy(manifest)
+                changed = copy.deepcopy(report)
+                if mutate == 'required-missing':
+                    del changed_manifest['requiredGates']
+                elif mutate == 'gate-omitted':
+                    changed['gates'].pop(0)
+                elif mutate == 'gate-reordered':
+                    changed['gates'][0], changed['gates'][1] = changed['gates'][1], changed['gates'][0]
+                else:
+                    changed['gates'].append(copy.deepcopy(changed['gates'][0]))
+                receipt.write_text(json.dumps(changed))
+                with self.subTest(mutate=mutate), self.assertRaises(AssertionError):
+                    bundle.validate_candidate(changed_manifest, receipt)
+            with self.assertRaisesRegex(AssertionError, 'exact candidate acceptance receipt'):
+                bundle.validate_candidate({**manifest, 'ciConclusion': 'success'}, None)
 
     def test_bundle_rejects_policy_not_matching_compiled_candidate_schema(self):
         with tempfile.TemporaryDirectory() as directory:

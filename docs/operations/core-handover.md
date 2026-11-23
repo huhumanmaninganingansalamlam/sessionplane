@@ -92,7 +92,7 @@ python3 scripts/ops/handover.py bundle \
 
 Bundle creation installs the tarball only into a temporary prefix and binds the
 manifest to the package SHA-256, clean Git commit/tree embedded in the build, all
-eight acceptance gates, six-tool MCP catalog hash, candidate BrowserOwner hash,
+nine manifest-required acceptance gates, six-tool MCP catalog hash, candidate BrowserOwner hash,
 and the currently installed old BrowserOwner hash needed for rollback. It does
 not contact or mutate the running Core.
 

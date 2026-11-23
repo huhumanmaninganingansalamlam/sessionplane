@@ -87,6 +87,7 @@ def promote_package(installed, candidate, stage, receipt):
 
 def validate_candidate(manifest, local_validation):
     if local_validation is None:
+        assert 'schemaTransition' not in manifest, 'Schema transition requires exact candidate acceptance receipt'
         assert manifest.get('ciConclusion') == 'success', 'Candidate CI not successful'
         return
     report = json.loads(local_validation.read_text())
@@ -99,12 +100,14 @@ def validate_candidate(manifest, local_validation):
         assert source.get('sourceIssues') == [], 'Candidate source provenance has issues'
         assert report.get('externalPackageSha256') == manifest['packageSha256'], 'Local validation package differs'
         assert report.get('candidateL1L2L4Passed') is True, 'Candidate acceptance gates did not pass'
-        required = manifest.get('requiredGates', [
-            'typecheck', 'public-core-ci', 'chromium-composition', 'four-background-tabs',
-            'browser-transport-comparison', 'semantic-adapter', 'clean-build',
-            'installed-tarball-core'])
-        gates = {gate.get('name'): gate for gate in report.get('gates', [])}
-        assert set(required).issubset(gates), 'Candidate acceptance is missing required gates'
+        required = manifest.get('requiredGates')
+        assert isinstance(required, list) and len(required) > 0, 'Candidate required gates are missing'
+        assert all(isinstance(name, str) and name for name in required), 'Candidate gate name is invalid'
+        assert len(required) == len(set(required)), 'Candidate required gates contain duplicates'
+        reported = report.get('gates')
+        assert isinstance(reported, list) and all(isinstance(gate, dict) for gate in reported), 'Candidate gate report is invalid'
+        assert [gate.get('name') for gate in reported] == required, 'Candidate gates differ from exact required names/order'
+        gates = {gate['name']: gate for gate in reported}
         for name in required:
             gate = gates[name]
             assert gate.get('passed') is True and gate.get('exitCode') == 0, 'Candidate gate failed: ' + name

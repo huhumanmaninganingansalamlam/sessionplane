@@ -59,7 +59,7 @@ For an exact reviewed merge commit, run
 `node scripts/candidate-acceptance.mjs --release-main --live-readonly`
 on the **clean main** checkout whose HEAD matches both `origin/main` and
 the remote main ref. The default remains clean dev-only. This explicit mode
-runs the same eight isolated gates and creates a fresh, main-commit-bound
+runs the same manifest-defined isolated gates and creates a fresh, main-commit-bound
 receipt and package checksum. It does not copy the dev receipt or authorize a
 production Core/Chrome change. Any tree, branch, upstream, or package mismatch
 fails closed.
