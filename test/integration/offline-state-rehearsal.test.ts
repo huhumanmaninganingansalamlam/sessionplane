@@ -40,6 +40,78 @@ function hash(path: string) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
+test('schema 16 legacy Decision bytes survive additive v17 column and rollback rejects tampering', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'sp-v1-decision-upgrade-'));
+  const source = join(root, 'source-v16.sqlite');
+  const target = join(root, 'migration');
+  const original = '{"schemaVersion":1,"question":"허용?\\n  exact","option":"계속"}';
+  try {
+    const current = SessionPlaneDatabase.open(source);
+    try {
+      const store = createKernelStores(current);
+      store.projects.openProject({ projectId: 'legacy', projectKey: 'legacy.v1',
+        clientId: 'owner', displayName: 'Preserve historical Decision' });
+      store.projects.openConversationSlot({ projectId: 'legacy', slotId: 'main',
+        clientId: 'owner', roleKey: 'Main', providerKey: 'chatgpt' });
+      store.tasks.createTask({ taskId: 'legacy-task', projectId: 'legacy',
+        slotId: 'main', clientId: 'owner', expectedSlotRevision: 1,
+        requestId: 'legacy-request', prompt: 'literal prompt' });
+      current.raw.prepare(
+        'INSERT INTO kernel_decisions(decision_id,task_id,audience,context_json,' +
+        'status,resolution_json,action_consumed,created_at,resolved_at,envelope_version)' +
+        ' VALUES(?,?,?,? ,?,NULL,0,?,NULL,1)',
+      ).run('decision-v1', 'legacy-task', 'agent', original, 'pending',
+        '2026-11-12T00:00:00.000Z');
+    } finally { current.close(); }
+    const old = new DatabaseSync(source);
+    try {
+      old.exec('BEGIN IMMEDIATE');
+      try {
+        old.exec('DROP INDEX kernel_decisions_envelope_version_idx');
+        old.exec('ALTER TABLE kernel_decisions DROP COLUMN envelope_version');
+        old.prepare('DELETE FROM schema_migrations WHERE version=17').run();
+        old.exec('COMMIT');
+      } catch (error) { old.exec('ROLLBACK'); throw error; }
+      assert.equal(old.prepare(
+        'SELECT max(version) AS version FROM schema_migrations').get()!.version, 16);
+    } finally { old.close(); }
+
+    const migrated = await rehearseMigration({ sourcePath: source, destinationDir: target });
+    assert.equal(migrated.sourceSchemaVersion, 16);
+    assert.equal(migrated.schemaVersion, 17);
+    const candidate = join(target, 'candidate.sqlite');
+    const db = new DatabaseSync(candidate);
+    try {
+      const record = db.prepare(
+        "SELECT context_json,envelope_version,status FROM kernel_decisions WHERE decision_id='decision-v1'"
+      ).get()!;
+      assert.equal(record.context_json, original);
+      assert.equal(record.envelope_version, 1);
+      assert.equal(record.status, 'pending');
+      const originalBytes = db.prepare(
+        "SELECT original_prompt FROM kernel_tasks WHERE task_id='legacy-task'").get()!;
+      assert.equal(originalBytes.original_prompt, 'literal prompt');
+    } finally { db.close(); }
+    const rollback = await rehearseRollback({ migrationDir: target,
+      candidatePath: candidate, destinationDir: join(root, 'rollback') });
+    assert.equal(rollback.candidateWasNeverOverwritten, true);
+    const tampered = new DatabaseSync(candidate);
+    try {
+      tampered.prepare("UPDATE kernel_decisions SET context_json='forged' WHERE decision_id='decision-v1'")
+        .run();
+    } finally { tampered.close(); }
+    await assert.rejects(rehearseRollback({ migrationDir: target,
+      candidatePath: candidate, destinationDir: join(root, 'rejected') }),
+    /changed or removed a source row: kernel_decisions/);
+    const untouched = new DatabaseSync(source, { readOnly: true });
+    try {
+      assert.equal(untouched.prepare(
+        "SELECT context_json FROM kernel_decisions WHERE decision_id='decision-v1'").get()!.context_json,
+      original);
+    } finally { untouched.close(); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('WAL-consistent offline backup upgrades schema and keeps every synthetic legacy fact byte-exact', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sp-offline-snapshot-'));
   const source = fixture(dir);

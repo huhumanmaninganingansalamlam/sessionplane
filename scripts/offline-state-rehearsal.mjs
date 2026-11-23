@@ -61,7 +61,7 @@ function canonicalRow(row) {
   });
 }
 
-function tableFacts(db) {
+function tableFacts(db, sourceColumnProjection = null) {
   const tables = db.prepare(
     "SELECT name,sql FROM sqlite_master WHERE type='table'" +
     " AND name NOT IN ('schema_migrations','sqlite_sequence')" +
@@ -76,7 +76,13 @@ function tableFacts(db) {
     const order = primaryKey.length > 0
       ? primaryKey.map(column => quote(String(column.name))).join(',')
       : 'rowid';
-    const statement = db.prepare('SELECT * FROM ' + quote(name) + ' ORDER BY ' + order);
+    // During an additive migration, compare only columns from the sealed source
+    // schema. New migration-owned columns must not rewrite the original
+    // Decision/Task fact hash, and every original value remains byte-exact.
+    const columns = sourceColumnProjection?.get(name);
+    const selection = columns ? columns.map(quote).join(',') : '*';
+    const statement = db.prepare('SELECT ' + selection + ' FROM ' +
+      quote(name) + ' ORDER BY ' + order);
     const sha = createHash('sha256');
     let count = 0;
     for (const row of statement.iterate()) {
@@ -164,10 +170,14 @@ export async function rehearseMigration(input) {
 
     const snapshotDb = openReadonly(snapshot);
     let sourceFacts;
+    let sourceColumns;
     let sourceSchemaVersion;
     try {
       verifyDatabase(snapshotDb);
       sourceFacts = tableFacts(snapshotDb);
+      sourceColumns = new Map(sourceFacts.map(fact => [fact.name,
+        snapshotDb.prepare('PRAGMA table_info(' + quote(fact.name) + ')').all()
+          .map(column => String(column.name))]));
       sourceSchemaVersion = schemaVersion(snapshotDb);
     } finally { snapshotDb.close(); }
     if (input.failAfterSnapshot === true) throw new Error('Injected offline interruption');
@@ -184,7 +194,7 @@ export async function rehearseMigration(input) {
     try {
       verifyDatabase(upgraded.raw);
       candidateSchemaVersion = upgraded.schemaVersion;
-      const retainedFacts = tableFacts(upgraded.raw);
+      const retainedFacts = tableFacts(upgraded.raw, sourceColumns);
       for (const fact of sourceFacts) {
         const after = retainedFacts.find(value => value.name === fact.name);
         if (!after || after.count !== fact.count || after.sha256 !== fact.sha256) {
