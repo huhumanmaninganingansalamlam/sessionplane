@@ -9,7 +9,7 @@ import test from 'node:test';
 
 import { inspectArchivedState, rehearseMigration, rehearseRollback } from '../../scripts/offline-state-rehearsal.mjs';
 import { SessionPlaneDatabase } from '../../src/storage/database.ts';
-import { TaskKernelRepository } from '../../src/storage/task-kernel-repository.ts';
+import { createKernelStores, type KernelStores } from '../../src/storage/kernel/create-kernel-stores.ts';
 import { migrations } from '../../src/storage/migrations/index.ts';
 
 const facts = [
@@ -111,28 +111,28 @@ test('interrupted migration publishes no partial candidate; rollback preserves p
     const candidate = join(destinationDir, 'candidate.sqlite');
     const database = SessionPlaneDatabase.open(candidate);
     try {
-      const store = new TaskKernelRepository(database);
+      const store = createKernelStores(database);
       for (const [i, phase] of ['uncertain', 'final', 'draft'].entries()) {
         const projectId = 'synthetic-project-' + i;
         const taskId = 'synthetic-task-' + i;
         const attemptId = 'synthetic-attempt-' + i;
-        store.openProject({ projectId, clientId: 'isolated-owner',
+        store.projects.openProject({ projectId, clientId: 'isolated-owner',
           projectKey: projectId, displayName: phase });
-        store.openSlot({ projectId, clientId: 'isolated-owner',
+        store.projects.openConversationSlot({ projectId, clientId: 'isolated-owner',
           slotId: 'main', roleKey: 'main', providerKey: 'chatgpt' });
-        store.startTask({ taskId, projectId, slotId: 'main',
+        store.tasks.createTask({ taskId, projectId, slotId: 'main',
           clientId: 'isolated-owner', requestId: 'start-' + phase,
           expectedSlotRevision: 1, prompt: 'prompt ' + phase });
-        store.planAttempt({ taskId, clientId: 'isolated-owner', attemptId,
+        store.attempts.planAttempt({ taskId, clientId: 'isolated-owner', attemptId,
           kind: 'initial', turnKey: 'root', content: 'prompt ' + phase });
-        if (phase !== 'draft') store.beginDispatch(taskId, 'isolated-owner', attemptId);
+        if (phase !== 'draft') store.attempts.reserveAttemptDispatch(taskId, 'isolated-owner', attemptId);
         if (phase === 'uncertain') {
-          store.markUncertain(taskId, 'isolated-owner', attemptId, 'lost-provider-ACK');
+          store.attempts.markAttemptUncertain(taskId, 'isolated-owner', attemptId, 'lost-provider-ACK');
         }
         if (phase === 'final') {
-          store.acknowledgeAttempt({ taskId, clientId: 'isolated-owner',
+          store.attempts.acknowledgeAttempt({ taskId, clientId: 'isolated-owner',
             attemptId, externalTurnId: 'turn-exact' });
-          store.recordFinal({ taskId, clientId: 'isolated-owner',
+          store.tasks.recordTaskFinal({ taskId, clientId: 'isolated-owner',
             attemptId, externalTurnId: 'turn-exact',
             resultId: 'result-exact', answerText: 'Exact final\n  retained',
             completeTask: true });
@@ -185,15 +185,15 @@ test('equal-schema rollback retains additive Task evidence and rejects mutation 
   const source = join(dir, 'source-current.sqlite');
   const sourceDb = SessionPlaneDatabase.open(source);
   try {
-    const store = new TaskKernelRepository(sourceDb);
-    store.openProject({ projectId: 'original-project', clientId: 'original-owner',
+    const store = createKernelStores(sourceDb);
+    store.projects.openProject({ projectId: 'original-project', clientId: 'original-owner',
       projectKey: 'original-project', displayName: 'original' });
-    store.openSlot({ projectId: 'original-project', clientId: 'original-owner',
+    store.projects.openConversationSlot({ projectId: 'original-project', clientId: 'original-owner',
       slotId: 'main', roleKey: 'main', providerKey: 'chatgpt' });
-    store.startTask({ taskId: 'original-task', projectId: 'original-project',
+    store.tasks.createTask({ taskId: 'original-task', projectId: 'original-project',
       slotId: 'main', clientId: 'original-owner', requestId: 'original-request',
       expectedSlotRevision: 1, prompt: 'original prompt must remain byte exact' });
-    store.planAttempt({ taskId: 'original-task', clientId: 'original-owner',
+    store.attempts.planAttempt({ taskId: 'original-task', clientId: 'original-owner',
       attemptId: 'original-attempt', kind: 'initial', turnKey: 'root',
       content: 'original prompt must remain byte exact' });
     sourceDb.raw.prepare(
@@ -202,28 +202,28 @@ test('equal-schema rollback retains additive Task evidence and rejects mutation 
       ' VALUES(?,?,?,?,?)',
     ).run('original-task', JSON.stringify({ enabled: false }),
       'original-policy-hash', 1, '2026-11-12T00:00:00.000Z');
-    assert.equal(store.listPendingPublicPreparations(1)[0]?.taskId, 'original-task');
-    assert.equal(store.claimPublicPreparationPrefersBound(), false);
+    assert.equal(store.scans.scanPendingPreparations(1)[0]?.taskId, 'original-task');
+    assert.equal(store.scans.claimPreparationPrefersBound(), false);
   } finally { sourceDb.close(); }
 
   const migrationDir = join(dir, 'migration');
   const rollbackDir = join(dir, 'rollback');
   try {
     const migrated = await rehearseMigration({ sourcePath: source, destinationDir: migrationDir });
-    assert.equal(migrated.sourceSchemaVersion, 16);
-    assert.equal(migrated.schemaVersion, 16);
+    assert.equal(migrated.sourceSchemaVersion, 17);
+    assert.equal(migrated.schemaVersion, 17);
     const candidatePath = join(migrationDir, 'candidate.sqlite');
     const candidate = SessionPlaneDatabase.open(candidatePath);
     try {
-      const store = new TaskKernelRepository(candidate);
-      store.openProject({ projectId: 'new-project', clientId: 'new-owner',
+      const store = createKernelStores(candidate);
+      store.projects.openProject({ projectId: 'new-project', clientId: 'new-owner',
         projectKey: 'new-project', displayName: 'new evidence' });
-      store.openSlot({ projectId: 'new-project', clientId: 'new-owner',
+      store.projects.openConversationSlot({ projectId: 'new-project', clientId: 'new-owner',
         slotId: 'main', roleKey: 'main', providerKey: 'chatgpt' });
-      store.startTask({ taskId: 'new-task', projectId: 'new-project', slotId: 'main',
+      store.tasks.createTask({ taskId: 'new-task', projectId: 'new-project', slotId: 'main',
         clientId: 'new-owner', requestId: 'new-request', expectedSlotRevision: 1,
         prompt: 'new evidence retained before rollback' });
-      store.planAttempt({ taskId: 'new-task', clientId: 'new-owner',
+      store.attempts.planAttempt({ taskId: 'new-task', clientId: 'new-owner',
         attemptId: 'new-attempt', kind: 'initial', turnKey: 'root',
         content: 'new evidence retained before rollback' });
       candidate.raw.prepare(
@@ -232,10 +232,10 @@ test('equal-schema rollback retains additive Task evidence and rejects mutation 
         ' VALUES(?,?,?,?,?)',
       ).run('new-task', JSON.stringify({ enabled: false }),
         'new-policy-hash', 1, '2026-11-12T00:00:00.000Z');
-      assert.equal(store.listPendingPublicPreparations(1)[0]?.taskId, 'new-task');
-      assert.equal(store.claimPublicPreparationPrefersBound(), true);
-      store.beginDispatch('new-task', 'new-owner', 'new-attempt');
-      store.markUncertain('new-task', 'new-owner', 'new-attempt', 'lost-ack');
+      assert.equal(store.scans.scanPendingPreparations(1)[0]?.taskId, 'new-task');
+      assert.equal(store.scans.claimPreparationPrefersBound(), true);
+      store.attempts.reserveAttemptDispatch('new-task', 'new-owner', 'new-attempt');
+      store.attempts.markAttemptUncertain('new-task', 'new-owner', 'new-attempt', 'lost-ack');
     } finally { candidate.close(); }
 
     const result = await rehearseRollback({
@@ -332,7 +332,7 @@ test('offline rehearsal CLI requires explicit paths and emits a verifiable manif
   }
 });
 
-test('v15-to-v16 isolated upgrade retains original exact ACK/FINAL and event chain', async () => {
+test('v15-to-v17 isolated upgrade retains original exact ACK/FINAL and event chain', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sp-scan-cursors-schema15-'));
   const source = join(dir, 'original-v15.sqlite');
   const target = join(dir, 'migration');
@@ -342,34 +342,39 @@ test('v15-to-v16 isolated upgrade retains original exact ACK/FINAL and event cha
     // The new table is empty before downgrading; no operational DB is touched.
     const current = SessionPlaneDatabase.open(source);
     try {
-      const store = new TaskKernelRepository(current);
-      store.openProject({ projectId: 'upgraded', clientId: 'owner',
+      const store = createKernelStores(current);
+      store.projects.openProject({ projectId: 'upgraded', clientId: 'owner',
         projectKey: 'upgrade.fixture', displayName: 'Preserve exact final' });
-      store.openSlot({ projectId: 'upgraded', clientId: 'owner', slotId: 'main',
+      store.projects.openConversationSlot({ projectId: 'upgraded', clientId: 'owner', slotId: 'main',
         roleKey: 'Main', providerKey: 'fixture' });
-      store.startTask({ taskId: 'retained-task', projectId: 'upgraded',
+      store.tasks.createTask({ taskId: 'retained-task', projectId: 'upgraded',
         slotId: 'main', expectedSlotRevision: 1, clientId: 'owner',
         requestId: 'start-once', prompt: 'exact original prompt' });
-      store.observeConversation({ projectId: 'upgraded', clientId: 'owner',
+      store.projects.bindObservedConversation({ projectId: 'upgraded', clientId: 'owner',
         slotId: 'main', expectedRevision: 1, taskId: 'retained-task',
         providerConversationId: 'exact-conversation' });
-      store.planAttempt({ taskId: 'retained-task', clientId: 'owner',
+      store.attempts.planAttempt({ taskId: 'retained-task', clientId: 'owner',
         attemptId: 'original-attempt', kind: 'initial', turnKey: 'root',
         content: 'exact original prompt' });
-      store.beginDispatch('retained-task', 'owner', 'original-attempt');
-      store.acknowledgeAttempt({ taskId: 'retained-task', clientId: 'owner',
+      store.attempts.reserveAttemptDispatch('retained-task', 'owner', 'original-attempt');
+      store.attempts.acknowledgeAttempt({ taskId: 'retained-task', clientId: 'owner',
         attemptId: 'original-attempt', externalTurnId: 'exact-turn' });
-      store.recordFinal({ taskId: 'retained-task', clientId: 'owner',
+      store.tasks.recordTaskFinal({ taskId: 'retained-task', clientId: 'owner',
         attemptId: 'original-attempt', externalTurnId: 'exact-turn',
         resultId: 'original-final', answerText: 'Original FINAL\n  exact spacing',
         completeTask: true });
-      assert.equal(store.getTask('retained-task', 'owner').state, 'completed');
+      assert.equal(store.tasks.getTask('retained-task', 'owner').state, 'completed');
     } finally { current.close(); }
 
     const original = new DatabaseSync(source);
     try {
       original.exec('BEGIN IMMEDIATE');
       try {
+        // Reconstruct an actual schema-15 source, including removal of the
+        // schema-17 envelope column and its index before removing v16 tables.
+        original.exec('DROP INDEX kernel_decisions_envelope_version_idx');
+        original.exec('ALTER TABLE kernel_decisions DROP COLUMN envelope_version');
+        original.prepare('DELETE FROM schema_migrations WHERE version=17').run();
         original.exec('DROP TABLE kernel_public_preparation_phase');
         original.exec('DROP TABLE kernel_public_scan_cursors');
         original.prepare('DELETE FROM schema_migrations WHERE version=16').run();
@@ -396,36 +401,36 @@ test('v15-to-v16 isolated upgrade retains original exact ACK/FINAL and event cha
     const before = snapshot(source);
     const result = await rehearseMigration({ sourcePath: source, destinationDir: target });
     assert.equal(result.sourceSchemaVersion, 15);
-    assert.equal(result.schemaVersion, 16);
+    assert.equal(result.schemaVersion, 17);
     assert.equal(result.sourceReadOnly, true);
     assert.deepEqual(snapshot(source), before, 'source archive is read-only');
     assert.deepEqual(snapshot(join(target, 'candidate.sqlite')), before,
       'exact Task, ACK, FINAL and event chain must survive the additive upgrade');
     const candidate = SessionPlaneDatabase.open(join(target, 'candidate.sqlite'));
     try {
-      assert.equal(candidate.schemaVersion, 16);
+      assert.equal(candidate.schemaVersion, 17);
       assert.equal(candidate.raw.prepare(
         'SELECT COUNT(*) AS count FROM kernel_public_scan_cursors').get()!.count, 0);
-      assert.equal(new TaskKernelRepository(candidate)
-        .getTask('retained-task', 'owner').state, 'completed');
+      assert.equal(createKernelStores(candidate)
+        .tasks.getTask('retained-task', 'owner').state, 'completed');
       // Simulate new exact POST provenance after promotion. An interrupted
-      // successor must retain this v16-only evidence during rollback, while
+      // successor must retain this candidate-only evidence during rollback, while
       // the archived source remains an untouched, executable v15 snapshot.
-      const store = new TaskKernelRepository(candidate);
-      store.openProject({ projectId: 'post-upgrade', clientId: 'owner',
+      const store = createKernelStores(candidate);
+      store.projects.openProject({ projectId: 'post-upgrade', clientId: 'owner',
         projectKey: 'upgrade.post', displayName: 'Post-upgrade evidence' });
-      store.openSlot({ projectId: 'post-upgrade', clientId: 'owner', slotId: 'main',
+      store.projects.openConversationSlot({ projectId: 'post-upgrade', clientId: 'owner', slotId: 'main',
         roleKey: 'Main', providerKey: 'fixture' });
-      store.startTask({ taskId: 'post-upgrade-task', projectId: 'post-upgrade',
+      store.tasks.createTask({ taskId: 'post-upgrade-task', projectId: 'post-upgrade',
         slotId: 'main', clientId: 'owner', expectedSlotRevision: 1,
         requestId: 'post-upgrade-once', prompt: 'Never replay this POST' });
-      store.planAttempt({ taskId: 'post-upgrade-task', clientId: 'owner',
+      store.attempts.planAttempt({ taskId: 'post-upgrade-task', clientId: 'owner',
         attemptId: 'post-upgrade-attempt', kind: 'initial', turnKey: 'root',
         content: 'Never replay this POST' });
-      store.beginDispatch('post-upgrade-task', 'owner', 'post-upgrade-attempt');
-      store.markUncertain('post-upgrade-task', 'owner', 'post-upgrade-attempt',
+      store.attempts.reserveAttemptDispatch('post-upgrade-task', 'owner', 'post-upgrade-attempt');
+      store.attempts.markAttemptUncertain('post-upgrade-task', 'owner', 'post-upgrade-attempt',
         'exact-ACK-not-observed');
-      assert.equal(store.getTask('post-upgrade-task', 'owner').state, 'uncertain');
+      assert.equal(store.tasks.getTask('post-upgrade-task', 'owner').state, 'uncertain');
     } finally { candidate.close(); }
 
     const afterWrites = snapshot(join(target, 'candidate.sqlite'));
@@ -473,7 +478,7 @@ test('v15-to-v16 isolated upgrade retains original exact ACK/FINAL and event cha
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('actual v8 legacy schema with WAL ACK/FINAL/UNKNOWN/draft is retained while upgrading only an isolated candidate to v16', async () => {
+test('actual v8 legacy schema with WAL ACK/FINAL/UNKNOWN/draft is retained while upgrading only an isolated candidate to v17', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sp-real-schema8-upgrade-'));
   const source = join(dir, 'original-v8.sqlite');
   const db = new DatabaseSync(source);
@@ -529,10 +534,10 @@ test('actual v8 legacy schema with WAL ACK/FINAL/UNKNOWN/draft is retained while
 
     const target = join(dir, 'migrated');
     const report = await rehearseMigration({ sourcePath: source, destinationDir: target });
-    assert.equal(report.schemaVersion, 16);
+    assert.equal(report.schemaVersion, 17);
     const archive = inspectArchivedState({ migrationDir: target });
     assert.equal(archive.sourceSchemaVersion, 8);
-    assert.equal(archive.candidateSchemaVersion, 16);
+    assert.equal(archive.candidateSchemaVersion, 17);
     assert.deepEqual(archive.retainedSubmissionStates.generations, [
       { state: 'composer_filled', count: 1 },
       { state: 'submission_unknown', count: 1 },
@@ -548,7 +553,7 @@ test('actual v8 legacy schema with WAL ACK/FINAL/UNKNOWN/draft is retained while
     }
     const candidate = SessionPlaneDatabase.open(join(target, 'candidate.sqlite'));
     try {
-      assert.equal(candidate.schemaVersion, 16);
+      assert.equal(candidate.schemaVersion, 17);
       assert.equal(candidate.raw.prepare('SELECT answer_text AS text FROM generations WHERE generation=1')
         .get()!.text, 'Exact FINAL \n  with whitespace');
       assert.equal(candidate.raw.prepare('SELECT submission_state AS state FROM generations WHERE generation=2')

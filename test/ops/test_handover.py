@@ -791,18 +791,18 @@ class HandoverTests(unittest.TestCase):
                     AssertionError, 'Candidate migration schema differs from handover policy'):
                 handover.verify_candidate_schema(installed, policy)
 
-    def test_checked_in_policy_requires_current_15_to_16_upgrade_and_no_old_schema(self):
+    def test_checked_in_policy_requires_current_16_to_17_upgrade_and_no_old_schema(self):
         root = pathlib.Path(__file__).resolve().parents[2]
         policy = json.loads((root/'scripts/ops/handover-manifest.json').read_text())
         transition = policy['schemaTransition']
         current_migration = max(int(path.name[:4]) for path in
                                 (root/'src/storage/migrations').glob('[0-9][0-9][0-9][0-9]-*.ts'))
-        self.assertEqual(transition, {'from': 15, 'to': 16},
-                         'A schema-8-to-15 handover policy cannot deploy schema-16 dev code')
+        self.assertEqual(transition, {'from': 16, 'to': 17},
+                         'A schema-15-to-16 handover policy cannot deploy schema-17 dev code')
         self.assertEqual(transition['to'], current_migration,
                          'Bundle policy must never authorize an obsolete SQLite schema')
-        self.assertEqual(handover.schema_transition(policy, 15), (15, 16))
-        for obsolete in [8, 14, 16]:
+        self.assertEqual(handover.schema_transition(policy, 16), (16, 17))
+        for obsolete in [8, 14, 15]:
             with self.subTest(obsolete=obsolete), self.assertRaisesRegex(
                     AssertionError, 'Live schema differs from transition source'):
                 handover.schema_transition(policy, obsolete)

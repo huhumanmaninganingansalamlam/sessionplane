@@ -11,10 +11,11 @@ import { ChatGptSemanticAdapter, chatGptBackendJsonClient } from '../providers/c
 import { SemanticProviderRegistry } from '../providers/semantic-provider-registry.ts';
 import type { SemanticRootPostEvidence, SemanticTaskContext } from '../providers/semantic-adapter.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
-import { TaskKernelRepository, type AttemptSessionBindingRecord } from '../storage/task-kernel-repository.ts';
+import { createKernelStores, type KernelStores, type AttemptSessionBindingRecord } from '../storage/kernel/create-kernel-stores.ts';
 import type { PageBindingRepository } from '../storage/page-binding-repository.ts';
 import { DurableTaskKernel, type ExactSendIntent } from './durable-task-kernel.ts';
 import { SemanticDecisionGateway } from './semantic-decision-gateway.ts';
+import { parseDecisionEnvelope } from './decisions/decision-envelope.ts';
 import { SemanticTaskArtifactReader } from './semantic-task-artifact-reader.ts';
 import { ManagedContinuationService } from './managed-continuation.ts';
 import { PublicTaskPreparationService } from './public-task-preparation.ts';
@@ -23,7 +24,7 @@ import type { TeamDirectory } from './team-directory.ts';
 
 export interface SemanticCoreRuntime {
   readonly providers: SemanticProviderRegistry;
-  readonly repository: TaskKernelRepository;
+  readonly repository: KernelStores;
   readonly kernel: DurableTaskKernel;
   readonly decisionGateway: SemanticDecisionGateway;
   readonly artifactReader: SemanticTaskArtifactReader;
@@ -42,14 +43,14 @@ export interface SemanticCoreRuntime {
  * foreign target remains unbound and awaits an agent decision.
  */
 export async function restoreSemanticPageBindings(input: {
-  readonly repository: TaskKernelRepository;
+  readonly repository: KernelStores;
   readonly teamDirectory: TeamDirectory;
   readonly pageRegistry: PageRegistry;
   readonly pageBindings: PageBindingRepository;
   readonly actorScheduler: ActorScheduler;
   readonly chatgptUrl: string;
 }): Promise<{ scanned: number; rebound: number; held: number }> {
-  const owners = input.repository.listCurrentPublicPageOwners();
+  const owners = input.repository.scans.scanCurrentPublicPageOwners('chatgpt');
   const providerOrigin = new URL(input.chatgptUrl).origin;
   let rebound = 0;
   let held = 0;
@@ -189,13 +190,13 @@ export function createSemanticCoreRuntime(input: {
   readonly continuationNow?: () => Date;
   readonly canRunContinuation?: () => boolean;
 }): SemanticCoreRuntime {
-  const repository = new TaskKernelRepository(input.database);
+  const repository = createKernelStores(input.database);
   const bindAttemptSession = (owner: {
     taskId: string; clientId: string; attemptId: string;
     sessionId: string; generation: number; conversationId: string;
   }): AttemptSessionBindingRecord => {
-    const task = repository.getTask(owner.taskId, owner.clientId);
-    const slot = repository.getSlot(task.projectId, task.slotId, owner.clientId);
+    const task = repository.tasks.getTask(owner.taskId, owner.clientId);
+    const slot = repository.projects.getConversationSlot(task.projectId, task.slotId, owner.clientId);
     const session = input.teamDirectory.getSession(owner.sessionId);
     if (slot.activeTaskId !== task.taskId ||
         task.slotRevision !== slot.revision || slot.providerKey !== 'chatgpt' ||
@@ -213,20 +214,20 @@ export function createSemanticCoreRuntime(input: {
         binding.expectedConversationId !== owner.conversationId) {
       throw new Error('Attempt session generation is not bound to one owned page');
     }
-    return repository.bindAttemptSession(owner);
+    return repository.attempts.bindAttemptSessionGeneration(owner);
   };
   const activeTask = (identity: OwnedPageIdentity) => {
-    const clientId = repository.dispatchClientId(identity.taskId);
+    const clientId = repository.tasks.findDispatchClientId(identity.taskId);
     if (!clientId) return null;
     try {
-      const task = repository.getTask(identity.taskId, clientId);
-      const slot = repository.getSlot(identity.projectId, identity.slotId, clientId);
+      const task = repository.tasks.getTask(identity.taskId, clientId);
+      const slot = repository.projects.getConversationSlot(identity.projectId, identity.slotId, clientId);
       if (task.projectId !== identity.projectId || task.slotId !== identity.slotId ||
         task.slotRevision !== identity.slotRevision || task.cancelRequested ||
         !['working', 'agent_input_required', 'human_input_required', 'uncertain'].includes(task.state) ||
         slot.activeTaskId !== identity.taskId || slot.revision !== identity.slotRevision ||
         slot.providerKey !== 'chatgpt' || slot.providerConversationId === null) return null;
-      const full = repository.getFullTask(identity.taskId, clientId);
+      const full = repository.tasks.readTaskAggregate(identity.taskId, clientId);
       const unresolved = full.attempts.filter(attempt =>
         attempt.kind !== 'stop' && attempt.state !== 'failed_before_dispatch' &&
         !full.results.some(result => result.attemptId === attempt.attemptId));
@@ -236,7 +237,7 @@ export function createSemanticCoreRuntime(input: {
       // without a FINAL. They are one contiguous turn chain, not competing
       // mutations. Every predecessor must be acknowledged and every turn must
       // retain the same immutable session generation and conversation.
-      let chainBinding: ReturnType<typeof repository.getAttemptSessionBinding> = null;
+      let chainBinding: ReturnType<typeof repository.attempts.getAttemptSessionBinding> = null;
       for (let index = 0; index < unresolved.length; index += 1) {
         const attempt = unresolved[index]!;
         if (index > 0) {
@@ -245,7 +246,7 @@ export function createSemanticCoreRuntime(input: {
         }
         if (index < unresolved.length - 1 &&
             (attempt.state !== 'acknowledged' || attempt.externalTurnId === null)) return null;
-        const bound = repository.getAttemptSessionBinding({
+        const bound = repository.attempts.getAttemptSessionBinding({
           taskId: identity.taskId, clientId, attemptId: attempt.attemptId,
         });
         if (!bound) return null;
@@ -255,7 +256,7 @@ export function createSemanticCoreRuntime(input: {
              chainBinding.conversationId !== bound.conversationId)) return null;
         chainBinding = bound;
       }
-      const sessionBinding = repository.getAttemptSessionBinding({
+      const sessionBinding = repository.attempts.getAttemptSessionBinding({
         taskId: identity.taskId, clientId, attemptId: latest.attemptId,
       });
       if (sessionBinding?.conversationId !== slot.providerConversationId) return null;
@@ -266,11 +267,11 @@ export function createSemanticCoreRuntime(input: {
     // A new conversation has no provider ID until its FIRST POST. The
     // reserved root page still has exact Task/session/generation ownership,
     // but is usable solely for pre-send model/login decisions.
-    const owner = repository.dispatchClientId(identity.taskId);
+    const owner = repository.tasks.findDispatchClientId(identity.taskId);
     if (owner) {
       try {
-        const current = repository.getTask(identity.taskId, owner);
-        const slot = repository.getSlot(identity.projectId, identity.slotId, owner);
+        const current = repository.tasks.getTask(identity.taskId, owner);
+        const slot = repository.projects.getConversationSlot(identity.projectId, identity.slotId, owner);
         if (current.projectId === identity.projectId &&
             current.slotId === identity.slotId &&
             current.slotRevision === identity.slotRevision &&
@@ -319,13 +320,13 @@ export function createSemanticCoreRuntime(input: {
         context.pageLease.pageKey !== lease.pageKey ||
         context.pageLease.targetId !== lease.targetId ||
         context.pageLease.bindingEpoch !== lease.bindingEpoch) return null;
-    const clientId = repository.dispatchClientId(context.taskId);
+    const clientId = repository.tasks.findDispatchClientId(context.taskId);
     if (!clientId) return null;
     try {
-      const full = repository.getFullTask(context.taskId, clientId);
+      const full = repository.tasks.readTaskAggregate(context.taskId, clientId);
       const task = full.task;
       const attempt = full.attempts.find(row => row.attemptId === attemptId);
-      const slot = repository.getSlot(context.projectId, context.slotId, clientId);
+      const slot = repository.projects.getConversationSlot(context.projectId, context.slotId, clientId);
       if (task.projectId !== context.projectId || task.slotId !== context.slotId ||
           task.slotRevision !== context.slotRevision || slot.activeTaskId !== task.taskId ||
           slot.revision !== task.slotRevision || slot.providerKey !== 'chatgpt' ||
@@ -360,7 +361,7 @@ export function createSemanticCoreRuntime(input: {
     const exact = exactRootDispatchPage(owner);
     if (!exact?.conversationId) return false;
     try {
-      const root = repository.getRootPost({
+      const root = repository.attempts.getRootDispatchEvidence({
         taskId: owner.context.taskId, clientId: exact.clientId,
         attemptId: owner.attemptId,
       });
@@ -375,9 +376,9 @@ export function createSemanticCoreRuntime(input: {
     } catch { return false; }
   };
   const resolveContext = (intent: ExactSendIntent): SemanticTaskContext => {
-    const task = repository.getTask(intent.taskId, intent.clientId);
-    const slot = repository.getSlot(intent.projectId, intent.slotId, intent.clientId);
-    const binding = repository.getBindingAtRevision(intent.projectId, intent.slotId,
+    const task = repository.tasks.getTask(intent.taskId, intent.clientId);
+    const slot = repository.projects.getConversationSlot(intent.projectId, intent.slotId, intent.clientId);
+    const binding = repository.projects.getSlotBindingAtRevision(intent.projectId, intent.slotId,
       intent.slotRevision, intent.clientId);
     if (task.projectId !== intent.projectId || task.slotId !== intent.slotId ||
       task.slotRevision !== intent.slotRevision || binding.providerKey !== 'chatgpt' ||
@@ -389,7 +390,7 @@ export function createSemanticCoreRuntime(input: {
     const activeSlot = slot.activeTaskId === intent.taskId &&
       slot.revision === intent.slotRevision && slot.providerKey === 'chatgpt' &&
       slot.providerConversationId === intent.providerConversationId;
-    const attemptBinding = repository.getAttemptSessionBinding({
+    const attemptBinding = repository.attempts.getAttemptSessionBinding({
       taskId: intent.taskId, clientId: intent.clientId, attemptId: intent.attemptId,
     });
     const matches = !activeSlot || intent.providerConversationId === null ||
@@ -404,10 +405,10 @@ export function createSemanticCoreRuntime(input: {
       taskId: intent.taskId, pageKey: matches[0]!.pageKey,
       targetId: matches[0]!.targetId!, bindingEpoch: matches[0]!.bindingEpoch,
     } : null;
-    const evidence = repository.getDispatchEvidence({
+    const evidence = repository.attempts.getDispatchEvidence({
       taskId: intent.taskId, clientId: intent.clientId, attemptId: intent.attemptId,
     });
-    const full = repository.getFullTask(intent.taskId, intent.clientId);
+    const full = repository.tasks.readTaskAggregate(intent.taskId, intent.clientId);
     const attempt = full.attempts.find(row => row.attemptId === intent.attemptId);
     if (candidate === null && activeSlot && intent.providerConversationId === null &&
         attempt?.kind === 'initial' &&
@@ -442,10 +443,10 @@ export function createSemanticCoreRuntime(input: {
         row.sequence === attempt.sequence - 1 && row.kind !== 'stop' &&
         row.state === 'acknowledged' && row.externalTurnId !== null);
       if (previous) {
-        const precedingEvidence = repository.getDispatchEvidence({
+        const precedingEvidence = repository.attempts.getDispatchEvidence({
           taskId: intent.taskId, clientId: intent.clientId, attemptId: previous.attemptId,
         });
-        const precedingBinding = repository.getAttemptSessionBinding({
+        const precedingBinding = repository.attempts.getAttemptSessionBinding({
           taskId: intent.taskId, clientId: intent.clientId, attemptId: previous.attemptId,
         });
         if (precedingEvidence?.conversationId === intent.providerConversationId &&
@@ -463,9 +464,9 @@ export function createSemanticCoreRuntime(input: {
       taskId: intent.taskId, providerConversationId: intent.providerConversationId,
       submittedUserMessageId,
       submittedUserTurnId,
-      ...(repository.publicModelIntent(intent.projectId, intent.clientId)
-        ? { requiredModel: repository.publicModelIntent(intent.projectId, intent.clientId) } : {}),
-      permissionGrants: repository.publicPermissionGrants(intent.taskId, intent.clientId),
+      ...(repository.projects.readPublicModelIntent(intent.projectId, intent.clientId)
+        ? { requiredModel: repository.projects.readPublicModelIntent(intent.projectId, intent.clientId) } : {}),
+      permissionGrants: repository.tasks.readPublicPermissionGrants(intent.taskId, intent.clientId),
       pageLease: activeSlot && candidate !== null && isExactLease(candidate) ? candidate : null,
     };
   };
@@ -475,12 +476,12 @@ export function createSemanticCoreRuntime(input: {
   }): boolean => {
     const { context, purpose, attemptId, contentSha256 } = input;
     if (!contentSha256 || (purpose !== 'submit' && purpose !== 'continue')) return false;
-    const clientId = repository.dispatchClientId(context.taskId);
+    const clientId = repository.tasks.findDispatchClientId(context.taskId);
     if (!clientId) return false;
     try {
-      const task = repository.getTask(context.taskId, clientId);
-      const slot = repository.getSlot(context.projectId, context.slotId, clientId);
-      const attempt = repository.getFullTask(context.taskId, clientId).attempts
+      const task = repository.tasks.getTask(context.taskId, clientId);
+      const slot = repository.projects.getConversationSlot(context.projectId, context.slotId, clientId);
+      const attempt = repository.tasks.readTaskAggregate(context.taskId, clientId).attempts
         .find(row => row.attemptId === attemptId);
       return task.projectId === context.projectId && task.slotId === context.slotId &&
         task.slotRevision === context.slotRevision && slot.activeTaskId === context.taskId &&
@@ -504,41 +505,41 @@ export function createSemanticCoreRuntime(input: {
   }): boolean => {
     const { context } = approval;
     if (!context.pageLease || !isExactLease(context.pageLease)) return false;
-    const clientId = repository.dispatchClientId(context.taskId);
+    const clientId = repository.tasks.findDispatchClientId(context.taskId);
     if (!clientId) return false;
     try {
-      const full = repository.getFullTask(context.taskId, clientId);
+      const full = repository.tasks.readTaskAggregate(context.taskId, clientId);
       if (full.task.cancelRequested ||
           full.task.state === 'completed' || full.task.state === 'failed' ||
           full.task.state === 'canceled') return false;
       const row = full.decisions.find(entry => entry.decisionId === approval.decisionId);
       if (!row || row.status !== 'resolved' || row.actionConsumed ||
           row.resolutionJson === null) return false;
-      const envelope = JSON.parse(row.contextJson);
-      const resolution = JSON.parse(row.resolutionJson);
-      const storedAction = Array.isArray(envelope?.actions)
-        ? envelope.actions.find((candidate: any) =>
-            candidate?.purpose === approval.purpose &&
-            candidate?.snapshotId === approval.snapshotId &&
-            candidate?.actionRef === approval.actionRef &&
-            candidate?.evidenceHash === approval.evidenceHash)
-        : envelope?.purpose === approval.purpose &&
-          envelope?.snapshotId === approval.snapshotId &&
-          envelope?.actionRef === approval.actionRef &&
-          envelope?.evidenceHash === approval.evidenceHash
-          ? envelope : null;
-      if (envelope?.kind !== 'semantic_action' ||
-          !sameDecisionContext(context, envelope.context) || !storedAction ||
-          resolution?.kind !== 'semantic_action' ||
-          resolution.actionRef !== approval.actionRef ||
-          resolution.input !== approval.input) return false;
-      return repository.consumeDecisionAction(context.taskId, clientId, approval.decisionId);
+      // The provider's one-shot authorization uses the same versioned
+      // Decision contract as the agent gateway. A historical v1 action is
+      // never executable after migration, even if its raw JSON still exists.
+      const envelope = parseDecisionEnvelope(row.contextJson);
+      if (envelope.schemaVersion !== 2) return false;
+      const resolution: unknown = JSON.parse(row.resolutionJson);
+      if (!resolution || typeof resolution !== 'object' ||
+          Array.isArray(resolution)) return false;
+      const receipt = resolution as Record<string, unknown>;
+      const storedAction = envelope.actions.find(candidate =>
+        candidate.purpose === approval.purpose &&
+        candidate.snapshotId === approval.snapshotId &&
+        candidate.actionRef === approval.actionRef &&
+        candidate.evidenceHash === approval.evidenceHash);
+      if (!sameDecisionContext(context, envelope.context) || !storedAction ||
+          receipt.kind !== 'semantic_action' ||
+          receipt.actionRef !== approval.actionRef ||
+          receipt.input !== approval.input) return false;
+      return repository.decisions.consumeDecisionAction(context.taskId, clientId, approval.decisionId);
     } catch { return false; }
   };
   const rootPageCandidate = (owner: {
     taskId: string; clientId: string; attemptId: string;
   }, expectedConversationId: string | null = null) => {
-    const root = repository.getRootPost(owner);
+    const root = repository.attempts.getRootDispatchEvidence(owner);
     if (!root || root.ambiguous || root.observationCount !== 1) return null;
     const retained = input.pageRegistry.listBindings({ includeClosed: false })
       .filter(binding => binding.targetId === root.targetId);
@@ -582,19 +583,19 @@ export function createSemanticCoreRuntime(input: {
     const { context, conversationId, root } = request;
     if (context.pageLease !== null || context.providerConversationId !== null ||
         context.submittedUserMessageId !== null || context.submittedUserTurnId !== null) return null;
-    const clientId = repository.dispatchClientId(context.taskId);
+    const clientId = repository.tasks.findDispatchClientId(context.taskId);
     if (!clientId) return null;
     try {
-      const full = repository.getFullTask(context.taskId, clientId);
+      const full = repository.tasks.readTaskAggregate(context.taskId, clientId);
       const task = full.task;
-      const slot = repository.getSlot(task.projectId, task.slotId, clientId);
+      const slot = repository.projects.getConversationSlot(task.projectId, task.slotId, clientId);
       if (task.projectId !== context.projectId || task.slotId !== context.slotId ||
           task.slotRevision !== context.slotRevision || slot.activeTaskId !== task.taskId ||
           slot.revision !== task.slotRevision || slot.providerKey !== 'chatgpt' ||
           slot.providerConversationId !== null) return null;
       const attempts = full.attempts.filter(attempt => {
         if (attempt.kind !== 'initial' || !['dispatched', 'uncertain'].includes(attempt.state)) return false;
-        const stored = repository.getRootPost({
+        const stored = repository.attempts.getRootDispatchEvidence({
           taskId: context.taskId, clientId, attemptId: attempt.attemptId,
         });
         return stored !== null && !stored.ambiguous && stored.observationCount === 1 &&
@@ -620,15 +621,15 @@ export function createSemanticCoreRuntime(input: {
     taskId: string; clientId: string; attemptId: string;
   }): Promise<void> => {
     if (!input.actorScheduler) throw new Error('Root ACK actor scheduler unavailable');
-    const full = repository.getFullTask(owner.taskId, owner.clientId);
+    const full = repository.tasks.readTaskAggregate(owner.taskId, owner.clientId);
     const attempt = full.attempts.find(row => row.attemptId === owner.attemptId);
-    const root = repository.getRootPost(owner);
+    const root = repository.attempts.getRootDispatchEvidence(owner);
     if (!attempt || attempt.state !== 'acknowledged' || attempt.externalTurnId === null ||
         !root?.canonicalConversationId) {
       throw new Error('Canonical root ACK is not durable');
     }
     const task = full.task;
-    const slot = repository.getSlot(task.projectId, task.slotId, owner.clientId);
+    const slot = repository.projects.getConversationSlot(task.projectId, task.slotId, owner.clientId);
     if (slot.activeTaskId !== task.taskId || slot.revision !== task.slotRevision ||
         slot.providerKey !== 'chatgpt' ||
         slot.providerConversationId !== root.canonicalConversationId) {
@@ -684,9 +685,9 @@ export function createSemanticCoreRuntime(input: {
   const backendRecovery = input.backendRecovery ?? new ChatGptBackendRecovery({
     requestTimeoutMs: input.backendRequestTimeoutMs ?? 15_000,
     tokenCacheTtlMs: input.tokenCacheTtlMs ?? 60_000,
-    acknowledgementRetryAtMs: repository.backendReadNotBeforeMs('chatgpt', backendOrigin),
+    acknowledgementRetryAtMs: repository.pacing.readBackendReadFence('chatgpt', backendOrigin),
     onConversationRetryAtMs: atMs =>
-      repository.extendBackendReadNotBeforeMs('chatgpt', backendOrigin, atMs),
+      repository.pacing.extendBackendReadFence('chatgpt', backendOrigin, atMs),
     ...(input.onBackendRateLimit ? { onRateLimitEvidence: input.onBackendRateLimit } : {}),
     ...(input.backendRecoveryNow ? { now: input.backendRecoveryNow } : {}),
   });
@@ -702,9 +703,9 @@ export function createSemanticCoreRuntime(input: {
       isAuthorizedAttempt: authorizedAttempt,
       isAuthorizedDecision: authorizedDecision,
       onDispatchObserved: ({ context, attemptId, evidence }) => {
-        const clientId = repository.dispatchClientId(context.taskId);
+        const clientId = repository.tasks.findDispatchClientId(context.taskId);
         if (!clientId) throw new Error('Dispatch task owner unavailable');
-        repository.recordDispatchEvidence({ taskId: context.taskId, clientId, attemptId, evidence });
+        repository.attempts.recordDispatchEvidence({ taskId: context.taskId, clientId, attemptId, evidence });
       },
       onRootDispatchObserved: ({ context, attemptId, evidence }) => {
         const lease = context.pageLease;
@@ -715,7 +716,7 @@ export function createSemanticCoreRuntime(input: {
             evidence.requestConversationId !== exact.conversationId)) {
           throw new Error('Root dispatch left the exact prepared session generation');
         }
-        repository.recordRootPost({
+        repository.attempts.recordRootDispatchEvidence({
           taskId: context.taskId, clientId: exact.clientId, attemptId,
           evidence: {
             sessionId: exact.session.sessionId, generation: exact.session.generation,
@@ -752,14 +753,14 @@ export function createSemanticCoreRuntime(input: {
       });
     },
     dispatchJournal: {
-      record: (intent, evidence) => repository.recordDispatchEvidence({
+      record: (intent, evidence) => repository.attempts.recordDispatchEvidence({
         taskId: intent.taskId, clientId: intent.clientId, attemptId: intent.attemptId, evidence,
       }),
-      read: query => repository.getDispatchEvidence({
+      read: query => repository.attempts.getDispatchEvidence({
         taskId: query.taskId, clientId: query.clientId, attemptId: query.attemptId,
       }),
       readRoot: query => {
-        const root = repository.getRootPost({
+        const root = repository.attempts.getRootDispatchEvidence({
           taskId: query.taskId, clientId: query.clientId, attemptId: query.attemptId,
         });
         return root === null ? null : {
@@ -790,11 +791,11 @@ export function createSemanticCoreRuntime(input: {
     ...(publicPreparation ? { preparePublicTask: async () => {
       const prepared = await publicPreparation.prepareNext();
       if (prepared.kind !== 'prepared' || prepared.taskId === null) return;
-      const clientId = repository.dispatchClientId(prepared.taskId);
+      const clientId = repository.tasks.findDispatchClientId(prepared.taskId);
       if (!clientId) return;
-      const full = repository.getFullTask(prepared.taskId, clientId);
+      const full = repository.tasks.readTaskAggregate(prepared.taskId, clientId);
       const initial = full.attempts.find(a => a.kind === 'initial' && a.state === 'planned');
-      const requested = repository.publicModelIntent(full.task.projectId, clientId);
+      const requested = repository.projects.readPublicModelIntent(full.task.projectId, clientId);
       if (initial && requested) {
         await decisionGateway.verifyModelIntent({
           taskId: full.task.taskId, clientId, attemptId: initial.attemptId,
@@ -809,8 +810,8 @@ export function createSemanticCoreRuntime(input: {
     },
     ...(input.actorScheduler ? { bindRootAttempt } : {}),
     bindInitialAttempt: ({ taskId, clientId, attemptId }) => {
-      const task = repository.getTask(taskId, clientId);
-      const slot = repository.getSlot(task.projectId, task.slotId, clientId);
+      const task = repository.tasks.getTask(taskId, clientId);
+      const slot = repository.projects.getConversationSlot(task.projectId, task.slotId, clientId);
       if (slot.activeTaskId !== taskId || slot.providerConversationId === null ||
           slot.revision !== task.slotRevision) {
         throw new Error('Public initial Task has no verified active conversation');
@@ -826,7 +827,7 @@ export function createSemanticCoreRuntime(input: {
       });
     },
     bindAttempt: ({ taskId, clientId, attemptId, sourceAttemptId }) => {
-      const prior = repository.getAttemptSessionBinding({
+      const prior = repository.attempts.getAttemptSessionBinding({
         taskId, clientId, attemptId: sourceAttemptId,
       });
       if (!prior) throw new Error('Managed continuation has no exact source session binding');
@@ -846,7 +847,7 @@ export function createSemanticCoreRuntime(input: {
       });
     }
     if (mode === 'provider_effect') {
-      const full = repository.getFullTask(taskId, clientId);
+      const full = repository.tasks.readTaskAggregate(taskId, clientId);
       const attempt = full.attempts.find(row => row.attemptId === attemptId);
       if (full.task.state === 'working' && !full.task.cancelRequested &&
           attempt?.state === 'planned') {

@@ -27,7 +27,7 @@ import { createSemanticCoreRuntime, restoreSemanticPageBindings, type SemanticCo
 import type { DurableTaskKernel } from './core/durable-task-kernel.ts';
 import type { SemanticTaskArtifactReader } from './core/semantic-task-artifact-reader.ts';
 import type { SemanticProviderRegistry } from './providers/semantic-provider-registry.ts';
-import type { TaskKernelRepository } from './storage/task-kernel-repository.ts';
+import type { KernelStores } from './storage/kernel/create-kernel-stores.ts';
 import { z } from 'zod';
 
 export interface CoreService {
@@ -45,7 +45,7 @@ export interface CoreService {
   readonly metrics: RuntimeMetrics;
   readonly pageBindings: PageBindingRepository;
   readonly semanticProviders: SemanticProviderRegistry;
-  readonly semanticTaskRepository: TaskKernelRepository;
+  readonly semanticTaskRepository: KernelStores;
   readonly semanticTaskKernel: DurableTaskKernel;
   readonly semanticTaskArtifactReader: SemanticTaskArtifactReader;
   readonly semanticDecisionGateway: SemanticCoreRuntime['decisionGateway'];
@@ -141,7 +141,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   });
   // Reconcile only attempts which irreversibly entered dispatch before the
   // previous Core died. A missing ACK is uncertain, never permission to send.
-  const interruptedSemantic = semanticTaskRepository.recoverInterruptedDispatches();
+  const interruptedSemantic = semanticTaskRepository.attempts.recoverInterruptedDispatches();
   if (interruptedSemantic > 0) {
     logger.warn('semantic.dispatch.recovered_uncertain', { attempts: interruptedSemantic });
   }

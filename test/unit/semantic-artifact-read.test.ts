@@ -12,7 +12,7 @@ import type {
 } from '../../src/providers/semantic-adapter.ts';
 import { SemanticProviderRegistry } from '../../src/providers/semantic-provider-registry.ts';
 import { SessionPlaneDatabase } from '../../src/storage/database.ts';
-import { TaskKernelRepository } from '../../src/storage/task-kernel-repository.ts';
+import { createKernelStores, type KernelStores } from '../../src/storage/kernel/create-kernel-stores.ts';
 
 const hash = (bytes: Uint8Array) => createHash('sha256').update(bytes).digest('hex');
 const file = Buffer.from('fixture binary\n  original bytes\0', 'utf8');
@@ -22,22 +22,22 @@ function fixture(t: TestContext) {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const db = SessionPlaneDatabase.open(join(dir, 'fixture.sqlite'));
   t.after(() => db.close());
-  const store = new TaskKernelRepository(db);
+  const store = createKernelStores(db);
   const clientId = 'owner', taskId = 'task-exact', resultId = 'result-exact';
-  store.openProject({
+  store.projects.openProject({
     projectId: 'project', projectKey: 'artifact.fixture', displayName: 'Fixture',
     clientId,
   });
-  store.openSlot({ projectId: 'project', clientId, slotId: 'Main',
+  store.projects.openConversationSlot({ projectId: 'project', clientId, slotId: 'Main',
     roleKey: 'Main', providerKey: 'artifact-fixture' });
-  store.startTask({ taskId, projectId: 'project', slotId: 'Main',
+  store.tasks.createTask({ taskId, projectId: 'project', slotId: 'Main',
     clientId, expectedSlotRevision: 1, requestId: 'once', prompt: 'exact prompt' });
-  store.observeConversation({ projectId: 'project', slotId: 'Main', clientId,
+  store.projects.bindObservedConversation({ projectId: 'project', slotId: 'Main', clientId,
     expectedRevision: 1, taskId, providerConversationId: 'conversation-exact' });
-  store.planAttempt({ taskId, clientId, attemptId: 'attempt-exact',
+  store.attempts.planAttempt({ taskId, clientId, attemptId: 'attempt-exact',
     kind: 'initial', turnKey: 'root', content: 'exact prompt' });
-  store.beginDispatch(taskId, clientId, 'attempt-exact');
-  store.acknowledgeAttempt({ taskId, clientId, attemptId: 'attempt-exact',
+  store.attempts.reserveAttemptDispatch(taskId, clientId, 'attempt-exact');
+  store.attempts.acknowledgeAttempt({ taskId, clientId, attemptId: 'attempt-exact',
     externalTurnId: 'turn-exact' });
   return { store, database: db, taskId, resultId, clientId };
 }
@@ -95,7 +95,7 @@ test('artifact read is tied to owner, exact recorded FINAL and verified bytes', 
     kind: 'unavailable', reason: 'exact_final_not_found',
   }, 'without durable exact FINAL no file can be read');
   assert.equal(adapter.reads, 0);
-  env.store.recordFinal({ taskId: env.taskId, clientId: env.clientId,
+  env.store.tasks.recordTaskFinal({ taskId: env.taskId, clientId: env.clientId,
     attemptId: 'attempt-exact', externalTurnId: 'turn-exact',
     resultId: env.resultId, answerText: 'exact text FINAL', completeTask: true });
   const verified = await read();
@@ -124,7 +124,7 @@ test('artifact read is tied to owner, exact recorded FINAL and verified bytes', 
 
 test('owner revoked during provider read receives no verified artifact bytes', async t => {
   const env = fixture(t);
-  env.store.recordFinal({ taskId: env.taskId, clientId: env.clientId,
+  env.store.tasks.recordTaskFinal({ taskId: env.taskId, clientId: env.clientId,
     attemptId: 'attempt-exact', externalTurnId: 'turn-exact',
     resultId: env.resultId, answerText: 'exact FINAL', completeTask: true });
   const adapter = new FakeArtifactProvider();
@@ -146,7 +146,7 @@ test('owner revoked during provider read receives no verified artifact bytes', a
 
 test('artifact capability cannot silently lie, drop access denial or trust bad provenance', async t => {
   const env = fixture(t);
-  env.store.recordFinal({ taskId: env.taskId, clientId: env.clientId,
+  env.store.tasks.recordTaskFinal({ taskId: env.taskId, clientId: env.clientId,
     attemptId: 'attempt-exact', externalTurnId: 'turn-exact',
     resultId: env.resultId, answerText: 'exact FINAL', completeTask: true });
   const adapter = new FakeArtifactProvider();

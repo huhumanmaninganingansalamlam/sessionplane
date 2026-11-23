@@ -16,6 +16,7 @@ import { publicTaskAdmissionMigration } from './0013-public-task-admission.ts';
 import { kernelRootDispatchEvidenceMigration } from './0014-kernel-root-dispatch-evidence.ts';
 import { kernelTaskCancelReceiptsMigration } from './0015-kernel-task-cancel-receipts.ts';
 import { kernelPublicScanCursorsMigration } from './0016-kernel-public-scan-cursors.ts';
+import { kernelDecisionEnvelopeV2Migration } from './0017-kernel-decision-envelope-v2.ts';
 
 export interface Migration {
   readonly version: number;
@@ -40,6 +41,7 @@ export const migrations: readonly Migration[] = [
   kernelRootDispatchEvidenceMigration,
   kernelTaskCancelReceiptsMigration,
   kernelPublicScanCursorsMigration,
+  kernelDecisionEnvelopeV2Migration,
 ];
 
 export function runMigrations(database: DatabaseSync, now: () => Date = () => new Date()): number {

@@ -80,7 +80,7 @@ try {
     provider: 'chatgpt', surfaceIntent: 'chat', modelIntent: 'Pro',
   };
   const replacement = await rpc('project.open', replacementInput);
-  core.semanticTaskRepository.replaceBinding({
+  core.semanticTaskRepository.projects.replaceConversationBinding({
     projectId: replacement.projectId, clientId, slotId: 'main',
     expectedRevision: 1, providerKey: 'chatgpt',
     providerConversationId: 'verified-fixture-replacement-only',
@@ -134,12 +134,12 @@ try {
     teamId: project.projectId, roleKey: 'expert.legacy',
     roleType: 'expert', reportsToRoleKey: 'main',
   });
-  core.semanticTaskRepository.openSlot({
+  core.semanticTaskRepository.projects.openConversationSlot({
     projectId: project.projectId, clientId,
     slotId: 'expert.legacy', roleKey: 'expert.legacy',
     providerKey: 'chatgpt',
   });
-  core.semanticTaskRepository.replaceBinding({
+  core.semanticTaskRepository.projects.replaceConversationBinding({
     projectId: project.projectId, clientId,
     slotId: 'expert.legacy', expectedRevision: 1,
     providerKey: 'chatgpt',
@@ -156,7 +156,7 @@ try {
     teamId: project.projectId, roleKey: 'reviewer', roleType: 'reviewer',
     displayName: 'Isolated installed reviewer', reportsToRoleKey: 'main',
   });
-  core.semanticTaskRepository.openSlot({
+  core.semanticTaskRepository.projects.openConversationSlot({
     projectId: project.projectId, clientId,
     slotId: 'reviewer', roleKey: 'reviewer', providerKey: 'chatgpt',
   });
@@ -168,7 +168,7 @@ try {
   const reviewer = await rpc('task.start', reviewerStart);
   assert.equal(reviewer.conversationSlotId, 'reviewer');
   assert.equal(reviewer.conversationRevision, 2);
-  assert.equal(core.semanticTaskRepository.getConversationRevision(
+  assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(
     project.projectId, 'main', clientId), 2,
     'Reviewer Task cannot alter the Main public revision');
   await assert.rejects(rpc('task.start', {
@@ -229,9 +229,9 @@ try {
   assert.equal(historical.conversationRevision, 3);
   assert.equal(historical.submission.attempted, false);
   assert.equal((await rpc('task.start', historicalInput)).taskId, historical.taskId);
-  assert.equal(core.semanticTaskRepository.getConversationRevision(
+  assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(
     project.projectId, 'expert.legacy', clientId), 3);
-  assert.equal(core.semanticTaskRepository.getFullTask(
+  assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(
     historical.taskId, clientId).attempts.length, 1);
 
   const reviewerResumed = await rpc('task.get', {
@@ -242,9 +242,9 @@ try {
   assert.equal(reviewerResumed.submission.attempted, false);
   assert.equal(reviewerResumed.evidence.attempts.length, 1);
   assert.equal((await rpc('task.start', reviewerStart)).taskId, reviewer.taskId);
-  assert.equal(core.semanticTaskRepository.getConversationRevision(
+  assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(
     project.projectId, 'main', clientId), 2);
-  assert.equal(core.semanticTaskRepository.getConversationRevision(
+  assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(
     project.projectId, 'reviewer', clientId), 2);
 
   assert.equal((await rpc('project.open', replacementInput)).conversationRevision, 2);
@@ -261,7 +261,7 @@ try {
   });
   assert.equal(rebound.conversationRevision, 3);
   assert.equal(rebound.submission.attempted, false);
-  assert.equal(core.semanticTaskRepository.getFullTask(
+  assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(
     rebound.taskId, clientId).attempts.length, 1);
 
   const managed = await verifyInstalledContinuation(moduleAt, work);
@@ -290,18 +290,18 @@ try {
  * POST, Chrome, profile, or operational Core participates.
  */
 async function verifyInstalledContinuation(moduleAt, work) {
-  const [{ SessionPlaneDatabase }, { TaskKernelRepository },
+  const [{ SessionPlaneDatabase }, { createKernelStores },
     { DurableTaskKernel }, { ManagedContinuationService, CONTINUATION_INTERVAL_MS }] =
     await Promise.all([
       moduleAt('storage/database.js'),
-      moduleAt('storage/task-kernel-repository.js'),
+      moduleAt('storage/kernel/create-kernel-stores.js'),
       moduleAt('core/durable-task-kernel.js'),
       moduleAt('core/managed-continuation.js'),
     ]);
   const db = SessionPlaneDatabase.open(path.join(work, 'compiled-continuation.sqlite'));
   let nowMs = Date.parse('2026-11-14T00:00:00.000Z');
   const clientId = 'compiled-fixture-agent';
-  const store = new TaskKernelRepository(db, () => new Date(nowMs).toISOString());
+  const store = createKernelStores(db, () => new Date(nowMs).toISOString());
   const pending = new Set(['initial:no-final', 'initial:rate-limited']);
   const rateLimited = new Set(['initial:rate-limited']);
   const paced = new Set();
@@ -340,7 +340,7 @@ async function verifyInstalledContinuation(moduleAt, work) {
     repository: store, kernel, now: () => new Date(nowMs),
     requestAgentReview: async input => {
       reviews.push(input);
-      store.requireDecision({
+      store.decisions.createDecision({
         taskId: input.taskId, clientId: input.clientId,
         decisionId: 'installed-review:' + input.attemptId, audience: 'agent',
         contextJson: JSON.stringify({
@@ -353,21 +353,21 @@ async function verifyInstalledContinuation(moduleAt, work) {
   });
   const projectId = 'installed-continuation-project';
   try {
-    store.openProject({
+    store.projects.openProject({
       projectId, projectKey: 'installed.continuation',
       displayName: 'No real browser package contract', clientId,
     });
     const prepare = async (name, slotId, agentReviewAfterMs = undefined) => {
       const taskId = 'task:' + name;
       const attemptId = 'initial:' + name;
-      store.openSlot({ projectId, slotId, roleKey: slotId,
+      store.projects.openConversationSlot({ projectId, slotId, roleKey: slotId,
         providerKey: provider.providerKey, clientId });
-      store.startTask({ taskId, projectId, slotId, clientId,
+      store.tasks.createTask({ taskId, projectId, slotId, clientId,
         requestId: 'request:' + name, expectedSlotRevision: 1,
         prompt: 'Fixture question ' + name });
-      store.observeConversation({ projectId, slotId, clientId, taskId,
+      store.projects.bindObservedConversation({ projectId, slotId, clientId, taskId,
         expectedRevision: 1, providerConversationId: 'conversation:' + name });
-      store.planAttempt({ taskId, clientId, attemptId, kind: 'initial',
+      store.attempts.planAttempt({ taskId, clientId, attemptId, kind: 'initial',
         turnKey: 'original', content: 'Fixture question ' + name });
       db.raw.prepare(
         'INSERT INTO kernel_public_task_policies' +
@@ -394,7 +394,7 @@ async function verifyInstalledContinuation(moduleAt, work) {
     ready.add(continuationId);
     nowMs += 1_000;
     await service.tick();
-    const completed = store.getFullTask(noFinal, clientId);
+    const completed = store.tasks.readTaskAggregate(noFinal, clientId);
     assert.equal(completed.task.state, 'completed');
     assert.equal(completed.results[0].completesTask, true);
     assert.equal(completed.timers.filter(timer => timer.status === 'pending').length, 0);
@@ -406,7 +406,7 @@ async function verifyInstalledContinuation(moduleAt, work) {
     const withFinal = await prepare('with-final', 'final');
     nowMs += CONTINUATION_INTERVAL_MS;
     assert.equal((await service.tick()).dispatchesAttempted, 0);
-    assert.equal(store.getTask(withFinal, clientId).state, 'completed');
+    assert.equal(store.tasks.getTask(withFinal, clientId).state, 'completed');
     assert.deepEqual(sends.filter(send => send.taskId === withFinal)
       .map(send => send.kind), ['initial'],
       'installed JS must never Continue after source FINAL');
@@ -414,7 +414,7 @@ async function verifyInstalledContinuation(moduleAt, work) {
     const rateTask = await prepare('rate-limited', 'rate');
     nowMs += CONTINUATION_INTERVAL_MS;
     assert.equal((await service.tick()).dispatchesAttempted, 0);
-    assert.equal(store.getFullTask(rateTask, clientId).attempts.length, 1,
+    assert.equal(store.tasks.readTaskAggregate(rateTask, clientId).attempts.length, 1,
       'canonical 429 cannot authorize an installed Continue');
     rateLimited.delete('initial:rate-limited');
     nowMs += CONTINUATION_INTERVAL_MS;
@@ -424,7 +424,7 @@ async function verifyInstalledContinuation(moduleAt, work) {
     ready.add('managed-continuation:initial:rate-limited');
     nowMs += 1_000;
     await service.tick();
-    assert.equal(store.getTask(rateTask, clientId).state, 'completed');
+    assert.equal(store.tasks.getTask(rateTask, clientId).state, 'completed');
 
     const sustainedRate = await prepare('sustained-rate-limited', 'sustained-rate',
       4 * CONTINUATION_INTERVAL_MS);
@@ -435,19 +435,19 @@ async function verifyInstalledContinuation(moduleAt, work) {
       assert.equal((await service.tick()).dispatchesAttempted, 0);
       assert.equal(reviews.length, reviewsBefore,
         'installed JS must hold the first four blocked slots without agent review');
-      assert.equal(store.getTask(sustainedRate, clientId).state, 'working');
+      assert.equal(store.tasks.getTask(sustainedRate, clientId).state, 'working');
       assert.equal(sends.filter(send => send.taskId === sustainedRate).length, 1);
     }
     nowMs += CONTINUATION_INTERVAL_MS;
     assert.equal((await service.tick()).dispatchesAttempted, 0);
     assert.deepEqual(reviews.slice(reviewsBefore).map(review => review.cause),
       ['persistent_backend_read_throttle']);
-    assert.equal(store.getTask(sustainedRate, clientId).state, 'agent_input_required');
-    assert.equal(store.getFullTask(sustainedRate, clientId).attempts.length, 1);
+    assert.equal(store.tasks.getTask(sustainedRate, clientId).state, 'agent_input_required');
+    assert.equal(store.tasks.readTaskAggregate(sustainedRate, clientId).attempts.length, 1);
     assert.equal(sends.filter(send => send.taskId === sustainedRate).length, 1);
     // An explicit agent read-only release must not immediately regenerate
     // the same rate-limit decision from events before that durable receipt.
-    store.resolveDecision({
+    store.decisions.resolveDecision({
       taskId: sustainedRate, clientId,
       decisionId: 'installed-review:initial:sustained-rate-limited',
       resolutionJson: JSON.stringify({ kind: 'read_only_refresh',
@@ -457,10 +457,10 @@ async function verifyInstalledContinuation(moduleAt, work) {
     paced.add('initial:sustained-rate-limited');
     nowMs += 1_000;
     await service.tick();
-    assert.equal(store.getTask(sustainedRate, clientId).state, 'working');
+    assert.equal(store.tasks.getTask(sustainedRate, clientId).state, 'working');
     nowMs += CONTINUATION_INTERVAL_MS;
     await service.tick();
-    assert.equal(store.getTask(sustainedRate, clientId).state, 'working');
+    assert.equal(store.tasks.getTask(sustainedRate, clientId).state, 'working');
     assert.deepEqual(reviews.filter(r => r.taskId === sustainedRate).map(r => r.cause),
       ['persistent_backend_read_throttle'], 'resolved 429 cannot escalate itself');
     const persistent429ExtraPosts = sends.filter(send => send.taskId === sustainedRate).length - 1;
@@ -476,18 +476,18 @@ async function verifyInstalledContinuation(moduleAt, work) {
       const taskId = 'task:' + name;
       const attemptId = 'initial:' + name;
       const slotId = 'slot:' + name;
-      store.openSlot({
+      store.projects.openConversationSlot({
         projectId, slotId, roleKey: slotId, providerKey: provider.providerKey, clientId,
       });
-      store.startTask({
+      store.tasks.createTask({
         taskId, projectId, slotId, clientId, requestId: 'request:' + name,
         expectedSlotRevision: 1, prompt: 'Fixture question ' + name,
       });
-      store.observeConversation({
+      store.projects.bindObservedConversation({
         projectId, slotId, clientId, taskId,
         expectedRevision: 1, providerConversationId: 'conversation:' + name,
       });
-      store.planAttempt({
+      store.attempts.planAttempt({
         taskId, clientId, attemptId, kind: 'initial',
         turnKey: 'original', content: 'Fixture question ' + name,
       });
@@ -527,12 +527,12 @@ async function verifyInstalledContinuation(moduleAt, work) {
       const name = 'prepare-' + String(index).padStart(2, '0');
       const taskId = 'task:' + name;
       const slotId = 'slot:' + name;
-      store.openSlot({ projectId, slotId, roleKey: slotId, clientId,
+      store.projects.openConversationSlot({ projectId, slotId, roleKey: slotId, clientId,
         providerKey: provider.providerKey });
-      store.startTask({ taskId, projectId, slotId, clientId,
+      store.tasks.createTask({ taskId, projectId, slotId, clientId,
         requestId: 'request:' + name, expectedSlotRevision: 1,
         prompt: 'Fixture question ' + name });
-      store.planAttempt({ taskId, clientId, attemptId: 'initial:' + name,
+      store.attempts.planAttempt({ taskId, clientId, attemptId: 'initial:' + name,
         kind: 'initial', turnKey: 'original', content: 'Fixture question ' + name });
       db.raw.prepare(
         'INSERT INTO kernel_public_task_policies' +
@@ -544,9 +544,9 @@ async function verifyInstalledContinuation(moduleAt, work) {
     }
     const chosen = [];
     for (let index = 0; index < prepIds.length; index++) {
-      const restartedRepo = new TaskKernelRepository(db, () => new Date(nowMs).toISOString());
-      assert.equal(restartedRepo.claimPublicPreparationPrefersBound(), index % 2 === 1);
-      chosen.push(restartedRepo.listPendingPublicPreparations(1)[0]?.taskId);
+      const restartedRepo = createKernelStores(db, () => new Date(nowMs).toISOString());
+      assert.equal(restartedRepo.scans.claimPreparationPrefersBound(), index % 2 === 1);
+      chosen.push(restartedRepo.scans.scanPendingPreparations(1)[0]?.taskId);
     }
     assert.deepEqual(chosen, prepIds,
       'installed JS must persist fair browser preparation across Core instances');

@@ -2,9 +2,9 @@ import type { AttemptKind } from '../domain/durable-task.ts';
 import type {
   AttemptRecord,
   ResultRecord,
-  TaskKernelRepository,
+  KernelStores,
   TaskRecord,
-} from '../storage/task-kernel-repository.ts';
+} from '../storage/kernel/create-kernel-stores.ts';
 
 /**
  * Provider-specific observe/act/verify lives behind this narrow port.
@@ -67,10 +67,10 @@ export interface ExactTaskProviderPort {
  * while callers can disconnect without changing task lifetime.
  */
 export class DurableTaskKernel {
-  readonly #storage: TaskKernelRepository;
+  readonly #storage: Pick<KernelStores, 'projects' | 'tasks' | 'attempts'>;
   readonly #providers: ReadonlyMap<string, ExactTaskProviderPort>;
 
-  constructor(storage: TaskKernelRepository, providers: readonly ExactTaskProviderPort[]) {
+  constructor(storage: Pick<KernelStores, 'projects' | 'tasks' | 'attempts'>, providers: readonly ExactTaskProviderPort[]) {
     this.#storage = storage;
     this.#providers = new Map(providers.map(provider => [provider.providerKey, provider]));
     if (this.#providers.size !== providers.length) throw new Error('Duplicate provider key');
@@ -80,7 +80,7 @@ export class DurableTaskKernel {
     const { attempt, provider, intent } = this.#resolve(taskId, clientId, attemptId);
     if (attempt.state !== 'planned') throw new Error('Mutation already attempted; no replay');
     if (attempt.kind !== 'stop') {
-      const current = this.#storage.getTask(taskId, clientId);
+      const current = this.#storage.tasks.getTask(taskId, clientId);
       if (current.pendingDecisionId !== null &&
           (current.state === 'agent_input_required' ||
            current.state === 'human_input_required')) {
@@ -102,25 +102,25 @@ export class DurableTaskKernel {
       if (ready.kind !== 'ready') {
         const reason = /^[a-z0-9_.:-]{1,100}$/i.test(ready.reason)
           ? ready.reason : 'provider-preflight-unverified';
-        this.#storage.recordObservationDeferred(taskId, clientId,
+        this.#storage.tasks.recordObservationDeferred(taskId, clientId,
           `preflight:${attemptId}:${reason}`);
-        return this.#storage.getTask(taskId, clientId);
+        return this.#storage.tasks.getTask(taskId, clientId);
       }
     }
-    this.#storage.beginDispatch(taskId, clientId, attemptId);
+    this.#storage.attempts.reserveAttemptDispatch(taskId, clientId, attemptId);
     try {
       const outcome = await provider.sendOnce(intent);
       if (outcome.kind === 'verified_ack') {
-        this.#storage.acknowledgeAttempt({
+        this.#storage.attempts.acknowledgeAttempt({
           taskId, clientId, attemptId, externalTurnId: outcome.externalTurnId,
         });
       } else {
-        this.#storage.markUncertain(taskId, clientId, attemptId, outcome.reason);
+        this.#storage.attempts.markAttemptUncertain(taskId, clientId, attemptId, outcome.reason);
       }
     } catch {
-      this.#storage.markUncertain(taskId, clientId, attemptId, 'adapter_dispatch_unverified');
+      this.#storage.attempts.markAttemptUncertain(taskId, clientId, attemptId, 'adapter_dispatch_unverified');
     }
-    return this.#storage.getTask(taskId, clientId);
+    return this.#storage.tasks.getTask(taskId, clientId);
   }
 
   /**
@@ -129,7 +129,7 @@ export class DurableTaskKernel {
    */
   async recoverAck(taskId: string, clientId: string, attemptId: string): Promise<TaskRecord> {
     const { attempt, provider, intent } = this.#resolve(taskId, clientId, attemptId);
-    if (attempt.state === 'acknowledged') return this.#storage.getTask(taskId, clientId);
+    if (attempt.state === 'acknowledged') return this.#storage.tasks.getTask(taskId, clientId);
     if (attempt.state !== 'uncertain' && attempt.state !== 'dispatched') {
       throw new Error('Only previously dispatched attempts may be reconciled');
     }
@@ -137,25 +137,25 @@ export class DurableTaskKernel {
       ...intent, externalTurnId: attempt.externalTurnId,
     });
     if (outcome.kind === 'verified_root_ack') {
-      this.#storage.promoteRootPost({
+      this.#storage.attempts.promoteRootDispatchEvidence({
         taskId, clientId, attemptId,
         conversationId: outcome.conversationId,
         messageId: outcome.messageId,
         externalTurnId: outcome.externalTurnId,
       });
     } else if (outcome.kind === 'verified_ack') {
-      this.#storage.acknowledgeAttempt({
+      this.#storage.attempts.acknowledgeAttempt({
         taskId, clientId, attemptId, externalTurnId: outcome.externalTurnId,
       });
     } else {
-      this.#storage.markUncertain(taskId, clientId, attemptId, outcome.reason);
+      this.#storage.attempts.markAttemptUncertain(taskId, clientId, attemptId, outcome.reason);
       const reason = /^[a-z0-9_.:-]{1,100}$/i.test(outcome.reason)
         ? outcome.reason : 'provider-ack-unverified';
       // Exact ACK deferrals are durable observations, never a send receipt.
-      this.#storage.recordObservationDeferred(taskId, clientId,
+      this.#storage.tasks.recordObservationDeferred(taskId, clientId,
         `ack:${attemptId}:${outcome.kind}:${reason}`);
     }
-    return this.#storage.getTask(taskId, clientId);
+    return this.#storage.tasks.getTask(taskId, clientId);
   }
 
   async reserveFinalRead(input: {
@@ -213,14 +213,14 @@ export class DurableTaskKernel {
     if (observation.kind !== 'exact_final') {
       const code = observation.reason && /^[a-z0-9_.:-]{1,100}$/i.test(observation.reason)
         ? observation.reason : 'provider-final-unverified';
-      this.#storage.recordObservationDeferred(input.taskId, input.clientId,
+      this.#storage.tasks.recordObservationDeferred(input.taskId, input.clientId,
         `final:${input.attemptId}:${observation.kind}:${code}`);
       return observation;
     }
     if (observation.externalTurnId !== attempt.externalTurnId) {
       throw new Error('Provider returned FINAL for wrong turn; reject evidence');
     }
-    return { kind: 'exact_final', result: this.#storage.recordFinal({
+    return { kind: 'exact_final', result: this.#storage.tasks.recordTaskFinal({
       ...input,
       externalTurnId: observation.externalTurnId,
       answerText: observation.answerText,
@@ -232,11 +232,11 @@ export class DurableTaskKernel {
     provider: ExactTaskProviderPort;
     intent: ExactSendIntent;
   } {
-    const full = this.#storage.getFullTask(taskId, clientId);
+    const full = this.#storage.tasks.readTaskAggregate(taskId, clientId);
     const task = full.task;
     const attempt = full.attempts.find(row => row.attemptId === attemptId);
     if (!attempt) throw new Error('Attempt does not belong to task');
-    const binding = this.#storage.getBindingAtRevision(task.projectId, task.slotId,
+    const binding = this.#storage.projects.getSlotBindingAtRevision(task.projectId, task.slotId,
       task.slotRevision, clientId);
     const provider = this.#providers.get(binding.providerKey);
     if (!provider) throw new Error('Provider capability unavailable');

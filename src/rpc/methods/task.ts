@@ -4,7 +4,7 @@ import { z } from 'zod';
 import type { SemanticDecisionGateway } from '../../core/semantic-decision-gateway.ts';
 import type { PublicTaskAdmissionService } from '../../core/public-task-admission.ts';
 import { waitForTaskRevision } from '../../core/task-wait.ts';
-import type { TaskKernelRepository } from '../../storage/task-kernel-repository.ts';
+import type { PublicTaskReadPort } from '../../core/kernel-consumer-ports.ts';
 import type { RpcRouter } from '../router.ts';
 
 const clientId = z.string().trim().min(1).max(200);
@@ -85,10 +85,10 @@ export const taskSchemas = {
 export type TaskView = z.infer<typeof view>;
 
 export function readTaskSummary(
-  store: TaskKernelRepository, gateway: SemanticDecisionGateway,
+  store: PublicTaskReadPort, gateway: SemanticDecisionGateway,
   taskIdValue: string, clientIdValue: string, selectedView: TaskView = 'summary',
 ) {
-  const full = store.getFullTask(taskIdValue, clientIdValue);
+  const full = store.tasks.readTaskAggregate(taskIdValue, clientIdValue);
   const pending = full.timers.filter(timer => timer.status === 'pending')
     .map(timer => timer.dueAt).sort()[0] ?? null;
   const lastAck = full.attempts.filter(attempt => attempt.acknowledgedAt !== null)
@@ -98,7 +98,7 @@ export function readTaskSummary(
     taskId: full.task.taskId,
     projectId: full.task.projectId,
     conversationSlotId: full.task.slotId,
-    conversationRevision: store.getConversationRevision(
+    conversationRevision: store.projects.getPublicConversationRevision(
       full.task.projectId, full.task.slotId, clientIdValue),
     revision: full.task.revision,
     state: full.task.state,
@@ -124,10 +124,10 @@ export function readTaskSummary(
   if (selectedView !== 'evidence') return summary;
   // Historical slot identity is read from the immutable Task revision, not
   // the current live page/slot (which may already belong to a later question).
-  const binding = store.getBindingAtRevision(
+  const binding = store.projects.getSlotBindingAtRevision(
     full.task.projectId, full.task.slotId, full.task.slotRevision, clientIdValue);
   const initial = full.attempts.find(attempt => attempt.kind === 'initial');
-  const rootPost = initial ? store.getRootPost({
+  const rootPost = initial ? store.attempts.getRootDispatchEvidence({
     taskId: full.task.taskId, clientId: clientIdValue, attemptId: initial.attemptId,
   }) : null;
   return {
@@ -169,7 +169,7 @@ export function readTaskSummary(
 
 export function registerTaskMethods(
   router: RpcRouter,
-  input: { readonly repository: TaskKernelRepository;
+  input: { readonly repository: PublicTaskReadPort;
     readonly gateway: SemanticDecisionGateway;
     readonly admission: PublicTaskAdmissionService },
 ): void {
@@ -216,17 +216,17 @@ export function registerTaskMethods(
   });
 
   router.register('task.cancel', taskSchemas.cancel, params =>
-    repository.withCancelReceipt(params, () => {
-      const before = repository.getFullTask(params.taskId, params.clientId);
+    repository.tasks.withTaskCancellationReceipt(params, () => {
+      const before = repository.tasks.readTaskAggregate(params.taskId, params.clientId);
       if (!['completed', 'failed', 'canceled'].includes(before.task.state) &&
           !before.task.cancelRequested) {
-        repository.requestCancel(params.taskId, params.clientId);
+        repository.tasks.requestTaskCancellation(params.taskId, params.clientId);
       }
-      const current = repository.getFullTask(params.taskId, params.clientId);
+      const current = repository.tasks.readTaskAggregate(params.taskId, params.clientId);
       const externalAttempted = current.attempts.some(attempt =>
         ['dispatched', 'uncertain', 'acknowledged'].includes(attempt.state));
       if (!externalAttempted && current.task.cancelRequested && current.task.state !== 'canceled') {
-        repository.confirmCancel(params.taskId, params.clientId);
+        repository.tasks.confirmTaskCancellation(params.taskId, params.clientId);
       }
       const snapshot = readTaskSummary(repository, gateway, params.taskId, params.clientId);
       return {

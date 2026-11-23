@@ -27,14 +27,14 @@ async function fixture(t: TestContext) {
   const clientId = 'alice';
   const projectId = randomUUID();
   const taskId = randomUUID();
-  store.openProject({
+  store.projects.openProject({
     projectId, projectKey: 'public-task-' + taskId,
     displayName: 'Public Task fixture', clientId,
   });
-  store.openSlot({
+  store.projects.openConversationSlot({
     projectId, clientId, slotId: 'main', roleKey: 'main', providerKey: 'chatgpt',
   });
-  store.startTask({
+  store.tasks.createTask({
     taskId, projectId, slotId: 'main', expectedSlotRevision: 1,
     clientId, requestId: 'public-start-' + taskId, prompt: 'Exact public question',
   });
@@ -51,16 +51,16 @@ test('Task RPC returns exact result bytes and semantic evidence without scraping
   assert.deepEqual(empty.submission, { attempted: false, acknowledged: false });
   assert.equal(empty.decision, null);
   assert.equal(empty.resultAvailable, false);
-  store.planAttempt({
+  store.attempts.planAttempt({
     taskId, clientId, attemptId: 'original', kind: 'initial',
     turnKey: 'root', content: 'Exact public question',
   });
-  store.beginDispatch(taskId, clientId, 'original');
-  store.acknowledgeAttempt({
+  store.attempts.reserveAttemptDispatch(taskId, clientId, 'original');
+  store.attempts.acknowledgeAttempt({
     taskId, clientId, attemptId: 'original', externalTurnId: 'turn-exact',
   });
   const answer = 'EXACT-FINAL-' + '답변💡'.repeat(5_000);
-  store.recordFinal({
+  store.tasks.recordTaskFinal({
     taskId, clientId, attemptId: 'original', externalTurnId: 'turn-exact',
     resultId: 'exact-result', answerText: answer, completeTask: true,
   });
@@ -84,11 +84,11 @@ test('Task RPC returns exact result bytes and semantic evidence without scraping
 
 test('Task wait returns a revision and MCP get uses the same Core state', async t => {
   const { taskId, clientId, store, config, rpc } = await fixture(t);
-  const original = store.getTask(taskId, clientId);
+  const original = store.tasks.getTask(taskId, clientId);
   const waiting = rpc<any>('task.wait', {
     taskId, clientId, afterRevision: original.revision, waitMs: 2_000,
   });
-  setTimeout(() => store.recordObservationDeferred(taskId, clientId,
+  setTimeout(() => store.tasks.recordObservationDeferred(taskId, clientId,
     'public-task-fixture-change'), 50);
   const seen = await waiting;
   assert.ok(seen.revision > original.revision);
@@ -105,7 +105,7 @@ test('Task wait returns a revision and MCP get uses the same Core state', async 
   assert.equal(mcp.isError, false);
   assert.equal(mcp.structuredContent.taskId, taskId);
   assert.equal(mcp.structuredContent.revision, seen.revision);
-  assert.equal(store.getFullTask(taskId, clientId).attempts.length, 0,
+  assert.equal(store.tasks.readTaskAggregate(taskId, clientId).attempts.length, 0,
     'reads and wait never submit or plan external attempts');
 });
 
@@ -138,22 +138,21 @@ test('task.get pages full decision evidence without dropping the executable deci
     }],
     resumePoint: 'same exact Task after selected answer', evidenceBytes: 5_000,
   };
-  store.requireDecision({
+  store.decisions.createDecision({
     taskId, clientId, decisionId, audience: 'agent',
     contextJson: JSON.stringify({
-      kind: 'semantic_action', attemptId: 'initial:' + taskId,
-      context: {
+      schemaVersion: 2, attemptId: 'initial:' + taskId,
+      taskContext: {
         projectId, slotId: 'main', slotRevision: 1, taskId,
         providerConversationId: null, submittedUserMessageId: null,
         submittedUserTurnId: null, pageLease: null,
       },
-      purpose: 'answer_question', snapshotId: packet.snapshotId,
-      actionRef, evidenceHash: 'evidence-paged-question',
-      actions: [{ purpose: 'answer_question', snapshotId: packet.snapshotId,
+      providerActions: [{ purpose: 'answer_question', snapshotId: packet.snapshotId,
         actionRef, evidenceHash: 'evidence-paged-question' }],
       evidence: {
         original_request: 'Exact public question', current_attempt: '',
         provider_question: question, permission: '', partial_answer: '', capability_issues: '',
+        provider_controls: '', decision_options: JSON.stringify(packet.options),
       },
       packet,
     }),
@@ -176,14 +175,14 @@ test('task.get pages full decision evidence without dropping the executable deci
     cursor = page.nextCursor;
   }
   assert.equal(restored, question);
-  assert.equal(store.getTask(taskId, clientId).pendingDecisionId, decisionId);
-  assert.equal(store.getFullTask(taskId, clientId).attempts.length, 0,
+  assert.equal(store.tasks.getTask(taskId, clientId).pendingDecisionId, decisionId);
+  assert.equal(store.tasks.readTaskAggregate(taskId, clientId).attempts.length, 0,
     'paged evidence is a read and cannot create a provider attempt');
 });
 
 test('Task cancel revokes a never-submitted task; an attempted external mutation remains uncertain', async t => {
   const { taskId, clientId, store, rpc } = await fixture(t);
-  store.planAttempt({
+  store.attempts.planAttempt({
     taskId, clientId, attemptId: 'pending-original',
     kind: 'initial', turnKey: 'root', content: 'Exact public question',
   });
@@ -196,35 +195,35 @@ test('Task cancel revokes a never-submitted task; an attempted external mutation
   assert.deepEqual(await rpc<any>('task.cancel', {
     taskId, clientId, requestId: 'cancel-no-post',
   }), result, 'same cancellation request replays its exact durable receipt');
-  assert.equal(store.getFullTask(taskId, clientId).attempts[0].state, 'planned');
+  assert.equal(store.tasks.readTaskAggregate(taskId, clientId).attempts[0].state, 'planned');
   const projectId = randomUUID();
   const other = randomUUID();
-  store.openProject({ projectId, projectKey: 'cancel-other-' + other,
+  store.projects.openProject({ projectId, projectKey: 'cancel-other-' + other,
     displayName: 'Other project', clientId });
-  store.openSlot({ projectId, clientId, slotId: 'main',
+  store.projects.openConversationSlot({ projectId, clientId, slotId: 'main',
     roleKey: 'main', providerKey: 'chatgpt' });
-  store.startTask({
+  store.tasks.createTask({
     taskId: other, projectId, slotId: 'main', expectedSlotRevision: 1,
     clientId, requestId: 'other-start', prompt: 'Other question',
   });
   await assert.rejects(rpc('task.cancel', {
     taskId: other, clientId, requestId: 'cancel-no-post',
   }), /Cancellation requestId is already bound/);
-  assert.equal(store.getTask(other, clientId).state, 'working',
+  assert.equal(store.tasks.getTask(other, clientId).state, 'working',
     'a requestId collision cannot cancel an unrelated Task');
-  store.planAttempt({
+  store.attempts.planAttempt({
     taskId: other, clientId, attemptId: 'maybe-sent',
     kind: 'initial', turnKey: 'root', content: 'Other question',
   });
-  store.beginDispatch(other, clientId, 'maybe-sent');
+  store.attempts.reserveAttemptDispatch(other, clientId, 'maybe-sent');
   const uncertain = await rpc<any>('task.cancel', {
     taskId: other, clientId, requestId: 'stop-intent',
   });
   assert.equal(uncertain.state, 'uncertain');
   assert.equal(uncertain.cancelOutcome, 'external_stop_unverified');
   assert.equal(uncertain.cancelRequested, true);
-  assert.equal(store.getFullTask(other, clientId).attempts[0].state, 'dispatched');
-  store.acknowledgeAttempt({
+  assert.equal(store.tasks.readTaskAggregate(other, clientId).attempts[0].state, 'dispatched');
+  store.attempts.acknowledgeAttempt({
     taskId: other, clientId, attemptId: 'maybe-sent', externalTurnId: 'late-ack-after-cancel',
   });
   assert.deepEqual(await rpc<any>('task.cancel', {
@@ -257,17 +256,22 @@ test('Task decide rejects arbitrary selector, stale decision and invalid typed i
     }],
     evidenceBytes: 100,
   };
-  store.planAttempt({ taskId, clientId, attemptId: 'original',
+  store.attempts.planAttempt({ taskId, clientId, attemptId: 'original',
     kind: 'initial', turnKey: 'root', content: 'Exact public question' });
-  store.requireDecision({ taskId, clientId, decisionId, audience: 'agent',
+  store.decisions.createDecision({ taskId, clientId, decisionId, audience: 'agent',
     contextJson: JSON.stringify({
-      kind: 'semantic_action', attemptId: 'original', context: {
-        projectId: store.getTask(taskId,clientId).projectId,
+      schemaVersion: 2, attemptId: 'original', taskContext: {
+        projectId: store.tasks.getTask(taskId,clientId).projectId,
         slotId: 'main', slotRevision: 1, taskId,
         providerConversationId: null, submittedUserMessageId: null,
         submittedUserTurnId: null, pageLease: null,
-      }, purpose: 'answer_question', snapshotId: 'snapshot',
-      actionRef, evidenceHash: 'fixture-hash', packet: decisionPacket,
+      }, providerActions: [{ purpose: 'answer_question', snapshotId: 'snapshot',
+        actionRef, evidenceHash: 'fixture-hash' }],
+      evidence: { original_request: '', current_attempt: '', provider_question: 'Proceed?',
+        permission: '', partial_answer: '', capability_issues: '',
+        provider_controls: '', decision_options: JSON.stringify(decisionPacket.options) },
+      packet: { ...decisionPacket, controls: [], evidenceSections: [], observedControls: [],
+        requestedModel: null, resumePoint: 'fixture pending question' },
     }),
   });
   const before = await rpc<any>('task.get', { taskId, clientId });
@@ -292,7 +296,7 @@ test('Task decide rejects arbitrary selector, stale decision and invalid typed i
       assert.equal(error.data?.errorCode, 'invalid_request');
       return true;
     });
-  assert.equal(store.getTask(taskId, clientId).pendingDecisionId, decisionId);
+  assert.equal(store.tasks.getTask(taskId, clientId).pendingDecisionId, decisionId);
 });
 
 
@@ -393,18 +397,18 @@ test('task.start atomically plans one original attempt and returns current slot 
   assert.equal(started.submission.attempted, false);
   assert.equal(started.preparation, 'not_bound',
     'without a verified provider conversation Task persists before any POST');
-  const full = store.getFullTask(started.taskId, 'alice');
+  const full = store.tasks.readTaskAggregate(started.taskId, 'alice');
   assert.equal(full.attempts.length, 1);
   assert.equal(full.attempts[0]!.state, 'planned');
   assert.equal(full.attempts[0]!.content, input.prompt);
-  assert.deepEqual(store.publicPermissionGrants(started.taskId, 'alice'), [{
+  assert.deepEqual(store.tasks.readPublicPermissionGrants(started.taskId, 'alice'), [{
     appName: 'hostspan-git', toolName: 'repository_read', allowMode: 'once',
   }]);
   assert.equal((await rpc<any>('task.get', {
     clientId: 'alice', taskId: started.taskId,
   })).conversationRevision, 2);
   assert.deepEqual(await rpc('task.start', input), started);
-  assert.equal(store.getFullTask(started.taskId, 'alice').attempts.length, 1,
+  assert.equal(store.tasks.readTaskAggregate(started.taskId, 'alice').attempts.length, 1,
     'a replay must not submit the initial prompt or plan a duplicate attempt');
   await assert.rejects(rpc('task.start', {
     ...input, requestId: 'competing-start',
@@ -476,25 +480,25 @@ test('approved task.start policy automatically arms on exact ACK without any cli
       message: '계속', approvalRef: 'explicit-delegation',
     },
   });
-  const attempt = store.getFullTask(started.taskId, 'alice').attempts[0]!;
+  const attempt = store.tasks.readTaskAggregate(started.taskId, 'alice').attempts[0]!;
   assert.equal((await core.semanticManagedContinuation.tick()).timersClaimed, 0);
-  assert.equal(store.getFullTask(started.taskId, 'alice').timers.length, 0,
+  assert.equal(store.tasks.readTaskAggregate(started.taskId, 'alice').timers.length, 0,
     'approval alone cannot create a timer before provider ACK');
-  store.observeConversation({
+  store.projects.bindObservedConversation({
     projectId: project.projectId, clientId: 'alice',
     slotId: 'main', expectedRevision: 1, taskId: started.taskId,
     providerConversationId: 'verified-fixture-conversation',
   });
-  store.beginDispatch(started.taskId, 'alice', attempt.attemptId);
-  store.acknowledgeAttempt({
+  store.attempts.reserveAttemptDispatch(started.taskId, 'alice', attempt.attemptId);
+  store.attempts.acknowledgeAttempt({
     taskId: started.taskId, clientId: 'alice',
     attemptId: attempt.attemptId, externalTurnId: 'verified-turn',
   });
-  const acknowledged = store.getFullTask(started.taskId, 'alice').attempts[0]!;
+  const acknowledged = store.tasks.readTaskAggregate(started.taskId, 'alice').attempts[0]!;
   const expectedDue = new Date(
     Date.parse(acknowledged.acknowledgedAt!) + 1_200_000).toISOString();
   assert.equal((await core.semanticManagedContinuation.tick()).timersClaimed, 0);
-  const tasks = store.getFullTask(started.taskId, 'alice');
+  const tasks = store.tasks.readTaskAggregate(started.taskId, 'alice');
   assert.equal(tasks.timers.length, 1);
   assert.equal(tasks.timers[0]?.dueAt, expectedDue);
   assert.equal(tasks.timers[0]?.status, 'pending');
@@ -502,13 +506,13 @@ test('approved task.start policy automatically arms on exact ACK without any cli
     clientId: 'alice', taskId: started.taskId,
   })).nextAutomaticActionAt, expectedDue);
   assert.equal((await core.semanticManagedContinuation.tick()).timersClaimed, 0);
-  assert.equal(store.getFullTask(started.taskId, 'alice').timers.length, 1,
+  assert.equal(store.tasks.readTaskAggregate(started.taskId, 'alice').timers.length, 1,
     'same ACK does not create a second continuation timer');
   const cancellation = await rpc<any>('task.cancel', {
     clientId: 'alice', taskId: started.taskId, requestId: 'cancel-approved-task',
   });
   assert.equal(cancellation.cancelRequested, true);
-  assert.equal(store.getFullTask(started.taskId, 'alice').timers[0]?.status, 'canceled');
+  assert.equal(store.tasks.readTaskAggregate(started.taskId, 'alice').timers[0]?.status, 'canceled');
 });
 
 
@@ -525,14 +529,14 @@ test('Core independently recovers delayed public ACK and exact FINAL without a c
     expectedConversationRevision: project.conversationRevision,
     prompt: 'Exact public final prompt',
   });
-  const attempt = store.getFullTask(started.taskId, 'alice').attempts[0]!;
-  store.observeConversation({
+  const attempt = store.tasks.readTaskAggregate(started.taskId, 'alice').attempts[0]!;
+  store.projects.bindObservedConversation({
     projectId: project.projectId, slotId: 'main', expectedRevision: 1,
     clientId: 'alice', taskId: started.taskId,
     providerConversationId: 'public-fixture-conversation',
   });
-  store.beginDispatch(started.taskId, 'alice', attempt.attemptId);
-  store.recordDispatchEvidence({
+  store.attempts.reserveAttemptDispatch(started.taskId, 'alice', attempt.attemptId);
+  store.attempts.recordDispatchEvidence({
     taskId: started.taskId, clientId: 'alice', attemptId: attempt.attemptId,
     evidence: {
       conversationId: 'public-fixture-conversation',
@@ -541,7 +545,7 @@ test('Core independently recovers delayed public ACK and exact FINAL without a c
       observedAt: new Date().toISOString(),
     },
   });
-  store.markUncertain(started.taskId, 'alice', attempt.attemptId,
+  store.attempts.markAttemptUncertain(started.taskId, 'alice', attempt.attemptId,
     'canonical-ack-still-unverified');
   const payload = {
     id: 'public-fixture-conversation', current_node: 'assistant-one',
@@ -582,11 +586,11 @@ test('Core independently recovers delayed public ACK and exact FINAL without a c
       now: () => new Date(backendNow),
     }),
   });
-  assert.equal(store.getTask(started.taskId, 'alice').state, 'uncertain');
+  assert.equal(store.tasks.getTask(started.taskId, 'alice').state, 'uncertain');
   assert.equal((await runtime.managedContinuation.tick()).dispatchesAttempted, 0);
-  assert.equal(store.getTask(started.taskId, 'alice').state, 'working',
+  assert.equal(store.tasks.getTask(started.taskId, 'alice').state, 'working',
     'canonical ACK restores working while the next GET respects pacing');
-  assert.equal(store.getFullTask(started.taskId, 'alice').attempts[0]!.state, 'acknowledged');
+  assert.equal(store.tasks.readTaskAggregate(started.taskId, 'alice').attempts[0]!.state, 'acknowledged');
   backendNow += 60_000;
   await runtime.managedContinuation.tick();
   const exact = await rpc<any>('task.get', {
@@ -597,7 +601,7 @@ test('Core independently recovers delayed public ACK and exact FINAL without a c
   assert.equal(exact.result.externalTurnId, 'public-turn-one');
   assert.equal(exact.result.answerText, 'Autonomous exact FINAL 🌟');
   assert.equal(exact.result.completesTask, true);
-  assert.equal(store.getFullTask(started.taskId, 'alice').attempts.length, 1,
+  assert.equal(store.tasks.readTaskAggregate(started.taskId, 'alice').attempts.length, 1,
     'the Final observer cannot create another POST attempt');
   const before = reads;
   await runtime.managedContinuation.tick();
@@ -623,14 +627,14 @@ test('approved public Task completes on exact FINAL and cancels its pending 20m 
       intervalMs: 1_200_000, message: '계속',
     },
   });
-  const attempt = store.getFullTask(started.taskId, 'alice').attempts[0]!;
-  store.observeConversation({
+  const attempt = store.tasks.readTaskAggregate(started.taskId, 'alice').attempts[0]!;
+  store.projects.bindObservedConversation({
     projectId: project.projectId, slotId: 'main',
     expectedRevision: 1, clientId: 'alice', taskId: started.taskId,
     providerConversationId: 'managed-public-conversation',
   });
-  store.beginDispatch(started.taskId, 'alice', attempt.attemptId);
-  store.recordDispatchEvidence({
+  store.attempts.reserveAttemptDispatch(started.taskId, 'alice', attempt.attemptId);
+  store.attempts.recordDispatchEvidence({
     taskId: started.taskId, clientId: 'alice', attemptId: attempt.attemptId,
     evidence: {
       conversationId: 'managed-public-conversation',
@@ -639,7 +643,7 @@ test('approved public Task completes on exact FINAL and cancels its pending 20m 
       observedAt: new Date().toISOString(),
     },
   });
-  store.acknowledgeAttempt({
+  store.attempts.acknowledgeAttempt({
     taskId: started.taskId, clientId: 'alice', attemptId: attempt.attemptId,
     externalTurnId: 'managed-public-turn',
   });
@@ -692,9 +696,9 @@ test('approved public Task completes on exact FINAL and cancels its pending 20m 
   assert.equal(exact.result.completesTask, true,
     'a verified FINAL ends this Task even when the continuation policy was approved');
   assert.equal(exact.nextAutomaticActionAt, null);
-  assert.equal(store.getFullTask(started.taskId, 'alice').timers
+  assert.equal(store.tasks.readTaskAggregate(started.taskId, 'alice').timers
     .filter(timer => timer.status === 'pending').length, 0);
-  assert.equal(store.getFullTask(started.taskId, 'alice').attempts.length, 1,
+  assert.equal(store.tasks.readTaskAggregate(started.taskId, 'alice').attempts.length, 1,
     'no client and no active page mean no early continuation POST');
   await runtime.managedContinuation.tick();
   assert.equal(conversationReads, 1, 'exact FINAL is not re-read on the next tick');
@@ -714,14 +718,14 @@ test('public exact FINAL 429 remains working, without fabricated answer or new a
     expectedConversationRevision: project.conversationRevision,
     prompt: 'Do not infer a final',
   });
-  const attempt = store.getFullTask(started.taskId, 'alice').attempts[0]!;
-  store.observeConversation({
+  const attempt = store.tasks.readTaskAggregate(started.taskId, 'alice').attempts[0]!;
+  store.projects.bindObservedConversation({
     projectId: project.projectId, slotId: 'main',
     expectedRevision: 1, clientId: 'alice', taskId: started.taskId,
     providerConversationId: 'final-429-conversation',
   });
-  store.beginDispatch(started.taskId, 'alice', attempt.attemptId);
-  store.recordDispatchEvidence({
+  store.attempts.reserveAttemptDispatch(started.taskId, 'alice', attempt.attemptId);
+  store.attempts.recordDispatchEvidence({
     taskId: started.taskId, clientId: 'alice', attemptId: attempt.attemptId,
     evidence: {
       conversationId: 'final-429-conversation', messageId: 'final-user',
@@ -730,7 +734,7 @@ test('public exact FINAL 429 remains working, without fabricated answer or new a
       observedAt: new Date().toISOString(),
     },
   });
-  store.acknowledgeAttempt({
+  store.attempts.acknowledgeAttempt({
     taskId: started.taskId, clientId: 'alice', attemptId: attempt.attemptId,
     externalTurnId: 'final-user-turn',
   });
@@ -762,7 +766,7 @@ test('public exact FINAL 429 remains working, without fabricated answer or new a
   assert.equal(pending.state, 'working');
   assert.equal(pending.result, null);
   assert.equal(pending.resultAvailable, false);
-  assert.equal(store.getFullTask(started.taskId, 'alice').attempts.length, 1);
+  assert.equal(store.tasks.readTaskAggregate(started.taskId, 'alice').attempts.length, 1);
   assert.equal(detailReads, 1);
   await runtime.managedContinuation.tick();
   assert.equal(detailReads, 1, 'Retry-After prevents premature repeated GET');
@@ -792,24 +796,24 @@ test('three independent public questions reuse one Main conversation and never s
     assert.equal(started.state, 'working');
     assert.equal(started.submission.attempted, false);
     if (i === 0) {
-      store.observeConversation({
+      store.projects.bindObservedConversation({
         projectId: project.projectId, slotId: 'main', clientId,
         expectedRevision: 1, taskId: started.taskId,
         providerConversationId: 'single-provider-conversation',
       });
     } else {
-      assert.equal(store.getSlot(project.projectId, 'main', clientId)
+      assert.equal(store.projects.getConversationSlot(project.projectId, 'main', clientId)
         .providerConversationId, 'single-provider-conversation');
     }
-    const initial = store.getFullTask(started.taskId, clientId).attempts[0]!;
+    const initial = store.tasks.readTaskAggregate(started.taskId, clientId).attempts[0]!;
     assert.equal(initial.kind, 'initial');
     assert.equal(initial.content, questions[i]);
-    store.beginDispatch(started.taskId, clientId, initial.attemptId);
-    store.acknowledgeAttempt({
+    store.attempts.reserveAttemptDispatch(started.taskId, clientId, initial.attemptId);
+    store.attempts.acknowledgeAttempt({
       taskId: started.taskId, clientId, attemptId: initial.attemptId,
       externalTurnId: 'turn-' + i,
     });
-    store.recordFinal({
+    store.tasks.recordTaskFinal({
       taskId: started.taskId, clientId, attemptId: initial.attemptId,
       externalTurnId: 'turn-' + i, resultId: 'final-' + i,
       answerText: 'Answer to ' + questions[i], completeTask: true,
@@ -820,7 +824,7 @@ test('three independent public questions reuse one Main conversation and never s
     assert.equal(done.state, 'completed');
     assert.equal(done.result.answerText, 'Answer to ' + questions[i]);
     assert.equal(done.result.externalTurnId, 'turn-' + i);
-    assert.equal(store.getSlot(project.projectId, 'main', clientId)
+    assert.equal(store.projects.getConversationSlot(project.projectId, 'main', clientId)
       .activeTaskId, null, 'terminal Task releases only the slot lease');
     assert.equal((await rpc<any>('task.start', {
       clientId, requestId, projectId: project.projectId,
@@ -850,16 +854,16 @@ test('public Task evidence exposes canonical root identity without adopting a la
   });
   const projectId = team.teamId;
   const taskId = randomUUID();
-  store.openProject({ projectId, clientId, projectKey: 'root-evidence-' + taskId,
+  store.projects.openProject({ projectId, clientId, projectKey: 'root-evidence-' + taskId,
     displayName: 'Root evidence fixture' });
-  store.openSlot({ projectId, clientId, slotId: 'main',
+  store.projects.openConversationSlot({ projectId, clientId, slotId: 'main',
     roleKey: 'main', providerKey: 'chatgpt' });
-  store.startTask({ taskId, projectId, clientId, slotId: 'main',
+  store.tasks.createTask({ taskId, projectId, clientId, slotId: 'main',
     expectedSlotRevision: 1, requestId: 'initial-' + taskId,
     prompt: 'Exact public question' });
-  store.planAttempt({ taskId, clientId, attemptId: 'exact-root', kind: 'initial',
+  store.attempts.planAttempt({ taskId, clientId, attemptId: 'exact-root', kind: 'initial',
     turnKey: 'root', content: 'Exact public question' });
-  store.beginDispatch(taskId, clientId, 'exact-root');
+  store.attempts.reserveAttemptDispatch(taskId, clientId, 'exact-root');
   const session = core.teamDirectory.createSession({
     teamId: projectId, roleKey: 'main', provider: 'chatgpt',
   });
@@ -870,7 +874,7 @@ test('public Task evidence exposes canonical root identity without adopting a la
     textHash: createHash('sha256').update('Exact public question').digest('hex'),
     observedAt: new Date().toISOString(), requestConversationId: null,
   };
-  store.recordRootPost({ taskId, clientId, attemptId: 'exact-root', evidence: original });
+  store.attempts.recordRootDispatchEvidence({ taskId, clientId, attemptId: 'exact-root', evidence: original });
   const before = await rpc<any>('task.get', { taskId, clientId, view: 'evidence' });
   assert.equal(before.evidence.conversation.providerConversationId, null);
   assert.equal(before.evidence.rootPost.observationCount, 1);
@@ -881,18 +885,18 @@ test('public Task evidence exposes canonical root identity without adopting a la
   assert.equal(JSON.stringify(before).includes('Exact public question'), false,
     'Evidence contains only bounded provenance, not the original prompt');
 
-  store.promoteRootPost({ taskId, clientId, attemptId: 'exact-root',
+  store.attempts.promoteRootDispatchEvidence({ taskId, clientId, attemptId: 'exact-root',
     conversationId: 'verified-conversation', messageId: original.messageId,
     externalTurnId: 'verified-turn' });
   const acknowledged = await rpc<any>('task.get', { taskId, clientId, view: 'evidence' });
   assert.equal(acknowledged.submission.acknowledged, true);
   assert.equal(acknowledged.evidence.conversation.providerConversationId, 'verified-conversation');
   assert.equal(acknowledged.evidence.rootPost.canonicalConversationId, 'verified-conversation');
-  store.recordFinal({ taskId, clientId, attemptId: 'exact-root',
+  store.tasks.recordTaskFinal({ taskId, clientId, attemptId: 'exact-root',
     externalTurnId: 'verified-turn', resultId: 'root-result',
     answerText: 'Exact root answer', completeTask: true });
-  store.replaceBinding({
-    projectId: store.getTask(taskId, clientId).projectId,
+  store.projects.replaceConversationBinding({
+    projectId: store.tasks.getTask(taskId, clientId).projectId,
     clientId, slotId: 'main', expectedRevision: 1,
     providerKey: 'chatgpt', providerConversationId: 'later-conversation',
   });
@@ -904,17 +908,17 @@ test('public Task evidence exposes canonical root identity without adopting a la
 
 test('an ambiguous initial POST is visible as durable evidence, never a fabricated ACK', async t => {
   const { taskId, clientId, store, rpc } = await fixture(t);
-  store.planAttempt({ taskId, clientId, attemptId: 'uncertain-root',
+  store.attempts.planAttempt({ taskId, clientId, attemptId: 'uncertain-root',
     kind: 'initial', turnKey: 'root', content: 'Exact public question' });
-  store.beginDispatch(taskId, clientId, 'uncertain-root');
+  store.attempts.reserveAttemptDispatch(taskId, clientId, 'uncertain-root');
   const original = {
     sessionId: 'one-session', generation: 1, pageKey: 'root-page', targetId: 'target',
     bindingEpoch: 1, messageId: 'post-one', parentMessageId: 'parent-one',
     textHash: createHash('sha256').update('Exact public question').digest('hex'),
     observedAt: new Date().toISOString(), requestConversationId: null,
   };
-  store.recordRootPost({ taskId, clientId, attemptId: 'uncertain-root', evidence: original });
-  assert.throws(() => store.recordRootPost({
+  store.attempts.recordRootDispatchEvidence({ taskId, clientId, attemptId: 'uncertain-root', evidence: original });
+  assert.throws(() => store.attempts.recordRootDispatchEvidence({
     taskId, clientId, attemptId: 'uncertain-root',
     evidence: { ...original, messageId: 'post-two' },
   }), /Conflicting root POST evidence/);
@@ -923,7 +927,7 @@ test('an ambiguous initial POST is visible as durable evidence, never a fabricat
   assert.equal(evidence.evidence.rootPost.observationCount, 2);
   assert.equal(evidence.evidence.rootPost.canonicalConversationId, null);
   assert.equal(evidence.submission.acknowledged, false);
-  assert.throws(() => store.promoteRootPost({
+  assert.throws(() => store.attempts.promoteRootDispatchEvidence({
     taskId, clientId, attemptId: 'uncertain-root',
     conversationId: 'untrusted', messageId: 'post-one', externalTurnId: 'bad-turn',
   }), /one unambiguous observed POST/);

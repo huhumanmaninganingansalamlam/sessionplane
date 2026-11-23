@@ -103,40 +103,40 @@ test('Core composes the semantic ChatGPT provider without launching a separate b
     assert.ok(core.semanticTaskRepository, 'the kernel must use the Core-owned durable journal');
     assert.equal(core.pageRegistry.listBindings().length, 0);
     const store = core.semanticTaskRepository;
-    store.openProject({
+    store.projects.openProject({
       projectId: 'kernel-project', projectKey: 'kernel-fixture', displayName: 'Kernel fixture',
       clientId: 'kernel-client',
     });
-    store.openSlot({
+    store.projects.openConversationSlot({
       projectId: 'kernel-project', clientId: 'kernel-client', slotId: 'main',
       roleKey: 'main', providerKey: 'chatgpt',
     });
-    store.startTask({
+    store.tasks.createTask({
       taskId: 'kernel-task', projectId: 'kernel-project', slotId: 'main',
       expectedSlotRevision: 1, clientId: 'kernel-client',
       requestId: 'kernel-start', prompt: 'One exact prompt',
     });
-    assert.equal(store.dispatchClientId('kernel-task'), 'kernel-client');
-    assert.equal(store.dispatchClientId('foreign-task'), null);
-    store.observeConversation({
+    assert.equal(store.tasks.findDispatchClientId('kernel-task'), 'kernel-client');
+    assert.equal(store.tasks.findDispatchClientId('foreign-task'), null);
+    store.projects.bindObservedConversation({
       projectId: 'kernel-project', clientId: 'kernel-client', slotId: 'main',
       expectedRevision: 1, taskId: 'kernel-task',
       providerConversationId: 'owned-conversation',
     });
-    store.planAttempt({
+    store.attempts.planAttempt({
       taskId: 'kernel-task', clientId: 'kernel-client',
       attemptId: 'kernel-attempt', kind: 'initial', turnKey: 'initial',
       content: 'One exact prompt',
     });
     await core.semanticTaskKernel.dispatch('kernel-task', 'kernel-client', 'kernel-attempt');
-    assert.equal(store.getFullTask('kernel-task', 'kernel-client').attempts[0]?.state,
+    assert.equal(store.tasks.readTaskAggregate('kernel-task', 'kernel-client').attempts[0]?.state,
       'planned', 'absence of an owned page is known before an external attempt');
-    assert.equal(store.getFullTask('kernel-task', 'kernel-client').events
+    assert.equal(store.tasks.readTaskAggregate('kernel-task', 'kernel-client').events
       .filter(event => event.event.type === 'attempt.dispatched').length, 0);
     await core.semanticTaskKernel.dispatch('kernel-task', 'kernel-client', 'kernel-attempt');
-    assert.equal(store.getFullTask('kernel-task', 'kernel-client').attempts[0]?.state,
+    assert.equal(store.tasks.readTaskAggregate('kernel-task', 'kernel-client').attempts[0]?.state,
       'planned', 'repeated preflight failures preserve one future safe send');
-    assert.equal(store.getFullTask('kernel-task', 'kernel-client').events
+    assert.equal(store.tasks.readTaskAggregate('kernel-task', 'kernel-client').events
       .filter(event => event.event.type === 'observation.deferred').length, 1);
     assert.equal(core.pageRegistry.listBindings().length, 0);
     const provider = core.semanticProviders.resolve('chatgpt', 'conversation');
@@ -198,23 +198,23 @@ test('Core-owned semantic Retry-After survives restart without an extra backend 
   try {
     core = await startCore({ config, startBrowser: false, logger });
     const store = core.semanticTaskRepository;
-    store.openProject({ projectId, projectKey: 'retry-pacing.fixture',
+    store.projects.openProject({ projectId, projectKey: 'retry-pacing.fixture',
       displayName: 'Retry pacing fixture', clientId });
-    store.openSlot({ projectId, clientId, slotId: 'main', roleKey: 'main',
+    store.projects.openConversationSlot({ projectId, clientId, slotId: 'main', roleKey: 'main',
       providerKey: 'chatgpt' });
-    store.startTask({ taskId, projectId, slotId: 'main', expectedSlotRevision: 1,
+    store.tasks.createTask({ taskId, projectId, slotId: 'main', expectedSlotRevision: 1,
       clientId, requestId: 'pacing-request', prompt });
-    store.observeConversation({ projectId, clientId, slotId: 'main',
+    store.projects.bindObservedConversation({ projectId, clientId, slotId: 'main',
       expectedRevision: 1, taskId, providerConversationId: conversationId });
-    store.planAttempt({ taskId, clientId, attemptId, kind: 'initial',
+    store.attempts.planAttempt({ taskId, clientId, attemptId, kind: 'initial',
       turnKey: 'initial', content: prompt });
-    store.beginDispatch(taskId, clientId, attemptId);
-    store.recordDispatchEvidence({ taskId, clientId, attemptId, evidence: {
+    store.attempts.reserveAttemptDispatch(taskId, clientId, attemptId);
+    store.attempts.recordDispatchEvidence({ taskId, clientId, attemptId, evidence: {
       conversationId, messageId: 'pacing-user', parentMessageId: 'root',
       textHash: createHash('sha256').update(prompt).digest('hex'),
       observedAt: new Date(0).toISOString(),
     } });
-    store.acknowledgeAttempt({ taskId, clientId, attemptId, externalTurnId: 'pacing-turn' });
+    store.attempts.acknowledgeAttempt({ taskId, clientId, attemptId, externalTurnId: 'pacing-turn' });
     const runtime = () => createSemanticCoreRuntime({
       database: core!.database, browserOwner: null, pageRegistry: core!.pageRegistry,
       teamDirectory: core!.teamDirectory, pageMutationMutex: core!.pageMutationMutex,
@@ -225,29 +225,29 @@ test('Core-owned semantic Retry-After survives restart without an extra backend 
     const query = { taskId, clientId, attemptId, resultId: 'pacing-result', completeTask: true };
     assert.equal(await runtime().kernel.observeFinal(query), null);
     assert.equal(conversationReads, 1);
-    assert.equal(store.backendReadNotBeforeMs('chatgpt', 'https://chatgpt.com'), now + 120_000);
-    assert.equal(store.backendReadNotBeforeMs('chatgpt', 'https://chat.openai.com'), 0,
+    assert.equal(store.pacing.readBackendReadFence('chatgpt', 'https://chatgpt.com'), now + 120_000);
+    assert.equal(store.pacing.readBackendReadFence('chatgpt', 'https://chat.openai.com'), 0,
       'one origin must not inherit another origin\'s cooldown');
-    assert.equal(store.extendBackendReadNotBeforeMs('chatgpt', 'https://chatgpt.com', now + 1_000),
+    assert.equal(store.pacing.extendBackendReadFence('chatgpt', 'https://chatgpt.com', now + 1_000),
       now + 120_000, 'an old caller cannot shorten a durable cooldown');
-    assert.throws(() => store.extendBackendReadNotBeforeMs('chatgpt',
+    assert.throws(() => store.pacing.extendBackendReadFence('chatgpt',
       'https://chatgpt.com', Number.MAX_SAFE_INTEGER + 1), /safe integer/);
     await core.close();
     core = null;
 
     core = await startCore({ config, startBrowser: false, logger });
-    assert.equal(core.semanticTaskRepository.backendReadNotBeforeMs('chatgpt', 'https://chatgpt.com'),
+    assert.equal(core.semanticTaskRepository.pacing.readBackendReadFence('chatgpt', 'https://chatgpt.com'),
       now + 120_000, 'pacing watermark is recovered from the same Core-owned SQLite');
     assert.equal(await runtime().kernel.observeFinal(query), null,
       'a restarted Core must preserve the original Retry-After, not query twice');
     assert.equal(conversationReads, 1, 'no backend GET before persisted Retry-After');
     assert.equal(authReads, 1, 'no auth GET needed during persisted backend cooldown');
-    assert.equal(core.semanticTaskRepository.getTask(taskId, clientId).state, 'working');
+    assert.equal(core.semanticTaskRepository.tasks.getTask(taskId, clientId).state, 'working');
     now += 120_001;
     const final = await runtime().kernel.observeFinal(query);
     assert.equal(final?.answerText, 'Recovered after due');
     assert.equal(conversationReads, 2);
-    assert.equal(core.semanticTaskRepository.getTask(taskId, clientId).state, 'completed');
+    assert.equal(core.semanticTaskRepository.tasks.getTask(taskId, clientId).state, 'completed');
   } finally {
     await core?.close();
     rmSync(root, { recursive: true, force: true });
@@ -291,23 +291,23 @@ test('Core-owned semantic late ACK preserves 429 evidence across restart without
   try {
     core = await startCore({ config, startBrowser: false, logger });
     const store = core.semanticTaskRepository;
-    store.openProject({ projectId, clientId, projectKey: 'late-ack-fixture',
+    store.projects.openProject({ projectId, clientId, projectKey: 'late-ack-fixture',
       displayName: 'Late ACK fixture' });
-    store.openSlot({ projectId, clientId, slotId: 'main', roleKey: 'main',
+    store.projects.openConversationSlot({ projectId, clientId, slotId: 'main', roleKey: 'main',
       providerKey: 'chatgpt' });
-    store.startTask({ taskId, projectId, clientId, slotId: 'main',
+    store.tasks.createTask({ taskId, projectId, clientId, slotId: 'main',
       expectedSlotRevision: 1, requestId: 'ack-request', prompt });
-    store.observeConversation({ taskId, projectId, clientId, slotId: 'main',
+    store.projects.bindObservedConversation({ taskId, projectId, clientId, slotId: 'main',
       expectedRevision: 1, providerConversationId: conversationId });
-    store.planAttempt({ taskId, clientId, attemptId, kind: 'initial',
+    store.attempts.planAttempt({ taskId, clientId, attemptId, kind: 'initial',
       turnKey: 'initial', content: prompt });
-    store.beginDispatch(taskId, clientId, attemptId);
-    store.recordDispatchEvidence({ taskId, clientId, attemptId, evidence: {
+    store.attempts.reserveAttemptDispatch(taskId, clientId, attemptId);
+    store.attempts.recordDispatchEvidence({ taskId, clientId, attemptId, evidence: {
       conversationId, messageId: 'ack-user', parentMessageId: 'root',
       textHash: createHash('sha256').update(prompt).digest('hex'),
       observedAt: new Date(0).toISOString(),
     } });
-    store.markUncertain(taskId, clientId, attemptId, 'lost-ack');
+    store.attempts.markAttemptUncertain(taskId, clientId, attemptId, 'lost-ack');
     const runtime = () => createSemanticCoreRuntime({
       database: core!.database, browserOwner: null,
       pageRegistry: core!.pageRegistry, teamDirectory: core!.teamDirectory,
@@ -318,7 +318,7 @@ test('Core-owned semantic late ACK preserves 429 evidence across restart without
     const first = await runtime().kernel.recoverAck(taskId, clientId, attemptId);
     assert.equal(first.state, 'uncertain');
     assert.equal(conversationReads, 1);
-    assert.ok(store.getFullTask(taskId, clientId).events.some(event =>
+    assert.ok(store.tasks.readTaskAggregate(taskId, clientId).events.some(event =>
       event.event.type === 'observation.deferred' &&
       event.event.reason === 'ack:ack-attempt:pending:backend-http-429'));
     await core.close();
@@ -332,7 +332,7 @@ test('Core-owned semantic late ACK preserves 429 evidence across restart without
     now += 120_001;
     const recovered = await runtime().kernel.recoverAck(taskId, clientId, attemptId);
     assert.equal(recovered.state, 'working');
-    assert.equal(core.semanticTaskRepository.getFullTask(taskId, clientId).attempts[0]?.externalTurnId,
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(taskId, clientId).attempts[0]?.externalTurnId,
       'ack-turn', 'only the original durable attempt receives its late ACK');
     assert.equal(conversationReads, 2, 'ACK never triggers a second POST');
     await runtime().kernel.recoverAck(taskId, clientId, attemptId);

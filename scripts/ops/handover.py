@@ -682,25 +682,25 @@ def seed_transition_evidence(candidate, database_path, receipt):
 import { pathToFileURL } from 'node:url';
 const [root, file, marker] = process.argv.slice(1);
 const { SessionPlaneDatabase } = await import(pathToFileURL(root + '/dist/storage/database.js').href);
-const { TaskKernelRepository } = await import(pathToFileURL(root + '/dist/storage/task-kernel-repository.js').href);
+const { createKernelStores } = await import(pathToFileURL(root + '/dist/storage/kernel/create-kernel-stores.js').href);
 const database = SessionPlaneDatabase.open(file);
 try {
-  const store = new TaskKernelRepository(database);
+  const store = createKernelStores(database);
   for (const [index, phase] of ['uncertain', 'final', 'draft'].entries()) {
     const projectId = marker + '-project-' + index;
     const taskId = marker + '-task-' + index;
     const attemptId = marker + '-attempt-' + index;
-    store.openProject({ projectId, clientId: marker, projectKey: projectId, displayName: phase });
-    store.openSlot({ projectId, clientId: marker, slotId: 'main', roleKey: 'main', providerKey: 'chatgpt' });
-    store.startTask({ taskId, projectId, slotId: 'main', clientId: marker,
+    store.projects.openProject({ projectId, clientId: marker, projectKey: projectId, displayName: phase });
+    store.projects.openConversationSlot({ projectId, clientId: marker, slotId: 'main', roleKey: 'main', providerKey: 'chatgpt' });
+    store.tasks.createTask({ taskId, projectId, slotId: 'main', clientId: marker,
       requestId: marker + '-start-' + phase, expectedSlotRevision: 1, prompt: 'handover ' + phase });
-    store.planAttempt({ taskId, clientId: marker, attemptId,
+    store.attempts.planAttempt({ taskId, clientId: marker, attemptId,
       kind: 'initial', turnKey: 'root', content: 'handover ' + phase });
-    if (phase !== 'draft') store.beginDispatch(taskId, marker, attemptId);
-    if (phase === 'uncertain') store.markUncertain(taskId, marker, attemptId, 'handover-lost-ack');
+    if (phase !== 'draft') store.attempts.reserveAttemptDispatch(taskId, marker, attemptId);
+    if (phase === 'uncertain') store.attempts.markAttemptUncertain(taskId, marker, attemptId, 'handover-lost-ack');
     if (phase === 'final') {
-      store.acknowledgeAttempt({ taskId, clientId: marker, attemptId, externalTurnId: marker + '-turn' });
-      store.recordFinal({ taskId, clientId: marker, attemptId,
+      store.attempts.acknowledgeAttempt({ taskId, clientId: marker, attemptId, externalTurnId: marker + '-turn' });
+      store.tasks.recordTaskFinal({ taskId, clientId: marker, attemptId,
         externalTurnId: marker + '-turn', resultId: marker + '-result',
         answerText: 'handover exact final\n  retained', completeTask: true });
     }

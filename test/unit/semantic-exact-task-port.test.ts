@@ -15,7 +15,7 @@ import type {
   SemanticTaskContext, SemanticVerification,
 } from '../../src/providers/semantic-adapter.ts';
 import { SessionPlaneDatabase } from '../../src/storage/database.ts';
-import { TaskKernelRepository } from '../../src/storage/task-kernel-repository.ts';
+import { createKernelStores, type KernelStores } from '../../src/storage/kernel/create-kernel-stores.ts';
 
 const hash = (text: string) => createHash('sha256').update(text).digest('hex');
 const SENT_AT = '2026-11-08T10:00:00.000Z';
@@ -106,19 +106,19 @@ test('semantic Core bridge persists exact dispatch evidence and recovers ACK/FIN
   const dir = mkdtempSync(join(tmpdir(), 'sessionplane-semantic-port-'));
   const path = join(dir, 'kernel.sqlite');
   let db = SessionPlaneDatabase.open(path);
-  let store = new TaskKernelRepository(db, () => SENT_AT);
+  let store = createKernelStores(db, () => SENT_AT);
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
-  store.openProject({ projectId: 'project-1', projectKey: 'sessionplane.demo',
+  store.projects.openProject({ projectId: 'project-1', projectKey: 'sessionplane.demo',
     displayName: 'SessionPlane', clientId: 'alice' });
-  store.openSlot({ projectId: 'project-1', slotId: 'main', roleKey: 'Main',
+  store.projects.openConversationSlot({ projectId: 'project-1', slotId: 'main', roleKey: 'Main',
     providerKey: 'fixture-semantic', clientId: 'alice' });
-  store.startTask({ taskId: 'task-1', projectId: 'project-1', slotId: 'main',
+  store.tasks.createTask({ taskId: 'task-1', projectId: 'project-1', slotId: 'main',
     expectedSlotRevision: 1, clientId: 'alice', requestId: 'request-1',
     prompt: 'original question 1' });
-  store.observeConversation({ taskId: 'task-1', projectId: 'project-1',
+  store.projects.bindObservedConversation({ taskId: 'task-1', projectId: 'project-1',
     slotId: 'main', expectedRevision: 1, clientId: 'alice',
     providerConversationId: 'conv-1' });
-  store.planAttempt({ taskId: 'task-1', clientId: 'alice', attemptId: 'attempt-1',
+  store.attempts.planAttempt({ taskId: 'task-1', clientId: 'alice', attemptId: 'attempt-1',
     kind: 'initial', turnKey: 'original', content: 'original question 1' });
 
   const adapter = new FakeSemanticProvider();
@@ -130,11 +130,11 @@ test('semantic Core bridge persists exact dispatch evidence and recovers ACK/FIN
   });
   const journal = {
     record(intent: ExactSendIntent, evidence: SemanticDispatchEvidence) {
-      store.recordDispatchEvidence({ taskId: intent.taskId, clientId: intent.clientId,
+      store.attempts.recordDispatchEvidence({ taskId: intent.taskId, clientId: intent.clientId,
         attemptId: intent.attemptId, evidence });
     },
     read(query: ExactTurnQuery): SemanticDispatchEvidence | null {
-      return store.getDispatchEvidence({ taskId: query.taskId, clientId: query.clientId,
+      return store.attempts.getDispatchEvidence({ taskId: query.taskId, clientId: query.clientId,
         attemptId: query.attemptId });
     },
   };
@@ -145,39 +145,39 @@ test('semantic Core bridge persists exact dispatch evidence and recovers ACK/FIN
   const first = await kernel.dispatch('task-1', 'alice', 'attempt-1');
   assert.equal(first.state, 'uncertain', 'a clicked send without backend ACK stays uncertain');
   assert.equal(adapter.sends, 1);
-  const stored = store.getDispatchEvidence({
+  const stored = store.attempts.getDispatchEvidence({
     taskId: 'task-1', clientId: 'alice', attemptId: 'attempt-1',
   });
   assert.equal(stored?.messageId, 'message-1');
   assert.equal(stored?.textHash, hash('original question 1'));
-  assert.ok(store.getFullTask('task-1', 'alice').events.some(
+  assert.ok(store.tasks.readTaskAggregate('task-1', 'alice').events.some(
     event => event.event.type === 'attempt.dispatch_evidence_recorded'));
-  const replayRevision = store.getTask('task-1', 'alice').revision;
-  store.recordDispatchEvidence({ taskId: 'task-1', clientId: 'alice',
+  const replayRevision = store.tasks.getTask('task-1', 'alice').revision;
+  store.attempts.recordDispatchEvidence({ taskId: 'task-1', clientId: 'alice',
     attemptId: 'attempt-1', evidence: stored! });
-  assert.equal(store.getTask('task-1', 'alice').revision, replayRevision,
+  assert.equal(store.tasks.getTask('task-1', 'alice').revision, replayRevision,
     'idempotent evidence write cannot advance task revision');
-  assert.throws(() => store.recordDispatchEvidence({ taskId: 'task-1', clientId: 'alice',
+  assert.throws(() => store.attempts.recordDispatchEvidence({ taskId: 'task-1', clientId: 'alice',
     attemptId: 'attempt-1', evidence: { ...stored!, messageId: 'another-message' } }),
   /Conflicting/);
   await assert.rejects(() => kernel.dispatch('task-1', 'alice', 'attempt-1'), /no replay/);
 
   db.close();
   db = SessionPlaneDatabase.open(path);
-  store = new TaskKernelRepository(db, () => SENT_AT);
-  assert.equal(store.getDispatchEvidence({
+  store = createKernelStores(db, () => SENT_AT);
+  assert.equal(store.attempts.getDispatchEvidence({
     taskId: 'task-1', clientId: 'alice', attemptId: 'attempt-1',
   })?.messageId, 'message-1', 'provider request evidence survives Core restart');
   kernel = new DurableTaskKernel(store, [port()]);
   const pendingAck = await kernel.recoverAck('task-1', 'alice', 'attempt-1');
   assert.equal(pendingAck.state, 'uncertain', 'read-only pending ACK cannot resubmit');
-  const deferrals = store.getFullTask('task-1', 'alice').events
+  const deferrals = store.tasks.readTaskAggregate('task-1', 'alice').events
     .filter(row => row.event.type === 'observation.deferred');
   assert.equal(deferrals.length, 1, 'the actual backend ACK reason must survive Core restart');
   assert.equal((deferrals[0]!.event as { reason: string }).reason,
     'ack:attempt-1:pending:not-yet-visible');
   await kernel.recoverAck('task-1', 'alice', 'attempt-1');
-  assert.equal(store.getTask('task-1', 'alice').revision, pendingAck.revision,
+  assert.equal(store.tasks.getTask('task-1', 'alice').revision, pendingAck.revision,
     'repeated identical paced ACK checks cannot flood the journal');
   assert.equal(adapter.sends, 1, 'ACK reconciliation must never replay an original POST');
   adapter.ackReady = true;
@@ -201,39 +201,39 @@ test('semantic Core bridge persists exact dispatch evidence and recovers ACK/FIN
     resultId: 'result-no-proof', completeTask: true,
   });
   assert.equal(unproven, null, 'FINAL requires durable exact POST evidence');
-  assert.equal(store.getFullTask('task-1', 'alice').results.length, 0);
+  assert.equal(store.tasks.readTaskAggregate('task-1', 'alice').results.length, 0);
   adapter.finalTurn = 'foreign-turn';
   const foreign = await kernel.observeFinal({ taskId: 'task-1', clientId: 'alice',
     attemptId: 'attempt-1', resultId: 'result-wrong', completeTask: true });
   assert.equal(foreign, null);
-  assert.equal(store.getFullTask('task-1', 'alice').results.length, 0);
+  assert.equal(store.tasks.readTaskAggregate('task-1', 'alice').results.length, 0);
   adapter.finalTurn = 'turn-1';
   const result = await kernel.observeFinal({ taskId: 'task-1', clientId: 'alice',
     attemptId: 'attempt-1', resultId: 'result-1', completeTask: true });
   assert.equal(result?.answerText, 'Exact answer after restart');
-  assert.equal(store.getTask('task-1', 'alice').state, 'completed');
+  assert.equal(store.tasks.getTask('task-1', 'alice').state, 'completed');
   assert.equal(adapter.sends, 1);
 
   // Future providers may legitimately reuse opaque conversation/message IDs.
   // The collision key is provider-scoped, never ChatGPT-global.
-  store.openSlot({ projectId: 'project-1', clientId: 'alice', slotId: 'review',
+  store.projects.openConversationSlot({ projectId: 'project-1', clientId: 'alice', slotId: 'review',
     roleKey: 'Reviewer', providerKey: 'alternate-semantic' });
-  store.startTask({ taskId: 'task-2', projectId: 'project-1', clientId: 'alice',
+  store.tasks.createTask({ taskId: 'task-2', projectId: 'project-1', clientId: 'alice',
     slotId: 'review', expectedSlotRevision: 1, requestId: 'request-2',
     prompt: 'original question 1' });
-  store.observeConversation({ taskId: 'task-2', projectId: 'project-1',
+  store.projects.bindObservedConversation({ taskId: 'task-2', projectId: 'project-1',
     clientId: 'alice', slotId: 'review', expectedRevision: 1,
     providerConversationId: 'conv-1' });
-  store.planAttempt({ taskId: 'task-2', clientId: 'alice', attemptId: 'attempt-2',
+  store.attempts.planAttempt({ taskId: 'task-2', clientId: 'alice', attemptId: 'attempt-2',
     kind: 'initial', turnKey: 'original', content: 'original question 1' });
-  store.beginDispatch('task-2', 'alice', 'attempt-2');
-  store.recordDispatchEvidence({ taskId: 'task-2', clientId: 'alice',
+  store.attempts.reserveAttemptDispatch('task-2', 'alice', 'attempt-2');
+  store.attempts.recordDispatchEvidence({ taskId: 'task-2', clientId: 'alice',
     attemptId: 'attempt-2', evidence: stored! });
-  assert.equal(store.getDispatchEvidence({ taskId: 'task-2', clientId: 'alice',
+  assert.equal(store.attempts.getDispatchEvidence({ taskId: 'task-2', clientId: 'alice',
     attemptId: 'attempt-2' })?.messageId, 'message-1');
 
   // ACL and immutable binding also protect the private dispatch journal.
-  assert.throws(() => store.getDispatchEvidence({
+  assert.throws(() => store.attempts.getDispatchEvidence({
     taskId: 'task-1', clientId: 'mallory', attemptId: 'attempt-1',
   }), /access denied/);
 });
@@ -273,15 +273,15 @@ test('semantic Core waits for an asynchronously enabled exact continuation Send 
 test('unbound new conversation is not submitted or re-created optimistically', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'sessionplane-unbound-semantic-'));
   const db = SessionPlaneDatabase.open(join(dir, 'kernel.sqlite'));
-  const store = new TaskKernelRepository(db);
+  const store = createKernelStores(db);
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
-  store.openProject({ projectId: 'project-1', projectKey: 'unbound.demo',
+  store.projects.openProject({ projectId: 'project-1', projectKey: 'unbound.demo',
     displayName: 'Demo', clientId: 'alice' });
-  store.openSlot({ projectId: 'project-1', slotId: 'main', roleKey: 'Main',
+  store.projects.openConversationSlot({ projectId: 'project-1', slotId: 'main', roleKey: 'Main',
     providerKey: 'fixture-semantic', clientId: 'alice' });
-  store.startTask({ taskId: 'task-1', projectId: 'project-1', slotId: 'main',
+  store.tasks.createTask({ taskId: 'task-1', projectId: 'project-1', slotId: 'main',
     expectedSlotRevision: 1, clientId: 'alice', requestId: 'request-1', prompt: 'one' });
-  store.planAttempt({ taskId: 'task-1', clientId: 'alice',
+  store.attempts.planAttempt({ taskId: 'task-1', clientId: 'alice',
     attemptId: 'attempt-1', kind: 'initial', turnKey: 'original', content: 'one' });
   const fake = new FakeSemanticProvider();
   const port = new SemanticExactTaskPort({ adapter: fake,
@@ -297,7 +297,7 @@ test('unbound new conversation is not submitted or re-created optimistically', a
   });
   const kernel = new DurableTaskKernel(store, [port]);
   assert.equal((await kernel.dispatch('task-1', 'alice', 'attempt-1')).state, 'working');
-  assert.equal(store.getFullTask('task-1', 'alice').attempts[0]!.state, 'planned',
+  assert.equal(store.tasks.readTaskAggregate('task-1', 'alice').attempts[0]!.state, 'planned',
     'known unbound conversation remains safely sendable after preparation');
   assert.equal(fake.sends, 0);
   assert.equal(fake.observations, 0);
@@ -443,16 +443,16 @@ test('evidence-free initial ACK recovery never invokes rendered dispatch adoptio
 test('semantic continuation ACK recovery records exact dispatch, refreshes context, and never replays', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'sessionplane-rendered-dispatch-recovery-'));
   const db = SessionPlaneDatabase.open(join(dir, 'kernel.sqlite'));
-  const store = new TaskKernelRepository(db, () => SENT_AT);
+  const store = createKernelStores(db, () => SENT_AT);
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
-  store.openProject({ projectId: 'project-1', projectKey: 'recovery.demo',
+  store.projects.openProject({ projectId: 'project-1', projectKey: 'recovery.demo',
     displayName: 'Recovery', clientId: 'alice' });
-  store.openSlot({ projectId: 'project-1', slotId: 'main', roleKey: 'Main',
+  store.projects.openConversationSlot({ projectId: 'project-1', slotId: 'main', roleKey: 'Main',
     providerKey: 'fixture-semantic', clientId: 'alice' });
-  store.startTask({ taskId: 'task-1', projectId: 'project-1', slotId: 'main',
+  store.tasks.createTask({ taskId: 'task-1', projectId: 'project-1', slotId: 'main',
     expectedSlotRevision: 1, clientId: 'alice', requestId: 'request-1',
     prompt: 'original question' });
-  store.observeConversation({ taskId: 'task-1', projectId: 'project-1',
+  store.projects.bindObservedConversation({ taskId: 'task-1', projectId: 'project-1',
     slotId: 'main', expectedRevision: 1, clientId: 'alice',
     providerConversationId: 'conv-1' });
 
@@ -460,18 +460,18 @@ test('semantic continuation ACK recovery records exact dispatch, refreshes conte
     conversationId: 'conv-1', messageId: 'source-message', parentMessageId: 'root',
     textHash: hash('original question'), observedAt: SENT_AT,
   };
-  store.planAttempt({ taskId: 'task-1', clientId: 'alice', attemptId: 'source-attempt',
+  store.attempts.planAttempt({ taskId: 'task-1', clientId: 'alice', attemptId: 'source-attempt',
     kind: 'initial', turnKey: 'original', content: 'original question' });
-  store.beginDispatch('task-1', 'alice', 'source-attempt');
-  store.recordDispatchEvidence({ taskId: 'task-1', clientId: 'alice',
+  store.attempts.reserveAttemptDispatch('task-1', 'alice', 'source-attempt');
+  store.attempts.recordDispatchEvidence({ taskId: 'task-1', clientId: 'alice',
     attemptId: 'source-attempt', evidence: sourceEvidence });
-  store.acknowledgeAttempt({ taskId: 'task-1', clientId: 'alice',
+  store.attempts.acknowledgeAttempt({ taskId: 'task-1', clientId: 'alice',
     attemptId: 'source-attempt', externalTurnId: 'source-turn' });
 
-  store.planAttempt({ taskId: 'task-1', clientId: 'alice', attemptId: 'continue-attempt',
+  store.attempts.planAttempt({ taskId: 'task-1', clientId: 'alice', attemptId: 'continue-attempt',
     kind: 'continuation', turnKey: 'managed-continue', content: '계속' });
-  store.beginDispatch('task-1', 'alice', 'continue-attempt');
-  store.markUncertain('task-1', 'alice', 'continue-attempt', 'semantic-action-not-verified');
+  store.attempts.reserveAttemptDispatch('task-1', 'alice', 'continue-attempt');
+  store.attempts.markAttemptUncertain('task-1', 'alice', 'continue-attempt', 'semantic-action-not-verified');
 
   const recoveredEvidence: SemanticDispatchEvidence = {
     conversationId: 'conv-1', messageId: 'continuation-message',
@@ -523,9 +523,9 @@ test('semantic continuation ACK recovery records exact dispatch, refreshes conte
   const port = new SemanticExactTaskPort({
     adapter,
     resolveContext: query => {
-      const evidence = store.getDispatchEvidence({ taskId: query.taskId,
+      const evidence = store.attempts.getDispatchEvidence({ taskId: query.taskId,
         clientId: query.clientId, attemptId: query.attemptId });
-      const attempt = store.getFullTask(query.taskId, query.clientId).attempts
+      const attempt = store.tasks.readTaskAggregate(query.taskId, query.clientId).attempts
         .find(row => row.attemptId === query.attemptId)!;
       const submittedUserMessageId = evidence?.messageId ?? sourceEvidence.messageId;
       const submittedUserTurnId = evidence === null
@@ -541,11 +541,11 @@ test('semantic continuation ACK recovery records exact dispatch, refreshes conte
     dispatchJournal: {
       record(query, evidence) {
         journalWrites++;
-        store.recordDispatchEvidence({ taskId: query.taskId, clientId: query.clientId,
+        store.attempts.recordDispatchEvidence({ taskId: query.taskId, clientId: query.clientId,
           attemptId: query.attemptId, evidence });
       },
       read(query) {
-        return store.getDispatchEvidence({ taskId: query.taskId, clientId: query.clientId,
+        return store.attempts.getDispatchEvidence({ taskId: query.taskId, clientId: query.clientId,
           attemptId: query.attemptId });
       },
     },
@@ -554,10 +554,10 @@ test('semantic continuation ACK recovery records exact dispatch, refreshes conte
   const recovered = await kernel.recoverAck('task-1', 'alice', 'continue-attempt');
   assert.equal(recovered.state, 'working');
   assert.deepEqual(resolvedMessages, ['source-message', 'continuation-message']);
-  assert.equal(store.getDispatchEvidence({ taskId: 'task-1', clientId: 'alice',
+  assert.equal(store.attempts.getDispatchEvidence({ taskId: 'task-1', clientId: 'alice',
     attemptId: 'continue-attempt' })?.messageId, 'continuation-message');
-  assert.equal(store.getFullTask('task-1', 'alice').attempts.at(-1)?.state, 'acknowledged');
-  assert.equal(store.getFullTask('task-1', 'alice').attempts.length, 2);
+  assert.equal(store.tasks.readTaskAggregate('task-1', 'alice').attempts.at(-1)?.state, 'acknowledged');
+  assert.equal(store.tasks.readTaskAggregate('task-1', 'alice').attempts.length, 2);
   assert.equal(recoverDispatchCalls, 1);
   assert.equal(recoverCalls, 1);
   assert.equal(journalWrites, 1);
@@ -572,7 +572,7 @@ test('semantic continuation ACK recovery records exact dispatch, refreshes conte
   assert.equal(recoverDispatchCalls, 1, 'an acknowledged restart cannot recover or POST again');
   assert.equal(recoverCalls, 1);
   assert.equal(journalWrites, 1);
-  assert.equal(store.getFullTask('task-1', 'alice').events.filter(
+  assert.equal(store.tasks.readTaskAggregate('task-1', 'alice').events.filter(
     row => row.event.type === 'attempt.dispatch_evidence_recorded').length, 2,
   'one source evidence plus one recovered continuation evidence are durable exactly once');
 });
@@ -667,9 +667,12 @@ function fixture(options: FixtureOptions = {}) {
   };
   const input = {
     repository: {
-      listCurrentPublicPageOwners() {
-        return [{ taskId: 'task-exact', projectId: 'project', slotId: 'main',
-          slotRevision: 1, providerConversationId: conversationId }];
+      scans: {
+        scanCurrentPublicPageOwners(providerKey: string) {
+          assert.equal(providerKey, 'chatgpt');
+          return [{ taskId: 'task-exact', projectId: 'project', slotId: 'main',
+            slotRevision: 1, providerConversationId: conversationId }];
+        },
       },
     },
     teamDirectory: {

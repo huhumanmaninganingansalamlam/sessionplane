@@ -17,7 +17,7 @@ import type {
   SemanticDispatchEvidence, SemanticTaskContext,
 } from '../../src/providers/semantic-adapter.ts';
 import { SessionPlaneDatabase } from '../../src/storage/database.ts';
-import { TaskKernelRepository } from '../../src/storage/task-kernel-repository.ts';
+import { createKernelStores, type KernelStores } from '../../src/storage/kernel/create-kernel-stores.ts';
 
 const digest = (text: string) => createHash('sha256').update(text).digest('hex');
 
@@ -31,22 +31,22 @@ test('disposable Chromium ChatGPT POST persists in Core journal and recovers on 
     profileDir: join(folder, 'browser-profile'), pageRegistry: browserRegistry, headless: true,
   });
   let database = SessionPlaneDatabase.open(dbPath);
-  let repository = new TaskKernelRepository(database);
+  let repository = createKernelStores(database);
   t.after(async () => {
     await owner.close();
     database.close();
     rmSync(folder, { recursive: true, force: true });
   });
-  repository.openProject({ projectId: 'project-b', projectKey: 'fixture.b',
+  repository.projects.openProject({ projectId: 'project-b', projectKey: 'fixture.b',
     displayName: 'B Browser', clientId: 'alice' });
-  repository.openSlot({ projectId: 'project-b', clientId: 'alice',
+  repository.projects.openConversationSlot({ projectId: 'project-b', clientId: 'alice',
     slotId: 'main', roleKey: 'Main', providerKey: 'chatgpt' });
-  repository.startTask({ taskId: 'task-b', projectId: 'project-b', clientId: 'alice',
+  repository.tasks.createTask({ taskId: 'task-b', projectId: 'project-b', clientId: 'alice',
     slotId: 'main', expectedSlotRevision: 1, requestId: 'request-b',
     prompt: 'Exact B prompt' });
-  repository.observeConversation({ projectId: 'project-b', clientId: 'alice',
+  repository.projects.bindObservedConversation({ projectId: 'project-b', clientId: 'alice',
     slotId: 'main', expectedRevision: 1, taskId: 'task-b', providerConversationId: 'conv-b' });
-  repository.planAttempt({ taskId: 'task-b', clientId: 'alice',
+  repository.attempts.planAttempt({ taskId: 'task-b', clientId: 'alice',
     attemptId: 'attempt-b', kind: 'initial', turnKey: 'root', content: 'Exact B prompt' });
 
   await owner.start();
@@ -106,11 +106,11 @@ test('disposable Chromium ChatGPT POST persists in Core journal and recovers on 
   };
   const journal = {
     record(intent: ExactSendIntent, evidence: SemanticDispatchEvidence) {
-      repository.recordDispatchEvidence({ taskId: intent.taskId, clientId: intent.clientId,
+      repository.attempts.recordDispatchEvidence({ taskId: intent.taskId, clientId: intent.clientId,
         attemptId: intent.attemptId, evidence });
     },
     read(query: ExactTurnQuery) {
-      return repository.getDispatchEvidence({ taskId: query.taskId, clientId: query.clientId,
+      return repository.attempts.getDispatchEvidence({ taskId: query.taskId, clientId: query.clientId,
         attemptId: query.attemptId });
     },
   };
@@ -124,9 +124,9 @@ test('disposable Chromium ChatGPT POST persists in Core journal and recovers on 
     isExactLease: input => pageLease === input &&
       browserRegistry.getBinding(input.pageKey).bindingEpoch === input.bindingEpoch,
     resolvePage: identity => browserRegistry.pageForObservation(identity.pageKey, identity.bindingEpoch),
-    isAuthorizedAttempt: input => repository.getFullTask(input.context.taskId, 'alice')
+    isAuthorizedAttempt: input => repository.tasks.readTaskAggregate(input.context.taskId, 'alice')
       .attempts.some(attempt => attempt.attemptId === input.attemptId && attempt.state === 'dispatched'),
-    onDispatchObserved: input => repository.recordDispatchEvidence({
+    onDispatchObserved: input => repository.attempts.recordDispatchEvidence({
       taskId: input.context.taskId, clientId: 'alice',
       attemptId: input.attemptId, evidence: input.evidence,
     }),
@@ -139,7 +139,7 @@ test('disposable Chromium ChatGPT POST persists in Core journal and recovers on 
   const dispatched = await kernel.dispatch('task-b', 'alice', 'attempt-b');
   assert.equal(dispatched.state, 'uncertain', '404 canonical read is not an ACK');
   assert.equal(await page.evaluate(() => (window as any).sends), 1);
-  const persisted = repository.getDispatchEvidence({ taskId: 'task-b',
+  const persisted = repository.attempts.getDispatchEvidence({ taskId: 'task-b',
     clientId: 'alice', attemptId: 'attempt-b' });
   assert.equal(persisted?.messageId, 'user-b');
   assert.equal(persisted?.parentMessageId, 'root');
@@ -152,7 +152,7 @@ test('disposable Chromium ChatGPT POST persists in Core journal and recovers on 
   await page.close();
   database.close();
   database = SessionPlaneDatabase.open(dbPath);
-  repository = new TaskKernelRepository(database);
+  repository = createKernelStores(database);
   let virtualNowMs = Date.parse('2026-11-08T10:00:00.000Z');
   const noPageAdapter = new ChatGptSemanticAdapter({
     backendRecovery: new ChatGptBackendRecovery({
@@ -176,9 +176,9 @@ test('disposable Chromium ChatGPT POST persists in Core journal and recovers on 
   const final = await kernel.observeFinal({ taskId: 'task-b', clientId: 'alice',
     attemptId: 'attempt-b', resultId: 'result-b', completeTask: true });
   assert.equal(final?.answerText, 'Exact B final');
-  assert.equal(repository.getTask('task-b', 'alice').state, 'completed');
-  assert.equal(repository.getFullTask('task-b', 'alice').attempts.length, 1);
-  assert.equal(repository.getDispatchEvidence({ taskId: 'task-b',
+  assert.equal(repository.tasks.getTask('task-b', 'alice').state, 'completed');
+  assert.equal(repository.tasks.readTaskAggregate('task-b', 'alice').attempts.length, 1);
+  assert.equal(repository.attempts.getDispatchEvidence({ taskId: 'task-b',
     clientId: 'alice', attemptId: 'attempt-b' })?.messageId, 'user-b');
 });
 
@@ -192,36 +192,36 @@ test('continuation POST callback gap recovers read-only after restart with no se
     profileDir: join(folder, 'browser-profile'), pageRegistry: browserRegistry, headless: true,
   });
   let database = SessionPlaneDatabase.open(dbPath);
-  let repository = new TaskKernelRepository(database);
+  let repository = createKernelStores(database);
   t.after(async () => {
     await owner.close();
     database.close();
     rmSync(folder, { recursive: true, force: true });
   });
 
-  repository.openProject({
+  repository.projects.openProject({
     projectId: 'gap-project', projectKey: 'fixture.continuation-gap',
     displayName: 'Continuation gap', clientId: 'alice',
   });
-  repository.openSlot({
+  repository.projects.openConversationSlot({
     projectId: 'gap-project', clientId: 'alice', slotId: 'main',
     roleKey: 'Main', providerKey: 'chatgpt',
   });
-  repository.startTask({
+  repository.tasks.createTask({
     taskId: 'gap-task', projectId: 'gap-project', clientId: 'alice',
     slotId: 'main', expectedSlotRevision: 1, requestId: 'gap-request',
     prompt: 'Original request',
   });
-  repository.observeConversation({
+  repository.projects.bindObservedConversation({
     projectId: 'gap-project', clientId: 'alice', slotId: 'main',
     expectedRevision: 1, taskId: 'gap-task', providerConversationId: 'gap-conversation',
   });
-  repository.planAttempt({
+  repository.attempts.planAttempt({
     taskId: 'gap-task', clientId: 'alice', attemptId: 'source-attempt',
     kind: 'initial', turnKey: 'source', content: 'Original request',
   });
-  repository.beginDispatch('gap-task', 'alice', 'source-attempt');
-  repository.recordDispatchEvidence({
+  repository.attempts.reserveAttemptDispatch('gap-task', 'alice', 'source-attempt');
+  repository.attempts.recordDispatchEvidence({
     taskId: 'gap-task', clientId: 'alice', attemptId: 'source-attempt',
     evidence: {
       conversationId: 'gap-conversation', messageId: 'source-message',
@@ -229,11 +229,11 @@ test('continuation POST callback gap recovers read-only after restart with no se
       observedAt: '2026-11-16T04:00:00.000Z',
     },
   });
-  repository.acknowledgeAttempt({
+  repository.attempts.acknowledgeAttempt({
     taskId: 'gap-task', clientId: 'alice', attemptId: 'source-attempt',
     externalTurnId: 'source-turn',
   });
-  repository.planAttempt({
+  repository.attempts.planAttempt({
     taskId: 'gap-task', clientId: 'alice', attemptId: 'continuation-attempt',
     kind: 'continuation', turnKey: 'managed-continuation', content: '계속',
   });
@@ -322,21 +322,21 @@ test('continuation POST callback gap recovers read-only after restart with no se
       if (intent.attemptId === 'continuation-attempt' && !allowEvidenceWrites) {
         throw new Error('simulated callback gap before durable dispatch evidence');
       }
-      repository.recordDispatchEvidence({
+      repository.attempts.recordDispatchEvidence({
         taskId: intent.taskId, clientId: intent.clientId,
         attemptId: intent.attemptId, evidence,
       });
     },
     read(query: ExactTurnQuery) {
-      return repository.getDispatchEvidence({
+      return repository.attempts.getDispatchEvidence({
         taskId: query.taskId, clientId: query.clientId, attemptId: query.attemptId,
       });
     },
   };
   const resolveContext = (intent: ExactSendIntent): SemanticTaskContext => {
-    const full = repository.getFullTask(intent.taskId, intent.clientId);
+    const full = repository.tasks.readTaskAggregate(intent.taskId, intent.clientId);
     const attempt = full.attempts.find(row => row.attemptId === intent.attemptId)!;
-    const evidence = repository.getDispatchEvidence({
+    const evidence = repository.attempts.getDispatchEvidence({
       taskId: intent.taskId, clientId: intent.clientId, attemptId: intent.attemptId,
     });
     return {
@@ -352,13 +352,13 @@ test('continuation POST callback gap recovers read-only after restart with no se
     isExactLease: input => input === lease &&
       browserRegistry.getBinding(input.pageKey).bindingEpoch === input.bindingEpoch,
     resolvePage: identity => browserRegistry.pageForObservation(identity.pageKey, identity.bindingEpoch),
-    isAuthorizedAttempt: input => repository.getFullTask(input.context.taskId, 'alice')
+    isAuthorizedAttempt: input => repository.tasks.readTaskAggregate(input.context.taskId, 'alice')
       .attempts.some(attempt => attempt.attemptId === input.attemptId && attempt.state === 'dispatched'),
     onDispatchObserved: input => {
       if (!allowEvidenceWrites) {
         throw new Error('simulated callback gap before durable dispatch evidence');
       }
-      repository.recordDispatchEvidence({
+      repository.attempts.recordDispatchEvidence({
         taskId: input.context.taskId, clientId: 'alice',
         attemptId: input.attemptId, evidence: input.evidence,
       });
@@ -379,10 +379,10 @@ test('continuation POST callback gap recovers read-only after restart with no se
     messages: [{ id: 'continuation-message', author: { role: 'user' },
       content: { content_type: 'text', parts: ['계속'] } }],
   }]);
-  assert.equal(repository.getDispatchEvidence({
+  assert.equal(repository.attempts.getDispatchEvidence({
     taskId: 'gap-task', clientId: 'alice', attemptId: 'continuation-attempt',
   }), null);
-  const beforeRestart = repository.getFullTask('gap-task', 'alice');
+  const beforeRestart = repository.tasks.readTaskAggregate('gap-task', 'alice');
   assert.equal(beforeRestart.attempts.length, 2);
   assert.equal(beforeRestart.attempts[1]!.state, 'uncertain');
   const uncertainRow = database.raw.prepare(
@@ -392,7 +392,7 @@ test('continuation POST callback gap recovers read-only after restart with no se
 
   database.close();
   database = SessionPlaneDatabase.open(dbPath);
-  repository = new TaskKernelRepository(database);
+  repository = createKernelStores(database);
   allowEvidenceWrites = true;
   let virtualNowMs = Date.parse('2026-11-16T05:00:00.000Z');
   const restartAdapter = new ChatGptSemanticAdapter({
@@ -412,7 +412,7 @@ test('continuation POST callback gap recovers read-only after restart with no se
   const paced = await kernel.recoverAck('gap-task', 'alice', 'continuation-attempt');
   assert.equal(paced.state, 'uncertain',
     'the first read-only pass durably recovers dispatch before paced ACK');
-  const recoveredEvidence = repository.getDispatchEvidence({
+  const recoveredEvidence = repository.attempts.getDispatchEvidence({
     taskId: 'gap-task', clientId: 'alice', attemptId: 'continuation-attempt',
   });
   assert.deepEqual(recoveredEvidence && {
@@ -430,7 +430,7 @@ test('continuation POST callback gap recovers read-only after restart with no se
   virtualNowMs += 5_001;
   const acknowledged = await kernel.recoverAck('gap-task', 'alice', 'continuation-attempt');
   assert.equal(acknowledged.state, 'working');
-  assert.equal(repository.getFullTask('gap-task', 'alice').attempts[1]!.externalTurnId,
+  assert.equal(repository.tasks.readTaskAggregate('gap-task', 'alice').attempts[1]!.externalTurnId,
     'continuation-turn');
 
   virtualNowMs += 5_001;
@@ -439,7 +439,7 @@ test('continuation POST callback gap recovers read-only after restart with no se
     resultId: 'gap-result', completeTask: true,
   });
   assert.equal(final?.answerText, 'Recovered final response');
-  const completed = repository.getFullTask('gap-task', 'alice');
+  const completed = repository.tasks.readTaskAggregate('gap-task', 'alice');
   assert.equal(completed.task.state, 'completed');
   assert.equal(completed.attempts.length, 2);
   assert.equal(completed.results.length, 1);
