@@ -117,7 +117,7 @@ export async function inspectHostSpanActivity(page: Page, submittedUserMessageId
         try {
           const parsed = href === null ? null : new URL(href, location.href);
           if (parsed?.protocol === 'https:' || parsed?.protocol === 'http:') url = parsed;
-        } catch { /* Malformed links remain diagnostic controls without a URL. */ }
+        } catch { url = null; }
         return { name: name(button).slice(0, 500), visible: visible(button),
           disabled: button.hasAttribute('disabled') || button.getAttribute('aria-disabled') === 'true',
           role: button.getAttribute('role') ?? (button.tagName === 'A' ? 'link' : 'button'),

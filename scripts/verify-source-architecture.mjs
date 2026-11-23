@@ -10,6 +10,9 @@ export const COMPOSITION_ROOTS = Object.freeze([
   'core/semantic-core-runtime.ts',
   'core/runtime/assemble-semantic-runtime.ts',
   'core/runtime/assemble-provider-runtime.ts',
+  'core/runtime/assemble-browser-rpc.ts',
+  'cli/main.ts',
+  'cli/commands/doctor.ts',
 ]);
 
 // These are ownership rules, not an aspirational generic layers diagram.
@@ -23,28 +26,6 @@ export const SOURCE_LAYER_RULES = Object.freeze({
   rpc: ['rpc', 'domain', 'config', 'logging', 'core'],
   cli: ['cli', 'rpc', 'config', 'skills'],
   mcp: ['mcp', 'cli', 'rpc', 'config'],
-});
-
-// Exact, reviewed pre-existing violations, not directory wildcards. Remove
-// each edge as its owning child Task narrows the relevant boundary.
-export const LEGACY_ARCHITECTURE_EDGES = Object.freeze({
-  'storage/page-binding-repository.ts -> browser/page-binding.ts': 'T-20261123033054Z-0e9ddfe3',
-  'browser/ref-snapshot.ts -> providers/provider-adapter.ts': 'T-20261123033056Z-d4464c8f',
-  'core/team-directory.ts -> storage/event-repository.ts': 'T-20261123033139Z-af36a8be',
-  'core/team-directory.ts -> storage/session-repository.ts': 'T-20261123033139Z-af36a8be',
-  'core/team-directory.ts -> storage/team-repository.ts': 'T-20261123033139Z-af36a8be',
-  'rpc/methods/browser.ts -> browser/browser-owner.ts': 'T-20261123033139Z-af36a8be',
-  'rpc/methods/browser.ts -> browser/browser-health.ts': 'T-20261123033139Z-af36a8be',
-  'rpc/methods/browser.ts -> browser/page-binding.ts': 'T-20261123033139Z-af36a8be',
-  'rpc/methods/browser.ts -> browser/page-registry.ts': 'T-20261123033139Z-af36a8be',
-  'rpc/methods/task.ts -> core/task-wait.ts': 'T-20261123033139Z-af36a8be',
-  'cli/main.ts -> browser/browser-health.ts': 'T-20261123033139Z-af36a8be',
-  'cli/main.ts -> main.ts': 'T-20261123033139Z-af36a8be',
-  'cli/main.ts -> mcp/server.ts': 'T-20261123033139Z-af36a8be',
-  'cli/format.ts -> browser/browser-owner.ts': 'T-20261123033139Z-af36a8be',
-  'cli/commands/doctor.ts -> browser/browser-health.ts': 'T-20261123033139Z-af36a8be',
-  'cli/commands/doctor.ts -> browser/browser-profile.ts': 'T-20261123033139Z-af36a8be',
-  'cli/commands/doctor.ts -> storage/database.ts': 'T-20261123033139Z-af36a8be',
 });
 
 export function classifySourceModule(filePath) {
@@ -111,8 +92,6 @@ function ruleViolation(edge, rules) {
 export function validateImportEdge(edge, rules = SOURCE_LAYER_RULES) {
   const violation = ruleViolation(edge, rules);
   if (!violation) return null;
-  const key = `${edge.from} -> ${edge.to}`;
-  if (Object.hasOwn(LEGACY_ARCHITECTURE_EDGES, key)) return null;
   return {
     ...edge,
     rule: violation[0],

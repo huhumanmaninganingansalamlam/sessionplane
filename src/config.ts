@@ -196,6 +196,19 @@ function parseEnabledProviders(value: string | undefined): readonly ProviderName
   return normalizeEnabledProviders(value.split(','), 'SESSIONPLANE_ENABLED_PROVIDERS');
 }
 
+function remoteFromEnvironment(env: NodeJS.ProcessEnv): RemoteConnection | undefined {
+  const host = env.SESSIONPLANE_REMOTE_HOST?.trim();
+  if (!host) return undefined;
+  return {
+    host,
+    executable: env.SESSIONPLANE_REMOTE_EXECUTABLE || 'sessplane',
+    ...(env.SESSIONPLANE_REMOTE_CONTROL_PATH
+      ? { controlPath: env.SESSIONPLANE_REMOTE_CONTROL_PATH } : {}),
+    ...(env.SESSIONPLANE_REMOTE_SOCKET
+      ? { socketPath: env.SESSIONPLANE_REMOTE_SOCKET } : {}),
+  };
+}
+
 export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConfig {
   const env = overrides.env ?? process.env;
   const cwd = path.resolve(overrides.cwd ?? process.cwd());
@@ -260,12 +273,7 @@ export function resolveConfig(overrides: ConfigOverrides = {}): SessionPlaneConf
   );
 
   return Object.freeze({
-    remote: overrides.remote ?? (env.SESSIONPLANE_REMOTE_HOST?.trim() ? {
-      host: env.SESSIONPLANE_REMOTE_HOST.trim(),
-      ...(env.SESSIONPLANE_REMOTE_CONTROL_PATH ? { controlPath: env.SESSIONPLANE_REMOTE_CONTROL_PATH } : {}),
-      executable: env.SESSIONPLANE_REMOTE_EXECUTABLE || 'sessplane',
-      ...(env.SESSIONPLANE_REMOTE_SOCKET ? { socketPath: env.SESSIONPLANE_REMOTE_SOCKET } : {}),
-    } : undefined),
+    remote: overrides.remote ?? remoteFromEnvironment(env),
     cwd,
     stateDir,
     socketPath,

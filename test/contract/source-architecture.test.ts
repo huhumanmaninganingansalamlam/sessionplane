@@ -38,10 +38,10 @@ function fixture(t: { after: (fn: () => void) => void }) {
   };
 }
 
-test('real source obeys explicit import boundaries and bounded legacy budgets', () => {
+test('real source obeys explicit import boundaries with no temporary quality ceilings', () => {
   assert.ok(Object.hasOwn(SOURCE_LAYER_RULES, 'storage'));
   assert.ok(COMPOSITION_ROOTS.includes('core/semantic-core-runtime.ts'));
-  assert.equal(Object.hasOwn(EXISTING_SIZE_CEILINGS, 'storage/task-kernel-repository.ts'), false);
+  assert.deepEqual(EXISTING_SIZE_CEILINGS, {});
   assert.equal(classifySourceModule('src/storage/example.ts'), 'storage');
   assertSourceArchitecture(collectRelativeImports(realSource));
   assertSourceQuality(measureSourceDeclarations(realSource));
@@ -66,6 +66,27 @@ test('browser and domain cannot depend on provider runtime', (t) => {
   const report = collectRelativeImports(f.source);
   assert.throws(() => assertSourceArchitecture(report), /browser\/misbound\.ts.*providers\/chatgpt/);
   assert.equal(report.edges.length, 2);
+});
+
+test('nested declarations are measured independently instead of double-counted in their owner', (t) => {
+  const f = fixture(t);
+  f.put('core/nested.ts', [
+    'export function assemble() {',
+    ...Array.from({ length: 80 }, (_, i) => `  const outer${i} = ${i};`),
+    '  const operation = () => {',
+    ...Array.from({ length: 80 }, (_, i) => `    const inner${i} = ${i};`),
+    '    return inner79;',
+    '  };',
+    '  return operation() + outer79;',
+    '}',
+  ].join('\n'));
+  const report = measureSourceDeclarations(f.source);
+  const declarations = report.declarations.filter((entry: { file: string }) =>
+    entry.file === 'core/nested.ts');
+  assert.equal(declarations.length, 2);
+  assert.ok(declarations.every((entry: { lines: number }) =>
+    entry.lines <= QUALITY_BUDGET.declarationLogicalLines));
+  assert.doesNotThrow(() => assertSourceQuality(report));
 });
 
 test('new 700-line file and new 200-line method fail with their exact paths', (t) => {
@@ -98,5 +119,5 @@ test('new empty catch, unchecked durable JSON cast, provider leakage and focus s
   f.put('browser/switch.ts', 'export function go(page: {bringToFront(): void}) { page.bringToFront(); }\n');
   assert.equal(findEmptyCatchClauses(f.source).length, 1);
   assert.equal(findUnvalidatedDurableJsonCasts(f.source).length, 1);
-  assert.throws(() => assertSourceQuality(measureSourceDeclarations(f.source)), /empty catch clauses/);
+  assert.throws(() => assertSourceQuality(measureSourceDeclarations(f.source)), /empty catch clause/);
 });

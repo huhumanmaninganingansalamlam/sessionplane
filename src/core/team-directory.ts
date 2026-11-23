@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
 import type { SessionPlaneDatabase } from '../storage/database.ts';
-import { EventRepository } from '../storage/event-repository.ts';
-import { SessionRepository, type CurrentSessionSummary } from '../storage/session-repository.ts';
-import { TeamRepository } from '../storage/team-repository.ts';
+import type { EventRepository } from '../storage/event-repository.ts';
+import type { CurrentSessionSummary, SessionRepository } from '../storage/session-repository.ts';
+import type { TeamRepository } from '../storage/team-repository.ts';
 import { assertDomain, SessionPlaneDomainError } from '../domain/errors.ts';
 import type { EventListResult } from '../domain/events.ts';
 import {
@@ -16,6 +16,13 @@ import {
 import { isTerminalGeneration, type SessionSnapshot } from '../domain/session.ts';
 import type { TeamListResult, TeamRecord, TeamSnapshot } from '../domain/team.ts';
 import { PROVIDERS, type ProviderName } from '../providers/provider-adapter.ts';
+
+export interface TeamDirectoryStores {
+  readonly database: SessionPlaneDatabase;
+  readonly teams: TeamRepository;
+  readonly sessions: SessionRepository;
+  readonly events: EventRepository;
+}
 
 export interface TeamDirectoryOptions {
   readonly now?: () => Date;
@@ -34,11 +41,11 @@ export class TeamDirectory {
   readonly #enabledProviders: ReadonlySet<ProviderName>;
   readonly #onSessionChanged: ((sessionId: string) => void) | undefined;
 
-  constructor(database: SessionPlaneDatabase, options: TeamDirectoryOptions = {}) {
-    this.#database = database;
-    this.#teams = new TeamRepository(database.raw);
-    this.#sessions = new SessionRepository(database.raw);
-    this.#events = new EventRepository(database.raw);
+  constructor(stores: TeamDirectoryStores, options: TeamDirectoryOptions = {}) {
+    this.#database = stores.database;
+    this.#teams = stores.teams;
+    this.#sessions = stores.sessions;
+    this.#events = stores.events;
     this.#now = options.now ?? (() => new Date());
     this.#uuid = options.uuid ?? randomUUID;
     this.#enabledProviders = new Set(options.enabledProviders ?? PROVIDERS);
