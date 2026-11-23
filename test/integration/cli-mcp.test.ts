@@ -78,7 +78,10 @@ class McpSubprocess {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
         reject(new Error(`MCP request timed out: ${method}; stderr=${this.#stderr}`));
-      }, 5_000);
+      // Cold Node type-stripping and subprocess handshakes may share a busy
+      // CI host. This remains a bounded test transport timeout, not a Core
+      // ACK/FINAL or provider-operation retry policy.
+      }, 10_000);
       this.#pending.set(id, { resolve, reject, timer });
       this.#child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`);
     });
@@ -180,7 +183,7 @@ test('CLI and modern/standard MCP expose one durable Task across MCP process res
       params: { clientId: owner, taskId: task.taskId, view: 'summary' },
     });
     assert.deepEqual(afterExit, exact);
-    assert.equal(core.semanticTaskRepository.getFullTask(task.taskId, owner).attempts.length, 1);
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(task.taskId, owner).attempts.length, 1);
 
     modern = new McpSubprocess(config.stateDir);
     subprocesses.push(modern);
@@ -219,7 +222,7 @@ test('CLI and modern/standard MCP expose one durable Task across MCP process res
       assert.deepEqual(read.result?.structuredContent, exact);
       await standard.close();
     }
-    assert.equal(core.semanticTaskRepository.getFullTask(task.taskId, owner).attempts.length, 1,
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(task.taskId, owner).attempts.length, 1,
       'MCP reconnect and protocol negotiation never create or replay an attempt');
   } finally {
     for (const process of subprocesses) await process.close();
@@ -255,19 +258,19 @@ test('current task.start file and stdin prompts preserve literal text and reject
         '--state-dir', config.stateDir, '--json'];
       const conflict = await runCliJson([...base, '--prompt', 'conflict', ...source]);
       assert.equal(conflict.code, 2);
-      assert.equal(core.semanticTaskRepository.getSlot(project.projectId, 'main', owner)
+      assert.equal(core.semanticTaskRepository.projects.getConversationSlot(project.projectId, 'main', owner)
         .activeTaskId, null);
       const input = source[0] === '--prompt-stdin'
         ? Array.from(Buffer.from(prompt), byte => Buffer.from([byte])) : [];
       const started = await runCliJson([...base, ...source], input);
       assert.equal(started.code, 0, started.stderr);
       const task = JSON.parse(started.stdout);
-      assert.equal(core.semanticTaskRepository.getFullTask(task.taskId, owner)
+      assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(task.taskId, owner)
         .attempts[0]?.content, prompt);
       const replay = await runCliJson([...base, '--prompt', prompt]);
       assert.equal(replay.code, 0, replay.stderr);
       assert.equal(JSON.parse(replay.stdout).taskId, task.taskId);
-      assert.equal(core.semanticTaskRepository.getFullTask(task.taskId, owner)
+      assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(task.taskId, owner)
         .attempts.length, 1);
     }
   } finally {

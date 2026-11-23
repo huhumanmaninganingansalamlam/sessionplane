@@ -8,6 +8,7 @@ import test from 'node:test';
 import { resolveConfig } from '../../src/config.ts';
 import { callRpc } from '../../src/cli/client.ts';
 import { createSemanticCoreRuntime } from '../../src/core/semantic-core-runtime.ts';
+import { buildDecisionEnvelopeV2 } from '../../src/core/decisions/decision-envelope.ts';
 import { PublicTaskPreparationService } from '../../src/core/public-task-preparation.ts';
 import { PageBindingRepository } from '../../src/storage/page-binding-repository.ts';
 import { startCore } from '../../src/main.ts';
@@ -70,24 +71,24 @@ test('Core-assembled semantic ChatGPT sends initial and continuation once each w
       sessionState: 'ready', providerState: 'idle',
     });
     const store = core.semanticTaskRepository;
-    store.openProject({
+    store.projects.openProject({
       projectId: team.teamId, projectKey: 'core-assembled.fixture',
       displayName: 'Core semantic fixture', clientId: 'fixture-alice',
     });
-    store.openSlot({
+    store.projects.openConversationSlot({
       projectId: team.teamId, clientId: 'fixture-alice',
       slotId: roleKey, roleKey, providerKey: 'chatgpt',
     });
-    store.startTask({
+    store.tasks.createTask({
       taskId: 'exact-task', projectId: team.teamId, slotId: roleKey,
       expectedSlotRevision: 1, clientId: 'fixture-alice', requestId: 'start-once',
       prompt: 'Exact integrated prompt',
     });
-    store.observeConversation({
+    store.projects.bindObservedConversation({
       projectId: team.teamId, clientId: 'fixture-alice', slotId: roleKey,
       expectedRevision: 1, taskId: 'exact-task', providerConversationId: 'core-conv',
     });
-    store.planAttempt({
+    store.attempts.planAttempt({
       taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-once',
       kind: 'initial', turnKey: 'initial', content: 'Exact integrated prompt',
     });
@@ -150,10 +151,10 @@ test('Core-assembled semantic ChatGPT sends initial and continuation once each w
       }),
     });
     await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-once');
-    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts[0]!.state,
+    assert.equal(runtime.repository.tasks.readTaskAggregate('exact-task', 'fixture-alice').attempts[0]!.state,
       'planned', 'the same exact request cannot be spent before its session binding');
     assert.equal(await page.evaluate(() => (window as any).sends), 0);
-    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').events
+    assert.equal(runtime.repository.tasks.readTaskAggregate('exact-task', 'fixture-alice').events
       .filter(event => event.event.type === 'observation.deferred').length, 1);
     const attemptBinding = runtime.bindAttemptSession({
       taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-once',
@@ -172,7 +173,7 @@ test('Core-assembled semantic ChatGPT sends initial and continuation once each w
       main.append(panel);
     });
     await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-once');
-    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts[0]!.state,
+    assert.equal(runtime.repository.tasks.readTaskAggregate('exact-task', 'fixture-alice').attempts[0]!.state,
       'planned', 'a visible provider question before POST cannot consume the attempt');
     assert.equal(await page.evaluate(() => (window as any).sends), 0);
     await page.locator('[data-codex-composer-request-navigation]').evaluate(panel => panel.remove());
@@ -185,13 +186,13 @@ test('Core-assembled semantic ChatGPT sends initial and continuation once each w
       main.append(stream);
     });
     await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-once');
-    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts[0]!.state,
+    assert.equal(runtime.repository.tasks.readTaskAggregate('exact-task', 'fixture-alice').attempts[0]!.state,
       'planned', 'an already generating provider cannot consume a future send');
     assert.equal(await page.evaluate(() => (window as any).sends), 0);
     await page.locator('[data-message-id="ongoing-provider-stream"]').evaluate(node => node.remove());
     await page.locator('#prompt-textarea').fill('Human-owned draft');
     await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-once');
-    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts[0]!.state,
+    assert.equal(runtime.repository.tasks.readTaskAggregate('exact-task', 'fixture-alice').attempts[0]!.state,
       'planned', 'a foreign draft with no exact content proof cannot consume the attempt');
     assert.equal(await page.evaluate(() => (window as any).sends), 0,
       'preflight must not click a foreign draft');
@@ -204,10 +205,10 @@ test('Core-assembled semantic ChatGPT sends initial and continuation once each w
     );
     assert.equal(dispatched.state, 'working', 'canonical ACK must complete after the one POST');
     assert.equal(await page.evaluate(() => (window as any).sends), 1);
-    const attempt = runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts[0]!;
+    const attempt = runtime.repository.tasks.readTaskAggregate('exact-task', 'fixture-alice').attempts[0]!;
     assert.equal(attempt.state, 'acknowledged');
     assert.equal(attempt.externalTurnId, 'turn-core');
-    const proof = runtime.repository.getDispatchEvidence({
+    const proof = runtime.repository.attempts.getDispatchEvidence({
       taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-once',
     });
     assert.equal(proof?.conversationId, 'core-conv');
@@ -222,8 +223,8 @@ test('Core-assembled semantic ChatGPT sends initial and continuation once each w
       resultId: 'exact-result', completeTask: false,
     });
     assert.equal(final?.answerText, 'Exact integrated answer');
-    assert.equal(runtime.repository.getTask('exact-task', 'fixture-alice').state, 'working');
-    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts.length, 1);
+    assert.equal(runtime.repository.tasks.getTask('exact-task', 'fixture-alice').state, 'working');
+    assert.equal(runtime.repository.tasks.readTaskAggregate('exact-task', 'fixture-alice').attempts.length, 1);
     assert.equal(await page.evaluate(() => (window as any).sends), 1);
     assert.ok(detailReads >= 2, 'ACK and FINAL are independent reads');
 
@@ -237,7 +238,7 @@ test('Core-assembled semantic ChatGPT sends initial and continuation once each w
       submitted.textContent = 'Exact integrated prompt';
       main.querySelector('[data-message-id="previous-user"]')!.after(submitted);
     });
-    runtime.repository.planAttempt({
+    runtime.repository.attempts.planAttempt({
       taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-continue',
       kind: 'continuation', turnKey: 'continue-1', content: '계속',
     });
@@ -263,9 +264,9 @@ test('Core-assembled semantic ChatGPT sends initial and continuation once each w
       main.append(panel);
     });
     await runtime.kernel.dispatch('exact-task', 'fixture-alice', 'attempt-continue');
-    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts
+    assert.equal(runtime.repository.tasks.readTaskAggregate('exact-task', 'fixture-alice').attempts
       .find(attempt => attempt.attemptId === 'attempt-continue')?.state, 'planned');
-    assert.equal(runtime.repository.getTask('exact-task', 'fixture-alice').state,
+    assert.equal(runtime.repository.tasks.getTask('exact-task', 'fixture-alice').state,
       'agent_input_required');
     assert.equal(await page.evaluate(() => (window as any).sends), 1,
       'a pending agent question never consumes or sends the continuation');
@@ -287,14 +288,14 @@ test('Core-assembled semantic ChatGPT sends initial and continuation once each w
       actionRef: pendingQuestion!.options[0]!.actionRef, input: 'Proceed',
     }), { kind: 'performed', effect: 'question_answered' });
     assert.equal(await page.evaluate(() => (window as any).decisionClicks), 1);
-    assert.equal(runtime.repository.getTask('exact-task', 'fixture-alice').state, 'working');
-    const continued = runtime.repository.getFullTask('exact-task', 'fixture-alice')
+    assert.equal(runtime.repository.tasks.getTask('exact-task', 'fixture-alice').state, 'working');
+    const continued = runtime.repository.tasks.readTaskAggregate('exact-task', 'fixture-alice')
       .attempts.find(row => row.attemptId === 'attempt-continue')!;
     assert.equal(continued.state, 'acknowledged',
       'the verified decision effect must automatically resume the same planned continuation');
     assert.equal(continued.externalTurnId, 'turn-continue');
     assert.equal(await page.evaluate(() => (window as any).sends), 2);
-    const continuationEvidence = runtime.repository.getDispatchEvidence({
+    const continuationEvidence = runtime.repository.attempts.getDispatchEvidence({
       taskId: 'exact-task', clientId: 'fixture-alice', attemptId: 'attempt-continue',
     });
     assert.equal(continuationEvidence?.messageId, 'user-continue');
@@ -305,8 +306,8 @@ test('Core-assembled semantic ChatGPT sends initial and continuation once each w
       resultId: 'continued-result', completeTask: true,
     });
     assert.equal(continuedFinal?.answerText, 'Continued exact answer');
-    assert.equal(runtime.repository.getTask('exact-task', 'fixture-alice').state, 'completed');
-    assert.equal(runtime.repository.getFullTask('exact-task', 'fixture-alice').attempts.length, 2);
+    assert.equal(runtime.repository.tasks.getTask('exact-task', 'fixture-alice').state, 'completed');
+    assert.equal(runtime.repository.tasks.readTaskAggregate('exact-task', 'fixture-alice').attempts.length, 2);
     assert.equal(await page.evaluate(() => (window as any).sends), 2);
   } finally {
     await core.close();
@@ -350,24 +351,24 @@ test('Core never sends a previous semantic Task after the owned session generati
       sessionState: 'ready', providerState: 'idle',
     });
     const store = core.semanticTaskRepository;
-    store.openProject({
+    store.projects.openProject({
       projectId: team.teamId, projectKey: 'semantic-stale-generation',
       displayName: 'Semantic stale fixture', clientId: 'fixture-alice',
     });
-    store.openSlot({
+    store.projects.openConversationSlot({
       projectId: team.teamId, clientId: 'fixture-alice',
       slotId: roleKey, roleKey, providerKey: 'chatgpt',
     });
-    store.startTask({
+    store.tasks.createTask({
       taskId: 'old-task', projectId: team.teamId, slotId: roleKey,
       expectedSlotRevision: 1, clientId: 'fixture-alice',
       requestId: 'old-start', prompt: 'Old exact intent',
     });
-    store.observeConversation({
+    store.projects.bindObservedConversation({
       projectId: team.teamId, clientId: 'fixture-alice', slotId: roleKey,
       expectedRevision: 1, taskId: 'old-task', providerConversationId: 'core-stale',
     });
-    store.planAttempt({
+    store.attempts.planAttempt({
       taskId: 'old-task', clientId: 'fixture-alice',
       attemptId: 'old-attempt', kind: 'initial', turnKey: 'root',
       content: 'Old exact intent',
@@ -399,7 +400,7 @@ test('Core never sends a previous semantic Task after the owned session generati
       taskId: 'old-task', clientId: 'fixture-alice', attemptId: 'old-attempt',
       sessionId: session.sessionId, generation: 2, conversationId: 'core-stale',
     }), /cannot be rebound/, 'a newer owned page never rewrites the earlier attempt');
-    assert.deepEqual(core.semanticTaskRepository.getAttemptSessionBinding({
+    assert.deepEqual(core.semanticTaskRepository.attempts.getAttemptSessionBinding({
       taskId: 'old-task', clientId: 'fixture-alice', attemptId: 'old-attempt',
     }), priorBinding);
     const runtime = createSemanticCoreRuntime({
@@ -467,32 +468,32 @@ test('Core accepts only the exact resolved question decision once', {
       promptSubmitted: true,
     });
     const store = core.semanticTaskRepository;
-    store.openProject({
+    store.projects.openProject({
       projectId: team.teamId, projectKey: 'decision-core', displayName: 'Decision Core',
       clientId,
     });
-    store.openSlot({ projectId: team.teamId, clientId, slotId: roleKey,
+    store.projects.openConversationSlot({ projectId: team.teamId, clientId, slotId: roleKey,
       roleKey, providerKey: 'chatgpt' });
-    store.startTask({ taskId: 'decision-task', projectId: team.teamId, clientId,
+    store.tasks.createTask({ taskId: 'decision-task', projectId: team.teamId, clientId,
       slotId: roleKey, expectedSlotRevision: 1, requestId: 'decision-request',
       prompt: 'Question prompt' });
-    store.observeConversation({ taskId: 'decision-task', projectId: team.teamId,
+    store.projects.bindObservedConversation({ taskId: 'decision-task', projectId: team.teamId,
       clientId, slotId: roleKey, expectedRevision: 1,
       providerConversationId: 'decision-conv' });
-    store.planAttempt({ taskId: 'decision-task', clientId, attemptId: 'decision-attempt',
+    store.attempts.planAttempt({ taskId: 'decision-task', clientId, attemptId: 'decision-attempt',
       kind: 'initial', turnKey: 'initial', content: 'Question prompt' });
     core.semanticTaskBindAttemptSession({
       taskId: 'decision-task', clientId, attemptId: 'decision-attempt',
       sessionId: session.sessionId, generation: 1, conversationId: 'decision-conv',
     });
-    store.beginDispatch('decision-task', clientId, 'decision-attempt');
-    store.recordDispatchEvidence({
+    store.attempts.reserveAttemptDispatch('decision-task', clientId, 'decision-attempt');
+    store.attempts.recordDispatchEvidence({
       taskId: 'decision-task', clientId, attemptId: 'decision-attempt',
       evidence: { conversationId: 'decision-conv', messageId: 'decision-user',
         parentMessageId: 'root', textHash: sha('Question prompt'),
         observedAt: new Date().toISOString() },
     });
-    store.acknowledgeAttempt({
+    store.attempts.acknowledgeAttempt({
       taskId: 'decision-task', clientId, attemptId: 'decision-attempt',
       externalTurnId: 'decision-turn',
     });
@@ -517,10 +518,47 @@ test('Core accepts only the exact resolved question decision once', {
       snapshotId: observation.snapshotId, actionRef: action.actionRef,
       evidenceHash: action.evidenceHash,
     });
+    // An old unversioned pending action is deliberately refused. Current
+    // model/retry fixtures must use the same v2 contract as the real gateway.
+    const currentDecisionContext = (
+      decisionId: string,
+      observed: typeof observation,
+      selectedAction: typeof action,
+      kind: 'model_choice' | 'recovery_choice',
+    ) => {
+      const option = {
+        actionRef: selectedAction.actionRef, purpose: selectedAction.purpose,
+        effect: selectedAction.effect, risk: selectedAction.risk,
+        evidenceHash: selectedAction.evidenceHash,
+        expiresAt: selectedAction.expiresAt, inputSchema: selectedAction.input,
+      };
+      return JSON.stringify(buildDecisionEnvelopeV2({
+        taskContext: decisionContext, attemptId: 'decision-attempt',
+        providerActions: [{
+          purpose: selectedAction.purpose, snapshotId: observed.snapshotId,
+          actionRef: selectedAction.actionRef, evidenceHash: selectedAction.evidenceHash,
+        }],
+        evidence: {
+          original_request: 'Question prompt', current_attempt: '',
+          provider_question: '', permission: '', partial_answer: '',
+          capability_issues: '', provider_controls: '',
+          decision_options: JSON.stringify([option]),
+        },
+        packet: {
+          taskId: 'decision-task', taskRevision: 1, decisionId, kind,
+          reason: 'exact-journaled-fixture', humanOnly: false,
+          observedAt: observed.observedAt, expiresAt: selectedAction.expiresAt,
+          snapshotId: observed.snapshotId, questionText: null, permission: null,
+          requestedModel: null, options: [option], controls: [],
+          evidenceSections: [], observedControls: [], resumePoint: 'fixture-v2',
+          evidenceBytes: 0,
+        },
+      }));
+    };
     const selected = 'Proceed';
-    store.requireDecision({ taskId: 'decision-task', clientId,
+    store.decisions.createDecision({ taskId: 'decision-task', clientId,
       decisionId: 'wrong-option', audience: 'agent', contextJson: makeContext() });
-    store.resolveDecision({ taskId: 'decision-task', clientId,
+    store.decisions.resolveDecision({ taskId: 'decision-task', clientId,
       decisionId: 'wrong-option', resolutionJson: JSON.stringify({
         kind: 'semantic_action', actionRef: action.actionRef, input: 'Decline',
       }) });
@@ -549,7 +587,7 @@ test('Core accepts only the exact resolved question decision once', {
     const applied = await core.semanticDecisionGateway.decide(choice);
     assert.deepEqual(applied, { kind: 'performed', effect: 'question_answered' });
     assert.equal(await page.evaluate(() => (window as any).applied), 1);
-    assert.equal(store.getFullTask('decision-task', clientId).decisions
+    assert.equal(store.tasks.readTaskAggregate('decision-task', clientId).decisions
       .find(d => d.decisionId === packet!.decisionId)?.actionConsumed, true);
     assert.deepEqual(await core.semanticDecisionGateway.decide(choice),
       { kind: 'performed', effect: 'question_answered' });
@@ -577,13 +615,10 @@ test('Core accepts only the exact resolved question decision once', {
     assert.equal(closedModel.blocker, 'none');
     const openModel = closedModel.actions.find(a => a.purpose === 'open_model_chooser')!;
     assert.ok(openModel);
-    store.requireDecision({ taskId: 'decision-task', clientId,
-      decisionId: 'model-open', audience: 'agent', contextJson: JSON.stringify({
-        kind: 'semantic_action', context: decisionContext, purpose: openModel.purpose,
-        snapshotId: closedModel.snapshotId, actionRef: openModel.actionRef,
-        evidenceHash: openModel.evidenceHash,
-      }) });
-    store.resolveDecision({ taskId: 'decision-task', clientId,
+    store.decisions.createDecision({ taskId: 'decision-task', clientId,
+      decisionId: 'model-open', audience: 'agent',
+      contextJson: currentDecisionContext('model-open', closedModel, openModel, 'model_choice') });
+    store.decisions.resolveDecision({ taskId: 'decision-task', clientId,
       decisionId: 'model-open', resolutionJson: JSON.stringify({
         kind: 'semantic_action', actionRef: openModel.actionRef, input: null,
       }) });
@@ -596,13 +631,10 @@ test('Core accepts only the exact resolved question decision once', {
     const openedModel = await adapter.observe(decisionContext);
     const chooseModel = openedModel.actions.find(a => a.purpose === 'choose_model')!;
     assert.ok(chooseModel && chooseModel.input.kind === 'option');
-    store.requireDecision({ taskId: 'decision-task', clientId,
-      decisionId: 'model-select', audience: 'agent', contextJson: JSON.stringify({
-        kind: 'semantic_action', context: decisionContext, purpose: chooseModel.purpose,
-        snapshotId: openedModel.snapshotId, actionRef: chooseModel.actionRef,
-        evidenceHash: chooseModel.evidenceHash,
-      }) });
-    store.resolveDecision({ taskId: 'decision-task', clientId,
+    store.decisions.createDecision({ taskId: 'decision-task', clientId,
+      decisionId: 'model-select', audience: 'agent',
+      contextJson: currentDecisionContext('model-select', openedModel, chooseModel, 'model_choice') });
+    store.decisions.resolveDecision({ taskId: 'decision-task', clientId,
       decisionId: 'model-select', resolutionJson: JSON.stringify({
         kind: 'semantic_action', actionRef: chooseModel.actionRef, input: 'Pro',
       }) });
@@ -612,7 +644,7 @@ test('Core accepts only the exact resolved question decision once', {
       input: 'Pro', authorizedDecisionId: 'model-select',
     }), { kind: 'performed', effect: 'model_selected' });
     assert.equal(await page.evaluate(() => (window as any).modelChanges), 1);
-    const finalDecisions = store.getFullTask('decision-task', clientId).decisions;
+    const finalDecisions = store.tasks.readTaskAggregate('decision-task', clientId).decisions;
     assert.ok(['model-open', 'model-select'].every(id =>
       finalDecisions.find(d => d.decisionId === id)?.actionConsumed));
     // A provider stream Retry is also a one-shot external effect, not a
@@ -628,13 +660,10 @@ test('Core accepts only the exact resolved question decision once', {
     assert.equal(retryObserved.blocker, 'provider_retry');
     const retryAction = retryObserved.actions.find(a => a.purpose === 'retry')!;
     assert.ok(retryAction && retryAction.risk === 'retry_once');
-    store.requireDecision({ taskId: 'decision-task', clientId,
-      decisionId: 'stream-retry', audience: 'agent', contextJson: JSON.stringify({
-        kind: 'semantic_action', context: decisionContext, purpose: retryAction.purpose,
-        snapshotId: retryObserved.snapshotId, actionRef: retryAction.actionRef,
-        evidenceHash: retryAction.evidenceHash,
-      }) });
-    store.resolveDecision({ taskId: 'decision-task', clientId,
+    store.decisions.createDecision({ taskId: 'decision-task', clientId,
+      decisionId: 'stream-retry', audience: 'agent',
+      contextJson: currentDecisionContext('stream-retry', retryObserved, retryAction, 'recovery_choice') });
+    store.decisions.resolveDecision({ taskId: 'decision-task', clientId,
       decisionId: 'stream-retry', resolutionJson: JSON.stringify({
         kind: 'semantic_action', actionRef: retryAction.actionRef, input: null,
       }) });
@@ -647,7 +676,7 @@ test('Core accepts only the exact resolved question decision once', {
       kind: 'uncertain', reason: 'retry-clicked-provider-progress-unverified',
     });
     assert.equal(await page.evaluate(() => (window as any).retries), 1);
-    assert.equal(store.getFullTask('decision-task', clientId).decisions
+    assert.equal(store.tasks.readTaskAggregate('decision-task', clientId).decisions
       .find(d => d.decisionId === 'stream-retry')?.actionConsumed, true);
     assert.equal((await adapter.act({
       context: decisionContext, snapshotId: retryObserved.snapshotId,
@@ -676,33 +705,33 @@ test('Core recovers historical ChatGPT ACK and FINAL after cancel and slot repla
       teamId: team.teamId, roleKey: slotId, provider: 'chatgpt',
     });
     const store = core.semanticTaskRepository;
-    store.openProject({
+    store.projects.openProject({
       projectId: team.teamId, projectKey: 'historical-final', displayName: 'Historical',
       clientId,
     });
-    store.openSlot({
+    store.projects.openConversationSlot({
       projectId: team.teamId, clientId, slotId, roleKey: slotId, providerKey: 'chatgpt',
     });
-    store.startTask({
+    store.tasks.createTask({
       taskId: 'historical-task', projectId: team.teamId, slotId, clientId,
       expectedSlotRevision: 1, requestId: 'historical-request',
       prompt: 'Historical task prompt',
     });
-    store.observeConversation({
+    store.projects.bindObservedConversation({
       taskId: 'historical-task', projectId: team.teamId, slotId, clientId,
       expectedRevision: 1, providerConversationId: 'historical-conversation',
     });
-    store.planAttempt({
+    store.attempts.planAttempt({
       taskId: 'historical-task', clientId, attemptId: 'historical-attempt',
       kind: 'initial', turnKey: 'initial', content: 'Historical task prompt',
     });
     // An original send has already occurred; no browser is needed for recovery.
-    store.bindAttemptSession({
+    store.attempts.bindAttemptSessionGeneration({
       taskId: 'historical-task', clientId, attemptId: 'historical-attempt',
       sessionId: session.sessionId, generation: 1, conversationId: 'historical-conversation',
     });
-    store.beginDispatch('historical-task', clientId, 'historical-attempt');
-    store.recordDispatchEvidence({
+    store.attempts.reserveAttemptDispatch('historical-task', clientId, 'historical-attempt');
+    store.attempts.recordDispatchEvidence({
       taskId: 'historical-task', clientId, attemptId: 'historical-attempt',
       evidence: {
         conversationId: 'historical-conversation', messageId: 'historical-user',
@@ -710,29 +739,29 @@ test('Core recovers historical ChatGPT ACK and FINAL after cancel and slot repla
         observedAt: '2026-11-11T09:00:00.000Z',
       },
     });
-    store.markUncertain('historical-task', clientId, 'historical-attempt', 'lost-ack');
-    store.requestCancel('historical-task', clientId);
-    store.planAttempt({
+    store.attempts.markAttemptUncertain('historical-task', clientId, 'historical-attempt', 'lost-ack');
+    store.tasks.requestTaskCancellation('historical-task', clientId);
+    store.attempts.planAttempt({
       taskId: 'historical-task', clientId, attemptId: 'historical-stop',
       kind: 'stop', turnKey: 'stop', content: '',
     });
-    store.beginDispatch('historical-task', clientId, 'historical-stop');
-    store.acknowledgeAttempt({
+    store.attempts.reserveAttemptDispatch('historical-task', clientId, 'historical-stop');
+    store.attempts.acknowledgeAttempt({
       taskId: 'historical-task', clientId, attemptId: 'historical-stop',
       externalTurnId: 'confirmed-stop',
     });
-    store.confirmCancel('historical-task', clientId);
-    const replacement = store.replaceBinding({
+    store.tasks.confirmTaskCancellation('historical-task', clientId);
+    const replacement = store.projects.replaceConversationBinding({
       projectId: team.teamId, clientId, slotId, expectedRevision: 1,
       providerKey: 'alternate-provider', providerConversationId: 'different-conversation',
     });
     assert.equal(replacement.revision, 2);
-    const successor = store.startTask({
+    const successor = store.tasks.createTask({
       taskId: 'successor-task', projectId: team.teamId, slotId, clientId,
       expectedSlotRevision: 2, requestId: 'successor-request',
       prompt: 'Unrelated new prompt',
     });
-    assert.equal(store.getSlot(team.teamId, slotId, clientId).activeTaskId, 'successor-task');
+    assert.equal(store.projects.getConversationSlot(team.teamId, slotId, clientId).activeTaskId, 'successor-task');
     let detailReads = 0;
     const payload = {
       id: 'historical-conversation', current_node: 'answer-node',
@@ -777,7 +806,7 @@ test('Core recovers historical ChatGPT ACK and FINAL after cancel and slot repla
     });
     assert.equal(core.pageRegistry.listBindings().length, 0);
     await runtime.kernel.recoverAck('historical-task', clientId, 'historical-attempt');
-    assert.equal(store.getFullTask('historical-task', clientId).attempts
+    assert.equal(store.tasks.readTaskAggregate('historical-task', clientId).attempts
       .find(a => a.attemptId === 'historical-attempt')?.state, 'acknowledged',
     'late original ACK must attach despite another current slot revision');
     const deferred = await runtime.kernel.observeFinal({
@@ -786,7 +815,7 @@ test('Core recovers historical ChatGPT ACK and FINAL after cancel and slot repla
     });
     assert.equal(deferred, null, 'back-to-back FINAL reads honor backend pacing');
     assert.equal(detailReads, 1, 'a waiting FINAL never consumes another backend slot');
-    const deferredEvents = store.getFullTask('historical-task', clientId).events
+    const deferredEvents = store.tasks.readTaskAggregate('historical-task', clientId).events
       .filter(entry => entry.event.type === 'observation.deferred');
     assert.equal(deferredEvents.length, 1,
       'a paced canonical FINAL must leave one durable per-attempt reason');
@@ -798,10 +827,10 @@ test('Core recovers historical ChatGPT ACK and FINAL after cancel and slot repla
       resultId: 'historical-result', completeTask: true,
     });
     assert.equal(final?.answerText, 'Late exact answer');
-    assert.equal(store.getTask('historical-task', clientId).state, 'canceled');
-    assert.equal(store.getTask('successor-task', clientId).state, successor.state);
-    assert.equal(store.getSlot(team.teamId, slotId, clientId).activeTaskId, 'successor-task');
-    assert.equal(store.getSlot(team.teamId, slotId, clientId).providerConversationId,
+    assert.equal(store.tasks.getTask('historical-task', clientId).state, 'canceled');
+    assert.equal(store.tasks.getTask('successor-task', clientId).state, successor.state);
+    assert.equal(store.projects.getConversationSlot(team.teamId, slotId, clientId).activeTaskId, 'successor-task');
+    assert.equal(store.projects.getConversationSlot(team.teamId, slotId, clientId).providerConversationId,
       'different-conversation');
     assert.ok(detailReads >= 2, 'ACK and FINAL each use the historical identity');
     assert.equal(core.pageRegistry.listBindings().length, 0);
@@ -870,23 +899,23 @@ test('Core-owned approved 20-minute continuation sends one exact POST without a 
       sessionState: 'ready', providerState: 'idle',
     });
     const repository = core.semanticTaskRepository;
-    repository.openProject({
+    repository.projects.openProject({
       projectId: team.teamId, projectKey: 'managed-browser-fixture',
       displayName: 'Managed browser fixture', clientId,
     });
-    repository.openSlot({
+    repository.projects.openConversationSlot({
       projectId: team.teamId, clientId, slotId, roleKey: slotId, providerKey: 'chatgpt',
     });
-    repository.startTask({
+    repository.tasks.createTask({
       taskId: 'managed-task', projectId: team.teamId, slotId,
       expectedSlotRevision: 1, clientId,
       requestId: 'managed-start', prompt: 'Root question',
     });
-    repository.observeConversation({
+    repository.projects.bindObservedConversation({
       projectId: team.teamId, clientId, slotId, expectedRevision: 1,
       taskId: 'managed-task', providerConversationId: 'managed-conversation',
     });
-    repository.planAttempt({
+    repository.attempts.planAttempt({
       taskId: 'managed-task', clientId, attemptId: 'managed-original',
       kind: 'initial', turnKey: 'original', content: 'Root question',
     });
@@ -894,8 +923,8 @@ test('Core-owned approved 20-minute continuation sends one exact POST without a 
       taskId: 'managed-task', clientId, attemptId: 'managed-original',
       sessionId: session.sessionId, generation: 1, conversationId: 'managed-conversation',
     });
-    repository.beginDispatch('managed-task', clientId, 'managed-original');
-    repository.recordDispatchEvidence({
+    repository.attempts.reserveAttemptDispatch('managed-task', clientId, 'managed-original');
+    repository.attempts.recordDispatchEvidence({
       taskId: 'managed-task', clientId, attemptId: 'managed-original',
       evidence: {
         conversationId: 'managed-conversation', messageId: 'user-root',
@@ -903,7 +932,7 @@ test('Core-owned approved 20-minute continuation sends one exact POST without a 
         observedAt: new Date().toISOString(),
       },
     });
-    repository.acknowledgeAttempt({
+    repository.attempts.acknowledgeAttempt({
       taskId: 'managed-task', clientId, attemptId: 'managed-original',
       externalTurnId: 'turn-root',
     });
@@ -947,7 +976,7 @@ test('Core-owned approved 20-minute continuation sends one exact POST without a 
           : { status: 200, headers: {}, body: postedContinuation ? payload : pendingPayload };
       },
     };
-    const prior = repository.getFullTask('managed-task', clientId).attempts[0]!;
+    const prior = repository.tasks.readTaskAggregate('managed-task', clientId).attempts[0]!;
     let clock = Date.parse(prior.acknowledgedAt!);
     const runtime = createSemanticCoreRuntime({
       database: core.database, browserOwner: core.browserOwner,
@@ -969,7 +998,7 @@ test('Core-owned approved 20-minute continuation sends one exact POST without a 
       approvalRef: 'explicit-approved-continuation', message: '계속',
     });
     assert.equal(Date.parse(due.dueAt), clock + 1_200_000);
-    assert.equal(repository.getFullTask('managed-task', clientId).results.length, 0,
+    assert.equal(repository.tasks.readTaskAggregate('managed-task', clientId).results.length, 0,
       'the approved Continue must be due while the original has no FINAL');
     clock += 1_200_000 - 1;
     assert.equal((await runtime.managedContinuation.tick()).timersClaimed, 0);
@@ -978,26 +1007,26 @@ test('Core-owned approved 20-minute continuation sends one exact POST without a 
     const dueReport = await runtime.managedContinuation.tick();
     assert.deepEqual(dueReport, {
       timersClaimed: 1, dispatchesAttempted: 1, deferred: 0,
-    }, JSON.stringify(repository.getFullTask('managed-task', clientId).events.slice(-8), null, 2));
+    }, JSON.stringify(repository.tasks.readTaskAggregate('managed-task', clientId).events.slice(-8), null, 2));
     assert.equal(await page.evaluate(() => (window as any).sends), 1);
     assert.equal(await page.evaluate(() => (window as any).readyTransitions), 1,
       'the Core waits for the asynchronously enabled exact Send control');
-    const exact = repository.getFullTask('managed-task', clientId).attempts[1]!;
+    const exact = repository.tasks.readTaskAggregate('managed-task', clientId).attempts[1]!;
     assert.equal(exact.kind, 'continuation');
     assert.equal(exact.content, '계속');
     assert.ok(['uncertain', 'acknowledged'].includes(exact.state),
       'the single POST may await a paced canonical ACK read');
-    assert.equal(repository.getAttemptSessionBinding({
+    assert.equal(repository.attempts.getAttemptSessionBinding({
       taskId: 'managed-task', clientId, attemptId: exact.attemptId,
     })?.sessionId, session.sessionId);
-    assert.equal(repository.getDispatchEvidence({
+    assert.equal(repository.attempts.getDispatchEvidence({
       taskId: 'managed-task', clientId, attemptId: exact.attemptId,
     })?.messageId, 'user-managed');
     clock += 5_001; // canonical ACK may be paced after the no-FINAL GET
     // This manually admitted fixture has no public policy row; reconcile its
     // persisted POST by the same read-only kernel path used by the Core scanner.
     await runtime.kernel.recoverAck('managed-task', clientId, exact.attemptId);
-    const afterAck = repository.getFullTask('managed-task', clientId);
+    const afterAck = repository.tasks.readTaskAggregate('managed-task', clientId);
     assert.equal(afterAck.attempts[1]!.state, 'acknowledged',
       JSON.stringify(afterAck.events.slice(-8), null, 2));
     assert.equal(afterAck.attempts[1]!.externalTurnId, 'turn-managed');
@@ -1014,7 +1043,7 @@ test('Core-owned approved 20-minute continuation sends one exact POST without a 
       resultId: 'managed-final', completeTask: true,
     });
     assert.equal(final?.answerText, 'Managed final response');
-    assert.equal(repository.getTask('managed-task', clientId).state, 'completed');
+    assert.equal(repository.tasks.getTask('managed-task', clientId).state, 'completed');
     clock += 1_200_000;
     assert.equal((await runtime.managedContinuation.tick()).timersClaimed, 0);
     assert.equal(await page.evaluate(() => (window as any).sends), 1);
@@ -1035,30 +1064,30 @@ test('Core restart marks interrupted semantic dispatch uncertain without a new P
   let core = await startCore({ config, startBrowser: false, logger });
   try {
     const store = core.semanticTaskRepository;
-    store.openProject({
+    store.projects.openProject({
       projectId: 'crash-project', projectKey: 'semantic-restart-fixture',
       displayName: 'Crash fixture', clientId: 'alice',
     });
-    store.openSlot({
+    store.projects.openConversationSlot({
       projectId: 'crash-project', clientId: 'alice',
       slotId: 'main', roleKey: 'Main', providerKey: 'chatgpt',
     });
-    store.startTask({
+    store.tasks.createTask({
       taskId: 'crashed-task', projectId: 'crash-project',
       slotId: 'main', expectedSlotRevision: 1, clientId: 'alice',
       requestId: 'crashed-request', prompt: 'Do not replay',
     });
-    store.planAttempt({
+    store.attempts.planAttempt({
       taskId: 'crashed-task', clientId: 'alice',
       attemptId: 'crashed-attempt', kind: 'initial', turnKey: 'root',
       content: 'Do not replay',
     });
-    store.beginDispatch('crashed-task', 'alice', 'crashed-attempt');
-    assert.equal(store.getFullTask('crashed-task', 'alice').attempts[0]!.state,
+    store.attempts.reserveAttemptDispatch('crashed-task', 'alice', 'crashed-attempt');
+    assert.equal(store.tasks.readTaskAggregate('crashed-task', 'alice').attempts[0]!.state,
       'dispatched');
     await core.close();
     core = await startCore({ config, startBrowser: false, logger });
-    const recovered = core.semanticTaskRepository.getFullTask('crashed-task', 'alice');
+    const recovered = core.semanticTaskRepository.tasks.readTaskAggregate('crashed-task', 'alice');
     assert.equal(recovered.attempts[0]!.state, 'uncertain');
     assert.equal(recovered.task.state, 'uncertain');
     assert.equal(recovered.events
@@ -1066,7 +1095,7 @@ test('Core restart marks interrupted semantic dispatch uncertain without a new P
     await assert.rejects(core.semanticTaskKernel.dispatch(
       'crashed-task', 'alice', 'crashed-attempt',
     ), /Mutation already attempted/, 'Core restart cannot send the original prompt');
-    assert.equal(core.semanticTaskRepository.getFullTask(
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(
       'crashed-task', 'alice').attempts.length, 1);
   } finally {
     await core.close();
@@ -1126,7 +1155,7 @@ test('planned Main after a closed tab reopens the exact owned conversation witho
     assert.equal(new PageBindingRepository(core.database.raw)
       .get(stale.binding.pageKey)?.targetId, stale.binding.targetId);
     const store = core.semanticTaskRepository;
-    store.observeConversation({
+    store.projects.bindObservedConversation({
       projectId: project.projectId, slotId: 'main', expectedRevision: 1,
       clientId, taskId: task.taskId, providerConversationId: canonical,
     });
@@ -1174,8 +1203,8 @@ test('planned Main after a closed tab reopens the exact owned conversation witho
       { kind: 'prepared', taskId: task.taskId });
     assert.equal(newTargets, 1, 'reinspection cannot create another target');
     assert.equal(providerPosts, 0, 'page restoration never sends the original prompt');
-    assert.equal(store.getFullTask(task.taskId, clientId).attempts.length, 1);
-    assert.equal(store.getFullTask(task.taskId, clientId).attempts[0]!.state, 'planned');
+    assert.equal(store.tasks.readTaskAggregate(task.taskId, clientId).attempts.length, 1);
+    assert.equal(store.tasks.readTaskAggregate(task.taskId, clientId).attempts[0]!.state, 'planned');
   } finally {
     await core.close();
     rmSync(root, { recursive: true, force: true });
@@ -1213,7 +1242,7 @@ test('public task.start uses Core-owned verified existing conversation for one i
       }, timeoutMs: 10_000,
     });
     const store = core.semanticTaskRepository;
-    const attempt = store.getFullTask(task.taskId, clientId).attempts[0]!;
+    const attempt = store.tasks.readTaskAggregate(task.taskId, clientId).attempts[0]!;
     assert.equal(attempt.state, 'planned');
     // A new project without a verified provider conversation cannot send.
     let virtualNow = 1_000_000;
@@ -1256,7 +1285,7 @@ test('public task.start uses Core-owned verified existing conversation for one i
       continuationNow: () => new Date(virtualNow),
     });
     await runtime.managedContinuation.tick();
-    assert.equal(store.getFullTask(task.taskId, clientId).attempts[0]!.state, 'planned');
+    assert.equal(store.tasks.readTaskAggregate(task.taskId, clientId).attempts[0]!.state, 'planned');
     const session = core.teamDirectory.getCurrentSession(project.projectId, 'main');
     await core.actorScheduler.startGeneration({
       sessionId: session.sessionId, teamBriefVersion: 0,
@@ -1300,24 +1329,24 @@ test('public task.start uses Core-owned verified existing conversation for one i
       conversationId: 'public-owned-conversation', pageKey: owned.binding.pageKey,
       sessionState: 'ready', providerState: 'idle',
     });
-    store.observeConversation({
+    store.projects.bindObservedConversation({
       projectId: project.projectId, slotId: 'main', expectedRevision: 1,
       clientId, taskId: task.taskId,
       providerConversationId: 'public-owned-conversation',
     });
     await runtime.managedContinuation.tick();
-    const dispatched = store.getFullTask(task.taskId, clientId).attempts[0]!;
+    const dispatched = store.tasks.readTaskAggregate(task.taskId, clientId).attempts[0]!;
     assert.equal(dispatched.state, 'acknowledged',
       'no caller manually binds attempt or dispatches a provider POST');
     assert.equal(dispatched.externalTurnId, 'public-exact-turn');
     assert.equal(await page.evaluate(() => (window as any).sends), 1);
-    assert.equal(store.getDispatchEvidence({
+    assert.equal(store.attempts.getDispatchEvidence({
       taskId: task.taskId, clientId, attemptId: attempt.attemptId,
     })?.messageId, 'public-exact-message');
     virtualNow += 5_001;
     await runtime.managedContinuation.tick();
-    assert.equal(store.getTask(task.taskId, clientId).state, 'completed');
-    assert.equal(store.getFullTask(task.taskId, clientId).results[0]?.answerText,
+    assert.equal(store.tasks.getTask(task.taskId, clientId).state, 'completed');
+    assert.equal(store.tasks.readTaskAggregate(task.taskId, clientId).results[0]?.answerText,
       'Public answer produced once');
     await runtime.managedContinuation.tick();
     assert.equal(await page.evaluate(() => (window as any).sends), 1);
@@ -1406,7 +1435,7 @@ test('public Pro effort intent rejects model radio Pro and never posts without e
       conversationId: 'public-pro-conversation',
       pageKey: owned.binding.pageKey, sessionState: 'ready', providerState: 'idle',
     });
-    core.semanticTaskRepository.observeConversation({
+    core.semanticTaskRepository.projects.bindObservedConversation({
       projectId: project.projectId, slotId: 'main', expectedRevision: 1,
       clientId, taskId: task.taskId,
       providerConversationId: 'public-pro-conversation',
@@ -1450,7 +1479,7 @@ test('public Pro effort intent rejects model radio Pro and never posts without e
       }),
     });
     await runtime.managedContinuation.tick();
-    const full = core.semanticTaskRepository.getFullTask(task.taskId, clientId);
+    const full = core.semanticTaskRepository.tasks.readTaskAggregate(task.taskId, clientId);
     assert.equal(full.task.state, 'agent_input_required');
     assert.equal(full.attempts[0]!.state, 'planned');
     assert.equal(await page.evaluate(() => (window as any).sends), 0);
@@ -1480,7 +1509,7 @@ test('public Pro effort intent rejects model radio Pro and never posts without e
     // bypass Core preflight, consume the original POST, or produce an ACK.
     await page.getByRole('menuitemradio', { name: 'Pro', exact: true }).click();
     await runtime.managedContinuation.tick();
-    const blocked = core.semanticTaskRepository.getFullTask(task.taskId, clientId);
+    const blocked = core.semanticTaskRepository.tasks.readTaskAggregate(task.taskId, clientId);
     assert.equal(blocked.task.state, 'agent_input_required');
     assert.equal(blocked.attempts[0]!.state, 'planned');
     assert.equal(blocked.attempts[0]!.dispatchedAt, null);
@@ -1558,7 +1587,7 @@ test('new public Task prepares exact Core-owned roots and blocks foreign navigat
     const before = core.teamDirectory.getCurrentSession(project.projectId, 'main');
     assert.equal(before.generation, 0);
     assert.equal(before.pageKey, null);
-    assert.equal(core.semanticTaskRepository.getSlot(
+    assert.equal(core.semanticTaskRepository.projects.getConversationSlot(
       project.projectId, 'main', clientId).providerConversationId, null);
 
     const report = await runtime.managedContinuation.tick();
@@ -1575,7 +1604,7 @@ test('new public Task prepares exact Core-owned roots and blocks foreign navigat
     assert.equal(binding.expectedConversationId, null);
     assert.equal(binding.conversationId, null);
     assert.equal(binding.url, 'https://chatgpt.com/');
-    const task = core.semanticTaskRepository.getFullTask(started.taskId, clientId);
+    const task = core.semanticTaskRepository.tasks.readTaskAggregate(started.taskId, clientId);
     assert.equal(task.attempts.length, 1);
     assert.equal(task.attempts[0]!.state, 'planned');
     assert.equal(task.task.state, 'agent_input_required');
@@ -1609,7 +1638,7 @@ test('new public Task prepares exact Core-owned roots and blocks foreign navigat
     assert.equal(otherSession.generation, 1);
     assert.notEqual(otherSession.pageKey, prepared.pageKey);
     assert.equal(core.pageRegistry.getBinding(otherSession.pageKey!).state, 'reserved');
-    assert.equal(core.semanticTaskRepository.getFullTask(
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(
       otherTask.taskId, clientId).attempts[0]!.state, 'planned');
     assert.equal(core.semanticDecisionGateway.get(started.taskId, clientId)?.decisionId,
       rootChoice?.decisionId);
@@ -1651,20 +1680,20 @@ test('new public Task prepares exact Core-owned roots and blocks foreign navigat
     assert.equal(choose?.options.length, 0);
     assert.equal(choose?.reason, 'reasoning-effort-pro-target-unverified');
     // A chooser disclosure did not select Pro or authorize the first POST.
-    assert.equal(core.semanticTaskRepository.getTask(started.taskId, clientId).state,
+    assert.equal(core.semanticTaskRepository.tasks.getTask(started.taskId, clientId).state,
       'agent_input_required');
-    assert.equal(core.semanticTaskRepository.getFullTask(
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(
       started.taskId, clientId).attempts[0]!.state, 'planned');
-    assert.equal(core.semanticTaskRepository.getSlot(
+    assert.equal(core.semanticTaskRepository.projects.getConversationSlot(
       project.projectId, 'main', clientId).providerConversationId, null);
     assert.equal(sendPosts, 0, 'a prepared root model is not a canonical first conversation');
     const rootPage = core.pageRegistry.pageForObservation(prepared.pageKey!);
     await rootPage.goto('https://chatgpt.com/c/foreign-before-first-post');
     await runtime.managedContinuation.tick();
-    assert.equal(core.semanticTaskRepository.getSlot(
+    assert.equal(core.semanticTaskRepository.projects.getConversationSlot(
       project.projectId, 'main', clientId).providerConversationId, null,
       'foreign navigation is not canonical Task conversation evidence');
-    assert.equal(core.semanticTaskRepository.getFullTask(
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(
       started.taskId, clientId).attempts[0]!.state, 'planned');
     assert.equal(sendPosts, 0);
     await callRpc<any>({
@@ -1683,7 +1712,7 @@ test('new public Task prepares exact Core-owned roots and blocks foreign navigat
     assert.equal(canceled.state, 'canceled');
     await runtime.managedContinuation.tick();
     assert.equal(sendPosts, 0);
-    assert.equal(core.semanticTaskRepository.getFullTask(
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(
       started.taskId, clientId).attempts[0]!.state, 'planned');
   } finally {
     await runtime?.managedContinuation.close();
@@ -1802,7 +1831,7 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
     });
     runtime = createRuntime();
     await runtime.managedContinuation.tick();
-    let full = core.semanticTaskRepository.getFullTask(task.taskId, clientId);
+    let full = core.semanticTaskRepository.tasks.readTaskAggregate(task.taskId, clientId);
     assert.equal(full.attempts.length, 1);
     assert.equal(full.attempts[0]!.state, 'planned');
     const prepared = core.teamDirectory.getCurrentSession(project.projectId, 'main');
@@ -1813,7 +1842,7 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
       'the prepared root already proves the requested Pro model');
 
     await runtime.managedContinuation.tick();
-    full = core.semanticTaskRepository.getFullTask(task.taskId, clientId);
+    full = core.semanticTaskRepository.tasks.readTaskAggregate(task.taskId, clientId);
     const attempt = full.attempts[0]!;
     assert.equal(attempt.state, 'uncertain', '429 cannot be mistaken for an ACK');
     assert.equal(sendPosts, 1);
@@ -1823,7 +1852,7 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
       messages: [{ id: 'root-user-message', author: { role: 'user' },
         content: { content_type: 'text', parts: [prompt] } }],
     }]);
-    const recorded = core.semanticTaskRepository.getRootPost({
+    const recorded = core.semanticTaskRepository.attempts.getRootDispatchEvidence({
       taskId: task.taskId, clientId, attemptId: attempt.attemptId,
     });
     assert.equal(recorded?.messageId, 'root-user-message');
@@ -1831,7 +1860,7 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
     assert.equal(recorded?.observationCount, 1);
     assert.equal(recorded?.ambiguous, false);
     assert.equal(recorded?.canonicalConversationId, null);
-    assert.equal(core.semanticTaskRepository.getSlot(
+    assert.equal(core.semanticTaskRepository.projects.getConversationSlot(
       project.projectId, 'main', clientId).providerConversationId, null);
 
     // Restart the Core semantic runtime after the irreversible POST. Durable
@@ -1855,17 +1884,17 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
     });
     restarted = createRuntime();
     await restarted.managedContinuation.tick();
-    full = core.semanticTaskRepository.getFullTask(task.taskId, clientId);
+    full = core.semanticTaskRepository.tasks.readTaskAggregate(task.taskId, clientId);
     assert.equal(detailReads, 1,
       'the restarted Core honors the persisted backend 429 cooldown');
     assert.equal(sendPosts, 1);
     assert.equal(full.attempts[0]!.state, 'acknowledged',
       'the exact identity-lost root renderer recovers ACK read-only');
     assert.equal(full.attempts[0]!.externalTurnId, 'root-user-message');
-    assert.equal(core.semanticTaskRepository.getRootPost({
+    assert.equal(core.semanticTaskRepository.attempts.getRootDispatchEvidence({
       taskId: task.taskId, clientId, attemptId: attempt.attemptId,
     })?.canonicalConversationId, 'root-canonical');
-    assert.equal(core.semanticTaskRepository.getSlot(
+    assert.equal(core.semanticTaskRepository.projects.getConversationSlot(
       project.projectId, 'main', clientId).providerConversationId, 'root-canonical');
     const boundSession = core.teamDirectory.getCurrentSession(project.projectId, 'main');
     assert.equal(boundSession.conversationId, 'root-canonical');
@@ -1891,7 +1920,7 @@ test('new public Task sends one root POST and binds only a canonical exact ACK a
     assert.equal(detailReads, 1,
       'ACK and FINAL renderer recovery perform no extra canonical GET during cooldown');
     assert.equal(sendPosts, 1);
-    assert.equal(core.semanticTaskRepository.getFullTask(
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(
       task.taskId, clientId).attempts.length, 1);
     assert.equal((await callRpc<any>({
       socketPath: config.socketPath, method: 'task.start',

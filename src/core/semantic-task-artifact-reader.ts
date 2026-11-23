@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { SemanticArtifactReadResult } from '../providers/semantic-adapter.ts';
 import type { SemanticProviderRegistry } from '../providers/semantic-provider-registry.ts';
-import type { TaskKernelRepository } from '../storage/task-kernel-repository.ts';
+import type { KernelStores } from '../storage/kernel/create-kernel-stores.ts';
 
 const DEFAULT_MAX_BYTES = 32 * 1024 * 1024;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -31,12 +31,12 @@ export type VerifiedTaskArtifactRead =
  * matched to durable Task/attempt/binding identity and SHA-256 bytes.
  */
 export class SemanticTaskArtifactReader {
-  readonly #repository: TaskKernelRepository;
+  readonly #repository: Pick<KernelStores, 'projects' | 'tasks' | 'attempts'>;
   readonly #providers: SemanticProviderRegistry;
   readonly #maxBytes: number;
 
   constructor(input: {
-    repository: TaskKernelRepository;
+    repository: Pick<KernelStores, 'projects' | 'tasks' | 'attempts'>;
     providers: SemanticProviderRegistry;
     maxBytes?: number;
   }) {
@@ -59,9 +59,9 @@ export class SemanticTaskArtifactReader {
         typeof input.resultId !== 'string' || input.resultId.length < 1) {
       return { kind: 'unavailable', reason: 'artifact_provenance_unverified' };
     }
-    let full: ReturnType<TaskKernelRepository['getFullTask']>;
+    let full: ReturnType<KernelStores['tasks']['readTaskAggregate']>;
     try {
-      full = this.#repository.getFullTask(input.taskId, input.clientId);
+      full = this.#repository.tasks.readTaskAggregate(input.taskId, input.clientId);
     } catch (error) {
       if (error instanceof SessionPlaneDomainError &&
           error.errorCode === 'invalid_request' &&
@@ -83,7 +83,7 @@ export class SemanticTaskArtifactReader {
     }
 
     const task = full.task;
-    const binding = this.#repository.getBindingAtRevision(
+    const binding = this.#repository.projects.getSlotBindingAtRevision(
       task.projectId, task.slotId, task.slotRevision, input.clientId);
     const resolved = this.#providers.resolve(binding.providerKey, 'artifact_read');
     if (resolved.kind === 'unsupported') return resolved;
@@ -146,9 +146,9 @@ export class SemanticTaskArtifactReader {
     }
     // External file reads may outlive a revoked project membership. Checking
     // authorization only before the await is not sufficient to release bytes.
-    let current: ReturnType<TaskKernelRepository['getFullTask']>;
+    let current: ReturnType<KernelStores['tasks']['readTaskAggregate']>;
     try {
-      current = this.#repository.getFullTask(input.taskId, input.clientId);
+      current = this.#repository.tasks.readTaskAggregate(input.taskId, input.clientId);
     } catch (error) {
       if ((error instanceof SessionPlaneDomainError &&
           error.errorCode === 'invalid_request' &&

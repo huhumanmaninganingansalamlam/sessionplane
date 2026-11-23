@@ -1,0 +1,54 @@
+{
+  "kind": "semantic_action",
+  "context": {
+    "projectId": "historical-project",
+    "slotId": "main",
+    "slotRevision": 4,
+    "taskId": "historical-task",
+    "providerConversationId": "historical-conversation",
+    "submittedUserMessageId": "historical-user",
+    "submittedUserTurnId": "historical-turn",
+    "pageLease": null
+  },
+  "attemptId": "historical-attempt",
+  "purpose": "choose_reasoning_effort",
+  "snapshotId": "old-snapshot",
+  "actionRef": "old-action",
+  "evidenceHash": "old-hash",
+  "actions": [
+    {"purpose":"choose_reasoning_effort","snapshotId":"old-snapshot","actionRef":"old-action","evidenceHash":"old-hash"}
+  ],
+  "allOptions": [
+    {"purpose":"choose_reasoning_effort","snapshotId":"old-snapshot","actionRef":"old-action","evidenceHash":"old-hash","effect":"set Pro","risk":"configuration_only","expiresAt":"2026-11-01T00:00:00Z","inputSchema":{"kind":"none"}}
+  ],
+  "evidence": {
+    "original_request": "Historical exact request",
+    "current_attempt": "{}",
+    "provider_question": "",
+    "permission": "",
+    "partial_answer": "",
+    "capability_issues": "",
+    "provider_controls": "",
+    "decision_options": "[]"
+  },
+  "packet": {
+    "taskId": "historical-task",
+    "taskRevision": 10,
+    "decisionId": "historical-decision",
+    "kind": "model_choice",
+    "reason": "historical-model-chooser",
+    "humanOnly": false,
+    "observedAt": "2026-11-01T00:00:00Z",
+    "expiresAt": "2026-11-01T00:00:00Z",
+    "snapshotId": "old-snapshot",
+    "questionText": null,
+    "permission": null,
+    "requestedModel": "Pro",
+    "options": [],
+    "controls": [],
+    "evidenceSections": [],
+    "observedControls": [],
+    "resumePoint": "historical",
+    "evidenceBytes": 0
+  }
+}

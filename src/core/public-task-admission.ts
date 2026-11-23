@@ -4,8 +4,8 @@ import { SessionPlaneDomainError } from '../domain/errors.ts';
 import type { TeamDirectory } from './team-directory.ts';
 import type { SessionPlaneDatabase } from '../storage/database.ts';
 import type {
-  SlotRecord, TaskKernelRepository, TaskRecord,
-} from '../storage/task-kernel-repository.ts';
+  SlotRecord, KernelStores, TaskRecord,
+} from '../storage/kernel/create-kernel-stores.ts';
 
 const MAIN_SLOT = 'main';
 const INTERVAL_MS = 20 * 60_000;
@@ -87,11 +87,11 @@ function normalizedKey(value: string): string {
  */
 export class PublicTaskAdmissionService {
   readonly #db: SessionPlaneDatabase;
-  readonly #store: TaskKernelRepository;
+  readonly #store: Pick<KernelStores, 'projects' | 'tasks' | 'attempts'>;
   readonly #teams: TeamDirectory;
   constructor(input: {
     database: SessionPlaneDatabase;
-    repository: TaskKernelRepository;
+    repository: Pick<KernelStores, 'projects' | 'tasks' | 'attempts'>;
     teamDirectory: TeamDirectory;
   }) {
     this.#db = input.database;
@@ -144,11 +144,11 @@ export class PublicTaskAdmissionService {
         });
         projectId = team.teamId;
         const scopedKey = 'public:' + hash([input.clientId, key]);
-        this.#store.openProject({
+        this.#store.projects.openProject({
           projectId, projectKey: scopedKey,
           displayName: input.displayName, clientId: input.clientId,
         });
-        this.#store.openSlot({
+        this.#store.projects.openConversationSlot({
           projectId, clientId: input.clientId, slotId: MAIN_SLOT,
           roleKey: MAIN_SLOT, providerKey: input.provider,
         });
@@ -178,7 +178,7 @@ export class PublicTaskAdmissionService {
         ' FROM kernel_public_project_intents i JOIN kernel_projects p' +
         ' ON p.project_id=i.project_id WHERE i.project_id=?',
       ).get(projectId) as unknown as PublicProjectRow;
-      const slot = this.#store.getSlot(projectId, row.mainSlotId, input.clientId);
+      const slot = this.#store.projects.getConversationSlot(projectId, row.mainSlotId, input.clientId);
       return this.#mapping(row, slot, input.clientId);
     });
   }
@@ -214,7 +214,7 @@ export class PublicTaskAdmissionService {
       ).get(input.projectId) as { mainSlotId: string; providerKey: string } | undefined;
       if (!publicProject) throw new SessionPlaneDomainError('invalid_request', 'Unknown public project identity');
       const slotId = input.conversationSlotId ?? publicProject.mainSlotId;
-      const slot = this.#store.findAuthorizedSlot(input.projectId, slotId, input.clientId);
+      const slot = this.#store.projects.findAuthorizedConversationSlot(input.projectId, slotId, input.clientId);
       if (slot === null) {
         throw new SessionPlaneDomainError('invalid_request', 'Unknown authorized conversation slot');
       }
@@ -238,7 +238,7 @@ export class PublicTaskAdmissionService {
         if (!recorded || recorded.inputSha256 !== exactInputHash) {
           throw new SessionPlaneDomainError('idempotency_conflict', 'Task start request identity conflict');
         }
-        const task = this.#store.getTask(prior.taskId, input.clientId);
+        const task = this.#store.tasks.getTask(prior.taskId, input.clientId);
         return this.#taskReceipt(task, slot, recorded.acceptedRevision);
       }
       // Public mutation identity is caller + requestId, not the project
@@ -258,7 +258,7 @@ export class PublicTaskAdmissionService {
       // Older explicitly owned slots may have immutable provider bindings
       // but no public revision row (schema 12 -> 13). Initialize that row
       // atomically before the CAS. It must never reset an existing counter.
-      const revision = this.#store.ensureConversationRevision(
+      const revision = this.#store.projects.ensurePublicConversationRevision(
         input.projectId, slotId, input.clientId);
       if (revision !== input.expectedConversationRevision) {
         throw new SessionPlaneDomainError('conversation_conflict', 'Conversation revision conflict; re-read the current slot');
@@ -267,12 +267,12 @@ export class PublicTaskAdmissionService {
         throw new SessionPlaneDomainError('conversation_busy', 'Conversation busy; prior Task still owns the slot');
       }
       const taskId = cryptoRandomUuid();
-      const task = this.#store.startTask({
+      const task = this.#store.tasks.createTask({
         taskId, projectId: input.projectId, slotId,
         expectedSlotRevision: slot.revision,
         clientId: input.clientId, requestId: input.requestId, prompt: input.prompt,
       });
-      this.#store.planAttempt({
+      this.#store.attempts.planAttempt({
         taskId, clientId: input.clientId, attemptId: cryptoRandomUuid(),
         kind: 'initial', turnKey: 'initial', content: input.prompt,
       });
@@ -300,7 +300,7 @@ export class PublicTaskAdmissionService {
           teamId: input.projectId, roleKey: slot.roleKey, provider: slot.providerKey,
         });
       }
-      return this.#taskReceipt(this.#store.getTask(task.taskId, input.clientId),
+      return this.#taskReceipt(this.#store.tasks.getTask(task.taskId, input.clientId),
         slot, revision + 1);
     });
   }
@@ -313,7 +313,7 @@ export class PublicTaskAdmissionService {
       projectKey: row.publicProjectKey,
       displayName: row.displayName,
       mainConversationSlotId: row.mainSlotId,
-      conversationRevision: this.#store.getConversationRevision(
+      conversationRevision: this.#store.projects.getPublicConversationRevision(
         row.projectId, row.mainSlotId, clientId),
       currentTaskId: slot.activeTaskId,
       provider: row.providerKey,
@@ -325,7 +325,7 @@ export class PublicTaskAdmissionService {
   #taskReceipt(
     task: TaskRecord, slot: SlotRecord, acceptedRevision: number,
   ): PublicTaskAdmission {
-    const attempted = this.#store.getFullTask(task.taskId, task.clientId).attempts;
+    const attempted = this.#store.tasks.readTaskAggregate(task.taskId, task.clientId).attempts;
     return {
       taskId: task.taskId,
       projectId: task.projectId,

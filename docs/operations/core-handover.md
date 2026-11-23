@@ -1,9 +1,12 @@
 # Core handover preserving Chrome and SQLite
 
+The [handover support matrix](handover-support-matrix.md) records the current
+compatibility evidence; it is not approval to modify the installed Core.
+
 This procedure describes a coordinated same-user SessionPlane Core replacement
 without closing the dedicated Chrome profile. The checked-in handover manifest
-records the historical schema 15→16 migration; current installations may already
-be at schema 16, including same-schema package upgrades. Inspect the installed
+now targets a reviewed schema 16→17 migration for a new candidate. Previously
+accepted schema 15→16 handovers remain historical evidence, not this policy. Inspect the installed
 Core, target package, and exact handover policy before acting. Never start two
 Cores against the same profile or database.
 
@@ -17,10 +20,10 @@ then invokes `system.maintenance.commit`. That RPC closes SQLite and exits the
 Core without calling browser shutdown. Ordinary `SIGTERM`, `SIGINT`, process
 group signals, Chrome signals, and profile-lock deletion are not used.
 
-The checked-in manifest records the historical 15 → 16 transition; it is
-not a deployment order, a current schema assertion or an acceptance receipt.
+The checked-in manifest declares a prospective 16 → 17 transition; it is
+not a deployment order, proof of the installed schema, or an acceptance receipt.
 Never use
-an old 8 -> 15 manifest against the installed schema-15 Core, and never
+an old 15 -> 16 manifest against a schema-17 candidate, and never
 bypass clean source, tarball, all required acceptance gates, exact handover
 identity, and review just because the policy names the new schema.
 
@@ -38,7 +41,7 @@ or durable Task evidence and must not block normal development, recovery, or L3;
 those paths revalidate the dedicated profile and canonical conversation instead.
 
 A later exact-package refresh may declare an equal source and target schema
-(for example 16 to 16). It still runs the same WAL-consistent copy, evidence-first
+(for example 17 to 17). It still runs the same WAL-consistent copy, evidence-first
 rollback rehearsal, raw DB archive, systemd ownership and browser-adoption checks;
 it is not a shortcut around the handover contract.
 
@@ -53,13 +56,13 @@ a separate restored original.
 
 After the exact old Core exits, the helper repeats migration from the now-static
 production database. The original raw DB/WAL/SHM files are moved into a private
-archive. A copy of the sealed schema-16 candidate is atomically renamed into the
+archive. A copy of the sealed schema-17 candidate is atomically renamed into the
 live DB path; the sealed migration candidate and source snapshot remain beside
 their manifest.
 
-If the new Core exits before readiness, rollback uses the schema-15 package to
+If the new Core exits before readiness, rollback uses the verified schema-16 package to
 retain the live candidate as `post-migration-evidence.sqlite`, archives its raw
-DB/WAL/SHM files, restores a schema-15 copy, restores the old package, and starts
+DB/WAL/SHM files, restores a schema-16 copy, restores the old package, and starts
 the same systemd unit once. A live but unhealthy successor is preserved and
 blocks automatic rollback. Never kill it or launch another Core to force a green
 result.
@@ -67,7 +70,7 @@ result.
 ## Build and bind an exact bundle
 
 Bundle verification reads the *installed candidate's compiled migration registry*
-and requires its highest schema version to match the policy target (16). A
+and requires its highest schema version to match the policy target (17). A
 version label, Git commit label, or edited policy alone cannot establish schema
 compatibility; a mismatch aborts bundle construction without accessing the live
 Core or database.
@@ -89,7 +92,7 @@ python3 scripts/ops/handover.py bundle \
 
 Bundle creation installs the tarball only into a temporary prefix and binds the
 manifest to the package SHA-256, clean Git commit/tree embedded in the build, all
-eight acceptance gates, six-tool MCP catalog hash, candidate BrowserOwner hash,
+nine manifest-required acceptance gates, six-tool MCP catalog hash, candidate BrowserOwner hash,
 and the currently installed old BrowserOwner hash needed for rollback. It does
 not contact or mutate the running Core.
 
@@ -132,7 +135,7 @@ The mutating order is fixed:
 4. Acquire the old Core maintenance fence and prove drain/identity twice.
 5. Commit the exact old Core only; prove Chrome is still the same process.
 6. Migrate the final static DB, archive old DB/WAL/SHM, promote package and DB.
-7. Start the same systemd unit and verify the exact candidate commit/tree, schema 16, adopted Chrome, sentinel, request hashes, bindings and sole DB holder.
+7. Start the same systemd unit and verify the exact candidate commit/tree, schema 17, adopted Chrome, sentinel, request hashes, bindings and sole DB holder.
 
 An issued receipt is never reused blindly. Preserve every migration, archive,
 rollback and process-phase file.
@@ -142,7 +145,7 @@ rollback and process-phase file.
 `result.json` is a cutover receipt only when all of these hold:
 
 - old and new Core PIDs differ, and the new PID is the systemd unit MainPID;
-- health reports the bundle commit/tree as clean and schema 16;
+- health reports the bundle commit/tree as clean and schema 17;
 - Chrome PID/start ticks, profile and CDP port are unchanged, with ownership `adopted`;
 - the sentinel request/anchor, every pre-existing request hash and binding identity are preserved;
 - full SQLite integrity and foreign keys passed on source snapshot and candidate;

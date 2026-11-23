@@ -286,7 +286,7 @@ export class SemanticExactTaskPort implements ExactTaskProviderPort {
         // A provider-side synchronous sink may have failed after the POST.
         // A second *journal write* is safe; a second send is never attempted.
         try { this.#journal.record(intent, dispatched.attempts[0]!); }
-        catch { /* Preserve uncertain; recovery will use any durable evidence. */ }
+        catch { return { kind: 'uncertain', reason: dispatched.reason }; }
         return { kind: 'uncertain', reason: dispatched.reason };
       }
       if (dispatched.kind !== 'dispatched_unverified' || dispatched.attempts.length !== 1 ||

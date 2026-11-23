@@ -30,7 +30,7 @@ test('public Main and explicitly opened second logical slot have independent rev
     });
     assert.equal(project.mainConversationSlotId, 'main');
     const projectId = project.projectId;
-    assert.equal(core.semanticTaskRepository.getConversationRevision(projectId, 'main', clientId), 1);
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(projectId, 'main', clientId), 1);
 
     // An explicit role is a fixture setup, not a new public role-creation
     // surface or a real Expert account/browser generation.
@@ -38,12 +38,12 @@ test('public Main and explicitly opened second logical slot have independent rev
       teamId: projectId, roleKey: 'reviewer', roleType: 'reviewer',
       displayName: 'Fixture only: reviewer', reportsToRoleKey: 'main',
     });
-    const second = core.semanticTaskRepository.openSlot({
+    const second = core.semanticTaskRepository.projects.openConversationSlot({
       projectId, clientId, slotId: 'reviewer', roleKey: 'reviewer',
       providerKey: 'chatgpt',
     });
     assert.equal(second.revision, 1);
-    assert.equal(core.semanticTaskRepository.getConversationRevision(projectId, 'reviewer', clientId), 1);
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(projectId, 'reviewer', clientId), 1);
     const revisionCount = () => Number(core.database.raw.prepare(
       'SELECT COUNT(*) AS count FROM kernel_public_slot_revisions WHERE project_id=?'
     ).get(projectId)!.count);
@@ -66,13 +66,13 @@ test('public Main and explicitly opened second logical slot have independent rev
     assert.notEqual(main.taskId, reviewer.taskId);
     assert.equal(main.conversationRevision, 2);
     assert.equal(reviewer.conversationRevision, 2);
-    assert.equal(core.semanticTaskRepository.getConversationRevision(projectId, 'main', clientId), 2);
-    assert.equal(core.semanticTaskRepository.getConversationRevision(projectId, 'reviewer', clientId), 2);
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(projectId, 'main', clientId), 2);
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(projectId, 'reviewer', clientId), 2);
     assert.equal((await rpc('task.start', reviewerInput)).taskId, reviewer.taskId);
     assert.equal((await rpc('task.start', mainInput)).taskId, main.taskId);
 
-    const mainTask = core.semanticTaskRepository.getFullTask(main.taskId, clientId);
-    const reviewerTask = core.semanticTaskRepository.getFullTask(reviewer.taskId, clientId);
+    const mainTask = core.semanticTaskRepository.tasks.readTaskAggregate(main.taskId, clientId);
+    const reviewerTask = core.semanticTaskRepository.tasks.readTaskAggregate(reviewer.taskId, clientId);
     assert.equal(mainTask.attempts.length, 1);
     assert.equal(reviewerTask.attempts.length, 1);
     assert.equal(mainTask.attempts[0]!.state, 'planned');
@@ -102,12 +102,12 @@ test('public Main and explicitly opened second logical slot have independent rev
     // Only reviewer completes. Main must remain unresolved, then its own
     // independent cancellation cannot affect the finished reviewer result.
     const attempt = reviewerTask.attempts[0]!;
-    core.semanticTaskRepository.beginDispatch(reviewer.taskId, clientId, attempt.attemptId);
-    core.semanticTaskRepository.acknowledgeAttempt({
+    core.semanticTaskRepository.attempts.reserveAttemptDispatch(reviewer.taskId, clientId, attempt.attemptId);
+    core.semanticTaskRepository.attempts.acknowledgeAttempt({
       taskId: reviewer.taskId, clientId, attemptId: attempt.attemptId,
       externalTurnId: 'reviewer-proven-turn',
     });
-    core.semanticTaskRepository.recordFinal({
+    core.semanticTaskRepository.tasks.recordTaskFinal({
       taskId: reviewer.taskId, clientId, attemptId: attempt.attemptId,
       resultId: 'reviewer-exact-final',
       externalTurnId: 'reviewer-proven-turn',
@@ -142,11 +142,11 @@ test('public Main and explicitly opened second logical slot have independent rev
     });
     assert.equal(reviewerNext.conversationSlotId, 'reviewer');
     assert.equal(reviewerNext.conversationRevision, 3);
-    assert.equal(core.semanticTaskRepository.getConversationRevision(projectId, 'main', clientId), 2);
-    assert.equal(core.semanticTaskRepository.getConversationRevision(projectId, 'reviewer', clientId), 3);
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(projectId, 'main', clientId), 2);
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(projectId, 'reviewer', clientId), 3);
     assert.equal((await rpc('task.get', { clientId, taskId: main.taskId })).state, 'canceled');
     assert.equal(revisionCount(), 2, 'An explicit role cannot generate new identity rows on task retry');
-    assert.equal(core.semanticTaskRepository.getFullTask(reviewerNext.taskId, clientId).attempts.length, 1);
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(reviewerNext.taskId, clientId).attempts.length, 1);
   } finally {
     await core.close();
     rmSync(root, { recursive: true, force: true });
@@ -174,11 +174,11 @@ test('a historical explicitly owned slot without public revision metadata is adm
       teamId: project.projectId, roleKey: 'expert.backend',
       roleType: 'expert', reportsToRoleKey: 'main',
     });
-    core.semanticTaskRepository.openSlot({
+    core.semanticTaskRepository.projects.openConversationSlot({
       projectId: project.projectId, clientId, slotId: 'expert.backend',
       roleKey: 'expert.backend', providerKey: 'chatgpt',
     });
-    core.semanticTaskRepository.replaceBinding({
+    core.semanticTaskRepository.projects.replaceConversationBinding({
       projectId: project.projectId, clientId, slotId: 'expert.backend',
       expectedRevision: 1, providerKey: 'chatgpt',
       providerConversationId: 'historical-verified-conversation',
@@ -189,7 +189,7 @@ test('a historical explicitly owned slot without public revision metadata is adm
     core.database.raw.prepare(
       'DELETE FROM kernel_public_slot_revisions WHERE project_id=? AND slot_id=?'
     ).run(project.projectId, 'expert.backend');
-    assert.equal(core.semanticTaskRepository.getConversationRevision(
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(
       project.projectId, 'expert.backend', clientId), 2);
     await core.close();
     core = await startCore({ config, startBrowser: false, logger });
@@ -219,15 +219,15 @@ test('a historical explicitly owned slot without public revision metadata is adm
     assert.equal(admitted.conversationRevision, 3);
     assert.equal(admitted.submission.attempted, false);
     assert.equal((await rpc('task.start', input)).taskId, admitted.taskId);
-    assert.equal(core.semanticTaskRepository.getConversationRevision(
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(
       project.projectId, 'expert.backend', clientId), 3);
-    assert.equal(core.semanticTaskRepository.getConversationRevision(
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(
       project.projectId, 'main', clientId), 1);
     const entry = core.database.raw.prepare(
       'SELECT revision FROM kernel_public_slot_revisions WHERE project_id=? AND slot_id=?'
     ).get(project.projectId, 'expert.backend') as { revision: number };
     assert.equal(entry.revision, 3);
-    const task = core.semanticTaskRepository.getFullTask(admitted.taskId, clientId);
+    const task = core.semanticTaskRepository.tasks.readTaskAggregate(admitted.taskId, clientId);
     assert.equal(task.attempts.length, 1);
     assert.equal(task.attempts[0]!.state, 'planned');
     assert.equal(task.attempts[0]!.content, input.prompt);
@@ -264,22 +264,22 @@ test('replacing an authorized provider conversation atomically invalidates stale
       teamId: projectId, roleKey: 'reviewer',
       roleType: 'reviewer', reportsToRoleKey: 'main',
     });
-    core.semanticTaskRepository.openSlot({
+    core.semanticTaskRepository.projects.openConversationSlot({
       projectId, clientId, slotId: 'reviewer',
       roleKey: 'reviewer', providerKey: 'chatgpt',
     });
-    assert.equal(core.semanticTaskRepository.getConversationRevision(
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(
       projectId, 'reviewer', clientId), 1);
 
-    const replaced = core.semanticTaskRepository.replaceBinding({
+    const replaced = core.semanticTaskRepository.projects.replaceConversationBinding({
       projectId, clientId, slotId: 'main', expectedRevision: 1,
       providerKey: 'chatgpt', providerConversationId: 'verified-new-conversation',
     });
     assert.equal(replaced.revision, 2);
     assert.equal(replaced.providerConversationId, 'verified-new-conversation');
-    assert.equal(core.semanticTaskRepository.getConversationRevision(projectId, 'main', clientId), 2,
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(projectId, 'main', clientId), 2,
       'An independently replaced provider conversation must advance the public CAS');
-    assert.equal(core.semanticTaskRepository.getConversationRevision(
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(
       projectId, 'reviewer', clientId), 1,
       'Changing Main cannot invalidate an unrelated reviewer slot');
 
@@ -307,13 +307,13 @@ test('replacing an authorized provider conversation atomically invalidates stale
     });
     assert.equal(fresh.conversationRevision, 3);
     assert.equal(fresh.submission.attempted, false);
-    assert.equal(core.semanticTaskRepository.getConversationRevision(projectId, 'main', clientId), 3);
-    assert.equal(core.semanticTaskRepository.getConversationRevision(
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(projectId, 'main', clientId), 3);
+    assert.equal(core.semanticTaskRepository.projects.getPublicConversationRevision(
       projectId, 'reviewer', clientId), 1);
-    assert.equal(core.semanticTaskRepository.getFullTask(fresh.taskId, clientId).attempts.length, 1);
-    assert.equal(core.semanticTaskRepository.getBindingAtRevision(
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(fresh.taskId, clientId).attempts.length, 1);
+    assert.equal(core.semanticTaskRepository.projects.getSlotBindingAtRevision(
       projectId, 'main', 1, clientId).providerConversationId, null);
-    assert.equal(core.semanticTaskRepository.getBindingAtRevision(
+    assert.equal(core.semanticTaskRepository.projects.getSlotBindingAtRevision(
       projectId, 'main', 2, clientId).providerConversationId,
       'verified-new-conversation');
   } finally {

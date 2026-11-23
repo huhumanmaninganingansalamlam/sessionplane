@@ -67,7 +67,7 @@ test('new public CLI and MCP share one durable project/task contract without own
     assert.equal(started.code, 0, started.stderr);
     const task = JSON.parse(started.stdout);
     assert.equal(task.taskId?.length > 0, true);
-    assert.equal(core.semanticTaskRepository.getFullTask(task.taskId, owner)
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(task.taskId, owner)
       .attempts[0]?.content, prompt, 'CLI passes unchanged bytes into one durable initial attempt');
     const replay = await cli(...startArgs);
     assert.equal(replay.code, 0, replay.stderr);
@@ -90,14 +90,14 @@ test('new public CLI and MCP share one durable project/task contract without own
       '--after-revision', String(summary.revision), '--wait-ms', '0', '--until-change');
     assert.equal(waited.code, 0, waited.stderr);
     assert.equal(JSON.parse(waited.stdout).revision, summary.revision);
-    assert.equal(core.semanticTaskRepository.getFullTask(task.taskId, owner)
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(task.taskId, owner)
       .attempts[0]?.state, 'planned', 'bounded client exit does not drive or abandon execution');
 
     const canceled = await cli('task', 'cancel', task.taskId, '--request-id', 'cancel-without-send');
     assert.equal(canceled.code, 0, canceled.stderr);
     assert.equal(JSON.parse(canceled.stdout).cancelOutcome, 'not_submitted');
-    assert.equal(core.semanticTaskRepository.getTask(task.taskId, owner).state, 'canceled');
-    assert.equal(core.semanticTaskRepository.getFullTask(task.taskId, owner).attempts.length, 1);
+    assert.equal(core.semanticTaskRepository.tasks.getTask(task.taskId, owner).state, 'canceled');
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(task.taskId, owner).attempts.length, 1);
 
     const publicTools = [PROJECT_MCP_TOOL, ...TASK_MCP_TOOLS];
     assert.deepEqual(publicTools.map(item => item.name).sort(), [
@@ -293,14 +293,14 @@ test('modern MCP client exit and reconnect cannot cancel or replay a durable pub
     });
     assert.equal(started.isError, false);
     const taskId: string = started.structuredContent.taskId;
-    assert.equal(core.semanticTaskRepository.getFullTask(taskId, owner)
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(taskId, owner)
       .attempts[0]!.state, 'planned');
 
     const replay = await rpcMcp('tools/call', {
       name: 'sessionplane_task_start', arguments: args,
     });
     assert.equal(replay.structuredContent.taskId, taskId);
-    assert.equal(core.semanticTaskRepository.getFullTask(taskId, owner)
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(taskId, owner)
       .attempts.length, 1);
     const current = await rpcMcp('tools/call', {
       name: 'sessionplane_task_get', arguments: { clientId: owner, taskId },
@@ -311,7 +311,7 @@ test('modern MCP client exit and reconnect cannot cancel or replay a durable pub
       arguments: { clientId: owner, taskId, requestId: 'cancel-mcp-once' },
     });
     assert.equal(terminal.structuredContent.state, 'canceled');
-    assert.equal(core.semanticTaskRepository.getFullTask(taskId, owner)
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(taskId, owner)
       .attempts.length, 1);
   } finally {
     await core.close();
@@ -346,7 +346,7 @@ test('SQLite cancellation receipt survives Core process restart and blocks forei
     await core.close();
     core = await startCore({ config, startBrowser: false, logger });
     assert.deepEqual(await rpc('task.cancel', identity), first);
-    assert.equal(core.semanticTaskRepository.getFullTask(started.taskId, owner)
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(started.taskId, owner)
       .events.filter((event: { event: { type: string } }) =>
         event.event.type === 'cancel.requested').length, 1);
 
@@ -366,7 +366,7 @@ test('SQLite cancellation receipt survives Core process restart and blocks forei
       assert.equal(error.data?.errorCode, 'idempotency_conflict');
       return true;
     });
-    assert.equal(core.semanticTaskRepository.getTask(otherTask.taskId, owner).state, 'working');
+    assert.equal(core.semanticTaskRepository.tasks.getTask(otherTask.taskId, owner).state, 'working');
   } finally {
     await core.close();
     rmSync(root, { recursive: true, force: true });

@@ -20,6 +20,14 @@ from unittest.mock import MagicMock, patch
 sys.dont_write_bytecode = True
 
 SCRIPT = pathlib.Path(__file__).resolve().parents[2] / 'scripts/ops/handover.py'
+OPS_DIR = SCRIPT.parent
+if str(OPS_DIR) not in sys.path:
+    sys.path.insert(0, str(OPS_DIR))
+from sessionplane_handover import (
+    model, preflight, legacy_transition, bundle, migration as migration_phase,
+    cutover, rollback, retention, systemd,
+)
+
 spec = importlib.util.spec_from_file_location('handover', SCRIPT)
 handover = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(handover)
@@ -37,37 +45,37 @@ class HandoverTests(unittest.TestCase):
             return expected
         with patch.object(handover.time, 'monotonic', side_effect=lambda: elapsed[0]), \
                 patch.object(handover.time, 'sleep', side_effect=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)), \
-                patch.object(handover, 'health', side_effect=health):
-            self.assertEqual(handover.await_ready(process), expected)
+                patch.object(preflight, 'health', side_effect=health):
+            self.assertEqual(systemd.await_ready(process), expected)
         self.assertEqual(elapsed[0], 98)
         for result in [dict(expected, process={'pid': 44}), dict(expected, browser={'state': 'error'})]:
-            with patch.object(handover, 'health', return_value=result), self.assertRaises(AssertionError):
-                handover.await_ready(process)
+            with patch.object(preflight, 'health', return_value=result), self.assertRaises(AssertionError):
+                systemd.await_ready(process)
         process.poll.return_value = 1
         with self.assertRaisesRegex(RuntimeError, 'exited'):
-            handover.await_ready(process)
+            systemd.await_ready(process)
         process.terminate.assert_not_called()
         process.kill.assert_not_called()
 
     def test_coordinated_drain_renews_short_lease_until_existing_calls_return(self):
         current = {'process': {'pid': 11, 'startedAt': 'original'},
                    'maintenance': {'phase': 'running', 'coordinatedDrain': True}}
-        with patch.object(handover.time, 'sleep'), patch.object(handover, 'health', side_effect=AssertionError('No idle-sample race')), \
-                patch.object(handover, 'maintenance_rpc', side_effect=[
+        with patch.object(handover.time, 'sleep'), patch.object(preflight, 'health', side_effect=AssertionError('No idle-sample race')), \
+                patch.object(preflight, 'maintenance_rpc', side_effect=[
                     {'phase': 'draining', 'token': 'owned'}, {'phase': 'ready', 'token': 'owned'}]) as rpc:
-            self.assertEqual(handover.prepare_maintenance(current)['phase'], 'ready')
+            self.assertEqual(preflight.prepare_maintenance(current)['phase'], 'ready')
             self.assertEqual(rpc.call_args.args[2]['token'], 'owned')
         with patch.object(handover.time, 'sleep', side_effect=KeyboardInterrupt), \
-                patch.object(handover, 'maintenance_rpc', return_value={'phase': 'draining', 'token': 'owned'}) as rpc:
-            with self.assertRaises(KeyboardInterrupt): handover.prepare_maintenance(current)
+                patch.object(preflight, 'maintenance_rpc', return_value={'phase': 'draining', 'token': 'owned'}) as rpc:
+            with self.assertRaises(KeyboardInterrupt): preflight.prepare_maintenance(current)
             self.assertEqual(rpc.call_args.args[1], 'system.maintenance.resume')
 
     def test_explicit_legacy_recovery_migration_drains_operations_without_waiting_for_generation(self):
         h = {'process': {'pid': 11, 'startedAt': 'original'}, 'maintenance': {'coordinatedDrain': True}}
-        with patch.object(handover.time, 'sleep'), patch.object(handover, 'maintenance_rpc', side_effect=[
+        with patch.object(handover.time, 'sleep'), patch.object(preflight, 'maintenance_rpc', side_effect=[
                 {'phase': 'draining', 'activeOperations': 1, 'token': 'owned'},
                 {'phase': 'draining', 'activeOperations': 0, 'token': 'owned'}]) as rpc:
-            lease = handover.prepare_maintenance(h, recovery_handover=True)
+            lease = preflight.prepare_maintenance(h, recovery_handover=True)
             self.assertEqual(lease['phase'], 'draining')
             self.assertEqual(lease['activeOperations'], 0)
             self.assertEqual(rpc.call_count, 2)
@@ -79,25 +87,25 @@ class HandoverTests(unittest.TestCase):
                 'metrics': {'session_actor_queue_depth': 0}}
         busy = copy.deepcopy(idle)
         busy['maintenance']['activeOperations'] = 1
-        with patch.object(handover, 'guard'), patch.object(handover.time, 'sleep'), \
-                patch.object(handover, 'health', side_effect=[busy, idle]) as health, \
-                patch.object(handover, 'maintenance_rpc', return_value={'phase': 'ready'}) as prepare:
-            self.assertEqual(handover.prepare_maintenance(idle), {'phase': 'ready'})
+        with patch.object(preflight, 'guard'), patch.object(handover.time, 'sleep'), \
+                patch.object(preflight, 'health', side_effect=[busy, idle]) as health, \
+                patch.object(preflight, 'maintenance_rpc', return_value={'phase': 'ready'}) as prepare:
+            self.assertEqual(preflight.prepare_maintenance(idle), {'phase': 'ready'})
             self.assertEqual(health.call_count, 2, 'do not fence while the current read is active')
             prepare.assert_called_once()
         report = {'locks': []}
-        with patch.object(handover, 'guard', side_effect=[handover.LockActivityError(report), None]), \
-                patch.object(handover, 'health', return_value=idle), patch.object(handover.time, 'sleep'), \
-                patch.object(handover, 'procstat', return_value=['ticks'] * 20), \
-                patch.object(handover, 'drainable_writer', return_value=True) as writer, \
-                patch.object(handover, 'maintenance_rpc', return_value={'phase': 'ready'}) as prepare:
-            self.assertEqual(handover.prepare_maintenance(idle), {'phase': 'ready'})
+        with patch.object(preflight, 'guard', side_effect=[preflight.LockActivityError(report), None]), \
+                patch.object(preflight, 'health', return_value=idle), patch.object(handover.time, 'sleep'), \
+                patch.object(preflight, 'procstat', return_value=['ticks'] * 20), \
+                patch.object(preflight, 'drainable_writer', return_value=True) as writer, \
+                patch.object(preflight, 'maintenance_rpc', return_value={'phase': 'ready'}) as prepare:
+            self.assertEqual(preflight.prepare_maintenance(idle), {'phase': 'ready'})
             writer.assert_called_once_with(report, 11, 'ticks')
             prepare.assert_called_once()
-        with patch.object(handover, 'guard', side_effect=AssertionError('identity changed')), \
-                patch.object(handover, 'health', return_value=idle), \
-                patch.object(handover, 'maintenance_rpc') as prepare:
-            with self.assertRaises(AssertionError): handover.prepare_maintenance(idle)
+        with patch.object(preflight, 'guard', side_effect=AssertionError('identity changed')), \
+                patch.object(preflight, 'health', return_value=idle), \
+                patch.object(preflight, 'maintenance_rpc') as prepare:
+            with self.assertRaises(AssertionError): preflight.prepare_maintenance(idle)
             prepare.assert_not_called()
 
     def test_local_candidate_requires_bound_complete_evidence_and_live_fence(self):
@@ -111,32 +119,32 @@ class HandoverTests(unittest.TestCase):
                       'fullTestLogSha256': handover.hashlib.sha256(log.read_bytes()).hexdigest()}
             receipt = root/'validation.json'
             receipt.write_text(json.dumps(report))
-            handover.validate_candidate(manifest, receipt)
+            bundle.validate_candidate(manifest, receipt)
             baseline = {**report, 'fullTestSourceCommit': 'previous'}
             receipt.write_text(json.dumps(baseline))
-            with self.assertRaises(AssertionError): handover.validate_candidate(manifest, receipt)
+            with self.assertRaises(AssertionError): bundle.validate_candidate(manifest, receipt)
             baseline.update(focusedTestSourceCommit='verified', focusedTestLog=str(log), focusedPassed=267,
                             focusedTestLogSha256=report['fullTestLogSha256'])
             receipt.write_text(json.dumps(baseline))
-            handover.validate_candidate(manifest, receipt)
-            with self.assertRaises(AssertionError): handover.validate_candidate(manifest, None)
+            bundle.validate_candidate(manifest, receipt)
+            with self.assertRaises(AssertionError): bundle.validate_candidate(manifest, None)
             for key in ['sourceCommit', 'packageSha256', 'build', 'fullTestLogSha256', 'passed']:
                 changed = {**report, key: 268 if key == 'passed' else 'different'}
                 receipt.write_text(json.dumps(changed))
                 with self.subTest(key=key), self.assertRaises(AssertionError):
-                    handover.validate_candidate(manifest, receipt)
+                    bundle.validate_candidate(manifest, receipt)
             for state in [{}, {'maintenance': {'phase': 'ready'}}, {'maintenance': {'phase': 'draining'}}]:
-                with self.assertRaises(AssertionError): handover.require_admission_fence(state, True)
-            handover.require_admission_fence({'maintenance': {'phase': 'running'}}, True)
+                with self.assertRaises(AssertionError): preflight.require_admission_fence(state, True)
+            preflight.require_admission_fence({'maintenance': {'phase': 'running'}}, True)
 
     def test_exit_during_proc_stat_read_is_not_a_live_core(self):
         # Linux can open /proc/PID/stat before exit, then return ESRCH on read.
         for error in [FileNotFoundError(2, 'No such file'), ProcessLookupError(3, 'No such process')]:
-            with self.subTest(error=type(error).__name__), patch.object(handover, 'procstat', side_effect=error):
-                self.assertFalse(handover.live(11))
-        with patch.object(handover, 'procstat', side_effect=PermissionError(1, 'Operation not permitted')):
+            with self.subTest(error=type(error).__name__), patch.object(preflight, 'procstat', side_effect=error):
+                self.assertFalse(preflight.live(11))
+        with patch.object(preflight, 'procstat', side_effect=PermissionError(1, 'Operation not permitted')):
             with self.assertRaises(PermissionError):
-                handover.live(11)
+                preflight.live(11)
 
     def test_drain_rejects_new_activity_and_identity_changes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -148,13 +156,13 @@ class HandoverTests(unittest.TestCase):
             db = MagicMock()
             db.__enter__.return_value = db
             db.execute.return_value.fetchone.return_value = (0,)
-            with patch.object(handover, 'read_db', return_value=db), patch.object(handover, 'no_writer'):
-                handover.guard(before, before)
+            with patch.object(preflight, 'read_db', return_value=db), patch.object(preflight, 'no_writer'):
+                preflight.guard(before, before)
                 busy = copy.deepcopy(before)
                 busy['metrics']['session_actor_queue_depth'] = 1
-                handover.guard(busy, before, require_idle=False)  # pre-fence only
+                preflight.guard(busy, before, require_idle=False)  # pre-fence only
                 with self.assertRaisesRegex(AssertionError, 'Actor running or queued'):
-                    handover.guard(busy, before)  # still mandatory after draining
+                    preflight.guard(busy, before)  # still mandatory after draining
                 for part, key, value in [('metrics', 'session_actor_queue_depth', 1),
                                          ('process', 'pid', 33), ('process', 'startedAt', 'replacement'),
                                          ('browser', 'browserPid', 44), ('database', 'integrity', 'error'),
@@ -163,17 +171,17 @@ class HandoverTests(unittest.TestCase):
                         current = copy.deepcopy(before)
                         current[part][key] = value
                         with self.assertRaises(AssertionError):
-                            handover.guard(current, before)
+                            preflight.guard(current, before)
                         if part != 'metrics':
                             with self.assertRaises(AssertionError):
-                                handover.guard(current, before, require_idle=False)
+                                preflight.guard(current, before, require_idle=False)
                 db.execute.return_value.fetchone.return_value = (1,)
                 with self.assertRaisesRegex(AssertionError, 'Active submission'):
-                    handover.guard(before, before)
+                    preflight.guard(before, before)
             db.execute.return_value.fetchone.return_value = (0,)
-            with patch.object(handover, 'read_db', return_value=db), patch.object(handover, 'no_writer', side_effect=AssertionError('writer')):
+            with patch.object(preflight, 'read_db', return_value=db), patch.object(preflight, 'no_writer', side_effect=AssertionError('writer')):
                 with self.assertRaisesRegex(AssertionError, 'writer'):
-                    handover.guard(before, before)
+                    preflight.guard(before, before)
 
     def test_opted_in_observation_requires_the_live_cores_durable_recovery_fence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -188,18 +196,18 @@ class HandoverTests(unittest.TestCase):
                  'browser': {'state': 'ready', 'browserPid': 22, 'profileDir': directory, 'debuggingPort': 4444},
                  'database': {'integrity': 'ok', 'path': str(dbpath)},
                  'metrics': {'session_actor_queue_depth': 0}, 'maintenance': {'durableRecoveryHandover': True}}
-            handover.guard_state(h, h)
+            preflight.guard_state(h, h)
             legacy = copy.deepcopy(h)
             legacy['maintenance'].pop('durableRecoveryHandover')
             with self.assertRaisesRegex(AssertionError, 'Legacy core'):
-                handover.guard_state(legacy, legacy)
-            handover.guard_state(legacy, legacy, recovery_handover=True)
+                preflight.guard_state(legacy, legacy)
+            preflight.guard_state(legacy, legacy, recovery_handover=True)
             with closing(sqlite3.connect(dbpath)) as db:
                 db.execute("UPDATE outbox SET submission_state='submit_attempted'"); db.commit()
             with self.assertRaisesRegex(AssertionError, 'Active submission'):
-                handover.guard_state(h, h)
+                preflight.guard_state(h, h)
             with self.assertRaisesRegex(AssertionError, 'Active submission'):
-                handover.guard_state(legacy, legacy, recovery_handover=True)
+                preflight.guard_state(legacy, legacy, recovery_handover=True)
 
     def test_target_identity_is_exact_and_read_only(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -216,13 +224,13 @@ class HandoverTests(unittest.TestCase):
             before = path.read_bytes()
             health = {'database': {'path': str(path)}}
             target = types.SimpleNamespace(request_ref='fixture-request', session_id='fixture-session', generation=7, user_anchor='fixture-user')
-            self.assertEqual(handover.request_identity(health, target)['anchor'][0], 'fixture-user')
+            self.assertEqual(preflight.request_identity(health, target)['anchor'][0], 'fixture-user')
             for key, value in [('request_ref', 'foreign-request'), ('session_id', 'foreign-session'), ('generation', 8), ('user_anchor', 'foreign-user')]:
                 wrong = copy.copy(target)
                 setattr(wrong, key, value)
                 with self.subTest(key=key), self.assertRaises(AssertionError):
-                    handover.request_identity(health, wrong)
-            with handover.read_db(health) as db, self.assertRaises(sqlite3.OperationalError):
+                    preflight.request_identity(health, wrong)
+            with preflight.read_db(health) as db, self.assertRaises(sqlite3.OperationalError):
                 db.execute('DELETE FROM outbox')
             self.assertEqual(path.read_bytes(), before)
 
@@ -243,7 +251,7 @@ class HandoverTests(unittest.TestCase):
                 """)
             health = {'database': {'path': str(path)}}
             target = types.SimpleNamespace(request_ref='original', session_id='maetda', generation=16, user_anchor='original-ack')
-            before = handover.request_identity(health, target)
+            before = preflight.request_identity(health, target)
             # Baseline precedes staging; an admitted request advances the same
             # page while the helper drains existing calls, as Hither12→13 did.
             with closing(sqlite3.connect(path)) as db:
@@ -252,15 +260,15 @@ class HandoverTests(unittest.TestCase):
                     INSERT INTO generations VALUES('hither',13,NULL,NULL,'next-prompt');
                     UPDATE page_bindings SET generation=13 WHERE page_key='page';
                 """)
-            after = handover.request_identity(health, target)
-            handover.verify_bindings(health, before['bindings'], after['bindings'])
+            after = preflight.request_identity(health, target)
+            preflight.verify_bindings(health, before['bindings'], after['bindings'])
             alias = ('recovered-page-key', None, None, 'conversation', 'target')
             recovered = ('recovered-page-key', 'hither', 13, 'conversation', 'target')
-            handover.verify_bindings(health, [*after['bindings'], alias], [*after['bindings'], recovered])
+            preflight.verify_bindings(health, [*after['bindings'], alias], [*after['bindings'], recovered])
             for column, value in [(1, 'other-session'), (2, 14), (3, 'other-conversation'), (4, 'other-target')]:
                 changed = list(recovered); changed[column] = value
                 with self.subTest(recovered_column=column), self.assertRaises(AssertionError):
-                    handover.verify_bindings(health, [*after['bindings'], alias], [*after['bindings'], changed])
+                    preflight.verify_bindings(health, [*after['bindings'], alias], [*after['bindings'], changed])
             self.assertEqual(after['request'], before['request'])
             self.assertEqual(after['anchor'], before['anchor'])
             self.assertTrue(all(after['requests'][key] == value for key, value in before['requests'].items()))
@@ -268,26 +276,53 @@ class HandoverTests(unittest.TestCase):
                                   (4, 'other-target'), (2, 11), (2, 14)]:
                 changed = list(after['bindings'][0]); changed[column] = value
                 with self.subTest(column=column), self.assertRaises(AssertionError):
-                    handover.verify_bindings(health, before['bindings'], [changed])
+                    preflight.verify_bindings(health, before['bindings'], [changed])
             with self.assertRaises(AssertionError):
-                handover.verify_bindings(health, before['bindings'], [])
+                preflight.verify_bindings(health, before['bindings'], [])
             # An outbox row alone cannot justify skipping the generation record.
             with closing(sqlite3.connect(path)) as db:
                 db.execute("INSERT INTO outbox VALUES('hither-14','hither',14,'unverified',0)")
                 db.commit()
             changed = list(after['bindings'][0]); changed[2] = 14
             with self.assertRaisesRegex(AssertionError, 'no durable request'):
-                handover.verify_bindings(health, before['bindings'], [changed])
+                preflight.verify_bindings(health, before['bindings'], [changed])
             with closing(sqlite3.connect(path)) as db:
                 db.execute("INSERT INTO generations VALUES('hither',14,NULL,NULL,'next-prompt')")
                 db.commit()
             advanced = list(recovered); advanced[2] = 14
-            handover.verify_bindings(health, [*after['bindings'], alias], [*after['bindings'], advanced])
+            preflight.verify_bindings(health, [*after['bindings'], alias], [*after['bindings'], advanced])
 
     def test_optimized_python_cannot_disable_guards(self):
         result = subprocess.run([sys.executable, '-O', str(SCRIPT), '--help'], capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('disables safety assertions', result.stderr)
+
+
+    def test_current_schema_cannot_select_or_fall_back_to_legacy_freeze(self):
+        original = {'database': {'schemaVersion': 16},
+                    'maintenance': {'coordinatedDrain': True,
+                                    'phase': 'running',
+                                    'durableRecoveryHandover': True}}
+        self.assertEqual(preflight.verify_transition_mode(original, True, False, True),
+                         'core_maintenance')
+        with self.assertRaisesRegex(AssertionError, 'pre-v16'):
+            preflight.verify_transition_mode(original, True, True, True)
+        with self.assertRaisesRegex(AssertionError, 'maintenance fence'):
+            preflight.verify_transition_mode(original, False, False, True)
+        without = {**original, 'maintenance': {'phase': 'running',
+                                               'coordinatedDrain': False}}
+        with self.assertRaisesRegex(AssertionError, 'no legacy fallback'):
+            preflight.verify_transition_mode(without, True, False, True)
+        historical = {'database': {'schemaVersion': 15},
+                      'maintenance': {'coordinatedDrain': True,
+                                      'phase': 'running',
+                                      'durableRecoveryHandover': False}}
+        self.assertEqual(preflight.verify_transition_mode(historical, True, True, True),
+                         'explicit_legacy')
+        with self.assertRaisesRegex(AssertionError, 'old Core'):
+            preflight.verify_transition_mode({**historical, 'maintenance': without['maintenance']}, True, True, True)
+        self.assertEqual(preflight.verify_transition_mode(original, False, False, False),
+                         'read_only_preflight')
 
     def test_apply_without_quiesce_stops_before_host_or_package_access(self):
         result = subprocess.run([sys.executable, str(SCRIPT), '--apply',
@@ -307,10 +342,10 @@ class HandoverTests(unittest.TestCase):
             stat = path.stat()
             inode = f'{os.major(stat.st_dev):02x}:{os.minor(stat.st_dev):02x}:{stat.st_ino}'
             with patch.object(pathlib.Path, 'read_text', return_value=f'1: POSIX ADVISORY READ 11 {inode} 0 1'):
-                handover.no_writer(str(path))
+                preflight.no_writer(str(path))
             with patch.object(pathlib.Path, 'read_text', return_value=f'1: POSIX ADVISORY WRITE 11 {inode} 0 1'):
-                with self.assertRaises(handover.LockActivityError) as error:
-                    handover.no_writer(str(path))
+                with self.assertRaises(preflight.LockActivityError) as error:
+                    preflight.no_writer(str(path))
                 self.assertEqual(error.exception.report['locks'][0]['mode'], 'WRITE')
                 self.assertEqual(error.exception.report['locks'][0]['inode'], stat.st_ino)
 
@@ -322,22 +357,22 @@ class HandoverTests(unittest.TestCase):
                 owner.execute('PRAGMA journal_mode=WAL')
                 owner.execute('CREATE TABLE fixture(value)')
                 owner.commit()
-                handover.no_writer(str(path))
-                with handover.read_db({'database': {'path': str(path)}}) as reader:
+                preflight.no_writer(str(path))
+                with preflight.read_db({'database': {'path': str(path)}}) as reader:
                     reader.execute('BEGIN')
                     reader.execute('SELECT * FROM fixture').fetchall()
-                    handover.no_writer(str(path))
+                    preflight.no_writer(str(path))
                 with self.assertRaises(sqlite3.ProgrammingError):
                     reader.execute('SELECT 1')
                 owner.execute('BEGIN IMMEDIATE')
-                with self.assertRaises(handover.LockActivityError) as error:
-                    handover.no_writer(str(path))
+                with self.assertRaises(preflight.LockActivityError) as error:
+                    preflight.no_writer(str(path))
                 writer = next(r for r in error.exception.report['locks'] if r['classification'] == 'wal-writer')
                 self.assertEqual(writer['holder']['pid'], os.getpid())
                 self.assertEqual((writer['start'], writer['end']), ('120', '120'))
                 self.assertEqual(writer['suffix'], '-shm')
                 owner.rollback()
-                handover.no_writer(str(path))
+                preflight.no_writer(str(path))
 
     def test_wal_management_write_is_distinguished_but_not_ignored(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -350,8 +385,8 @@ class HandoverTests(unittest.TestCase):
                                  (124, 'wal-read-mark-exclusive'), (128, 'wal-shm-initialization')]:
                 raw = f'1: POSIX ADVISORY WRITE -1 {inode} {offset} {offset}'
                 with self.subTest(offset=offset), patch.object(pathlib.Path, 'read_text', return_value=raw):
-                    with self.assertRaises(handover.LockActivityError) as error:
-                        handover.no_writer(str(db))
+                    with self.assertRaises(preflight.LockActivityError) as error:
+                        preflight.no_writer(str(db))
                     row = error.exception.report['locks'][0]
                     self.assertEqual(row['classification'], kind)
                     self.assertEqual(row['raw'], raw)
@@ -371,16 +406,16 @@ class HandoverTests(unittest.TestCase):
                 target = prefix/'lib/node_modules/sessionplane'
                 target.mkdir(parents=True)
                 (target/'marker').write_text('new')
-            with patch.object(handover.subprocess, 'run', side_effect=install), patch.object(handover, 'verify_package', return_value='catalog'):
-                stage, candidate, _ = handover.stage_package(installed, root/'package.tgz', {}, receipt)
+            with patch.object(handover.subprocess, 'run', side_effect=install), patch.object(bundle, 'verify_package', return_value='catalog'):
+                stage, candidate, _ = bundle.stage_package(installed, root/'package.tgz', {}, receipt)
             # The actual final guard can abort here without touching the live path.
-            with self.assertRaises(handover.LockActivityError):
-                with patch.object(handover, 'lock_report', return_value={'locks': [{'blocksHandover': True}]}):
-                    handover.no_writer('fixture')
+            with self.assertRaises(preflight.LockActivityError):
+                with patch.object(preflight, 'lock_report', return_value={'locks': [{'blocksHandover': True}]}):
+                    preflight.no_writer('fixture')
             self.assertEqual((installed/'marker').read_text(), 'running-old')
             self.assertEqual((candidate/'marker').read_text(), 'new')
             self.assertFalse((receipt/'promotion.json').exists())
-            handover.promote_package(installed, candidate, stage, receipt)
+            bundle.promote_package(installed, candidate, stage, receipt)
             self.assertEqual((installed/'marker').read_text(), 'new')
             self.assertEqual((stage/'previous-install/marker').read_text(), 'running-old')
 
@@ -396,7 +431,7 @@ class HandoverTests(unittest.TestCase):
                 if path == candidate: raise OSError('fixture promotion failure')
                 return rename(path, target)
             with patch.object(pathlib.Path, 'rename', fail_candidate), self.assertRaises(OSError):
-                handover.promote_package(installed, candidate, stage, receipt)
+                bundle.promote_package(installed, candidate, stage, receipt)
             self.assertEqual((installed/'marker').read_text(), 'old')
             self.assertEqual((candidate/'marker').read_text(), 'new')
 
@@ -409,24 +444,24 @@ class HandoverTests(unittest.TestCase):
             for name in ['previous-install.tgz', 'predeploy.sqlite']: (prior/name).touch()
             identity = {'request': ['fixture-request-hash'], 'anchor': ['fixture-user']}
             (prior/'before-identity.json').write_text(json.dumps(identity))
-            with patch.object(handover, 'verify_package') as verify, patch.object(handover, 'request_identity', return_value=identity):
-                handover.verify_pre_signal_resume(prior, health, prior/'installed', prior/'package', {}, None)
+            with patch.object(bundle, 'verify_package') as verify, patch.object(preflight, 'request_identity', return_value=identity):
+                cutover.verify_pre_signal_resume(prior, health, prior/'installed', prior/'package', {}, None)
                 verify.assert_called_once()
                 wrong = copy.deepcopy(health)
                 wrong['process']['startedAt'] = 'new-core'
                 with self.assertRaisesRegex(AssertionError, 'lifetime'):
-                    handover.verify_pre_signal_resume(prior, wrong, prior/'installed', prior/'package', {}, None)
+                    cutover.verify_pre_signal_resume(prior, wrong, prior/'installed', prior/'package', {}, None)
                 (prior/'handover.json').write_text('{}')
                 with self.assertRaisesRegex(AssertionError, 'may have occurred'):
-                    handover.verify_pre_signal_resume(prior, health, prior/'installed', prior/'package', {}, None)
+                    cutover.verify_pre_signal_resume(prior, health, prior/'installed', prior/'package', {}, None)
 
     def test_staged_only_abort_cannot_use_legacy_installed_resume(self):
         with tempfile.TemporaryDirectory() as directory:
             prior = pathlib.Path(directory)
             (prior/'staging.json').write_text('{}')
-            with patch.object(handover, 'verify_package') as verify:
+            with patch.object(bundle, 'verify_package') as verify:
                 with self.assertRaisesRegex(AssertionError, 'Staging-only abort'):
-                    handover.verify_pre_signal_resume(prior, {}, prior/'live', prior/'pkg', {}, None)
+                    cutover.verify_pre_signal_resume(prior, {}, prior/'live', prior/'pkg', {}, None)
                 verify.assert_not_called()
 
     def test_maintenance_transport_accepts_eof_only_for_commit_and_never_masks_refusal(self):
@@ -436,14 +471,14 @@ class HandoverTests(unittest.TestCase):
         with patch.object(handover.socket, 'socket', return_value=channel):
             channel.recv.return_value = b''
             with self.assertRaisesRegex(RuntimeError, 'response missing'):
-                handover.maintenance_rpc(h, 'system.maintenance.prepare', {})
-            self.assertIsNone(handover.maintenance_rpc(h, 'system.maintenance.commit', {}, True))
+                preflight.maintenance_rpc(h, 'system.maintenance.prepare', {})
+            self.assertIsNone(preflight.maintenance_rpc(h, 'system.maintenance.commit', {}, True))
             channel.recv.side_effect = ConnectionResetError('core exited')
-            self.assertIsNone(handover.maintenance_rpc(h, 'system.maintenance.commit', {}, True))
+            self.assertIsNone(preflight.maintenance_rpc(h, 'system.maintenance.commit', {}, True))
             channel.recv.side_effect = None
             channel.recv.return_value = b'{"error":{"message":"readiness changed"}}\n'
             with self.assertRaisesRegex(RuntimeError, 'Maintenance refused'):
-                handover.maintenance_rpc(h, 'system.maintenance.commit', {}, True)
+                preflight.maintenance_rpc(h, 'system.maintenance.commit', {}, True)
 
     def test_legacy_freeze_commit_abort_expiry_and_parent_loss(self):
         # Only fixture children are signalled. An unrelated browser sentinel survives.
@@ -453,23 +488,23 @@ class HandoverTests(unittest.TestCase):
                 with self.subTest(mode=mode):
                     core = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
                     fd = os.pidfd_open(core.pid)
-                    ticks = handover.procstat(core.pid)[19]
+                    ticks = preflight.procstat(core.pid)[19]
                     try:
                         if mode == 'wrong-lifetime':
                             with self.assertRaisesRegex(AssertionError, 'freeze failed'):
-                                with handover.frozen_core(fd, core.pid, 'not-the-start-ticks'): pass
+                                with legacy_transition.frozen_core(fd, core.pid, 'not-the-start-ticks'): pass
                         elif mode == 'parent-loss':
                             controller = os.fork()
                             if controller == 0:
-                                with handover.frozen_core(fd, core.pid, ticks, timeout=1):
+                                with legacy_transition.frozen_core(fd, core.pid, ticks, timeout=1):
                                     os._exit(0)  # Guardian gets EOF, even without finally.
                             os.waitpid(controller, 0)
                             deadline = time.monotonic() + 2
-                            while handover.procstat(core.pid)[0] in ('T', 't') and time.monotonic() < deadline:
+                            while preflight.procstat(core.pid)[0] in ('T', 't') and time.monotonic() < deadline:
                                 time.sleep(.01)
                         else:
-                            with handover.frozen_core(fd, core.pid, ticks, timeout=.3) as commit:
-                                self.assertEqual(handover.procstat(core.pid)[0], 'T')
+                            with legacy_transition.frozen_core(fd, core.pid, ticks, timeout=.3) as commit:
+                                self.assertEqual(preflight.procstat(core.pid)[0], 'T')
                                 self.assertIsNone(browser.poll())
                                 if mode == 'commit': commit()
                                 if mode == 'expiry':
@@ -479,7 +514,7 @@ class HandoverTests(unittest.TestCase):
                             self.assertEqual(core.wait(timeout=2), -signal.SIGKILL)
                         else:
                             self.assertIsNone(core.poll())
-                            self.assertNotIn(handover.procstat(core.pid)[0], ('T', 't'))
+                            self.assertNotIn(preflight.procstat(core.pid)[0], ('T', 't'))
                         self.assertIsNone(browser.poll())
                     finally:
                         os.close(fd)
@@ -497,11 +532,11 @@ class HandoverTests(unittest.TestCase):
                 self.assertEqual(worker.stdout.readline().strip(), 'ready')
                 fd = os.pidfd_open(worker.pid)
                 try:
-                    with self.assertRaises(handover.LockActivityError):
-                        with handover.frozen_core(fd, worker.pid, handover.procstat(worker.pid)[19]):
-                            handover.no_writer(str(dbpath))
+                    with self.assertRaises(preflight.LockActivityError):
+                        with legacy_transition.frozen_core(fd, worker.pid, preflight.procstat(worker.pid)[19]):
+                            preflight.no_writer(str(dbpath))
                     self.assertIsNone(worker.poll())
-                    self.assertNotIn(handover.procstat(worker.pid)[0], ('T', 't'))
+                    self.assertNotIn(preflight.procstat(worker.pid)[0], ('T', 't'))
                 finally: os.close(fd)
             finally:
                 worker.terminate(); worker.wait(timeout=2); worker.stdout.close()
@@ -523,31 +558,31 @@ class HandoverTests(unittest.TestCase):
                 (prior/(name+'.json')).write_text(json.dumps(value))
             (prior/'predeploy.sqlite').touch()
             before = {p.name:p.read_bytes() for p in prior.iterdir()}
-            with patch.object(handover, 'request_identity', return_value=identity):
-                handover.verify_staged_resume(prior, h, installed, None)
+            with patch.object(preflight, 'request_identity', return_value=identity):
+                cutover.verify_staged_resume(prior, h, installed, None)
                 self.assertEqual(before, {p.name:p.read_bytes() for p in prior.iterdir()})
                 (installed/'marker').write_text('mixed')
                 with self.assertRaisesRegex(AssertionError, 'installation changed'):
-                    handover.verify_staged_resume(prior, h, installed, None)
+                    cutover.verify_staged_resume(prior, h, installed, None)
                 (installed/'marker').write_text('old')
                 (prior/'handover.json').write_text('{}')
                 with self.assertRaisesRegex(AssertionError, 'ambiguous'):
-                    handover.verify_staged_resume(prior, h, installed, None)
+                    cutover.verify_staged_resume(prior, h, installed, None)
                 (prior/'handover.json').write_text(json.dumps({'oldPid': 11, 'oldStartTicks': 'original-ticks'}))
                 h['maintenance'] = {'phase': 'running'}
-                with patch.object(handover, 'procstat', return_value=[''] * 19 + ['original-ticks']):
-                    handover.verify_staged_resume(prior, h, installed, None)
+                with patch.object(preflight, 'procstat', return_value=[''] * 19 + ['original-ticks']):
+                    cutover.verify_staged_resume(prior, h, installed, None)
                     h['maintenance']['phase'] = 'ready'
                     with self.assertRaisesRegex(AssertionError, 'lease is still active'):
-                        handover.verify_staged_resume(prior, h, installed, None)
+                        cutover.verify_staged_resume(prior, h, installed, None)
                     h['maintenance']['phase'] = 'running'
                     (prior/'promotion.json').write_text('{}')
                     with self.assertRaisesRegex(AssertionError, 'ambiguous'):
-                        handover.verify_staged_resume(prior, h, installed, None)
+                        cutover.verify_staged_resume(prior, h, installed, None)
                 (prior/'promotion.json').unlink()
-                with patch.object(handover, 'procstat', return_value=[''] * 19 + ['reused-pid']):
+                with patch.object(preflight, 'procstat', return_value=[''] * 19 + ['reused-pid']):
                     with self.assertRaisesRegex(AssertionError, 'lifetime unverified'):
-                        handover.verify_staged_resume(prior, h, installed, None)
+                        cutover.verify_staged_resume(prior, h, installed, None)
 
     def test_post_exit_rollback_preserves_db_and_refuses_live_successor(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -581,32 +616,32 @@ class HandoverTests(unittest.TestCase):
                 h = {'database': {'path':str(dbpath), 'integrity':'ok', 'schemaVersion':1},
                      'browser': {'browserPid':browser.pid, 'profileDir':str(profile), 'debuggingPort':44, 'ownership':'adopted'}}
                 target = types.SimpleNamespace(request_ref='r',session_id='s',generation=7,user_anchor='a')
-                identity = handover.request_identity(h,target)
+                identity = preflight.request_identity(h,target)
                 def healthy_fixture():
                     result = copy.deepcopy(h)
                     result['requestOk'] = True; result['browser']['state'] = 'ready'
                     result['process'] = {'pid':json.loads((receipt/'rollback-core.json').read_text())['pid']}
                     return result
-                with patch.object(handover, 'health', side_effect=healthy_fixture):
-                    args=(h,old.pid,successor,handover.procstat(browser.pid)[19],installed,stage,receipt,
+                with patch.object(preflight, 'health', side_effect=healthy_fixture):
+                    args=(h,old.pid,successor,preflight.procstat(browser.pid)[19],installed,stage,receipt,
                           [sys.executable,'-c','import time; time.sleep(30)'],directory,dict(os.environ),target,identity)
-                    with self.assertRaisesRegex(AssertionError,'Live successor'): handover.rollback_exited(*args)
+                    with self.assertRaisesRegex(AssertionError,'Live successor'): rollback.rollback_exited(*args)
                     self.assertFalse((receipt/'rollback-core.json').exists())
                     self.assertEqual((installed/'marker').read_text(),'candidate')
                     successor.terminate(); successor.wait(timeout=2)
-                    restored_process = handover.rollback_exited(*args)
+                    restored_process = rollback.rollback_exited(*args)
                     restored_pid = json.loads((receipt/'rollback-core.json').read_text())['pid']
-                    self.assertTrue(handover.live(restored_pid))
+                    self.assertTrue(preflight.live(restored_pid))
                     self.assertEqual((installed/'marker').read_text(),'old')
                     self.assertEqual((stage/'failed-candidate/marker').read_text(),'candidate')
                     self.assertEqual(dbpath.read_bytes(),dbbytes)
-                    self.assertEqual(handover.request_identity(h,target),identity)
+                    self.assertEqual(preflight.request_identity(h,target),identity)
                     self.assertIsNone(browser.poll())
                     self.assertEqual(json.loads((receipt/'rollback.json').read_text())['phase'],'original-core-restored')
             finally:
                 if (receipt/'rollback-core.json').exists():
                     restored_pid = json.loads((receipt/'rollback-core.json').read_text())['pid']
-                    if handover.live(restored_pid): os.kill(restored_pid,signal.SIGTERM)
+                    if preflight.live(restored_pid): os.kill(restored_pid,signal.SIGTERM)
                     if restored_process is not None: restored_process.wait(timeout=2)
                     else: os.waitpid(restored_pid,0)
                 if successor.poll() is None: successor.terminate()
@@ -643,14 +678,14 @@ class HandoverTests(unittest.TestCase):
                     self.assertEqual(worker.stdout.readline().strip(),'ack')
                 try:
                     self.assertEqual(worker.stdout.readline().strip(),'ready')
-                    ticks=handover.procstat(worker.pid)[19]; chrome_ticks=handover.procstat(browser.pid)[19]
+                    ticks=preflight.procstat(worker.pid)[19]; chrome_ticks=preflight.procstat(browser.pid)[19]
                     profile=root/'.sessionplane-profile.lock'
                     profile.write_text(json.dumps({'pid':worker.pid,'browserPid':browser.pid}))
                     h={'requestOk':True,'process':{'pid':worker.pid,'startedAt':'fixture'},
                        'browser':{'state':'ready','browserPid':browser.pid,'profileDir':str(root),'debuggingPort':4444},
                        'database':{'path':str(dbpath),'integrity':'ok'},'metrics':{'session_actor_queue_depth':0}}
                     target=types.SimpleNamespace(request_ref='request-0',session_id='fixture-session',generation=7,user_anchor='fixture-user')
-                    identity=handover.request_identity(h,target); calls=[]
+                    identity=preflight.request_identity(h,target); calls=[]
                     real_sleep=time.sleep
                     def health(timeout):
                         real_sleep(.02)
@@ -658,8 +693,8 @@ class HandoverTests(unittest.TestCase):
                         return h
                     def drain(seconds):
                         command('quiet'); calls.append('quiet')
-                    with patch.object(handover,'health',side_effect=health), patch.object(handover.time,'sleep',side_effect=drain):
-                        current=handover.prefreeze_drain(h,ticks,chrome_ticks,target,identity,root)
+                    with patch.object(preflight, 'health',side_effect=health), patch.object(handover.time,'sleep',side_effect=drain):
+                        current=legacy_transition.prefreeze_drain(h,ticks,chrome_ticks,target,identity,root)
                     self.assertEqual(calls,['health-with-writer']*2+['quiet'])
                     samples=json.loads((root/'writer-drain.json').read_text())['samples']
                     for sample in samples[:2]:
@@ -671,30 +706,30 @@ class HandoverTests(unittest.TestCase):
                             db.execute("UPDATE outbox SET "+("submission_state='submit_attempted'" if mode=='submit' else "request_hash='changed'")+" WHERE outbox_id='request-0'");db.commit()
                     if mode=='owner': profile.write_text(json.dumps({'pid':0,'browserPid':browser.pid}))
                     if mode=='chrome': chrome_ticks='wrong-lifetime'
-                    with patch.object(handover,'health',side_effect=AssertionError('No health after quiet')):
+                    with patch.object(preflight, 'health',side_effect=AssertionError('No health after quiet')):
                         if mode=='parent-loss':
                             controller=os.fork()
                             if controller==0:
-                                with handover.frozen_core(fd,worker.pid,ticks,timeout=1): os._exit(0)
+                                with legacy_transition.frozen_core(fd,worker.pid,ticks,timeout=1): os._exit(0)
                             os.waitpid(controller,0)
                             deadline=time.monotonic()+2
-                            while handover.procstat(worker.pid)[0] in ('T','t') and time.monotonic()<deadline: time.sleep(.01)
+                            while preflight.procstat(worker.pid)[0] in ('T','t') and time.monotonic()<deadline: time.sleep(.01)
                             self.assertIsNone(worker.poll())
-                            self.assertNotIn(handover.procstat(worker.pid)[0],('T','t'))
+                            self.assertNotIn(preflight.procstat(worker.pid)[0],('T','t'))
                         elif mode=='success':
-                            with handover.frozen_core(fd,worker.pid,ticks) as commit:
-                                handover.frozen_guard(current,h,ticks,chrome_ticks,target,identity)
+                            with legacy_transition.frozen_core(fd,worker.pid,ticks) as commit:
+                                legacy_transition.frozen_guard(current,h,ticks,chrome_ticks,target,identity)
                                 commit()
                             self.assertEqual(worker.wait(timeout=2),-signal.SIGKILL)
                         else:
                             with self.assertRaises(AssertionError):
-                                with handover.frozen_core(fd,worker.pid,ticks,timeout=.2 if mode=='expiry' else 10) as commit:
-                                    handover.frozen_guard(current,h,ticks,chrome_ticks,target,identity)
+                                with legacy_transition.frozen_core(fd,worker.pid,ticks,timeout=.2 if mode=='expiry' else 10) as commit:
+                                    legacy_transition.frozen_guard(current,h,ticks,chrome_ticks,target,identity)
                                     if mode=='exception': raise AssertionError('injected parent failure')
                                     if mode=='expiry': time.sleep(.3)
                                     commit()
                             self.assertIsNone(worker.poll())
-                            self.assertNotIn(handover.procstat(worker.pid)[0],('T','t'))
+                            self.assertNotIn(preflight.procstat(worker.pid)[0],('T','t'))
                             if mode=='raced-writer': command('quiet')
                     self.assertIsNone(browser.poll())
                     with closing(sqlite3.connect(dbpath)) as db:
@@ -702,7 +737,7 @@ class HandoverTests(unittest.TestCase):
                         self.assertEqual(db.execute('SELECT count(*) FROM outbox').fetchone()[0],878)
                         if mode not in ['submit','request']:
                             self.assertEqual(db.execute("SELECT count(*) FROM outbox WHERE submission_state='submission_unknown'").fetchone()[0],4)
-                            post=handover.request_identity(h,target)
+                            post=preflight.request_identity(h,target)
                             for key in ['requests','bindings','request','anchor']: self.assertEqual(post[key],identity[key])
                 finally:
                     os.close(fd)
@@ -732,9 +767,9 @@ class HandoverTests(unittest.TestCase):
                             clock[0]+=timeout
                             raise subprocess.TimeoutExpired('health',timeout)
                         return h
-                    with patch.object(handover.time,'monotonic',side_effect=lambda:clock[0]), patch.object(handover.time,'sleep',side_effect=sleep), patch.object(handover,'procstat',side_effect=stat), patch.object(handover,'live',return_value=True), patch.object(handover,'health',side_effect=health), patch.object(handover,'guard_state',side_effect=check), patch.object(handover,'request_identity',return_value={'request':['changed']} if mode=='request' else identity), patch.object(handover,'lock_report',return_value={'locks':[row]}), patch.object(handover.signal,'pidfd_send_signal') as signal_call:
+                    with patch.object(handover.time,'monotonic',side_effect=lambda:clock[0]), patch.object(handover.time,'sleep',side_effect=sleep), patch.object(preflight, 'procstat',side_effect=stat), patch.object(preflight, 'live',return_value=True), patch.object(preflight, 'health',side_effect=health), patch.object(preflight, 'guard_state',side_effect=check), patch.object(preflight, 'request_identity',return_value={'request':['changed']} if mode=='request' else identity), patch.object(preflight, 'lock_report',return_value={'locks':[row]}), patch.object(handover.signal,'pidfd_send_signal') as signal_call:
                         with self.assertRaises((AssertionError,subprocess.TimeoutExpired)):
-                            handover.prefreeze_drain(h,'ticks','ticks',None,identity,root,timeout=.25)
+                            legacy_transition.prefreeze_drain(h,'ticks','ticks',None,identity,root,timeout=.25)
                         signal_call.assert_not_called()
                         self.assertLessEqual(clock[0],.25)
                         if mode not in ['persistent','slow-health']: self.assertEqual(clock[0],0)
@@ -743,7 +778,7 @@ class HandoverTests(unittest.TestCase):
     def test_candidate_acceptance_v1_binds_commit_tree_package_and_all_required_gates(self):
         with tempfile.TemporaryDirectory() as directory:
             receipt = pathlib.Path(directory)/'acceptance.json'
-            names = ['typecheck', 'public-core-ci', 'chromium-composition',
+            names = ['source-quality', 'typecheck', 'public-core-ci', 'chromium-composition',
                      'four-background-tabs', 'browser-transport-comparison',
                      'semantic-adapter', 'clean-build', 'installed-tarball-core']
             manifest = {'sourceCommit': 'a'*40, 'sourceTree': 'b'*40,
@@ -758,7 +793,7 @@ class HandoverTests(unittest.TestCase):
                 'gates': [{'name': name, 'passed': True, 'exitCode': 0,
                            'assertionsFailed': 0, 'skipped': 0} for name in names]}
             receipt.write_text(json.dumps(report))
-            handover.validate_candidate(manifest, receipt)
+            bundle.validate_candidate(manifest, receipt)
             for mutate in ['package', 'tree', 'gate']:
                 changed = copy.deepcopy(report)
                 if mutate == 'package': changed['externalPackageSha256'] = 'd'*64
@@ -766,7 +801,23 @@ class HandoverTests(unittest.TestCase):
                 else: changed['gates'][2]['passed'] = False
                 receipt.write_text(json.dumps(changed))
                 with self.subTest(mutate=mutate), self.assertRaises(AssertionError):
-                    handover.validate_candidate(manifest, receipt)
+                    bundle.validate_candidate(manifest, receipt)
+            for mutate in ['required-missing', 'gate-omitted', 'gate-reordered', 'gate-duplicated']:
+                changed_manifest = copy.deepcopy(manifest)
+                changed = copy.deepcopy(report)
+                if mutate == 'required-missing':
+                    del changed_manifest['requiredGates']
+                elif mutate == 'gate-omitted':
+                    changed['gates'].pop(0)
+                elif mutate == 'gate-reordered':
+                    changed['gates'][0], changed['gates'][1] = changed['gates'][1], changed['gates'][0]
+                else:
+                    changed['gates'].append(copy.deepcopy(changed['gates'][0]))
+                receipt.write_text(json.dumps(changed))
+                with self.subTest(mutate=mutate), self.assertRaises(AssertionError):
+                    bundle.validate_candidate(changed_manifest, receipt)
+            with self.assertRaisesRegex(AssertionError, 'exact candidate acceptance receipt'):
+                bundle.validate_candidate({**manifest, 'ciConclusion': 'success'}, None)
 
     def test_bundle_rejects_policy_not_matching_compiled_candidate_schema(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -777,35 +828,35 @@ class HandoverTests(unittest.TestCase):
             (migrations/'index.js').write_text(
                 'export const migrations = Array.from({length:16},(_,i)=>({version:i+1}));')
             policy = {'schemaTransition': {'from': 15, 'to': 16}}
-            self.assertEqual(handover.verify_candidate_schema(installed, policy), 16)
+            self.assertEqual(bundle.verify_candidate_schema(installed, policy), 16)
             for bad in [
                 {'schemaTransition': {'from': 8, 'to': 15}},
                 {'schemaTransition': {'from': 15, 'to': 17}},
             ]:
                 with self.subTest(bad=bad), self.assertRaisesRegex(
                         AssertionError, 'Candidate migration schema differs from handover policy'):
-                    handover.verify_candidate_schema(installed, bad)
+                    bundle.verify_candidate_schema(installed, bad)
             (migrations/'index.js').write_text(
                 'export const migrations = Array.from({length:15},(_,i)=>({version:i+1}));')
             with self.assertRaisesRegex(
                     AssertionError, 'Candidate migration schema differs from handover policy'):
-                handover.verify_candidate_schema(installed, policy)
+                bundle.verify_candidate_schema(installed, policy)
 
-    def test_checked_in_policy_requires_current_15_to_16_upgrade_and_no_old_schema(self):
+    def test_checked_in_policy_requires_current_16_to_17_upgrade_and_no_old_schema(self):
         root = pathlib.Path(__file__).resolve().parents[2]
         policy = json.loads((root/'scripts/ops/handover-manifest.json').read_text())
         transition = policy['schemaTransition']
         current_migration = max(int(path.name[:4]) for path in
                                 (root/'src/storage/migrations').glob('[0-9][0-9][0-9][0-9]-*.ts'))
-        self.assertEqual(transition, {'from': 15, 'to': 16},
-                         'A schema-8-to-15 handover policy cannot deploy schema-16 dev code')
+        self.assertEqual(transition, {'from': 16, 'to': 17},
+                         'A schema-15-to-16 handover policy cannot deploy schema-17 dev code')
         self.assertEqual(transition['to'], current_migration,
                          'Bundle policy must never authorize an obsolete SQLite schema')
-        self.assertEqual(handover.schema_transition(policy, 15), (15, 16))
-        for obsolete in [8, 14, 16]:
+        self.assertEqual(bundle.schema_transition(policy, 16), (16, 17))
+        for obsolete in [8, 14, 15]:
             with self.subTest(obsolete=obsolete), self.assertRaisesRegex(
                     AssertionError, 'Live schema differs from transition source'):
-                handover.schema_transition(policy, obsolete)
+                bundle.schema_transition(policy, obsolete)
 
     def test_synthetic_15_to_16_promotion_preserves_source_and_archives_wal(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -835,27 +886,27 @@ class HandoverTests(unittest.TestCase):
             make(original, 15, 'live-v15')
             make(candidate, 16, 'candidate-v16')
             pathlib.Path(str(live)+'-wal').write_bytes(b'synthetic-old-wal')
-            report = handover.promote_database(live, migration, receipt, (15, 16))
+            report = migration_phase.promote_database(live, migration, receipt, (15, 16))
             self.assertEqual(report['sourceSchemaVersion'], 15)
             self.assertEqual(report['targetSchemaVersion'], 16)
-            self.assertEqual(handover.sqlite_schema(live), 16)
-            self.assertEqual(handover.sqlite_schema(original), 15)
-            self.assertEqual(handover.sqlite_schema(receipt/'database-archive/sessionplane.sqlite'), 15)
+            self.assertEqual(migration_phase.sqlite_schema(live), 16)
+            self.assertEqual(migration_phase.sqlite_schema(original), 15)
+            self.assertEqual(migration_phase.sqlite_schema(receipt/'database-archive/sessionplane.sqlite'), 15)
             self.assertEqual((receipt/'database-archive/sessionplane.sqlite-wal').read_bytes(),
                              b'synthetic-old-wal')
             with sqlite3.connect(live) as db:
                 self.assertEqual(db.execute('SELECT value FROM preserved WHERE id=?',
                                             ('original',)).fetchone(), ('fixed',))
-            self.assertEqual(report['sealedCandidateSha256'], handover.sha256_file(candidate))
+            self.assertEqual(report['sealedCandidateSha256'], bundle.sha256_file(candidate))
 
     def test_schema_transition_is_explicit_and_database_promotion_archives_original_sidecars(self):
-        self.assertEqual(handover.schema_transition(
+        self.assertEqual(bundle.schema_transition(
             {'schemaTransition': {'from': 8, 'to': 15}}, 8), (8, 15))
-        self.assertEqual(handover.schema_transition(
+        self.assertEqual(bundle.schema_transition(
             {'schemaTransition': {'from': 15, 'to': 15}}, 15), (15, 15),
             'An exact package refresh may reuse the evidence-first systemd path without a schema downgrade')
         with self.assertRaises(AssertionError):
-            handover.schema_transition({'schemaTransition': {'from': 8, 'to': 15}}, 9)
+            bundle.schema_transition({'schemaTransition': {'from': 8, 'to': 15}}, 9)
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             live = root/'sessionplane.sqlite'
@@ -872,10 +923,10 @@ class HandoverTests(unittest.TestCase):
             make(migration/'source-snapshot.sqlite', 8, 'old')
             make(migration/'candidate.sqlite', 15, 'new')
             pathlib.Path(str(live)+'-wal').write_bytes(b'archived-wal-evidence')
-            report = handover.promote_database(live, migration, receipt, (8, 15))
-            self.assertEqual(handover.sqlite_schema(live), 15)
+            report = migration_phase.promote_database(live, migration, receipt, (8, 15))
+            self.assertEqual(migration_phase.sqlite_schema(live), 15)
             self.assertEqual(report['targetSchemaVersion'], 15)
-            self.assertEqual(handover.sqlite_schema(receipt/'database-archive/sessionplane.sqlite'), 8)
+            self.assertEqual(migration_phase.sqlite_schema(receipt/'database-archive/sessionplane.sqlite'), 8)
             self.assertEqual((receipt/'database-archive/sessionplane.sqlite-wal').read_bytes(),
                              b'archived-wal-evidence')
 
@@ -915,7 +966,7 @@ class HandoverTests(unittest.TestCase):
                 'databaseIntegrity': 'ok', 'singleCoreWriterVerified': False}))
             (foreign/'predeploy.sqlite').write_text('unknown')
             current = snapshots[-1]
-            outcome = handover.retain_successful_handover_snapshots(current, state)
+            outcome = retention.retain_successful_handover_snapshots(current, state)
             self.assertEqual(outcome['keptRollbackReceipts'], 2)
             self.assertEqual(outcome['compactedReceipts'], 2)
             self.assertEqual(outcome['retiredReceipts'], 2)
@@ -937,7 +988,7 @@ class HandoverTests(unittest.TestCase):
                                  ['final-migration/source-snapshot.sqlite'])
             self.assertEqual((foreign/'predeploy.sqlite').read_text(), 'unknown')
             # Re-running the same retention step is idempotent.
-            rerun = handover.retain_successful_handover_snapshots(current, state)
+            rerun = retention.retain_successful_handover_snapshots(current, state)
             self.assertEqual(rerun['retiredReceipts'], 0)
             self.assertEqual(rerun['compactedReceipts'], 0)
 
@@ -950,7 +1001,7 @@ class HandoverTests(unittest.TestCase):
                 'databaseIntegrity': 'error', 'singleCoreWriterVerified': False}))
             (receipt/'predeploy.sqlite').write_text('preserve')
             with self.assertRaisesRegex(AssertionError, 'verified'):
-                handover.retain_successful_handover_snapshots(receipt, state)
+                retention.retain_successful_handover_snapshots(receipt, state)
             self.assertEqual((receipt/'predeploy.sqlite').read_text(), 'preserve')
 
     def test_interrupted_snapshot_retention_merges_prior_hash_evidence_atomically(self):
@@ -983,7 +1034,7 @@ class HandoverTests(unittest.TestCase):
                 'keptSnapshots': [],
             }))
             (oldest/'predeploy.sqlite').unlink()
-            handover.retain_successful_handover_snapshots(receipts[-1], state)
+            retention.retain_successful_handover_snapshots(receipts[-1], state)
             manifest = json.loads((oldest/'snapshot-retention.json').read_text())
             removed = {row['path']: row for row in manifest['removedSnapshots']}
             self.assertEqual(removed['predeploy.sqlite']['sha256'], prior_hash)
@@ -1003,10 +1054,10 @@ class HandoverTests(unittest.TestCase):
             (receipt/'handover.json').write_text(json.dumps({'atUnix': 1}))
             (receipt/'predeploy.sqlite').write_text('database')
             with self.assertRaisesRegex(AssertionError, 'previous package'):
-                handover.retain_successful_handover_snapshots(receipt, state)
+                retention.retain_successful_handover_snapshots(receipt, state)
             self.assertEqual((receipt/'predeploy.sqlite').read_text(), 'database')
             (receipt/'previous-install.tgz').write_text('package')
-            result = handover.retain_successful_handover_snapshots(receipt, state)
+            result = retention.retain_successful_handover_snapshots(receipt, state)
             self.assertEqual(result['compactedReceipts'], 0)
             self.assertTrue((receipt/'predeploy.sqlite').exists())
 
@@ -1016,7 +1067,7 @@ class HandoverTests(unittest.TestCase):
             receipt = root/'handover-manual'/'cutover'
             receipt.mkdir(parents=True)
             (receipt/'predeploy.sqlite').write_text('manual evidence')
-            result = handover.retain_successful_handover_snapshots(receipt, root)
+            result = retention.retain_successful_handover_snapshots(receipt, root)
             self.assertEqual(result['status'], 'not-managed-release')
             self.assertEqual((receipt/'predeploy.sqlite').read_text(), 'manual evidence')
 
@@ -1043,7 +1094,7 @@ class HandoverTests(unittest.TestCase):
             (receipts[0]/'preflight-migration').mkdir()
             (receipts[0]/'preflight-migration'/'candidate.sqlite').symlink_to(external)
             with self.assertRaisesRegex(AssertionError, 'symlink'):
-                handover.retain_successful_handover_snapshots(receipts[-1], state)
+                retention.retain_successful_handover_snapshots(receipts[-1], state)
             self.assertTrue((receipts[0]/'predeploy.sqlite').exists())
             self.assertEqual(external.read_text(), 'untouched')
 

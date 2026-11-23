@@ -6,8 +6,10 @@ ACK/FINAL recovery, approved timers and decision execution. CLI and MCP are
 clients of that Core; disconnecting them never stops the Task or authorizes a
 replay.
 
-The authoritative product contract is [docs/PRD.md](docs/PRD.md).
-For focused changes, issues and PRs, see [CONTRIBUTING.md](CONTRIBUTING.md).
+The repository product contract is [docs/PRD.md](docs/PRD.md). In the canonical
+workspace, the private authority index and Task ledger live in the parent
+`docs/` tree; this repository does not duplicate their work status. For focused
+changes, issue intake and review, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Public interface
 
@@ -139,7 +141,7 @@ rather than automatically resubmitted.
 
 Use the matching package version after that release is published:
 
-VERSION=0.4.111
+VERSION=0.4.112
     npm install -g ./sessionplane-$VERSION.tgz
     sessplane doctor --json
 
@@ -233,6 +235,7 @@ docs/verification/sessionplane-candidate-acceptance-gates.md.
 Requires Node.js 24.15–24.x and a Chromium-family browser for browser tests.
 
     npm ci
+    npm run lint:docs
     npm run typecheck
     node --test --test-concurrency=1 --experimental-strip-types test/integration/public-cli.test.ts test/integration/public-task-rpc.test.ts
     node --test --test-concurrency=1 --experimental-strip-types test/browser/semantic-core-composition.test.ts

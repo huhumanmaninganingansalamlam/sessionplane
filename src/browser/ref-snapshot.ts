@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
 import type { ElementHandle, Page } from 'playwright-core';
-import type { PreparationTarget } from '../providers/provider-adapter.ts';
 
 export const REF_PROPERTY = '__sessionplaneRefToken';
 
@@ -197,12 +196,11 @@ export class BrowserRefSnapshotStore {
           }
           const htmlElement = element as HTMLElement;
           if (htmlElement.id !== '') {
-            try {
-              const label = document.querySelector(`label[for="${CSS.escape(htmlElement.id)}"]`);
-              if (evidenceText(label).trim()) return normalize(evidenceText(label));
-            } catch {
-              // Ignore malformed ids and continue through the name fallback chain.
-            }
+            const label = (() => {
+              try { return document.querySelector(`label[for="${CSS.escape(htmlElement.id)}"]`); }
+              catch { return null; }
+            })();
+            if (evidenceText(label).trim()) return normalize(evidenceText(label));
           }
           const wrappingLabel = element.closest('label');
           if (evidenceText(wrappingLabel).trim()) return normalize(evidenceText(wrappingLabel));
@@ -618,40 +616,8 @@ export function sameSnapshotSemantics(left: BrowserSnapshotNode, right: BrowserS
   return semanticFields(left) === semanticFields(right);
 }
 
-export function matchesPreparationTarget(
-  node: BrowserSnapshotNode,
-  target: PreparationTarget,
-): boolean {
-  const normalize = (value: string): string => value.replaceAll(/\s+/g, ' ').trim();
-  return node.role === target.role && node.tag === target.tag && node.name === target.name &&
-    (target.id === '' || node.id === target.id) &&
-    (target.purpose === 'composer' || normalize(node.text) === normalize(target.text)) &&
-    (target.placeholder === null || node.placeholder === target.placeholder);
-}
-
-export function isPreparationSummary(node: BrowserSnapshotNode, insideMenu: boolean): boolean {
-  return node.role === 'menuitem' && node.name.trim() !== '' && node.text.trim() !== '' &&
-    node.text.trim() !== node.name.trim() && insideMenu;
-}
-
-export function hasPreparationSelectionEvidence(
-  nodes: readonly BrowserSnapshotNode[],
-  target: PreparationTarget,
-): boolean {
-  const normalize = (value: string): string => value.replaceAll(/\s+/g, ' ').trim().toLowerCase();
-  if (target.role === 'slider' && target.selectedValue !== null) {
-    return nodes.some((node) => matchesPreparationTarget(node, target) &&
-      Number(node.ariaValueNow ?? node.value) === target.selectedValue);
-  }
-  if (target.role === 'menuitem') return nodes.some((node) => matchesPreparationTarget(node, target) &&
-    isPreparationSummary(node, nodes.some((parent) =>
-      parent.role === 'menu' && parent.id !== '' && node.ancestorIds.includes(parent.id))));
-  if (target.role === 'button') return nodes.some((node) => matchesPreparationTarget(node, target) &&
-    node.hasPopup !== null);
-  if (nodes.some((node) => matchesPreparationTarget(node, target) &&
-      (node.selected === true || node.checked === true))) return true;
-  const choice = normalize(target.name || target.text);
-  return choice !== '' && nodes.some((node) => ['button', 'combobox'].includes(node.role) &&
-    node.controls.some((id) => target.ancestorIds.includes(id)) &&
-    normalize(`${node.name} ${node.text}`).includes(choice));
-}
+export {
+  hasPreparationSelectionEvidence,
+  isPreparationSummary,
+  matchesPreparationTarget,
+} from './preparation-snapshot.ts';

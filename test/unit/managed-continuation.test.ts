@@ -15,7 +15,7 @@ import type {
   RecoveryOutcome, FinalObservation, SendOutcome,
 } from '../../src/core/durable-task-kernel.ts';
 import { SessionPlaneDatabase } from '../../src/storage/database.ts';
-import { TaskKernelRepository } from '../../src/storage/task-kernel-repository.ts';
+import { createKernelStores, type KernelStores } from '../../src/storage/kernel/create-kernel-stores.ts';
 
 class FakeProvider implements ExactTaskProviderPort {
   readonly providerKey = 'provider-fixture';
@@ -87,21 +87,21 @@ function fixture(t: TestContext) {
   const file = join(root, 'kernel.sqlite');
   let current = START;
   let database = SessionPlaneDatabase.open(file);
-  let store = new TaskKernelRepository(database, () => new Date(current).toISOString());
+  let store = createKernelStores(database, () => new Date(current).toISOString());
   const fake = new FakeProvider();
   let kernel = new DurableTaskKernel(store, [fake]);
   t.after(() => { database.close(); rmSync(root, { recursive: true, force: true }); });
-  store.openProject({ projectId: 'project', projectKey: 'managed.test',
+  store.projects.openProject({ projectId: 'project', projectKey: 'managed.test',
     displayName: 'Managed fixture', clientId: 'alice' });
   const startTask = (taskId: string, slotId: string) => {
-    store.openSlot({ projectId: 'project', clientId: 'alice', slotId,
+    store.projects.openConversationSlot({ projectId: 'project', clientId: 'alice', slotId,
       roleKey: slotId, providerKey: fake.providerKey });
-    store.startTask({ taskId, projectId: 'project', slotId, clientId: 'alice',
+    store.tasks.createTask({ taskId, projectId: 'project', slotId, clientId: 'alice',
       requestId: 'request:' + taskId, expectedSlotRevision: 1,
       prompt: 'Question ' + taskId });
-    store.observeConversation({ projectId: 'project', slotId, clientId: 'alice',
+    store.projects.bindObservedConversation({ projectId: 'project', slotId, clientId: 'alice',
       taskId, expectedRevision: 1, providerConversationId: 'conversation:' + taskId });
-    store.planAttempt({ taskId, clientId: 'alice', attemptId: 'initial:' + taskId,
+    store.attempts.planAttempt({ taskId, clientId: 'alice', attemptId: 'initial:' + taskId,
       kind: 'initial', turnKey: 'original', content: 'Question ' + taskId });
   };
   const ack = async (taskId: string, withFinal = false) => {
@@ -148,7 +148,7 @@ function fixture(t: TestContext) {
     reopen() {
       database.close();
       database = SessionPlaneDatabase.open(file);
-      store = new TaskKernelRepository(database, () => new Date(current).toISOString());
+      store = createKernelStores(database, () => new Date(current).toISOString());
       kernel = new DurableTaskKernel(store, [fake]);
     },
   };
@@ -170,7 +170,7 @@ test('approved exact ACK schedules one due at 20m, no client wait, no repeated P
   const timer = service.activate(approved);
   assert.equal(timer.dueAt, '2026-11-12T00:20:00.000Z');
   assert.deepEqual(service.activate(approved), timer, 'approval is idempotent');
-  assert.equal(env.store.getFullTask('task-a', 'alice').attempts.length, 1);
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').attempts.length, 1);
   env.now = START + CONTINUATION_INTERVAL_MS - 1;
   assert.equal((await service.tick()).timersClaimed, 0);
   assert.equal(env.fake.sends.length, 1);
@@ -180,8 +180,8 @@ test('approved exact ACK schedules one due at 20m, no client wait, no repeated P
   assert.equal(env.fake.sends.length, 2);
   assert.equal(env.fake.sends[1]!.kind, 'continuation');
   assert.equal(env.fake.sends[1]!.content, '계속');
-  assert.equal(env.store.getFullTask('task-a', 'alice').attempts[1]!.state, 'acknowledged');
-  assert.equal(env.store.getFullTask('task-a', 'alice').timers
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').attempts[1]!.state, 'acknowledged');
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').timers
     .some(t => t.status === 'pending' && t.dueAt === '2026-11-12T00:40:00.000Z'), true);
   assert.equal((await service.tick()).timersClaimed, 0);
   assert.equal(env.fake.sends.length, 2, 'due timer and original attempt cannot replay');
@@ -208,7 +208,7 @@ test('approved repeated continuation policy creates one new exact attempt at eac
   env.now = START + 2 * CONTINUATION_INTERVAL_MS;
   assert.equal((await service.tick()).dispatchesAttempted, 1,
     'a new approved due is not the same execution attempt and may send one new Continue');
-  const afterSecondDue = env.store.getFullTask('task-a', 'alice');
+  const afterSecondDue = env.store.tasks.readTaskAggregate('task-a', 'alice');
   assert.equal(env.fake.sends.length, 3);
   assert.equal(afterSecondDue.attempts.length, 3);
   assert.deepEqual(afterSecondDue.attempts.map(attempt => attempt.kind),
@@ -221,7 +221,7 @@ test('approved repeated continuation policy creates one new exact attempt at eac
   env.fake.readyContinuationFinals.add(latest.attemptId);
   env.now = START + 3 * CONTINUATION_INTERVAL_MS;
   await service.tick();
-  const completed = env.store.getFullTask('task-a', 'alice');
+  const completed = env.store.tasks.readTaskAggregate('task-a', 'alice');
   assert.equal(completed.task.state, 'completed');
   assert.equal(completed.results.length, 1);
   assert.equal(env.fake.sends.length, 3, 'the exact FINAL cancels all later automatic sends');
@@ -262,7 +262,7 @@ test('explicit stagnation duration hands repeated no-progress to the agent and r
   const resumed = await service.tick();
   assert.equal(resumed.dispatchesAttempted, 1);
   assert.equal(env.fake.sends.length, 4);
-  assert.equal(env.store.getFullTask('task-a', 'alice').attempts.length, 4);
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').attempts.length, 4);
   assert.deepEqual(reviews, [{
     attemptId: 'managed-continuation:task-a:3', cause: 'repeated_no_progress',
   }], 'resume resets the stagnation epoch instead of looping into the same review');
@@ -273,16 +273,16 @@ test('terminal FINAL completes while a human decision is pending without a conne
   env.startTask('task-a', 'main');
   env.seedPublicPolicy('task-a');
   await env.ack('task-a');
-  env.store.requireDecision({
+  env.store.decisions.createDecision({
     taskId: 'task-a', clientId: 'alice', decisionId: 'human-help',
     audience: 'human', contextJson: JSON.stringify({ reason: 'fixture-human-action' }),
   });
-  assert.equal(env.store.getTask('task-a', 'alice').state, 'human_input_required');
+  assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'human_input_required');
   env.fake.pendingInitialFinals.delete('initial:task-a');
   const service = env.createService();
   const run = await service.tick();
   assert.equal(run.dispatchesAttempted, 0);
-  const completed = env.store.getFullTask('task-a', 'alice');
+  const completed = env.store.tasks.readTaskAggregate('task-a', 'alice');
   assert.equal(completed.task.state, 'completed');
   assert.equal(completed.task.pendingDecisionId, null);
   assert.equal(completed.results.length, 1);
@@ -302,14 +302,14 @@ test('Core restart retains due timer and recovers a claimed but unplanned slot',
   });
   env.reopen();
   env.now = START + CONTINUATION_INTERVAL_MS;
-  assert.deepEqual(env.store.claimDueTimers(
+  assert.deepEqual(env.store.timers.claimDueTaskTimers(
     new Date(env.now).toISOString(), 50, 'continuation_due').map(t => t.status),
     ['fired'], 'simulate a crash after durable timer claim but before the send plan');
   const recovered = env.createService();
   assert.equal((await recovered.tick()).timersClaimed, 0,
     'restart does not replay an already claimed due event');
   assert.equal(env.fake.sends.length, 1);
-  assert.equal(env.store.getFullTask('task-a', 'alice').timers
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').timers
     .filter(t => t.status === 'pending').length, 1, 'next fixed review is durable');
   env.now += CONTINUATION_INTERVAL_MS;
   assert.equal((await recovered.tick()).dispatchesAttempted, 1);
@@ -330,11 +330,11 @@ test('no exact FINAL at 20m sends one approved Continue; later exact FINAL ends 
   assert.equal(env.fake.sends.length, 2, 'no answer at 20 minutes must dispatch exactly once');
   assert.equal(env.fake.sends[1]!.kind, 'continuation');
   assert.equal(env.fake.sends[1]!.content, '계속');
-  assert.equal(env.store.getFullTask('task-a', 'alice').results.length, 0);
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').results.length, 0);
   env.fake.readyContinuationFinals.add('managed-continuation:initial:task-a');
   env.now += 1_000;
   await service.tick();
-  const completed = env.store.getFullTask('task-a', 'alice');
+  const completed = env.store.tasks.readTaskAggregate('task-a', 'alice');
   assert.equal(completed.task.state, 'completed');
   assert.equal(completed.results.length, 1);
   assert.equal(completed.results[0]!.completesTask, true);
@@ -355,7 +355,7 @@ test('exact FINAL at the 20m due ends the Task before any Continue POST', async 
   env.now += CONTINUATION_INTERVAL_MS;
   assert.deepEqual(await service.tick(),
     { timersClaimed: 1, dispatchesAttempted: 0, deferred: 0 });
-  const completed = env.store.getFullTask('task-a', 'alice');
+  const completed = env.store.tasks.readTaskAggregate('task-a', 'alice');
   assert.equal(completed.task.state, 'completed');
   assert.equal(completed.results[0]!.completesTask, true);
   assert.equal(completed.timers.filter(timer => timer.status === 'pending').length, 0);
@@ -374,7 +374,7 @@ test('unavailable canonical FINAL read at due defers without speculative Continu
   assert.deepEqual(await service.tick(),
     { timersClaimed: 1, dispatchesAttempted: 0, deferred: 1 });
   assert.equal(env.fake.sends.length, 1);
-  assert.equal(env.store.getFullTask('task-a', 'alice').attempts.length, 1);
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').attempts.length, 1);
   env.fake.unavailableFinals.delete('initial:task-a');
   env.now += CONTINUATION_INTERVAL_MS;
   assert.equal((await service.tick()).dispatchesAttempted, 1);
@@ -395,7 +395,7 @@ test('a direct 429 FINAL read retries at its exact fence without speculative Con
   env.now += CONTINUATION_INTERVAL_MS;
   assert.deepEqual(await service.tick(),
     { timersClaimed: 1, dispatchesAttempted: 0, deferred: 1 });
-  let full = env.store.getFullTask('task-a', 'alice');
+  let full = env.store.tasks.readTaskAggregate('task-a', 'alice');
   assert.equal(env.fake.sends.length, 1);
   assert.equal(full.attempts.length, 1);
   assert.equal(full.timers.some(timer => timer.status === 'pending' &&
@@ -405,7 +405,7 @@ test('a direct 429 FINAL read retries at its exact fence without speculative Con
   env.fake.pending429Finals.delete('initial:task-a');
   env.now = Date.parse(env.fake.pending429NextCheckAt);
   assert.equal((await service.tick()).dispatchesAttempted, 1);
-  full = env.store.getFullTask('task-a', 'alice');
+  full = env.store.tasks.readTaskAggregate('task-a', 'alice');
   assert.equal(env.fake.sends.length, 2);
   assert.equal(full.attempts.filter(attempt => attempt.kind === 'continuation').length, 1);
 });
@@ -455,7 +455,7 @@ test('transient paced FINAL read retries at its read fence, then sends only afte
   env.now += CONTINUATION_INTERVAL_MS;
   assert.deepEqual(await service.tick(),
     { timersClaimed: 1, dispatchesAttempted: 0, deferred: 1 });
-  let full = env.store.getFullTask('task-a', 'alice');
+  let full = env.store.tasks.readTaskAggregate('task-a', 'alice');
   assert.equal(env.fake.sends.length, 1, 'paced read never licenses Continue');
   assert.equal(full.attempts.length, 1);
   assert.equal(full.timers.some(timer => timer.status === 'pending' &&
@@ -466,7 +466,7 @@ test('transient paced FINAL read retries at its read fence, then sends only afte
   env.now = Date.parse(env.fake.pacedNextCheckAt);
   assert.deepEqual(await service.tick(),
     { timersClaimed: 1, dispatchesAttempted: 1, deferred: 0 });
-  full = env.store.getFullTask('task-a', 'alice');
+  full = env.store.tasks.readTaskAggregate('task-a', 'alice');
   assert.equal(env.fake.sends.length, 2);
   assert.equal(full.attempts.filter(attempt => attempt.kind === 'continuation').length, 1);
 });
@@ -481,8 +481,8 @@ test('fresh no-FINAL observer repairs an older full-interval pacing review witho
     sourceAttemptId: 'initial:task-a', approvalRef: 'approved-public', message: '계속' });
   env.fake.pacedFinals.add('initial:task-a');
   env.now += CONTINUATION_INTERVAL_MS;
-  env.store.claimDueTimers(new Date(env.now).toISOString(), 1, 'continuation_due');
-  env.store.scheduleTimer({ taskId: 'task-a', clientId: 'alice',
+  env.store.timers.claimDueTaskTimers(new Date(env.now).toISOString(), 1, 'continuation_due');
+  env.store.timers.scheduleTaskTimer({ taskId: 'task-a', clientId: 'alice',
     timerId: 'continuation-review:initial:task-a:' + (env.now + CONTINUATION_INTERVAL_MS),
     kind: 'continuation_due',
     dueAt: new Date(env.now + CONTINUATION_INTERVAL_MS).toISOString(),
@@ -491,7 +491,7 @@ test('fresh no-FINAL observer repairs an older full-interval pacing review witho
 
   assert.deepEqual(await service.tick(),
     { timersClaimed: 0, dispatchesAttempted: 0, deferred: 0 });
-  let full = env.store.getFullTask('task-a', 'alice');
+  let full = env.store.tasks.readTaskAggregate('task-a', 'alice');
   const repaired = full.timers.find(timer => timer.status === 'pending' &&
     timer.timerId.startsWith('continuation-read-review:'))!;
   assert.ok(repaired, 'fresh canonical no-FINAL schedules a read-only repair review');
@@ -499,7 +499,7 @@ test('fresh no-FINAL observer repairs an older full-interval pacing review witho
 
   env.now = Date.parse(repaired.dueAt);
   assert.equal((await service.tick()).dispatchesAttempted, 1);
-  full = env.store.getFullTask('task-a', 'alice');
+  full = env.store.tasks.readTaskAggregate('task-a', 'alice');
   assert.equal(env.fake.sends.length, 2);
   assert.equal(full.attempts.filter(attempt => attempt.kind === 'continuation').length, 1);
 });
@@ -508,23 +508,23 @@ test('pending unbound root POSTs recover ACK fairly across a sixteen-slot limit'
   const env = fixture(t);
   const ids = Array.from({ length: 18 }, (_, index) => 'root-ack-' + String(index).padStart(2, '0'));
   for (const taskId of ids) {
-    env.store.openSlot({
+    env.store.projects.openConversationSlot({
       projectId: 'project', slotId: 'slot-' + taskId, clientId: 'alice',
       roleKey: 'slot-' + taskId, providerKey: env.fake.providerKey,
     });
-    env.store.startTask({
+    env.store.tasks.createTask({
       taskId, projectId: 'project', slotId: 'slot-' + taskId,
       clientId: 'alice', requestId: 'request:' + taskId,
       expectedSlotRevision: 1, prompt: 'Question ' + taskId,
     });
     const attemptId = 'initial:' + taskId;
-    env.store.planAttempt({
+    env.store.attempts.planAttempt({
       taskId, clientId: 'alice', attemptId,
       kind: 'initial', turnKey: 'original', content: 'Question ' + taskId,
     });
     env.seedPublicPolicy(taskId);
-    env.store.beginDispatch(taskId, 'alice', attemptId);
-    env.store.recordRootPost({
+    env.store.attempts.reserveAttemptDispatch(taskId, 'alice', attemptId);
+    env.store.attempts.recordRootDispatchEvidence({
       taskId, clientId: 'alice', attemptId,
       evidence: {
         sessionId: 'session-' + taskId, generation: 1,
@@ -545,7 +545,7 @@ test('pending unbound root POSTs recover ACK fairly across a sixteen-slot limit'
   assert.ok(ids.every(taskId => recovered.has('initial:' + taskId)),
     'every retained root POST must have a read-only canonical ACK recovery chance');
   assert.equal(env.fake.sends.length, 0, 'root reconciliation never resends initial POST');
-  assert.ok(ids.every(taskId => env.store.getFullTask(taskId, 'alice')
+  assert.ok(ids.every(taskId => env.store.tasks.readTaskAggregate(taskId, 'alice')
     .attempts[0]!.state === 'uncertain'));
 });
 
@@ -553,16 +553,16 @@ test('unbound root initial scans visit all waiting Tasks despite an eight-slot l
   const env = fixture(t);
   const ids = Array.from({ length: 12 }, (_, index) => 'root-' + String(index).padStart(2, '0'));
   for (const taskId of ids) {
-    env.store.openSlot({
+    env.store.projects.openConversationSlot({
       projectId: 'project', slotId: 'slot-' + taskId, clientId: 'alice',
       roleKey: 'slot-' + taskId, providerKey: env.fake.providerKey,
     });
-    env.store.startTask({
+    env.store.tasks.createTask({
       taskId, projectId: 'project', slotId: 'slot-' + taskId,
       clientId: 'alice', requestId: 'request:' + taskId,
       expectedSlotRevision: 1, prompt: 'Question ' + taskId,
     });
-    env.store.planAttempt({
+    env.store.attempts.planAttempt({
       taskId, clientId: 'alice', attemptId: 'initial:' + taskId,
       kind: 'initial', turnKey: 'original', content: 'Question ' + taskId,
     });
@@ -579,7 +579,7 @@ test('unbound root initial scans visit all waiting Tasks despite an eight-slot l
   assert.ok(ids.every(taskId => observed.has('initial:' + taskId)),
     'bounded root scan must rotate past the first eight blocked Tasks');
   assert.equal(env.fake.sends.length, 0);
-  assert.ok(ids.every(taskId => env.store.getFullTask(taskId, 'alice')
+  assert.ok(ids.every(taskId => env.store.tasks.readTaskAggregate(taskId, 'alice')
     .attempts[0]!.state === 'planned'));
 });
 
@@ -590,8 +590,8 @@ test('read-only ACK reconciliation rotates past eight uncertain exact attempts',
     env.startTask(taskId, 'slot-' + taskId);
     env.seedPublicPolicy(taskId);
     const attemptId = 'initial:' + taskId;
-    env.store.beginDispatch(taskId, 'alice', attemptId);
-    env.store.recordDispatchEvidence({
+    env.store.attempts.reserveAttemptDispatch(taskId, 'alice', attemptId);
+    env.store.attempts.recordDispatchEvidence({
       taskId, clientId: 'alice', attemptId,
       evidence: {
         conversationId: 'conversation:' + taskId,
@@ -600,7 +600,7 @@ test('read-only ACK reconciliation rotates past eight uncertain exact attempts',
         observedAt: new Date(env.now).toISOString(),
       },
     });
-    env.store.markUncertain(taskId, 'alice', attemptId, 'fixture-lost-ack');
+    env.store.attempts.markAttemptUncertain(taskId, 'alice', attemptId, 'fixture-lost-ack');
   }
   const first = env.createService();
   await first.tick();
@@ -612,7 +612,7 @@ test('read-only ACK reconciliation rotates past eight uncertain exact attempts',
     'all uncertain attempts must get read-only ACK recovery opportunities');
   assert.equal(env.fake.sends.length, 0, 'ACK recovery must never replay a POST');
   assert.ok(ids.every(taskId =>
-    env.store.getFullTask(taskId, 'alice').attempts[0]!.state === 'uncertain'));
+    env.store.tasks.readTaskAggregate(taskId, 'alice').attempts[0]!.state === 'uncertain'));
 });
 
 test('unready early public initials never starve later safe Tasks past the scan limit', async t => {
@@ -632,7 +632,7 @@ test('unready early public initials never starve later safe Tasks past the scan 
   assert.deepEqual(sentIds.slice().sort(), ids.slice(8),
     'a blocked leading batch cannot monopolize every future initial scan');
   assert.ok(ids.slice(0, 8).every(taskId =>
-    env.store.getFullTask(taskId, 'alice').attempts[0]!.state === 'planned'));
+    env.store.tasks.readTaskAggregate(taskId, 'alice').attempts[0]!.state === 'planned'));
 });
 
 test('stable single-Task scan does not rewrite the same durable cursor every tick', async t => {
@@ -640,7 +640,7 @@ test('stable single-Task scan does not rewrite the same durable cursor every tic
   env.startTask('only-task', 'main');
   env.seedPublicPolicy('only-task');
   await env.ack('only-task');
-  assert.deepEqual(env.store.listPendingPublicFinals(8)
+  assert.deepEqual(env.store.scans.scanPendingFinals(8)
     .map(item => item.taskId), ['only-task']);
   const cursor = env.database.raw.prepare(
     "SELECT scan_kind AS kind,last_task_id AS taskId FROM kernel_public_scan_cursors").all();
@@ -650,7 +650,7 @@ test('stable single-Task scan does not rewrite the same durable cursor every tic
   const writesAfterFirst = Number((env.database.raw.prepare(
     'SELECT total_changes() AS changes').get() as { changes: number }).changes);
   for (let i = 0; i < 4; i++) {
-    assert.deepEqual(env.store.listPendingPublicFinals(8)
+    assert.deepEqual(env.store.scans.scanPendingFinals(8)
       .map(item => item.taskId), ['only-task']);
   }
   const writesAfterRepeat = Number((env.database.raw.prepare(
@@ -668,17 +668,17 @@ test('durable FINAL scan selection advances atomically without changing Task evi
     env.seedPublicPolicy(taskId);
     await env.ack(taskId);
   }
-  const before = ids.map(taskId => env.store.getTask(taskId, 'alice').revision);
-  const first = env.store.listPendingPublicFinals(8);
+  const before = ids.map(taskId => env.store.tasks.getTask(taskId, 'alice').revision);
+  const first = env.store.scans.scanPendingFinals(8);
   assert.deepEqual(first.map(row => row.taskId), ids.slice(0, 8));
-  assert.deepEqual(ids.map(taskId => env.store.getTask(taskId, 'alice').revision), before,
+  assert.deepEqual(ids.map(taskId => env.store.tasks.getTask(taskId, 'alice').revision), before,
     'fairness selection is not a durable Task event');
   env.reopen();
-  const second = env.store.listPendingPublicFinals(8);
+  const second = env.store.scans.scanPendingFinals(8);
   assert.deepEqual(second.map(row => row.taskId), [...ids.slice(8), ...ids.slice(0, 4)]);
-  const third = env.store.listPendingPublicFinals(8);
+  const third = env.store.scans.scanPendingFinals(8);
   assert.deepEqual(third.map(row => row.taskId), ids.slice(4));
-  assert.deepEqual(ids.map(taskId => env.store.getTask(taskId, 'alice').revision), before);
+  assert.deepEqual(ids.map(taskId => env.store.tasks.getTask(taskId, 'alice').revision), before);
   assert.equal(env.fake.sends.length, 12);
 });
 
@@ -703,7 +703,7 @@ test('FINAL scan fairness survives SQLite/Core reopen after every bounded tick',
     'each restart must resume the bounded cursor, not reset to first eight: ' +
     JSON.stringify(readCounts));
   assert.equal(env.fake.sends.length, 12, 'recovery never replays POST');
-  assert.ok(ids.every(taskId => env.store.getTask(taskId, 'alice').state === 'working'));
+  assert.ok(ids.every(taskId => env.store.tasks.getTask(taskId, 'alice').state === 'working'));
 });
 
 test('bounded public FINAL observer revisits every Task beyond its eight-slot limit', async t => {
@@ -727,7 +727,7 @@ test('bounded public FINAL observer revisits every Task beyond its eight-slot li
     'every Task needs a second opportunity despite identical deferred observations: ' +
     JSON.stringify(readCounts));
   assert.equal(env.fake.sends.length, ids.length, 'read-only rotation never sends a follow-up');
-  assert.ok(ids.every(taskId => env.store.getTask(taskId, 'alice').state === 'working'));
+  assert.ok(ids.every(taskId => env.store.tasks.getTask(taskId, 'alice').state === 'working'));
 });
 
 test('public FINAL 429/pacing never invents an agent-review threshold without explicit policy', async t => {
@@ -746,7 +746,7 @@ test('public FINAL 429/pacing never invents an agent-review threshold without ex
     await service.tick();
   }
   assert.deepEqual(reviews, [], 'elapsed time and probe count are not hidden escalation policy');
-  assert.equal(env.store.getTask('task-a', 'alice').state, 'working');
+  assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'working');
   assert.equal(env.fake.sends.length, 1, 'read throttling never licenses another POST');
 });
 
@@ -770,13 +770,13 @@ test('a successful canonical observation resets 429 escalation and exact FINAL c
   env.now = START + 4 * CONTINUATION_INTERVAL_MS;
   await service.tick();
   assert.deepEqual(reviews, [], 'old 429 cannot leak across a successful read');
-  assert.equal(env.store.getTask('task-a', 'alice').state, 'working');
+  assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'working');
   env.fake.pacedFinals.delete('initial:task-a');
   env.fake.pendingInitialFinals.delete('initial:task-a');
   env.now += 1_000;
   await service.tick();
-  assert.equal(env.store.getTask('task-a', 'alice').state, 'completed');
-  assert.equal(env.store.getFullTask('task-a', 'alice').results[0]!.completesTask, true);
+  assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'completed');
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').results[0]!.completesTask, true);
   assert.equal(env.fake.sends.length, 1);
 });
 
@@ -788,7 +788,7 @@ test('standalone approved due 429 raises review only after the explicit policy d
   const reviews: string[] = [];
   const service = env.createService(async owner => {
     reviews.push(owner.cause ?? 'missing-cause');
-    env.store.requireDecision({
+    env.store.decisions.createDecision({
       taskId: owner.taskId, clientId: owner.clientId,
       decisionId: 'due-429-review', audience: 'agent',
       contextJson: JSON.stringify({ reason: owner.cause }),
@@ -803,14 +803,14 @@ test('standalone approved due 429 raises review only after the explicit policy d
     env.now = START + slot * CONTINUATION_INTERVAL_MS;
     assert.equal((await service.tick()).dispatchesAttempted, 0);
     assert.deepEqual(reviews, [], 'pre-threshold interval ' + slot + ' must not escalate');
-    assert.equal(env.store.getTask('task-a', 'alice').state, 'working');
+    assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'working');
     assert.equal(env.fake.sends.length, 1);
   }
   env.now = START + 5 * CONTINUATION_INTERVAL_MS;
   assert.equal((await service.tick()).dispatchesAttempted, 0);
   assert.deepEqual(reviews, ['persistent_backend_read_throttle']);
-  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
-  assert.equal(env.store.getFullTask('task-a', 'alice').timers
+  assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').timers
     .filter(timer => timer.status === 'pending').length, 0);
   assert.equal(env.fake.sends.length, 1);
 });
@@ -834,7 +834,7 @@ test('explicit agent release resets only the prior policy-duration 429 streak', 
   }) => {
     const decisionId = 'rate-review-' + (reviews.length + 1);
     reviews.push(decisionId);
-    env.store.requireDecision({
+    env.store.decisions.createDecision({
       taskId: owner.taskId, clientId: owner.clientId, decisionId,
       audience: 'agent', contextJson: JSON.stringify({
         kind: 'semantic_action', attemptId: owner.attemptId,
@@ -849,8 +849,8 @@ test('explicit agent release resets only the prior policy-duration 429 streak', 
   env.now += 4 * CONTINUATION_INTERVAL_MS;
   await service.tick();
   assert.deepEqual(reviews, ['rate-review-1']);
-  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
-  env.store.resolveDecision({
+  assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'agent_input_required');
+  env.store.decisions.resolveDecision({
     taskId: 'task-a', clientId: 'alice', decisionId: reviews[0]!,
     resolutionJson: JSON.stringify({ kind: 'read_only_refresh', requestId: 'agent-resume-1' }),
   });
@@ -858,7 +858,7 @@ test('explicit agent release resets only the prior policy-duration 429 streak', 
   service = env.createService(review);
   await service.tick();
   assert.deepEqual(reviews, ['rate-review-1'], 'an old throttle must not re-escalate on resume');
-  assert.equal(env.store.getTask('task-a', 'alice').state, 'working');
+  assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'working');
   assert.equal(env.fake.sends.length, 1);
   env.now += CONTINUATION_INTERVAL_MS;
   await service.tick();
@@ -875,7 +875,7 @@ test('explicit agent release resets only the prior policy-duration 429 streak', 
   env.now += 5_001;
   await service.tick();
   assert.deepEqual(reviews, ['rate-review-1', 'rate-review-2']);
-  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'agent_input_required');
   assert.equal(env.fake.sends.length, 1, 'explicit review never permits a speculative POST');
 });
 
@@ -891,7 +891,7 @@ test('approved policy-duration 429 review resumes one fixed due without catch-up
     cause?: 'persistent_backend_read_throttle' | 'repeated_no_progress';
   }) => {
     reviews.push(owner.cause ?? 'missing-cause');
-    env.store.requireDecision({
+    env.store.decisions.createDecision({
       taskId: owner.taskId, clientId: owner.clientId,
       decisionId: 'policy-duration-approved-review', audience: 'agent',
       contextJson: JSON.stringify({
@@ -912,20 +912,20 @@ test('approved policy-duration 429 review resumes one fixed due without catch-up
     assert.equal(env.fake.sends.length, 1);
   }
   assert.deepEqual(reviews, ['persistent_backend_read_throttle']);
-  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'agent_input_required');
   env.fake.pending429Finals.delete('initial:task-a');
   env.fake.pacedFinals.add('initial:task-a');
   env.now = START + 6 * CONTINUATION_INTERVAL_MS - 1;
   await service.tick(); // hold stays durable while agent is away
   assert.equal(env.fake.sends.length, 1);
-  env.store.resolveDecision({
+  env.store.decisions.resolveDecision({
     taskId: 'task-a', clientId: 'alice', decisionId: 'policy-duration-approved-review',
     resolutionJson: JSON.stringify({ kind: 'read_only_refresh', requestId: 'agent-checked-429' }),
   });
   env.reopen();
   const resumed = env.createService(review);
   await resumed.tick();
-  const pending = env.store.getFullTask('task-a', 'alice').timers
+  const pending = env.store.tasks.readTaskAggregate('task-a', 'alice').timers
     .filter(timer => timer.status === 'pending' && timer.kind === 'continuation_due');
   assert.equal(pending.length, 1, 'existing approval resumes one due after agent review');
   assert.equal(pending[0]!.dueAt,
@@ -950,7 +950,7 @@ test('a later foreign user turn becomes an agent decision, never another automat
   const reviews: string[] = [];
   const service = env.createService(async owner => {
     reviews.push(owner.attemptId);
-    env.store.requireDecision({
+    env.store.decisions.createDecision({
       taskId: owner.taskId, clientId: owner.clientId,
       decisionId: 'foreign-review', audience: 'agent',
       contextJson: JSON.stringify({ kind: 'foreign-user-review', attemptId: owner.attemptId }),
@@ -963,7 +963,7 @@ test('a later foreign user turn becomes an agent decision, never another automat
   assert.deepEqual(await service.tick(),
     { timersClaimed: 1, dispatchesAttempted: 0, deferred: 1 });
   assert.deepEqual(reviews, ['initial:task-a']);
-  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'agent_input_required');
   assert.equal(env.fake.sends.length, 1);
 });
 
@@ -976,7 +976,7 @@ test('an unsafe composer yields a durable agent decision without starving other 
   const reviews: string[] = [];
   const service = env.createService(async owner => {
     reviews.push(owner.taskId);
-    env.store.requireDecision({
+    env.store.decisions.createDecision({
       taskId: owner.taskId, clientId: owner.clientId,
       decisionId: 'review:' + owner.taskId, audience: 'agent',
       contextJson: JSON.stringify({ kind: 'blocked-send-review', attemptId: owner.attemptId }),
@@ -990,8 +990,8 @@ test('an unsafe composer yields a durable agent decision without starving other 
   env.now += CONTINUATION_INTERVAL_MS;
   assert.deepEqual(await service.tick(),
     { timersClaimed: 2, dispatchesAttempted: 1, deferred: 1 });
-  assert.equal(env.store.getFullTask('task-a', 'alice').attempts[1]!.state, 'planned');
-  assert.equal(env.store.getTask('task-a', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').attempts[1]!.state, 'planned');
+  assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'agent_input_required');
   assert.deepEqual(reviews, ['task-a']);
   assert.equal(env.fake.sends.filter(s => s.taskId === 'task-a').length, 1);
   assert.equal(env.fake.sends.filter(s => s.taskId === 'task-b').length, 2);
@@ -1000,7 +1000,7 @@ test('an unsafe composer yields a durable agent decision without starving other 
   await service.tick();
   assert.equal(env.fake.sends.filter(s => s.taskId === 'task-a').length, 1,
     'an agent decision cannot silently replay the unsent Continue');
-  assert.equal(env.store.getFullTask('task-a', 'alice').attempts.length, 2);
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').attempts.length, 2);
 });
 
 test('cancellation revokes pending due timers and prevents later continuation', async t => {
@@ -1010,11 +1010,11 @@ test('cancellation revokes pending due timers and prevents later continuation', 
   const service = env.createService();
   service.activate({ taskId: 'task-a', clientId: 'alice',
     sourceAttemptId: 'initial:task-a', approvalRef: 'approved', message: '계속' });
-  env.store.requestCancel('task-a', 'alice');
+  env.store.tasks.requestTaskCancellation('task-a', 'alice');
   env.now += 2 * CONTINUATION_INTERVAL_MS;
   assert.equal((await service.tick()).timersClaimed, 0);
   assert.equal(env.fake.sends.length, 1);
-  assert.equal(env.store.getFullTask('task-a', 'alice').timers[0]!.status, 'canceled');
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').timers[0]!.status, 'canceled');
 });
 
 test('maintenance pause preserves due policy and resumes without catch-up burst', async t => {
@@ -1050,14 +1050,14 @@ test('Core continuation does not claim another component timer kind', async t =>
     taskId: 'task-a', clientId: 'alice', sourceAttemptId: 'initial:task-a',
     approvalRef: 'approved', message: '계속',
   });
-  env.store.scheduleTimer({
+  env.store.timers.scheduleTaskTimer({
     taskId: 'task-a', clientId: 'alice', timerId: 'independent-review',
     kind: 'unrelated_due', dueAt: new Date(START + CONTINUATION_INTERVAL_MS).toISOString(),
     contextJson: '{}',
   });
   env.now += CONTINUATION_INTERVAL_MS;
   assert.equal((await service.tick()).timersClaimed, 1);
-  const independent = env.store.getFullTask('task-a', 'alice')
+  const independent = env.store.tasks.readTaskAggregate('task-a', 'alice')
     .timers.find(timer => timer.timerId === 'independent-review');
   assert.equal(independent?.status, 'pending',
     'managed scanner cannot consume timers owned by other Core workflows');
@@ -1072,21 +1072,21 @@ test('Core restart after continuation ACK but before next timer rearm restores o
     approvalRef: 'approved', message: '계속',
   });
   env.now += CONTINUATION_INTERVAL_MS;
-  assert.equal(env.store.claimDueTimers(
+  assert.equal(env.store.timers.claimDueTaskTimers(
     new Date(env.now).toISOString(), 50, 'continuation_due').length, 1);
   const plannedId = 'managed-continuation:initial:task-a';
-  env.store.planAttempt({
+  env.store.attempts.planAttempt({
     taskId: 'task-a', clientId: 'alice', attemptId: plannedId,
     kind: 'continuation', turnKey: plannedId, content: '계속',
   });
   await env.kernel.dispatch('task-a', 'alice', plannedId);
   assert.equal(env.fake.sends.length, 2);
-  assert.equal(env.store.getFullTask('task-a', 'alice').timers
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').timers
     .filter(timer => timer.status === 'pending' && timer.kind === 'continuation_due').length, 0);
   env.reopen();
   const restored = env.createService();
   assert.equal((await restored.tick()).timersClaimed, 0);
-  const full = env.store.getFullTask('task-a', 'alice');
+  const full = env.store.tasks.readTaskAggregate('task-a', 'alice');
   assert.equal(full.timers.filter(timer => timer.status === 'pending' &&
     timer.timerId === 'continuation-due:' + plannedId).length, 1,
     'exact ACK restores its next due without reissuing the POST');
@@ -1102,13 +1102,13 @@ test('Core drives one planned public initial send after exact bound conversation
   env.fake.blocked.add('task-a');
   await service.tick();
   assert.equal(env.fake.sends.length, 0);
-  assert.equal(env.store.getFullTask('task-a', 'alice').attempts[0]!.state, 'planned');
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').attempts[0]!.state, 'planned');
   env.fake.blocked.delete('task-a');
   await service.tick();
   assert.equal(env.fake.sends.length, 1);
   assert.equal(env.fake.sends[0]!.content, 'Question task-a');
   assert.equal(env.fake.sends[0]!.kind, 'initial');
-  assert.equal(env.store.getTask('task-a', 'alice').state, 'completed',
+  assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'completed',
     'Core also observes exact FINAL for the public standalone task');
   await service.tick();
   assert.equal(env.fake.sends.length, 1, 'completed public initial never resubmits');
@@ -1120,8 +1120,8 @@ test('public ACK scanner admits only the latest evidence-free uncertain continua
     env.startTask(taskId, slotId);
     env.seedPublicPolicy(taskId);
     const attemptId = 'initial:' + taskId;
-    env.store.beginDispatch(taskId, 'alice', attemptId);
-    env.store.recordDispatchEvidence({
+    env.store.attempts.reserveAttemptDispatch(taskId, 'alice', attemptId);
+    env.store.attempts.recordDispatchEvidence({
       taskId, clientId: 'alice', attemptId,
       evidence: {
         conversationId: 'conversation:' + taskId,
@@ -1131,18 +1131,18 @@ test('public ACK scanner admits only the latest evidence-free uncertain continua
         observedAt: new Date(env.now).toISOString(),
       },
     });
-    env.store.acknowledgeAttempt({
+    env.store.attempts.acknowledgeAttempt({
       taskId, clientId: 'alice', attemptId, externalTurnId: 'source-turn:' + taskId,
     });
   };
   const seedUncertainContinuation = (taskId: string) => {
     const attemptId = 'continue:' + taskId;
-    env.store.planAttempt({
+    env.store.attempts.planAttempt({
       taskId, clientId: 'alice', attemptId,
       kind: 'continuation', turnKey: attemptId, content: '계속',
     });
-    env.store.beginDispatch(taskId, 'alice', attemptId);
-    env.store.markUncertain(taskId, 'alice', attemptId, 'semantic-action-not-verified');
+    env.store.attempts.reserveAttemptDispatch(taskId, 'alice', attemptId);
+    env.store.attempts.markAttemptUncertain(taskId, 'alice', attemptId, 'semantic-action-not-verified');
     return attemptId;
   };
 
@@ -1151,8 +1151,8 @@ test('public ACK scanner admits only the latest evidence-free uncertain continua
 
   env.startTask('initial-no-evidence', 'scan-initial-no-evidence');
   env.seedPublicPolicy('initial-no-evidence');
-  env.store.beginDispatch('initial-no-evidence', 'alice', 'initial:initial-no-evidence');
-  env.store.markUncertain('initial-no-evidence', 'alice',
+  env.store.attempts.reserveAttemptDispatch('initial-no-evidence', 'alice', 'initial:initial-no-evidence');
+  env.store.attempts.markAttemptUncertain('initial-no-evidence', 'alice',
     'initial:initial-no-evidence', 'semantic-action-not-verified');
 
   seedAcknowledgedSource('stop-only', 'scan-stop');
@@ -1183,7 +1183,7 @@ test('public ACK scanner admits only the latest evidence-free uncertain continua
 
   seedAcknowledgedSource('foreign-evidence', 'scan-foreign-evidence');
   const foreignEvidence = seedUncertainContinuation('foreign-evidence');
-  env.store.recordDispatchEvidence({
+  env.store.attempts.recordDispatchEvidence({
     taskId: 'foreign-evidence', clientId: 'alice', attemptId: foreignEvidence,
     evidence: {
       conversationId: 'conversation:foreign-evidence',
@@ -1197,15 +1197,15 @@ test('public ACK scanner admits only the latest evidence-free uncertain continua
     'UPDATE kernel_dispatch_evidence SET provider_conversation_id=? WHERE attempt_id=?',
   ).run('conversation:foreign', foreignEvidence);
 
-  const pending = env.store.listPendingPublicAcknowledgements(100);
+  const pending = env.store.scans.scanPendingAcknowledgements(100);
   assert.equal(pending.length, 1);
   assert.deepEqual({ ...pending[0]! }, {
     taskId: 'recoverable', clientId: 'alice', attemptId: recoverable,
   });
-  assert.equal(env.store.getDispatchEvidence({
+  assert.equal(env.store.attempts.getDispatchEvidence({
     taskId: 'recoverable', clientId: 'alice', attemptId: recoverable,
   }), null);
-  assert.equal(env.store.getFullTask('recoverable', 'alice').attempts.at(-1)?.state,
+  assert.equal(env.store.tasks.readTaskAggregate('recoverable', 'alice').attempts.at(-1)?.state,
     'uncertain');
 });
 
@@ -1218,7 +1218,7 @@ test('Core recovers journaled public ACK after restart without another send', as
   env.fake.sendOnce = async intent => {
     env.fake.sends.push(intent);
     if (intent.taskId === 'task-a') {
-      env.store.recordDispatchEvidence({
+      env.store.attempts.recordDispatchEvidence({
         taskId: intent.taskId, clientId: 'alice', attemptId: intent.attemptId,
         evidence: {
           conversationId: intent.providerConversationId!,
@@ -1244,17 +1244,17 @@ test('Core recovers journaled public ACK after restart without another send', as
   };
   const service = env.createService();
   await service.tick();
-  assert.equal(env.store.getTask('task-a', 'alice').state, 'uncertain');
+  assert.equal(env.store.tasks.getTask('task-a', 'alice').state, 'uncertain');
   assert.deepEqual(recovered, ['initial:task-a'],
     'missing POST evidence is never inferred from an uncertain state');
   ackReady = true;
   await service.tick();
-  const exact = env.store.getFullTask('task-a', 'alice');
+  const exact = env.store.tasks.readTaskAggregate('task-a', 'alice');
   assert.equal(exact.task.state, 'completed');
   assert.equal(exact.attempts[0]!.externalTurnId, 'exact-delayed-turn');
   assert.equal(exact.results[0]!.answerText, 'Exact final for initial:task-a');
   assert.equal(exact.attempts.length, 1);
-  assert.equal(env.store.getTask('no-evidence', 'alice').state, 'uncertain');
+  assert.equal(env.store.tasks.getTask('no-evidence', 'alice').state, 'uncertain');
   assert.equal(env.fake.sends.filter(send => send.taskId === 'task-a').length, 1,
     'read-only ACK recovery cannot resend the existing prompt');
   assert.equal(env.fake.sends.length, 2);
@@ -1268,11 +1268,11 @@ test('Core public initial scanner never dispatches canceled public work', async 
   const env = fixture(t);
   env.startTask('task-a', 'main');
   env.seedPublicPolicy('task-a');
-  env.store.requestCancel('task-a', 'alice');
+  env.store.tasks.requestTaskCancellation('task-a', 'alice');
   const service = env.createService();
   await service.tick();
   assert.equal(env.fake.sends.length, 0);
-  assert.equal(env.store.getFullTask('task-a', 'alice').attempts[0]!.state, 'planned');
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').attempts[0]!.state, 'planned');
 });
 
 
@@ -1285,8 +1285,8 @@ test('explicit project model intent never silently sends the initial prompt with
   await service.tick();
   assert.equal(env.fake.sends.length, 0,
     'configured model intent requires exact observed model verification');
-  assert.equal(env.store.getFullTask('task-a', 'alice').attempts[0]!.state, 'planned');
-  assert.ok(env.store.getFullTask('task-a', 'alice').events.some(event =>
+  assert.equal(env.store.tasks.readTaskAggregate('task-a', 'alice').attempts[0]!.state, 'planned');
+  assert.ok(env.store.tasks.readTaskAggregate('task-a', 'alice').events.some(event =>
     event.event.type === 'observation.deferred' &&
     event.event.reason === 'public-initial-model-intent-unverified'));
   await service.tick();

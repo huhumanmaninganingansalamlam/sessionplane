@@ -1,5 +1,7 @@
 import { CoreMaintenance } from './core/maintenance.ts';
+import { EventRepository } from './storage/event-repository.ts';
 import { SessionRepository } from './storage/session-repository.ts';
+import { TeamRepository } from './storage/team-repository.ts';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -14,6 +16,7 @@ import { createLogger, type Logger } from './logging.ts';
 import { RpcRouter } from './rpc/router.ts';
 import { RpcServer } from './rpc/server.ts';
 import { registerBrowserMethods } from './rpc/methods/browser.ts';
+import { assembleBrowserRpcPort } from './core/runtime/assemble-browser-rpc.ts';
 import { registerTaskMethods } from './rpc/methods/task.ts';
 import { PublicTaskAdmissionService } from './core/public-task-admission.ts';
 import { ActorScheduler } from './scheduler/actor-scheduler.ts';
@@ -21,13 +24,13 @@ import { ProbeCoordinator } from './scheduler/probe-coordinator.ts';
 import { SessionPlaneDatabase } from './storage/database.ts';
 import { PageBindingRepository } from './storage/page-binding-repository.ts';
 import { ReceiptRepository } from './storage/receipt-repository.ts';
-import { ConversationLoadRecoveryRepository } from './storage/conversation-load-recovery-repository.ts';
+import { ProbeBudgetRepository } from './storage/probe-budget-repository.ts';
 import { RuntimeMetrics } from './telemetry/metrics.ts';
 import { createSemanticCoreRuntime, restoreSemanticPageBindings, type SemanticCoreRuntime } from './core/semantic-core-runtime.ts';
 import type { DurableTaskKernel } from './core/durable-task-kernel.ts';
 import type { SemanticTaskArtifactReader } from './core/semantic-task-artifact-reader.ts';
 import type { SemanticProviderRegistry } from './providers/semantic-provider-registry.ts';
-import type { TaskKernelRepository } from './storage/task-kernel-repository.ts';
+import type { KernelStores } from './storage/kernel/create-kernel-stores.ts';
 import { z } from 'zod';
 
 export interface CoreService {
@@ -45,7 +48,7 @@ export interface CoreService {
   readonly metrics: RuntimeMetrics;
   readonly pageBindings: PageBindingRepository;
   readonly semanticProviders: SemanticProviderRegistry;
-  readonly semanticTaskRepository: TaskKernelRepository;
+  readonly semanticTaskRepository: KernelStores;
   readonly semanticTaskKernel: DurableTaskKernel;
   readonly semanticTaskArtifactReader: SemanticTaskArtifactReader;
   readonly semanticDecisionGateway: SemanticCoreRuntime['decisionGateway'];
@@ -80,34 +83,22 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   });
   const pageMutationMutex = new PageMutationMutex();
   const actorScheduler = new ActorScheduler(database);
-  const teamDirectory = new TeamDirectory(database, {
+  const sessions = new SessionRepository(database.raw);
+  const teamDirectory = new TeamDirectory({
+    database,
+    sessions,
+    teams: new TeamRepository(database.raw),
+    events: new EventRepository(database.raw),
+  }, {
     enabledProviders: config.enabledProviders,
     onSessionChanged: (sessionId) => actorScheduler.refreshSession(sessionId),
   });
   const receipts = new ReceiptRepository(database);
-  const accountPacing = new ConversationLoadRecoveryRepository(database);
-  const browserOwner =
-    options.startBrowser === false
-      ? null
-      : new BrowserOwner({
-          profileDir: config.profileDir,
-          scopeProfileByBrowser: config.browserScopedProfile,
-          pageRegistry,
-          headless: options.browserHeadless ?? config.browserHeadless,
-          persistentMetrics: config.browserMetrics,
-          browserPreference: config.browserPreference,
-          browserExecutable: config.browserExecutable,
-          launchTimeoutMs: config.browserLaunchTimeoutMs,
-          resolveTeam: (sessionId, conversationId, targetId) => {
-            const sessions = new SessionRepository(database.raw);
-            const session = sessionId ? sessions.getSession(sessionId)
-              : conversationId ? sessions.getUniqueConversationSession(conversationId) : null;
-            const teamId = session?.teamId ?? (targetId ? pageBindings.uniqueTeamForTarget(targetId) : null);
-            if (!teamId) return null;
-            const team = teamDirectory.getTeam(teamId);
-            return { teamId: team.teamId, title: team.name?.trim() || team.teamId };
-          },
-        });
+  const browserOwner = assembleBrowserOwner({
+    enabled: options.startBrowser !== false,
+    headless: options.browserHeadless ?? config.browserHeadless,
+    config, pageRegistry, pageBindings, sessions, teamDirectory,
+  });
 
   try {
     await browserOwner?.start();
@@ -141,7 +132,7 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
   });
   // Reconcile only attempts which irreversibly entered dispatch before the
   // previous Core died. A missing ACK is uncertain, never permission to send.
-  const interruptedSemantic = semanticTaskRepository.recoverInterruptedDispatches();
+  const interruptedSemantic = semanticTaskRepository.attempts.recoverInterruptedDispatches();
   if (interruptedSemantic > 0) {
     logger.warn('semantic.dispatch.recovered_uncertain', { attempts: interruptedSemantic });
   }
@@ -169,60 +160,18 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
     database.close();
     throw error;
   }
-  router.register('system.defer_account_cooldown', z.object({
-    requestId: z.string().min(1).max(200), observedAt: z.iso.datetime(), until: z.iso.datetime(),
-    evidenceRef: z.string().min(1).max(500),
-    scope: z.enum(['chatgpt:default', 'chatgpt:conversation-list']).optional(),
-  }).strict().refine(input => Date.parse(input.until) >= Date.parse(input.observedAt),
-    'Cooldown cannot end before its observed rate-limit signal'), input => receipts.execute({
-      clientId: 'operator-account-coordination', requestId: input.requestId,
-      method: 'system.defer_account_cooldown', payload: input,
-      operation: () => {
-        probeCoordinator.defer(input.scope ?? 'chatgpt:conversation-list', input.until);
-        return { deferred: true, scope: input.scope ?? 'chatgpt:conversation-list', ...accountPacing.pacing() };
-      },
-    }));
-  router.register('system.health', z.object({}).strict(), () =>
-    ({ ...getSystemHealth({
-      config,
-      database,
-      startedAt,
-      browserOwner,
-      pageRegistry,
-      actorScheduler,
-      metrics,
-    }), maintenance: {
-      ...maintenance.status(), durableRecoveryHandover: true,
-    } }),
-  );
-  const handoverIdle = () => (browserOwner === null || (browserOwner.status.state === 'ready' && !browserOwner.teamGroupsBusy)) && actorScheduler.totalQueueDepth === 0 && pageMutationMutex.activeCount === 0 &&
-    // Recovery mutations enter maintenance and drain naturally. Durable opt-in
-    // observation is restored below; a generating browser need not finish first.
-    Number(database.raw.prepare("SELECT count(*) AS n FROM outbox WHERE submission_state IN ('submit_attempted','composer_filled')").get()!.n) === 0;
-  const ownerSchema = { expectedPid: z.literal(process.pid), expectedStartedAt: z.literal(startedAt.toISOString()) };
-  router.register('system.maintenance.quiesce', z.object({ ...ownerSchema, token: z.string().uuid().optional() }).strict(), input =>
-    maintenance.quiesce(input.token, handoverIdle));
-  router.register('system.maintenance.prepare', z.object({ ...ownerSchema,
-    drainTimeoutMs: z.number().int().min(1).max(10_000).default(5_000),
-    leaseMs: z.number().int().min(100).max(60_000).default(30_000),
-  }).strict(), input => maintenance.prepare(input.drainTimeoutMs, input.leaseMs, handoverIdle));
-  router.register('system.maintenance.resume', z.object({ ...ownerSchema, token: z.string().uuid() }).strict(), input => {
-    maintenance.resume(input.token); return maintenance.status();
+  registerSystemMethods({
+    router, receipts, probeCoordinator, config, database, startedAt, browserOwner,
+    pageRegistry, actorScheduler, metrics, maintenance, pageMutationMutex,
+    handoverExit: options.handoverExit,
   });
-  router.register('system.maintenance.commit', z.object({ ...ownerSchema, token: z.string().uuid() }).strict(), input =>
-    maintenance.commit(input.token, handoverIdle, options.handoverExit ?? (() => {
-      // Synchronous commit: no callback can write between the lease check and exit.
-      // Do not call service.close(): it closes the still-generating Chrome.
-      database.close();
-      process.exit(0);
-    })));
-  registerBrowserMethods(router, {
+  registerBrowserMethods(router, assembleBrowserRpcPort({
     browserOwner,
     pageRegistry,
     loginUrl: config.chatgptUrl,
     profileDir: config.profileDir,
     recoverBrowser: () => restartBrowser(),
-  });
+  }));
   registerTaskMethods(router, {
     repository: semanticTaskRepository, gateway: semanticDecisionGateway,
     admission: new PublicTaskAdmissionService({
@@ -324,6 +273,107 @@ export async function startCore(options: StartCoreOptions = {}): Promise<CoreSer
       database.close();
     },
   };
+}
+
+
+function assembleBrowserOwner(options: {
+  readonly enabled: boolean;
+  readonly headless: boolean;
+  readonly config: SessionPlaneConfig;
+  readonly pageRegistry: PageRegistry;
+  readonly pageBindings: PageBindingRepository;
+  readonly sessions: SessionRepository;
+  readonly teamDirectory: TeamDirectory;
+}): BrowserOwner | null {
+  if (!options.enabled) return null;
+  const { config, pageRegistry, pageBindings, sessions, teamDirectory } = options;
+  return new BrowserOwner({
+    profileDir: config.profileDir,
+    scopeProfileByBrowser: config.browserScopedProfile,
+    pageRegistry,
+    headless: options.headless,
+    persistentMetrics: config.browserMetrics,
+    browserPreference: config.browserPreference,
+    browserExecutable: config.browserExecutable,
+    launchTimeoutMs: config.browserLaunchTimeoutMs,
+    resolveTeam: (sessionId, conversationId, targetId) => {
+      const session = sessionId ? sessions.getSession(sessionId)
+        : conversationId ? sessions.getUniqueConversationSession(conversationId, 'chatgpt') : null;
+      const teamId = session?.teamId ??
+        (targetId ? pageBindings.uniqueTeamForTarget(targetId) : null);
+      if (!teamId) return null;
+      const team = teamDirectory.getTeam(teamId);
+      return { teamId: team.teamId, title: team.name?.trim() || team.teamId };
+    },
+  });
+}
+
+function registerSystemMethods(options: {
+  readonly router: RpcRouter;
+  readonly receipts: ReceiptRepository;
+  readonly probeCoordinator: ProbeCoordinator;
+  readonly config: SessionPlaneConfig;
+  readonly database: SessionPlaneDatabase;
+  readonly startedAt: Date;
+  readonly browserOwner: BrowserOwner | null;
+  readonly pageRegistry: PageRegistry;
+  readonly actorScheduler: ActorScheduler;
+  readonly metrics: RuntimeMetrics;
+  readonly maintenance: CoreMaintenance;
+  readonly pageMutationMutex: PageMutationMutex;
+  readonly handoverExit: (() => never) | undefined;
+}): void {
+  const { router, receipts, probeCoordinator, config, database, startedAt,
+    browserOwner, pageRegistry, actorScheduler, metrics, maintenance,
+    pageMutationMutex, handoverExit } = options;
+  router.register('system.defer_account_cooldown', z.object({
+    requestId: z.string().min(1).max(200), observedAt: z.iso.datetime(), until: z.iso.datetime(),
+    evidenceRef: z.string().min(1).max(500),
+    scope: z.enum(['chatgpt:default', 'chatgpt:conversation-list']).optional(),
+  }).strict().refine(input => Date.parse(input.until) >= Date.parse(input.observedAt),
+    'Cooldown cannot end before its observed rate-limit signal'), input => receipts.execute({
+      clientId: 'operator-account-coordination', requestId: input.requestId,
+      method: 'system.defer_account_cooldown', payload: input,
+      operation: () => {
+        const scope = input.scope ?? 'chatgpt:conversation-list';
+        probeCoordinator.defer(scope, input.until);
+        const budgets = new ProbeBudgetRepository(database.raw);
+        return { deferred: true, scope,
+          ui: budgets.get('chatgpt:conversation-load-ui'),
+          account: budgets.get('chatgpt:default') };
+      },
+    }));
+  router.register('system.health', z.object({}).strict(), () => ({
+    ...getSystemHealth({ config, database, startedAt, browserOwner,
+      pageRegistry, actorScheduler, metrics }),
+    maintenance: { ...maintenance.status(), durableRecoveryHandover: true },
+  }));
+  const handoverIdle = () => (browserOwner === null ||
+    (browserOwner.status.state === 'ready' && !browserOwner.teamGroupsBusy)) &&
+    actorScheduler.totalQueueDepth === 0 && pageMutationMutex.activeCount === 0 &&
+    Number(database.raw.prepare("SELECT count(*) AS n FROM outbox WHERE submission_state IN ('submit_attempted','composer_filled')").get()!.n) === 0;
+  const ownerSchema = {
+    expectedPid: z.literal(process.pid),
+    expectedStartedAt: z.literal(startedAt.toISOString()),
+  };
+  router.register('system.maintenance.quiesce',
+    z.object({ ...ownerSchema, token: z.string().uuid().optional() }).strict(),
+    input => maintenance.quiesce(input.token, handoverIdle));
+  router.register('system.maintenance.prepare', z.object({ ...ownerSchema,
+    drainTimeoutMs: z.number().int().min(1).max(10_000).default(5_000),
+    leaseMs: z.number().int().min(100).max(60_000).default(30_000),
+  }).strict(), input => maintenance.prepare(input.drainTimeoutMs, input.leaseMs, handoverIdle));
+  router.register('system.maintenance.resume',
+    z.object({ ...ownerSchema, token: z.string().uuid() }).strict(), input => {
+      maintenance.resume(input.token);
+      return maintenance.status();
+    });
+  router.register('system.maintenance.commit',
+    z.object({ ...ownerSchema, token: z.string().uuid() }).strict(), input =>
+      maintenance.commit(input.token, handoverIdle, handoverExit ?? (() => {
+        database.close();
+        process.exit(0);
+      })));
 }
 
 export async function serveForever(config: SessionPlaneConfig = resolveConfig()): Promise<void> {

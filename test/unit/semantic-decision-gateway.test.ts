@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -13,7 +13,7 @@ import type {
 } from '../../src/providers/semantic-adapter.ts';
 import { SemanticProviderRegistry } from '../../src/providers/semantic-provider-registry.ts';
 import { SessionPlaneDatabase } from '../../src/storage/database.ts';
-import { TaskKernelRepository } from '../../src/storage/task-kernel-repository.ts';
+import { createKernelStores, type KernelStores } from '../../src/storage/kernel/create-kernel-stores.ts';
 
 const MANIFEST: SemanticCapabilityManifest = {
   providerKey: 'fixture-provider', browserRequired: false, contractVersion: 1,
@@ -26,7 +26,7 @@ type Mode = 'question' | 'free_text' | 'model' | 'model-verified' | 'power' | 'm
 class FakeSemanticAdapter implements SemanticProviderAdapter {
   readonly providerKey = 'fixture-provider';
   readonly capabilities = MANIFEST;
-  readonly store: TaskKernelRepository;
+  readonly store: KernelStores;
   mode: Mode = 'question';
   observed = 0;
   clicks = 0;
@@ -35,7 +35,7 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
   expiresOffsetMs = 120_000;
   holdAction: Promise<void> | null = null;
 
-  constructor(store: TaskKernelRepository) { this.store = store; }
+  constructor(store: KernelStores) { this.store = store; }
 
   async observe(context: SemanticTaskContext): Promise<SemanticObservation> {
     this.observed++;
@@ -123,7 +123,7 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
     if (!request.authorizedDecisionId) {
       return { kind: 'authorization_required', reason: 'missing-durable-decision' };
     }
-    const full = this.store.getFullTask(request.context.taskId, 'alice');
+    const full = this.store.tasks.readTaskAggregate(request.context.taskId, 'alice');
     const row = full.decisions.find(decision => decision.decisionId === request.authorizedDecisionId);
     if (!row || row.status !== 'resolved' || row.resolutionJson === null) {
       return { kind: 'authorization_required', reason: 'unresolved-decision' };
@@ -131,7 +131,7 @@ class FakeSemanticAdapter implements SemanticProviderAdapter {
     const resolution: unknown = JSON.parse(row.resolutionJson);
     if (!resolution || typeof resolution !== 'object' ||
         (resolution as { input?: unknown }).input !== (request.input ?? null) ||
-        !this.store.consumeDecisionAction(request.context.taskId, 'alice', row.decisionId)) {
+        !this.store.decisions.consumeDecisionAction(request.context.taskId, 'alice', row.decisionId)) {
       return { kind: 'authorization_required', reason: 'unconsumed-decision' };
     }
     this.clicks++;
@@ -154,23 +154,23 @@ function fixture(t: TestContext, options: { plannedInitial?: boolean; requiredMo
   const dir = mkdtempSync(join(tmpdir(), 'sessionplane-agent-gateway-'));
   const file = join(dir, 'state.sqlite');
   let db = SessionPlaneDatabase.open(file);
-  let store = new TaskKernelRepository(db);
+  let store = createKernelStores(db);
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
-  store.openProject({ projectId: 'project', projectKey: 'gateway.fixture',
+  store.projects.openProject({ projectId: 'project', projectKey: 'gateway.fixture',
     displayName: 'Gateway', clientId: 'alice' });
-  store.openSlot({ projectId: 'project', clientId: 'alice', slotId: 'main',
+  store.projects.openConversationSlot({ projectId: 'project', clientId: 'alice', slotId: 'main',
     roleKey: 'Main', providerKey: 'fixture-provider' });
-  store.startTask({ taskId: 'task-1', projectId: 'project', slotId: 'main',
+  store.tasks.createTask({ taskId: 'task-1', projectId: 'project', slotId: 'main',
     expectedSlotRevision: 1, clientId: 'alice', requestId: 'request-1',
     prompt: 'Provider question prompt' });
-  store.observeConversation({ projectId: 'project', slotId: 'main',
+  store.projects.bindObservedConversation({ projectId: 'project', slotId: 'main',
     expectedRevision: 1, clientId: 'alice', taskId: 'task-1',
     providerConversationId: 'conv-1' });
-  store.planAttempt({ taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
+  store.attempts.planAttempt({ taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
     kind: 'initial', turnKey: 'root', content: 'Provider question prompt' });
   if (options.plannedInitial !== true) {
-    store.beginDispatch('task-1', 'alice', 'initial-1');
-    store.acknowledgeAttempt({ taskId: 'task-1', clientId: 'alice',
+    store.attempts.reserveAttemptDispatch('task-1', 'alice', 'initial-1');
+    store.attempts.acknowledgeAttempt({ taskId: 'task-1', clientId: 'alice',
       attemptId: 'initial-1', externalTurnId: 'turn-1' });
   }
   const context: SemanticTaskContext = {
@@ -198,7 +198,7 @@ function fixture(t: TestContext, options: { plannedInitial?: boolean; requiredMo
     reopen() {
       db.close();
       db = SessionPlaneDatabase.open(file);
-      store = new TaskKernelRepository(db);
+      store = createKernelStores(db);
       return store;
     },
   };
@@ -215,7 +215,7 @@ test('owned canonical Main load failure offers a bounded read-only refresh witho
   assert.equal(first?.kind, 'adapter_unsupported');
   assert.equal(first?.reason, 'chat-surface-unverified');
   assert.deepEqual(first?.options, []);
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'agent_input_required');
   await assert.rejects(() => gateway.decideCurrent({
     taskId: 'task-1', clientId: 'alice', decisionId: first!.decisionId,
     requestId: 'invented-post', actionRef: 'invented-send',
@@ -233,8 +233,8 @@ test('owned canonical Main load failure offers a bounded read-only refresh witho
     requestId: 'bound-load-refresh-1',
   }), stillBlocked, 'a replay can only read the next pending packet');
   assert.equal(adapter.clicks, 0);
-  assert.equal(env.store.getFullTask('task-1', 'alice').attempts.length, 1);
-  assert.equal(env.store.getFullTask('task-1', 'alice').attempts[0]!.state, 'planned');
+  assert.equal(env.store.tasks.readTaskAggregate('task-1', 'alice').attempts.length, 1);
+  assert.equal(env.store.tasks.readTaskAggregate('task-1', 'alice').attempts[0]!.state, 'planned');
 
   adapter.mode = 'none';
   assert.deepEqual(await gateway.refreshCurrent({
@@ -242,9 +242,9 @@ test('owned canonical Main load failure offers a bounded read-only refresh witho
     decisionId: stillBlocked.packet!.decisionId,
     requestId: 'bound-load-refresh-2',
   }), { kind: 'refresh_required', packet: null });
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'working');
-  assert.equal(env.store.getFullTask('task-1', 'alice').attempts.length, 1);
-  assert.equal(env.store.getFullTask('task-1', 'alice').attempts[0]!.state, 'planned');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'working');
+  assert.equal(env.store.tasks.readTaskAggregate('task-1', 'alice').attempts.length, 1);
+  assert.equal(env.store.tasks.readTaskAggregate('task-1', 'alice').attempts[0]!.state, 'planned');
   assert.equal(adapter.clicks, 0, 'refresh must never click a provider control');
 
   const submitted = fixture(t);
@@ -258,7 +258,7 @@ test('owned canonical Main load failure offers a bounded read-only refresh witho
     taskId: 'task-1', clientId: 'alice',
     decisionId: submittedPacket!.decisionId, requestId: 'wrong-boundary',
   }), /Current decision is not refreshable/);
-  assert.equal(submitted.store.getFullTask('task-1', 'alice').attempts[0]!.state, 'acknowledged');
+  assert.equal(submitted.store.tasks.readTaskAggregate('task-1', 'alice').attempts[0]!.state, 'acknowledged');
 });
 
 test('persistent canonical 429 creates a reasoned, agent-first decision on the original ACK', async t => {
@@ -272,7 +272,7 @@ test('persistent canonical 429 creates a reasoned, agent-first decision on the o
   assert.equal(packet?.reason, 'canonical-final-rate-limit-persistent');
   assert.equal(packet?.humanOnly, false, 'agent decides whether human assistance is necessary');
   assert.ok((packet?.controls?.length ?? 0) > 0, 'agent handoff must expose safe task controls');
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'agent_input_required');
   assert.equal((await gateway.requireNoProgressReview({
     taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
     cause: 'persistent_backend_read_throttle',
@@ -286,7 +286,7 @@ test('persistent 429 review can be explicitly reobserved after restart without a
     taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
     cause: 'persistent_backend_read_throttle',
   });
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'agent_input_required');
   env.reopen();
   const adapter = new FakeSemanticAdapter(env.store);
   adapter.mode = 'none';
@@ -301,27 +301,27 @@ test('persistent 429 review can be explicitly reobserved after restart without a
   };
   assert.deepEqual(await resumed.refreshCurrent(refresh),
     { kind: 'refresh_required', packet: null });
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'working');
-  assert.equal(env.store.getTask('task-1', 'alice').pendingDecisionId, null);
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'working');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').pendingDecisionId, null);
   assert.deepEqual(await resumed.refreshCurrent(refresh),
     { kind: 'refresh_required', packet: null }, 'replayed receipt is read-only');
   await assert.rejects(() => resumed.refreshCurrent({
     ...refresh, requestId: 'another-agent-request',
   }), /different request|stale/i);
   assert.equal(adapter.clicks, 0);
-  assert.equal(env.store.getFullTask('task-1', 'alice').attempts.length, 1);
-  assert.equal(env.store.getFullTask('task-1', 'alice').attempts[0]!.state, 'acknowledged');
-  assert.equal(env.store.getFullTask('task-1', 'alice').results.length, 0);
+  assert.equal(env.store.tasks.readTaskAggregate('task-1', 'alice').attempts.length, 1);
+  assert.equal(env.store.tasks.readTaskAggregate('task-1', 'alice').attempts[0]!.state, 'acknowledged');
+  assert.equal(env.store.tasks.readTaskAggregate('task-1', 'alice').results.length, 0);
 });
 
 test('unanswered continuation creates durable agent review; refresh is read-only and late FINAL completes', async t => {
   const env = fixture(t);
-  env.store.planAttempt({
+  env.store.attempts.planAttempt({
     taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
     kind: 'continuation', turnKey: 'managed-continue-1', content: '계속',
   });
-  env.store.beginDispatch('task-1', 'alice', 'continue-1');
-  env.store.acknowledgeAttempt({
+  env.store.attempts.reserveAttemptDispatch('task-1', 'alice', 'continue-1');
+  env.store.attempts.acknowledgeAttempt({
     taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
     externalTurnId: 'turn-2',
   });
@@ -343,7 +343,7 @@ test('unanswered continuation creates durable agent review; refresh is read-only
   });
   const history = JSON.parse(historyPage.text) as { attemptHistory: unknown[] };
   assert.equal(history.attemptHistory.length, 2);
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'agent_input_required');
   assert.equal(gateway.get('task-1', 'alice')?.decisionId, packet?.decisionId);
   await assert.rejects(() => gateway.decideCurrent({
     taskId: 'task-1', clientId: 'alice', decisionId: packet!.decisionId,
@@ -354,7 +354,7 @@ test('unanswered continuation creates durable agent review; refresh is read-only
     requestId: 'agent-refresh-1',
   });
   assert.deepEqual(refreshed, { kind: 'refresh_required', packet: null });
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'working');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'working');
   assert.equal(adapter.clicks, 0);
   assert.deepEqual(await gateway.refreshCurrent({
     taskId: 'task-1', clientId: 'alice', decisionId: packet!.decisionId,
@@ -364,19 +364,19 @@ test('unanswered continuation creates durable agent review; refresh is read-only
   const second = await gateway.requireNoProgressReview({
     taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
   });
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
-  assert.throws(() => env.store.recordFinal({
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.throws(() => env.store.tasks.recordTaskFinal({
     taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
     resultId: 'nonterminal-wrong', externalTurnId: 'turn-2',
     answerText: 'Pending review must persist', completeTask: false,
   }), /Invalid task transition/);
-  assert.equal(env.store.getTask('task-1', 'alice').pendingDecisionId, second!.decisionId);
-  env.store.recordFinal({
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').pendingDecisionId, second!.decisionId);
+  env.store.tasks.recordTaskFinal({
     taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
     resultId: 'result-final-1', externalTurnId: 'turn-2',
     answerText: 'Exact FINAL finally arrived', completeTask: true,
   });
-  const completed = env.store.getFullTask('task-1', 'alice');
+  const completed = env.store.tasks.readTaskAggregate('task-1', 'alice');
   assert.equal(completed.task.state, 'completed');
   assert.equal(completed.task.pendingDecisionId, null);
   assert.equal(completed.decisions.find(row => row.decisionId === second!.decisionId)?.status,
@@ -387,12 +387,12 @@ test('unanswered continuation creates durable agent review; refresh is read-only
 
 test('agent-first stall packet persists without a live browser context', async t => {
   const env = fixture(t);
-  env.store.planAttempt({
+  env.store.attempts.planAttempt({
     taskId: 'task-1', clientId: 'alice', attemptId: 'continue-lost-page',
     kind: 'continuation', turnKey: 'managed-lost-page', content: '계속',
   });
-  env.store.beginDispatch('task-1', 'alice', 'continue-lost-page');
-  env.store.acknowledgeAttempt({
+  env.store.attempts.reserveAttemptDispatch('task-1', 'alice', 'continue-lost-page');
+  env.store.attempts.acknowledgeAttempt({
     taskId: 'task-1', clientId: 'alice', attemptId: 'continue-lost-page',
     externalTurnId: 'turn-lost-page',
   });
@@ -407,7 +407,7 @@ test('agent-first stall packet persists without a live browser context', async t
   assert.equal(packet?.kind, 'recovery_choice');
   assert.equal(packet?.humanOnly, false);
   assert.deepEqual(packet?.options, []);
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'agent_input_required');
   assert.equal(gateway.get('task-1', 'alice')?.decisionId, packet?.decisionId);
   assert.equal(adapter.observed, 0);
   assert.equal(adapter.clicks, 0);
@@ -420,13 +420,13 @@ test('an unsendable approved Continue becomes a durable actionless agent packet 
     contract: 'approved_continuation_v1', approvalRef: 'verified-original',
     sourceAttemptId: 'initial-1', message: '계속', intervalMs: 1_200_000,
   });
-  env.store.scheduleTimer({
+  env.store.timers.scheduleTaskTimer({
     taskId: 'task-1', clientId: 'alice', timerId: 'continuation-due:initial-1',
     kind: 'continuation_due', dueAt: new Date(Date.now() - 10_000).toISOString(),
     contextJson: approval,
   });
-  assert.equal(env.store.claimDueTimers(new Date().toISOString(), 1, 'continuation_due').length, 1);
-  env.store.planAttempt({
+  assert.equal(env.store.timers.claimDueTaskTimers(new Date().toISOString(), 1, 'continuation_due').length, 1);
+  env.store.attempts.planAttempt({
     taskId: 'task-1', clientId: 'alice', attemptId: 'continue-planned',
     kind: 'continuation', turnKey: 'managed-unable-to-send', content: '계속',
   });
@@ -440,7 +440,7 @@ test('an unsendable approved Continue becomes a durable actionless agent packet 
   assert.equal(packet?.reason, 'managed-continuation-safe-send-unavailable');
   assert.equal(packet?.humanOnly, false);
   assert.deepEqual(packet?.options, []);
-  const full = env.store.getFullTask('task-1', 'alice');
+  const full = env.store.tasks.readTaskAggregate('task-1', 'alice');
   assert.equal(full.task.state, 'agent_input_required');
   assert.equal(full.attempts[1]!.state, 'planned');
   assert.equal(full.attempts[1]!.dispatchedAt, null);
@@ -451,7 +451,7 @@ test('an unsendable approved Continue becomes a durable actionless agent packet 
     requestId: 'read-only-after-unsafe-send',
   });
   assert.equal(refreshed.kind, 'refresh_required');
-  const resumed = env.store.getFullTask('task-1', 'alice');
+  const resumed = env.store.tasks.readTaskAggregate('task-1', 'alice');
   assert.equal(resumed.attempts[1]!.state, 'planned');
   assert.equal(resumed.task.state, 'working');
   const timer = resumed.timers.find(row =>
@@ -462,7 +462,7 @@ test('an unsendable approved Continue becomes a durable actionless agent packet 
     taskId: 'task-1', clientId: 'alice', decisionId: packet!.decisionId,
     requestId: 'read-only-after-unsafe-send',
   }), refreshed, 'same read-only request must not schedule another timer');
-  assert.equal(env.store.getFullTask('task-1', 'alice').attempts.length, 2);
+  assert.equal(env.store.tasks.readTaskAggregate('task-1', 'alice').attempts.length, 2);
 });
 
 test('an exact initial ACK with a foreign later turn requires agent judgment, not Continue', async t => {
@@ -474,8 +474,8 @@ test('an exact initial ACK with a foreign later turn requires agent judgment, no
   assert.equal(packet?.kind, 'recovery_choice');
   assert.equal(packet?.reason, 'managed-continuation-later-user-boundary');
   assert.deepEqual(packet?.options, []);
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
-  assert.equal(env.store.getFullTask('task-1', 'alice').attempts.length, 1);
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.readTaskAggregate('task-1', 'alice').attempts.length, 1);
   assert.equal(adapter.clicks, 0);
 });
 
@@ -491,7 +491,7 @@ test('agent question persists, rejects disabled options and consumes one exact t
   assert.equal(packet?.options.length, 1);
   assert.equal(packet?.humanOnly, false);
   assert.equal(packet?.evidenceBytes, Buffer.byteLength(JSON.stringify(packet)));
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'agent_input_required');
   assert.deepEqual(gateway.get('task-1', 'alice'), packet);
   assert.equal((await gateway.inspect({
     taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
@@ -505,11 +505,11 @@ test('agent question persists, rejects disabled options and consumes one exact t
   await assert.rejects(gateway.decide({ ...request, input: 'Decline' }),
     /enabled decision schema/);
   assert.equal(adapter.clicks, 0);
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'agent_input_required');
   assert.deepEqual(await gateway.decide({ ...request, input: 'Proceed' }),
     { kind: 'performed', effect: 'question_answered' });
   assert.equal(adapter.clicks, 1);
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'working');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'working');
   assert.deepEqual(await gateway.decide({ ...request, input: 'Proceed' }),
     { kind: 'performed', effect: 'question_answered' });
   assert.equal(adapter.clicks, 1);
@@ -584,7 +584,7 @@ test('permission remains read-only; human verification is agent-delivered, not f
   assert.equal(changed.kind, 'human_verification');
   assert.equal(changed.humanOnly, true);
   assert.deepEqual(changed.options, []);
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'human_input_required');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'human_input_required');
   assert.deepEqual(gateway.get('task-1', 'alice'), changed);
 });
 
@@ -632,14 +632,14 @@ test('transient unsubmitted Pro root page race can be refreshed read-only, not c
   const directory = mkdtempSync(join(tmpdir(), 'sessionplane-model-race-'));
   const db = SessionPlaneDatabase.open(join(directory, 'state.sqlite'));
   t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
-  const store = new TaskKernelRepository(db);
-  store.openProject({ projectId: 'project-race', projectKey: 'root-race',
+  const store = createKernelStores(db);
+  store.projects.openProject({ projectId: 'project-race', projectKey: 'root-race',
     displayName: 'Race', clientId: 'alice' });
-  store.openSlot({ projectId: 'project-race', slotId: 'main',
+  store.projects.openConversationSlot({ projectId: 'project-race', slotId: 'main',
     roleKey: 'Main', providerKey: 'fixture-provider', clientId: 'alice' });
-  store.startTask({ taskId: 'task-race', projectId: 'project-race', slotId: 'main',
+  store.tasks.createTask({ taskId: 'task-race', projectId: 'project-race', slotId: 'main',
     expectedSlotRevision: 1, clientId: 'alice', requestId: 'root-1', prompt: 'Only once' });
-  store.planAttempt({ taskId: 'task-race', clientId: 'alice',
+  store.attempts.planAttempt({ taskId: 'task-race', clientId: 'alice',
     attemptId: 'attempt-race', kind: 'initial', turnKey: 'root', content: 'Only once' });
   const context: SemanticTaskContext = {
     taskId: 'task-race', projectId: 'project-race', slotId: 'main', slotRevision: 1,
@@ -677,21 +677,21 @@ test('transient unsubmitted Pro root page race can be refreshed read-only, not c
   assert.equal(adapter.observed, previousObserved);
   await assert.rejects(gateway.refreshCurrent({ ...request, requestId: 'different-id' }),
     /different request/);
-  assert.equal(store.getFullTask('task-race', 'alice').attempts[0]?.state, 'planned');
+  assert.equal(store.tasks.readTaskAggregate('task-race', 'alice').attempts[0]?.state, 'planned');
 });
 
 test('transient unsubmitted Pro root Chat hydration can be refreshed without any provider POST', async t => {
   const directory = mkdtempSync(join(tmpdir(), 'sessionplane-model-race-'));
   const db = SessionPlaneDatabase.open(join(directory, 'state.sqlite'));
   t.after(() => { db.close(); rmSync(directory, { recursive: true, force: true }); });
-  const store = new TaskKernelRepository(db);
-  store.openProject({ projectId: 'project-race', projectKey: 'root-race',
+  const store = createKernelStores(db);
+  store.projects.openProject({ projectId: 'project-race', projectKey: 'root-race',
     displayName: 'Race', clientId: 'alice' });
-  store.openSlot({ projectId: 'project-race', slotId: 'main',
+  store.projects.openConversationSlot({ projectId: 'project-race', slotId: 'main',
     roleKey: 'Main', providerKey: 'fixture-provider', clientId: 'alice' });
-  store.startTask({ taskId: 'task-race', projectId: 'project-race', slotId: 'main',
+  store.tasks.createTask({ taskId: 'task-race', projectId: 'project-race', slotId: 'main',
     expectedSlotRevision: 1, clientId: 'alice', requestId: 'root-1', prompt: 'Only once' });
-  store.planAttempt({ taskId: 'task-race', clientId: 'alice',
+  store.attempts.planAttempt({ taskId: 'task-race', clientId: 'alice',
     attemptId: 'attempt-race', kind: 'initial', turnKey: 'root', content: 'Only once' });
   const context: SemanticTaskContext = {
     taskId: 'task-race', projectId: 'project-race', slotId: 'main', slotRevision: 1,
@@ -729,7 +729,7 @@ test('transient unsubmitted Pro root Chat hydration can be refreshed without any
   assert.equal(adapter.observed, previousObserved);
   await assert.rejects(gateway.refreshCurrent({ ...request, requestId: 'different-id' }),
     /different request/);
-  assert.equal(store.getFullTask('task-race', 'alice').attempts[0]?.state, 'planned');
+  assert.equal(store.tasks.readTaskAggregate('task-race', 'alice').attempts[0]?.state, 'planned');
 });
 
 test('bounded free-text and oversized evidence never broaden a provider action', async t => {
@@ -836,12 +836,12 @@ test('large candidate catalogs stay bounded, page fully, and later exact actions
 
 test('agent resume control resolves the same Task and triggers Core progress exactly once', async t => {
   const env = fixture(t);
-  env.store.planAttempt({
+  env.store.attempts.planAttempt({
     taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
     kind: 'continuation', turnKey: 'continue-1', content: '계속',
   });
-  env.store.beginDispatch('task-1', 'alice', 'continue-1');
-  env.store.acknowledgeAttempt({
+  env.store.attempts.reserveAttemptDispatch('task-1', 'alice', 'continue-1');
+  env.store.attempts.acknowledgeAttempt({
     taskId: 'task-1', clientId: 'alice', attemptId: 'continue-1',
     externalTurnId: 'continue-turn-1',
   });
@@ -858,8 +858,8 @@ test('agent resume control resolves the same Task and triggers Core progress exa
   };
   assert.deepEqual(await gateway.decideCurrent(selected),
     { kind: 'performed', effect: 'task_resumed' });
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'working');
-  assert.equal(env.store.getTask('task-1', 'alice').pendingDecisionId, null);
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'working');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').pendingDecisionId, null);
   assert.deepEqual(resumed, ['resume']);
   assert.deepEqual(await gateway.decideCurrent(selected),
     { kind: 'performed', effect: 'task_resumed' });
@@ -883,14 +883,14 @@ test('agent can escalate an exact decision to a durable human request', async t 
   assert.deepEqual(await gateway.decideCurrent(selection),
     { kind: 'performed', effect: 'human_assistance_requested' },
     'a lost response replays the atomic receipt without creating another human request');
-  const current = env.store.getTask('task-1', 'alice');
+  const current = env.store.tasks.getTask('task-1', 'alice');
   assert.equal(current.state, 'human_input_required');
   const human = gateway.get('task-1', 'alice')!;
   assert.equal(human.humanOnly, true);
   assert.equal(human.reason, 'agent-requested-human-assistance');
   assert.equal(human.options.length, 0);
   assert.ok(human.controls.some(control => control.purpose === 'reobserve'));
-  const full = env.store.getFullTask('task-1', 'alice');
+  const full = env.store.tasks.readTaskAggregate('task-1', 'alice');
   assert.equal(full.decisions.filter(row => row.audience === 'human').length, 1);
   const source = full.decisions.find(row => row.decisionId === packet.decisionId)!;
   assert.equal(source.status, 'resolved');
@@ -912,14 +912,14 @@ test('human assistance resolution is reobserved and resumes the same Task withou
     taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
   }))!;
   assert.equal(packet.humanOnly, true);
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'human_input_required');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'human_input_required');
   const reobserve = packet.controls.find(control => control.purpose === 'reobserve')!;
   adapter.mode = 'none';
   assert.deepEqual(await gateway.decideCurrent({
     taskId: 'task-1', clientId: 'alice', decisionId: packet.decisionId,
     requestId: 'human-action-completed', actionRef: reobserve.actionRef,
   }), { kind: 'refresh_required', packet: null });
-  const resumed = env.store.getFullTask('task-1', 'alice');
+  const resumed = env.store.tasks.readTaskAggregate('task-1', 'alice');
   assert.equal(resumed.task.state, 'working');
   assert.equal(resumed.task.pendingDecisionId, null);
   assert.equal(resumed.decisions.find(row => row.decisionId === packet.decisionId)?.status,
@@ -937,13 +937,13 @@ test('an exact terminal FINAL supersedes a human decision without waiting for a 
     taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
   }))!;
   assert.equal(packet.humanOnly, true);
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'human_input_required');
-  env.store.recordFinal({
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'human_input_required');
+  env.store.tasks.recordTaskFinal({
     taskId: 'task-1', clientId: 'alice', attemptId: 'initial-1',
     resultId: 'late-human-wait-final', externalTurnId: 'turn-1',
     answerText: 'The provider completed while a human decision was pending', completeTask: true,
   });
-  const completed = env.store.getFullTask('task-1', 'alice');
+  const completed = env.store.tasks.readTaskAggregate('task-1', 'alice');
   assert.equal(completed.task.state, 'completed');
   assert.equal(completed.task.pendingDecisionId, null);
   assert.equal(completed.decisions.find(row => row.decisionId === packet.decisionId)?.status,
@@ -998,7 +998,7 @@ test('replayed successful decision returns its exact durable effect after Core r
     { kind: 'performed', effect: 'question_answered' },
     'idempotent replay must return the original durable success, not a generic resolved marker');
   assert.equal(fresh.clicks, 0, 'replay cannot run a provider action again');
-  assert.equal(env.store.getFullTask('task-1', 'alice').events
+  assert.equal(env.store.tasks.readTaskAggregate('task-1', 'alice').events
     .filter(event => event.event.type === 'decision.outcome_recorded').length, 1);
 });
 
@@ -1014,7 +1014,7 @@ test('resolved decision with no effect receipt is uncertain, even after restart'
     decisionId: packet.decisionId, requestId: 'crashed-after-reservation',
     actionRef: packet.options[0]!.actionRef, input: 'Proceed',
   };
-  env.store.resolveDecision({
+  env.store.decisions.resolveDecision({
     taskId: request.taskId, clientId: request.clientId, decisionId: request.decisionId,
     resolutionJson: JSON.stringify({
       kind: 'semantic_action', requestId: request.requestId,
@@ -1028,7 +1028,7 @@ test('resolved decision with no effect receipt is uncertain, even after restart'
     { kind: 'uncertain', reason: 'decision-effect-receipt-pending' },
     'durable reservation is not proof that the provider acted');
   assert.equal(resumedAdapter.clicks, 0);
-  assert.equal(env.store.getFullTask('task-1', 'alice').decisions[0]?.actionConsumed, false);
+  assert.equal(env.store.tasks.readTaskAggregate('task-1', 'alice').decisions[0]?.actionConsumed, false);
 });
 
 test('concurrent matching decide calls execute once and never claim premature success', async t => {
@@ -1135,13 +1135,13 @@ test('a legacy pending Power packet requires fresh reobservation before another 
   });
   assert.equal(outcome.kind, 'uncertain');
   assert.equal(adapter.clicks, 1);
-  const stored = env.store.getFullTask('task-1', 'alice').decisions
+  const stored = env.store.tasks.readTaskAggregate('task-1', 'alice').decisions
     .find(row => row.decisionId === original.decisionId)!;
   const prior = JSON.parse(stored.contextJson);
   const legacyId = 'legacy-pending-before-reobserve-contract';
   prior.packet.decisionId = legacyId;
   delete prior.reconcilesUncertainReasoningEffort;
-  env.store.requireDecision({
+  env.store.decisions.createDecision({
     taskId: 'task-1', clientId: 'alice', decisionId: legacyId,
     audience: 'agent', contextJson: JSON.stringify(prior),
   });
@@ -1151,7 +1151,7 @@ test('a legacy pending Power packet requires fresh reobservation before another 
     requestId: 'different-power-attempt', actionRef: pending.options[0]!.actionRef,
   }), /current-state reobservation/i);
   assert.equal(adapter.clicks, 1);
-  assert.equal(env.store.getTask('task-1', 'alice').pendingDecisionId, legacyId);
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').pendingDecisionId, legacyId);
 
   adapter.throwAfterConsume = false;
   const refreshed = await gateway.refresh({
@@ -1186,7 +1186,7 @@ test('read-only refresh clears a stale model chooser after exact external select
   };
   assert.deepEqual(await gateway.refreshCurrent(input),
     { kind: 'refresh_required', packet: null });
-  const after = env.store.getFullTask('task-1', 'alice');
+  const after = env.store.tasks.readTaskAggregate('task-1', 'alice');
   assert.equal(after.task.pendingDecisionId, null);
   assert.equal(after.task.state, 'working');
   assert.equal(after.attempts[0]?.state, 'planned');
@@ -1194,7 +1194,7 @@ test('read-only refresh clears a stale model chooser after exact external select
   assert.deepEqual(await gateway.refreshCurrent(input),
     { kind: 'refresh_required', packet: null },
     'idempotent replay must not create another model packet when Pro is verified');
-  assert.equal(env.store.getFullTask('task-1', 'alice').decisions.length, 1);
+  assert.equal(env.store.tasks.readTaskAggregate('task-1', 'alice').decisions.length, 1);
 });
 
 test('historically uncertain Pro choice remains observable and exact external selection also reconciles it', async t => {
@@ -1244,7 +1244,7 @@ test('historically uncertain Pro choice remains observable and exact external se
     taskId: 'task-1', clientId: 'alice', decisionId: exactProPacket.decisionId,
     requestId: 'read-only-now-exact-pro', actionRef: exactProReobserve.actionRef,
   }), { kind: 'refresh_required', packet: null });
-  const after = env.store.getFullTask('task-1', 'alice');
+  const after = env.store.tasks.readTaskAggregate('task-1', 'alice');
   assert.equal(after.task.pendingDecisionId, null);
   assert.equal(after.task.state, 'working');
   assert.equal(after.attempts[0]?.state, 'planned');
@@ -1288,7 +1288,7 @@ test('decision refuses a mismatched attempt before consuming its one-shot action
     actionRef: packet.options[0]!.actionRef, input: 'Proceed',
   }), /attempt/i);
   assert.equal(adapter.clicks, 0);
-  assert.equal(env.store.getTask('task-1', 'alice').state, 'agent_input_required');
+  assert.equal(env.store.tasks.getTask('task-1', 'alice').state, 'agent_input_required');
 });
 
 
@@ -1313,4 +1313,91 @@ test('model intent appears in bounded agent packet and survives explicit refresh
   assert.equal(next.requestedModel, 'Pro',
     'refresh must not accidentally drop the requested model');
   assert.equal(adapter.clicks, 0, 'model inspection does not click');
+});
+
+
+test('pending historical v1 Decision cannot execute its old action and refreshes into v2', async t => {
+  const env = fixture(t);
+  const adapter = new FakeSemanticAdapter(env.store);
+  const gateway = env.getGateway(adapter);
+  const historic = JSON.parse(readFileSync(
+    new URL('../fixtures/decision-envelope-v1.json', import.meta.url), 'utf8'));
+  historic.context = {
+    ...historic.context, projectId: 'project', slotId: 'main',
+    slotRevision: 1, taskId: 'task-1', providerConversationId: 'conv-1',
+  };
+  historic.attemptId = 'initial-1';
+  historic.packet = {
+    ...historic.packet, taskId: 'task-1',
+    decisionId: 'historical-pending-v1', requestedModel: 'Pro',
+  };
+  const original = JSON.stringify(historic);
+  env.store.decisions.createDecision({
+    taskId: 'task-1', clientId: 'alice', decisionId: 'historical-pending-v1',
+    audience: 'agent', contextJson: original,
+  });
+  const projected = gateway.get('task-1', 'alice');
+  assert.equal(projected?.kind, 'recovery_choice');
+  assert.equal(projected?.options.length, 0);
+  assert.equal(projected?.reason, 'historical-decision-read-only-refresh-required');
+  await assert.rejects(gateway.decideCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: 'historical-pending-v1',
+    requestId: 'legacy-replay', actionRef: 'old-action',
+  }), /Historical pending action is read-only/);
+  assert.equal(adapter.clicks, 0);
+  const resumed = await gateway.refreshCurrent({
+    taskId: 'task-1', clientId: 'alice',
+    decisionId: 'historical-pending-v1', requestId: 'legacy-refresh-1',
+  });
+  assert.equal(resumed.kind, 'refresh_required');
+  const history = env.store.tasks.readTaskAggregate('task-1', 'alice');
+  const old = history.decisions.find(row => row.decisionId === 'historical-pending-v1');
+  assert.equal(old?.contextJson, original, 'historic JSON is byte-for-byte retained');
+  assert.equal(old?.status, 'resolved');
+  assert.equal(adapter.clicks, 0);
+  const next = history.decisions.find(row => row.status === 'pending');
+  assert.ok(next, 'same Task gets one reobserved Decision');
+  const newEnvelope = JSON.parse(next.contextJson);
+  assert.equal(newEnvelope.schemaVersion, 2);
+  assert.equal(Object.hasOwn(newEnvelope, 'actionRef'), false);
+  assert.equal(Object.hasOwn(newEnvelope, 'purpose'), false);
+  assert.equal(history.decisions.length, 2);
+});
+
+
+test('resolved historical v1 receipt replays exactly without another provider effect', async t => {
+  const env = fixture(t);
+  const adapter = new FakeSemanticAdapter(env.store);
+  const gateway = env.getGateway(adapter);
+  const historic = JSON.parse(readFileSync(
+    new URL('../fixtures/decision-envelope-v1.json', import.meta.url), 'utf8'));
+  historic.context = { ...historic.context, projectId: 'project', slotId: 'main',
+    slotRevision: 1, taskId: 'task-1', providerConversationId: 'conv-1' };
+  historic.attemptId = 'initial-1';
+  historic.packet = { ...historic.packet, taskId: 'task-1',
+    decisionId: 'historical-resolved-v1' };
+  const original = JSON.stringify(historic);
+  env.store.decisions.createDecision({ taskId: 'task-1', clientId: 'alice',
+    decisionId: 'historical-resolved-v1', audience: 'agent', contextJson: original });
+  env.store.decisions.resolveDecision({ taskId: 'task-1', clientId: 'alice',
+    decisionId: 'historical-resolved-v1',
+    resolutionJson: JSON.stringify({
+      kind: 'semantic_action', requestId: 'historic-request-1',
+      actionRef: 'old-action', input: null,
+      outcome: { kind: 'performed', effect: 'reasoning_effort_selected' },
+    }),
+  });
+  assert.equal(env.store.decisions.consumeDecisionAction('task-1', 'alice',
+    'historical-resolved-v1'), true);
+  assert.deepEqual(await gateway.decideCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: 'historical-resolved-v1',
+    requestId: 'historic-request-1', actionRef: 'old-action',
+  }), { kind: 'performed', effect: 'reasoning_effort_selected' });
+  await assert.rejects(gateway.decideCurrent({
+    taskId: 'task-1', clientId: 'alice', decisionId: 'historical-resolved-v1',
+    requestId: 'new-request', actionRef: 'old-action',
+  }), /different request/);
+  assert.equal(adapter.clicks, 0, 'replay consumes no new provider execution');
+  const actual = env.store.tasks.readTaskAggregate('task-1', 'alice').decisions[0];
+  assert.equal(actual?.contextJson, original);
 });

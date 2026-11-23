@@ -110,7 +110,7 @@ test('MCP direct project/task calls share the same Core and never schedule a cli
     assert.equal(first.isError, false);
     assert.equal(first.structuredContent.taskId, replay.structuredContent.taskId);
     const taskId = String(first.structuredContent.taskId);
-    assert.equal(core.semanticTaskRepository.getFullTask(taskId, clientId).attempts.length, 1);
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(taskId, clientId).attempts.length, 1);
     const read = await call('sessionplane_task_get', { clientId, taskId });
     assert.equal(read.structuredContent.state, 'working');
     assert.equal((read.structuredContent.submission as { attempted: boolean }).attempted, false);
@@ -118,12 +118,12 @@ test('MCP direct project/task calls share the same Core and never schedule a cli
       clientId, taskId, afterRevision: read.structuredContent.revision, waitMs: 0,
     });
     assert.equal(wait.structuredContent.revision, read.structuredContent.revision);
-    assert.equal(core.semanticTaskRepository.getFullTask(taskId, clientId).attempts.length, 1);
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(taskId, clientId).attempts.length, 1);
     const cancel = await call('sessionplane_task_cancel', {
       clientId, taskId, requestId: 'cancel-once',
     });
     assert.equal(cancel.structuredContent.state, 'canceled');
-    assert.equal(core.semanticTaskRepository.getFullTask(taskId, clientId).attempts.length, 1);
+    assert.equal(core.semanticTaskRepository.tasks.readTaskAggregate(taskId, clientId).attempts.length, 1);
   } finally {
     await core.close();
     rmSync(root, { recursive: true, force: true });

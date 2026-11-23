@@ -11,7 +11,7 @@ const candidate = { version: '0.4.93', sourceCommit: sha, sourceTree: tree, sour
 const health = {
   version: '0.4.93', sourceCommit: sha, sourceTree: tree, sourceState: 'clean',
   browser: { state: 'ready', ownership: 'spawned', debuggingPort: 43865 },
-  database: { schemaVersion: 16 }, // matching dev candidate; installed v15 must be held
+  database: { schemaVersion: 17 }, // matching dev candidate; installed v15 must be held
 };
 const targets = [
   { type: 'page', url: 'https://chatgpt.com/' },
@@ -48,7 +48,7 @@ test('live preflight rejects a running older schema even when Chrome and Pro are
     'The machine-readable report must not reveal existing account conversation IDs');
 });
 
-test('released schema-15 Core cannot pass schema-16 candidate preflight without handover', () => {
+test('released schema-15 Core cannot pass schema-17 candidate preflight without handover', () => {
   const report = evaluateInstalledCandidate({
     health: { ...health, database: { schemaVersion: 15 } },
     pages: [{ state: 'owned' }], targets,
@@ -57,7 +57,7 @@ test('released schema-15 Core cannot pass schema-16 candidate preflight without 
     candidate,
   });
   assert.equal(report.installed.schemaVersion, 15);
-  assert.equal(report.candidate.schemaVersion, 16);
+  assert.equal(report.candidate.schemaVersion, 17);
   assert.equal(report.outcome.candidateMatchesLiveCore, false);
   assert.deepEqual(report.outcome.blockers,
     ['installed_core_schema_differs_from_candidate']);

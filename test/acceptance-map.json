@@ -1,0 +1,233 @@
+{
+  "E01": {
+    "invariant": "duplicate/concurrent project.open",
+    "evidence": "L1+L2",
+    "test": "test/integration/public-task-rpc.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:E01"
+  },
+  "E02": {
+    "invariant": "one Main request has one Attempt, exact ACK, and descendant FINAL",
+    "evidence": "L2+L3-required",
+    "test": "test/integration/public-task-rpc.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E02"
+  },
+  "E03": {
+    "invariant": "client exit after ACK preserves observation, policy, decision, and next due",
+    "evidence": "L1+L3-required",
+    "test": "test/integration/public-cli.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E03"
+  },
+  "E04": {
+    "invariant": "Core/browser/host replacement resumes the exact Task without original replay",
+    "evidence": "L2+approved-L3/L4-required",
+    "test": "test/integration/live-task-acceptance.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E04"
+  },
+  "E05": {
+    "invariant": "four background projects progress without changing human foreground",
+    "evidence": "L2+L3-required",
+    "test": "test/browser/four-project-background.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E05"
+  },
+  "E06": {
+    "invariant": "freeze/discard/crash/load failure is recovered or typed without cross-Task damage",
+    "evidence": "L2",
+    "test": "test/unit/owned-page-runtime.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:E06"
+  },
+  "E07": {
+    "invariant": "approved real twenty-minute no-FINAL interval sends one literal 계속 Attempt",
+    "evidence": "L2-clock+real-time-L3-required",
+    "test": "test/unit/managed-continuation.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E07"
+  },
+  "E08": {
+    "invariant": "due while streaming records no-send and retains the next slot",
+    "evidence": "L2+natural-L3-required",
+    "test": "test/unit/managed-continuation.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E08"
+  },
+  "E09": {
+    "invariant": "ambiguous submit or stop stays uncertain with zero automatic replay",
+    "evidence": "L1+L2",
+    "test": "test/unit/durable-task-kernel.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:E09"
+  },
+  "E10": {
+    "invariant": "model choice or provider question consumes the current exact action once",
+    "evidence": "L2+L3-required",
+    "test": "test/unit/semantic-decision-gateway.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E10"
+  },
+  "E11": {
+    "invariant": "human-only barrier reaches the agent before concrete human action and reobservation",
+    "evidence": "L2+natural-L3-required",
+    "test": "test/unit/semantic-decision-gateway.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E11"
+  },
+  "E12": {
+    "invariant": "wrapper, testid, or UI drift yields fresh candidates or typed unsupported",
+    "evidence": "L2",
+    "test": "test/browser/chatgpt-semantic-adapter.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:E12"
+  },
+  "E13": {
+    "invariant": "canonical backend FINAL recovers when the DOM is unavailable",
+    "evidence": "L2+natural-L3-required",
+    "test": "test/unit/backend-recovery.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E13"
+  },
+  "E14": {
+    "invariant": "operation-scoped 429 honors Retry-After without creating send authority",
+    "evidence": "L2+natural-L3-required",
+    "test": "test/unit/backend-recovery.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E14"
+  },
+  "E15": {
+    "invariant": "one Task completion leaves another waiting Task's observer, timer, and approval intact",
+    "evidence": "L1+L2+L3-required",
+    "test": "test/integration/public-second-slot.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E15"
+  },
+  "E16": {
+    "invariant": "stored FINAL and display mount remain separate facts",
+    "evidence": "L2",
+    "test": "test/browser/chatgpt-semantic-adapter.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:E16"
+  },
+  "E17": {
+    "invariant": "cancellation before, during, and after submit preserves exact outcome and late evidence",
+    "evidence": "L1+L2",
+    "test": "test/integration/public-task-rpc.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:E17"
+  },
+  "E18": {
+    "invariant": "three sequential questions share one Main without answer mixing",
+    "evidence": "L2+L3-required",
+    "test": "test/integration/public-task-rpc.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E18"
+  },
+  "E19": {
+    "invariant": "offline decision packet persists and stale refs refresh after reconnect",
+    "evidence": "L1+L2",
+    "test": "test/unit/semantic-decision-gateway.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:E19"
+  },
+  "E20": {
+    "invariant": "large decision evidence and action catalogue page completely with stable identity",
+    "evidence": "L1+L2",
+    "test": "test/unit/semantic-decision-gateway.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:E20"
+  },
+  "E21": {
+    "invariant": "exact delegated permission grant or decline executes once and never broadens scope",
+    "evidence": "L2+approved-L3-required",
+    "test": "test/browser/chatgpt-semantic-adapter.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E21"
+  },
+  "E22": {
+    "invariant": "explicit no-progress review exposes history and resumes the next exact due",
+    "evidence": "L1+L2",
+    "test": "test/unit/semantic-decision-gateway.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:E22"
+  },
+  "E23": {
+    "invariant": "SSH transport uses the same Core, Task, and request identity",
+    "evidence": "L2",
+    "test": "test/integration/public-remote-ssh.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:E23"
+  },
+  "E24": {
+    "invariant": "package and install identity agree across source, tree, digest, receipt, and health",
+    "evidence": "L4-required",
+    "test": "test/integration/live-candidate-preflight.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "sessionplane-acceptance:E24"
+  },
+  "E25": {
+    "invariant": "SQLite schema migration and rollback rehearsal preserves durable state",
+    "evidence": "L2+L4-required",
+    "test": "test/integration/offline-state-rehearsal.test.ts",
+    "owner": "test-and-authorized-operations",
+    "source": "task-extension:T-20261123033056Z-cc5867b3:E25"
+  },
+  "A01": {
+    "invariant": "only current enabled provider choices and effects are shown",
+    "evidence": "L2",
+    "test": "test/unit/chatgpt-action-catalog.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:A01"
+  },
+  "A02": {
+    "invariant": "relevant context and complete pageable choices are available without transcript dumping",
+    "evidence": "L2",
+    "test": "test/unit/semantic-decision-gateway.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:A02"
+  },
+  "A03": {
+    "invariant": "permission app, tool, material arguments, and delegation scope are preserved",
+    "evidence": "L2",
+    "test": "test/browser/chatgpt-semantic-adapter.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:A03"
+  },
+  "A04": {
+    "invariant": "stale or consumed action has zero mutation and matching replay returns its receipt",
+    "evidence": "L2",
+    "test": "test/unit/semantic-decision-gateway.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:A04"
+  },
+  "A05": {
+    "invariant": "raw DOM or full screenshot is not default evidence; bounded expansion is redacted",
+    "evidence": "L2",
+    "test": "test/unit/semantic-decision-gateway.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:A05"
+  },
+  "A06": {
+    "invariant": "human-only and unresolved cases reach the upstream agent with concrete evidence",
+    "evidence": "L2",
+    "test": "test/unit/semantic-decision-gateway.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:A06"
+  },
+  "A07": {
+    "invariant": "result text remains complete and hashable beyond decision-preview limits",
+    "evidence": "L2",
+    "test": "test/unit/exact-final.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:A07"
+  },
+  "A08": {
+    "invariant": "provider text and page content cannot create authority or override contracts",
+    "evidence": "L2",
+    "test": "test/unit/chatgpt-action-catalog.test.ts",
+    "owner": "test",
+    "source": "sessionplane-acceptance:A08"
+  }
+}

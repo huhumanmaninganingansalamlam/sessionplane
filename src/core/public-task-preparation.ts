@@ -4,7 +4,7 @@ import type { BrowserOwner } from '../browser/browser-owner.ts';
 import type { PageRegistry } from '../browser/page-registry.ts';
 import type { ActorScheduler } from '../scheduler/actor-scheduler.ts';
 import type { PageBindingRepository } from '../storage/page-binding-repository.ts';
-import type { TaskKernelRepository } from '../storage/task-kernel-repository.ts';
+import type { KernelStores } from '../storage/kernel/create-kernel-stores.ts';
 import type { TeamDirectory } from './team-directory.ts';
 
 export interface PreparationReport {
@@ -21,7 +21,7 @@ export interface PreparationReport {
  * browser context, actor, task state machine, or persistent data store.
  */
 export class PublicTaskPreparationService {
-  readonly #repository: TaskKernelRepository;
+  readonly #repository: Pick<KernelStores, 'projects' | 'tasks' | 'attempts' | 'scans'>;
   readonly #teams: TeamDirectory;
   readonly #scheduler: ActorScheduler;
   readonly #browserOwner: BrowserOwner | null;
@@ -30,7 +30,7 @@ export class PublicTaskPreparationService {
   readonly #chatgptUrl: string;
 
   constructor(input: {
-    repository: TaskKernelRepository;
+    repository: Pick<KernelStores, 'projects' | 'tasks' | 'attempts' | 'scans'>;
     teams: TeamDirectory;
     scheduler: ActorScheduler;
     browserOwner: BrowserOwner | null;
@@ -54,21 +54,21 @@ export class PublicTaskPreparationService {
     }
     // An existing canonical Main requires a safely owned page just as a new
     // root does. Alternate preparation classes to avoid starving either one.
-    const preferBoundTask = this.#repository.claimPublicPreparationPrefersBound();
+    const preferBoundTask = this.#repository.scans.claimPreparationPrefersBound();
     if (preferBoundTask) {
       const bound = await this.#prepareBoundConversation();
       if (bound.kind !== 'none') return bound;
     }
     // The root cursor survives Core restart. Selecting one candidate does
     // not allocate a tab, POST or authorize a provider action.
-    const pending = this.#repository.listPendingPublicPreparations(1)[0];
+    const pending = this.#repository.scans.scanPendingPreparations(1)[0];
     if (!pending) return await this.#prepareBoundConversation();
     if (pending.providerKey !== 'chatgpt') {
       return { kind: 'waiting', taskId: pending.taskId };
     }
     const { taskId, clientId, attemptId } = pending;
-    const full = this.#repository.getFullTask(taskId, clientId);
-    const slot = this.#repository.getSlot(full.task.projectId, full.task.slotId, clientId);
+    const full = this.#repository.tasks.readTaskAggregate(taskId, clientId);
+    const slot = this.#repository.projects.getConversationSlot(full.task.projectId, full.task.slotId, clientId);
     if (slot.providerConversationId !== null || slot.activeTaskId !== taskId ||
         full.task.cancelRequested || full.task.state !== 'working' ||
         !full.attempts.some(attempt => attempt.attemptId === attemptId &&
@@ -110,7 +110,7 @@ export class PublicTaskPreparationService {
       if (retained.length === 1) {
         pageKey = retained[0]!.pageKey;
       } else {
-        const current = this.#repository.getTask(taskId, clientId);
+        const current = this.#repository.tasks.getTask(taskId, clientId);
         if (current.state !== 'working' || current.cancelRequested) {
           return { kind: 'waiting', taskId };
         }
@@ -131,6 +131,7 @@ export class PublicTaskPreparationService {
       await this.#scheduler.updateGeneration(session.sessionId, session.generation,
         { pageKey }, 'public.task.root-page-reserved');
     }
+    if (pageKey === null) return { kind: 'waiting', taskId };
     const bound = this.#pages.refreshPage(pageKey);
     if (bound.sessionId !== session.sessionId ||
         bound.generation !== session.generation ||
@@ -172,10 +173,10 @@ export class PublicTaskPreparationService {
    * A live foreign/ambiguous target is held rather than adopted or navigated.
    */
   async #prepareBoundConversation(): Promise<PreparationReport> {
-    for (const planned of this.#repository.listPendingPublicBoundPreparations(8)) {
+    for (const planned of this.#repository.scans.scanPendingBoundPreparations(8)) {
       const { taskId, clientId, attemptId } = planned;
-      const task = this.#repository.getTask(taskId, clientId);
-      const slot = this.#repository.getSlot(task.projectId, task.slotId, clientId);
+      const task = this.#repository.tasks.getTask(taskId, clientId);
+      const slot = this.#repository.projects.getConversationSlot(task.projectId, task.slotId, clientId);
       if (slot.providerKey !== 'chatgpt' || slot.providerConversationId === null) continue;
       if (slot.activeTaskId !== taskId || slot.revision !== task.slotRevision ||
           task.state !== 'working' || task.cancelRequested) {
@@ -236,7 +237,7 @@ export class PublicTaskPreparationService {
       }
       const browserOwner = this.#browserOwner;
       if (browserOwner === null) return { kind: 'waiting', taskId };
-      const latest = this.#repository.getFullTask(taskId, clientId);
+      const latest = this.#repository.tasks.readTaskAggregate(taskId, clientId);
       if (latest.task.cancelRequested || latest.task.state !== 'working' ||
           !latest.attempts.some(attempt => attempt.attemptId === attemptId &&
             attempt.kind === 'initial' && attempt.state === 'planned')) {
@@ -254,8 +255,8 @@ export class PublicTaskPreparationService {
             candidates.length !== 1 || candidates[0]!.pageKey !== page.pageKey) {
           return { kind: 'waiting', taskId };
         }
-        const currentTask = this.#repository.getTask(taskId, clientId);
-        const currentSlot = this.#repository.getSlot(task.projectId, task.slotId, clientId);
+        const currentTask = this.#repository.tasks.getTask(taskId, clientId);
+        const currentSlot = this.#repository.projects.getConversationSlot(task.projectId, task.slotId, clientId);
         const currentSession = this.#teams.getCurrentSession(task.projectId, task.slotId);
         if (currentTask.state !== 'working' || currentTask.cancelRequested ||
             currentSlot.activeTaskId !== taskId ||

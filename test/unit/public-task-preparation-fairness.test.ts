@@ -10,7 +10,7 @@ import { PublicTaskPreparationService } from '../../src/core/public-task-prepara
 import type { TeamDirectory } from '../../src/core/team-directory.ts';
 import type { ActorScheduler } from '../../src/scheduler/actor-scheduler.ts';
 import { SessionPlaneDatabase } from '../../src/storage/database.ts';
-import { TaskKernelRepository } from '../../src/storage/task-kernel-repository.ts';
+import { createKernelStores, type KernelStores } from '../../src/storage/kernel/create-kernel-stores.ts';
 
 test('public root preparation visits every waiting Task after repeated Core/SQLite restart', async t => {
   const dir = mkdtempSync(join(tmpdir(), 'sp-public-prepare-restart-'));
@@ -20,16 +20,16 @@ test('public root preparation visits every waiting Task after repeated Core/SQLi
     'prepared-' + String(index).padStart(2, '0'));
   const db = SessionPlaneDatabase.open(file);
   try {
-    const store = new TaskKernelRepository(db);
-    store.openProject({ projectId: 'project', projectKey: 'prepare.fixture',
+    const store = createKernelStores(db);
+    store.projects.openProject({ projectId: 'project', projectKey: 'prepare.fixture',
       displayName: 'Synthetic preparation', clientId: 'agent' });
     for (const taskId of ids) {
-      store.openSlot({ projectId: 'project', clientId: 'agent',
+      store.projects.openConversationSlot({ projectId: 'project', clientId: 'agent',
         slotId: taskId, roleKey: taskId, providerKey: 'synthetic-not-chatgpt' });
-      store.startTask({ taskId, projectId: 'project', slotId: taskId,
+      store.tasks.createTask({ taskId, projectId: 'project', slotId: taskId,
         expectedSlotRevision: 1, clientId: 'agent',
         requestId: 'start-' + taskId, prompt: 'fixture-' + taskId });
-      store.planAttempt({ taskId, clientId: 'agent',
+      store.attempts.planAttempt({ taskId, clientId: 'agent',
         attemptId: 'attempt-' + taskId, kind: 'initial', turnKey: 'root',
         content: 'fixture-' + taskId });
       db.raw.prepare(
@@ -46,7 +46,7 @@ test('public root preparation visits every waiting Task after repeated Core/SQLi
     const reopened = SessionPlaneDatabase.open(file);
     try {
       const service = new PublicTaskPreparationService({
-        repository: new TaskKernelRepository(reopened),
+        repository: createKernelStores(reopened),
         teams: {} as TeamDirectory,
         scheduler: {} as ActorScheduler,
         // Provider key is deliberately unsupported; no browser call, target,
@@ -71,20 +71,20 @@ test('root/bound preparation priority and bounded conversation cursor survive re
   const ids = Array.from({ length: 12 }, (_, index) =>
     'bound-' + String(index).padStart(2, '0'));
   let db = SessionPlaneDatabase.open(file);
-  let store = new TaskKernelRepository(db);
+  let store = createKernelStores(db);
   try {
-    store.openProject({ projectId: 'project', projectKey: 'bound.fixture',
+    store.projects.openProject({ projectId: 'project', projectKey: 'bound.fixture',
       displayName: 'Synthetic bound preparations', clientId: 'agent' });
     for (const taskId of ids) {
-      store.openSlot({ projectId: 'project', clientId: 'agent',
+      store.projects.openConversationSlot({ projectId: 'project', clientId: 'agent',
         slotId: taskId, roleKey: taskId, providerKey: 'chatgpt' });
-      store.startTask({ taskId, projectId: 'project', slotId: taskId,
+      store.tasks.createTask({ taskId, projectId: 'project', slotId: taskId,
         expectedSlotRevision: 1, clientId: 'agent',
         requestId: 'start-' + taskId, prompt: 'fixture-' + taskId });
-      store.observeConversation({ projectId: 'project', slotId: taskId,
+      store.projects.bindObservedConversation({ projectId: 'project', slotId: taskId,
         expectedRevision: 1, clientId: 'agent', taskId,
         providerConversationId: 'conversation-' + taskId });
-      store.planAttempt({ taskId, clientId: 'agent',
+      store.attempts.planAttempt({ taskId, clientId: 'agent',
         attemptId: 'attempt-' + taskId, kind: 'initial', turnKey: 'root',
         content: 'fixture-' + taskId });
       db.raw.prepare(
@@ -94,21 +94,21 @@ test('root/bound preparation priority and bounded conversation cursor survive re
       ).run(taskId, JSON.stringify({ enabled: false }),
         'synthetic-policy-hash', 1, '2026-11-12T00:00:00.000Z');
     }
-    const before = ids.map(taskId => store.getTask(taskId, 'agent').revision);
-    assert.equal(store.claimPublicPreparationPrefersBound(), false);
-    assert.deepEqual(store.listPendingPublicInitials(8).map(row => row.taskId), ids.slice(0, 8));
-    assert.deepEqual(store.listPendingPublicBoundPreparations(8).map(row => row.taskId),
+    const before = ids.map(taskId => store.tasks.getTask(taskId, 'agent').revision);
+    assert.equal(store.scans.claimPreparationPrefersBound(), false);
+    assert.deepEqual(store.scans.scanPendingInitials(8).map(row => row.taskId), ids.slice(0, 8));
+    assert.deepEqual(store.scans.scanPendingBoundPreparations(8).map(row => row.taskId),
       ids.slice(0, 8), 'the bound preparation scanner must have its own cursor');
 
     db.close();
     db = SessionPlaneDatabase.open(file);
-    store = new TaskKernelRepository(db);
-    assert.equal(store.claimPublicPreparationPrefersBound(), true);
+    store = createKernelStores(db);
+    assert.equal(store.scans.claimPreparationPrefersBound(), true);
     const wrapped = [...ids.slice(8), ...ids.slice(0, 4)];
-    assert.deepEqual(store.listPendingPublicInitials(8).map(row => row.taskId), wrapped);
-    assert.deepEqual(store.listPendingPublicBoundPreparations(8).map(row => row.taskId), wrapped);
-    assert.equal(store.claimPublicPreparationPrefersBound(), false);
-    assert.deepEqual(ids.map(taskId => store.getTask(taskId, 'agent').revision), before,
+    assert.deepEqual(store.scans.scanPendingInitials(8).map(row => row.taskId), wrapped);
+    assert.deepEqual(store.scans.scanPendingBoundPreparations(8).map(row => row.taskId), wrapped);
+    assert.equal(store.scans.claimPreparationPrefersBound(), false);
+    assert.deepEqual(ids.map(taskId => store.tasks.getTask(taskId, 'agent').revision), before,
       'preparation ordering cannot publish a provider action or Task event');
     const cursorKinds = (db.raw.prepare(
       'SELECT scan_kind AS kind FROM kernel_public_scan_cursors ORDER BY scan_kind',

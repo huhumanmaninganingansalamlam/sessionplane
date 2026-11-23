@@ -95,14 +95,14 @@ test('four public projects prepare four independent background Main roots withou
       assert.equal(binding.expectedConversationId, null);
       assert.equal(binding.url, 'https://chatgpt.com/');
       assert.ok(binding.targetId);
-      const full = core.semanticTaskRepository.getFullTask(taskId, clientId);
+      const full = core.semanticTaskRepository.tasks.readTaskAggregate(taskId, clientId);
       assert.equal(full.attempts.length, 1);
       assert.equal(full.attempts[0]!.state, 'planned');
       assert.equal(full.results.length, 0);
       assert.equal(full.task.state, 'agent_input_required');
       assert.equal(core.semanticDecisionGateway.get(taskId, clientId)?.kind, 'model_choice',
         'An Instant model must not be silently substituted for required Pro');
-      assert.equal(core.semanticTaskRepository.getSlot(projectId, 'main', clientId)
+      assert.equal(core.semanticTaskRepository.projects.getConversationSlot(projectId, 'main', clientId)
         .providerConversationId, null);
       projects.push({ projectId, taskId, sessionId: session.sessionId,
         pageKey: session.pageKey, targetId: binding.targetId,
@@ -289,7 +289,7 @@ test('four independent background Main projects each submit once, bind their own
       virtualNow += 5_001;
       await runtime.managedContinuation.tick();
       completed = cases.every(({ taskId }) =>
-        core.semanticTaskRepository.getTask(taskId, clientId).state === 'completed');
+        core.semanticTaskRepository.tasks.getTask(taskId, clientId).state === 'completed');
       if (completed) break;
     }
     assert.equal(completed, true,

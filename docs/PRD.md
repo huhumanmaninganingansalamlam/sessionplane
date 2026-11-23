@@ -4,6 +4,11 @@ Status: current product contract. The source version comes from `package.json`;
 the installed Core version, source identity, and browser state come from
 `sessplane health --json`. A Git checkout is not evidence of an installed release.
 
+In the canonical workspace, the parent `docs/PRD.md` is the private authority
+index and `docs/tasks/**` is the editable work ledger. This repository
+document defines product behavior only and does not copy Task status,
+handoffs or completion receipts.
+
 ## Product goal
 
 SessionPlane owns the durable lifetime of one project conversation Task. It

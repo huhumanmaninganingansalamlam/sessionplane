@@ -17,7 +17,7 @@ export function pruneBrowserMetrics(profileDir: string, enabled: boolean, browse
       try { process.kill(pid, 0); continue; } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') continue; }
       const file = path.join(root, name);
       try { const stat = lstatSync(file); if (stat.isFile()) retired.push({ file, time: stat.mtimeMs, ino: stat.ino, dev: stat.dev }); }
-      catch { /* Concurrent Chromium cleanup. */ }
+      catch { continue; }
     }
   }
   retired.sort((a, b) => b.time - a.time);
@@ -27,13 +27,13 @@ export function pruneBrowserMetrics(profileDir: string, enabled: boolean, browse
     try {
       const fresh = lstatSync(item.file);
       if (fresh.isFile() && fresh.ino === item.ino && fresh.dev === item.dev) { unlinkSync(item.file); removed.push(item.file); }
-    } catch { /* Preserve uncertain ownership or a concurrent cleanup. */ }
+    } catch { continue; }
   }
   // Chromium may create one spare even when histogram recording is disabled.
   // Remove it only after our exact owned browser has actually exited.
   if (browserExited && !enabled) {
     const spare = path.join(profileDir, 'BrowserMetrics-spare.pma');
-    try { if (lstatSync(spare).isFile()) { unlinkSync(spare); removed.push(spare); } } catch { /* Absent or inaccessible. */ }
+    try { if (lstatSync(spare).isFile()) { unlinkSync(spare); removed.push(spare); } } catch { return { removedCount: removed.length }; }
   }
   return { removedCount: removed.length };
 }

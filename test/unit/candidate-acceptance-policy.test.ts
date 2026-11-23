@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { candidateGatePlan, candidateGateFailureSummary, parseCandidateAcceptanceArgs } from '../../scripts/candidate-acceptance-policy.mjs';
 
-test('candidate gate plan uses eight bounded stage-specific budgets', () => {
+test('candidate gate plan uses nine bounded stage-specific budgets', () => {
   const plan = candidateGatePlan('/exact/node');
-  assert.equal(plan.length, 8);
-  assert.equal(new Set(plan.map(step => step.name)).size, 8);
+  assert.equal(plan.length, 9);
+  assert.equal(new Set(plan.map(step => step.name)).size, 9);
   for (const step of plan) {
     assert.ok(Number.isSafeInteger(step.timeoutMs));
     assert.ok(step.timeoutMs >= 120_000 && step.timeoutMs <= 480_000);
