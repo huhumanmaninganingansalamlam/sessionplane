@@ -154,6 +154,6 @@ export async function inspectComposerRadixControls(
       }
       return { ...initial, status: 'unsupported' as const,
         reason: 'composer-model-view-ambiguous' };
-    
+
   }, input);
 }

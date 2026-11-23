@@ -5,7 +5,7 @@ import { CONTINUATION_INTERVAL_MS, CONTINUATION_READ_RETRY_MIN_MS,
   parseContinuationPolicy, nextContinuationDueAt } from './continuation-policy.ts';
 import type { ContinuationPolicy } from './continuation-policy.ts';
 
-export function upcomingDueRead(services: ContinuationServices, 
+export function upcomingDueRead(services: ContinuationServices,
     taskId: string, clientId: string, now: string,
   ): { attemptId: string; dueAt: string } | null {
     const nowMs = Date.parse(now);
@@ -33,7 +33,7 @@ export function upcomingDueRead(services: ContinuationServices,
     }
   }
 
-export function armFromAck(services: ContinuationServices, 
+export function armFromAck(services: ContinuationServices,
     full: FullTaskRecord, clientId: string, source: AttemptRecord,
     approved: ContinuationPolicy,
   ): TimerRecord {
@@ -81,7 +81,7 @@ export function reconcileOwner(services: ContinuationServices, taskId: string, c
     }
   }
 
-export function rearmReadReview(services: ContinuationServices, 
+export function rearmReadReview(services: ContinuationServices,
     timer: TimerRecord, clientId: string, context: ContinuationPolicy, now: string,
     nextCheckAt?: string | null,
   ): void {
@@ -103,7 +103,7 @@ export function rearmReadReview(services: ContinuationServices,
     });
   }
 
-export function scheduleFreshFinalReview(services: ContinuationServices, 
+export function scheduleFreshFinalReview(services: ContinuationServices,
     taskId: string, clientId: string, attemptId: string, now: string,
   ): void {
     const full = services.repository.tasks.readTaskAggregate(taskId, clientId);
@@ -124,7 +124,7 @@ export function scheduleFreshFinalReview(services: ContinuationServices,
     rearmReadReview(services, fired, clientId, context, now, now);
   }
 
-export function rearmReview(services: ContinuationServices, 
+export function rearmReview(services: ContinuationServices,
     timer: TimerRecord, clientId: string, context: ContinuationPolicy, now: string,
   ): void {
     const nextMs = Date.parse(timer.dueAt) +
@@ -139,7 +139,7 @@ export function rearmReview(services: ContinuationServices,
     });
   }
 
-export function hasPersistentReadLimit(services: ContinuationServices, 
+export function hasPersistentReadLimit(services: ContinuationServices,
     taskId: string, clientId: string, attemptId: string, now: string,
     reviewAfterMs: number,
   ): boolean {

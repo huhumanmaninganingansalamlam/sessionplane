@@ -14,7 +14,6 @@ export const QUALITY_BUDGET = Object.freeze({
 export const EXISTING_SIZE_CEILINGS = Object.freeze({
   'core/semantic-decision-gateway.ts': 1192, // T-20261123033055Z-d4557f7e
   'core/managed-continuation.ts': 694, // T-20261123033055Z-4366babb
-  'browser/browser-owner.ts': 1441, // T-20261123033056Z-d4464c8f
   'core/semantic-core-runtime.ts': 817, // T-20261123033139Z-af36a8be
   'browser/ref-snapshot.ts': 621, // T-20261123033056Z-d4464c8f
 });

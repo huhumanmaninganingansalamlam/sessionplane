@@ -131,6 +131,7 @@ export class PublicTaskPreparationService {
       await this.#scheduler.updateGeneration(session.sessionId, session.generation,
         { pageKey }, 'public.task.root-page-reserved');
     }
+    if (pageKey === null) return { kind: 'waiting', taskId };
     const bound = this.#pages.refreshPage(pageKey);
     if (bound.sessionId !== session.sessionId ||
         bound.generation !== session.generation ||

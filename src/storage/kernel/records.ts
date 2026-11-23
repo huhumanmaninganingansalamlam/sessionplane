@@ -120,4 +120,3 @@ export interface FullTaskRecord {
   readonly results: readonly ResultRecord[];
   readonly events: readonly TaskEventRecord[];
 }
-
